@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient } from '@/lib/supabase/server'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 
@@ -9,7 +9,8 @@ export default async function SettingsPage() {
 
   if (!user) redirect('/login')
 
-  const { data: profile } = await supabase
+  const adminClient = await createAdminClient()
+  const { data: profile } = await adminClient
     .from('user_profiles')
     .select('role, email')
     .eq('id', user.id)
