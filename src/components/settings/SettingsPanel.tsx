@@ -6,32 +6,87 @@ import { toast } from 'sonner'
 import {
   CheckCircle,
   XCircle,
-  Link,
   RefreshCw,
   AlertTriangle,
   Info,
   Loader2,
+  Save,
+  Eye,
+  EyeOff,
+  Key,
 } from 'lucide-react'
 
 interface SettingsPanelProps {
   amazonConnected: boolean
   lastSyncStatus: string
+  amazonClientId: string
+  amazonClientSecret: string
+  amazonRefreshToken: string
 }
 
 export default function SettingsPanel({
   amazonConnected,
   lastSyncStatus,
+  amazonClientId,
+  amazonClientSecret,
+  amazonRefreshToken,
 }: SettingsPanelProps) {
   const searchParams = useSearchParams()
   const successParam = searchParams.get('success')
   const errorParam = searchParams.get('error')
 
   const [syncing, setSyncing] = useState(false)
+  const [savingCreds, setSavingCreds] = useState(false)
   const [syncResult, setSyncResult] = useState<{
     success: boolean
     ordersInserted?: number
     error?: string
   } | null>(null)
+
+  // Credentials form state
+  const [clientId, setClientId] = useState(amazonClientId || '')
+  const [clientSecret, setClientSecret] = useState(amazonClientSecret || '')
+  const [refreshToken, setRefreshToken] = useState(amazonRefreshToken || '')
+  const [showSecret, setShowSecret] = useState(false)
+  const [showToken, setShowToken] = useState(false)
+
+  const credentialsChanged =
+    clientId !== (amazonClientId || '') ||
+    clientSecret !== (amazonClientSecret || '') ||
+    refreshToken !== (amazonRefreshToken || '')
+
+  const credentialsFilled = clientId.trim() && clientSecret.trim() && refreshToken.trim()
+
+  async function handleSaveCredentials() {
+    if (!credentialsFilled) {
+      toast.error('Please fill in all three credential fields')
+      return
+    }
+    setSavingCreds(true)
+    try {
+      const res = await fetch('/api/amazon/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: clientId.trim(),
+          clientSecret: clientSecret.trim(),
+          refreshToken: refreshToken.trim(),
+        }),
+      })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        toast.success('Amazon credentials saved — connection is now active')
+        // Reload to update connected status
+        window.location.reload()
+      } else {
+        toast.error(data.error || 'Failed to save credentials')
+      }
+    } catch {
+      toast.error('Network error saving credentials')
+    } finally {
+      setSavingCreds(false)
+    }
+  }
 
   async function handleManualSync() {
     setSyncing(true)
@@ -74,7 +129,7 @@ export default function SettingsPanel({
         </div>
       )}
 
-      {/* Amazon Connection */}
+      {/* Amazon Connection Status */}
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
         <div className="flex items-start justify-between mb-4">
           <div>
@@ -96,7 +151,7 @@ export default function SettingsPanel({
           </div>
         </div>
 
-        <div className="space-y-3 text-xs text-gray-600 bg-gray-50 rounded-lg p-3 mb-4">
+        <div className="space-y-3 text-xs text-gray-600 bg-gray-50 rounded-lg p-3 mb-5">
           <div className="flex items-center gap-2">
             <Info size={12} className="text-[#2E9CE6] flex-shrink-0" />
             <span>Marketplace: <strong>US (ATVPDKIKX0DER)</strong></span>
@@ -115,25 +170,102 @@ export default function SettingsPanel({
           </div>
         </div>
 
-        {!amazonConnected && (
-          <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg mb-4">
-            <AlertTriangle size={14} className="text-amber-600 flex-shrink-0 mt-0.5" />
-            <p className="text-xs text-amber-800">
-              Amazon Developer account approval is pending. Once approved, add your
-              <strong> AMAZON_CLIENT_ID</strong>, <strong>AMAZON_CLIENT_SECRET</strong>, and
-              <strong> AMAZON_REFRESH_TOKEN</strong> to your <code>.env.local</code> file,
-              then click "Connect Amazon" below.
-            </p>
+        {/* Credentials Form */}
+        <div className="border border-gray-200 rounded-lg p-4 mb-4">
+          <div className="flex items-center gap-2 mb-4">
+            <Key size={14} className="text-gray-500" />
+            <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+              Amazon Developer Credentials
+            </h3>
           </div>
-        )}
 
-        <a
-          href="/api/amazon/connect"
-          className="inline-flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          <Link size={14} />
-          {amazonConnected ? 'Reconnect Amazon' : 'Connect Amazon'}
-        </a>
+          <div className="space-y-3">
+            {/* Client ID */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Client ID <span className="text-gray-400 font-normal">(from Amazon Developer Central)</span>
+              </label>
+              <input
+                type="text"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="amzn1.application-oa2-client.xxxxxxxx"
+                className="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
+              />
+            </div>
+
+            {/* Client Secret */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Client Secret
+              </label>
+              <div className="relative">
+                <input
+                  type={showSecret ? 'text' : 'password'}
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  placeholder="amzn1.oa2-cs.v1.xxxxxxxx"
+                  className="w-full px-3 py-2 pr-9 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showSecret ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+
+            {/* Refresh Token */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Refresh Token <span className="text-gray-400 font-normal">(from Amazon OAuth flow or Seller Central)</span>
+              </label>
+              <div className="relative">
+                <input
+                  type={showToken ? 'text' : 'password'}
+                  value={refreshToken}
+                  onChange={(e) => setRefreshToken(e.target.value)}
+                  placeholder="Atzr|xxxxxxxx"
+                  className="w-full px-3 py-2 pr-9 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              onClick={handleSaveCredentials}
+              disabled={savingCreds || !credentialsFilled}
+              className="flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium rounded-lg transition-colors"
+            >
+              {savingCreds ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <Save size={13} />
+              )}
+              {savingCreds ? 'Saving…' : 'Save Credentials'}
+            </button>
+            {credentialsChanged && !savingCreds && (
+              <span className="text-xs text-amber-600 flex items-center gap-1">
+                <AlertTriangle size={12} /> Unsaved changes
+              </span>
+            )}
+            {amazonConnected && !credentialsChanged && (
+              <span className="text-xs text-green-600 flex items-center gap-1">
+                <CheckCircle size={12} /> Credentials saved
+              </span>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Manual Sync */}
@@ -172,36 +304,8 @@ export default function SettingsPanel({
         </button>
 
         {!amazonConnected && (
-          <p className="text-xs text-gray-400 mt-2">Connect Amazon first to enable syncing.</p>
+          <p className="text-xs text-gray-400 mt-2">Save your Amazon credentials above to enable syncing.</p>
         )}
-      </div>
-
-      {/* Environment Variables Reference */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
-        <h2 className="text-sm font-bold text-gray-900 mb-3">Required Environment Variables</h2>
-        <div className="space-y-2">
-          {[
-            { key: 'NEXT_PUBLIC_SUPABASE_URL', status: 'set', desc: 'Supabase project URL' },
-            { key: 'NEXT_PUBLIC_SUPABASE_ANON_KEY', status: 'set', desc: 'Supabase public key' },
-            { key: 'SUPABASE_SERVICE_ROLE_KEY', status: 'required', desc: 'Supabase service role key (from Project Settings → API)' },
-            { key: 'AMAZON_CLIENT_ID', status: 'pending', desc: 'Amazon SP-API Client ID (after developer approval)' },
-            { key: 'AMAZON_CLIENT_SECRET', status: 'pending', desc: 'Amazon SP-API Client Secret' },
-            { key: 'AMAZON_REFRESH_TOKEN', status: 'pending', desc: 'Amazon refresh token (after OAuth flow)' },
-            { key: 'CRON_SECRET', status: 'required', desc: 'Random secret for cron job authentication' },
-          ].map((env) => (
-            <div key={env.key} className="flex items-center gap-3 text-xs">
-              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                env.status === 'set' ? 'bg-green-500' :
-                env.status === 'pending' ? 'bg-amber-400' : 'bg-red-400'
-              }`} />
-              <code className="font-mono text-gray-800 font-medium">{env.key}</code>
-              <span className="text-gray-400">— {env.desc}</span>
-            </div>
-          ))}
-        </div>
-        <p className="text-xs text-gray-400 mt-3">
-          See <code>.env.example</code> in the project root for the full template.
-        </p>
       </div>
     </div>
   )

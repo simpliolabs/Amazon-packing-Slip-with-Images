@@ -1,7 +1,11 @@
 /**
  * Amazon SP-API OAuth2 Token Management
- * Handles LWA (Login with Amazon) token refresh flow
+ * Handles LWA (Login with Amazon) token refresh flow.
+ * Credentials are read from Supabase app_settings (primary)
+ * with fallback to environment variables.
  */
+
+import { createClient } from '@supabase/supabase-js'
 
 const LWA_TOKEN_URL = 'https://api.amazon.com/auth/o2/token'
 
@@ -16,6 +20,60 @@ interface TokenResponse {
 let cachedToken: { token: string; expiresAt: number } | null = null
 
 /**
+ * Get Amazon credentials from Supabase app_settings, falling back to env vars.
+ */
+async function getCredentials(): Promise<{
+  clientId: string
+  clientSecret: string
+  refreshToken: string
+}> {
+  // Try to read from Supabase app_settings first
+  try {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+    if (supabaseUrl && serviceRoleKey) {
+      const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+        auth: { persistSession: false },
+      })
+
+      const { data: settings } = await adminClient
+        .from('app_settings')
+        .select('key, value')
+        .in('key', ['amazon_client_id', 'amazon_client_secret', 'amazon_refresh_token'])
+
+      if (settings && settings.length === 3) {
+        const map: Record<string, string> = {}
+        settings.forEach((s: { key: string; value: string }) => { map[s.key] = s.value })
+
+        const clientId = map['amazon_client_id']
+        const clientSecret = map['amazon_client_secret']
+        const refreshToken = map['amazon_refresh_token']
+
+        if (clientId && clientSecret && refreshToken) {
+          return { clientId, clientSecret, refreshToken }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to read Amazon credentials from Supabase, falling back to env vars:', err)
+  }
+
+  // Fallback to environment variables
+  const clientId = process.env.AMAZON_CLIENT_ID
+  const clientSecret = process.env.AMAZON_CLIENT_SECRET
+  const refreshToken = process.env.AMAZON_REFRESH_TOKEN
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error(
+      'Amazon SP-API credentials not configured. Set them in Settings or as environment variables (AMAZON_CLIENT_ID, AMAZON_CLIENT_SECRET, AMAZON_REFRESH_TOKEN).'
+    )
+  }
+
+  return { clientId, clientSecret, refreshToken }
+}
+
+/**
  * Get a valid access token, refreshing if necessary.
  * Uses in-memory cache to avoid unnecessary refreshes.
  */
@@ -27,15 +85,7 @@ export async function getAccessToken(): Promise<string> {
     return cachedToken.token
   }
 
-  const clientId = process.env.AMAZON_CLIENT_ID
-  const clientSecret = process.env.AMAZON_CLIENT_SECRET
-  const refreshToken = process.env.AMAZON_REFRESH_TOKEN
-
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error(
-      'Amazon SP-API credentials not configured. Set AMAZON_CLIENT_ID, AMAZON_CLIENT_SECRET, and AMAZON_REFRESH_TOKEN in environment variables.'
-    )
-  }
+  const { clientId, clientSecret, refreshToken } = await getCredentials()
 
   const response = await fetch(LWA_TOKEN_URL, {
     method: 'POST',
@@ -67,13 +117,8 @@ export async function getAccessToken(): Promise<string> {
  * Exchange an authorization code for tokens (used in OAuth callback)
  */
 export async function exchangeCodeForTokens(code: string): Promise<TokenResponse> {
-  const clientId = process.env.AMAZON_CLIENT_ID
-  const clientSecret = process.env.AMAZON_CLIENT_SECRET
+  const { clientId, clientSecret } = await getCredentials()
   const appUrl = process.env.NEXT_PUBLIC_APP_URL
-
-  if (!clientId || !clientSecret) {
-    throw new Error('Amazon SP-API credentials not configured.')
-  }
 
   const response = await fetch(LWA_TOKEN_URL, {
     method: 'POST',

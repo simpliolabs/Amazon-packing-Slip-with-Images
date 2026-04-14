@@ -19,7 +19,7 @@ export default async function SettingsPage() {
   if (profile?.role !== 'admin') redirect('/')
 
   // Fetch current settings
-  const { data: settings } = await supabase
+  const { data: settings } = await adminClient
     .from('app_settings')
     .select('key, value') as { data: { key: string; value: string }[] | null }
 
@@ -33,6 +33,9 @@ export default async function SettingsPage() {
       <SettingsPanel
         amazonConnected={settingsMap['amazon_connected'] === 'true'}
         lastSyncStatus={settingsMap['last_sync_status'] || ''}
+        amazonClientId={settingsMap['amazon_client_id'] || ''}
+        amazonClientSecret={settingsMap['amazon_client_secret'] || ''}
+        amazonRefreshToken={settingsMap['amazon_refresh_token'] || ''}
       />
     </DashboardLayout>
   )
