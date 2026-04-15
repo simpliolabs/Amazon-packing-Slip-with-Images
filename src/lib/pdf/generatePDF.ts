@@ -1,6 +1,25 @@
 import type { Order } from '@/types/database'
 
 /**
+ * Fetch an image from a URL and convert to base64 string
+ */
+async function imageToBase64(url: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return undefined
+    const buf = await res.arrayBuffer()
+    const bytes = new Uint8Array(buf)
+    let binary = ''
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i])
+    }
+    return btoa(binary)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Generate and download a single packing slip PDF
  */
 export async function generateSinglePDF(order: Order): Promise<void> {
@@ -8,8 +27,20 @@ export async function generateSinglePDF(order: Order): Promise<void> {
   const { default: PackingSlipDocument } = await import('./PackingSlipDocument')
   const React = await import('react')
 
+  // Load logos and QR code as base64 for the PDF renderer
+  const [logoBase64, amazonLogoBase64, qrCodeBase64] = await Promise.all([
+    imageToBase64('/theceo_logo_registered.png'),
+    imageToBase64('/amazon_logo.png'),
+    imageToBase64('/qr_code.png'),
+  ])
+
   const blob = await pdf(
-    React.createElement(PackingSlipDocument, { order }) as any
+    React.createElement(PackingSlipDocument, {
+      order,
+      logoBase64,
+      amazonLogoBase64,
+      qrCodeBase64,
+    }) as any
   ).toBlob()
 
   const url = URL.createObjectURL(blob)
@@ -31,6 +62,13 @@ export async function generateBulkPDF(orders: Order[]): Promise<void> {
   const JSZip = (await import('jszip')).default
   const React = await import('react')
 
+  // Load logos once for all PDFs
+  const [logoBase64, amazonLogoBase64, qrCodeBase64] = await Promise.all([
+    imageToBase64('/theceo_logo_registered.png'),
+    imageToBase64('/amazon_logo.png'),
+    imageToBase64('/qr_code.png'),
+  ])
+
   const zip = new JSZip()
   const folder = zip.folder('packing-slips')
 
@@ -43,7 +81,12 @@ export async function generateBulkPDF(orders: Order[]): Promise<void> {
     await Promise.all(
       batch.map(async (order) => {
         const blob = await pdf(
-          React.createElement(PackingSlipDocument, { order }) as any
+          React.createElement(PackingSlipDocument, {
+            order,
+            logoBase64,
+            amazonLogoBase64,
+            qrCodeBase64,
+          }) as any
         ).toBlob()
         const arrayBuffer = await blob.arrayBuffer()
         folder.file(`packing-slip-${order.id}.pdf`, arrayBuffer)

@@ -18,6 +18,8 @@ const BRAND_GRAY = '#6B7280'
 const BRAND_LIGHT = '#F9FAFB'
 const BRAND_BORDER = '#E5E7EB'
 const BRAND_RED = '#DC2626'
+const REVIEW_BG = '#EFF8FF'
+const STAR_GOLD = '#F59E0B'
 
 // ─── Dynamic attribute parser ─────────────────────────────────────────────────
 
@@ -28,7 +30,6 @@ const SIZES = [
   'Small', 'Medium', 'Large',
   'S/M', 'M/L', 'L/XL',
   'Plus Size', 'One Size',
-  // Single-letter sizes matched carefully below
 ]
 
 const COLORS = [
@@ -78,40 +79,27 @@ interface ProductAttributes {
 function parseProductAttributes(title: string): ProductAttributes {
   const result: ProductAttributes = { size: null, color: null, style: null }
 
-  // Size — check multi-word first, then single-letter with word boundaries
   for (const size of SIZES) {
     const escaped = size.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
-    if (re.test(title)) {
-      result.size = size
-      break
-    }
+    if (re.test(title)) { result.size = size; break }
   }
-  // Fallback: single-letter sizes XS, S, M, L
   if (!result.size) {
     const singleMatch = title.match(/\b(XS|[SMLX])\b/)
     if (singleMatch) result.size = singleMatch[1].toUpperCase()
   }
 
-  // Color — longest match first
   const sortedColors = [...COLORS].sort((a, b) => b.length - a.length)
   for (const color of sortedColors) {
     const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
-    if (re.test(title)) {
-      result.color = color
-      break
-    }
+    if (re.test(title)) { result.color = color; break }
   }
 
-  // Style
   for (const [keyword, label] of STYLES) {
     const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
-    if (re.test(title)) {
-      result.style = label
-      break
-    }
+    if (re.test(title)) { result.style = label; break }
   }
   if (!result.style) result.style = 'Short Sleeve'
 
@@ -126,44 +114,49 @@ const styles = StyleSheet.create({
     fontSize: 9,
     color: BRAND_DARK,
     backgroundColor: '#FFFFFF',
-    paddingTop: 28,
+    paddingTop: 22,
     paddingBottom: 38,
-    paddingHorizontal: 32,
+    paddingHorizontal: 28,
   },
 
-  // Header
-  header: {
+  // ── Header: logos row ──
+  headerRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 18,
-    paddingBottom: 14,
+    justifyContent: 'center',
+    marginBottom: 10,
+    paddingBottom: 10,
     borderBottomWidth: 2,
     borderBottomColor: BRAND_BLUE,
   },
-  logo: {
-    width: 150,
-    height: 68,
+  ceoLogo: {
+    width: 56,
+    height: 56,
     objectFit: 'contain',
-    marginBottom: 5,
   },
-  headerSubtitle: {
-    fontSize: 7,
+  headerConnector: {
+    fontSize: 10,
     color: BRAND_GRAY,
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
+    marginHorizontal: 10,
+  },
+  amazonLogo: {
+    width: 76,
+    height: 23,
+    objectFit: 'contain',
   },
 
   // Info boxes row
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 12,
-    gap: 10,
+    marginBottom: 10,
+    gap: 8,
   },
   infoBox: {
     flex: 1,
     backgroundColor: BRAND_LIGHT,
     borderRadius: 3,
-    padding: 8,
+    padding: 7,
     borderWidth: 1,
     borderColor: BRAND_BORDER,
   },
@@ -172,7 +165,7 @@ const styles = StyleSheet.create({
     color: BRAND_GRAY,
     textTransform: 'uppercase',
     letterSpacing: 0.8,
-    marginBottom: 4,
+    marginBottom: 3,
   },
   infoValue: {
     fontSize: 9,
@@ -200,7 +193,7 @@ const styles = StyleSheet.create({
     fontSize: 8,
     fontFamily: 'Helvetica-Bold',
     color: BRAND_DARK,
-    marginBottom: 5,
+    marginBottom: 4,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
@@ -209,12 +202,12 @@ const styles = StyleSheet.create({
     borderColor: BRAND_BORDER,
     borderRadius: 3,
     overflow: 'hidden',
-    marginBottom: 14,
+    marginBottom: 10,
   },
   tableHeader: {
     flexDirection: 'row',
     backgroundColor: BRAND_BLUE,
-    paddingVertical: 6,
+    paddingVertical: 5,
     paddingHorizontal: 6,
   },
   tableHeaderCell: {
@@ -226,22 +219,22 @@ const styles = StyleSheet.create({
   },
   tableRow: {
     flexDirection: 'row',
-    paddingVertical: 8,
+    paddingVertical: 7,
     paddingHorizontal: 6,
     borderTopWidth: 1,
     borderTopColor: BRAND_BORDER,
     alignItems: 'center',
-    minHeight: 70,
+    minHeight: 68,
   },
   tableRowAlt: {
     backgroundColor: BRAND_LIGHT,
   },
 
   // Column widths
-  colQty: { width: 24 },
-  colImage: { width: 72 },   // 50% bigger than original 48
-  colTitle: { flex: 1, paddingHorizontal: 8 },
-  colAttrs: { width: 130 },  // Size / Color / Style
+  colQty: { width: 22 },
+  colImage: { width: 70 },
+  colTitle: { flex: 1, paddingHorizontal: 7 },
+  colAttrs: { width: 128 },
 
   // Qty badge
   qtyBadge: {
@@ -260,8 +253,8 @@ const styles = StyleSheet.create({
 
   // Product image
   productImage: {
-    width: 64,
-    height: 64,
+    width: 62,
+    height: 62,
     objectFit: 'contain',
     borderRadius: 3,
     borderWidth: 1,
@@ -269,8 +262,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
   noImage: {
-    width: 64,
-    height: 64,
+    width: 62,
+    height: 62,
     backgroundColor: BRAND_LIGHT,
     borderRadius: 3,
     borderWidth: 1,
@@ -301,7 +294,7 @@ const styles = StyleSheet.create({
   attrRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 5,
+    marginBottom: 4,
   },
   attrLabel: {
     fontSize: 6,
@@ -317,15 +310,113 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
+  // ── Review / Thank You section ──
+  reviewBox: {
+    flexDirection: 'row',
+    backgroundColor: REVIEW_BG,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: BRAND_BLUE,
+    overflow: 'hidden',
+    marginBottom: 10,
+    minHeight: 110,
+  },
+  reviewBar: {
+    width: 56,
+    backgroundColor: BRAND_BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+  },
+  reviewBarText: {
+    fontSize: 8,
+    fontFamily: 'Helvetica-Bold',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    lineHeight: 1.5,
+  },
+  reviewBarStar: {
+    fontSize: 12,
+    color: STAR_GOLD,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  reviewContent: {
+    flex: 1,
+    padding: 10,
+  },
+  reviewHeading: {
+    fontSize: 8,
+    fontFamily: 'Helvetica-Bold',
+    color: BRAND_BLUE,
+    marginBottom: 1,
+  },
+  reviewSubheading: {
+    fontSize: 7.5,
+    fontFamily: 'Helvetica-Bold',
+    color: BRAND_BLUE,
+    marginBottom: 5,
+  },
+  reviewStarsRow: {
+    flexDirection: 'row',
+    marginBottom: 5,
+  },
+  reviewStar: {
+    fontSize: 14,
+    color: STAR_GOLD,
+    marginRight: 2,
+  },
+  reviewStepLabel: {
+    fontSize: 7,
+    color: BRAND_DARK,
+    marginBottom: 3,
+    fontFamily: 'Helvetica-Bold',
+  },
+  reviewStep: {
+    fontSize: 7,
+    color: BRAND_DARK,
+    marginBottom: 2,
+    paddingLeft: 4,
+  },
+  reviewFootnote: {
+    fontSize: 6.5,
+    color: BRAND_GRAY,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  reviewQrCol: {
+    width: 90,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+  },
+  qrImage: {
+    width: 62,
+    height: 62,
+    marginBottom: 4,
+  },
+  qrCaption: {
+    fontSize: 6,
+    color: BRAND_DARK,
+    textAlign: 'center',
+    lineHeight: 1.4,
+  },
+  qrCaptionBold: {
+    fontSize: 6,
+    fontFamily: 'Helvetica-Bold',
+    color: BRAND_DARK,
+    textAlign: 'center',
+  },
+
   // Footer
   footer: {
     position: 'absolute',
-    bottom: 18,
-    left: 32,
-    right: 32,
+    bottom: 14,
+    left: 28,
+    right: 28,
     borderTopWidth: 1,
     borderTopColor: BRAND_BORDER,
-    paddingTop: 8,
+    paddingTop: 6,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -339,19 +430,6 @@ const styles = StyleSheet.create({
     fontFamily: 'Helvetica-Bold',
     color: BRAND_BLUE,
   },
-  thankYou: {
-    textAlign: 'center',
-    fontSize: 11,
-    fontFamily: 'Helvetica-Bold',
-    color: BRAND_DARK,
-    marginBottom: 4,
-  },
-  thankYouSub: {
-    textAlign: 'center',
-    fontSize: 8,
-    color: BRAND_GRAY,
-    marginBottom: 16,
-  },
 })
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -359,11 +437,15 @@ const styles = StyleSheet.create({
 interface PackingSlipDocumentProps {
   order: Order
   logoBase64?: string
+  amazonLogoBase64?: string
+  qrCodeBase64?: string
 }
 
 export default function PackingSlipDocument({
   order,
   logoBase64,
+  amazonLogoBase64,
+  qrCodeBase64,
 }: PackingSlipDocumentProps) {
   const items: OrderItem[] = Array.isArray(order.order_items)
     ? (order.order_items as unknown as OrderItem[])
@@ -384,12 +466,18 @@ export default function PackingSlipDocument({
 
   const logoSrc = logoBase64
     ? `data:image/png;base64,${logoBase64}`
-    : '/logo.png'
+    : '/theceo_logo_registered.png'
 
-  // Clean product title — strip trailing " - Color - Size" suffixes
+  const amazonLogoSrc = amazonLogoBase64
+    ? `data:image/png;base64,${amazonLogoBase64}`
+    : '/amazon_logo.png'
+
+  const qrSrc = qrCodeBase64
+    ? `data:image/png;base64,${qrCodeBase64}`
+    : '/qr_code.png'
+
   const cleanTitle = (title: string): string => {
     let t = title
-    // Remove up to 2 trailing " - Attribute" segments
     for (let i = 0; i < 2; i++) {
       t = t.replace(/\s*[-–]\s*[A-Z][a-zA-Z\s]+$/, '').trim()
     }
@@ -406,13 +494,14 @@ export default function PackingSlipDocument({
     >
       <Page size="A4" style={styles.page}>
 
-        {/* ── Header ── */}
-        <View style={styles.header}>
-          <Image src={logoSrc} style={styles.logo} />
-          <Text style={styles.headerSubtitle}>Packing Slip</Text>
+        {/* ── Header: CEO® logo | Store is on | Amazon logo ── */}
+        <View style={styles.headerRow}>
+          <Image src={logoSrc} style={styles.ceoLogo} />
+          <Text style={styles.headerConnector}>Store is on</Text>
+          <Image src={amazonLogoSrc} style={styles.amazonLogo} />
         </View>
 
-        {/* ── Order Number + Date (no Status) ── */}
+        {/* ── Order Number + Date ── */}
         <View style={styles.infoRow}>
           <View style={styles.infoBox}>
             <Text style={styles.infoLabel}>Order Number</Text>
@@ -440,10 +529,10 @@ export default function PackingSlipDocument({
             <Text style={styles.infoLabel}>Ship By</Text>
             <Text style={styles.infoValueRed}>
               {order.raw_data && typeof order.raw_data === 'object' && !Array.isArray(order.raw_data) && 'LatestShipDate' in order.raw_data
-              ? formatDateShort(String(order.raw_data.LatestShipDate))
-              : '—'}
+                ? formatDateShort(String((order.raw_data as Record<string, unknown>).LatestShipDate))
+                : '—'}
             </Text>
-            <Text style={[styles.infoLabel, { marginTop: 8 }]}>Total Items</Text>
+            <Text style={[styles.infoLabel, { marginTop: 7 }]}>Total Items</Text>
             <Text style={styles.infoValue}>
               {totalQty} unit{totalQty !== 1 ? 's' : ''}
             </Text>
@@ -453,7 +542,6 @@ export default function PackingSlipDocument({
         {/* ── Items Table ── */}
         <Text style={styles.tableTitle}>Order Items</Text>
         <View style={styles.table}>
-          {/* Header */}
           <View style={styles.tableHeader}>
             <Text style={[styles.tableHeaderCell, styles.colQty]}>Qty</Text>
             <Text style={[styles.tableHeaderCell, styles.colImage]}>Image</Text>
@@ -461,7 +549,6 @@ export default function PackingSlipDocument({
             <Text style={[styles.tableHeaderCell, styles.colAttrs]}>Size / Color / Style</Text>
           </View>
 
-          {/* Rows */}
           {items.map((item, index) => {
             const attrs = parseProductAttributes(item.title)
             const title = cleanTitle(item.title)
@@ -471,14 +558,12 @@ export default function PackingSlipDocument({
                 key={`${item.asin}-${index}`}
                 style={[styles.tableRow, index % 2 === 1 ? styles.tableRowAlt : {}]}
               >
-                {/* Qty badge */}
                 <View style={[styles.colQty, { alignItems: 'center' }]}>
                   <View style={styles.qtyBadge}>
                     <Text style={styles.qtyText}>{item.qty}</Text>
                   </View>
                 </View>
 
-                {/* Product image (50% bigger) */}
                 <View style={styles.colImage}>
                   {item.image_url ? (
                     <Image src={item.image_url} style={styles.productImage} />
@@ -489,7 +574,6 @@ export default function PackingSlipDocument({
                   )}
                 </View>
 
-                {/* Title + SKU */}
                 <View style={styles.colTitle}>
                   <Text style={styles.productTitle}>
                     {title.length > 100 ? title.substring(0, 97) + '...' : title}
@@ -497,7 +581,6 @@ export default function PackingSlipDocument({
                   <Text style={styles.productSku}>SKU: {item.sku || '—'}</Text>
                 </View>
 
-                {/* Size / Color / Style */}
                 <View style={styles.colAttrs}>
                   <View style={styles.attrRow}>
                     <Text style={styles.attrLabel}>Size:</Text>
@@ -517,11 +600,41 @@ export default function PackingSlipDocument({
           })}
         </View>
 
-        {/* ── Thank You ── */}
-        <Text style={styles.thankYou}>Thank you for your order!</Text>
-        <Text style={styles.thankYouSub}>
-          Questions? Contact us at orders@theceo.store
-        </Text>
+        {/* ── Review / Thank You section ── */}
+        <View style={styles.reviewBox}>
+          {/* Blue left bar */}
+          <View style={styles.reviewBar}>
+            <Text style={styles.reviewBarText}>{'thank you\nfor your\norder!'}</Text>
+            <Text style={styles.reviewBarStar}>{'★\n★\n★\n★'}</Text>
+          </View>
+
+          {/* Main content */}
+          <View style={styles.reviewContent}>
+            <Text style={styles.reviewHeading}>FEEDBACK ON OUR AMAZON PRODUCT &amp; SERVICE</Text>
+            <Text style={styles.reviewSubheading}>WOULD MEAN THE WORLD TO US!</Text>
+            <View style={styles.reviewStarsRow}>
+              {['★', '★', '★', '★', '★'].map((s, i) => (
+                <Text key={i} style={styles.reviewStar}>{s}</Text>
+              ))}
+            </View>
+            <Text style={styles.reviewStepLabel}>How to leave a review:</Text>
+            <Text style={styles.reviewStep}>1  Go to &apos;Your Orders&apos;</Text>
+            <Text style={styles.reviewStep}>2  Select the product and tap &apos;Write a Review.&apos;</Text>
+            <Text style={styles.reviewStep}>3  Share your honest feedback to help others!</Text>
+            <Text style={styles.reviewFootnote}>
+              Your support helps us continue to bring you great products!
+            </Text>
+          </View>
+
+          {/* QR code column */}
+          <View style={styles.reviewQrCol}>
+            <Image src={qrSrc} style={styles.qrImage} />
+            <Text style={styles.qrCaptionBold}>{"What's on the other side of this"}</Text>
+            <Text style={styles.qrCaption}>{'QR code will Change. Your. LIFE!*'}</Text>
+            <Text style={styles.qrCaption}>{'*okay, that\'s a little dramatic'}</Text>
+            <Text style={styles.qrCaption}>{'but just scan it already.'}</Text>
+          </View>
+        </View>
 
         {/* ── Footer ── */}
         <View style={styles.footer} fixed>
