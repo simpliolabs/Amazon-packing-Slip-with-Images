@@ -331,20 +331,39 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
             size: letter portrait;
             margin: 0.5in;
           }
-          body > *:not(#packing-slip-print) { display: none !important; }
-          .no-print { display: none !important; }
+          /* Hide everything first */
+          body * {
+            visibility: hidden !important;
+          }
+          /* Show only the packing slip and all its children */
+          #packing-slip-print,
+          #packing-slip-print * {
+            visibility: visible !important;
+          }
+          .no-print, .no-print * {
+            display: none !important;
+            visibility: hidden !important;
+          }
+          /* Position the packing slip at the top of the page */
           #packing-slip-print {
-            display: block !important;
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%;
-            padding: 0;
-            box-shadow: none;
-            border-radius: 0;
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            padding: 0.25in !important;
+            margin: 0 !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
+            background: white !important;
           }
           #packing-slip-print img {
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
+          }
+          /* Ensure colors print correctly */
+          * {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
         }
       `}</style>

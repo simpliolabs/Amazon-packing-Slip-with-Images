@@ -458,6 +458,7 @@ interface PackingSlipDocumentProps {
   logoBase64?: string
   amazonLogoBase64?: string
   qrCodeBase64?: string
+  productImagesBase64?: Record<string, string>
 }
 
 export default function PackingSlipDocument({
@@ -465,6 +466,7 @@ export default function PackingSlipDocument({
   logoBase64,
   amazonLogoBase64,
   qrCodeBase64,
+  productImagesBase64,
 }: PackingSlipDocumentProps) {
   const items: OrderItem[] = Array.isArray(order.order_items)
     ? (order.order_items as unknown as OrderItem[])
@@ -584,13 +586,19 @@ export default function PackingSlipDocument({
                 </View>
 
                 <View style={styles.colImage}>
-                  {item.image_url ? (
-                    <Image src={item.image_url} style={styles.productImage} />
-                  ) : (
-                    <View style={styles.noImage}>
-                      <Text style={styles.noImageText}>No{'\n'}Image</Text>
-                    </View>
-                  )}
+                  {(() => {
+                    const b64 = productImagesBase64?.[item.asin]
+                    const imgSrc = b64
+                      ? `data:image/jpeg;base64,${b64}`
+                      : item.image_url || null
+                    return imgSrc ? (
+                      <Image src={imgSrc} style={styles.productImage} />
+                    ) : (
+                      <View style={styles.noImage}>
+                        <Text style={styles.noImageText}>No{'\n'}Image</Text>
+                      </View>
+                    )
+                  })()}
                 </View>
 
                 <View style={styles.colTitle}>
