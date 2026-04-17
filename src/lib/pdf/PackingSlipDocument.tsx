@@ -40,15 +40,24 @@ const COLORS = [
   'Light Gray', 'Dark Gray', 'Heather Gray',
   'Off White', 'Cream', 'Ivory', 'Natural',
   'Washed Denim', 'Denim', 'Chambray',
-  'Black', 'White', 'Red', 'Orange', 'Yellow', 'Purple', 'Lavender',
+  'Black', 'White', 'Red', 'Orange', 'Yellow', 'Purple', 'Lavender', 'Violet',
   'Maroon', 'Burgundy', 'Wine', 'Rust', 'Mustard', 'Gold', 'Tan', 'Brown',
   'Teal', 'Aqua', 'Coral', 'Peach', 'Espresso', 'Seafoam', 'Butter',
   'Granite', 'Sandstone', 'Brick', 'Moss', 'Olive', 'Pepper',
+  'Crunchberry', 'Yam', 'Lagoon', 'Blossom', 'Chalky Mint', 'Flo Blue',
+  'Island Reef', 'Orchid', 'Berry', 'Citrus', 'Crimson', 'Graphite',
+  'Ice Blue', 'Khaki', 'Neon Pink', 'Neon Green', 'Neon Orange',
+  'Sapphire', 'Terracotta', 'Watermelon',
+  'Bright Salmon', 'Blue Jean', 'Blue Spruce', 'Burnt Orange',
+  'Candy Pink', 'Chili', 'Faded Blue', 'Hemp', 'Jean',
+  'Lagoon Blue', 'Midnight', 'Neon Blue', 'Old Gold',
+  'Periwinkle', 'Pigment Black', 'Red Orange', 'Sage',
+  'Smoke', 'Vineyard', 'Coral Silk',
   'Navy', 'Green', 'Blue', 'Pink', 'Gray', 'Grey',
 ]
 
 const STYLES: [string, string][] = [
-  ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
+  ['Comfort Colors', 'Comfort Colors'],
   ['Long Sleeve', 'Long Sleeve'],
   ['V-Neck', 'V-Neck'],
   ['V Neck', 'V-Neck'],
@@ -112,6 +121,22 @@ function parseProductAttributes(title: string, sku?: string): ProductAttributes 
     const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
     if (re.test(title)) { result.color = color; break }
+  }
+
+  // Fallback: extract color from title trailing segments ("- Color - Size" pattern)
+  if (!result.color) {
+    const segments = title.split(/\s*[-\u2013]\s*/).map(s => s.trim()).filter(Boolean)
+    if (segments.length >= 3 && result.size) {
+      for (let i = segments.length - 1; i >= 0; i--) {
+        if (segments[i].toLowerCase() === result.size.toLowerCase() && i > 0) {
+          const candidate = segments[i - 1]
+          if (candidate.split(/\s+/).length <= 3 && candidate.length <= 30) {
+            result.color = candidate
+          }
+          break
+        }
+      }
+    }
   }
 
   for (const [keyword, label] of STYLES) {

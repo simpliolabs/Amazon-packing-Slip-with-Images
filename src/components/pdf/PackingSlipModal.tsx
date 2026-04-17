@@ -33,14 +33,25 @@ const COLORS = [
   'Light Grey', 'Dark Grey', 'Heather Grey', 'Dark Heather',
   'Light Gray', 'Dark Gray', 'Heather Gray',
   'Off White', 'Cream', 'Ivory', 'Natural', 'Washed Denim', 'Denim', 'Chambray',
-  'Black', 'White', 'Red', 'Orange', 'Yellow', 'Purple', 'Lavender',
+  'Black', 'White', 'Red', 'Orange', 'Yellow', 'Purple', 'Lavender', 'Violet',
   'Maroon', 'Burgundy', 'Wine', 'Rust', 'Mustard', 'Gold', 'Tan', 'Brown',
   'Teal', 'Aqua', 'Coral', 'Peach', 'Espresso', 'Seafoam', 'Butter',
   'Granite', 'Sandstone', 'Brick', 'Moss', 'Olive', 'Pepper',
+  'Crunchberry', 'Yam', 'Lagoon', 'Blossom', 'Chalky Mint', 'Flo Blue',
+  'Island Reef', 'Orchid', 'Berry', 'Citrus', 'Crimson', 'Graphite',
+  'Ice Blue', 'Ivory', 'Khaki', 'Neon Pink', 'Neon Green', 'Neon Orange',
+  'Sapphire', 'Seafoam', 'Terracotta', 'Watermelon', 'Chambray',
+  'Bright Salmon', 'Blue Jean', 'Blue Spruce', 'Burnt Orange',
+  'Candy Pink', 'Chili', 'Crimson', 'Denim', 'Faded Blue',
+  'Hemp', 'Ivory', 'Jean', 'Lagoon Blue', 'Light Green',
+  'Midnight', 'Moss', 'Mustard', 'Neon Blue', 'Old Gold',
+  'Periwinkle', 'Pigment Black', 'Red Orange', 'Sage',
+  'Sandstone', 'Smoke', 'Vineyard', 'Washed Denim',
   'Navy', 'Green', 'Blue', 'Pink', 'Gray', 'Grey',
+  'Coral Silk',
 ]
 const STYLES: [string, string][] = [
-  ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
+  ['Comfort Colors', 'Comfort Colors'],
   ['Long Sleeve', 'Long Sleeve'], ['V-Neck', 'V-Neck'], ['V Neck', 'V-Neck'],
   ['Vneck', 'V-Neck'], ['Crop Top', 'Crop Top'], ['Crop Tee', 'Crop Top'],
   ['Tank Top', 'Tank Top'], ['Tank', 'Tank Top'], ['Muscle Tee', 'Muscle Tee'],
@@ -58,6 +69,47 @@ function extractVariantFromSku(sku: string): string | null {
   return null
 }
 
+/**
+ * Fallback: extract color from the title's trailing segments.
+ * Amazon titles often end with "- Color - Size" pattern.
+ * We look for the segment before the size segment.
+ */
+function extractColorFromTitleSegments(title: string, detectedSize: string | null): string | null {
+  // Split by " - " delimiter
+  const segments = title.split(/\s*[-–]\s*/).map(s => s.trim()).filter(Boolean)
+  if (segments.length < 2) return null
+
+  // Find the size segment index
+  if (detectedSize) {
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i]
+      if (seg.toLowerCase() === detectedSize.toLowerCase() ||
+          seg.match(new RegExp(`^${detectedSize.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))) {
+        // The segment before the size is likely the color
+        if (i > 0) {
+          const colorCandidate = segments[i - 1]
+          // Validate: should be 1-3 words, not too long, not a product description
+          if (colorCandidate.split(/\s+/).length <= 3 && colorCandidate.length <= 30) {
+            return colorCandidate
+          }
+        }
+      }
+    }
+  }
+
+  // Last resort: take the second-to-last segment if last looks like a size
+  const last = segments[segments.length - 1]
+  const sizePattern = /^(XX?S|[SMLX]|XX?L|[2-6]?X[LS]|Small|Medium|Large|X-Small|X-Large|2X-Large|3X-Large|4X-Large|5X-Large|6X-Large|One Size|Plus Size)$/i
+  if (sizePattern.test(last) && segments.length >= 3) {
+    const colorCandidate = segments[segments.length - 2]
+    if (colorCandidate.split(/\s+/).length <= 3 && colorCandidate.length <= 30) {
+      return colorCandidate
+    }
+  }
+
+  return null
+}
+
 function parseAttrs(title: string, sku?: string) {
   let size: string | null = null, color: string | null = null, style: string | null = null
   for (const s of SIZES) {
@@ -70,6 +122,12 @@ function parseAttrs(title: string, sku?: string) {
     const re = new RegExp(`(?<![A-Za-z])${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
     if (re.test(title)) { color = c; break }
   }
+
+  // Fallback: extract color from title segments if not found in known list
+  if (!color) {
+    color = extractColorFromTitleSegments(title, size)
+  }
+
   for (const [kw, lbl] of STYLES) {
     const re = new RegExp(`(?<![A-Za-z])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
     if (re.test(title)) { style = lbl; break }
@@ -82,6 +140,92 @@ function cleanTitle(title: string): string {
   let t = title
   for (let i = 0; i < 2; i++) t = t.replace(/\s*[-–]\s*[A-Z][a-zA-Z\s]+$/, '').trim()
   return t.replace(/\s*[-–]\s*$/, '').trim()
+}
+
+/**
+ * Print the packing slip using an iframe for clean, reliable output.
+ * This avoids all CSS conflicts with the parent page.
+ */
+function handlePrint() {
+  const content = document.getElementById('packing-slip-print')
+  if (!content) return
+
+  const iframe = document.createElement('iframe')
+  iframe.style.position = 'fixed'
+  iframe.style.top = '-10000px'
+  iframe.style.left = '-10000px'
+  iframe.style.width = '8.5in'
+  iframe.style.height = '11in'
+  document.body.appendChild(iframe)
+
+  const doc = iframe.contentDocument || iframe.contentWindow?.document
+  if (!doc) { document.body.removeChild(iframe); return }
+
+  // Get all stylesheets from the parent page
+  const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style'))
+    .map(el => el.outerHTML)
+    .join('\n')
+
+  doc.open()
+  doc.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      ${styles}
+      <style>
+        @page {
+          size: letter portrait;
+          margin: 0.5in;
+        }
+        html, body {
+          margin: 0;
+          padding: 0;
+          background: white;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        body {
+          padding: 0.25in;
+        }
+        * {
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        img {
+          max-width: 100%;
+        }
+      </style>
+    </head>
+    <body>
+      ${content.innerHTML}
+    </body>
+    </html>
+  `)
+  doc.close()
+
+  // Wait for images to load before printing
+  const images = Array.from(doc.querySelectorAll('img'))
+  const imagePromises = images.map(img => {
+    if (img.complete) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      img.onload = () => resolve()
+      img.onerror = () => resolve()
+      // Timeout after 5 seconds
+      setTimeout(resolve, 5000)
+    })
+  })
+
+  Promise.all(imagePromises).then(() => {
+    // Small delay to ensure rendering is complete
+    setTimeout(() => {
+      iframe.contentWindow?.print()
+      // Clean up after print dialog closes
+      setTimeout(() => {
+        document.body.removeChild(iframe)
+      }, 1000)
+    }, 500)
+  })
 }
 
 interface PackingSlipModalProps {
@@ -146,8 +290,8 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors no-print"
+              onClick={handlePrint}
+              className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors"
             >
               <Printer size={14} />
               Print
@@ -158,7 +302,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
               className="flex items-center gap-1.5 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
             >
               {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-              {downloading ? 'Generating…' : 'Download PDF'}
+              {downloading ? 'Generating...' : 'Download PDF'}
             </button>
             <button onClick={onClose} className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
               <X size={18} />
@@ -175,7 +319,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
             {/* ── Header: CEO logo | Store is on | Amazon logo ── */}
             <div className="flex items-center justify-center gap-4 mb-5 pb-4 border-b-2 border-[#2E9CE6]">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/theceo_logo_registered.png" alt="TheCEO®" className="h-14 w-14 object-contain" />
+              <img src="/theceo_logo_registered.png" alt="TheCEO" className="h-14 w-14 object-contain" />
               <span className="text-sm text-gray-500 font-medium">Store is on</span>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/amazon_logo.png" alt="Amazon" className="h-7 object-contain" />
@@ -323,50 +467,6 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
           </div>
         </div>
       </div>
-
-      {/* Print-only styles — Letter size (8.5 x 11 in) */}
-      <style jsx global>{`
-        @media print {
-          @page {
-            size: letter portrait;
-            margin: 0.5in;
-          }
-          /* Hide everything first */
-          body * {
-            visibility: hidden !important;
-          }
-          /* Show only the packing slip and all its children */
-          #packing-slip-print,
-          #packing-slip-print * {
-            visibility: visible !important;
-          }
-          .no-print, .no-print * {
-            display: none !important;
-            visibility: hidden !important;
-          }
-          /* Position the packing slip at the top of the page */
-          #packing-slip-print {
-            position: absolute !important;
-            top: 0 !important;
-            left: 0 !important;
-            width: 100% !important;
-            padding: 0.25in !important;
-            margin: 0 !important;
-            box-shadow: none !important;
-            border-radius: 0 !important;
-            background: white !important;
-          }
-          #packing-slip-print img {
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
-          }
-          /* Ensure colors print correctly */
-          * {
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-          }
-        }
-      `}</style>
     </div>
   )
 }
