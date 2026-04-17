@@ -116,7 +116,13 @@ function extractDesignKey(sku: string): string {
 
 /**
  * Main sync function — fetches all FBM orders from last 7 days
- * and upserts them into Supabase
+ * and upserts them into Supabase.
+ *
+ * Optimization: For orders that already exist in the DB and are now
+ * Shipped on Amazon, we only update the status field (no need to
+ * re-fetch items, images, PII). Full processing is only done for
+ * new orders or orders whose status changed to something other than
+ * what we already have.
  */
 export async function syncOrders(): Promise<SyncResult> {
   const supabase = getAdminSupabase()
@@ -139,9 +145,53 @@ export async function syncOrders(): Promise<SyncResult> {
     const amazonOrders = await fetchFBMOrders(createdAfter)
     let ordersInserted = 0
 
+    // Fetch existing orders from DB to determine which need full processing
+    const orderIds = amazonOrders.map(o => o.AmazonOrderId)
+    const { data: existingOrders } = await supabase
+      .from('orders')
+      .select('id, order_status')
+      .in('id', orderIds)
+
+    const existingMap = new Map<string, string>()
+    if (existingOrders) {
+      for (const eo of existingOrders) {
+        existingMap.set(eo.id, eo.order_status || '')
+      }
+    }
+
     for (const order of amazonOrders) {
       try {
-        // Fetch order items
+        const existingStatus = existingMap.get(order.AmazonOrderId)
+
+        // If the order already exists and the status hasn't changed, skip entirely
+        if (existingStatus === order.OrderStatus) {
+          continue
+        }
+
+        // If the order already exists but status changed (e.g. Unshipped → Shipped),
+        // just update the status and raw_data — no need to re-fetch items/images/PII
+        if (existingStatus !== undefined) {
+          const sanitizedRawData = { ...order } as Record<string, unknown>
+          delete sanitizedRawData.ShippingAddress
+          delete sanitizedRawData.BuyerInfo
+          delete sanitizedRawData.BuyerName
+          delete sanitizedRawData.BuyerEmail
+          delete sanitizedRawData.DefaultShipFromLocationAddress
+
+          const { error } = await supabase
+            .from('orders')
+            .update({
+              order_status: order.OrderStatus,
+              raw_data: sanitizedRawData,
+              synced_at: new Date().toISOString(),
+            })
+            .eq('id', order.AmazonOrderId)
+
+          if (!error) ordersInserted++
+          continue
+        }
+
+        // New order — full processing: fetch items, images, PII
         const items = await fetchOrderItems(order.AmazonOrderId)
 
         // Fetch and cache product images

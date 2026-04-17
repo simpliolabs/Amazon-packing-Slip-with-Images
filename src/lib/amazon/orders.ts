@@ -83,8 +83,10 @@ export interface AmazonOrderItem {
 }
 
 /**
- * Fetch FBM orders created after a given date
- * Uses Orders API v0
+ * Fetch FBM orders created after a given date.
+ * Fetches Unshipped, PartiallyShipped, and Shipped statuses
+ * so that order status updates are reflected in the app.
+ * Uses Orders API v0.
  */
 export async function fetchFBMOrders(createdAfter: Date): Promise<AmazonOrder[]> {
   const orders: AmazonOrder[] = []
@@ -95,7 +97,7 @@ export async function fetchFBMOrders(createdAfter: Date): Promise<AmazonOrder[]>
       MarketplaceIds: MARKETPLACE_ID,
       FulfillmentChannels: 'MFN',
       CreatedAfter: createdAfter.toISOString(),
-      OrderStatuses: 'Unshipped',
+      OrderStatuses: 'Unshipped,PartiallyShipped,Shipped',
     })
 
     if (nextToken) {

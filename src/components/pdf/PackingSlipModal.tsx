@@ -676,7 +676,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                 <thead>
                   <tr className="bg-[#2E9CE6] text-white">
                     <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-10">Qty</th>
-                    <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-28">Image</th>
+                    <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-[135px]">Image</th>
                     <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide">Product</th>
                     <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-36">Size / Color / Style</th>
                   </tr>
@@ -708,12 +708,12 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                             <img
                               src={imgSrc}
                               alt={item.title}
-                              className="w-24 h-24 object-contain rounded bg-white"
+                              className="w-[115px] h-[115px] object-contain rounded bg-white"
                               crossOrigin="anonymous"
                               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
                             />
                           ) : (
-                            <div className="w-24 h-24 bg-gray-100 rounded flex items-center justify-center">
+                            <div className="w-[115px] h-[115px] bg-gray-100 rounded flex items-center justify-center">
                               <span className="text-xs text-gray-400 text-center">No Image</span>
                             </div>
                           )}

@@ -10,6 +10,21 @@ export async function GET(request: NextRequest) {
     const supabase = await createClient()
     const { error } = await supabase.auth.exchangeCodeForSession(code)
     if (!error) {
+      // Check if this user has a profile (i.e., has completed setup)
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        const { data: profile } = await supabase
+          .from('user_profiles')
+          .select('id')
+          .eq('id', user.id)
+          .single()
+
+        // If no profile exists, this is a new invited user — redirect to set-password
+        if (!profile) {
+          return NextResponse.redirect(`${origin}/set-password`)
+        }
+      }
+
       return NextResponse.redirect(`${origin}${next}`)
     }
   }

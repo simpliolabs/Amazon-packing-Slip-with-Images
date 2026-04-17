@@ -60,6 +60,20 @@ async function prefetchAllProductImages(orders: Order[]): Promise<Record<string,
 }
 
 /**
+ * Helper: wrap a promise with a timeout. Rejects if the promise doesn't
+ * resolve within the given milliseconds.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timeout: ${label} took longer than ${ms}ms`)), ms)
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val) },
+      (err) => { clearTimeout(timer); reject(err) },
+    )
+  })
+}
+
+/**
  * Generate and download a single packing slip PDF
  */
 export async function generateSinglePDF(order: Order): Promise<void> {
@@ -113,7 +127,7 @@ export async function generateCombinedPDF(
   onProgress?.('loading', 'Loading PDF engine…')
 
   const [
-    { pdf, Document, Page },
+    { pdf },
     { default: PackingSlipDocument },
     React,
   ] = await Promise.all([
@@ -134,31 +148,31 @@ export async function generateCombinedPDF(
 
   onProgress?.('rendering', `Rendering ${orders.length} packing slips…`)
 
-  // Create a single combined document with all orders
-  // Each PackingSlipDocument is a <Document> with <Page> inside,
-  // so we need to render each order individually and combine the blobs.
-  // Unfortunately @react-pdf/renderer doesn't support multi-document merging,
-  // so we render each order as a separate PDF and merge with pdf-lib.
-
-  // Actually, let's create individual blobs and merge them
+  // Render each order as a separate PDF blob, then merge with pdf-lib.
+  // Each render has a 30-second timeout to prevent hanging.
   const pdfBlobs: Blob[] = []
   for (let i = 0; i < orders.length; i++) {
     const order = orders[i]
     onProgress?.('rendering', `Rendering slip ${i + 1} of ${orders.length}…`)
     try {
-      const blob = await pdf(
-        React.createElement(PackingSlipDocument, {
-          order,
-          logoBase64,
-          amazonLogoBase64,
-          qrCodeBase64,
-          productImagesBase64,
-        } as any) as any
-      ).toBlob()
+      const element = React.createElement(PackingSlipDocument, {
+        order,
+        logoBase64,
+        amazonLogoBase64,
+        qrCodeBase64,
+        productImagesBase64,
+      } as any) as any
+
+      // Wrap pdf().toBlob() with a 30s timeout per order to prevent infinite hangs
+      const blob = await withTimeout(
+        pdf(element).toBlob(),
+        30000,
+        `PDF render for order ${order.id}`,
+      )
       pdfBlobs.push(blob)
     } catch (err) {
       console.error(`Failed to render PDF for order ${order.id}:`, err)
-      // Skip failed orders
+      // Skip failed orders and continue with the rest
     }
   }
 

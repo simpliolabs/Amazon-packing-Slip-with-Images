@@ -418,7 +418,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: BRAND_BORDER,
     alignItems: 'center',
-    minHeight: 96,
+    minHeight: 114,
   },
   tableRowAlt: {
     backgroundColor: BRAND_LIGHT,
@@ -426,7 +426,7 @@ const styles = StyleSheet.create({
 
   // Column widths
   colQty: { width: 22 },
-  colImage: { width: 100 },
+  colImage: { width: 118 },
   colTitle: { flex: 1, paddingHorizontal: 7 },
   colAttrs: { width: 128 },
 
@@ -447,15 +447,15 @@ const styles = StyleSheet.create({
 
   // Product image
   productImage: {
-    width: 90,
-    height: 90,
+    width: 108,
+    height: 108,
     objectFit: 'contain',
     borderRadius: 3,
     backgroundColor: '#FFFFFF',
   },
   noImage: {
-    width: 90,
-    height: 90,
+    width: 108,
+    height: 108,
     backgroundColor: BRAND_LIGHT,
     borderRadius: 3,
     alignItems: 'center',

@@ -112,8 +112,7 @@ export async function POST(request: NextRequest) {
       const { data: authUsers } = await adminSupabase.auth.admin.listUsers()
       const existingUser = authUsers?.users?.find(u => u.email === email)
       if (existingUser) {
-        await supabase
-          .from('user_profiles')
+        await (supabase.from('user_profiles') as any)
           .delete()
           .eq('id', existingUser.id)
         await adminSupabase.auth.admin.deleteUser(existingUser.id)
@@ -132,7 +131,9 @@ export async function POST(request: NextRequest) {
         role,
         full_name: fullName || '',
       },
-      redirectTo: `${appUrl}/auth/callback`,
+      // redirect_to goes directly to /set-password — the client-side page
+      // will read the #access_token hash fragment via supabase.auth.getSession()
+      redirectTo: `${appUrl}/set-password`,
     },
   })
 
@@ -141,12 +142,12 @@ export async function POST(request: NextRequest) {
   }
 
   // The generated link contains a token_hash and type parameter
-  // We need to construct the proper invite URL that goes through our auth callback
+  // We need to construct the proper invite URL that goes through Supabase verify
   const properties = linkData?.properties
   const hashedToken = properties?.hashed_token
   
-  // Build the invite URL: Supabase verify endpoint → redirects to our callback
-  const inviteLink = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/verify?token=${hashedToken}&type=invite&redirect_to=${encodeURIComponent(`${appUrl}/auth/callback`)}`
+  // Build the invite URL: Supabase verify endpoint → validates token → redirects to /set-password with #access_token
+  const inviteLink = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/verify?token=${hashedToken}&type=invite&redirect_to=${encodeURIComponent(`${appUrl}/set-password`)}`
 
   return NextResponse.json({
     success: true,
