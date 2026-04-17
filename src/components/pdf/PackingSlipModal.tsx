@@ -1,8 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { X, Download, Printer, Loader2 } from 'lucide-react'
-import { toast } from 'sonner'
+import { X, Printer } from 'lucide-react'
 import type { Order, OrderItem, ShipTo } from '@/types/database'
 import { formatDate, formatDateShort } from '@/lib/utils'
 
@@ -454,7 +453,6 @@ interface PackingSlipModalProps {
 }
 
 export default function PackingSlipModal({ order, onClose }: PackingSlipModalProps) {
-  const [downloading, setDownloading] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [imageDataUrls, setImageDataUrls] = useState<Record<string, string>>({})
 
@@ -502,89 +500,6 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
     ? formatDateShort(String((order.raw_data as Record<string, unknown>).LatestShipDate))
     : null
 
-  async function handleDownload() {
-    setDownloading(true)
-    try {
-      const content = document.getElementById('packing-slip-print')
-      if (!content) throw new Error('Content not found')
-
-      const html2canvas = (await import('html2canvas')).default
-      const { jsPDF } = await import('jspdf')
-
-      // Letter size
-      const canvas = await html2canvas(content, {
-        scale: 2,
-        useCORS: true,
-        allowTaint: true,
-        backgroundColor: '#ffffff',
-        width: content.scrollWidth,
-        height: content.scrollHeight,
-        logging: false,
-      })
-
-      const imgData = canvas.toDataURL('image/jpeg', 0.95)
-      const imgWidthPx = canvas.width
-      const imgHeightPx = canvas.height
-
-      // Letter page with 0.5in margins
-      const pdfPageWidthPt = 7.5 * 72  // 7.5in printable
-      const pdfPageHeightPt = 10 * 72   // 10in printable
-
-      const scale = pdfPageWidthPt / imgWidthPx
-      const scaledHeight = imgHeightPx * scale
-
-      const pdf = new jsPDF({
-        orientation: 'portrait',
-        unit: 'pt',
-        format: 'letter',
-      })
-
-      if (scaledHeight <= pdfPageHeightPt) {
-        pdf.addImage(imgData, 'JPEG', 36, 36, pdfPageWidthPt, scaledHeight)
-      } else {
-        // Multi-page: slice the canvas into page-sized chunks
-        const pageHeightPx = pdfPageHeightPt / scale
-        const totalPages = Math.ceil(imgHeightPx / pageHeightPx)
-
-        for (let page = 0; page < totalPages; page++) {
-          if (page > 0) pdf.addPage('letter', 'portrait')
-
-          const srcY = page * pageHeightPx
-          const srcH = Math.min(pageHeightPx, imgHeightPx - srcY)
-          const destH = srcH * scale
-
-          const pageCanvas = document.createElement('canvas')
-          pageCanvas.width = imgWidthPx
-          pageCanvas.height = Math.round(srcH * 2) // scale factor = 2
-          const ctx = pageCanvas.getContext('2d')
-          if (ctx) {
-            ctx.drawImage(
-              canvas,
-              0, Math.round(srcY * 2), imgWidthPx, Math.round(srcH * 2),
-              0, 0, imgWidthPx, Math.round(srcH * 2)
-            )
-            const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95)
-            pdf.addImage(pageImgData, 'JPEG', 36, 36, pdfPageWidthPt, destH)
-          }
-        }
-      }
-
-      pdf.save(`${order.id}.pdf`)
-
-      await fetch('/api/downloads/log', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: order.id, downloadType: 'single' }),
-      }).catch(() => {})
-      toast.success('Packing slip downloaded')
-    } catch (err) {
-      console.error('PDF download error:', err)
-      toast.error('Download failed')
-    } finally {
-      setDownloading(false)
-    }
-  }
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
@@ -605,14 +520,6 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
             >
               <Printer size={14} />
               Print
-            </button>
-            <button
-              onClick={handleDownload}
-              disabled={downloading}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
-            >
-              {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-              {downloading ? 'Generating...' : 'Download PDF'}
             </button>
             <button onClick={onClose} className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
               <X size={18} />

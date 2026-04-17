@@ -5,7 +5,6 @@ import { toast } from 'sonner'
 import {
   Search,
   Download,
-  FileDown,
   Printer,
   RefreshCw,
   ChevronLeft,
@@ -50,8 +49,6 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
   const [dateTo, setDateTo] = useState('')
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set())
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null)
-  const [bulkDownloading, setBulkDownloading] = useState(false)
-  const [bulkStatusText, setBulkStatusText] = useState('')
   const [bulkPrinting, setBulkPrinting] = useState(false)
   const [printStatusText, setPrintStatusText] = useState('')
   const [lastSync, setLastSync] = useState<string | null>(null)
@@ -131,39 +128,6 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
     }
   }
 
-  async function handleBulkDownload() {
-    if (selectedOrders.size === 0) {
-      toast.error('Select at least one order')
-      return
-    }
-    setBulkDownloading(true)
-    setBulkStatusText('Loading…')
-    try {
-      const selectedOrderObjects = orders.filter((o) => selectedOrders.has(o.id))
-
-      const { generateBulkPDF } = await import('@/lib/pdf/generatePDF')
-      await generateBulkPDF(selectedOrderObjects, (phase, detail) => {
-        setBulkStatusText(detail || phase)
-      })
-
-      // Log bulk download
-      await fetch('/api/downloads/log', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: null, downloadType: 'bulk' }),
-      }).catch(() => {})
-
-      toast.success(`Downloaded ${selectedOrders.size} packing slips`)
-      setSelectedOrders(new Set())
-    } catch (err) {
-      toast.error('Bulk download failed. Please try again.')
-      console.error(err)
-    } finally {
-      setBulkDownloading(false)
-      setBulkStatusText('')
-    }
-  }
-
   async function handleBulkPrint() {
     if (selectedOrders.size === 0) {
       toast.error('Select at least one order')
@@ -214,23 +178,13 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
           <div className="flex items-center gap-2">
             <button
               onClick={handleBulkPrint}
-              disabled={bulkPrinting || bulkDownloading}
+              disabled={bulkPrinting}
               className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-800 disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
             >
               <Printer size={16} className={bulkPrinting ? 'animate-pulse' : ''} />
               {bulkPrinting
                 ? printStatusText || 'Preparing…'
                 : `Print ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
-            </button>
-            <button
-              onClick={handleBulkDownload}
-              disabled={bulkDownloading || bulkPrinting}
-              className="flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
-            >
-              <FileDown size={16} className={bulkDownloading ? 'animate-bounce' : ''} />
-              {bulkDownloading
-                ? bulkStatusText || 'Preparing…'
-                : `Download ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
             </button>
           </div>
         )}
