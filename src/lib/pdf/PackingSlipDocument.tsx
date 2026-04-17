@@ -57,7 +57,6 @@ const COLORS = [
 ]
 
 const STYLES: [string, string][] = [
-  ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
   ['Long Sleeve', 'Long Sleeve'],
   ['V-Neck', 'V-Neck'],
   ['V Neck', 'V-Neck'],
@@ -75,9 +74,99 @@ const STYLES: [string, string][] = [
   ['Crewneck Sweatshirt', 'Crewneck Sweatshirt'],
   ['Crewneck', 'Crewneck Sweatshirt'],
   ['Sweatshirt', 'Crewneck Sweatshirt'],
+  ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
   ['T-Shirt', 'Short Sleeve'],
   ['Tee', 'Short Sleeve'],
 ]
+
+// SKU color code → color name mapping
+const SKU_COLOR_CODES: Record<string, string> = {
+  WH: 'White', WHT: 'White', WT: 'White',
+  BK: 'Black', BLK: 'Black',
+  NV: 'Navy', NVY: 'Navy',
+  RD: 'Red',
+  BL: 'Blue', BLU: 'Blue',
+  GR: 'Green', GRN: 'Green',
+  GY: 'Gray', GRY: 'Gray', GREY: 'Grey',
+  PK: 'Pink', PNK: 'Pink',
+  PU: 'Purple', PUR: 'Purple',
+  OR: 'Orange', ORG: 'Orange',
+  YL: 'Yellow', YLW: 'Yellow',
+  BR: 'Brown', BRN: 'Brown',
+  TL: 'Teal',
+  CR: 'Coral',
+  MN: 'Maroon', MRN: 'Maroon',
+  BG: 'Burgundy',
+  RS: 'Rust',
+  MOS: 'Moss',
+  OLV: 'Olive', OL: 'Olive',
+  PPR: 'Pepper',
+  SND: 'Sandstone',
+  GRN8: 'Granite', GRNT: 'Granite',
+  ESP: 'Espresso',
+  SFM: 'Seafoam',
+  BTR: 'Butter',
+  SAG: 'Sage',
+  IVY: 'Ivory', IV: 'Ivory',
+  CRM: 'Cream',
+  KHK: 'Khaki', KH: 'Khaki',
+  LAV: 'Lavender',
+  PCH: 'Peach',
+  AQ: 'Aqua',
+  GLD: 'Gold',
+  TAN: 'Tan',
+  SMK: 'Smoke',
+  MID: 'Midnight',
+  VIN: 'Vineyard',
+  HMP: 'Hemp',
+  YAM: 'Yam',
+  LAG: 'Lagoon',
+  BLS: 'Blossom',
+  BRY: 'Berry',
+  CIT: 'Citrus',
+  CRI: 'Crimson',
+  GPH: 'Graphite',
+  SPH: 'Sapphire',
+  TRC: 'Terracotta',
+  WTR: 'Watermelon',
+  BJN: 'Blue Jean',
+  BSP: 'Blue Spruce',
+  FBL: 'Flo Blue',
+  ICB: 'Ice Blue',
+  IRF: 'Island Reef',
+  ORC: 'Orchid',
+  PRW: 'Periwinkle',
+  PBK: 'Pigment Black',
+  CSK: 'Coral Silk',
+  CMT: 'Chalky Mint',
+  CRB: 'Crunchberry',
+  BSL: 'Bright Salmon',
+  BOR: 'Burnt Orange',
+  CPK: 'Candy Pink',
+  CHL: 'Chili',
+  FDB: 'Faded Blue',
+  OGD: 'Old Gold',
+  ROR: 'Red Orange',
+}
+
+// SKU size code → size name mapping
+const SKU_SIZE_CODES: Record<string, string> = {
+  XS: 'X-Small', '2XS': 'XX-Small',
+  S: 'Small', SM: 'Small',
+  M: 'Medium', MD: 'Medium', MED: 'Medium',
+  L: 'Large', LG: 'Large',
+  XL: 'X-Large',
+  '2XL': '2X-Large', XXL: '2X-Large',
+  '3XL': '3X-Large', XXXL: '3X-Large',
+  '4XL': '4X-Large', '5XL': '5X-Large', '6XL': '6X-Large',
+}
+
+// Words that should NOT be treated as colors in fallback parsing
+const NON_COLOR_WORDS = new Set([
+  'regular', 'slim', 'relaxed', 'fitted', 'classic', 'standard', 'unisex',
+  'alpha', 'numeric', 'us', 'uk', 'eu', 'men', 'women', 'adult', 'youth',
+  'graphic', 'vintage', 'retro', 'modern', 'apparel', 'shirt', 'tee',
+])
 
 interface ProductAttributes {
   size: string | null
@@ -87,17 +176,45 @@ interface ProductAttributes {
 }
 
 /**
+ * Extract color, size, and style codes from SKU segments.
+ * SKU formats:
+ *   BTFFTW64000XL-WH           → color=White
+ *   TCEO-Later-Gator-LS-L-MOS  → style=Long Sleeve, size=Large, color=Moss
+ *   640002XL-WH-Soccer-Cup-TS-Germany → color=White
+ */
+function parseSkuCodes(sku: string): { color?: string; size?: string; style?: string } {
+  if (!sku) return {}
+  const result: { color?: string; size?: string; style?: string } = {}
+
+  const segments = sku.split('-').map(s => s.trim()).filter(Boolean)
+
+  for (const seg of segments) {
+    const upper = seg.toUpperCase()
+
+    if (upper === 'LS') { result.style = 'Long Sleeve'; continue }
+    if (upper === 'SS') { result.style = 'Short Sleeve'; continue }
+    if (SKU_COLOR_CODES[upper]) { result.color = SKU_COLOR_CODES[upper]; continue }
+    if (SKU_SIZE_CODES[upper]) { result.size = SKU_SIZE_CODES[upper]; continue }
+  }
+
+  // Check for embedded size in first segment like "64000XL" or "640002XL"
+  if (!result.size) {
+    const firstSeg = segments[0] || ''
+    const sizeMatch = firstSeg.match(/(\d+)(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS|S|M|L)$/i)
+    if (sizeMatch) {
+      const sizeCode = sizeMatch[2].toUpperCase()
+      result.size = SKU_SIZE_CODES[sizeCode] || sizeCode
+    }
+  }
+
+  return result
+}
+
+/**
  * Extract the variant/team/country from the SKU.
- * SKU format examples:
- *   64000XL-WH-Soccer-Cup-TS-Germany  → "Germany"
- *   64000XS-WH-FIFA-WORLD-CUP-TS-Japan → "Japan"
- *   64000L-BK-Hoodie-Classic           → null
- * Looks for the last segment after "TS-" or "ts-" in the SKU.
- * Falls back to checking the title for known country names.
  */
 function extractVariantFromSku(sku: string): string | null {
   if (!sku) return null
-  // Match the last segment after TS- (case insensitive)
   const tsMatch = sku.match(/TS-([A-Za-z]+)$/i)
   if (tsMatch) return tsMatch[1]
   return null
@@ -106,6 +223,7 @@ function extractVariantFromSku(sku: string): string | null {
 function parseProductAttributes(title: string, sku?: string): ProductAttributes {
   const result: ProductAttributes = { size: null, color: null, style: null, variant: null }
 
+  // ── 1. Parse size from title ──
   for (const size of SIZES) {
     const escaped = size.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
@@ -116,6 +234,7 @@ function parseProductAttributes(title: string, sku?: string): ProductAttributes 
     if (singleMatch) result.size = singleMatch[1].toUpperCase()
   }
 
+  // ── 2. Parse color from title ──
   const sortedColors = [...COLORS].sort((a, b) => b.length - a.length)
   for (const color of sortedColors) {
     const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -123,7 +242,20 @@ function parseProductAttributes(title: string, sku?: string): ProductAttributes 
     if (re.test(title)) { result.color = color; break }
   }
 
-  // Fallback: extract color from title trailing segments ("- Color - Size" pattern)
+  // ── 3. Parse SKU codes ──
+  const skuData = parseSkuCodes(sku || '')
+
+  // Use SKU color if title didn't find one
+  if (!result.color && skuData.color) {
+    result.color = skuData.color
+  }
+
+  // Use SKU size if title didn't find one
+  if (!result.size && skuData.size) {
+    result.size = skuData.size
+  }
+
+  // ── 4. Fallback: extract color from title trailing segments ──
   if (!result.color) {
     const segments = title.split(/\s*[-\u2013]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 3 && result.size) {
@@ -131,7 +263,10 @@ function parseProductAttributes(title: string, sku?: string): ProductAttributes 
         if (segments[i].toLowerCase() === result.size.toLowerCase() && i > 0) {
           const candidate = segments[i - 1]
           if (candidate.split(/\s+/).length <= 3 && candidate.length <= 30) {
-            result.color = candidate
+            // Skip non-color words
+            if (!NON_COLOR_WORDS.has(candidate.toLowerCase())) {
+              result.color = candidate
+            }
           }
           break
         }
@@ -139,14 +274,25 @@ function parseProductAttributes(title: string, sku?: string): ProductAttributes 
     }
   }
 
-  for (const [keyword, label] of STYLES) {
-    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
-    if (re.test(title)) { result.style = label; break }
+  // ── 5. Style detection with smart Comfort Colors + Long Sleeve combo ──
+  const titleLower = title.toLowerCase()
+  const hasComfortColors = titleLower.includes('comfort colors')
+  const hasLongSleeve = titleLower.includes('long sleeve') || skuData.style === 'Long Sleeve'
+
+  if (hasComfortColors && hasLongSleeve) {
+    result.style = 'Comfort Colors / Long Sleeve'
+  } else if (hasLongSleeve) {
+    result.style = 'Long Sleeve'
+  } else {
+    for (const [keyword, label] of STYLES) {
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
+      if (re.test(title)) { result.style = label; break }
+    }
   }
   if (!result.style) result.style = 'Short Sleeve'
 
-  // Extract variant (team/country) from SKU
+  // ── 6. Extract variant (team/country) from SKU ──
   if (sku) {
     result.variant = extractVariantFromSku(sku)
   }
