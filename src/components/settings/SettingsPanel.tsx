@@ -7,29 +7,31 @@ import {
   CheckCircle,
   XCircle,
   RefreshCw,
-  AlertTriangle,
   Info,
   Loader2,
   Save,
-  Eye,
-  EyeOff,
   Key,
+  ShieldCheck,
 } from 'lucide-react'
 
 interface SettingsPanelProps {
   amazonConnected: boolean
   lastSyncStatus: string
   amazonClientId: string
-  amazonClientSecret: string
-  amazonRefreshToken: string
+  amazonClientSecretMasked: string
+  amazonRefreshTokenMasked: string
+  hasExistingSecret: boolean
+  hasExistingToken: boolean
 }
 
 export default function SettingsPanel({
   amazonConnected,
   lastSyncStatus,
   amazonClientId,
-  amazonClientSecret,
-  amazonRefreshToken,
+  amazonClientSecretMasked,
+  amazonRefreshTokenMasked,
+  hasExistingSecret,
+  hasExistingToken,
 }: SettingsPanelProps) {
   const searchParams = useSearchParams()
   const successParam = searchParams.get('success')
@@ -43,40 +45,61 @@ export default function SettingsPanel({
     error?: string
   } | null>(null)
 
-  // Credentials form state
+  // Credentials form state — secrets are NEVER pre-filled from server
   const [clientId, setClientId] = useState(amazonClientId || '')
-  const [clientSecret, setClientSecret] = useState(amazonClientSecret || '')
-  const [refreshToken, setRefreshToken] = useState(amazonRefreshToken || '')
-  const [showSecret, setShowSecret] = useState(false)
-  const [showToken, setShowToken] = useState(false)
+  const [clientSecret, setClientSecret] = useState('')
+  const [refreshToken, setRefreshToken] = useState('')
 
-  const credentialsChanged =
-    clientId !== (amazonClientId || '') ||
-    clientSecret !== (amazonClientSecret || '') ||
-    refreshToken !== (amazonRefreshToken || '')
+  // Track if user wants to update secrets
+  const [editingSecret, setEditingSecret] = useState(!hasExistingSecret)
+  const [editingToken, setEditingToken] = useState(!hasExistingToken)
 
-  const credentialsFilled = clientId.trim() && clientSecret.trim() && refreshToken.trim()
+  const clientIdChanged = clientId !== (amazonClientId || '')
+  const hasNewSecret = editingSecret && clientSecret.trim().length > 0
+  const hasNewToken = editingToken && refreshToken.trim().length > 0
+
+  const canSave = clientId.trim() && (
+    clientIdChanged ||
+    hasNewSecret ||
+    hasNewToken
+  )
 
   async function handleSaveCredentials() {
-    if (!credentialsFilled) {
-      toast.error('Please fill in all three credential fields')
+    if (!clientId.trim()) {
+      toast.error('Client ID is required')
       return
     }
+
+    // Build payload — only include secrets if user provided new values
+    const payload: Record<string, string> = {
+      clientId: clientId.trim(),
+    }
+    if (hasNewSecret) {
+      payload.clientSecret = clientSecret.trim()
+    }
+    if (hasNewToken) {
+      payload.refreshToken = refreshToken.trim()
+    }
+
+    if (!hasExistingSecret && !hasNewSecret) {
+      toast.error('Client Secret is required')
+      return
+    }
+    if (!hasExistingToken && !hasNewToken) {
+      toast.error('Refresh Token is required')
+      return
+    }
+
     setSavingCreds(true)
     try {
       const res = await fetch('/api/amazon/credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId: clientId.trim(),
-          clientSecret: clientSecret.trim(),
-          refreshToken: refreshToken.trim(),
-        }),
+        body: JSON.stringify(payload),
       })
       const data = await res.json()
       if (res.ok && data.success) {
         toast.success('Amazon credentials saved — connection is now active')
-        // Reload to update connected status
         window.location.reload()
       } else {
         toast.error(data.error || 'Failed to save credentials')
@@ -115,7 +138,6 @@ export default function SettingsPanel({
         <p className="text-sm text-gray-500 mt-0.5">Configure your Amazon integration and app preferences</p>
       </div>
 
-      {/* Success/Error banners from OAuth redirect */}
       {successParam === 'amazon_connected' && (
         <div className="flex items-center gap-3 p-4 bg-green-50 border border-green-200 rounded-xl mb-5">
           <CheckCircle size={18} className="text-green-600 flex-shrink-0" />
@@ -194,57 +216,89 @@ export default function SettingsPanel({
               />
             </div>
 
-            {/* Client Secret */}
+            {/* Client Secret — masked */}
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Client Secret
-              </label>
-              <div className="relative">
-                <input
-                  type={showSecret ? 'text' : 'password'}
-                  value={clientSecret}
-                  onChange={(e) => setClientSecret(e.target.value)}
-                  placeholder="amzn1.oa2-cs.v1.xxxxxxxx"
-                  className="w-full px-3 py-2 pr-9 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowSecret(!showSecret)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  {showSecret ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Client Secret</label>
+              {!editingSecret ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg font-mono bg-gray-50 text-gray-500">
+                    {amazonClientSecretMasked}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingSecret(true)}
+                    className="px-3 py-2 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+                  >
+                    Update
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <input
+                    type="password"
+                    value={clientSecret}
+                    onChange={(e) => setClientSecret(e.target.value)}
+                    placeholder="Enter new client secret"
+                    className="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
+                  />
+                  {hasExistingSecret && (
+                    <button
+                      type="button"
+                      onClick={() => { setEditingSecret(false); setClientSecret('') }}
+                      className="text-xs text-gray-400 hover:text-gray-600"
+                    >
+                      Cancel — keep existing
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Refresh Token */}
+            {/* Refresh Token — masked */}
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">
                 Refresh Token <span className="text-gray-400 font-normal">(from Amazon OAuth flow or Seller Central)</span>
               </label>
-              <div className="relative">
-                <input
-                  type={showToken ? 'text' : 'password'}
-                  value={refreshToken}
-                  onChange={(e) => setRefreshToken(e.target.value)}
-                  placeholder="Atzr|xxxxxxxx"
-                  className="w-full px-3 py-2 pr-9 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowToken(!showToken)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
+              {!editingToken ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg font-mono bg-gray-50 text-gray-500">
+                    {amazonRefreshTokenMasked}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingToken(true)}
+                    className="px-3 py-2 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+                  >
+                    Update
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <input
+                    type="password"
+                    value={refreshToken}
+                    onChange={(e) => setRefreshToken(e.target.value)}
+                    placeholder="Enter new refresh token"
+                    className="w-full px-3 py-2 text-xs border border-gray-200 rounded-lg font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
+                  />
+                  {hasExistingToken && (
+                    <button
+                      type="button"
+                      onClick={() => { setEditingToken(false); setRefreshToken('') }}
+                      className="text-xs text-gray-400 hover:text-gray-600"
+                    >
+                      Cancel — keep existing
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
           <div className="mt-4 flex items-center gap-3">
             <button
               onClick={handleSaveCredentials}
-              disabled={savingCreds || !credentialsFilled}
+              disabled={savingCreds || !canSave}
               className="flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium rounded-lg transition-colors"
             >
               {savingCreds ? (
@@ -254,17 +308,17 @@ export default function SettingsPanel({
               )}
               {savingCreds ? 'Saving…' : 'Save Credentials'}
             </button>
-            {credentialsChanged && !savingCreds && (
-              <span className="text-xs text-amber-600 flex items-center gap-1">
-                <AlertTriangle size={12} /> Unsaved changes
-              </span>
-            )}
-            {amazonConnected && !credentialsChanged && (
+            {amazonConnected && !canSave && (
               <span className="text-xs text-green-600 flex items-center gap-1">
-                <CheckCircle size={12} /> Credentials saved
+                <ShieldCheck size={12} /> Credentials secured
               </span>
             )}
           </div>
+
+          <p className="mt-3 text-xs text-gray-400 flex items-center gap-1">
+            <ShieldCheck size={11} />
+            Secrets are never displayed in full. Only masked previews are shown.
+          </p>
         </div>
       </div>
 

@@ -222,7 +222,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                 <thead>
                   <tr className="bg-[#2E9CE6] text-white">
                     <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-10">Qty</th>
-                    <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-16">Image</th>
+                    <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-28">Image</th>
                     <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide">Product</th>
                     <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide w-36">Size / Color / Style</th>
                   </tr>
@@ -244,11 +244,11 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                             <img
                               src={item.image_url}
                               alt={item.title}
-                              className="w-16 h-16 object-contain rounded border border-gray-200 bg-white"
+                              className="w-24 h-24 object-contain rounded bg-white"
                               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
                             />
                           ) : (
-                            <div className="w-16 h-16 bg-gray-100 rounded border border-gray-200 flex items-center justify-center">
+                            <div className="w-24 h-24 bg-gray-100 rounded flex items-center justify-center">
                               <span className="text-xs text-gray-400 text-center">No Image</span>
                             </div>
                           )}
@@ -324,17 +324,27 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
         </div>
       </div>
 
-      {/* Print-only styles */}
+      {/* Print-only styles — Letter size (8.5 x 11 in) */}
       <style jsx global>{`
         @media print {
+          @page {
+            size: letter portrait;
+            margin: 0.5in;
+          }
           body > *:not(#packing-slip-print) { display: none !important; }
+          .no-print { display: none !important; }
           #packing-slip-print {
             display: block !important;
             position: fixed;
             top: 0; left: 0;
             width: 100%;
-            padding: 20px;
+            padding: 0;
             box-shadow: none;
+            border-radius: 0;
+          }
+          #packing-slip-print img {
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
           }
         }
       `}</style>

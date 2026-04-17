@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
+import { logAudit } from '@/lib/audit'
 
 /**
  * POST /api/amazon/credentials
  * Saves Amazon SP-API credentials to app_settings.
- * Admin only.
+ * Admin only. Supports partial updates — secrets are only overwritten
+ * when the client explicitly provides new values.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -30,21 +32,28 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { clientId, clientSecret, refreshToken } = body
 
-    if (!clientId || !clientSecret || !refreshToken) {
+    if (!clientId) {
       return NextResponse.json(
-        { error: 'clientId, clientSecret, and refreshToken are required' },
+        { error: 'clientId is required' },
         { status: 400 }
       )
     }
 
-    // Save all three credentials to app_settings
     const now = new Date().toISOString()
-    const upserts = [
+
+    // Always update client ID
+    const upserts: { key: string; value: string; updated_at: string }[] = [
       { key: 'amazon_client_id', value: clientId, updated_at: now },
-      { key: 'amazon_client_secret', value: clientSecret, updated_at: now },
-      { key: 'amazon_refresh_token', value: refreshToken, updated_at: now },
       { key: 'amazon_connected', value: 'true', updated_at: now },
     ]
+
+    // Only update secrets if new values are provided
+    if (clientSecret && clientSecret.trim()) {
+      upserts.push({ key: 'amazon_client_secret', value: clientSecret.trim(), updated_at: now })
+    }
+    if (refreshToken && refreshToken.trim()) {
+      upserts.push({ key: 'amazon_refresh_token', value: refreshToken.trim(), updated_at: now })
+    }
 
     for (const record of upserts) {
       const { error } = await adminClient
@@ -58,6 +67,22 @@ export async function POST(request: NextRequest) {
         )
       }
     }
+
+    // Audit log for credential update
+    await logAudit({
+      userId: user.id,
+      action: 'settings.update_credentials',
+      resourceType: 'settings',
+      details: {
+        updatedFields: [
+          'client_id',
+          ...(clientSecret ? ['client_secret'] : []),
+          ...(refreshToken ? ['refresh_token'] : []),
+        ],
+      },
+      ipAddress: request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || undefined,
+      userAgent: request.headers.get('user-agent') || undefined,
+    })
 
     return NextResponse.json({ success: true })
   } catch (err) {

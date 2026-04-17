@@ -247,7 +247,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: BRAND_BORDER,
     alignItems: 'center',
-    minHeight: 68,
+    minHeight: 96,
   },
   tableRowAlt: {
     backgroundColor: BRAND_LIGHT,
@@ -255,7 +255,7 @@ const styles = StyleSheet.create({
 
   // Column widths
   colQty: { width: 22 },
-  colImage: { width: 70 },
+  colImage: { width: 100 },
   colTitle: { flex: 1, paddingHorizontal: 7 },
   colAttrs: { width: 128 },
 
@@ -276,21 +276,17 @@ const styles = StyleSheet.create({
 
   // Product image
   productImage: {
-    width: 62,
-    height: 62,
+    width: 90,
+    height: 90,
     objectFit: 'contain',
     borderRadius: 3,
-    borderWidth: 1,
-    borderColor: BRAND_BORDER,
     backgroundColor: '#FFFFFF',
   },
   noImage: {
-    width: 62,
-    height: 62,
+    width: 90,
+    height: 90,
     backgroundColor: BRAND_LIGHT,
     borderRadius: 3,
-    borderWidth: 1,
-    borderColor: BRAND_BORDER,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -515,7 +511,7 @@ export default function PackingSlipDocument({
       author="TheCEO.Store"
       subject="Amazon FBM Packing Slip"
     >
-      <Page size="A4" style={styles.page}>
+      <Page size="LETTER" style={styles.page}>
 
         {/* ── Header: CEO® logo | Store is on | Amazon logo ── */}
         <View style={styles.headerRow}>

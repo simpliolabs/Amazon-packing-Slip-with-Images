@@ -3,6 +3,12 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import DashboardLayout from '@/components/layout/DashboardLayout'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 
+/** Mask a secret string, showing only the last 4 characters */
+function maskSecret(value: string): string {
+  if (!value || value.length <= 4) return value ? '••••' : ''
+  return '••••••••' + value.slice(-4)
+}
+
 export default async function SettingsPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -34,8 +40,10 @@ export default async function SettingsPage() {
         amazonConnected={settingsMap['amazon_connected'] === 'true'}
         lastSyncStatus={settingsMap['last_sync_status'] || ''}
         amazonClientId={settingsMap['amazon_client_id'] || ''}
-        amazonClientSecret={settingsMap['amazon_client_secret'] || ''}
-        amazonRefreshToken={settingsMap['amazon_refresh_token'] || ''}
+        amazonClientSecretMasked={maskSecret(settingsMap['amazon_client_secret'] || '')}
+        amazonRefreshTokenMasked={maskSecret(settingsMap['amazon_refresh_token'] || '')}
+        hasExistingSecret={!!settingsMap['amazon_client_secret']}
+        hasExistingToken={!!settingsMap['amazon_refresh_token']}
       />
     </DashboardLayout>
   )

@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/server'
 /**
  * GET /api/amazon/callback
  * Handles the OAuth2 redirect from Amazon after user grants access.
+ * Validates the state parameter to prevent CSRF attacks.
  * Stores the refresh_token in app_settings for future use.
  */
 export async function GET(request: NextRequest) {
@@ -26,6 +27,14 @@ export async function GET(request: NextRequest) {
     )
   }
 
+  // Validate OAuth state to prevent CSRF
+  const storedState = request.cookies.get('amazon_oauth_state')?.value
+  if (!state || !storedState || state !== storedState) {
+    return NextResponse.redirect(
+      new URL('/settings?error=invalid_state_csrf_protection', request.url)
+    )
+  }
+
   try {
     // Verify user is authenticated
     const supabase = await createClient()
@@ -41,7 +50,6 @@ export async function GET(request: NextRequest) {
     // Store refresh token securely in app_settings
     const adminSupabase = await createAdminClient()
     
-    // Perform upserts individually to satisfy TypeScript types
     await adminSupabase.from('app_settings').upsert({
       key: 'amazon_refresh_token',
       value: tokens.refresh_token || '',
@@ -54,9 +62,13 @@ export async function GET(request: NextRequest) {
       updated_at: new Date().toISOString(),
     } as any)
 
-    return NextResponse.redirect(
+    // Clear the state cookie
+    const response = NextResponse.redirect(
       new URL('/settings?success=amazon_connected', request.url)
     )
+    response.cookies.delete('amazon_oauth_state')
+
+    return response
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
     return NextResponse.redirect(

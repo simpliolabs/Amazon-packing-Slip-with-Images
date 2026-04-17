@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { logAudit } from '@/lib/audit'
 
 /**
  * POST /api/downloads/log
- * Logs a download event
+ * Logs a download event with audit trail
  */
 export async function POST(request: NextRequest) {
   const supabase = await createClient()
@@ -24,6 +25,17 @@ export async function POST(request: NextRequest) {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
+
+  // Audit log for PII access (packing slips contain customer data)
+  await logAudit({
+    userId: user.id,
+    action: downloadType === 'bulk' ? 'order.bulk_download' : 'order.download_pdf',
+    resourceType: 'order',
+    resourceId: orderId || undefined,
+    details: { downloadType: downloadType || 'single' },
+    ipAddress: request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || undefined,
+    userAgent: request.headers.get('user-agent') || undefined,
+  })
 
   return NextResponse.json({ success: true })
 }

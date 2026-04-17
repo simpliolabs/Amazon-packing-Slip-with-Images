@@ -162,6 +162,14 @@ export async function syncOrders(): Promise<SyncResult> {
             }
           : null
 
+        // Strip PII from raw_data before storage (DPP compliance)
+        const sanitizedRawData = { ...order } as Record<string, unknown>
+        delete sanitizedRawData.ShippingAddress
+        delete sanitizedRawData.BuyerInfo
+        delete sanitizedRawData.BuyerName
+        delete sanitizedRawData.BuyerEmail
+        delete sanitizedRawData.DefaultShipFromLocationAddress
+
         // Upsert order into Supabase
         const { error } = await supabase.from('orders').upsert(
           {
@@ -173,7 +181,7 @@ export async function syncOrders(): Promise<SyncResult> {
             order_items: orderItems,
             fulfillment_channel: order.FulfillmentChannel,
             order_status: order.OrderStatus,
-            raw_data: order as unknown as Record<string, unknown>,
+            raw_data: sanitizedRawData,
             synced_at: new Date().toISOString(),
           },
           { onConflict: 'id' }

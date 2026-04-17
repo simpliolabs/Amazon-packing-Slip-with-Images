@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import crypto from 'crypto'
 
 /**
  * GET /api/amazon/connect
  * Redirects the user to Amazon's OAuth consent screen.
+ * Generates a cryptographically secure state token to prevent CSRF.
  */
 export async function GET(request: NextRequest) {
   const supabase = await createClient()
@@ -24,7 +26,8 @@ export async function GET(request: NextRequest) {
   }
 
   const redirectUri = `${appUrl}/api/amazon/callback`
-  const state = Math.random().toString(36).substring(2, 15)
+  // Use cryptographically secure random state for CSRF protection
+  const state = crypto.randomBytes(32).toString('hex')
 
   const amazonAuthUrl = new URL('https://sellercentral.amazon.com/apps/authorize/consent')
   amazonAuthUrl.searchParams.set('application_id', clientId)
@@ -32,5 +35,15 @@ export async function GET(request: NextRequest) {
   amazonAuthUrl.searchParams.set('redirect_uri', redirectUri)
   amazonAuthUrl.searchParams.set('version', 'beta')
 
-  return NextResponse.redirect(amazonAuthUrl.toString())
+  // Store state in a secure, httpOnly cookie for validation in callback
+  const response = NextResponse.redirect(amazonAuthUrl.toString())
+  response.cookies.set('amazon_oauth_state', state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 600, // 10 minutes
+    path: '/api/amazon/callback',
+  })
+
+  return response
 }
