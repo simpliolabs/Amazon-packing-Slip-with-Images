@@ -141,8 +141,8 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
     try {
       const selectedOrderObjects = orders.filter((o) => selectedOrders.has(o.id))
 
-      const { generateBulkPrint } = await import('@/lib/pdf/generatePDF')
-      await generateBulkPrint(selectedOrderObjects, (phase, detail) => {
+      const { generateBulkPrintHTML } = await import('@/lib/pdf/bulkPrintHTML')
+      await generateBulkPrintHTML(selectedOrderObjects, (phase, detail) => {
         setPrintStatusText(detail || phase)
       })
 

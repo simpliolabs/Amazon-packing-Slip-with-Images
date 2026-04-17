@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
@@ -14,56 +14,92 @@ export default function SetPasswordPage() {
   const [checking, setChecking] = useState(true)
   const [userName, setUserName] = useState('')
   const [sessionReady, setSessionReady] = useState(false)
-
-  const supabase = createClient()
-
-  const checkSession = useCallback(async () => {
-    // The Supabase browser client automatically detects #access_token in the URL hash
-    // and exchanges it for a session. We need to wait for that to complete.
-    
-    // First, listen for auth state changes — the SIGNED_IN event fires
-    // when the hash fragment token is successfully parsed
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') {
-          if (session?.user) {
-            setUserName(session.user.user_metadata?.full_name || session.user.email || '')
-            setSessionReady(true)
-            setChecking(false)
-          }
-        }
-      }
-    )
-
-    // Also check if there's already an active session (e.g., page refresh)
-    const { data: { session } } = await supabase.auth.getSession()
-    if (session?.user) {
-      setUserName(session.user.user_metadata?.full_name || session.user.email || '')
-      setSessionReady(true)
-      setChecking(false)
-    } else {
-      // Give the hash fragment parsing a few seconds to complete
-      setTimeout(async () => {
-        const { data: { session: retrySession } } = await supabase.auth.getSession()
-        if (retrySession?.user) {
-          setUserName(retrySession.user.user_metadata?.full_name || retrySession.user.email || '')
-          setSessionReady(true)
-          setChecking(false)
-        } else {
-          // No session after waiting — redirect to login
-          setChecking(false)
-        }
-      }, 3000)
-    }
-
-    return () => {
-      subscription.unsubscribe()
-    }
-  }, [supabase])
+  const [errorMessage, setErrorMessage] = useState('')
 
   useEffect(() => {
-    checkSession()
-  }, [checkSession])
+    const supabase = createClient()
+
+    async function bootstrap() {
+      try {
+        // ── Step 1: Check if there's already a valid session (e.g., page refresh) ──
+        const { data: { session: existingSession } } = await supabase.auth.getSession()
+        if (existingSession?.user) {
+          setUserName(existingSession.user.user_metadata?.full_name || existingSession.user.email || '')
+          setSessionReady(true)
+          setChecking(false)
+          return
+        }
+
+        // ── Step 2: Parse hash fragment for implicit flow tokens ──
+        // Supabase invite links redirect with: #access_token=...&refresh_token=...&type=invite
+        const hash = window.location.hash.substring(1) // remove the '#'
+        if (!hash) {
+          // Check URL search params too (some flows use query params)
+          const params = new URLSearchParams(window.location.search)
+          const error = params.get('error')
+          const errorDesc = params.get('error_description')
+          if (error) {
+            console.error('Auth error from URL:', error, errorDesc)
+            setErrorMessage(errorDesc || 'Authentication failed. Please request a new invite.')
+          }
+          setChecking(false)
+          return
+        }
+
+        const hashParams = new URLSearchParams(hash)
+        const accessToken = hashParams.get('access_token')
+        const refreshToken = hashParams.get('refresh_token')
+        const errorParam = hashParams.get('error')
+        const errorDesc = hashParams.get('error_description')
+
+        if (errorParam) {
+          console.error('Auth error from hash:', errorParam, errorDesc)
+          setErrorMessage(errorDesc || 'Authentication failed. Please request a new invite.')
+          setChecking(false)
+          return
+        }
+
+        if (!accessToken || !refreshToken) {
+          console.error('Missing tokens in hash fragment')
+          setErrorMessage('Invalid invite link. Please request a new invite from your admin.')
+          setChecking(false)
+          return
+        }
+
+        // ── Step 3: Explicitly set the session using the hash tokens ──
+        const { data, error } = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        })
+
+        if (error) {
+          console.error('setSession error:', error)
+          setErrorMessage(error.message || 'Failed to verify invite. Please request a new invite.')
+          setChecking(false)
+          return
+        }
+
+        if (data.session?.user) {
+          setUserName(data.session.user.user_metadata?.full_name || data.session.user.email || '')
+          setSessionReady(true)
+
+          // Clean up the hash from the URL (don't expose tokens)
+          if (window.history.replaceState) {
+            window.history.replaceState(null, '', window.location.pathname)
+          }
+        } else {
+          setErrorMessage('Could not establish session. Please request a new invite.')
+        }
+      } catch (err) {
+        console.error('Bootstrap error:', err)
+        setErrorMessage('Something went wrong. Please request a new invite.')
+      } finally {
+        setChecking(false)
+      }
+    }
+
+    bootstrap()
+  }, [])
 
   async function handleSetPassword(e: React.FormEvent) {
     e.preventDefault()
@@ -81,6 +117,8 @@ export default function SetPasswordPage() {
     setLoading(true)
 
     try {
+      const supabase = createClient()
+
       // Update the user's password
       const { error: updateError } = await supabase.auth.updateUser({
         password,
@@ -139,7 +177,7 @@ export default function SetPasswordPage() {
               Invite Link Expired
             </h1>
             <p className="text-sm text-gray-500 mb-6">
-              This invite link is no longer valid. Please ask your admin to send a new invite.
+              {errorMessage || 'This invite link is no longer valid. Please ask your admin to send a new invite.'}
             </p>
             <a
               href="/login"
