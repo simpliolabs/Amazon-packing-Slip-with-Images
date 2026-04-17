@@ -147,7 +147,7 @@ export async function POST(request: NextRequest) {
   const hashedToken = properties?.hashed_token
   
   // Build the invite URL: Supabase verify endpoint → validates token → redirects to /set-password with #access_token
-  const inviteLink = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/verify?token=${hashedToken}&type=invite&redirect_to=${encodeURIComponent(`${appUrl}/set-password`)}`
+  const inviteLink = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/verify?token_hash=${hashedToken}&type=invite&redirect_to=${encodeURIComponent(`${appUrl}/set-password`)}`
 
   return NextResponse.json({
     success: true,

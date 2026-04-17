@@ -500,18 +500,21 @@ export async function generateBulkPrintHTML(
   }
 
   const originalTitle = document.title
-  document.title = `Packing Slips - ${orders.length} orders`
+  document.title = ' '
 
   doc.open()
   doc.write(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Packing Slips - ${orders.length} orders</title>
+  <title> </title>
   <style>
     @page {
       size: letter portrait;
       margin: 0.4in;
+      /* Suppress browser default headers and footers */
+      margin-top: 0.3in;
+      margin-bottom: 0.3in;
     }
     html, body {
       margin: 0;

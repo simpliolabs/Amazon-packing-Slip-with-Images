@@ -342,9 +342,9 @@ function handlePrint(orderId: string) {
   const content = document.getElementById('packing-slip-print')
   if (!content) return
 
-  // Set the main document title to the order number so the print dialog uses it
-  const originalTitle = document.title
-  document.title = orderId
+  // Set the main document title to blank so browser doesn't show it in print header/footer
+   const originalTitle = document.title
+   document.title = ' '
 
   const iframe = document.createElement('iframe')
   iframe.style.position = 'fixed'
@@ -368,7 +368,7 @@ function handlePrint(orderId: string) {
     <html>
     <head>
       <meta charset="utf-8" />
-      <title>${orderId}</title>
+      <title> </title>
       ${styles}
       <style>
         @page {
