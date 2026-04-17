@@ -76,7 +76,8 @@ export async function GET(request: NextRequest) {
 
 /**
  * POST /api/users
- * Invite a new user or reinvite an existing pending user (admin only)
+ * Create a user and generate an invite link (no email sent).
+ * Returns the invite link for the admin to share manually.
  */
 export async function POST(request: NextRequest) {
   const supabase = await createClient()
@@ -103,20 +104,18 @@ export async function POST(request: NextRequest) {
   }
 
   const adminSupabase = await createAdminClient()
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://slip.theceo.store'
 
-  // If reinvite, delete the old user first so we can send a fresh invite
+  // If reinvite, delete the old user first so we can create a fresh one
   if (reinvite) {
     try {
-      // Find the existing auth user by email
       const { data: authUsers } = await adminSupabase.auth.admin.listUsers()
       const existingUser = authUsers?.users?.find(u => u.email === email)
       if (existingUser) {
-        // Delete user_profiles record first (if exists)
         await supabase
           .from('user_profiles')
           .delete()
           .eq('id', existingUser.id)
-        // Delete auth user
         await adminSupabase.auth.admin.deleteUser(existingUser.id)
       }
     } catch {
@@ -124,21 +123,34 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Invite user via Supabase Admin API
-  const { data: inviteData, error: inviteError } = await adminSupabase.auth.admin.inviteUserByEmail(
+  // Generate an invite link without sending an email
+  const { data: linkData, error: linkError } = await adminSupabase.auth.admin.generateLink({
+    type: 'invite',
     email,
-    {
+    options: {
       data: {
         role,
         full_name: fullName || '',
       },
-      redirectTo: `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
-    }
-  )
+      redirectTo: `${appUrl}/auth/callback`,
+    },
+  })
 
-  if (inviteError) {
-    return NextResponse.json({ error: inviteError.message }, { status: 500 })
+  if (linkError) {
+    return NextResponse.json({ error: linkError.message }, { status: 500 })
   }
 
-  return NextResponse.json({ success: true, user: inviteData.user })
+  // The generated link contains a token_hash and type parameter
+  // We need to construct the proper invite URL that goes through our auth callback
+  const properties = linkData?.properties
+  const hashedToken = properties?.hashed_token
+  
+  // Build the invite URL: Supabase verify endpoint → redirects to our callback
+  const inviteLink = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/verify?token=${hashedToken}&type=invite&redirect_to=${encodeURIComponent(`${appUrl}/auth/callback`)}`
+
+  return NextResponse.json({
+    success: true,
+    user: linkData?.user,
+    inviteLink,
+  })
 }

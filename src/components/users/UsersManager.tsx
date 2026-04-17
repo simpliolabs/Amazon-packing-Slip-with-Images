@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { toast } from 'sonner'
-import { UserPlus, Trash2, Shield, User, Loader2, Mail, RefreshCw, Clock } from 'lucide-react'
+import { UserPlus, Trash2, Shield, User, Loader2, Link2, RefreshCw, Clock, Copy, Check, X } from 'lucide-react'
 import { formatDate } from '@/lib/utils'
 import type { UserProfile } from '@/types/database'
 
@@ -19,6 +19,8 @@ export default function UsersManager() {
   const [inviteName, setInviteName] = useState('')
   const [inviting, setInviting] = useState(false)
   const [reinviting, setReinviting] = useState<string | null>(null)
+  const [generatedLink, setGeneratedLink] = useState<string | null>(null)
+  const [linkCopied, setLinkCopied] = useState(false)
 
   const fetchUsers = useCallback(async () => {
     setLoading(true)
@@ -40,6 +42,7 @@ export default function UsersManager() {
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault()
     setInviting(true)
+    setGeneratedLink(null)
     try {
       const res = await fetch('/api/users', {
         method: 'POST',
@@ -53,14 +56,11 @@ export default function UsersManager() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
 
-      toast.success(`Invitation sent to ${inviteEmail}`)
-      setInviteEmail('')
-      setInviteName('')
-      setInviteRole('packer')
-      setShowInviteForm(false)
+      setGeneratedLink(data.inviteLink)
+      toast.success('Invite link generated! Copy and share it.')
       fetchUsers()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Invite failed')
+      toast.error(err instanceof Error ? err.message : 'Failed to generate invite link')
     } finally {
       setInviting(false)
     }
@@ -68,6 +68,7 @@ export default function UsersManager() {
 
   async function handleReinvite(userId: string, email: string, fullName: string, role: string) {
     setReinviting(userId)
+    setGeneratedLink(null)
     try {
       const res = await fetch('/api/users', {
         method: 'POST',
@@ -82,13 +83,36 @@ export default function UsersManager() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
 
-      toast.success(`Reinvitation sent to ${email}`)
+      setGeneratedLink(data.inviteLink)
+      toast.success('New invite link generated! Copy and share it.')
       fetchUsers()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Reinvite failed')
+      toast.error(err instanceof Error ? err.message : 'Failed to generate reinvite link')
     } finally {
       setReinviting(null)
     }
+  }
+
+  async function copyLink() {
+    if (!generatedLink) return
+    try {
+      await navigator.clipboard.writeText(generatedLink)
+      setLinkCopied(true)
+      toast.success('Link copied to clipboard!')
+      setTimeout(() => setLinkCopied(false), 3000)
+    } catch {
+      // Fallback: select the text in the input
+      toast.error('Failed to copy — please select and copy manually')
+    }
+  }
+
+  function dismissLink() {
+    setGeneratedLink(null)
+    setLinkCopied(false)
+    setInviteEmail('')
+    setInviteName('')
+    setInviteRole('packer')
+    setShowInviteForm(false)
   }
 
   async function handleRoleChange(userId: string, newRole: 'admin' | 'packer') {
@@ -135,7 +159,7 @@ export default function UsersManager() {
           </p>
         </div>
         <button
-          onClick={() => setShowInviteForm(!showInviteForm)}
+          onClick={() => { setShowInviteForm(!showInviteForm); setGeneratedLink(null) }}
           className="flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] text-white text-sm font-medium rounded-lg transition-colors"
         >
           <UserPlus size={16} />
@@ -186,12 +210,12 @@ export default function UsersManager() {
                 disabled={inviting}
                 className="flex items-center gap-1.5 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
               >
-                {inviting ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
-                {inviting ? 'Sending…' : 'Send Invite'}
+                {inviting ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                {inviting ? 'Generating…' : 'Generate Invite Link'}
               </button>
               <button
                 type="button"
-                onClick={() => setShowInviteForm(false)}
+                onClick={() => { setShowInviteForm(false); setGeneratedLink(null) }}
                 className="px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors"
               >
                 Cancel
@@ -199,8 +223,50 @@ export default function UsersManager() {
             </div>
           </form>
           <p className="text-xs text-gray-400 mt-3">
-            The user will receive a magic link email to set their password and access the portal.
+            An invite link will be generated for you to copy and share. No email will be sent.
           </p>
+        </div>
+      )}
+
+      {/* Generated Invite Link Banner */}
+      {generatedLink && (
+        <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-5">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Link2 size={16} className="text-green-600" />
+              <span className="text-sm font-semibold text-green-800">Invite Link Generated</span>
+            </div>
+            <button
+              onClick={dismissLink}
+              className="p-1 text-green-400 hover:text-green-600 rounded transition-colors"
+              title="Dismiss"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <p className="text-xs text-green-700 mb-3">
+            Copy this link and share it with the invited user. They will use it to set their password and access the portal.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              readOnly
+              value={generatedLink}
+              className="flex-1 px-3 py-2 bg-white border border-green-300 rounded-lg text-xs text-gray-700 font-mono focus:outline-none select-all"
+              onClick={(e) => (e.target as HTMLInputElement).select()}
+            />
+            <button
+              onClick={copyLink}
+              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                linkCopied
+                  ? 'bg-green-600 text-white'
+                  : 'bg-[#2E9CE6] hover:bg-[#1A7BC4] text-white'
+              }`}
+            >
+              {linkCopied ? <Check size={14} /> : <Copy size={14} />}
+              {linkCopied ? 'Copied!' : 'Copy Link'}
+            </button>
+          </div>
         </div>
       )}
 
@@ -279,14 +345,14 @@ export default function UsersManager() {
                           onClick={() => handleReinvite(u.id, u.email, u.full_name || '', u.role)}
                           disabled={reinviting === u.id}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#2E9CE6] hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
-                          title="Resend invitation"
+                          title="Generate new invite link"
                         >
                           {reinviting === u.id ? (
                             <Loader2 size={12} className="animate-spin" />
                           ) : (
                             <RefreshCw size={12} />
                           )}
-                          Reinvite
+                          New Link
                         </button>
                       )}
                       <button
