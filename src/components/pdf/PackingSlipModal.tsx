@@ -27,16 +27,15 @@ const COLORS = [
   'Granite', 'Sandstone', 'Brick', 'Moss', 'Olive', 'Pepper',
   'Crunchberry', 'Yam', 'Lagoon', 'Blossom', 'Chalky Mint', 'Flo Blue',
   'Island Reef', 'Orchid', 'Berry', 'Citrus', 'Crimson', 'Graphite',
-  'Ice Blue', 'Ivory', 'Khaki', 'Neon Pink', 'Neon Green', 'Neon Orange',
-  'Sapphire', 'Seafoam', 'Terracotta', 'Watermelon', 'Chambray',
+  'Ice Blue', 'Khaki', 'Neon Pink', 'Neon Green', 'Neon Orange',
+  'Sapphire', 'Terracotta', 'Watermelon',
   'Bright Salmon', 'Blue Jean', 'Blue Spruce', 'Burnt Orange',
-  'Candy Pink', 'Chili', 'Crimson', 'Denim', 'Faded Blue',
-  'Hemp', 'Ivory', 'Jean', 'Lagoon Blue', 'Light Green',
-  'Midnight', 'Moss', 'Mustard', 'Neon Blue', 'Old Gold',
+  'Candy Pink', 'Chili', 'Faded Blue',
+  'Hemp', 'Jean', 'Lagoon Blue',
+  'Midnight', 'Neon Blue', 'Old Gold',
   'Periwinkle', 'Pigment Black', 'Red Orange', 'Sage',
-  'Sandstone', 'Smoke', 'Vineyard', 'Washed Denim',
+  'Smoke', 'Vineyard', 'Coral Silk',
   'Navy', 'Green', 'Blue', 'Pink', 'Gray', 'Grey',
-  'Coral Silk',
 ]
 const STYLES: [string, string][] = [
   ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
@@ -50,93 +49,101 @@ const STYLES: [string, string][] = [
   ['T-Shirt', 'Short Sleeve'], ['Tee', 'Short Sleeve'],
 ]
 
-function extractVariantFromSku(sku: string): string | null {
-  if (!sku) return null
-  const tsMatch = sku.match(/TS-([A-Za-z]+)$/i)
-  if (tsMatch) return tsMatch[1]
-  return null
-}
+function parseAttrs(title: string, sku: string) {
+  const t = title || ''
+  const size = SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || '—'
+  let color = COLORS.find(c => {
+    const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+    return re.test(t)
+  }) || ''
 
-/**
- * Fallback: extract color from the title's trailing segments.
- * Amazon titles often end with "- Color - Size" pattern.
- * We look for the segment before the size segment.
- */
-function extractColorFromTitleSegments(title: string, detectedSize: string | null): string | null {
-  // Split by " - " delimiter
-  const segments = title.split(/\s*[-–]\s*/).map(s => s.trim()).filter(Boolean)
-  if (segments.length < 2) return null
-
-  // Find the size segment index
-  if (detectedSize) {
-    for (let i = segments.length - 1; i >= 0; i--) {
-      const seg = segments[i]
-      if (seg.toLowerCase() === detectedSize.toLowerCase() ||
-          seg.match(new RegExp(`^${detectedSize.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'))) {
-        // The segment before the size is likely the color
-        if (i > 0) {
-          const colorCandidate = segments[i - 1]
-          // Validate: should be 1-3 words, not too long, not a product description
-          if (colorCandidate.split(/\s+/).length <= 3 && colorCandidate.length <= 30) {
-            return colorCandidate
-          }
+  // Fallback: extract color from title segments like "- Color - Size" at the end
+  if (!color) {
+    const segments = t.split(/\s*[-–—,]\s*/).map(s => s.trim()).filter(Boolean)
+    if (segments.length >= 2) {
+      // Check the last few segments for potential color values
+      for (let i = segments.length - 1; i >= Math.max(0, segments.length - 3); i--) {
+        const seg = segments[i]
+        // Skip if it's a known size
+        if (SIZES.some(s => s.toLowerCase() === seg.toLowerCase())) continue
+        // Skip if it's too long (likely a description)
+        if (seg.split(/\s+/).length > 3) continue
+        // Use it as color if it's a short phrase
+        if (seg.length > 1 && seg.length < 30) {
+          color = seg
+          break
         }
       }
     }
   }
 
-  // Last resort: take the second-to-last segment if last looks like a size
-  const last = segments[segments.length - 1]
-  const sizePattern = /^(XX?S|[SMLX]|XX?L|[2-6]?X[LS]|Small|Medium|Large|X-Small|X-Large|2X-Large|3X-Large|4X-Large|5X-Large|6X-Large|One Size|Plus Size)$/i
-  if (sizePattern.test(last) && segments.length >= 3) {
-    const colorCandidate = segments[segments.length - 2]
-    if (colorCandidate.split(/\s+/).length <= 3 && colorCandidate.length <= 30) {
-      return colorCandidate
+  if (!color) color = '—'
+
+  let style = '—'
+  for (const [keyword, label] of STYLES) {
+    if (t.toLowerCase().includes(keyword.toLowerCase())) { style = label; break }
+  }
+
+  // Variant extraction from SKU (e.g., "TS-Germany" → "Germany")
+  let variant = ''
+  if (sku) {
+    const tsMatch = sku.match(/TS-([A-Za-z]+)$/i)
+    if (tsMatch) {
+      const v = tsMatch[1]
+      // Skip if it's a known size abbreviation or color code
+      const skipValues = ['S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'XS', 'CS']
+      if (!skipValues.includes(v.toUpperCase())) {
+        variant = v
+      }
     }
   }
 
-  return null
-}
-
-function parseAttrs(title: string, sku?: string) {
-  let size: string | null = null, color: string | null = null, style: string | null = null
-  for (const s of SIZES) {
-    const re = new RegExp(`(?<![A-Za-z])${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
-    if (re.test(title)) { size = s; break }
-  }
-  if (!size) { const m = title.match(/\b(XS|[SMLX])\b/); if (m) size = m[1].toUpperCase() }
-  const sc = [...COLORS].sort((a, b) => b.length - a.length)
-  for (const c of sc) {
-    const re = new RegExp(`(?<![A-Za-z])${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
-    if (re.test(title)) { color = c; break }
-  }
-
-  // Fallback: extract color from title segments if not found in known list
-  if (!color) {
-    color = extractColorFromTitleSegments(title, size)
-  }
-
-  for (const [kw, lbl] of STYLES) {
-    const re = new RegExp(`(?<![A-Za-z])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
-    if (re.test(title)) { style = lbl; break }
-  }
-  const variant = sku ? extractVariantFromSku(sku) : null
-  return { size: size || '—', color: color || '—', style: style || 'Short Sleeve', variant }
+  return { size, color, style, variant }
 }
 
 function cleanTitle(title: string): string {
+  if (!title) return ''
   let t = title
-  for (let i = 0; i < 2; i++) t = t.replace(/\s*[-–]\s*[A-Z][a-zA-Z\s]+$/, '').trim()
-  return t.replace(/\s*[-–]\s*$/, '').trim()
+  for (const s of SIZES) {
+    t = t.replace(new RegExp(`\\b${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '')
+  }
+  for (const c of COLORS) {
+    t = t.replace(new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '')
+  }
+  t = t.replace(/\s*[-–—,]\s*[-–—,]\s*/g, ' - ')
+  t = t.replace(/\s*[-–—,]\s*$/, '')
+  t = t.replace(/\s{2,}/g, ' ').trim()
+  return t
+}
+
+/**
+ * Convert an image URL to a base64 data URL to avoid CORS issues with html2canvas.
+ */
+async function imageToBase64(url: string): Promise<string> {
+  try {
+    const response = await fetch(url)
+    const blob = await response.blob()
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  } catch {
+    return url // fallback to original URL
+  }
 }
 
 /**
  * Print the packing slip using an iframe for clean, reliable output.
- * This avoids all CSS conflicts with the parent page.
  */
 function handlePrint(orderId: string) {
   const content = document.getElementById('packing-slip-print')
   if (!content) return
+
+  // Set the main document title to the order number so the print dialog uses it
+  const originalTitle = document.title
+  document.title = orderId
 
   const iframe = document.createElement('iframe')
   iframe.style.position = 'fixed'
@@ -147,7 +154,7 @@ function handlePrint(orderId: string) {
   document.body.appendChild(iframe)
 
   const doc = iframe.contentDocument || iframe.contentWindow?.document
-  if (!doc) { document.body.removeChild(iframe); return }
+  if (!doc) { document.body.removeChild(iframe); document.title = originalTitle; return }
 
   // Get all stylesheets from the parent page
   const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style'))
@@ -184,7 +191,6 @@ function handlePrint(orderId: string) {
         img {
           max-width: 100%;
         }
-        /* Page break handling — never split these elements across pages */
         tr {
           break-inside: avoid;
           page-break-inside: avoid;
@@ -196,17 +202,14 @@ function handlePrint(orderId: string) {
         thead {
           display: table-header-group;
         }
-        /* Keep the feedback/review card together */
         .review-card {
           break-inside: avoid;
           page-break-inside: avoid;
         }
-        /* Keep the footer together */
         .slip-footer {
           break-inside: avoid;
           page-break-inside: avoid;
         }
-        /* Keep feedback + footer together if possible */
         .review-footer-group {
           break-inside: avoid;
           page-break-inside: avoid;
@@ -227,17 +230,16 @@ function handlePrint(orderId: string) {
     return new Promise<void>((resolve) => {
       img.onload = () => resolve()
       img.onerror = () => resolve()
-      // Timeout after 5 seconds
       setTimeout(resolve, 5000)
     })
   })
 
   Promise.all(imagePromises).then(() => {
-    // Small delay to ensure rendering is complete
     setTimeout(() => {
       iframe.contentWindow?.print()
-      // Clean up after print dialog closes
+      // Restore original title and clean up
       setTimeout(() => {
+        document.title = originalTitle
         document.body.removeChild(iframe)
       }, 1000)
     }, 500)
@@ -252,16 +254,32 @@ interface PackingSlipModalProps {
 export default function PackingSlipModal({ order, onClose }: PackingSlipModalProps) {
   const [downloading, setDownloading] = useState(false)
   const [mounted, setMounted] = useState(false)
-
-  useEffect(() => {
-    setMounted(true)
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = '' }
-  }, [])
+  const [imageDataUrls, setImageDataUrls] = useState<Record<string, string>>({})
 
   const items: OrderItem[] = Array.isArray(order.order_items)
     ? (order.order_items as unknown as OrderItem[])
     : []
+
+  // Pre-fetch all product images as base64 on mount to avoid CORS issues
+  useEffect(() => {
+    setMounted(true)
+    document.body.style.overflow = 'hidden'
+
+    // Convert all product images to base64
+    const fetchImages = async () => {
+      const urls: Record<string, string> = {}
+      for (const item of items) {
+        if (item.image_url) {
+          urls[item.image_url] = await imageToBase64(item.image_url)
+        }
+      }
+      setImageDataUrls(urls)
+    }
+    fetchImages()
+
+    return () => { document.body.style.overflow = '' }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const shipTo = order.ship_to as ShipTo | null
   const totalQty = items.reduce((s, i) => s + i.qty, 0)
@@ -282,31 +300,25 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
       const html2canvas = (await import('html2canvas')).default
       const { jsPDF } = await import('jspdf')
 
-      // Letter size in points: 612 x 792
-      const letterWidth = 8.5 // inches
-      const letterHeight = 11 // inches
-      const dpi = 2 // scale factor for quality
-
+      // Letter size
       const canvas = await html2canvas(content, {
-        scale: dpi,
+        scale: 2,
         useCORS: true,
         allowTaint: true,
         backgroundColor: '#ffffff',
         width: content.scrollWidth,
         height: content.scrollHeight,
+        logging: false,
       })
 
       const imgData = canvas.toDataURL('image/jpeg', 0.95)
       const imgWidthPx = canvas.width
       const imgHeightPx = canvas.height
 
-      // Calculate how the content maps to letter pages
-      const pdfPageWidthIn = letterWidth - 1 // 0.5in margins each side
-      const pdfPageHeightIn = letterHeight - 1 // 0.5in margins each side
-      const pdfPageWidthPt = pdfPageWidthIn * 72
-      const pdfPageHeightPt = pdfPageHeightIn * 72
+      // Letter page with 0.5in margins
+      const pdfPageWidthPt = 7.5 * 72  // 7.5in printable
+      const pdfPageHeightPt = 10 * 72   // 10in printable
 
-      // Scale image to fit page width
       const scale = pdfPageWidthPt / imgWidthPx
       const scaledHeight = imgHeightPx * scale
 
@@ -316,7 +328,6 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
         format: 'letter',
       })
 
-      // If content fits on one page
       if (scaledHeight <= pdfPageHeightPt) {
         pdf.addImage(imgData, 'JPEG', 36, 36, pdfPageWidthPt, scaledHeight)
       } else {
@@ -331,16 +342,15 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
           const srcH = Math.min(pageHeightPx, imgHeightPx - srcY)
           const destH = srcH * scale
 
-          // Create a sub-canvas for this page
           const pageCanvas = document.createElement('canvas')
           pageCanvas.width = imgWidthPx
-          pageCanvas.height = srcH * dpi
+          pageCanvas.height = Math.round(srcH * 2) // scale factor = 2
           const ctx = pageCanvas.getContext('2d')
           if (ctx) {
             ctx.drawImage(
               canvas,
-              0, srcY * dpi, imgWidthPx, srcH * dpi,
-              0, 0, imgWidthPx, srcH * dpi
+              0, Math.round(srcY * 2), imgWidthPx, Math.round(srcH * 2),
+              0, 0, imgWidthPx, Math.round(srcH * 2)
             )
             const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95)
             pdf.addImage(pageImgData, 'JPEG', 36, 36, pdfPageWidthPt, destH)
@@ -354,7 +364,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orderId: order.id, downloadType: 'single' }),
-      })
+      }).catch(() => {})
       toast.success('Packing slip downloaded')
     } catch (err) {
       console.error('PDF download error:', err)
@@ -464,6 +474,10 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                   {items.map((item, index) => {
                     const attrs = parseAttrs(item.title, item.sku)
                     const title = cleanTitle(item.title)
+                    // Use pre-fetched base64 image if available
+                    const imgSrc = item.image_url
+                      ? (imageDataUrls[item.image_url] || item.image_url)
+                      : null
                     return (
                       <tr key={`${item.asin}-${index}`} className={index % 2 === 1 ? 'bg-gray-50' : 'bg-white'}>
                         <td className="px-3 py-3">
@@ -472,12 +486,13 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                           </span>
                         </td>
                         <td className="px-3 py-3">
-                          {item.image_url ? (
+                          {imgSrc ? (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img
-                              src={item.image_url}
+                              src={imgSrc}
                               alt={item.title}
                               className="w-24 h-24 object-contain rounded bg-white"
+                              crossOrigin="anonymous"
                               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
                             />
                           ) : (
