@@ -100,9 +100,13 @@ export async function generateSinglePDF(order: Order): Promise<void> {
 }
 
 /**
- * Generate and download multiple packing slips as a ZIP file
+ * Generate and download multiple packing slips as a ZIP file.
+ * Accepts an optional progress callback: (completed, total) => void
  */
-export async function generateBulkPDF(orders: Order[]): Promise<void> {
+export async function generateBulkPDF(
+  orders: Order[],
+  onProgress?: (completed: number, total: number) => void,
+): Promise<void> {
   const { pdf } = await import('@react-pdf/renderer')
   const { default: PackingSlipDocument } = await import('./PackingSlipDocument')
   const JSZip = (await import('jszip')).default
@@ -115,34 +119,35 @@ export async function generateBulkPDF(orders: Order[]): Promise<void> {
     imageToBase64('/qr_code.png'),
   ])
 
-  // Pre-fetch ALL product images across all orders in parallel
-  const allImageMaps = await Promise.all(orders.map(prefetchProductImages))
-
   const zip = new JSZip()
   const folder = zip.folder('packing-slips')
-
   if (!folder) throw new Error('Failed to create ZIP folder')
 
-  // Generate PDFs in parallel (with concurrency limit)
-  const CONCURRENCY = 3
-  for (let i = 0; i < orders.length; i += CONCURRENCY) {
-    const batch = orders.slice(i, i + CONCURRENCY)
-    await Promise.all(
-      batch.map(async (order, batchIdx) => {
-        const productImagesBase64 = allImageMaps[i + batchIdx]
-        const blob = await pdf(
-          React.createElement(PackingSlipDocument, {
-            order,
-            logoBase64,
-            amazonLogoBase64,
-            qrCodeBase64,
-            productImagesBase64,
-          } as any) as any
-        ).toBlob()
-        const arrayBuffer = await blob.arrayBuffer()
-        folder.file(`packing-slip-${order.id}.pdf`, arrayBuffer)
-      })
-    )
+  let completed = 0
+  const total = orders.length
+
+  // Process PDFs one at a time to avoid memory issues with large batches.
+  // Each order: fetch images → render PDF → add to ZIP → release memory.
+  for (const order of orders) {
+    try {
+      const productImagesBase64 = await prefetchProductImages(order)
+      const blob = await pdf(
+        React.createElement(PackingSlipDocument, {
+          order,
+          logoBase64,
+          amazonLogoBase64,
+          qrCodeBase64,
+          productImagesBase64,
+        } as any) as any
+      ).toBlob()
+      const arrayBuffer = await blob.arrayBuffer()
+      folder.file(`packing-slip-${order.id}.pdf`, arrayBuffer)
+    } catch (err) {
+      console.error(`Failed to generate PDF for order ${order.id}:`, err)
+      // Continue with remaining orders instead of failing the whole batch
+    }
+    completed++
+    onProgress?.(completed, total)
   }
 
   const zipBlob = await zip.generateAsync({ type: 'blob' })

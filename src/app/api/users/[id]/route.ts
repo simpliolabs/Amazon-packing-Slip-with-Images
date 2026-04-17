@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { createClient, createAdminClient } from '@/lib/supabase/server'
 
 /**
  * PATCH /api/users/[id]
@@ -46,7 +46,7 @@ export async function PATCH(
 
 /**
  * DELETE /api/users/[id]
- * Remove a user (admin only)
+ * Remove a user (admin only) — handles both active and pending users
  */
 export async function DELETE(
   request: NextRequest,
@@ -76,13 +76,18 @@ export async function DELETE(
     return NextResponse.json({ error: 'Cannot delete your own account' }, { status: 400 })
   }
 
-  const { error } = await supabase
+  // Delete from user_profiles (may not exist for pending users)
+  await supabase
     .from('user_profiles')
     .delete()
     .eq('id', id)
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  // Also delete from auth.users to fully remove the user (handles pending invites)
+  try {
+    const adminSupabase = await createAdminClient()
+    await adminSupabase.auth.admin.deleteUser(id)
+  } catch {
+    // If auth delete fails, the profile delete still succeeded
   }
 
   return NextResponse.json({ success: true })

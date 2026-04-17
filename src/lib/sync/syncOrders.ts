@@ -87,6 +87,34 @@ export interface SyncResult {
 }
 
 /**
+ * Extract a design key from a SKU for image sharing.
+ * Items with the same design key are the same product in different sizes,
+ * so they should share the same image.
+ *
+ * Examples:
+ *   640002XL-WH-Soccer-Cup-TS-Germany  →  WH-Soccer-Cup-TS-Germany
+ *   64000XL-WH-Soccer-Cup-TS-Germany   →  WH-Soccer-Cup-TS-Germany
+ *   BTFFTW64000XL-WH                   →  BTFFTW-WH
+ *   TCEO-Later-Gator-LS-L-MOS          →  TCEO-Later-Gator-MOS
+ *
+ * Strategy: strip size codes (XS,S,M,L,XL,2XL,...,6XL,LS,SS) and
+ * embedded numeric+size patterns (e.g. 64000XL, 640002XL) to get a
+ * stable key that is identical across sizes of the same design.
+ */
+function extractDesignKey(sku: string): string {
+  if (!sku) return ''
+
+  // Remove embedded numeric+size patterns like 640002XL, 64000XL, 64000L, 3001C etc.
+  let key = sku.replace(/\d{3,}(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S)/gi, '')
+
+  // Split by dash and filter out standalone size tokens
+  const sizeTokens = new Set(['XS','S','M','L','XL','2XL','3XL','4XL','5XL','6XL','LS','SS'])
+  const parts = key.split('-').filter(p => !sizeTokens.has(p.toUpperCase()) && p !== '')
+
+  return parts.join('-').toUpperCase()
+}
+
+/**
  * Main sync function — fetches all FBM orders from last 7 days
  * and upserts them into Supabase
  */
@@ -138,6 +166,25 @@ export async function syncOrders(): Promise<SyncResult> {
             }
           })
         )
+
+        // SKU-based image sharing: if multiple items share the same
+        // design key (same product, different sizes), propagate the
+        // first available image to all items with that design.
+        const designImageMap = new Map<string, string>()
+        for (const item of orderItems) {
+          const dk = extractDesignKey(item.sku)
+          if (dk && item.image_url && !designImageMap.has(dk)) {
+            designImageMap.set(dk, item.image_url)
+          }
+        }
+        for (const item of orderItems) {
+          if (!item.image_url) {
+            const dk = extractDesignKey(item.sku)
+            if (dk && designImageMap.has(dk)) {
+              item.image_url = designImageMap.get(dk)!
+            }
+          }
+        }
 
         // Try to get full address via RDT (PII access)
         // Falls back to partial address from list endpoint if RDT unavailable

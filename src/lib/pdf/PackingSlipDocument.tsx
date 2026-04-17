@@ -622,6 +622,31 @@ const styles = StyleSheet.create({
   },
 })
 
+// ─── SKU-based image sharing ──────────────────────────────────────────────────
+
+/**
+ * Extract a design key from a SKU for image sharing.
+ * Items with the same design key are the same product in different sizes.
+ */
+function extractDesignKey(sku: string): string {
+  if (!sku) return ''
+  let key = sku.replace(/\d{3,}(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S)/gi, '')
+  const sizeTokens = new Set(['XS','S','M','L','XL','2XL','3XL','4XL','5XL','6XL','LS','SS'])
+  const parts = key.split('-').filter(p => !sizeTokens.has(p.toUpperCase()) && p !== '')
+  return parts.join('-').toUpperCase()
+}
+
+function buildDesignImageMap(items: OrderItem[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const item of items) {
+    const dk = extractDesignKey(item.sku)
+    if (dk && item.image_url && !map.has(dk)) {
+      map.set(dk, item.image_url)
+    }
+  }
+  return map
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface PackingSlipDocumentProps {
@@ -642,6 +667,9 @@ export default function PackingSlipDocument({
   const items: OrderItem[] = Array.isArray(order.order_items)
     ? (order.order_items as unknown as OrderItem[])
     : []
+
+  // Build design-key → image map for SKU-based image sharing
+  const designImageMap = buildDesignImageMap(items)
 
   const shipTo = order.ship_to as ShipTo | null
 
@@ -758,10 +786,15 @@ export default function PackingSlipDocument({
 
                 <View style={styles.colImage}>
                   {(() => {
+                    // SKU-based image sharing: use design key to share images
+                    const dk = extractDesignKey(item.sku)
+                    const effectiveImageUrl = item.image_url
+                      || (dk ? designImageMap.get(dk) : undefined)
+                      || null
                     const b64 = productImagesBase64?.[item.asin]
                     const imgSrc = b64
                       ? `data:image/jpeg;base64,${b64}`
-                      : item.image_url || null
+                      : effectiveImageUrl
                     return imgSrc ? (
                       <Image src={imgSrc} style={styles.productImage} />
                     ) : (

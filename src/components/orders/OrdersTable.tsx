@@ -6,6 +6,7 @@ import {
   Search,
   Download,
   FileDown,
+  Printer,
   RefreshCw,
   ChevronLeft,
   ChevronRight,
@@ -50,6 +51,8 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set())
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null)
   const [bulkDownloading, setBulkDownloading] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState<{ completed: number; total: number } | null>(null)
+  const [bulkPrinting, setBulkPrinting] = useState(false)
   const [lastSync, setLastSync] = useState<string | null>(null)
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -134,12 +137,15 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       return
     }
     setBulkDownloading(true)
+    setBulkProgress({ completed: 0, total: selectedOrders.size })
     try {
       const selectedOrderObjects = orders.filter((o) => selectedOrders.has(o.id))
 
       // Dynamic import to avoid SSR issues
       const { generateBulkPDF } = await import('@/lib/pdf/generatePDF')
-      await generateBulkPDF(selectedOrderObjects)
+      await generateBulkPDF(selectedOrderObjects, (completed, total) => {
+        setBulkProgress({ completed, total })
+      })
 
       // Log bulk download
       await fetch('/api/downloads/log', {
@@ -151,10 +157,36 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       toast.success(`Downloaded ${selectedOrders.size} packing slips`)
       setSelectedOrders(new Set())
     } catch (err) {
-      toast.error('Bulk download failed')
+      toast.error('Bulk download failed. Please try with fewer orders.')
       console.error(err)
     } finally {
       setBulkDownloading(false)
+      setBulkProgress(null)
+    }
+  }
+
+  async function handleBulkPrint() {
+    if (selectedOrders.size === 0) {
+      toast.error('Select at least one order')
+      return
+    }
+    setBulkPrinting(true)
+    try {
+      const selectedOrderObjects = orders.filter((o) => selectedOrders.has(o.id))
+
+      // Dynamic import to avoid SSR issues
+      const { generateBulkPDF } = await import('@/lib/pdf/generatePDF')
+      await generateBulkPDF(selectedOrderObjects, (completed, total) => {
+        setBulkProgress({ completed, total })
+      })
+
+      toast.success(`Printed ${selectedOrders.size} packing slips`)
+    } catch (err) {
+      toast.error('Bulk print failed. Please try with fewer orders.')
+      console.error(err)
+    } finally {
+      setBulkPrinting(false)
+      setBulkProgress(null)
     }
   }
 
@@ -180,16 +212,32 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
         </div>
 
         {selectedOrders.size > 0 && (
-          <button
-            onClick={handleBulkDownload}
-            disabled={bulkDownloading}
-            className="flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            <FileDown size={16} className={bulkDownloading ? 'animate-bounce' : ''} />
-            {bulkDownloading
-              ? 'Generating…'
-              : `Download ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleBulkPrint}
+              disabled={bulkPrinting || bulkDownloading}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-800 disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              <Printer size={16} className={bulkPrinting ? 'animate-pulse' : ''} />
+              {bulkPrinting
+                ? bulkProgress
+                  ? `Printing ${bulkProgress.completed}/${bulkProgress.total}…`
+                  : 'Preparing…'
+                : `Print ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
+            </button>
+            <button
+              onClick={handleBulkDownload}
+              disabled={bulkDownloading || bulkPrinting}
+              className="flex items-center gap-2 px-4 py-2 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              <FileDown size={16} className={bulkDownloading ? 'animate-bounce' : ''} />
+              {bulkDownloading
+                ? bulkProgress
+                  ? `Generating ${bulkProgress.completed}/${bulkProgress.total}…`
+                  : 'Preparing…'
+                : `Download ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
+            </button>
+          </div>
         )}
       </div>
 

@@ -2,18 +2,23 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { toast } from 'sonner'
-import { UserPlus, Trash2, Shield, User, Loader2, Mail } from 'lucide-react'
+import { UserPlus, Trash2, Shield, User, Loader2, Mail, RefreshCw, Clock } from 'lucide-react'
 import { formatDate } from '@/lib/utils'
 import type { UserProfile } from '@/types/database'
 
+interface UserWithStatus extends UserProfile {
+  status: 'active' | 'pending'
+}
+
 export default function UsersManager() {
-  const [users, setUsers] = useState<UserProfile[]>([])
+  const [users, setUsers] = useState<UserWithStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [showInviteForm, setShowInviteForm] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState<'packer' | 'admin'>('packer')
   const [inviteName, setInviteName] = useState('')
   const [inviting, setInviting] = useState(false)
+  const [reinviting, setReinviting] = useState<string | null>(null)
 
   const fetchUsers = useCallback(async () => {
     setLoading(true)
@@ -61,6 +66,31 @@ export default function UsersManager() {
     }
   }
 
+  async function handleReinvite(userId: string, email: string, fullName: string, role: string) {
+    setReinviting(userId)
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          role,
+          fullName,
+          reinvite: true,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+
+      toast.success(`Reinvitation sent to ${email}`)
+      fetchUsers()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Reinvite failed')
+    } finally {
+      setReinviting(null)
+    }
+  }
+
   async function handleRoleChange(userId: string, newRole: 'admin' | 'packer') {
     try {
       const res = await fetch(`/api/users/${userId}`, {
@@ -91,13 +121,18 @@ export default function UsersManager() {
     }
   }
 
+  const activeUsers = users.filter(u => u.status === 'active')
+  const pendingUsers = users.filter(u => u.status === 'pending')
+
   return (
     <div className="p-4 lg:p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Team Members</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{users.length} user{users.length !== 1 ? 's' : ''}</p>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {activeUsers.length} active{pendingUsers.length > 0 && ` · ${pendingUsers.length} pending`}
+          </p>
         </div>
         <button
           onClick={() => setShowInviteForm(!showInviteForm)}
@@ -187,6 +222,7 @@ export default function UsersManager() {
               <tr className="border-b border-gray-200 bg-gray-50">
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">User</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Role</th>
+                <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Joined</th>
                 <th className="px-4 py-3 text-right font-semibold text-gray-600">Actions</th>
               </tr>
@@ -196,7 +232,9 @@ export default function UsersManager() {
                 <tr key={u.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-[#2E9CE6] flex items-center justify-center text-white text-xs font-bold uppercase flex-shrink-0">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold uppercase flex-shrink-0 ${
+                        u.status === 'pending' ? 'bg-amber-400' : 'bg-[#2E9CE6]'
+                      }`}>
                         {u.email.charAt(0)}
                       </div>
                       <div>
@@ -206,26 +244,59 @@ export default function UsersManager() {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <select
-                      value={u.role}
-                      onChange={(e) => handleRoleChange(u.id, e.target.value as 'admin' | 'packer')}
-                      className="px-2.5 py-1 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] bg-white"
-                    >
-                      <option value="packer">Packer</option>
-                      <option value="admin">Admin</option>
-                    </select>
+                    {u.status === 'active' ? (
+                      <select
+                        value={u.role}
+                        onChange={(e) => handleRoleChange(u.id, e.target.value as 'admin' | 'packer')}
+                        className="px-2.5 py-1 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] bg-white"
+                      >
+                        <option value="packer">Packer</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    ) : (
+                      <span className="text-xs text-gray-500 capitalize">{u.role}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {u.status === 'pending' ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                        <Clock size={10} />
+                        Pending
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200">
+                        Active
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">
                     {formatDate(u.created_at)}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => handleDelete(u.id, u.email)}
-                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                      title="Remove user"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    <div className="flex items-center justify-end gap-1">
+                      {u.status === 'pending' && (
+                        <button
+                          onClick={() => handleReinvite(u.id, u.email, u.full_name || '', u.role)}
+                          disabled={reinviting === u.id}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#2E9CE6] hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                          title="Resend invitation"
+                        >
+                          {reinviting === u.id ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <RefreshCw size={12} />
+                          )}
+                          Reinvite
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleDelete(u.id, u.email)}
+                        className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                        title="Remove user"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

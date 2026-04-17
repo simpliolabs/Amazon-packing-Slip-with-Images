@@ -274,6 +274,35 @@ function parseAttrs(title: string, sku: string) {
   return { size, color, style, variant }
 }
 
+/**
+ * Extract a design key from a SKU for image sharing.
+ * Items with the same design key are the same product in different sizes,
+ * so they should share the same image.
+ */
+function extractDesignKey(sku: string): string {
+  if (!sku) return ''
+  let key = sku.replace(/\d{3,}(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S)/gi, '')
+  const sizeTokens = new Set(['XS','S','M','L','XL','2XL','3XL','4XL','5XL','6XL','LS','SS'])
+  const parts = key.split('-').filter(p => !sizeTokens.has(p.toUpperCase()) && p !== '')
+  return parts.join('-').toUpperCase()
+}
+
+/**
+ * Build a map from design key → image_url for SKU-based image sharing.
+ * When multiple items share the same design (same product, different sizes),
+ * the first item's image is used for all.
+ */
+function buildDesignImageMap(items: OrderItem[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const item of items) {
+    const dk = extractDesignKey(item.sku)
+    if (dk && item.image_url && !map.has(dk)) {
+      map.set(dk, item.image_url)
+    }
+  }
+  return map
+}
+
 function cleanTitle(title: string): string {
   if (!title) return ''
   let t = title
@@ -433,18 +462,27 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
     ? (order.order_items as unknown as OrderItem[])
     : []
 
+  // Build design-key → image map for SKU-based image sharing
+  const designImageMap = buildDesignImageMap(items)
+
   // Pre-fetch all product images as base64 on mount to avoid CORS issues
   useEffect(() => {
     setMounted(true)
     document.body.style.overflow = 'hidden'
 
-    // Convert all product images to base64
+    // Convert all product images to base64 (including shared design images)
     const fetchImages = async () => {
       const urls: Record<string, string> = {}
+      const allImageUrls = new Set<string>()
       for (const item of items) {
-        if (item.image_url) {
-          urls[item.image_url] = await imageToBase64(item.image_url)
-        }
+        if (item.image_url) allImageUrls.add(item.image_url)
+      }
+      // Also include design-shared images
+      for (const url of designImageMap.values()) {
+        allImageUrls.add(url)
+      }
+      for (const url of allImageUrls) {
+        urls[url] = await imageToBase64(url)
       }
       setImageDataUrls(urls)
     }
@@ -647,9 +685,15 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                   {items.map((item, index) => {
                     const attrs = parseAttrs(item.title, item.sku)
                     const title = cleanTitle(item.title)
-                    // Use pre-fetched base64 image if available
-                    const imgSrc = item.image_url
-                      ? (imageDataUrls[item.image_url] || item.image_url)
+                    // Use pre-fetched base64 image if available.
+                    // SKU-based image sharing: if this item's design key matches
+                    // another item, use the shared design image.
+                    const dk = extractDesignKey(item.sku)
+                    const effectiveImageUrl = item.image_url
+                      || (dk ? designImageMap.get(dk) : undefined)
+                      || null
+                    const imgSrc = effectiveImageUrl
+                      ? (imageDataUrls[effectiveImageUrl] || effectiveImageUrl)
                       : null
                     return (
                       <tr key={`${item.asin}-${index}`} className={index % 2 === 1 ? 'bg-gray-50' : 'bg-white'}>
