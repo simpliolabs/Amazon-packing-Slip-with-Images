@@ -4,14 +4,12 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 import {
   Search,
-  Download,
   Printer,
   RefreshCw,
   ChevronLeft,
   ChevronRight,
   Package,
   Calendar,
-  Filter,
 } from 'lucide-react'
 import { formatDate, getStatusColor, getTotalItems, cn } from '@/lib/utils'
 import type { Order } from '@/types/database'
@@ -28,13 +26,12 @@ interface OrdersResponse {
   totalPages: number
 }
 
-const ORDER_STATUSES = [
-  'All',
-  'Unshipped',
-  'PartiallyShipped',
-  'Shipped',
-  'Pending',
-  'Canceled',
+type Tab = 'active' | 'shipped' | 'all'
+
+const TABS: { key: Tab; label: string; description: string }[] = [
+  { key: 'active', label: 'Active', description: 'Unshipped & Pending' },
+  { key: 'shipped', label: 'Shipped', description: 'Completed orders' },
+  { key: 'all', label: 'All Orders', description: 'Everything' },
 ]
 
 export default function OrdersTable({ userRole }: OrdersTableProps) {
@@ -44,7 +41,7 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [status, setStatus] = useState('All')
+  const [tab, setTab] = useState<Tab>('active')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set())
@@ -60,9 +57,9 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       const params = new URLSearchParams({
         page: String(currentPage),
         limit: '25',
+        tab,
       })
       if (search) params.set('search', search)
-      if (status !== 'All') params.set('status', status)
       if (dateFrom) params.set('dateFrom', dateFrom)
       if (dateTo) params.set('dateTo', dateTo)
 
@@ -78,7 +75,7 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
     } finally {
       setLoading(false)
     }
-  }, [search, status, dateFrom, dateTo])
+  }, [search, tab, dateFrom, dateTo])
 
   const fetchLastSync = useCallback(async () => {
     try {
@@ -109,6 +106,12 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
     searchTimeout.current = setTimeout(() => {
       setPage(1)
     }, 400)
+  }
+
+  function handleTabChange(newTab: Tab) {
+    setTab(newTab)
+    setPage(1)
+    setSelectedOrders(new Set())
   }
 
   function toggleSelectOrder(orderId: string) {
@@ -165,7 +168,8 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
         <div>
           <h1 className="text-xl font-bold text-gray-900">FBM Orders</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {total} orders
+            {total} order{total !== 1 ? 's' : ''}
+            <span className="ml-1 text-gray-400">· Last 7 days</span>
             {lastSync && (
               <span className="ml-2 text-gray-400">
                 · Last sync: {formatDate(lastSync)}
@@ -190,6 +194,24 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
         )}
       </div>
 
+      {/* Tabs */}
+      <div className="flex items-center gap-1 mb-4 bg-gray-100 rounded-lg p-1 w-fit">
+        {TABS.map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => handleTabChange(key)}
+            className={cn(
+              'px-4 py-2 text-sm font-medium rounded-md transition-all',
+              tab === key
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Filters */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 mb-4">
         <div className="flex flex-col sm:flex-row gap-3">
@@ -206,23 +228,6 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
               onChange={(e) => handleSearchChange(e.target.value)}
               className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] focus:border-transparent"
             />
-          </div>
-
-          {/* Status filter */}
-          <div className="relative">
-            <Filter
-              size={14}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-            />
-            <select
-              value={status}
-              onChange={(e) => { setStatus(e.target.value); setPage(1) }}
-              className="pl-8 pr-8 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#2E9CE6] bg-white appearance-none cursor-pointer"
-            >
-              {ORDER_STATUSES.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
           </div>
 
           {/* Date range */}
@@ -304,7 +309,11 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
                 <tr>
                   <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
                     <Package size={24} className="mx-auto mb-2 opacity-50" />
-                    No orders found
+                    {tab === 'active'
+                      ? 'No active orders in the last 7 days'
+                      : tab === 'shipped'
+                        ? 'No shipped orders in the last 7 days'
+                        : 'No orders found'}
                   </td>
                 </tr>
               ) : (
@@ -351,7 +360,7 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
                         onClick={() => setSelectedOrder(order)}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#2E9CE6] hover:bg-[#1A7BC4] text-white text-xs font-medium rounded-lg transition-colors"
                       >
-                        <Download size={12} />
+                        <Printer size={12} />
                         Packing Slip
                       </button>
                     </td>
