@@ -1,6 +1,6 @@
 /**
  * Amazon SP-API Orders Integration
- * Uses Orders API v2026-01-01 to fetch FBM orders
+ * Uses Orders API v0 to fetch FBM orders
  */
 
 import { getAccessToken } from './auth'
@@ -84,7 +84,7 @@ export interface AmazonOrderItem {
 
 /**
  * Fetch FBM orders created after a given date
- * Uses Orders API v2026-01-01
+ * Uses Orders API v0
  */
 export async function fetchFBMOrders(createdAfter: Date): Promise<AmazonOrder[]> {
   const orders: AmazonOrder[] = []
@@ -95,7 +95,7 @@ export async function fetchFBMOrders(createdAfter: Date): Promise<AmazonOrder[]>
       MarketplaceIds: MARKETPLACE_ID,
       FulfillmentChannels: 'MFN',
       CreatedAfter: createdAfter.toISOString(),
-      OrderStatuses: 'Unshipped,PartiallyShipped,Shipped,Pending',
+      OrderStatuses: 'Unshipped',
     })
 
     if (nextToken) {
@@ -103,7 +103,7 @@ export async function fetchFBMOrders(createdAfter: Date): Promise<AmazonOrder[]>
     }
 
     const data = await spApiRequest(
-      `/orders/v2026-01-01/orders?${params.toString()}`
+      `/orders/v0/orders?${params.toString()}`
     )
 
     const payload = data.payload || data
@@ -125,7 +125,7 @@ export async function fetchOrderItems(orderId: string): Promise<AmazonOrderItem[
   do {
     const params = nextToken ? `?NextToken=${encodeURIComponent(nextToken)}` : ''
     const data = await spApiRequest(
-      `/orders/v2026-01-01/orders/${orderId}/orderItems${params}`
+      `/orders/v0/orders/${orderId}/orderItems${params}`
     )
 
     const payload = data.payload || data
