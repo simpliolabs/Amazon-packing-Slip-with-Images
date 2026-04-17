@@ -5,7 +5,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js'
-import { fetchFBMOrders, fetchOrderItems, fetchProductImage } from '@/lib/amazon/orders'
+import { fetchFBMOrders, fetchOrderItems, fetchProductImage, fetchOrderAddress, fetchOrderBuyerInfo } from '@/lib/amazon/orders'
 import type { OrderItem, ShipTo } from '@/types/database'
 
 // Use service role for sync operations (bypasses RLS)
@@ -132,11 +132,26 @@ export async function syncOrders(): Promise<SyncResult> {
           })
         )
 
+        // Try to get full address via RDT (PII access)
+        // Falls back to partial address from list endpoint if RDT unavailable
+        let fullAddress = order.ShippingAddress
+        let buyerInfo = order.BuyerInfo
+
+        const rdtAddress = await fetchOrderAddress(order.AmazonOrderId)
+        if (rdtAddress) {
+          fullAddress = rdtAddress
+        }
+
+        const rdtBuyer = await fetchOrderBuyerInfo(order.AmazonOrderId)
+        if (rdtBuyer) {
+          buyerInfo = rdtBuyer
+        }
+
         // Build ship_to address
-        const addr = order.ShippingAddress
+        const addr = fullAddress
         const shipTo: ShipTo | null = addr
           ? {
-              name: addr.Name || order.BuyerInfo?.BuyerName || 'Customer',
+              name: addr.Name || buyerInfo?.BuyerName || 'Customer',
               addressLine1: addr.AddressLine1 || '',
               addressLine2: addr.AddressLine2,
               city: addr.City || '',
@@ -152,8 +167,8 @@ export async function syncOrders(): Promise<SyncResult> {
           {
             id: order.AmazonOrderId,
             purchase_date: order.PurchaseDate,
-            buyer_name: order.BuyerInfo?.BuyerName || null,
-            buyer_email: order.BuyerInfo?.BuyerEmail || null,
+            buyer_name: buyerInfo?.BuyerName || null,
+            buyer_email: buyerInfo?.BuyerEmail || null,
             ship_to: shipTo,
             order_items: orderItems,
             fulfillment_channel: order.FulfillmentChannel,

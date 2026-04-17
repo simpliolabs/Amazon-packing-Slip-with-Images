@@ -114,6 +114,41 @@ export async function getAccessToken(): Promise<string> {
 }
 
 /**
+ * Get a Restricted Data Token (RDT) for accessing PII data like buyer info and shipping address.
+ * Returns null if the application doesn't have PII access permissions.
+ */
+export async function getRestrictedDataToken(
+  restrictedResources: Array<{ method: string; path: string; dataElements?: string[] }>
+): Promise<string | null> {
+  try {
+    const accessToken = await getAccessToken()
+    const endpoint = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
+
+    const response = await fetch(`${endpoint}/tokens/2021-03-01/restrictedDataToken`, {
+      method: 'POST',
+      headers: {
+        'x-amz-access-token': accessToken,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ restrictedResources }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.warn(`RDT request failed (${response.status}): ${errorText}`)
+      return null
+    }
+
+    const data = await response.json()
+    return data.restrictedDataToken || null
+  } catch (err) {
+    console.warn('Failed to get RDT:', err)
+    return null
+  }
+}
+
+/**
  * Exchange an authorization code for tokens (used in OAuth callback)
  */
 export async function exchangeCodeForTokens(code: string): Promise<TokenResponse> {
