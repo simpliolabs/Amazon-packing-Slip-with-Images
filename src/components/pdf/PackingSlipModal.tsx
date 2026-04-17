@@ -51,7 +51,14 @@ const STYLES: [string, string][] = [
   ['T-Shirt', 'Short Sleeve'], ['Tee', 'Short Sleeve'],
 ]
 
-function parseAttrs(title: string) {
+function extractVariantFromSku(sku: string): string | null {
+  if (!sku) return null
+  const tsMatch = sku.match(/TS-([A-Za-z]+)$/i)
+  if (tsMatch) return tsMatch[1]
+  return null
+}
+
+function parseAttrs(title: string, sku?: string) {
   let size: string | null = null, color: string | null = null, style: string | null = null
   for (const s of SIZES) {
     const re = new RegExp(`(?<![A-Za-z])${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
@@ -67,7 +74,8 @@ function parseAttrs(title: string) {
     const re = new RegExp(`(?<![A-Za-z])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z])`, 'i')
     if (re.test(title)) { style = lbl; break }
   }
-  return { size: size || '—', color: color || '—', style: style || 'Short Sleeve' }
+  const variant = sku ? extractVariantFromSku(sku) : null
+  return { size: size || '—', color: color || '—', style: style || 'Short Sleeve', variant }
 }
 
 function cleanTitle(title: string): string {
@@ -221,7 +229,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {items.map((item, index) => {
-                    const attrs = parseAttrs(item.title)
+                    const attrs = parseAttrs(item.title, item.sku)
                     const title = cleanTitle(item.title)
                     return (
                       <tr key={`${item.asin}-${index}`} className={index % 2 === 1 ? 'bg-gray-50' : 'bg-white'}>
@@ -256,6 +264,9 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                             <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Size: </span><span className="font-semibold text-gray-900">{attrs.size}</span></p>
                             <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Color: </span><span className="font-semibold text-gray-900">{attrs.color}</span></p>
                             <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Style: </span><span className="font-semibold text-gray-900">{attrs.style}</span></p>
+                            {attrs.variant && (
+                              <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Team: </span><span className="font-semibold text-gray-900">{attrs.variant}</span></p>
+                            )}
                           </div>
                         </td>
                       </tr>

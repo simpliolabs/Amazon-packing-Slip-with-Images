@@ -74,10 +74,28 @@ interface ProductAttributes {
   size: string | null
   color: string | null
   style: string | null
+  variant: string | null
 }
 
-function parseProductAttributes(title: string): ProductAttributes {
-  const result: ProductAttributes = { size: null, color: null, style: null }
+/**
+ * Extract the variant/team/country from the SKU.
+ * SKU format examples:
+ *   64000XL-WH-Soccer-Cup-TS-Germany  → "Germany"
+ *   64000XS-WH-FIFA-WORLD-CUP-TS-Japan → "Japan"
+ *   64000L-BK-Hoodie-Classic           → null
+ * Looks for the last segment after "TS-" or "ts-" in the SKU.
+ * Falls back to checking the title for known country names.
+ */
+function extractVariantFromSku(sku: string): string | null {
+  if (!sku) return null
+  // Match the last segment after TS- (case insensitive)
+  const tsMatch = sku.match(/TS-([A-Za-z]+)$/i)
+  if (tsMatch) return tsMatch[1]
+  return null
+}
+
+function parseProductAttributes(title: string, sku?: string): ProductAttributes {
+  const result: ProductAttributes = { size: null, color: null, style: null, variant: null }
 
   for (const size of SIZES) {
     const escaped = size.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -102,6 +120,11 @@ function parseProductAttributes(title: string): ProductAttributes {
     if (re.test(title)) { result.style = label; break }
   }
   if (!result.style) result.style = 'Short Sleeve'
+
+  // Extract variant (team/country) from SKU
+  if (sku) {
+    result.variant = extractVariantFromSku(sku)
+  }
 
   return result
 }
@@ -550,7 +573,7 @@ export default function PackingSlipDocument({
           </View>
 
           {items.map((item, index) => {
-            const attrs = parseProductAttributes(item.title)
+            const attrs = parseProductAttributes(item.title, item.sku)
             const title = cleanTitle(item.title)
 
             return (
@@ -594,6 +617,12 @@ export default function PackingSlipDocument({
                     <Text style={styles.attrLabel}>Style:</Text>
                     <Text style={styles.attrValue}>{attrs.style || '—'}</Text>
                   </View>
+                  {attrs.variant && (
+                    <View style={styles.attrRow}>
+                      <Text style={styles.attrLabel}>Team:</Text>
+                      <Text style={styles.attrValue}>{attrs.variant}</Text>
+                    </View>
+                  )}
                 </View>
               </View>
             )

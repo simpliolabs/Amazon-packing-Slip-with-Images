@@ -43,7 +43,10 @@ async function cacheProductImage(
 
     // Download and cache the image
     const imgResponse = await fetch(imageUrl)
-    if (!imgResponse.ok) return imageUrl
+    if (!imgResponse.ok) {
+      console.warn(`Failed to download image for ${asin}, using direct URL`)
+      return imageUrl
+    }
 
     const imgBuffer = await imgResponse.arrayBuffer()
     const { error } = await supabase.storage
@@ -53,14 +56,18 @@ async function cacheProductImage(
         upsert: true,
       })
 
-    if (error) return imageUrl
+    if (error) {
+      console.warn(`Failed to cache image for ${asin}: ${error.message}, using direct URL`)
+      return imageUrl
+    }
 
     const { data: urlData } = supabase.storage
       .from('product-images')
       .getPublicUrl(filePath)
 
     return urlData.publicUrl
-  } catch {
+  } catch (err) {
+    console.warn(`Image caching error for ${asin}:`, err)
     return imageUrl
   }
 }
