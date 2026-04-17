@@ -29,26 +29,33 @@ async function cacheProductImage(
   try {
     const filePath = `${asin}.jpg`
 
-    // Check if already cached
-    const { data: existing } = await supabase.storage
-      .from('product-images')
-      .list('', { search: asin })
-
-    if (existing && existing.length > 0) {
-      const { data: urlData } = supabase.storage
-        .from('product-images')
-        .getPublicUrl(filePath)
-      return urlData.publicUrl
-    }
-
-    // Download and cache the image
+    // Always download the latest image from Amazon and upsert it.
+    // This ensures cached images stay up-to-date if Amazon changes
+    // the product image (e.g. wrong variant was initially returned).
     const imgResponse = await fetch(imageUrl)
     if (!imgResponse.ok) {
+      // If download fails, fall back to existing cached image if available
+      const { data: existing } = await supabase.storage
+        .from('product-images')
+        .list('', { search: asin })
+
+      if (existing && existing.length > 0) {
+        const { data: urlData } = supabase.storage
+          .from('product-images')
+          .getPublicUrl(filePath)
+        return urlData.publicUrl
+      }
       console.warn(`Failed to download image for ${asin}, using direct URL`)
       return imageUrl
     }
 
     const imgBuffer = await imgResponse.arrayBuffer()
+
+    // Delete existing image first (if any) to avoid stale cache
+    await supabase.storage
+      .from('product-images')
+      .remove([filePath])
+
     const { error } = await supabase.storage
       .from('product-images')
       .upload(filePath, imgBuffer, {
