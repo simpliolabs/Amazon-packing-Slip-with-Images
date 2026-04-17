@@ -1,13 +1,14 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useEffect, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
 import Image from 'next/image'
 
-export default function SetPasswordPage() {
+function SetPasswordContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -19,87 +20,39 @@ export default function SetPasswordPage() {
   useEffect(() => {
     const supabase = createClient()
 
-    async function bootstrap() {
+    async function checkSession() {
       try {
-        // ── Step 1: Check if there's already a valid session (e.g., page refresh) ──
-        const { data: { session: existingSession } } = await supabase.auth.getSession()
-        if (existingSession?.user) {
-          setUserName(existingSession.user.user_metadata?.full_name || existingSession.user.email || '')
+        // With PKCE flow, the /auth/confirm route already verified the token
+        // and set the session cookies. We just need to check if we have a session.
+        const { data: { session } } = await supabase.auth.getSession()
+
+        if (session?.user) {
+          setUserName(session.user.user_metadata?.full_name || session.user.email || '')
           setSessionReady(true)
           setChecking(false)
           return
         }
 
-        // ── Step 2: Parse hash fragment for implicit flow tokens ──
-        // Supabase invite links redirect with: #access_token=...&refresh_token=...&type=invite
-        const hash = window.location.hash.substring(1) // remove the '#'
-        if (!hash) {
-          // Check URL search params too (some flows use query params)
-          const params = new URLSearchParams(window.location.search)
-          const error = params.get('error')
-          const errorDesc = params.get('error_description')
-          if (error) {
-            console.error('Auth error from URL:', error, errorDesc)
-            setErrorMessage(errorDesc || 'Authentication failed. Please request a new invite.')
-          }
-          setChecking(false)
-          return
-        }
-
-        const hashParams = new URLSearchParams(hash)
-        const accessToken = hashParams.get('access_token')
-        const refreshToken = hashParams.get('refresh_token')
-        const errorParam = hashParams.get('error')
-        const errorDesc = hashParams.get('error_description')
-
-        if (errorParam) {
-          console.error('Auth error from hash:', errorParam, errorDesc)
-          setErrorMessage(errorDesc || 'Authentication failed. Please request a new invite.')
-          setChecking(false)
-          return
-        }
-
-        if (!accessToken || !refreshToken) {
-          console.error('Missing tokens in hash fragment')
-          setErrorMessage('Invalid invite link. Please request a new invite from your admin.')
-          setChecking(false)
-          return
-        }
-
-        // ── Step 3: Explicitly set the session using the hash tokens ──
-        const { data, error } = await supabase.auth.setSession({
-          access_token: accessToken,
-          refresh_token: refreshToken,
-        })
-
-        if (error) {
-          console.error('setSession error:', error)
-          setErrorMessage(error.message || 'Failed to verify invite. Please request a new invite.')
-          setChecking(false)
-          return
-        }
-
-        if (data.session?.user) {
-          setUserName(data.session.user.user_metadata?.full_name || data.session.user.email || '')
-          setSessionReady(true)
-
-          // Clean up the hash from the URL (don't expose tokens)
-          if (window.history.replaceState) {
-            window.history.replaceState(null, '', window.location.pathname)
-          }
+        // Check for error from /auth/confirm redirect
+        const error = searchParams.get('error')
+        if (error === 'invite_expired') {
+          setErrorMessage('This invite link has expired or was already used. Please ask your admin to send a new invite.')
+        } else if (error) {
+          setErrorMessage('Authentication failed. Please request a new invite.')
         } else {
-          setErrorMessage('Could not establish session. Please request a new invite.')
+          // No session and no error — maybe they navigated here directly
+          setErrorMessage('No active session. Please use the invite link sent to you, or ask your admin for a new one.')
         }
       } catch (err) {
-        console.error('Bootstrap error:', err)
+        console.error('Session check error:', err)
         setErrorMessage('Something went wrong. Please request a new invite.')
       } finally {
         setChecking(false)
       }
     }
 
-    bootstrap()
-  }, [])
+    checkSession()
+  }, [searchParams])
 
   async function handleSetPassword(e: React.FormEvent) {
     e.preventDefault()
@@ -271,5 +224,22 @@ export default function SetPasswordPage() {
         </p>
       </div>
     </div>
+  )
+}
+
+export default function SetPasswordPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+          <div className="flex flex-col items-center gap-3">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#2E9CE6]"></div>
+            <div className="text-sm text-gray-500">Loading…</div>
+          </div>
+        </div>
+      }
+    >
+      <SetPasswordContent />
+    </Suspense>
   )
 }

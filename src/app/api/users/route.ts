@@ -141,13 +141,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: linkError.message }, { status: 500 })
   }
 
-  // The generated link contains a token_hash and type parameter
-  // We need to construct the proper invite URL that goes through Supabase verify
+  // Use PKCE-compatible flow: route through our own /auth/confirm handler
+  // which calls verifyOtp server-side, then redirects to /set-password
   const properties = linkData?.properties
   const hashedToken = properties?.hashed_token
   
-  // Build the invite URL: Supabase verify endpoint → validates token → redirects to /set-password with #access_token
-  const inviteLink = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/auth/v1/verify?token_hash=${hashedToken}&type=invite&redirect_to=${encodeURIComponent(`${appUrl}/set-password`)}`
+  // Build the invite URL: our server-side confirm route verifies the token
+  const inviteLink = `${appUrl}/auth/confirm?token_hash=${hashedToken}&type=invite&next=/set-password`
 
   return NextResponse.json({
     success: true,
