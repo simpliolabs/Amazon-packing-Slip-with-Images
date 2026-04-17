@@ -4,7 +4,7 @@ import type { Order, OrderItem } from '@/types/database'
  * Fetch an image from a URL and convert to base64 string.
  * Includes a timeout to prevent hanging on slow CDN responses.
  */
-async function imageToBase64(url: string, timeoutMs = 8000): Promise<string | undefined> {
+async function imageToBase64(url: string, timeoutMs = 10000): Promise<string | undefined> {
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -24,34 +24,37 @@ async function imageToBase64(url: string, timeoutMs = 8000): Promise<string | un
 }
 
 /**
- * Pre-fetch all unique product images from an order as base64.
+ * Pre-fetch all unique product images from one or more orders as base64.
  * Returns a map of ASIN → base64 string.
  */
-async function prefetchProductImages(order: Order): Promise<Record<string, string>> {
-  const items: OrderItem[] = Array.isArray(order.order_items)
-    ? (order.order_items as unknown as OrderItem[])
-    : []
-
-  // Deduplicate by ASIN
+async function prefetchAllProductImages(orders: Order[]): Promise<Record<string, string>> {
   const uniqueImages = new Map<string, string>()
-  for (const item of items) {
-    if (item.image_url && item.asin && !uniqueImages.has(item.asin)) {
-      uniqueImages.set(item.asin, item.image_url)
+  for (const order of orders) {
+    const items: OrderItem[] = Array.isArray(order.order_items)
+      ? (order.order_items as unknown as OrderItem[])
+      : []
+    for (const item of items) {
+      if (item.image_url && item.asin && !uniqueImages.has(item.asin)) {
+        uniqueImages.set(item.asin, item.image_url)
+      }
     }
   }
 
-  // Fetch all in parallel with timeout
+  // Fetch in batches of 5 to avoid overwhelming the browser
   const entries = Array.from(uniqueImages.entries())
-  const results = await Promise.all(
-    entries.map(async ([asin, url]) => {
-      const b64 = await imageToBase64(url, 8000)
-      return [asin, b64] as [string, string | undefined]
-    })
-  )
-
   const map: Record<string, string> = {}
-  for (const [asin, b64] of results) {
-    if (b64) map[asin] = b64
+  const batchSize = 5
+  for (let i = 0; i < entries.length; i += batchSize) {
+    const batch = entries.slice(i, i + batchSize)
+    const results = await Promise.all(
+      batch.map(async ([asin, url]) => {
+        const b64 = await imageToBase64(url, 10000)
+        return [asin, b64] as [string, string | undefined]
+      })
+    )
+    for (const [asin, b64] of results) {
+      if (b64) map[asin] = b64
+    }
   }
   return map
 }
@@ -60,7 +63,6 @@ async function prefetchProductImages(order: Order): Promise<Record<string, strin
  * Generate and download a single packing slip PDF
  */
 export async function generateSinglePDF(order: Order): Promise<void> {
-  // Start all fetches in parallel: logos + product images
   const [
     { pdf },
     { default: PackingSlipDocument },
@@ -76,7 +78,7 @@ export async function generateSinglePDF(order: Order): Promise<void> {
     imageToBase64('/theceo_logo_registered.png'),
     imageToBase64('/amazon_logo.png'),
     imageToBase64('/qr_code.png'),
-    prefetchProductImages(order),
+    prefetchAllProductImages([order]),
   ])
 
   const blob = await pdf(
@@ -100,37 +102,50 @@ export async function generateSinglePDF(order: Order): Promise<void> {
 }
 
 /**
- * Generate and download multiple packing slips as a ZIP file.
- * Accepts an optional progress callback: (completed, total) => void
+ * Generate a single combined PDF containing all orders (one per page).
+ * Used for both bulk download and bulk print.
+ * Accepts an optional progress callback: (phase, detail) => void
  */
-export async function generateBulkPDF(
+export async function generateCombinedPDF(
   orders: Order[],
-  onProgress?: (completed: number, total: number) => void,
-): Promise<void> {
-  const { pdf } = await import('@react-pdf/renderer')
-  const { default: PackingSlipDocument } = await import('./PackingSlipDocument')
-  const JSZip = (await import('jszip')).default
-  const React = await import('react')
+  onProgress?: (phase: string, detail?: string) => void,
+): Promise<Blob> {
+  onProgress?.('loading', 'Loading PDF engine…')
 
-  // Load logos once for all PDFs
-  const [logoBase64, amazonLogoBase64, qrCodeBase64] = await Promise.all([
+  const [
+    { pdf, Document, Page },
+    { default: PackingSlipDocument },
+    React,
+  ] = await Promise.all([
+    import('@react-pdf/renderer'),
+    import('./PackingSlipDocument'),
+    import('react'),
+  ])
+
+  onProgress?.('images', `Fetching images for ${orders.length} orders…`)
+
+  // Pre-fetch logos + all product images in parallel
+  const [logoBase64, amazonLogoBase64, qrCodeBase64, productImagesBase64] = await Promise.all([
     imageToBase64('/theceo_logo_registered.png'),
     imageToBase64('/amazon_logo.png'),
     imageToBase64('/qr_code.png'),
+    prefetchAllProductImages(orders),
   ])
 
-  const zip = new JSZip()
-  const folder = zip.folder('packing-slips')
-  if (!folder) throw new Error('Failed to create ZIP folder')
+  onProgress?.('rendering', `Rendering ${orders.length} packing slips…`)
 
-  let completed = 0
-  const total = orders.length
+  // Create a single combined document with all orders
+  // Each PackingSlipDocument is a <Document> with <Page> inside,
+  // so we need to render each order individually and combine the blobs.
+  // Unfortunately @react-pdf/renderer doesn't support multi-document merging,
+  // so we render each order as a separate PDF and merge with pdf-lib.
 
-  // Process PDFs one at a time to avoid memory issues with large batches.
-  // Each order: fetch images → render PDF → add to ZIP → release memory.
-  for (const order of orders) {
+  // Actually, let's create individual blobs and merge them
+  const pdfBlobs: Blob[] = []
+  for (let i = 0; i < orders.length; i++) {
+    const order = orders[i]
+    onProgress?.('rendering', `Rendering slip ${i + 1} of ${orders.length}…`)
     try {
-      const productImagesBase64 = await prefetchProductImages(order)
       const blob = await pdf(
         React.createElement(PackingSlipDocument, {
           order,
@@ -140,23 +155,78 @@ export async function generateBulkPDF(
           productImagesBase64,
         } as any) as any
       ).toBlob()
-      const arrayBuffer = await blob.arrayBuffer()
-      folder.file(`packing-slip-${order.id}.pdf`, arrayBuffer)
+      pdfBlobs.push(blob)
     } catch (err) {
-      console.error(`Failed to generate PDF for order ${order.id}:`, err)
-      // Continue with remaining orders instead of failing the whole batch
+      console.error(`Failed to render PDF for order ${order.id}:`, err)
+      // Skip failed orders
     }
-    completed++
-    onProgress?.(completed, total)
   }
 
-  const zipBlob = await zip.generateAsync({ type: 'blob' })
-  const url = URL.createObjectURL(zipBlob)
+  if (pdfBlobs.length === 0) {
+    throw new Error('No PDFs were generated successfully')
+  }
+
+  // If only one order, return it directly
+  if (pdfBlobs.length === 1) {
+    return pdfBlobs[0]
+  }
+
+  onProgress?.('merging', `Merging ${pdfBlobs.length} PDFs…`)
+
+  // Merge all PDFs into one using pdf-lib
+  const { PDFDocument } = await import('pdf-lib')
+  const mergedPdf = await PDFDocument.create()
+
+  for (const blob of pdfBlobs) {
+    try {
+      const arrayBuffer = await blob.arrayBuffer()
+      const pdfDoc = await PDFDocument.load(arrayBuffer)
+      const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices())
+      for (const page of pages) {
+        mergedPdf.addPage(page)
+      }
+    } catch (err) {
+      console.error('Failed to merge a PDF page:', err)
+    }
+  }
+
+  const mergedBytes = await mergedPdf.save()
+  return new Blob([mergedBytes.buffer as ArrayBuffer], { type: 'application/pdf' })
+}
+
+/**
+ * Generate and download multiple packing slips as a single combined PDF.
+ */
+export async function generateBulkPDF(
+  orders: Order[],
+  onProgress?: (phase: string, detail?: string) => void,
+): Promise<void> {
+  const blob = await generateCombinedPDF(orders, onProgress)
+
+  const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `packing-slips-${new Date().toISOString().split('T')[0]}.zip`
+  link.download = `packing-slips-${new Date().toISOString().split('T')[0]}.pdf`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
+}
+
+/**
+ * Generate a combined PDF and open it in a new window for printing.
+ */
+export async function generateBulkPrint(
+  orders: Order[],
+  onProgress?: (phase: string, detail?: string) => void,
+): Promise<void> {
+  const blob = await generateCombinedPDF(orders, onProgress)
+
+  const url = URL.createObjectURL(blob)
+  const printWindow = window.open(url, '_blank')
+  if (printWindow) {
+    printWindow.addEventListener('load', () => {
+      printWindow.print()
+    })
+  }
 }

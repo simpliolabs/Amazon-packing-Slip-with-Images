@@ -51,8 +51,9 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set())
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null)
   const [bulkDownloading, setBulkDownloading] = useState(false)
-  const [bulkProgress, setBulkProgress] = useState<{ completed: number; total: number } | null>(null)
+  const [bulkStatusText, setBulkStatusText] = useState('')
   const [bulkPrinting, setBulkPrinting] = useState(false)
+  const [printStatusText, setPrintStatusText] = useState('')
   const [lastSync, setLastSync] = useState<string | null>(null)
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -98,7 +99,6 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
 
   useEffect(() => {
     fetchLastSync()
-    // Auto-refresh every 30 minutes
     const interval = setInterval(() => {
       fetchOrders(page)
       fetchLastSync()
@@ -137,14 +137,13 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       return
     }
     setBulkDownloading(true)
-    setBulkProgress({ completed: 0, total: selectedOrders.size })
+    setBulkStatusText('Loading…')
     try {
       const selectedOrderObjects = orders.filter((o) => selectedOrders.has(o.id))
 
-      // Dynamic import to avoid SSR issues
       const { generateBulkPDF } = await import('@/lib/pdf/generatePDF')
-      await generateBulkPDF(selectedOrderObjects, (completed, total) => {
-        setBulkProgress({ completed, total })
+      await generateBulkPDF(selectedOrderObjects, (phase, detail) => {
+        setBulkStatusText(detail || phase)
       })
 
       // Log bulk download
@@ -152,16 +151,16 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orderId: null, downloadType: 'bulk' }),
-      })
+      }).catch(() => {})
 
       toast.success(`Downloaded ${selectedOrders.size} packing slips`)
       setSelectedOrders(new Set())
     } catch (err) {
-      toast.error('Bulk download failed. Please try with fewer orders.')
+      toast.error('Bulk download failed. Please try again.')
       console.error(err)
     } finally {
       setBulkDownloading(false)
-      setBulkProgress(null)
+      setBulkStatusText('')
     }
   }
 
@@ -171,22 +170,22 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       return
     }
     setBulkPrinting(true)
+    setPrintStatusText('Loading…')
     try {
       const selectedOrderObjects = orders.filter((o) => selectedOrders.has(o.id))
 
-      // Dynamic import to avoid SSR issues
-      const { generateBulkPDF } = await import('@/lib/pdf/generatePDF')
-      await generateBulkPDF(selectedOrderObjects, (completed, total) => {
-        setBulkProgress({ completed, total })
+      const { generateBulkPrint } = await import('@/lib/pdf/generatePDF')
+      await generateBulkPrint(selectedOrderObjects, (phase, detail) => {
+        setPrintStatusText(detail || phase)
       })
 
-      toast.success(`Printed ${selectedOrders.size} packing slips`)
+      toast.success(`Opened ${selectedOrders.size} packing slips for printing`)
     } catch (err) {
-      toast.error('Bulk print failed. Please try with fewer orders.')
+      toast.error('Bulk print failed. Please try again.')
       console.error(err)
     } finally {
       setBulkPrinting(false)
-      setBulkProgress(null)
+      setPrintStatusText('')
     }
   }
 
@@ -220,9 +219,7 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
             >
               <Printer size={16} className={bulkPrinting ? 'animate-pulse' : ''} />
               {bulkPrinting
-                ? bulkProgress
-                  ? `Printing ${bulkProgress.completed}/${bulkProgress.total}…`
-                  : 'Preparing…'
+                ? printStatusText || 'Preparing…'
                 : `Print ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
             </button>
             <button
@@ -232,9 +229,7 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
             >
               <FileDown size={16} className={bulkDownloading ? 'animate-bounce' : ''} />
               {bulkDownloading
-                ? bulkProgress
-                  ? `Generating ${bulkProgress.completed}/${bulkProgress.total}…`
-                  : 'Preparing…'
+                ? bulkStatusText || 'Preparing…'
                 : `Download ${selectedOrders.size} Slip${selectedOrders.size > 1 ? 's' : ''}`}
             </button>
           </div>
@@ -301,9 +296,9 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
 
           <button
             onClick={() => fetchOrders(page)}
-            className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-gray-900 border border-gray-200 rounded-lg text-sm transition-colors"
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            <RefreshCw size={14} />
             Refresh
           </button>
         </div>
@@ -312,48 +307,50 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       {/* Table */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full">
             <thead>
-              <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="px-4 py-3 text-left">
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="w-10 px-4 py-3">
                   <input
                     type="checkbox"
                     checked={orders.length > 0 && selectedOrders.size === orders.length}
                     onChange={toggleSelectAll}
-                    className="rounded border-gray-300 text-[#2E9CE6] focus:ring-[#2E9CE6]"
+                    className="w-4 h-4 rounded border-gray-300 text-[#2E9CE6] focus:ring-[#2E9CE6] cursor-pointer"
                   />
                 </th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Order ID</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Date</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Customer</th>
-                <th className="px-4 py-3 text-center font-semibold text-gray-600">Items</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
-                <th className="px-4 py-3 text-right font-semibold text-gray-600">Actions</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Order ID
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Date
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Customer
+                </th>
+                <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Items
+                </th>
+                <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Status
+                </th>
+                <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                Array.from({ length: 8 }).map((_, i) => (
-                  <tr key={i} className="animate-pulse">
-                    <td className="px-4 py-3"><div className="w-4 h-4 bg-gray-200 rounded" /></td>
-                    <td className="px-4 py-3"><div className="h-4 bg-gray-200 rounded w-36" /></td>
-                    <td className="px-4 py-3"><div className="h-4 bg-gray-200 rounded w-28" /></td>
-                    <td className="px-4 py-3"><div className="h-4 bg-gray-200 rounded w-32" /></td>
-                    <td className="px-4 py-3"><div className="h-4 bg-gray-200 rounded w-8 mx-auto" /></td>
-                    <td className="px-4 py-3"><div className="h-6 bg-gray-200 rounded-full w-20" /></td>
-                    <td className="px-4 py-3"><div className="h-8 bg-gray-200 rounded w-24 ml-auto" /></td>
-                  </tr>
-                ))
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
+                    <RefreshCw size={20} className="animate-spin mx-auto mb-2" />
+                    Loading orders…
+                  </td>
+                </tr>
               ) : orders.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-16 text-center">
-                    <Package size={40} className="mx-auto text-gray-300 mb-3" />
-                    <p className="text-gray-500 font-medium">No orders found</p>
-                    <p className="text-gray-400 text-xs mt-1">
-                      {search || status !== 'All' || dateFrom || dateTo
-                        ? 'Try adjusting your filters'
-                        : 'Click "Sync Now" to pull orders from Amazon'}
-                    </p>
+                  <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
+                    <Package size={24} className="mx-auto mb-2 opacity-50" />
+                    No orders found
                   </td>
                 </tr>
               ) : (
@@ -370,42 +367,29 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
                         type="checkbox"
                         checked={selectedOrders.has(order.id)}
                         onChange={() => toggleSelectOrder(order.id)}
-                        className="rounded border-gray-300 text-[#2E9CE6] focus:ring-[#2E9CE6]"
+                        className="w-4 h-4 rounded border-gray-300 text-[#2E9CE6] focus:ring-[#2E9CE6] cursor-pointer"
                       />
                     </td>
-                    <td className="px-4 py-3">
-                      <span className="font-mono text-xs font-medium text-gray-900">
-                        {order.id}
-                      </span>
+                    <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                      {order.id}
                     </td>
-                    <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
+                    <td className="px-4 py-3 text-sm text-gray-500">
                       {formatDate(order.purchase_date)}
                     </td>
-                    <td className="px-4 py-3">
-                      <div>
-                        <p className="font-medium text-gray-900 truncate max-w-[160px]">
-                          {order.buyer_name || '—'}
-                        </p>
-                        {order.buyer_email && (
-                          <p className="text-xs text-gray-400 truncate max-w-[160px]">
-                            {order.buyer_email}
-                          </p>
-                        )}
-                      </div>
+                    <td className="px-4 py-3 text-sm text-gray-500">
+                      {order.buyer_name || '—'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-500 text-center">
+                      {getItemCount(order)}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-gray-100 text-gray-700 text-xs font-bold">
-                        {getItemCount(order)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
                       <span
                         className={cn(
-                          'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border',
-                          getStatusColor(order.order_status || '')
+                          'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
+                          getStatusColor(order.order_status ?? '')
                         )}
                       >
-                        {order.order_status || 'Unknown'}
+                        {order.order_status}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right">
@@ -428,20 +412,20 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200">
             <p className="text-sm text-gray-500">
-              Page {page} of {totalPages} · {total} total orders
+              Page {page} of {totalPages}
             </p>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 <ChevronLeft size={16} />
               </button>
               <button
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
-                className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 <ChevronRight size={16} />
               </button>
