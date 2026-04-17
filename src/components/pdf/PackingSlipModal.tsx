@@ -687,11 +687,11 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                     const title = cleanTitle(item.title)
                     // Use pre-fetched base64 image if available.
                     // SKU-based image sharing: if this item's design key matches
-                    // another item, use the shared design image.
-                    const dk = extractDesignKey(item.sku)
-                    const effectiveImageUrl = item.image_url
-                      || (dk ? designImageMap.get(dk) : undefined)
-                      || null
+                     // another item, always use the first matching item's image.
+                     // This fixes cases where Amazon returns wrong images for size variants.
+                     const dk = extractDesignKey(item.sku)
+                     const sharedImage = dk ? designImageMap.get(dk) : undefined
+                     const effectiveImageUrl = sharedImage || item.image_url || null
                     const imgSrc = effectiveImageUrl
                       ? (imageDataUrls[effectiveImageUrl] || effectiveImageUrl)
                       : null

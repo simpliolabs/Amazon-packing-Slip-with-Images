@@ -636,12 +636,12 @@ function extractDesignKey(sku: string): string {
   return parts.join('-').toUpperCase()
 }
 
-function buildDesignImageMap(items: OrderItem[]): Map<string, string> {
-  const map = new Map<string, string>()
+function buildDesignImageMap(items: OrderItem[]): Map<string, { url: string; asin: string }> {
+  const map = new Map<string, { url: string; asin: string }>()
   for (const item of items) {
     const dk = extractDesignKey(item.sku)
     if (dk && item.image_url && !map.has(dk)) {
-      map.set(dk, item.image_url)
+      map.set(dk, { url: item.image_url, asin: item.asin })
     }
   }
   return map
@@ -786,12 +786,13 @@ export default function PackingSlipDocument({
 
                 <View style={styles.colImage}>
                   {(() => {
-                    // SKU-based image sharing: use design key to share images
-                    const dk = extractDesignKey(item.sku)
-                    const effectiveImageUrl = item.image_url
-                      || (dk ? designImageMap.get(dk) : undefined)
-                      || null
-                    const b64 = productImagesBase64?.[item.asin]
+                    // SKU-based image sharing: always use the first matching item's image.
+                     // This fixes cases where Amazon returns wrong images for size variants.
+                     const dk = extractDesignKey(item.sku)
+                     const shared = dk ? designImageMap.get(dk) : undefined
+                     const effectiveImageUrl = shared?.url || item.image_url || null
+                     const effectiveAsin = shared?.asin || item.asin
+                    const b64 = productImagesBase64?.[effectiveAsin]
                     const imgSrc = b64
                       ? `data:image/jpeg;base64,${b64}`
                       : effectiveImageUrl
