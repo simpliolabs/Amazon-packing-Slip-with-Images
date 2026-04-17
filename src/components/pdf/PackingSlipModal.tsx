@@ -1,22 +1,10 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import dynamic from 'next/dynamic'
 import { X, Download, Printer, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import type { Order, OrderItem, ShipTo } from '@/types/database'
 import { formatDate, formatDateShort } from '@/lib/utils'
-
-// Dynamically import PDFViewer to avoid SSR issues
-const PDFDownloadLink = dynamic(
-  () => import('@react-pdf/renderer').then((mod) => mod.PDFDownloadLink),
-  { ssr: false, loading: () => null }
-)
-
-const PackingSlipDocument = dynamic(
-  () => import('@/lib/pdf/PackingSlipDocument'),
-  { ssr: false, loading: () => null }
-)
 
 // ─── Attribute parser (mirrors PackingSlipDocument logic) ────────────────────
 const SIZES = [
@@ -51,7 +39,7 @@ const COLORS = [
   'Coral Silk',
 ]
 const STYLES: [string, string][] = [
-  ['Comfort Colors', 'Comfort Colors'],
+  ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
   ['Long Sleeve', 'Long Sleeve'], ['V-Neck', 'V-Neck'], ['V Neck', 'V-Neck'],
   ['Vneck', 'V-Neck'], ['Crop Top', 'Crop Top'], ['Crop Tee', 'Crop Top'],
   ['Tank Top', 'Tank Top'], ['Tank', 'Tank Top'], ['Muscle Tee', 'Muscle Tee'],
@@ -146,7 +134,7 @@ function cleanTitle(title: string): string {
  * Print the packing slip using an iframe for clean, reliable output.
  * This avoids all CSS conflicts with the parent page.
  */
-function handlePrint() {
+function handlePrint(orderId: string) {
   const content = document.getElementById('packing-slip-print')
   if (!content) return
 
@@ -172,6 +160,7 @@ function handlePrint() {
     <html>
     <head>
       <meta charset="utf-8" />
+      <title>${orderId}</title>
       ${styles}
       <style>
         @page {
@@ -194,6 +183,33 @@ function handlePrint() {
         }
         img {
           max-width: 100%;
+        }
+        /* Page break handling — never split these elements across pages */
+        tr {
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        table {
+          break-inside: auto;
+          page-break-inside: auto;
+        }
+        thead {
+          display: table-header-group;
+        }
+        /* Keep the feedback/review card together */
+        .review-card {
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        /* Keep the footer together */
+        .slip-footer {
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        /* Keep feedback + footer together if possible */
+        .review-footer-group {
+          break-inside: avoid;
+          page-break-inside: avoid;
         }
       </style>
     </head>
@@ -260,15 +276,88 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
   async function handleDownload() {
     setDownloading(true)
     try {
-      const { generateSinglePDF } = await import('@/lib/pdf/generatePDF')
-      await generateSinglePDF(order)
+      const content = document.getElementById('packing-slip-print')
+      if (!content) throw new Error('Content not found')
+
+      const html2canvas = (await import('html2canvas')).default
+      const { jsPDF } = await import('jspdf')
+
+      // Letter size in points: 612 x 792
+      const letterWidth = 8.5 // inches
+      const letterHeight = 11 // inches
+      const dpi = 2 // scale factor for quality
+
+      const canvas = await html2canvas(content, {
+        scale: dpi,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+        width: content.scrollWidth,
+        height: content.scrollHeight,
+      })
+
+      const imgData = canvas.toDataURL('image/jpeg', 0.95)
+      const imgWidthPx = canvas.width
+      const imgHeightPx = canvas.height
+
+      // Calculate how the content maps to letter pages
+      const pdfPageWidthIn = letterWidth - 1 // 0.5in margins each side
+      const pdfPageHeightIn = letterHeight - 1 // 0.5in margins each side
+      const pdfPageWidthPt = pdfPageWidthIn * 72
+      const pdfPageHeightPt = pdfPageHeightIn * 72
+
+      // Scale image to fit page width
+      const scale = pdfPageWidthPt / imgWidthPx
+      const scaledHeight = imgHeightPx * scale
+
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'pt',
+        format: 'letter',
+      })
+
+      // If content fits on one page
+      if (scaledHeight <= pdfPageHeightPt) {
+        pdf.addImage(imgData, 'JPEG', 36, 36, pdfPageWidthPt, scaledHeight)
+      } else {
+        // Multi-page: slice the canvas into page-sized chunks
+        const pageHeightPx = pdfPageHeightPt / scale
+        const totalPages = Math.ceil(imgHeightPx / pageHeightPx)
+
+        for (let page = 0; page < totalPages; page++) {
+          if (page > 0) pdf.addPage('letter', 'portrait')
+
+          const srcY = page * pageHeightPx
+          const srcH = Math.min(pageHeightPx, imgHeightPx - srcY)
+          const destH = srcH * scale
+
+          // Create a sub-canvas for this page
+          const pageCanvas = document.createElement('canvas')
+          pageCanvas.width = imgWidthPx
+          pageCanvas.height = srcH * dpi
+          const ctx = pageCanvas.getContext('2d')
+          if (ctx) {
+            ctx.drawImage(
+              canvas,
+              0, srcY * dpi, imgWidthPx, srcH * dpi,
+              0, 0, imgWidthPx, srcH * dpi
+            )
+            const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.95)
+            pdf.addImage(pageImgData, 'JPEG', 36, 36, pdfPageWidthPt, destH)
+          }
+        }
+      }
+
+      pdf.save(`${order.id}.pdf`)
+
       await fetch('/api/downloads/log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orderId: order.id, downloadType: 'single' }),
       })
       toast.success('Packing slip downloaded')
-    } catch {
+    } catch (err) {
+      console.error('PDF download error:', err)
       toast.error('Download failed')
     } finally {
       setDownloading(false)
@@ -290,7 +379,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={handlePrint}
+              onClick={() => handlePrint(order.id)}
               className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors"
             >
               <Printer size={14} />
@@ -421,7 +510,8 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
             </div>
 
             {/* Review / Thank You section */}
-            <div className="flex rounded-lg border border-[#2E9CE6] overflow-hidden bg-[#EFF8FF]">
+            <div className="review-footer-group">
+            <div className="review-card flex rounded-lg border border-[#2E9CE6] overflow-hidden bg-[#EFF8FF]">
               {/* Blue left bar */}
               <div className="w-16 bg-[#2E9CE6] flex flex-col items-center justify-center py-4 px-2 shrink-0">
                 <p className="text-white text-xs font-bold text-center leading-tight mb-3">thank you<br />for your<br />order!</p>
@@ -459,11 +549,12 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
             </div>
 
             {/* Footer */}
-            <div className="flex justify-between items-center pt-3 border-t border-gray-100 mt-3">
+            <div className="slip-footer flex justify-between items-center pt-3 border-t border-gray-100 mt-3">
               <span className="text-xs text-gray-400">Generated: {formatDate(new Date().toISOString())}</span>
               <span className="text-xs font-bold text-[#2E9CE6]">TheCEO.Store</span>
               <span className="text-xs text-gray-400 font-mono">{order.id}</span>
             </div>
+            </div>{/* end review-footer-group */}
           </div>
         </div>
       </div>

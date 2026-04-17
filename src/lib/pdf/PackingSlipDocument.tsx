@@ -57,7 +57,7 @@ const COLORS = [
 ]
 
 const STYLES: [string, string][] = [
-  ['Comfort Colors', 'Comfort Colors'],
+  ['Comfort Colors', 'Comfort Colors / Short Sleeve'],
   ['Long Sleeve', 'Long Sleeve'],
   ['V-Neck', 'V-Neck'],
   ['V Neck', 'V-Neck'],
