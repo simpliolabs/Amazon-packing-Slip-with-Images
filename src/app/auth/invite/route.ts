@@ -8,10 +8,10 @@ import { NextRequest, NextResponse } from 'next/server'
  * 1. Validates the reusable invite token from user_profiles
  * 2. Ensures the auth user exists (with email_confirm: true)
  * 3. Generates a magic link via admin.generateLink()
- * 4. Redirects the user to the magic link action_link
+ * 4. Redirects to /auth/confirm with the hashed_token for server-side verification
  *
- * Supabase then verifies the magic link, creates an authenticated session,
- * and redirects to /auth/callback which forwards to /set-password.
+ * /auth/confirm calls verifyOtp() to establish the session with cookies,
+ * then redirects to /set-password where the user sets their password.
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
@@ -83,24 +83,26 @@ export async function GET(request: NextRequest) {
     email_confirm: true,
   })
 
-  // 5. Generate the Magic Link
+  // 5. Generate the Magic Link — we use the hashed_token for server-side verification
   const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
     type: 'magiclink',
     email: profile.email,
-    options: {
-      redirectTo: `${appUrl}/auth/callback?next=/set-password&invite_token=${token}`,
-    },
   })
 
-  if (linkError || !linkData?.properties?.action_link) {
+  if (linkError || !linkData?.properties?.hashed_token) {
     console.error('Failed to generate magic link:', linkError?.message)
     return NextResponse.redirect(
       new URL('/login?error=Failed+to+generate+session', appUrl)
     )
   }
 
-  // 6. Redirect the user to the Supabase magic link action URL
-  // Supabase will verify the link, create an authenticated session,
-  // and redirect to /auth/callback with a code
-  return NextResponse.redirect(linkData.properties.action_link)
+  // 6. Redirect to our /auth/confirm route with the hashed_token
+  // /auth/confirm uses verifyOtp() to establish the session server-side
+  // (with cookies on the redirect response), then redirects to /set-password
+  const confirmUrl = new URL('/auth/confirm', appUrl)
+  confirmUrl.searchParams.set('token_hash', linkData.properties.hashed_token)
+  confirmUrl.searchParams.set('type', 'magiclink')
+  confirmUrl.searchParams.set('next', `/set-password?token=${token}`)
+
+  return NextResponse.redirect(confirmUrl)
 }
