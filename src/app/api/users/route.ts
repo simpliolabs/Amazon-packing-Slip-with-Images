@@ -5,7 +5,9 @@ import { randomUUID } from 'crypto'
 
 /**
  * GET /api/users
- * Returns all users including pending invites (admin only)
+ * Returns all users with status derived from invite_token (admin only).
+ * invite_token IS NOT NULL → pending (hasn't set password)
+ * invite_token IS NULL     → active (has set password)
  */
 export async function GET(request: NextRequest) {
   const supabase = await createClient()
@@ -15,6 +17,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  // Admin check — RLS policy now lets admins see all profiles
   const { data: profile } = await supabase
     .from('user_profiles')
     .select('role')
@@ -25,53 +28,28 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  // Fetch confirmed users from user_profiles
+  // Fetch ALL user_profiles — RLS now allows admin to see all rows
   const { data: users, error } = await supabase
     .from('user_profiles')
     .select('*')
-    .order('created_at', { ascending: false }) as { data: Array<{ id: string; email: string; full_name: string; role: string; created_at: string; invite_token?: string; [key: string]: unknown }> | null; error: { message: string } | null }
+    .order('created_at', { ascending: false }) as {
+      data: Array<{
+        id: string; email: string; full_name: string; role: string;
+        created_at: string; invite_token?: string | null;
+        [key: string]: unknown
+      }> | null;
+      error: { message: string } | null
+    }
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  // Also fetch pending invited users from auth.users via admin client
-  const adminSupabase = await createAdminClient()
-  let pendingUsers: Array<{
-    id: string
-    email: string
-    full_name: string
-    role: string
-    created_at: string
-    status: 'pending'
-    invite_token?: string
-  }> = []
-
-  try {
-    const { data: authUsers } = await adminSupabase.auth.admin.listUsers()
-    if (authUsers?.users) {
-      const confirmedIds = new Set((users || []).map((u: { id: string }) => u.id))
-      pendingUsers = authUsers.users
-        .filter(au => !confirmedIds.has(au.id) && au.email)
-        .map(au => ({
-          id: au.id,
-          email: au.email || '',
-          full_name: au.user_metadata?.full_name || '',
-          role: au.user_metadata?.role || 'packer',
-          created_at: au.created_at,
-          status: 'pending' as const,
-        }))
-    }
-  } catch {
-    // If admin list fails, just return confirmed users
-  }
-
-  // Merge: confirmed users (with status 'active') + pending users
-  const usersList = users || []
-  const allUsers = [
-    ...usersList.map(u => ({ ...u, status: 'active' as const })),
-    ...pendingUsers,
-  ]
+  // Derive status from invite_token — single source of truth
+  const allUsers = (users || []).map(u => ({
+    ...u,
+    status: u.invite_token ? 'pending' as const : 'active' as const,
+  }))
 
   return NextResponse.json({ users: allUsers })
 }
@@ -79,6 +57,7 @@ export async function GET(request: NextRequest) {
 /**
  * POST /api/users
  * Create a user and generate a reusable invite link.
+ * Uses admin.createUser with email_confirm: true so email is always confirmed.
  * The invite link contains a UUID token stored in user_profiles.
  * Each click generates a fresh session server-side — link never expires
  * until the user sets their password.
@@ -126,23 +105,21 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Create the user via invite (this creates the auth.users entry with metadata)
-  const { data: linkData, error: linkError } = await adminSupabase.auth.admin.generateLink({
-    type: 'invite',
+  // Create the user with email already confirmed — no verification email needed
+  const { data: newUser, error: createError } = await adminSupabase.auth.admin.createUser({
     email,
-    options: {
-      data: {
-        role,
-        full_name: fullName || '',
-      },
+    email_confirm: true,
+    user_metadata: {
+      role,
+      full_name: fullName || '',
     },
   })
 
-  if (linkError) {
-    return NextResponse.json({ error: linkError.message }, { status: 500 })
+  if (createError) {
+    return NextResponse.json({ error: createError.message }, { status: 500 })
   }
 
-  const newUserId = linkData?.user?.id
+  const newUserId = newUser?.user?.id
 
   // Generate a reusable invite token (UUID)
   const inviteToken = randomUUID()
@@ -165,7 +142,7 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({
     success: true,
-    user: linkData?.user,
+    user: newUser?.user,
     inviteLink,
   })
 }
