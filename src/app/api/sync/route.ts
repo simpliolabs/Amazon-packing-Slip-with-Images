@@ -52,15 +52,15 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Check admin role
+  // Check authenticated role (admin and packer can sync)
   const { data: profile } = await supabase
     .from('user_profiles')
     .select('role')
     .eq('id', user.id)
     .single() as { data: { role: string } | null }
 
-  if (!profile || profile.role !== 'admin') {
-    return NextResponse.json({ error: 'Forbidden: Admin only' }, { status: 403 })
+  if (!profile || !['admin', 'packer'].includes(profile.role)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
   // Audit log for manual sync
