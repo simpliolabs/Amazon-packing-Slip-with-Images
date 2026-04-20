@@ -43,10 +43,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 2. Set the user's password using the admin API
+    // 2. Set the user's password and confirm email using the admin API
     const { error: updateError } = await adminClient.auth.admin.updateUserById(
       profile.id,
-      { password }
+      { password, email_confirm: true }
     )
 
     if (updateError) {
