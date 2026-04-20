@@ -90,6 +90,15 @@ function SetPasswordContent() {
         console.error('Profile setup error:', profileData)
       }
 
+      // Clear the invite_token so the invite link stops working
+      // The setup-profile API already handles this, but we do it client-side too as a safety net
+      try {
+        const { data: { user: currentUser } } = await supabase.auth.getUser()
+        if (currentUser?.id) {
+          await (supabase.from('user_profiles') as any).update({ invite_token: null }).eq('id', currentUser.id)
+        }
+      } catch { /* ignore — setup-profile API handles this */ }
+
       toast.success('Password set successfully! Redirecting…')
       router.push('/')
       router.refresh()

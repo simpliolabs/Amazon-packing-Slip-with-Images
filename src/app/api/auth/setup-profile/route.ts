@@ -23,6 +23,10 @@ export async function POST() {
     .single()
 
   if (existingProfile) {
+    // Clear invite_token if it still exists (user has set their password)
+    await (adminSupabase.from('user_profiles') as any)
+      .update({ invite_token: null })
+      .eq('id', user.id)
     return NextResponse.json({ message: 'Profile already exists' })
   }
 

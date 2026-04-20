@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/server'
+import { randomUUID } from 'crypto'
 
 /**
  * GET /api/users
@@ -28,7 +29,7 @@ export async function GET(request: NextRequest) {
   const { data: users, error } = await supabase
     .from('user_profiles')
     .select('*')
-    .order('created_at', { ascending: false }) as { data: Array<{ id: string; email: string; full_name: string; role: string; created_at: string; [key: string]: unknown }> | null; error: { message: string } | null }
+    .order('created_at', { ascending: false }) as { data: Array<{ id: string; email: string; full_name: string; role: string; created_at: string; invite_token?: string; [key: string]: unknown }> | null; error: { message: string } | null }
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
@@ -43,6 +44,7 @@ export async function GET(request: NextRequest) {
     role: string
     created_at: string
     status: 'pending'
+    invite_token?: string
   }> = []
 
   try {
@@ -76,8 +78,10 @@ export async function GET(request: NextRequest) {
 
 /**
  * POST /api/users
- * Create a user and generate an invite link (no email sent).
- * Returns the invite link for the admin to share manually.
+ * Create a user and generate a reusable invite link.
+ * The invite link contains a UUID token stored in user_profiles.
+ * Each click generates a fresh session server-side — link never expires
+ * until the user sets their password.
  */
 export async function POST(request: NextRequest) {
   const supabase = await createClient()
@@ -122,7 +126,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Generate an invite link without sending an email
+  // Create the user via invite (this creates the auth.users entry with metadata)
   const { data: linkData, error: linkError } = await adminSupabase.auth.admin.generateLink({
     type: 'invite',
     email,
@@ -131,9 +135,6 @@ export async function POST(request: NextRequest) {
         role,
         full_name: fullName || '',
       },
-      // redirect_to goes directly to /set-password — the client-side page
-      // will read the #access_token hash fragment via supabase.auth.getSession()
-      redirectTo: `${appUrl}/set-password`,
     },
   })
 
@@ -141,13 +142,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: linkError.message }, { status: 500 })
   }
 
-  // Use PKCE-compatible flow: route through our own /auth/confirm handler
-  // which calls verifyOtp server-side, then redirects to /set-password
-  const properties = linkData?.properties
-  const hashedToken = properties?.hashed_token
-  
-  // Build the invite URL: our server-side confirm route verifies the token
-  const inviteLink = `${appUrl}/auth/confirm?token_hash=${hashedToken}&type=invite&next=/set-password`
+  const newUserId = linkData?.user?.id
+
+  // Generate a reusable invite token (UUID)
+  const inviteToken = randomUUID()
+
+  // Ensure user_profiles row exists with the invite_token
+  if (newUserId) {
+    // Upsert: create profile if not exists, or update invite_token if it does
+    await (adminSupabase.from('user_profiles') as any).upsert({
+      id: newUserId,
+      email,
+      full_name: fullName || '',
+      role,
+      invite_token: inviteToken,
+    }, { onConflict: 'id' })
+  }
+
+  // Build the reusable invite URL — points to our /auth/invite route
+  // which looks up the token, generates a fresh session, and redirects
+  const inviteLink = `${appUrl}/auth/invite?token=${inviteToken}`
 
   return NextResponse.json({
     success: true,
