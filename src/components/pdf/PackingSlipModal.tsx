@@ -491,7 +491,8 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
   }, [])
 
   const shipTo = order.ship_to as ShipTo | null
-  const totalQty = items.reduce((s, i) => s + i.qty, 0)
+  const visibleItems = items.filter(i => i.qty > 0)
+  const totalQty = visibleItems.reduce((s, i) => s + i.qty, 0)
 
   const shipBy = order.raw_data &&
     typeof order.raw_data === 'object' &&
@@ -589,7 +590,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {items.map((item, index) => {
+                  {visibleItems.map((item, index) => {
                     const attrs = parseAttrs(item.title, item.sku)
                     const title = cleanTitle(item.title)
                     // Use pre-fetched base64 image if available.
