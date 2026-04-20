@@ -8,9 +8,13 @@ export async function GET(request: NextRequest) {
   const type = searchParams.get('type') as EmailOtpType | null
   const next = searchParams.get('next') ?? '/'
 
+  // Use the public app URL for all redirects — request.url resolves to
+  // localhost:3000 inside the Docker container, which is wrong.
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://slip.theceo.store'
+
   if (token_hash && type) {
-    // Build the success redirect URL
-    const redirectUrl = new URL(next, request.url)
+    // Build the success redirect URL using the PUBLIC domain
+    const redirectUrl = new URL(next, appUrl)
 
     // Create a redirect response FIRST — we'll attach cookies to THIS response
     const redirectResponse = NextResponse.redirect(redirectUrl)
@@ -49,8 +53,8 @@ export async function GET(request: NextRequest) {
     console.error('verifyOtp failed:', error.message, error.status)
   }
 
-  // Verification failed — redirect to set-password with error
-  const errorUrl = new URL('/set-password', request.url)
+  // Verification failed — redirect to set-password with error using PUBLIC domain
+  const errorUrl = new URL('/set-password', appUrl)
   errorUrl.searchParams.set('error', 'invite_expired')
   return NextResponse.redirect(errorUrl)
 }
