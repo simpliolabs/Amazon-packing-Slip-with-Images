@@ -101,19 +101,17 @@ export default function DashboardLayout({
         </button>
       </div>
 
-      {/* Sync Now button (admin only) */}
-      {userRole === 'admin' && (
-        <div className="px-4 py-3 border-b border-gray-100">
-          <button
-            onClick={handleSyncNow}
-            disabled={syncing}
-            className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
-            {syncing ? 'Syncing…' : 'Sync Now'}
-          </button>
-        </div>
-      )}
+      {/* Sync Now button (all roles) */}
+      <div className="px-4 py-3 border-b border-gray-100">
+        <button
+          onClick={handleSyncNow}
+          disabled={syncing}
+          className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-[#2E9CE6] hover:bg-[#1A7BC4] disabled:opacity-60 text-white text-sm font-medium rounded-lg transition-colors"
+        >
+          <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
+          {syncing ? 'Syncing…' : 'Sync Now'}
+        </button>
+      </div>
 
       {/* Navigation */}
       <nav className="flex-1 px-3 py-4 space-y-1">
