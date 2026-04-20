@@ -95,7 +95,8 @@ export async function POST(request: NextRequest) {
       const { data: authUsers } = await adminSupabase.auth.admin.listUsers()
       const existingUser = authUsers?.users?.find(u => u.email === email)
       if (existingUser) {
-        await (supabase.from('user_profiles') as any)
+        // Use admin client (service role) to bypass RLS for delete
+        await (adminSupabase.from('user_profiles') as any)
           .delete()
           .eq('id', existingUser.id)
         await adminSupabase.auth.admin.deleteUser(existingUser.id)
@@ -106,6 +107,8 @@ export async function POST(request: NextRequest) {
   }
 
   // Create the user with email already confirmed — no verification email needed
+  // NOTE: The handle_new_user() trigger on auth.users INSERT automatically creates
+  // a user_profiles row (without invite_token). We then UPDATE to set invite_token.
   const { data: newUser, error: createError } = await adminSupabase.auth.admin.createUser({
     email,
     email_confirm: true,
@@ -124,16 +127,16 @@ export async function POST(request: NextRequest) {
   // Generate a reusable invite token (UUID)
   const inviteToken = randomUUID()
 
-  // Ensure user_profiles row exists with the invite_token
+  // UPDATE the profile row created by the trigger to set invite_token
+  // The trigger fires synchronously on INSERT, so the row exists by now
   if (newUserId) {
-    // Upsert: create profile if not exists, or update invite_token if it does
-    await (adminSupabase.from('user_profiles') as any).upsert({
-      id: newUserId,
-      email,
-      full_name: fullName || '',
-      role,
-      invite_token: inviteToken,
-    }, { onConflict: 'id' })
+    const { error: updateError } = await (adminSupabase.from('user_profiles') as any)
+      .update({ invite_token: inviteToken })
+      .eq('id', newUserId)
+
+    if (updateError) {
+      console.error('Failed to set invite_token:', updateError)
+    }
   }
 
   // Build the reusable invite URL — points to our /auth/invite route
