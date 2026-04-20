@@ -2,7 +2,6 @@
 
 import { useState, useEffect, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
 import Image from 'next/image'
 
@@ -12,50 +11,33 @@ function SetPasswordContent() {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
-  const [checking, setChecking] = useState(true)
-  const [userName, setUserName] = useState('')
-  const [sessionReady, setSessionReady] = useState(false)
+  const [inviteToken, setInviteToken] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState('')
 
   useEffect(() => {
-    const supabase = createClient()
+    const token = searchParams.get('token')
+    const error = searchParams.get('error')
 
-    async function checkSession() {
-      try {
-        // With PKCE flow, the /auth/confirm route already verified the token
-        // and set the session cookies. We just need to check if we have a session.
-        const { data: { session } } = await supabase.auth.getSession()
-
-        if (session?.user) {
-          setUserName(session.user.user_metadata?.full_name || session.user.email || '')
-          setSessionReady(true)
-          setChecking(false)
-          return
-        }
-
-        // Check for error from /auth/confirm redirect
-        const error = searchParams.get('error')
-        if (error === 'invite_expired') {
-          setErrorMessage('This invite link has expired or was already used. Please ask your admin to send a new invite.')
-        } else if (error) {
-          setErrorMessage('Authentication failed. Please request a new invite.')
-        } else {
-          // No session and no error — maybe they navigated here directly
-          setErrorMessage('No active session. Please use the invite link sent to you, or ask your admin for a new one.')
-        }
-      } catch (err) {
-        console.error('Session check error:', err)
-        setErrorMessage('Something went wrong. Please request a new invite.')
-      } finally {
-        setChecking(false)
-      }
+    if (error === 'invite_expired') {
+      setErrorMessage('This invite link has expired or was already used. Please ask your admin to send a new invite.')
+    } else if (error === 'invalid_link') {
+      setErrorMessage('This invite link is invalid. Please ask your admin to send a new invite.')
+    } else if (error) {
+      setErrorMessage('Something went wrong. Please ask your admin to send a new invite.')
+    } else if (!token) {
+      setErrorMessage('No invite token found. Please use the invite link sent to you.')
+    } else {
+      setInviteToken(token)
     }
-
-    checkSession()
   }, [searchParams])
 
   async function handleSetPassword(e: React.FormEvent) {
     e.preventDefault()
+
+    if (!inviteToken) {
+      toast.error('No invite token. Please use the invite link sent to you.')
+      return
+    }
 
     if (password.length < 6) {
       toast.error('Password must be at least 6 characters')
@@ -70,57 +52,34 @@ function SetPasswordContent() {
     setLoading(true)
 
     try {
-      const supabase = createClient()
-
-      // Update the user's password
-      const { error: updateError } = await supabase.auth.updateUser({
-        password,
+      const res = await fetch('/api/auth/accept-invite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: inviteToken, password }),
       })
 
-      if (updateError) {
-        toast.error(updateError.message)
+      const data = await res.json()
+
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to set password')
         setLoading(false)
         return
       }
 
-      // Create user_profile if it doesn't exist yet via API
-      const profileRes = await fetch('/api/auth/setup-profile', { method: 'POST' })
-      if (!profileRes.ok) {
-        const profileData = await profileRes.json()
-        console.error('Profile setup error:', profileData)
-      }
+      toast.success('Password set successfully! Redirecting to login…')
 
-      // Clear the invite_token so the invite link stops working
-      // The setup-profile API already handles this, but we do it client-side too as a safety net
-      try {
-        const { data: { user: currentUser } } = await supabase.auth.getUser()
-        if (currentUser?.id) {
-          await (supabase.from('user_profiles') as any).update({ invite_token: null }).eq('id', currentUser.id)
-        }
-      } catch { /* ignore — setup-profile API handles this */ }
-
-      toast.success('Password set successfully! Redirecting…')
-      router.push('/')
-      router.refresh()
+      // Redirect to login page — user will log in with their new password
+      setTimeout(() => {
+        router.push('/login')
+      }, 1500)
     } catch {
       toast.error('Something went wrong. Please try again.')
       setLoading(false)
     }
   }
 
-  if (checking) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="flex flex-col items-center gap-3">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#2E9CE6]"></div>
-          <div className="text-sm text-gray-500">Verifying your invite…</div>
-        </div>
-      </div>
-    )
-  }
-
-  // No session found — show error with link to login
-  if (!sessionReady) {
+  // Show error state
+  if (errorMessage) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
         <div className="w-full max-w-md text-center">
@@ -139,7 +98,7 @@ function SetPasswordContent() {
               Invite Link Expired
             </h1>
             <p className="text-sm text-gray-500 mb-6">
-              {errorMessage || 'This invite link is no longer valid. Please ask your admin to send a new invite.'}
+              {errorMessage}
             </p>
             <a
               href="/login"
@@ -153,6 +112,7 @@ function SetPasswordContent() {
     )
   }
 
+  // Show password form
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
       <div className="w-full max-w-md">
@@ -171,7 +131,7 @@ function SetPasswordContent() {
         {/* Card */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
           <h1 className="text-2xl font-bold text-gray-900 mb-1">
-            Welcome{userName ? `, ${userName}` : ''}!
+            Welcome!
           </h1>
           <p className="text-sm text-gray-500 mb-6">
             Set your password to access the FBM Packing Slip Portal.

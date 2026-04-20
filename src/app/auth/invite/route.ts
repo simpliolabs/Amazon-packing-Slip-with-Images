@@ -1,4 +1,3 @@
-import { createServerClient } from '@supabase/ssr'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -11,7 +10,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(new URL('/set-password?error=invalid_link', appUrl))
   }
 
-  // 1. Look up the invite token in user_profiles using the admin client
+  // Look up the invite token in user_profiles
   const adminClient = createAdminClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -24,56 +23,12 @@ export async function GET(request: NextRequest) {
     .single()
 
   if (lookupError || !profile) {
-    console.error('Invite token lookup failed:', lookupError?.message)
     return NextResponse.redirect(new URL('/set-password?error=invite_expired', appUrl))
   }
 
-  // 2. Generate a fresh magic link for this user's email
-  const { data: linkData, error: linkError } = await adminClient.auth.admin.generateLink({
-    type: 'magiclink',
-    email: profile.email,
-  })
-
-  if (linkError || !linkData) {
-    console.error('generateLink failed:', linkError?.message)
-    return NextResponse.redirect(new URL('/set-password?error=invite_expired', appUrl))
-  }
-
-  const { hashed_token } = linkData.properties
-
-  // 3. Build the redirect response FIRST so we can attach cookies to it
-  const redirectUrl = new URL('/set-password', appUrl)
-  const redirectResponse = NextResponse.redirect(redirectUrl)
-
-  // 4. Create a Supabase SSR client that writes cookies to the redirect response
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll()
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            redirectResponse.cookies.set(name, value, options)
-          })
-        },
-      },
-    }
+  // Token is valid — redirect to set-password with the token
+  // The set-password page will use this token to set the password via API
+  return NextResponse.redirect(
+    new URL(`/set-password?token=${encodeURIComponent(token)}`, appUrl)
   )
-
-  // 5. Verify the fresh token to establish a session — cookies go onto redirectResponse
-  const { error: verifyError } = await supabase.auth.verifyOtp({
-    type: 'magiclink',
-    token_hash: hashed_token,
-  })
-
-  if (verifyError) {
-    console.error('verifyOtp failed:', verifyError.message)
-    return NextResponse.redirect(new URL('/set-password?error=invite_expired', appUrl))
-  }
-
-  // 6. Session established, cookies attached — redirect to set-password
-  return redirectResponse
 }
