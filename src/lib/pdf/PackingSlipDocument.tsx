@@ -223,36 +223,33 @@ function extractVariantFromSku(sku: string): string | null {
 function parseProductAttributes(title: string, sku?: string): ProductAttributes {
   const result: ProductAttributes = { size: null, color: null, style: null, variant: null }
 
-  // ── 1. Parse size from title ──
-  for (const size of SIZES) {
-    const escaped = size.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
-    if (re.test(title)) { result.size = size; break }
-  }
-  if (!result.size) {
-    const singleMatch = title.match(/\b(XS|[SMLX])\b/)
-    if (singleMatch) result.size = singleMatch[1].toUpperCase()
-  }
-
-  // ── 2. Parse color from title ──
-  const sortedColors = [...COLORS].sort((a, b) => b.length - a.length)
-  for (const color of sortedColors) {
-    const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
-    if (re.test(title)) { result.color = color; break }
-  }
-
-  // ── 3. Parse SKU codes ──
+  // ── 1. Parse SKU codes FIRST (most reliable per-variant source) ──
   const skuData = parseSkuCodes(sku || '')
 
-  // Use SKU color if title didn't find one
-  if (!result.color && skuData.color) {
-    result.color = skuData.color
+  // ── 2. Use SKU values, fall back to title parsing ──
+  if (skuData.size) {
+    result.size = skuData.size
+  } else {
+    for (const size of SIZES) {
+      const escaped = size.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
+      if (re.test(title)) { result.size = size; break }
+    }
+    if (!result.size) {
+      const singleMatch = title.match(/\b(XS|[SMLX])\b/)
+      if (singleMatch) result.size = singleMatch[1].toUpperCase()
+    }
   }
 
-  // Use SKU size if title didn't find one
-  if (!result.size && skuData.size) {
-    result.size = skuData.size
+  if (skuData.color) {
+    result.color = skuData.color
+  } else {
+    const sortedColors = [...COLORS].sort((a, b) => b.length - a.length)
+    for (const color of sortedColors) {
+      const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'i')
+      if (re.test(title)) { result.color = color; break }
+    }
   }
 
   // ── 4. Fallback: extract color from title trailing segments ──

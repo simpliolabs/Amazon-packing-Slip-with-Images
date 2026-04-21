@@ -198,25 +198,15 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
 function parseAttrs(title: string, sku: string) {
   const t = title || ''
 
-  // ── 1. Parse from title first ──
-  let size = SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
-  let color = COLORS.find(c => {
+  // ── 1. Parse SKU codes FIRST (most reliable per-variant source) ──
+  const skuData = parseSkuCodes(sku)
+
+  // ── 2. Parse from title as fallback ──
+  let size = skuData.size || SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
+  let color = skuData.color || COLORS.find(c => {
     const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
     return re.test(t)
   }) || ''
-
-  // ── 2. Parse SKU codes ──
-  const skuData = parseSkuCodes(sku)
-
-  // Use SKU color if title didn't find one
-  if (!color && skuData.color) {
-    color = skuData.color
-  }
-
-  // Use SKU size if title didn't find one
-  if (!size && skuData.size) {
-    size = skuData.size
-  }
 
   // ── 3. Fallback: extract color from title segments ──
   if (!color) {

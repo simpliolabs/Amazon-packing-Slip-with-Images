@@ -179,14 +179,13 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
 
 function parseAttrs(title: string, sku: string) {
   const t = title || ''
-  let size = SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
-  let color = COLORS.find(c => {
+  // Parse SKU codes FIRST (most reliable per-variant source)
+  const skuData = parseSkuCodes(sku)
+  let size = skuData.size || SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
+  let color = skuData.color || COLORS.find(c => {
     const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
     return re.test(t)
   }) || ''
-  const skuData = parseSkuCodes(sku)
-  if (!color && skuData.color) color = skuData.color
-  if (!size && skuData.size) size = skuData.size
   if (!color) {
     const segments = t.split(/\s*[-–—,]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 2) {
