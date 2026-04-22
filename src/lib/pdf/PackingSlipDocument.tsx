@@ -197,12 +197,13 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
     if (SKU_SIZE_CODES[upper]) { result.size = SKU_SIZE_CODES[upper]; continue }
   }
 
-  // Check for embedded size in first segment like "64000XL" or "640002XL"
+  // Check for embedded size suffix in first segment like "64000XL" or "BC30012XL"
+  // Match size suffix directly — no greedy \d+ prefix that would eat digits from style numbers
   if (!result.size) {
     const firstSeg = segments[0] || ''
-    const sizeMatch = firstSeg.match(/(\d+)(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS|S|M|L)$/i)
+    const sizeMatch = firstSeg.match(/(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS)$/i)
     if (sizeMatch) {
-      const sizeCode = sizeMatch[2].toUpperCase()
+      const sizeCode = sizeMatch[1].toUpperCase()
       result.size = SKU_SIZE_CODES[sizeCode] || sizeCode
     }
   }

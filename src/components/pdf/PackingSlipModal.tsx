@@ -182,12 +182,13 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
   // e.g., "BTFFTW64000XL-WH" → last segment is "WH"
   // Already handled above since segments split by "-"
 
-  // Check for embedded size in first segment like "64000XL" or "640002XL"
+  // Check for embedded size suffix in first segment like "64000XL" or "BC30012XL"
+  // Match size suffix directly — no greedy \d+ prefix that would eat digits from style numbers
   if (!result.size) {
     const firstSeg = segments[0] || ''
-    const sizeMatch = firstSeg.match(/(\d+)(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS|S|M|L)$/i)
+    const sizeMatch = firstSeg.match(/(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS)$/i)
     if (sizeMatch) {
-      const sizeCode = sizeMatch[2].toUpperCase()
+      const sizeCode = sizeMatch[1].toUpperCase()
       result.size = SKU_SIZE_CODES[sizeCode] || sizeCode
     }
   }
@@ -358,12 +359,12 @@ function handlePrint(orderId: string) {
     <html>
     <head>
       <meta charset="utf-8" />
-      <title> </title>
+      <title>${orderId}</title>
       ${styles}
       <style>
         @page {
           size: letter portrait;
-          margin: 0.5in;
+          margin: 0;
         }
         html, body {
           margin: 0;
@@ -373,7 +374,7 @@ function handlePrint(orderId: string) {
           print-color-adjust: exact !important;
         }
         body {
-          padding: 0.25in;
+          padding: 0.4in;
         }
         * {
           -webkit-print-color-adjust: exact !important;

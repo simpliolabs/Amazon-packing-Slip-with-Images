@@ -166,11 +166,13 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
     if (SKU_COLOR_CODES[upper]) { result.color = SKU_COLOR_CODES[upper]; continue }
     if (SKU_SIZE_CODES[upper]) { result.size = SKU_SIZE_CODES[upper]; continue }
   }
+  // Check for embedded size suffix in first segment like "64000XL" or "BC30012XL"
+  // Match size suffix directly — no greedy \d+ prefix that would eat digits from style numbers
   if (!result.size) {
     const firstSeg = segments[0] || ''
-    const sizeMatch = firstSeg.match(/(\d+)(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS|S|M|L)$/i)
+    const sizeMatch = firstSeg.match(/(6XL|5XL|4XL|3XL|2XL|XXL|XXXL|XL|XS)$/i)
     if (sizeMatch) {
-      const sizeCode = sizeMatch[2].toUpperCase()
+      const sizeCode = sizeMatch[1].toUpperCase()
       result.size = SKU_SIZE_CODES[sizeCode] || sizeCode
     }
   }
@@ -506,14 +508,11 @@ export async function generateBulkPrintHTML(
 <html>
 <head>
   <meta charset="utf-8" />
-  <title> </title>
+  <title>packing-slips</title>
   <style>
     @page {
       size: letter portrait;
-      margin: 0.4in;
-      /* Suppress browser default headers and footers */
-      margin-top: 0.3in;
-      margin-bottom: 0.3in;
+      margin: 0;
     }
     html, body {
       margin: 0;
@@ -529,7 +528,7 @@ export async function generateBulkPrintHTML(
       print-color-adjust: exact !important;
     }
     .slip-page {
-      padding: 0.2in;
+      padding: 0.4in;
       page-break-after: always;
     }
     .slip-page:last-child {

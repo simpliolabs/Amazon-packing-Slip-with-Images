@@ -108,7 +108,7 @@ export async function generateSinglePDF(order: Order): Promise<void> {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `packing-slip-${order.id}.pdf`
+  link.download = `${order.id}.pdf`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
