@@ -333,9 +333,9 @@ function handlePrint(orderId: string) {
   const content = document.getElementById('packing-slip-print')
   if (!content) return
 
-  // Set the main document title to blank so browser doesn't show it in print header/footer
+  // Set the main document title to the order ID so browser uses it as the Save-as-PDF filename
    const originalTitle = document.title
-   document.title = ' '
+   document.title = orderId
 
   const iframe = document.createElement('iframe')
   iframe.style.position = 'fixed'
