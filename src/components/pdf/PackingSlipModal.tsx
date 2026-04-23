@@ -90,7 +90,8 @@ const SKU_COLOR_CODES: Record<string, string> = {
   HMP: 'Hemp',
   YAM: 'Yam',
   LAG: 'Lagoon',
-  BLS: 'Blossom',
+  BLS: 'Blue Spruce',
+  BLO: 'Blossom',
   BRY: 'Berry',
   CIT: 'Citrus',
   CRI: 'Crimson',
@@ -99,7 +100,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   TRC: 'Terracotta',
   WTR: 'Watermelon',
   BJN: 'Blue Jean',
-  BSP: 'Blue Spruce',
+
   FBL: 'Flo Blue',
   ICB: 'Ice Blue',
   IRF: 'Island Reef',
