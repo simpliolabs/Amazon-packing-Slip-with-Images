@@ -197,7 +197,7 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
   return result
 }
 
-function parseAttrs(title: string, sku: string) {
+function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null) {
   const t = title || ''
 
   // ── 1. Parse SKU codes FIRST (most reliable per-variant source) ──
@@ -228,6 +228,11 @@ function parseAttrs(title: string, sku: string) {
         }
       }
     }
+  }
+
+  // ── 3b. AI-detected color fallback (Layer 2) ──
+  if (!color && aiDetectedColor) {
+    color = aiDetectedColor
   }
 
   if (!color) color = '—'
@@ -583,7 +588,7 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {visibleItems.map((item, index) => {
-                    const attrs = parseAttrs(item.title, item.sku)
+                    const attrs = parseAttrs(item.title, item.sku, item.ai_detected_color)
                     const title = cleanTitle(item.title)
                     // Use pre-fetched base64 image if available.
                     // SKU-based image sharing: if this item's design key matches

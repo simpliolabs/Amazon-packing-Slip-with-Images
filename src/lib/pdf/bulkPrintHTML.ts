@@ -179,7 +179,7 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
   return result
 }
 
-function parseAttrs(title: string, sku: string) {
+function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null) {
   const t = title || ''
   // Parse SKU codes FIRST (most reliable per-variant source)
   const skuData = parseSkuCodes(sku)
@@ -201,6 +201,8 @@ function parseAttrs(title: string, sku: string) {
       }
     }
   }
+  // AI-detected color fallback (Layer 2)
+  if (!color && aiDetectedColor) { color = aiDetectedColor }
   if (!color) color = '—'
   if (!size) size = '—'
   let style = '—'
@@ -298,7 +300,7 @@ function buildSlipHTML(
     : null
 
   const itemRows = items.map((item, index) => {
-    const attrs = parseAttrs(item.title, item.sku)
+    const attrs = parseAttrs(item.title, item.sku, item.ai_detected_color)
     const title = cleanTitle(item.title)
     const dk = extractDesignKey(item.sku)
     const sharedImage = dk ? designMap.get(dk) : undefined

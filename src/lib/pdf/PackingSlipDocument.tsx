@@ -222,7 +222,7 @@ function extractVariantFromSku(sku: string): string | null {
   return null
 }
 
-function parseProductAttributes(title: string, sku?: string): ProductAttributes {
+function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: string | null): ProductAttributes {
   const result: ProductAttributes = { size: null, color: null, style: null, variant: null }
 
   // ── 1. Parse SKU codes FIRST (most reliable per-variant source) ──
@@ -271,6 +271,11 @@ function parseProductAttributes(title: string, sku?: string): ProductAttributes 
         }
       }
     }
+  }
+
+  // ── 4b. AI-detected color fallback (Layer 2) ──
+  if (!result.color && aiDetectedColor) {
+    result.color = aiDetectedColor
   }
 
   // ── 5. Style detection with smart Comfort Colors + Long Sleeve combo ──
@@ -769,7 +774,7 @@ export default function PackingSlipDocument({
           </View>
 
           {items.map((item, index) => {
-            const attrs = parseProductAttributes(item.title, item.sku)
+            const attrs = parseProductAttributes(item.title, item.sku, item.ai_detected_color)
             const title = cleanTitle(item.title)
 
             return (

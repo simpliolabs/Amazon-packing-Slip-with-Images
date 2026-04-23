@@ -178,6 +178,7 @@ export interface OrderItem {
   image_url: string | null
   price?: string
   order_item_id?: string
+  ai_detected_color?: string | null
 }
 
 export type Order = Database['public']['Tables']['orders']['Row']

@@ -6,6 +6,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { fetchFBMOrders, fetchOrderItems, fetchProductImage, fetchOrderAddress, fetchOrderBuyerInfo } from '@/lib/amazon/orders'
+import { batchDetectColors } from '@/lib/ai/detectColor'
 import type { OrderItem, ShipTo } from '@/types/database'
 
 // Use service role for sync operations (bypasses RLS)
@@ -236,6 +237,16 @@ export async function syncOrders(): Promise<SyncResult> {
           }
         }
 
+        // AI Color Detection (Layer 2)
+        // Runs after images are cached and shared. Detects garment color
+        // from product images using GPT-4.1-mini vision.
+        // Only calls the API for items that have an image and no cached color.
+        try {
+          await batchDetectColors(orderItems)
+        } catch (aiError) {
+          console.warn('AI color detection failed, continuing without:', aiError)
+        }
+
         // Try to get full address via RDT (PII access)
         // Falls back to partial address from list endpoint if RDT unavailable
         let fullAddress = order.ShippingAddress
@@ -295,6 +306,58 @@ export async function syncOrders(): Promise<SyncResult> {
       } catch (itemError) {
         console.error(`Error processing order ${order.AmazonOrderId}:`, itemError)
       }
+    }
+
+    // ── AI Color Backfill ──────────────────────────────────────────────
+    // For existing orders that were synced before AI detection was added,
+    // detect colors for items that have images but no ai_detected_color.
+    // Process up to 10 orders per sync to avoid long sync times.
+    try {
+      const { data: ordersNeedingColor } = await supabase
+        .from('orders')
+        .select('id, order_items')
+        .not('order_items', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(50)
+
+      if (ordersNeedingColor) {
+        let backfillCount = 0
+        const MAX_BACKFILL = 10
+
+        for (const order of ordersNeedingColor) {
+          if (backfillCount >= MAX_BACKFILL) break
+
+          const items = order.order_items as OrderItem[]
+          if (!items || items.length === 0) continue
+
+          // Check if any item needs AI color detection
+          const needsDetection = items.some(
+            (item) => item.image_url && !item.ai_detected_color
+          )
+          if (!needsDetection) continue
+
+          try {
+            await batchDetectColors(items)
+
+            // Update the order with AI-detected colors
+            await supabase
+              .from('orders')
+              .update({ order_items: items as unknown as Record<string, unknown>[] })
+              .eq('id', order.id)
+
+            backfillCount++
+            console.log(`[AI Color Backfill] Updated ${order.id} (${backfillCount}/${MAX_BACKFILL})`)
+          } catch (err) {
+            console.warn(`[AI Color Backfill] Failed for ${order.id}:`, err)
+          }
+        }
+
+        if (backfillCount > 0) {
+          console.log(`[AI Color Backfill] Completed ${backfillCount} orders`)
+        }
+      }
+    } catch (backfillError) {
+      console.warn('[AI Color Backfill] Error during backfill:', backfillError)
     }
 
     // Update sync log as success
