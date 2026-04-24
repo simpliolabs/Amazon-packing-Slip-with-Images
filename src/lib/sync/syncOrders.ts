@@ -375,6 +375,85 @@ export async function syncOrders(): Promise<SyncResult> {
       console.warn('[AI Color Backfill] Error during backfill:', backfillError)
     }
 
+    // ── Customization Backfill ─────────────────────────────────────────
+    // For existing orders that were synced before customization fetch was
+    // added, check if any items have a BuyerCustomizedInfo URL in the
+    // raw SP-API data but no customization stored. Re-fetch via RDT.
+    // Process up to 5 orders per sync to avoid long sync times.
+    try {
+      const { data: ordersNeedingCustomization } = await supabase
+        .from('orders')
+        .select('id, order_items')
+        .not('order_items', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(50)
+
+      if (ordersNeedingCustomization) {
+        let custBackfillCount = 0
+        const MAX_CUST_BACKFILL = 5
+
+        for (const order of ordersNeedingCustomization) {
+          if (custBackfillCount >= MAX_CUST_BACKFILL) break
+
+          const items = order.order_items as OrderItem[]
+          if (!items || items.length === 0) continue
+
+          // Check if any item needs customization fetch
+          const needsCustomization = items.some(
+            (item) => !item.customization
+          )
+          if (!needsCustomization) continue
+
+          try {
+            // Re-fetch order items with RDT to get BuyerCustomizedInfo
+            const freshItems = await fetchOrderItemsWithBuyerInfo(order.id)
+            let updated = false
+
+            for (const item of items) {
+              if (item.customization) continue // already has customization
+
+              // Find matching fresh item by order_item_id or ASIN
+              const freshItem = freshItems.find(
+                (fi) => fi.OrderItemId === item.order_item_id || fi.ASIN === item.asin
+              )
+
+              const customizedUrl = freshItem?.BuyerInfo?.BuyerCustomizedInfo?.CustomizedURL
+              if (customizedUrl) {
+                try {
+                  const customization = await fetchCustomizationFromZip(customizedUrl)
+                  if (customization) {
+                    item.customization = customization
+                    updated = true
+                    console.log(`[Customization Backfill] Fetched for ${item.asin} on order ${order.id}`)
+                  }
+                } catch (custErr) {
+                  console.warn(`[Customization Backfill] ZIP fetch failed for ${item.asin}:`, custErr)
+                }
+              }
+            }
+
+            if (updated) {
+              await supabase
+                .from('orders')
+                .update({ order_items: items as unknown as Record<string, unknown>[] })
+                .eq('id', order.id)
+
+              custBackfillCount++
+              console.log(`[Customization Backfill] Updated ${order.id} (${custBackfillCount}/${MAX_CUST_BACKFILL})`)
+            }
+          } catch (err) {
+            console.warn(`[Customization Backfill] Failed for ${order.id}:`, err)
+          }
+        }
+
+        if (custBackfillCount > 0) {
+          console.log(`[Customization Backfill] Completed ${custBackfillCount} orders`)
+        }
+      }
+    } catch (custBackfillError) {
+      console.warn('[Customization Backfill] Error during backfill:', custBackfillError)
+    }
+
     // Update sync log as success
     if (syncLogId) {
       await supabase
