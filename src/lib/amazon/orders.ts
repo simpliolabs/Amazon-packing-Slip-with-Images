@@ -237,13 +237,26 @@ export async function fetchOrderItemsWithBuyerInfo(
 
   // Then, try to get buyer info (customization) from the separate endpoint
   try {
-    const rdt = await getRestrictedDataToken([
+    // Try without dataElements first (the /orderItems/buyerInfo endpoint
+    // is a separate deprecated endpoint that may not need dataElements)
+    let rdt = await getRestrictedDataToken([
       {
         method: 'GET',
         path: `/orders/v0/orders/${orderId}/orderItems/buyerInfo`,
-        dataElements: ['buyerInfo'],
       },
     ])
+
+    // If that fails, try with dataElements (requires Tax remittance/invoicing role)
+    if (!rdt) {
+      console.log(`[Customization] Trying with dataElements for ${orderId}`)
+      rdt = await getRestrictedDataToken([
+        {
+          method: 'GET',
+          path: `/orders/v0/orders/${orderId}/orderItems/buyerInfo`,
+          dataElements: ['buyerInfo'],
+        },
+      ])
+    }
 
     if (!rdt) {
       console.warn(`No RDT for orderItems/buyerInfo on ${orderId}`)
