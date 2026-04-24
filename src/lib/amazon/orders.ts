@@ -223,56 +223,67 @@ export async function fetchOrderBuyerInfo(
 }
 
 /**
- * Fetch order items WITH buyer customization info using RDT.
- * Returns items with BuyerCustomizedInfo.CustomizedURL populated
- * for custom/personalized orders.
+ * Fetch order items WITH buyer customization info.
+ * Uses TWO endpoints:
+ *   1. getOrderItems → /orders/v0/orders/{orderId}/orderItems (product details)
+ *   2. getOrderItemsBuyerInfo → /orders/v0/orders/{orderId}/orderItems/buyerInfo (customization)
+ * Merges BuyerCustomizedInfo from endpoint 2 into items from endpoint 1.
  */
 export async function fetchOrderItemsWithBuyerInfo(
   orderId: string
 ): Promise<AmazonOrderItem[]> {
+  // First, get the regular order items (product details, SKU, ASIN, etc.)
+  const items = await fetchOrderItems(orderId)
+
+  // Then, try to get buyer info (customization) from the separate endpoint
   try {
     const rdt = await getRestrictedDataToken([
       {
         method: 'GET',
-        path: `/orders/v0/orders/${orderId}/orderItems`,
+        path: `/orders/v0/orders/${orderId}/orderItems/buyerInfo`,
         dataElements: ['buyerInfo'],
       },
     ])
 
     if (!rdt) {
-      console.warn(`No RDT for orderItems buyerInfo on ${orderId}, falling back to regular fetch`)
-      return fetchOrderItems(orderId)
+      console.warn(`No RDT for orderItems/buyerInfo on ${orderId}`)
+      return items
     }
 
-    const items: AmazonOrderItem[] = []
-    let nextToken: string | undefined
+    await rateLimit()
+    const url = `${ENDPOINT}/orders/v0/orders/${orderId}/orderItems/buyerInfo`
+    const response = await fetch(url, {
+      headers: {
+        'x-amz-access-token': rdt,
+        'Accept': 'application/json',
+      },
+    })
 
-    do {
-      await rateLimit()
-      const params = nextToken ? `?NextToken=${encodeURIComponent(nextToken)}` : ''
-      const url = `${ENDPOINT}/orders/v0/orders/${orderId}/orderItems${params}`
-      const response = await fetch(url, {
-        headers: {
-          'x-amz-access-token': rdt,
-          'Accept': 'application/json',
-        },
-      })
+    if (!response.ok) {
+      const errText = await response.text()
+      console.warn(`orderItems/buyerInfo fetch failed (${response.status}) for ${orderId}: ${errText}`)
+      return items
+    }
 
-      if (!response.ok) {
-        console.warn(`RDT orderItems fetch failed (${response.status}) for ${orderId}`)
-        return fetchOrderItems(orderId)
+    const data = await response.json()
+    const payload = data.payload || data
+    const buyerInfoItems = payload.OrderItems || []
+
+    // Merge BuyerCustomizedInfo into the main items by OrderItemId
+    for (const biItem of buyerInfoItems) {
+      const match = items.find(i => i.OrderItemId === biItem.OrderItemId)
+      if (match && biItem.BuyerCustomizedInfo) {
+        match.BuyerInfo = {
+          BuyerCustomizedInfo: biItem.BuyerCustomizedInfo,
+        }
+        console.log(`[Customization] Found CustomizedURL for item ${match.OrderItemId} on order ${orderId}`)
       }
-
-      const data = await response.json()
-      const payload = data.payload || data
-      items.push(...(payload.OrderItems || []))
-      nextToken = payload.NextToken
-    } while (nextToken)
+    }
 
     return items
   } catch (err) {
-    console.warn(`Failed to fetch orderItems with buyerInfo for ${orderId}:`, err)
-    return fetchOrderItems(orderId)
+    console.warn(`Failed to fetch orderItems/buyerInfo for ${orderId}:`, err)
+    return items
   }
 }
 

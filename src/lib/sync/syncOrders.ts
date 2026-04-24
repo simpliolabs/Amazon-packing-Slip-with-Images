@@ -376,10 +376,10 @@ export async function syncOrders(): Promise<SyncResult> {
     }
 
     // ── Customization Backfill ─────────────────────────────────────────
-    // For existing orders that were synced before customization fetch was
-    // added, check if any items have a BuyerCustomizedInfo URL.
-    // Items that have been checked and have no customization get marked
-    // with customization_checked = true so they're skipped on future syncs.
+    // For existing orders, check the /orderItems/buyerInfo endpoint for
+    // BuyerCustomizedInfo. Items checked and found to have no customization
+    // get marked with customization_checked = 2 (v2 = correct endpoint).
+    // Items with customization_checked = true (v1 = wrong endpoint) get re-checked.
     // Process up to 10 RDT calls per sync to avoid long sync times.
     try {
       const { data: ordersNeedingCustomization } = await supabase
@@ -396,12 +396,13 @@ export async function syncOrders(): Promise<SyncResult> {
         for (const order of ordersNeedingCustomization) {
           if (custApiCalls >= MAX_CUST_API_CALLS) break
 
-          const items = order.order_items as (OrderItem & { customization_checked?: boolean })[]
+          const items = order.order_items as (OrderItem & { customization_checked?: boolean | number })[]
           if (!items || items.length === 0) continue
 
-          // Skip if all items already have customization or have been checked
+          // Skip if all items already have customization or have been checked with v2 endpoint
+          // Re-check items that were checked with v1 (customization_checked === true)
           const needsCheck = items.some(
-            (item) => !item.customization && !item.customization_checked
+            (item) => !item.customization && item.customization_checked !== 2
           )
           if (!needsCheck) continue
 
@@ -412,7 +413,7 @@ export async function syncOrders(): Promise<SyncResult> {
             let hasCustomization = false
 
             for (const item of items) {
-              if (item.customization || item.customization_checked) continue
+              if (item.customization || item.customization_checked === 2) continue
 
               // Find matching fresh item by order_item_id or ASIN
               const freshItem = freshItems.find(
@@ -433,9 +434,9 @@ export async function syncOrders(): Promise<SyncResult> {
                 }
               }
 
-              // Mark as checked so we don't re-check on next sync
+              // Mark as checked with v2 (correct endpoint) so we don't re-check
               if (!item.customization) {
-                item.customization_checked = true
+                item.customization_checked = 2
               }
             }
 
