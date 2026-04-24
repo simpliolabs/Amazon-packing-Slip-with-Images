@@ -377,9 +377,10 @@ export async function syncOrders(): Promise<SyncResult> {
 
     // ── Customization Backfill ─────────────────────────────────────────
     // For existing orders that were synced before customization fetch was
-    // added, check if any items have a BuyerCustomizedInfo URL in the
-    // raw SP-API data but no customization stored. Re-fetch via RDT.
-    // Process up to 5 orders per sync to avoid long sync times.
+    // added, check if any items have a BuyerCustomizedInfo URL.
+    // Items that have been checked and have no customization get marked
+    // with customization_checked = true so they're skipped on future syncs.
+    // Process up to 10 RDT calls per sync to avoid long sync times.
     try {
       const { data: ordersNeedingCustomization } = await supabase
         .from('orders')
@@ -389,28 +390,29 @@ export async function syncOrders(): Promise<SyncResult> {
         .limit(50)
 
       if (ordersNeedingCustomization) {
-        let custBackfillCount = 0
-        const MAX_CUST_BACKFILL = 5
+        let custApiCalls = 0
+        const MAX_CUST_API_CALLS = 10
 
         for (const order of ordersNeedingCustomization) {
-          if (custBackfillCount >= MAX_CUST_BACKFILL) break
+          if (custApiCalls >= MAX_CUST_API_CALLS) break
 
-          const items = order.order_items as OrderItem[]
+          const items = order.order_items as (OrderItem & { customization_checked?: boolean })[]
           if (!items || items.length === 0) continue
 
-          // Check if any item needs customization fetch
-          const needsCustomization = items.some(
-            (item) => !item.customization
+          // Skip if all items already have customization or have been checked
+          const needsCheck = items.some(
+            (item) => !item.customization && !item.customization_checked
           )
-          if (!needsCustomization) continue
+          if (!needsCheck) continue
 
           try {
             // Re-fetch order items with RDT to get BuyerCustomizedInfo
             const freshItems = await fetchOrderItemsWithBuyerInfo(order.id)
-            let updated = false
+            custApiCalls++
+            let hasCustomization = false
 
             for (const item of items) {
-              if (item.customization) continue // already has customization
+              if (item.customization || item.customization_checked) continue
 
               // Find matching fresh item by order_item_id or ASIN
               const freshItem = freshItems.find(
@@ -423,31 +425,38 @@ export async function syncOrders(): Promise<SyncResult> {
                   const customization = await fetchCustomizationFromZip(customizedUrl)
                   if (customization) {
                     item.customization = customization
-                    updated = true
+                    hasCustomization = true
                     console.log(`[Customization Backfill] Fetched for ${item.asin} on order ${order.id}`)
                   }
                 } catch (custErr) {
                   console.warn(`[Customization Backfill] ZIP fetch failed for ${item.asin}:`, custErr)
                 }
               }
+
+              // Mark as checked so we don't re-check on next sync
+              if (!item.customization) {
+                item.customization_checked = true
+              }
             }
 
-            if (updated) {
-              await supabase
-                .from('orders')
-                .update({ order_items: items as unknown as Record<string, unknown>[] })
-                .eq('id', order.id)
+            // Always update — either with customization data or with checked flags
+            await supabase
+              .from('orders')
+              .update({ order_items: items as unknown as Record<string, unknown>[] })
+              .eq('id', order.id)
 
-              custBackfillCount++
-              console.log(`[Customization Backfill] Updated ${order.id} (${custBackfillCount}/${MAX_CUST_BACKFILL})`)
+            if (hasCustomization) {
+              console.log(`[Customization Backfill] Found customization for ${order.id}`)
+            } else {
+              console.log(`[Customization Backfill] No customization found for ${order.id}, marked as checked`)
             }
           } catch (err) {
             console.warn(`[Customization Backfill] Failed for ${order.id}:`, err)
           }
         }
 
-        if (custBackfillCount > 0) {
-          console.log(`[Customization Backfill] Completed ${custBackfillCount} orders`)
+        if (custApiCalls > 0) {
+          console.log(`[Customization Backfill] Checked ${custApiCalls} orders via RDT`)
         }
       }
     } catch (custBackfillError) {
