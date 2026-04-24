@@ -179,6 +179,17 @@ export interface OrderItem {
   price?: string
   order_item_id?: string
   ai_detected_color?: string | null
+  customization?: CustomizationData | null
+}
+
+export interface CustomizationSurface {
+  label: string           // e.g. "Surface 1"
+  options: Record<string, string>  // e.g. { "Font Text": "Bebas Neue", "Write Name": "Son Heung-min" }
+}
+
+export interface CustomizationData {
+  surfaces: CustomizationSurface[]
+  raw?: Record<string, unknown>  // full parsed JSON for debugging
 }
 
 export type Order = Database['public']['Tables']['orders']['Row']

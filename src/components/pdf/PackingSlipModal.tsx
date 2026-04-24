@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { X, Printer } from 'lucide-react'
-import type { Order, OrderItem, ShipTo } from '@/types/database'
+import type { Order, OrderItem, ShipTo, CustomizationData } from '@/types/database'
 import { formatDate, formatDateShort } from '@/lib/utils'
 
 // ─── Attribute parser (mirrors PackingSlipDocument logic) ────────────────────
@@ -636,6 +636,24 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
                             <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Style: </span><span className="font-semibold text-gray-900">{attrs.style}</span></p>
                             {attrs.variant && (
                               <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Team: </span><span className="font-semibold text-gray-900">{attrs.variant}</span></p>
+                            )}
+                            {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (
+                              <div className="mt-1.5 pt-1.5 border-t border-dashed border-orange-300">
+                                <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wide mb-0.5">Customization</p>
+                                {item.customization.surfaces.map((surface, si) => (
+                                  <div key={si}>
+                                    {item.customization!.surfaces.length > 1 && (
+                                      <p className="text-[10px] text-orange-500 font-semibold">{surface.label}</p>
+                                    )}
+                                    {Object.entries(surface.options).map(([key, value]) => (
+                                      <p key={key} className="text-xs">
+                                        <span className="text-orange-400 uppercase text-[10px]">{key}: </span>
+                                        <span className="font-semibold text-gray-900">{value}</span>
+                                      </p>
+                                    ))}
+                                  </div>
+                                ))}
+                              </div>
                             )}
                           </div>
                         </td>

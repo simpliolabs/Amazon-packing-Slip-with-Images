@@ -5,7 +5,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js'
-import { fetchFBMOrders, fetchOrderItems, fetchProductImage, fetchOrderAddress, fetchOrderBuyerInfo } from '@/lib/amazon/orders'
+import { fetchFBMOrders, fetchOrderItems, fetchOrderItemsWithBuyerInfo, fetchCustomizationFromZip, fetchProductImage, fetchOrderAddress, fetchOrderBuyerInfo } from '@/lib/amazon/orders'
 import { batchDetectColors } from '@/lib/ai/detectColor'
 import type { OrderItem, ShipTo } from '@/types/database'
 
@@ -192,8 +192,8 @@ export async function syncOrders(): Promise<SyncResult> {
           continue
         }
 
-        // New order — full processing: fetch items, images, PII
-        const items = await fetchOrderItems(order.AmazonOrderId)
+        // New order — full processing: fetch items (with customization), images, PII
+        const items = await fetchOrderItemsWithBuyerInfo(order.AmazonOrderId)
 
         // Fetch and cache product images
         const orderItems: OrderItem[] = await Promise.all(
@@ -206,6 +206,20 @@ export async function syncOrders(): Promise<SyncResult> {
               imageUrl = await cacheProductImage(supabase, item.ASIN, fetchedUrl)
             }
 
+            // Fetch customization data if this is a custom order
+            let customization = null
+            const customizedUrl = item.BuyerInfo?.BuyerCustomizedInfo?.CustomizedURL
+            if (customizedUrl) {
+              try {
+                customization = await fetchCustomizationFromZip(customizedUrl)
+                if (customization) {
+                  console.log(`[Customization] Fetched for ${item.ASIN} on order ${order.AmazonOrderId}`)
+                }
+              } catch (custErr) {
+                console.warn(`[Customization] Failed for ${item.ASIN}:`, custErr)
+              }
+            }
+
             return {
               asin: item.ASIN,
               sku: item.SellerSKU || '',
@@ -214,6 +228,7 @@ export async function syncOrders(): Promise<SyncResult> {
               image_url: imageUrl,
               price: item.ItemPrice?.Amount,
               order_item_id: item.OrderItemId,
+              customization,
             }
           })
         )

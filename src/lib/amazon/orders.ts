@@ -80,6 +80,11 @@ export interface AmazonOrderItem {
     Amount: string
   }
   OrderItemId: string
+  BuyerInfo?: {
+    BuyerCustomizedInfo?: {
+      CustomizedURL?: string
+    }
+  }
 }
 
 /**
@@ -215,6 +220,167 @@ export async function fetchOrderBuyerInfo(
     console.warn(`Failed to fetch buyer info for order ${orderId}:`, err)
     return null
   }
+}
+
+/**
+ * Fetch order items WITH buyer customization info using RDT.
+ * Returns items with BuyerCustomizedInfo.CustomizedURL populated
+ * for custom/personalized orders.
+ */
+export async function fetchOrderItemsWithBuyerInfo(
+  orderId: string
+): Promise<AmazonOrderItem[]> {
+  try {
+    const rdt = await getRestrictedDataToken([
+      {
+        method: 'GET',
+        path: `/orders/v0/orders/${orderId}/orderItems`,
+        dataElements: ['buyerInfo'],
+      },
+    ])
+
+    if (!rdt) {
+      console.warn(`No RDT for orderItems buyerInfo on ${orderId}, falling back to regular fetch`)
+      return fetchOrderItems(orderId)
+    }
+
+    const items: AmazonOrderItem[] = []
+    let nextToken: string | undefined
+
+    do {
+      await rateLimit()
+      const params = nextToken ? `?NextToken=${encodeURIComponent(nextToken)}` : ''
+      const url = `${ENDPOINT}/orders/v0/orders/${orderId}/orderItems${params}`
+      const response = await fetch(url, {
+        headers: {
+          'x-amz-access-token': rdt,
+          'Accept': 'application/json',
+        },
+      })
+
+      if (!response.ok) {
+        console.warn(`RDT orderItems fetch failed (${response.status}) for ${orderId}`)
+        return fetchOrderItems(orderId)
+      }
+
+      const data = await response.json()
+      const payload = data.payload || data
+      items.push(...(payload.OrderItems || []))
+      nextToken = payload.NextToken
+    } while (nextToken)
+
+    return items
+  } catch (err) {
+    console.warn(`Failed to fetch orderItems with buyerInfo for ${orderId}:`, err)
+    return fetchOrderItems(orderId)
+  }
+}
+
+/**
+ * Download and parse the customization ZIP from Amazon's CustomizedURL.
+ * Returns parsed customization data or null if unavailable.
+ */
+export async function fetchCustomizationFromZip(
+  customizedUrl: string
+): Promise<import('@/types/database').CustomizationData | null> {
+  try {
+    if (!customizedUrl) return null
+
+    const response = await fetch(customizedUrl)
+    if (!response.ok) {
+      console.warn(`Failed to download customization ZIP: ${response.status}`)
+      return null
+    }
+
+    const buffer = await response.arrayBuffer()
+    const JSZip = (await import('jszip')).default
+    const zip = await JSZip.loadAsync(buffer)
+
+    // Find JSON files in the ZIP
+    const jsonFiles = Object.keys(zip.files).filter(
+      (name) => name.endsWith('.json') && !zip.files[name].dir
+    )
+
+    if (jsonFiles.length === 0) {
+      // Try to find any text file
+      const textFiles = Object.keys(zip.files).filter(
+        (name) => !zip.files[name].dir
+      )
+      if (textFiles.length === 0) return null
+
+      const content = await zip.files[textFiles[0]].async('string')
+      try {
+        const parsed = JSON.parse(content)
+        return parseCustomizationJson(parsed)
+      } catch {
+        console.warn('Customization file is not valid JSON')
+        return null
+      }
+    }
+
+    // Parse the first JSON file
+    const content = await zip.files[jsonFiles[0]].async('string')
+    const parsed = JSON.parse(content)
+    return parseCustomizationJson(parsed)
+  } catch (err) {
+    console.warn('Error parsing customization ZIP:', err)
+    return null
+  }
+}
+
+/**
+ * Parse the raw customization JSON into our structured format.
+ * Amazon's format varies, so we handle multiple structures.
+ */
+function parseCustomizationJson(
+  data: Record<string, unknown>
+): import('@/types/database').CustomizationData {
+  const surfaces: import('@/types/database').CustomizationSurface[] = []
+
+  // Format 1: { version: "3.0", surfaces: [{ name, areas: [{ customizationType, ... }] }] }
+  if (data.version && Array.isArray(data.surfaces)) {
+    for (const surface of data.surfaces as Array<Record<string, unknown>>) {
+      const options: Record<string, string> = {}
+      const areas = (surface.areas || surface.customizations || []) as Array<Record<string, unknown>>
+
+      for (const area of areas) {
+        const type = String(area.customizationType || area.type || '')
+        if (area.text) options['Text'] = String(area.text)
+        if (area.fontFamily) options['Font Text'] = String(area.fontFamily)
+        if (area.fontColor || area.color) {
+          const color = String(area.fontColor || area.color || '')
+          options['Text Color'] = color
+        }
+        if (area.name && area.value) {
+          options[String(area.name)] = String(area.value)
+        }
+        if (type && !options['Type']) options['Type'] = type
+      }
+
+      if (Object.keys(options).length > 0) {
+        surfaces.push({
+          label: String(surface.name || surface.label || `Surface ${surfaces.length + 1}`),
+          options,
+        })
+      }
+    }
+  }
+
+  // Format 2: Flat key-value pairs
+  if (surfaces.length === 0) {
+    const options: Record<string, string> = {}
+    for (const [key, value] of Object.entries(data)) {
+      if (key === 'version' || key === 'customizationId') continue
+      if (typeof value === 'string' || typeof value === 'number') {
+        options[key] = String(value)
+      }
+    }
+    if (Object.keys(options).length > 0) {
+      surfaces.push({ label: 'Customization', options })
+    }
+  }
+
+  return { surfaces, raw: data }
 }
 
 /**
