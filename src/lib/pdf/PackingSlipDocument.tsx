@@ -43,7 +43,7 @@ const COLORS = [
   'Black', 'White', 'Red', 'Orange', 'Yellow', 'Purple', 'Lavender', 'Violet',
   'Maroon', 'Burgundy', 'Wine', 'Rust', 'Mustard', 'Gold', 'Tan', 'Brown',
   'Teal', 'Aqua', 'Coral', 'Peach', 'Espresso', 'Seafoam', 'Butter',
-  'Granite', 'Sandstone', 'Brick', 'Moss', 'Olive', 'Pepper',
+  'Granite', 'Sand', 'Sandstone', 'Brick', 'Moss', 'Olive', 'Pepper',
   'Crunchberry', 'Yam', 'Lagoon', 'Blossom', 'Chalky Mint', 'Flo Blue',
   'Island Reef', 'Orchid', 'Berry', 'Citrus', 'Crimson', 'Graphite',
   'Ice Blue', 'Khaki', 'Neon Pink', 'Neon Green', 'Neon Orange',
@@ -156,6 +156,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   LTG: 'Light Green',
   LTGN: 'Light Green',
   SC: 'Soft Cream',
+  SA: 'Sand',
   CHM: 'Chambray',
   BJ: 'Blue Jean',
 
