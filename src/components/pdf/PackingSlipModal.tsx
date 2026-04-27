@@ -119,7 +119,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   ROR: 'Red Orange',
   BAY: 'Bay',
   BLJN: 'Blue Jean',
-  MUS: 'Mustard',
+  MUS: 'Mustard', MSTD: 'Mustard',
   IVO: 'Ivory',
   VIO: 'Violet',
   VOLT: 'Volt',
@@ -530,13 +530,7 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-lg font-bold text-gray-900">Packing Slip Preview</h2>
-            <p className="text-sm text-gray-500 font-mono">{order.id}
-              {orders.length > 1 && (
-                <span className="ml-2 text-xs text-gray-400">
-                  {orders.findIndex(o => o.id === order.id) + 1} of {orders.length}
-                </span>
-              )}
-            </p>
+            <p className="text-sm text-gray-500 font-mono">{order.id}</p>
           </div>
           <div className="flex items-center gap-2">
             <button

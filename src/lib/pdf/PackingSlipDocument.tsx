@@ -150,7 +150,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   ROR: 'Red Orange',
   BAY: 'Bay',
   BLJN: 'Blue Jean',
-  MUS: 'Mustard',
+  MUS: 'Mustard', MSTD: 'Mustard',
   IVO: 'Ivory',
   VIO: 'Violet',
   VOLT: 'Volt',
