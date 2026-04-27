@@ -47,7 +47,7 @@ const COLORS = [
   'Crunchberry', 'Yam', 'Lagoon', 'Blossom', 'Chalky Mint', 'Flo Blue',
   'Island Reef', 'Orchid', 'Berry', 'Citrus', 'Crimson', 'Graphite',
   'Ice Blue', 'Khaki', 'Neon Pink', 'Neon Green', 'Neon Orange',
-  'Sapphire', 'Terracotta', 'Watermelon',
+  'Sapphire', 'Terracotta', 'Watermelon', 'Turquoise', 'Lilac', 'Team Purple',
   'Bright Salmon', 'Blue Jean', 'Blue Spruce', 'Burnt Orange',
   'Candy Pink', 'Chili', 'Faded Blue', 'Hemp', 'Jean',
   'Lagoon Blue', 'Midnight', 'Neon Blue', 'Old Gold',
@@ -157,6 +157,17 @@ const SKU_COLOR_CODES: Record<string, string> = {
   LTG: 'Light Green',
   CHM: 'Chambray',
   BJ: 'Blue Jean',
+
+  // Additional short codes found in live orders
+  CS: 'Coral Silk',
+  WTM: 'Watermelon', WTML: 'Watermelon',
+  TQ: 'Turquoise',
+  BLJ: 'Blue Jean',
+  DN: 'Denim',
+  LIL: 'Lilac',
+  PP: 'Pepper',
+  SH: 'Sapphire',
+  TP: 'Team Purple',
 }
 
 // SKU size code → size name mapping
