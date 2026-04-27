@@ -155,6 +155,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   VOLT: 'Volt',
   LTG: 'Light Green',
   LTGN: 'Light Green',
+  SC: 'Soft Cream',
   CHM: 'Chambray',
   BJ: 'Blue Jean',
 
