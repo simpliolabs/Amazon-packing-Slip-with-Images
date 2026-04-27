@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { X, Printer } from 'lucide-react'
+import { X, Printer, ChevronUp, ChevronDown } from 'lucide-react'
 import type { Order, OrderItem, ShipTo, CustomizationData } from '@/types/database'
 import { formatDate, formatDateShort } from '@/lib/utils'
 
@@ -117,6 +117,15 @@ const SKU_COLOR_CODES: Record<string, string> = {
   FDB: 'Faded Blue',
   OGD: 'Old Gold',
   ROR: 'Red Orange',
+  BAY: 'Bay',
+  BLJN: 'Blue Jean',
+  MUS: 'Mustard',
+  IVO: 'Ivory',
+  VIO: 'Violet',
+  VOLT: 'Volt',
+  LTG: 'Light Green',
+  CHM: 'Chambray',
+  BJ: 'Blue Jean',
 }
 
 // SKU size code → size name mapping
@@ -205,12 +214,29 @@ function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null)
 
   // ── 2. Parse from title as fallback ──
   let size = skuData.size || SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
-  let color = skuData.color || COLORS.find(c => {
-    const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-    return re.test(t)
-  }) || ''
 
-  // ── 3. Fallback: extract color from title segments ──
+  // ── Color priority: AI-detected > SKU code > title match > segment fallback ──
+  let color = ''
+
+  // Layer 1: AI-detected color (highest priority — based on actual product image)
+  if (aiDetectedColor) {
+    color = aiDetectedColor
+  }
+
+  // Layer 2: SKU color code
+  if (!color && skuData.color) {
+    color = skuData.color
+  }
+
+  // Layer 3: Known color name in title
+  if (!color) {
+    color = COLORS.find(c => {
+      const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+      return re.test(t)
+    }) || ''
+  }
+
+  // Layer 4: Fallback — extract color from title segments
   if (!color) {
     const segments = t.split(/\s*[-–—,]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 2) {
@@ -218,9 +244,7 @@ function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null)
         const seg = segments[i]
         if (SIZES.some(s => s.toLowerCase() === seg.toLowerCase())) continue
         if (seg.split(/\s+/).length > 3) continue
-        // Skip non-color words
         if (NON_COLOR_WORDS.has(seg.toLowerCase())) continue
-        // Skip if it looks like a parenthetical content (e.g., "Born to Fish Forced to Work")
         if (seg.split(/\s+/).length > 2) continue
         if (seg.length > 1 && seg.length < 30) {
           color = seg
@@ -228,11 +252,6 @@ function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null)
         }
       }
     }
-  }
-
-  // ── 3b. AI-detected color fallback (Layer 2) ──
-  if (!color && aiDetectedColor) {
-    color = aiDetectedColor
   }
 
   if (!color) color = '—'
@@ -446,10 +465,12 @@ function handlePrint(orderId: string) {
 
 interface PackingSlipModalProps {
   order: Order
+  orders?: Order[]
   onClose: () => void
+  onNavigate?: (order: Order) => void
 }
 
-export default function PackingSlipModal({ order, onClose }: PackingSlipModalProps) {
+export default function PackingSlipModal({ order, orders = [], onClose, onNavigate }: PackingSlipModalProps) {
   const [mounted, setMounted] = useState(false)
   const [imageDataUrls, setImageDataUrls] = useState<Record<string, string>>({})
 
@@ -507,9 +528,43 @@ export default function PackingSlipModal({ order, onClose }: PackingSlipModalPro
       <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div>
-            <h2 className="text-lg font-bold text-gray-900">Packing Slip Preview</h2>
-            <p className="text-sm text-gray-500 font-mono">{order.id}</p>
+          <div className="flex items-center gap-3">
+            {/* Navigation Arrows */}
+            {orders.length > 1 && onNavigate && (() => {
+              const currentIndex = orders.findIndex(o => o.id === order.id)
+              const hasPrev = currentIndex > 0
+              const hasNext = currentIndex < orders.length - 1
+              return (
+                <div className="flex flex-col gap-0.5">
+                  <button
+                    onClick={() => hasPrev && onNavigate(orders[currentIndex - 1])}
+                    disabled={!hasPrev}
+                    className="p-1 rounded hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Previous order"
+                  >
+                    <ChevronUp size={18} className="text-gray-600" />
+                  </button>
+                  <button
+                    onClick={() => hasNext && onNavigate(orders[currentIndex + 1])}
+                    disabled={!hasNext}
+                    className="p-1 rounded hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Next order"
+                  >
+                    <ChevronDown size={18} className="text-gray-600" />
+                  </button>
+                </div>
+              )
+            })()}
+            <div>
+              <h2 className="text-lg font-bold text-gray-900">Packing Slip Preview</h2>
+              <p className="text-sm text-gray-500 font-mono">{order.id}
+                {orders.length > 1 && (
+                  <span className="ml-2 text-xs text-gray-400">
+                    {orders.findIndex(o => o.id === order.id) + 1} of {orders.length}
+                  </span>
+                )}
+              </p>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button

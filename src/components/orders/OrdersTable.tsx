@@ -401,7 +401,9 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
       {selectedOrder && (
         <PackingSlipModal
           order={selectedOrder}
+          orders={orders}
           onClose={() => setSelectedOrder(null)}
+          onNavigate={(order) => setSelectedOrder(order)}
         />
       )}
     </div>

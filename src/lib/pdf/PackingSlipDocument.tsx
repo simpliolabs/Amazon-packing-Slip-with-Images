@@ -148,6 +148,15 @@ const SKU_COLOR_CODES: Record<string, string> = {
   FDB: 'Faded Blue',
   OGD: 'Old Gold',
   ROR: 'Red Orange',
+  BAY: 'Bay',
+  BLJN: 'Blue Jean',
+  MUS: 'Mustard',
+  IVO: 'Ivory',
+  VIO: 'Violet',
+  VOLT: 'Volt',
+  LTG: 'Light Green',
+  CHM: 'Chambray',
+  BJ: 'Blue Jean',
 }
 
 // SKU size code → size name mapping
@@ -243,9 +252,20 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
     }
   }
 
-  if (skuData.color) {
+  // ── Color priority: AI-detected > SKU code > title match > segment fallback ──
+
+  // Layer 1: AI-detected color (highest priority — based on actual product image)
+  if (aiDetectedColor) {
+    result.color = aiDetectedColor
+  }
+
+  // Layer 2: SKU color code
+  if (!result.color && skuData.color) {
     result.color = skuData.color
-  } else {
+  }
+
+  // Layer 3: Known color name in title
+  if (!result.color) {
     const sortedColors = [...COLORS].sort((a, b) => b.length - a.length)
     for (const color of sortedColors) {
       const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -254,7 +274,7 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
     }
   }
 
-  // ── 4. Fallback: extract color from title trailing segments ──
+  // Layer 4: Fallback — extract color from title trailing segments
   if (!result.color) {
     const segments = title.split(/\s*[-\u2013]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 3 && result.size) {
@@ -262,7 +282,6 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
         if (segments[i].toLowerCase() === result.size.toLowerCase() && i > 0) {
           const candidate = segments[i - 1]
           if (candidate.split(/\s+/).length <= 3 && candidate.length <= 30) {
-            // Skip non-color words
             if (!NON_COLOR_WORDS.has(candidate.toLowerCase())) {
               result.color = candidate
             }
@@ -271,11 +290,6 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
         }
       }
     }
-  }
-
-  // ── 4b. AI-detected color fallback (Layer 2) ──
-  if (!result.color && aiDetectedColor) {
-    result.color = aiDetectedColor
   }
 
   // ── 5. Style detection with smart Comfort Colors + Long Sleeve combo ──
