@@ -102,7 +102,6 @@ const SKU_COLOR_CODES: Record<string, string> = {
   BJN: 'Blue Jean',
 
   FBL: 'Flo Blue',
-  ICB: 'Ice Blue',
   IRF: 'Island Reef',
   ORC: 'Orchid',
   PRW: 'Periwinkle',
@@ -124,6 +123,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   VIO: 'Violet',
   VOLT: 'Volt',
   LTG: 'Light Green',
+  LTGN: 'Light Green',
   CHM: 'Chambray',
   BJ: 'Blue Jean',
 
@@ -186,8 +186,8 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
       continue
     }
 
-    // Check color codes (exact match on uppercase)
-    if (SKU_COLOR_CODES[upper]) {
+    // Check color codes (exact match on uppercase) — keep FIRST match only
+    if (!result.color && SKU_COLOR_CODES[upper]) {
       result.color = SKU_COLOR_CODES[upper]
       continue
     }
