@@ -215,17 +215,17 @@ function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null)
   // ── 2. Parse from title as fallback ──
   let size = skuData.size || SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
 
-  // ── Color priority: AI-detected > SKU code > title match > segment fallback ──
+  // ── Color priority: SKU code > AI-detected > title match > segment fallback ──
   let color = ''
 
-  // Layer 1: AI-detected color (highest priority — based on actual product image)
-  if (aiDetectedColor) {
-    color = aiDetectedColor
+  // Layer 1: SKU color code (most reliable — seller-assigned per-variant)
+  if (skuData.color) {
+    color = skuData.color
   }
 
-  // Layer 2: SKU color code
-  if (!color && skuData.color) {
-    color = skuData.color
+  // Layer 2: AI-detected color (good when SKU has no color code)
+  if (!color && aiDetectedColor) {
+    color = aiDetectedColor
   }
 
   // Layer 3: Known color name in title
@@ -528,43 +528,15 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
       <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-3">
-            {/* Navigation Arrows */}
-            {orders.length > 1 && onNavigate && (() => {
-              const currentIndex = orders.findIndex(o => o.id === order.id)
-              const hasPrev = currentIndex > 0
-              const hasNext = currentIndex < orders.length - 1
-              return (
-                <div className="flex flex-col gap-0.5">
-                  <button
-                    onClick={() => hasPrev && onNavigate(orders[currentIndex - 1])}
-                    disabled={!hasPrev}
-                    className="p-1 rounded hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                    title="Previous order"
-                  >
-                    <ChevronUp size={18} className="text-gray-600" />
-                  </button>
-                  <button
-                    onClick={() => hasNext && onNavigate(orders[currentIndex + 1])}
-                    disabled={!hasNext}
-                    className="p-1 rounded hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                    title="Next order"
-                  >
-                    <ChevronDown size={18} className="text-gray-600" />
-                  </button>
-                </div>
-              )
-            })()}
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">Packing Slip Preview</h2>
-              <p className="text-sm text-gray-500 font-mono">{order.id}
-                {orders.length > 1 && (
-                  <span className="ml-2 text-xs text-gray-400">
-                    {orders.findIndex(o => o.id === order.id) + 1} of {orders.length}
-                  </span>
-                )}
-              </p>
-            </div>
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">Packing Slip Preview</h2>
+            <p className="text-sm text-gray-500 font-mono">{order.id}
+              {orders.length > 1 && (
+                <span className="ml-2 text-xs text-gray-400">
+                  {orders.findIndex(o => o.id === order.id) + 1} of {orders.length}
+                </span>
+              )}
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -574,6 +546,32 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
               <Printer size={14} />
               Print
             </button>
+            {/* Navigation Arrows */}
+            {orders.length > 1 && onNavigate && (() => {
+              const currentIndex = orders.findIndex(o => o.id === order.id)
+              const hasPrev = currentIndex > 0
+              const hasNext = currentIndex < orders.length - 1
+              return (
+                <div className="flex flex-col gap-0.5 border border-gray-200 rounded-lg p-1">
+                  <button
+                    onClick={() => hasPrev && onNavigate(orders[currentIndex - 1])}
+                    disabled={!hasPrev}
+                    className="p-0.5 rounded hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Previous order"
+                  >
+                    <ChevronUp size={16} className="text-gray-600" />
+                  </button>
+                  <button
+                    onClick={() => hasNext && onNavigate(orders[currentIndex + 1])}
+                    disabled={!hasNext}
+                    className="p-0.5 rounded hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Next order"
+                  >
+                    <ChevronDown size={16} className="text-gray-600" />
+                  </button>
+                </div>
+              )
+            })()}
             <button onClick={onClose} className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
               <X size={18} />
             </button>

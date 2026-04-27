@@ -252,16 +252,16 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
     }
   }
 
-  // ── Color priority: AI-detected > SKU code > title match > segment fallback ──
+  // ── Color priority: SKU code > AI-detected > title match > segment fallback ──
 
-  // Layer 1: AI-detected color (highest priority — based on actual product image)
-  if (aiDetectedColor) {
-    result.color = aiDetectedColor
+  // Layer 1: SKU color code (most reliable — seller-assigned per-variant)
+  if (skuData.color) {
+    result.color = skuData.color
   }
 
-  // Layer 2: SKU color code
-  if (!result.color && skuData.color) {
-    result.color = skuData.color
+  // Layer 2: AI-detected color (good when SKU has no color code)
+  if (!result.color && aiDetectedColor) {
+    result.color = aiDetectedColor
   }
 
   // Layer 3: Known color name in title
