@@ -58,7 +58,8 @@ export async function middleware(request: NextRequest) {
   // For authenticated users on protected routes, check MFA and password expiration
   if (user && !isPublicRoute && !isMFARoute && !isPasswordResetRoute) {
     // Check MFA: if user has verified TOTP factors, verify AAL level
-    const { data: { currentLevel } } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+    const { data: aalData } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+    const currentLevel = aalData?.currentLevel ?? null
 
     // If user has MFA enrolled but current session is only AAL1, redirect to verify
     const { data: factors } = await supabase.auth.mfa.listFactors()
