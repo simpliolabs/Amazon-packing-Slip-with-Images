@@ -124,6 +124,7 @@ const SKU_COLOR_CODES: Record<string, string> = {
   VOLT: 'Volt',
   LTG: 'Light Green',
   LTGN: 'Light Green',
+  LG: 'Light Green',
   SC: 'Soft Cream',
   SA: 'Sand',
   CHM: 'Chambray',
@@ -146,7 +147,7 @@ const SKU_SIZE_CODES: Record<string, string> = {
   XS: 'X-Small', '2XS': 'XX-Small',
   S: 'Small', SM: 'Small',
   M: 'Medium', MD: 'Medium', MED: 'Medium',
-  L: 'Large', LG: 'Large',
+  L: 'Large',
   XL: 'X-Large',
   '2XL': '2X-Large', XXL: '2X-Large',
   '3XL': '3X-Large', XXXL: '3X-Large',
@@ -194,8 +195,8 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
       continue
     }
 
-    // Check size codes (exact match on uppercase)
-    if (SKU_SIZE_CODES[upper]) {
+    // Check size codes (exact match on uppercase) — keep FIRST match only
+    if (!result.size && SKU_SIZE_CODES[upper]) {
       result.size = SKU_SIZE_CODES[upper]
       continue
     }
