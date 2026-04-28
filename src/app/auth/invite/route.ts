@@ -6,9 +6,10 @@ import { NextRequest, NextResponse } from 'next/server'
  *
  * Secure invite flow — Step 1:
  * 1. Validates the reusable invite token from user_profiles
- * 2. Ensures the auth user exists (with email_confirm: true)
- * 3. Generates a magic link via admin.generateLink()
- * 4. Redirects to /auth/confirm with the hashed_token for server-side verification
+ * 2. Checks invite_expires_at for 72-hour TTL (Amazon Credential Management 1.4)
+ * 3. Ensures the auth user exists (with email_confirm: true)
+ * 4. Generates a magic link via admin.generateLink()
+ * 5. Redirects to /auth/confirm with the hashed_token for server-side verification
  *
  * /auth/confirm calls verifyOtp() to establish the session with cookies,
  * then redirects to /set-password where the user sets their password.
@@ -31,17 +32,27 @@ export async function GET(request: NextRequest) {
   // 1. Validate the invite token in user_profiles
   const { data: profile, error: lookupError } = await supabaseAdmin
     .from('user_profiles')
-    .select('id, email, full_name, role')
+    .select('id, email, full_name, role, invite_expires_at')
     .eq('invite_token', token)
     .single()
 
   if (lookupError || !profile) {
     return NextResponse.redirect(
-      new URL('/login?error=Invalid+or+expired+invite+link', appUrl)
+      new URL('/set-password?error=invalid_link', appUrl)
     )
   }
 
-  // 2. Check if user already exists in Supabase Auth
+  // 2. Check invite expiration (72-hour TTL)
+  if (profile.invite_expires_at) {
+    const expiresAt = new Date(profile.invite_expires_at)
+    if (new Date() > expiresAt) {
+      return NextResponse.redirect(
+        new URL('/set-password?error=invite_expired', appUrl)
+      )
+    }
+  }
+
+  // 3. Check if user already exists in Supabase Auth
   let userId = profile.id
   if (userId) {
     const { data: existingUser } = await supabaseAdmin.auth.admin.getUserById(userId)
@@ -51,7 +62,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // 3. If user doesn't exist in auth, create them
+  // 4. If user doesn't exist in auth, create them
   if (!userId) {
     const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
       email: profile.email,
@@ -78,12 +89,12 @@ export async function GET(request: NextRequest) {
       .eq('invite_token', token)
   }
 
-  // 4. Ensure email is confirmed (in case user was created earlier without confirmation)
+  // 5. Ensure email is confirmed (in case user was created earlier without confirmation)
   await supabaseAdmin.auth.admin.updateUserById(userId, {
     email_confirm: true,
   })
 
-  // 5. Generate the Magic Link — we use the hashed_token for server-side verification
+  // 6. Generate the Magic Link — we use the hashed_token for server-side verification
   const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
     type: 'magiclink',
     email: profile.email,
@@ -96,9 +107,7 @@ export async function GET(request: NextRequest) {
     )
   }
 
-  // 6. Redirect to our /auth/confirm route with the hashed_token
-  // /auth/confirm uses verifyOtp() to establish the session server-side
-  // (with cookies on the redirect response), then redirects to /set-password
+  // 7. Redirect to our /auth/confirm route with the hashed_token
   const confirmUrl = new URL('/auth/confirm', appUrl)
   confirmUrl.searchParams.set('token_hash', linkData.properties.hashed_token)
   confirmUrl.searchParams.set('type', 'magiclink')

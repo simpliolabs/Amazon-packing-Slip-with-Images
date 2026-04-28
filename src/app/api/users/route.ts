@@ -127,11 +127,14 @@ export async function POST(request: NextRequest) {
   // Generate a reusable invite token (UUID)
   const inviteToken = randomUUID()
 
-  // UPDATE the profile row created by the trigger to set invite_token
+  // UPDATE the profile row created by the trigger to set invite_token + expiration
   // The trigger fires synchronously on INSERT, so the row exists by now
+  // Invite links expire after 72 hours (Amazon Credential Management 1.4)
+  const inviteExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString()
+
   if (newUserId) {
     const { error: updateError } = await (adminSupabase.from('user_profiles') as any)
-      .update({ invite_token: inviteToken })
+      .update({ invite_token: inviteToken, invite_expires_at: inviteExpiresAt })
       .eq('id', newUserId)
 
     if (updateError) {

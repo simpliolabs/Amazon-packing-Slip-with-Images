@@ -48,11 +48,19 @@ export async function POST(request: NextRequest) {
     ]
 
     // Only update secrets if new values are provided
+    let secretsUpdated = false
     if (clientSecret && clientSecret.trim()) {
       upserts.push({ key: 'amazon_client_secret', value: clientSecret.trim(), updated_at: now })
+      secretsUpdated = true
     }
     if (refreshToken && refreshToken.trim()) {
       upserts.push({ key: 'amazon_refresh_token', value: refreshToken.trim(), updated_at: now })
+      secretsUpdated = true
+    }
+
+    // Track rotation date when any secret is updated (Amazon Credential Management 1.4)
+    if (secretsUpdated) {
+      upserts.push({ key: 'amazon_credentials_rotated_at', value: now, updated_at: now })
     }
 
     for (const record of upserts) {

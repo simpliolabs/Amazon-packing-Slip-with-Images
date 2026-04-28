@@ -57,6 +57,9 @@ export interface Database {
           full_name: string | null
           role: 'admin' | 'packer'
           invite_token: string | null
+          invite_expires_at: string | null
+          password_changed_at: string | null
+          mfa_enrolled: boolean
           created_at: string
           updated_at: string
         }
@@ -66,6 +69,9 @@ export interface Database {
           full_name?: string | null
           role?: 'admin' | 'packer'
           invite_token?: string | null
+          invite_expires_at?: string | null
+          password_changed_at?: string | null
+          mfa_enrolled?: boolean
           created_at?: string
           updated_at?: string
         }
@@ -75,8 +81,34 @@ export interface Database {
           full_name?: string | null
           role?: 'admin' | 'packer'
           invite_token?: string | null
+          invite_expires_at?: string | null
+          password_changed_at?: string | null
+          mfa_enrolled?: boolean
           created_at?: string
           updated_at?: string
+        }
+      }
+      login_attempts: {
+        Row: {
+          id: string
+          email: string
+          ip_address: string | null
+          success: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          email: string
+          ip_address?: string | null
+          success?: boolean
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          email?: string
+          ip_address?: string | null
+          success?: boolean
+          created_at?: string
         }
       }
       download_logs: {
@@ -145,6 +177,41 @@ export interface Database {
           updated_at?: string
         }
       }
+      audit_logs: {
+        Row: {
+          id: string
+          user_id: string | null
+          action: string
+          resource_type: string
+          resource_id: string | null
+          details: Json | null
+          ip_address: string | null
+          user_agent: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id?: string | null
+          action: string
+          resource_type: string
+          resource_id?: string | null
+          details?: Json | null
+          ip_address?: string | null
+          user_agent?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string | null
+          action?: string
+          resource_type?: string
+          resource_id?: string | null
+          details?: Json | null
+          ip_address?: string | null
+          user_agent?: string | null
+          created_at?: string
+        }
+      }
     }
     Views: Record<string, never>
     Functions: {
@@ -196,3 +263,5 @@ export type Order = Database['public']['Tables']['orders']['Row']
 export type UserProfile = Database['public']['Tables']['user_profiles']['Row']
 export type DownloadLog = Database['public']['Tables']['download_logs']['Row']
 export type SyncLog = Database['public']['Tables']['sync_logs']['Row']
+export type LoginAttempt = Database['public']['Tables']['login_attempts']['Row']
+export type AuditLog = Database['public']['Tables']['audit_logs']['Row']

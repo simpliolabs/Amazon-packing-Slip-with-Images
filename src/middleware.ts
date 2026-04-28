@@ -34,6 +34,8 @@ export async function middleware(request: NextRequest) {
   const publicRoutes = ['/login', '/auth/callback', '/auth/confirm', '/auth/invite', '/set-password']
   const isPublicRoute = publicRoutes.some((route) => pathname.startsWith(route))
   const isApiRoute = pathname.startsWith('/api/')
+  const isMFARoute = pathname.startsWith('/mfa/')
+  const isPasswordResetRoute = pathname === '/reset-password'
 
   // Allow API routes to handle their own auth
   if (isApiRoute) {
@@ -51,6 +53,31 @@ export async function middleware(request: NextRequest) {
   // Redirect authenticated users away from login
   if (user && pathname === '/login') {
     return NextResponse.redirect(new URL('/', request.url))
+  }
+
+  // For authenticated users on protected routes, check MFA and password expiration
+  if (user && !isPublicRoute && !isMFARoute && !isPasswordResetRoute) {
+    // Check MFA: if user has verified TOTP factors, verify AAL level
+    const { data: { currentLevel } } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+
+    // If user has MFA enrolled but current session is only AAL1, redirect to verify
+    const { data: factors } = await supabase.auth.mfa.listFactors()
+    const verifiedFactors = factors?.totp?.filter(f => f.status === 'verified') || []
+
+    if (verifiedFactors.length > 0 && currentLevel === 'aal1') {
+      // User has MFA but hasn't verified this session
+      const url = request.nextUrl.clone()
+      url.pathname = '/mfa/verify'
+      return NextResponse.redirect(url)
+    }
+
+    // If user has NO MFA enrolled, redirect to enroll (required by policy)
+    // Skip this check for the enroll page itself
+    if (verifiedFactors.length === 0 && !pathname.startsWith('/mfa/enroll')) {
+      const url = request.nextUrl.clone()
+      url.pathname = '/mfa/enroll'
+      return NextResponse.redirect(url)
+    }
   }
 
   return supabaseResponse

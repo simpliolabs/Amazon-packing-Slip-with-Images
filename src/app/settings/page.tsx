@@ -44,6 +44,7 @@ export default async function SettingsPage() {
         amazonRefreshTokenMasked={maskSecret(settingsMap['amazon_refresh_token'] || '')}
         hasExistingSecret={!!settingsMap['amazon_client_secret']}
         hasExistingToken={!!settingsMap['amazon_refresh_token']}
+        credentialsRotatedAt={settingsMap['amazon_credentials_rotated_at'] || null}
       />
     </DashboardLayout>
   )

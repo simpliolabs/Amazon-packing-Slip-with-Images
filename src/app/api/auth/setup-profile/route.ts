@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createRawAdmin } from '@supabase/supabase-js'
 
@@ -6,14 +6,24 @@ import { createClient as createRawAdmin } from '@supabase/supabase-js'
  * POST /api/auth/setup-profile
  * Creates a user_profile for the currently authenticated user if one doesn't exist.
  * Also clears invite_token when called after password setup.
+ * Records password_changed_at timestamp for expiration tracking.
  * Uses raw supabase-js admin client (not SSR) to bypass RLS for updates.
  */
-export async function POST() {
+export async function POST(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
 
   if (authError || !user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  // Parse optional body
+  let passwordChanged = false
+  try {
+    const body = await request.json()
+    passwordChanged = body?.passwordChanged === true
+  } catch {
+    // No body or invalid JSON — that's fine
   }
 
   // Use raw supabase-js admin client to bypass RLS
@@ -30,20 +40,37 @@ export async function POST() {
     .single()
 
   if (existingProfile) {
+    // Build update payload
+    const updatePayload: Record<string, unknown> = {}
+
     // Clear invite_token if it still exists (user has set their password)
     if (existingProfile.invite_token) {
+      updatePayload.invite_token = null
+    }
+
+    // Record password change timestamp
+    if (passwordChanged) {
+      updatePayload.password_changed_at = new Date().toISOString()
+    }
+
+    if (Object.keys(updatePayload).length > 0) {
       const { error: updateError } = await adminClient
         .from('user_profiles')
-        .update({ invite_token: null })
+        .update(updatePayload)
         .eq('id', user.id)
 
       if (updateError) {
-        console.error('Failed to clear invite_token:', updateError.message)
+        console.error('Failed to update profile:', updateError.message)
       } else {
-        console.log('Cleared invite_token for user:', user.id)
+        console.log('Updated profile for user:', user.id, updatePayload)
       }
     }
-    return NextResponse.json({ message: 'Profile already exists', tokenCleared: !!existingProfile.invite_token })
+
+    return NextResponse.json({
+      message: 'Profile already exists',
+      tokenCleared: !!existingProfile.invite_token,
+      passwordTimestampUpdated: passwordChanged,
+    })
   }
 
   // Create the profile from user metadata
@@ -54,6 +81,7 @@ export async function POST() {
       email: user.email || '',
       full_name: user.user_metadata?.full_name || '',
       role: user.user_metadata?.role || 'packer',
+      password_changed_at: passwordChanged ? new Date().toISOString() : null,
     })
 
   if (insertError) {

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
 import {
@@ -12,6 +12,7 @@ import {
   Save,
   Key,
   ShieldCheck,
+  AlertTriangle,
 } from 'lucide-react'
 
 interface SettingsPanelProps {
@@ -22,6 +23,7 @@ interface SettingsPanelProps {
   amazonRefreshTokenMasked: string
   hasExistingSecret: boolean
   hasExistingToken: boolean
+  credentialsRotatedAt: string | null
 }
 
 export default function SettingsPanel({
@@ -32,6 +34,7 @@ export default function SettingsPanel({
   amazonRefreshTokenMasked,
   hasExistingSecret,
   hasExistingToken,
+  credentialsRotatedAt,
 }: SettingsPanelProps) {
   const searchParams = useSearchParams()
   const successParam = searchParams.get('success')
@@ -63,6 +66,24 @@ export default function SettingsPanel({
     hasNewSecret ||
     hasNewToken
   )
+
+  // API Key rotation status
+  const rotationStatus = useMemo(() => {
+    if (!credentialsRotatedAt) {
+      // No rotation date recorded — assume they need rotation
+      return { status: 'unknown' as const, daysOld: null, message: 'Rotation date not recorded' }
+    }
+    const rotatedAt = new Date(credentialsRotatedAt)
+    const daysOld = Math.floor((Date.now() - rotatedAt.getTime()) / (1000 * 60 * 60 * 24))
+    
+    if (daysOld > 365) {
+      return { status: 'expired' as const, daysOld, message: `Credentials are ${daysOld} days old — rotation overdue!` }
+    } else if (daysOld > 330) {
+      return { status: 'warning' as const, daysOld, message: `Credentials are ${daysOld} days old — rotation due in ${365 - daysOld} days` }
+    } else {
+      return { status: 'ok' as const, daysOld, message: `Last rotated ${daysOld} days ago` }
+    }
+  }, [credentialsRotatedAt])
 
   async function handleSaveCredentials() {
     if (!clientId.trim()) {
@@ -151,6 +172,36 @@ export default function SettingsPanel({
         </div>
       )}
 
+      {/* API Key Rotation Warning */}
+      {amazonConnected && (rotationStatus.status === 'expired' || rotationStatus.status === 'warning') && (
+        <div className={`flex items-start gap-3 p-4 rounded-xl mb-5 ${
+          rotationStatus.status === 'expired'
+            ? 'bg-red-50 border border-red-200'
+            : 'bg-amber-50 border border-amber-200'
+        }`}>
+          <AlertTriangle size={18} className={`flex-shrink-0 mt-0.5 ${
+            rotationStatus.status === 'expired' ? 'text-red-600' : 'text-amber-600'
+          }`} />
+          <div>
+            <p className={`text-sm font-medium ${
+              rotationStatus.status === 'expired' ? 'text-red-800' : 'text-amber-800'
+            }`}>
+              {rotationStatus.status === 'expired' ? 'API Key Rotation Overdue' : 'API Key Rotation Due Soon'}
+            </p>
+            <p className={`text-xs mt-0.5 ${
+              rotationStatus.status === 'expired' ? 'text-red-700' : 'text-amber-700'
+            }`}>
+              {rotationStatus.message}. Amazon Credential Management 1.4 requires API keys to be rotated every 12 months.
+            </p>
+            {rotationStatus.status === 'expired' && (
+              <p className="text-xs text-red-600 mt-1 font-medium">
+                Update your credentials below to comply with the rotation policy.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Amazon Connection Status */}
       <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
         <div className="flex items-start justify-between mb-4">
@@ -190,6 +241,12 @@ export default function SettingsPanel({
             <Info size={12} className="text-[#2E9CE6] flex-shrink-0" />
             <span>Data retention: <strong>7 days</strong></span>
           </div>
+          {rotationStatus.status === 'ok' && rotationStatus.daysOld !== null && (
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={12} className="text-green-500 flex-shrink-0" />
+              <span>Credential age: <strong>{rotationStatus.daysOld} days</strong> (rotation due at 365)</span>
+            </div>
+          )}
         </div>
 
         {/* Credentials Form */}
@@ -361,6 +418,46 @@ export default function SettingsPanel({
           <p className="text-xs text-gray-400 mt-2">Save your Amazon credentials above to enable syncing.</p>
         )}
       </div>
+
+      {/* Security Compliance Status */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <ShieldCheck size={16} className="text-[#2E9CE6]" />
+          <h2 className="text-sm font-bold text-gray-900">Security Compliance</h2>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Amazon Credential Management 1.4 compliance status
+        </p>
+
+        <div className="space-y-2">
+          <ComplianceItem label="Password complexity (12+ chars, mixed)" status="enforced" />
+          <ComplianceItem label="Password expiration (365 days max)" status="enforced" />
+          <ComplianceItem label="Account lockout (5 failed attempts)" status="enforced" />
+          <ComplianceItem label="Multi-factor authentication (TOTP)" status="enforced" />
+          <ComplianceItem label="Passwords hashed (bcrypt)" status="enforced" />
+          <ComplianceItem label="API key rotation (12 months)" status={
+            rotationStatus.status === 'expired' ? 'action_needed' :
+            rotationStatus.status === 'warning' ? 'warning' : 'enforced'
+          } />
+          <ComplianceItem label="Invite link expiration (72 hours)" status="enforced" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ComplianceItem({ label, status }: { label: string; status: 'enforced' | 'warning' | 'action_needed' }) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {status === 'enforced' && <CheckCircle size={13} className="text-green-500 flex-shrink-0" />}
+      {status === 'warning' && <AlertTriangle size={13} className="text-amber-500 flex-shrink-0" />}
+      {status === 'action_needed' && <XCircle size={13} className="text-red-500 flex-shrink-0" />}
+      <span className={
+        status === 'enforced' ? 'text-gray-700' :
+        status === 'warning' ? 'text-amber-700' : 'text-red-700'
+      }>
+        {label}
+      </span>
     </div>
   )
 }
