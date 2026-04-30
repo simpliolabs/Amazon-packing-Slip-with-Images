@@ -100,6 +100,16 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
     return () => clearInterval(interval)
   }, [fetchLastSync, fetchOrders, page])
 
+  // Listen for sync-complete event from Sync Now button to refresh data
+  useEffect(() => {
+    const handleSyncComplete = () => {
+      fetchOrders(page)
+      fetchLastSync()
+    }
+    window.addEventListener('sync-complete', handleSyncComplete)
+    return () => window.removeEventListener('sync-complete', handleSyncComplete)
+  }, [fetchOrders, fetchLastSync, page])
+
   function handleSearchChange(value: string) {
     setSearch(value)
     if (searchTimeout.current) clearTimeout(searchTimeout.current)

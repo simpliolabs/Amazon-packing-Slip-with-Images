@@ -141,6 +141,8 @@ export default function SettingsPanel({
       setSyncResult(data)
       if (data.success) {
         toast.success(`Sync complete — ${data.ordersInserted} orders updated`)
+        // Dispatch custom event so OrdersTable re-fetches data
+        window.dispatchEvent(new Event('sync-complete'))
       } else {
         toast.error(data.error || 'Sync failed')
       }

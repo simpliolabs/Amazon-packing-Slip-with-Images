@@ -69,6 +69,8 @@ export default function DashboardLayout({
       const data = await res.json()
       if (data.success) {
         toast.success(`Sync complete — ${data.ordersInserted} orders updated`)
+        // Dispatch custom event so OrdersTable re-fetches data
+        window.dispatchEvent(new Event('sync-complete'))
         router.refresh()
       } else {
         toast.error(data.error || 'Sync failed')
