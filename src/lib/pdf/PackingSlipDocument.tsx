@@ -864,24 +864,32 @@ export default function PackingSlipDocument({
                       <Text style={styles.attrValue}>{attrs.variant}</Text>
                     </View>
                   )}
-                  {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (
-                    <View style={{ marginTop: 4, paddingTop: 3, borderTopWidth: 1, borderTopColor: '#FDBA74', borderTopStyle: 'dashed' as const }}>
-                      <Text style={{ fontSize: 6, fontFamily: 'Helvetica-Bold', color: '#EA580C', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>Customization</Text>
-                      {item.customization.surfaces.map((surface, si) => (
-                        <View key={si}>
-                          {item.customization!.surfaces.length > 1 && (
-                            <Text style={{ fontSize: 6, color: '#F97316', fontFamily: 'Helvetica-Bold' }}>{surface.label}</Text>
-                          )}
-                          {Object.entries(surface.options).map(([key, value]) => (
-                            <View key={key} style={styles.attrRow}>
-                              <Text style={{ fontSize: 6, color: '#FB923C', textTransform: 'uppercase', width: 45 }}>{key}:</Text>
-                              <Text style={styles.attrValue}>{value}</Text>
-                            </View>
-                          ))}
-                        </View>
-                      ))}
-                    </View>
-                  )}
+                  {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (() => {
+                    const METADATA_KEYS = new Set(['ASIN', 'asin', 'TITLE', 'title', 'ORDERID', 'orderId', 'OrderId', 'QUANTITY', 'quantity', 'Quantity', 'MERCHANTID', 'merchantId', 'MerchantId', 'ORDERITEMID', 'orderItemId', 'OrderItemId', 'MARKETPLACEID', 'marketplaceId', 'MarketplaceId', 'SKU', 'sku', 'FNSKU', 'fnsku', 'version', 'customizationId'])
+                    const filteredSurfaces = item.customization!.surfaces.map(s => ({
+                      ...s,
+                      options: Object.fromEntries(Object.entries(s.options).filter(([k]) => !METADATA_KEYS.has(k)))
+                    })).filter(s => Object.keys(s.options).length > 0)
+                    if (filteredSurfaces.length === 0) return null
+                    return (
+                      <View style={{ marginTop: 4, paddingTop: 3, borderTopWidth: 1, borderTopColor: '#FDBA74', borderTopStyle: 'dashed' as const }}>
+                        <Text style={{ fontSize: 6, fontFamily: 'Helvetica-Bold', color: '#EA580C', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>Customization</Text>
+                        {filteredSurfaces.map((surface, si) => (
+                          <View key={si}>
+                            {filteredSurfaces.length > 1 && (
+                              <Text style={{ fontSize: 6, color: '#F97316', fontFamily: 'Helvetica-Bold' }}>{surface.label}</Text>
+                            )}
+                            {Object.entries(surface.options).map(([key, value]) => (
+                              <View key={key} style={styles.attrRow}>
+                                <Text style={{ fontSize: 6, color: '#FB923C', textTransform: 'uppercase', width: 45 }}>{key}:</Text>
+                                <Text style={styles.attrValue}>{value}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        ))}
+                      </View>
+                    )
+                  })()}
                 </View>
               </View>
             )

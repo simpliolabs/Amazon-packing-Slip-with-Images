@@ -390,11 +390,22 @@ function parseCustomizationJson(
     }
   }
 
+  // Metadata keys that should never appear in customization display
+  const METADATA_KEYS = new Set([
+    'version', 'customizationId', 'ASIN', 'asin',
+    'TITLE', 'title', 'ORDERID', 'orderId', 'OrderId',
+    'QUANTITY', 'quantity', 'Quantity',
+    'MERCHANTID', 'merchantId', 'MerchantId',
+    'ORDERITEMID', 'orderItemId', 'OrderItemId',
+    'MARKETPLACEID', 'marketplaceId', 'MarketplaceId',
+    'SKU', 'sku', 'FNSKU', 'fnsku',
+  ])
+
   // Format 2: Flat key-value pairs
   if (surfaces.length === 0) {
     const options: Record<string, string> = {}
     for (const [key, value] of Object.entries(data)) {
-      if (key === 'version' || key === 'customizationId') continue
+      if (METADATA_KEYS.has(key)) continue
       if (typeof value === 'string' || typeof value === 'number') {
         options[key] = String(value)
       }

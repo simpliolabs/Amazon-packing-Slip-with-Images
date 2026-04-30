@@ -698,24 +698,32 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
                             {attrs.variant && (
                               <p className="text-xs"><span className="text-gray-400 uppercase text-[10px]">Team: </span><span className="font-semibold text-gray-900">{attrs.variant}</span></p>
                             )}
-                            {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (
-                              <div className="mt-1.5 pt-1.5 border-t border-dashed border-orange-300">
-                                <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wide mb-0.5">Customization</p>
-                                {item.customization.surfaces.map((surface, si) => (
-                                  <div key={si}>
-                                    {item.customization!.surfaces.length > 1 && (
-                                      <p className="text-[10px] text-orange-500 font-semibold">{surface.label}</p>
-                                    )}
-                                    {Object.entries(surface.options).map(([key, value]) => (
-                                      <p key={key} className="text-xs">
-                                        <span className="text-orange-400 uppercase text-[10px]">{key}: </span>
-                                        <span className="font-semibold text-gray-900">{value}</span>
-                                      </p>
-                                    ))}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
+                            {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (() => {
+                              const METADATA_KEYS = new Set(['ASIN', 'asin', 'TITLE', 'title', 'ORDERID', 'orderId', 'OrderId', 'QUANTITY', 'quantity', 'Quantity', 'MERCHANTID', 'merchantId', 'MerchantId', 'ORDERITEMID', 'orderItemId', 'OrderItemId', 'MARKETPLACEID', 'marketplaceId', 'MarketplaceId', 'SKU', 'sku', 'FNSKU', 'fnsku', 'version', 'customizationId'])
+                              const filteredSurfaces = item.customization!.surfaces.map(s => ({
+                                ...s,
+                                options: Object.fromEntries(Object.entries(s.options).filter(([k]) => !METADATA_KEYS.has(k)))
+                              })).filter(s => Object.keys(s.options).length > 0)
+                              if (filteredSurfaces.length === 0) return null
+                              return (
+                                <div className="mt-1.5 pt-1.5 border-t border-dashed border-orange-300">
+                                  <p className="text-[10px] font-bold text-orange-600 uppercase tracking-wide mb-0.5">Customization</p>
+                                  {filteredSurfaces.map((surface, si) => (
+                                    <div key={si}>
+                                      {filteredSurfaces.length > 1 && (
+                                        <p className="text-[10px] text-orange-500 font-semibold">{surface.label}</p>
+                                      )}
+                                      {Object.entries(surface.options).map(([key, value]) => (
+                                        <p key={key} className="text-xs">
+                                          <span className="text-orange-400 uppercase text-[10px]">{key}: </span>
+                                          <span className="font-semibold text-gray-900">{value}</span>
+                                        </p>
+                                      ))}
+                                    </div>
+                                  ))}
+                                </div>
+                              )
+                            })()}
                           </div>
                         </td>
                       </tr>

@@ -12,7 +12,7 @@ import {
   Calendar,
 } from 'lucide-react'
 import { formatDate, getStatusColor, getTotalItems, cn } from '@/lib/utils'
-import type { Order } from '@/types/database'
+import type { Order, OrderItem, ShipTo } from '@/types/database'
 import PackingSlipModal from '@/components/pdf/PackingSlipModal'
 
 interface OrdersTableProps {
@@ -169,6 +169,21 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
   const getItemCount = (order: Order) => {
     const items = Array.isArray(order.order_items) ? order.order_items : []
     return getTotalItems(items as Array<{ qty: number }>)
+  }
+
+  const getCustomerName = (order: Order): string => {
+    if (order.buyer_name) return order.buyer_name
+    if (order.ship_to && typeof order.ship_to === 'object' && 'name' in order.ship_to) {
+      return (order.ship_to as ShipTo).name || '—'
+    }
+    return '—'
+  }
+
+  const hasCustomization = (order: Order): boolean => {
+    const items = Array.isArray(order.order_items) ? order.order_items : []
+    return items.some((item: OrderItem) => 
+      item.customization && item.customization.surfaces && item.customization.surfaces.length > 0
+    )
   }
 
   return (
@@ -344,13 +359,20 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
                       />
                     </td>
                     <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                      {order.id}
+                      <div className="flex items-center gap-2">
+                        <span>{order.id}</span>
+                        {hasCustomization(order) && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 border border-red-200 uppercase tracking-wide">
+                            Custom
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-500">
                       {formatDate(order.purchase_date)}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-500">
-                      {order.buyer_name || '—'}
+                      {getCustomerName(order)}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-500 text-center">
                       {getItemCount(order)}
