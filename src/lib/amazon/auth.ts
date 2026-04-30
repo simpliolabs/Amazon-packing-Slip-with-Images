@@ -120,32 +120,49 @@ export async function getAccessToken(): Promise<string> {
 export async function getRestrictedDataToken(
   restrictedResources: Array<{ method: string; path: string; dataElements?: string[] }>
 ): Promise<string | null> {
-  try {
-    const accessToken = await getAccessToken()
-    const endpoint = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
+  const MAX_RETRIES = 3
+  const endpoint = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
 
-    const response = await fetch(`${endpoint}/tokens/2021-03-01/restrictedDataToken`, {
-      method: 'POST',
-      headers: {
-        'x-amz-access-token': accessToken,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({ restrictedResources }),
-    })
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const accessToken = await getAccessToken()
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.warn(`RDT request failed (${response.status}): ${errorText}`)
-      return null
+      const response = await fetch(`${endpoint}/tokens/2021-03-01/restrictedDataToken`, {
+        method: 'POST',
+        headers: {
+          'x-amz-access-token': accessToken,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ restrictedResources }),
+      })
+
+      if (response.status === 429) {
+        // Rate limited - wait with exponential backoff then retry
+        const waitTime = Math.pow(2, attempt + 1) * 1000 // 2s, 4s, 8s
+        console.warn(`RDT rate limited (429), retrying in ${waitTime}ms (attempt ${attempt + 1}/${MAX_RETRIES})`)
+        await new Promise(resolve => setTimeout(resolve, waitTime))
+        continue
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.warn(`RDT request failed (${response.status}): ${errorText}`)
+        return null
+      }
+
+      const data = await response.json()
+      return data.restrictedDataToken || null
+    } catch (err) {
+      console.warn(`Failed to get RDT (attempt ${attempt + 1}/${MAX_RETRIES}):`, err)
+      if (attempt < MAX_RETRIES - 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
     }
-
-    const data = await response.json()
-    return data.restrictedDataToken || null
-  } catch (err) {
-    console.warn('Failed to get RDT:', err)
-    return null
   }
+
+  console.warn('RDT request failed after all retries')
+  return null
 }
 
 /**

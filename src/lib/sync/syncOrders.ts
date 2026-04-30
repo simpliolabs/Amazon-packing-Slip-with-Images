@@ -478,14 +478,21 @@ export async function syncOrders(): Promise<SyncResult> {
 
       if (ordersNeedingPII) {
         let piiBackfillCount = 0
-        const MAX_PII_BACKFILL = 10
+        const MAX_PII_BACKFILL = 5
 
         for (const order of ordersNeedingPII) {
           if (piiBackfillCount >= MAX_PII_BACKFILL) break
 
           try {
+            // Throttle: wait 2 seconds between orders to avoid SP-API rate limits (429)
+            if (piiBackfillCount > 0) {
+              await new Promise(resolve => setTimeout(resolve, 2000))
+            }
+
             // Fetch full address via RDT
             const rdtAddress = await fetchOrderAddress(order.id)
+            // Wait 1 second between RDT calls for the same order
+            await new Promise(resolve => setTimeout(resolve, 1000))
             const rdtBuyer = await fetchOrderBuyerInfo(order.id)
 
             // Only count as a backfill if we actually got data
