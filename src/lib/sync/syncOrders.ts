@@ -464,6 +464,81 @@ export async function syncOrders(): Promise<SyncResult> {
       console.warn('[Customization Backfill] Error during backfill:', custBackfillError)
     }
 
+    // ── PII Backfill (Address & Buyer Name) ───────────────────────────
+    // For existing orders that were synced before PII access was approved,
+    // re-fetch shipping address and buyer info via RDT.
+    // Process up to 10 orders per sync to stay within rate limits.
+    try {
+      const { data: ordersNeedingPII } = await supabase
+        .from('orders')
+        .select('id, ship_to, buyer_name')
+        .or('ship_to.is.null,buyer_name.is.null')
+        .order('created_at', { ascending: false })
+        .limit(50)
+
+      if (ordersNeedingPII) {
+        let piiBackfillCount = 0
+        const MAX_PII_BACKFILL = 10
+
+        for (const order of ordersNeedingPII) {
+          if (piiBackfillCount >= MAX_PII_BACKFILL) break
+
+          try {
+            // Fetch full address via RDT
+            const rdtAddress = await fetchOrderAddress(order.id)
+            const rdtBuyer = await fetchOrderBuyerInfo(order.id)
+
+            // Only count as a backfill if we actually got data
+            if (!rdtAddress && !rdtBuyer) {
+              // RDT still not working for this order, skip
+              continue
+            }
+
+            const updateData: Record<string, unknown> = {}
+
+            if (rdtAddress) {
+              const shipTo: ShipTo = {
+                name: rdtAddress.Name || rdtBuyer?.BuyerName || 'Customer',
+                addressLine1: rdtAddress.AddressLine1 || '',
+                addressLine2: rdtAddress.AddressLine2,
+                city: rdtAddress.City || '',
+                stateOrRegion: rdtAddress.StateOrRegion || '',
+                postalCode: rdtAddress.PostalCode || '',
+                countryCode: rdtAddress.CountryCode || 'US',
+                phone: rdtAddress.Phone || undefined,
+              }
+              updateData.ship_to = shipTo
+            }
+
+            if (rdtBuyer?.BuyerName) {
+              updateData.buyer_name = rdtBuyer.BuyerName
+            }
+            if (rdtBuyer?.BuyerEmail) {
+              updateData.buyer_email = rdtBuyer.BuyerEmail
+            }
+
+            if (Object.keys(updateData).length > 0) {
+              await supabase
+                .from('orders')
+                .update(updateData)
+                .eq('id', order.id)
+
+              piiBackfillCount++
+              console.log(`[PII Backfill] Updated ${order.id} (${piiBackfillCount}/${MAX_PII_BACKFILL})`)
+            }
+          } catch (err) {
+            console.warn(`[PII Backfill] Failed for ${order.id}:`, err)
+          }
+        }
+
+        if (piiBackfillCount > 0) {
+          console.log(`[PII Backfill] Completed ${piiBackfillCount} orders`)
+        }
+      }
+    } catch (piiBackfillError) {
+      console.warn('[PII Backfill] Error during backfill:', piiBackfillError)
+    }
+
     // Update sync log as success
     if (syncLogId) {
       await supabase
