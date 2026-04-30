@@ -380,6 +380,8 @@ export async function syncOrders(): Promise<SyncResult> {
     // BuyerCustomizedInfo. Items checked and found to have no customization
     // get marked with customization_checked = 2 (v2 = correct endpoint).
     // Items with customization_checked = true (v1 = wrong endpoint) get re-checked.
+    // Also re-check items with personalized SKUs (containing "Custom") that were
+    // previously checked but had no customization (pre-RDT-approval scenario).
     // Process up to 10 RDT calls per sync to avoid long sync times.
     try {
       const { data: ordersNeedingCustomization } = await supabase
@@ -393,16 +395,27 @@ export async function syncOrders(): Promise<SyncResult> {
         let custApiCalls = 0
         const MAX_CUST_API_CALLS = 10
 
+        // SKU patterns that indicate a personalized/custom product
+        const isPersonalizedSku = (sku: string) => {
+          const lower = sku.toLowerCase()
+          return lower.includes('custom') || lower.includes('personali')
+        }
+
         for (const order of ordersNeedingCustomization) {
           if (custApiCalls >= MAX_CUST_API_CALLS) break
 
           const items = order.order_items as (OrderItem & { customization_checked?: boolean | number })[]
           if (!items || items.length === 0) continue
 
-          // Skip if all items already have customization or have been checked with v2 endpoint
-          // Re-check items that were checked with v1 (customization_checked === true)
+          // Check if any item needs customization fetch:
+          // 1. Not yet checked (no customization and not checked with v2)
+          // 2. Previously checked with v1 (customization_checked === true)
+          // 3. Has a personalized SKU but no customization (pre-RDT-approval re-check)
           const needsCheck = items.some(
-            (item) => !item.customization && item.customization_checked !== 2
+            (item) => (
+              (!item.customization && item.customization_checked !== 2) ||
+              (!item.customization && item.customization_checked === 2 && isPersonalizedSku(item.sku || ''))
+            )
           )
           if (!needsCheck) continue
 
@@ -413,7 +426,10 @@ export async function syncOrders(): Promise<SyncResult> {
             let hasCustomization = false
 
             for (const item of items) {
-              if (item.customization || item.customization_checked === 2) continue
+              // Skip items that already have customization data
+              if (item.customization) continue
+              // Skip items already checked UNLESS they have a personalized SKU (pre-approval re-check)
+              if (item.customization_checked === 2 && !isPersonalizedSku(item.sku || '')) continue
 
               // Find matching fresh item by order_item_id or ASIN
               const freshItem = freshItems.find(
@@ -434,9 +450,11 @@ export async function syncOrders(): Promise<SyncResult> {
                 }
               }
 
-              // Mark as checked with v2 (correct endpoint) so we don't re-check
+              // Mark as checked with v2 — for personalized SKUs that still have no
+              // customization after re-check, upgrade to customization_checked = 3
+              // ("re-checked after approval, confirmed no customization")
               if (!item.customization) {
-                item.customization_checked = 2
+                item.customization_checked = isPersonalizedSku(item.sku || '') ? 3 : 2
               }
             }
 

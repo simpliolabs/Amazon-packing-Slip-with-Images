@@ -13,6 +13,7 @@ import {
   Key,
   ShieldCheck,
   AlertTriangle,
+  ExternalLink,
 } from 'lucide-react'
 
 interface SettingsPanelProps {
@@ -419,6 +420,42 @@ export default function SettingsPanel({
         {!amazonConnected && (
           <p className="text-xs text-gray-400 mt-2">Save your Amazon credentials above to enable syncing.</p>
         )}
+      </div>
+
+      {/* App Source — Amazon Solution Provider Portal */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
+        <div className="flex items-start justify-between mb-3">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900 mb-1">App Source</h2>
+            <p className="text-xs text-gray-500">
+              This application is registered and managed through the Amazon Solution Provider Portal.
+            </p>
+          </div>
+        </div>
+
+        <a
+          href="https://solutionproviderportal.amazon.com/home"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#232F3E] hover:bg-[#37475A] text-white text-xs font-medium rounded-lg transition-colors"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M21.996 18.23c0 .08-.09.13-.16.09C20.06 17.16 14.53 14.85 12 14.85s-8.06 2.31-9.836 3.47c-.07.04-.164-.01-.164-.09V5.77c0-.08.09-.13.16-.09C3.94 6.84 9.47 9.15 12 9.15s8.06-2.31 9.836-3.47c.07-.04.16.01.16.09v12.46z" fill="#FF9900"/>
+          </svg>
+          Amazon Solution Provider Portal
+          <ExternalLink size={12} />
+        </a>
+
+        <div className="mt-3 space-y-1.5 text-xs text-gray-500">
+          <p className="flex items-center gap-2">
+            <Info size={12} className="text-[#2E9CE6] flex-shrink-0" />
+            Manage app permissions, RDT access, and API scopes
+          </p>
+          <p className="flex items-center gap-2">
+            <Info size={12} className="text-[#2E9CE6] flex-shrink-0" />
+            View app authorization status and buyer data access
+          </p>
+        </div>
       </div>
 
       {/* Security Compliance Status */}
