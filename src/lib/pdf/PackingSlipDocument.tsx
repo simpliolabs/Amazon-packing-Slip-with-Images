@@ -737,6 +737,7 @@ export default function PackingSlipDocument({
   }
 
   const totalQty = items.reduce((s, i) => s + i.qty, 0)
+  const orderHasCustomization = items.some(i => i.customization && i.customization.surfaces && i.customization.surfaces.length > 0)
 
   return (
     <Document
@@ -757,7 +758,12 @@ export default function PackingSlipDocument({
         <View style={styles.infoRow}>
           <View style={styles.infoBox}>
             <Text style={styles.infoLabel}>Order Number</Text>
-            <Text style={styles.infoValue}>{order.id}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <Text style={styles.infoValue}>{order.id}</Text>
+              {orderHasCustomization && (
+                <Text style={{ fontSize: 6, fontFamily: 'Helvetica-Bold', color: '#FFFFFF', backgroundColor: '#DC2626', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2, textTransform: 'uppercase', letterSpacing: 0.5 }}>CUSTOM</Text>
+              )}
+            </View>
           </View>
           <View style={styles.infoBox}>
             <Text style={styles.infoLabel}>Order Date</Text>
@@ -866,10 +872,69 @@ export default function PackingSlipDocument({
                   )}
                   {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (() => {
                     const METADATA_KEYS = new Set(['ASIN', 'asin', 'TITLE', 'title', 'ORDERID', 'orderId', 'OrderId', 'QUANTITY', 'quantity', 'Quantity', 'MERCHANTID', 'merchantId', 'MerchantId', 'ORDERITEMID', 'orderItemId', 'OrderItemId', 'MARKETPLACEID', 'marketplaceId', 'MarketplaceId', 'SKU', 'sku', 'FNSKU', 'fnsku', 'version', 'customizationId'])
-                    const filteredSurfaces = item.customization!.surfaces.map(s => ({
+                    let filteredSurfaces = item.customization!.surfaces.map(s => ({
                       ...s,
                       options: Object.fromEntries(Object.entries(s.options).filter(([k]) => !METADATA_KEYS.has(k)))
                     })).filter(s => Object.keys(s.options).length > 0)
+
+                    // If filtered surfaces are empty but raw data exists, re-parse from raw
+                    if (filteredSurfaces.length === 0 && item.customization!.raw) {
+                      const raw = item.customization!.raw as Record<string, unknown>
+                      const v3 = raw['version3.0'] as Record<string, unknown> | undefined
+                      const custInfo = v3?.customizationInfo as Record<string, unknown> | undefined
+                      const v3Surfaces = custInfo?.surfaces as Array<Record<string, unknown>> | undefined
+                      if (Array.isArray(v3Surfaces)) {
+                        for (const surface of v3Surfaces) {
+                          const options: Record<string, string> = {}
+                          const areas = (surface.areas || []) as Array<Record<string, unknown>>
+                          for (const area of areas) {
+                            const label = String(area.label || area.name || '')
+                            const text = area.text ? String(area.text) : ''
+                            const fontFamily = area.fontFamily ? String(area.fontFamily) : ''
+                            const colorName = area.colorName ? String(area.colorName) : ''
+                            const fill = area.fill ? String(area.fill) : ''
+                            if (label && text) options[label] = text
+                            if (fontFamily && !options['Font Text']) options['Font Text'] = fontFamily
+                            if ((colorName || fill) && !options['Text Color']) {
+                              options['Text Color'] = colorName && fill ? `${colorName} (${fill})` : (colorName || fill)
+                            }
+                          }
+                          if (Object.keys(options).length > 0) {
+                            filteredSurfaces.push({ label: String(surface.name || 'Surface 1'), options })
+                          }
+                        }
+                      }
+                      if (filteredSurfaces.length === 0 && raw.customizationData) {
+                        const custData = raw.customizationData as Record<string, unknown>
+                        const children = custData.children as Array<Record<string, unknown>> | undefined
+                        if (Array.isArray(children)) {
+                          for (const surfaceNode of children) {
+                            if (surfaceNode.type !== 'PreviewContainerCustomization') continue
+                            const options: Record<string, string> = {}
+                            const extractFromTree = (node: Record<string, unknown>) => {
+                              const nType = String(node.type || '')
+                              const nLabel = String(node.label || node.name || '')
+                              if (nType === 'TextCustomization' && node.inputValue) options[nLabel || 'Text'] = String(node.inputValue)
+                              else if (nType === 'FontCustomization' && node.fontSelection) {
+                                const f = node.fontSelection as Record<string, unknown>
+                                options[nLabel || 'Font Text'] = String(f.family || '')
+                              } else if (nType === 'ColorCustomization' && node.colorSelection) {
+                                const c = node.colorSelection as Record<string, unknown>
+                                options[nLabel || 'Text Color'] = c.name && c.value ? `${c.name} (${c.value})` : String(c.name || c.value || '')
+                              }
+                              if (Array.isArray(node.children)) {
+                                for (const child of node.children as Array<Record<string, unknown>>) extractFromTree(child)
+                              }
+                            }
+                            extractFromTree(surfaceNode)
+                            if (Object.keys(options).length > 0) {
+                              filteredSurfaces.push({ label: String(surfaceNode.label || surfaceNode.name || 'Surface 1'), options })
+                            }
+                          }
+                        }
+                      }
+                    }
+
                     if (filteredSurfaces.length === 0) return null
                     return (
                       <View style={{ marginTop: 4, paddingTop: 3, borderTopWidth: 1, borderTopColor: '#FDBA74', borderTopStyle: 'dashed' as const }}>

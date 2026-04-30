@@ -525,6 +525,7 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
   const shipTo = order.ship_to as ShipTo | null
   const visibleItems = items.filter(i => i.qty > 0)
   const totalQty = visibleItems.reduce((s, i) => s + i.qty, 0)
+  const orderHasCustomization = items.some(i => i.customization && i.customization.surfaces && i.customization.surfaces.length > 0)
 
   const shipBy = order.raw_data &&
     typeof order.raw_data === 'object' &&
@@ -605,7 +606,12 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
             <div className="grid grid-cols-2 gap-3 mb-4">
               <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
                 <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Order Number</p>
-                <p className="text-sm font-bold font-mono text-gray-900 break-all">{order.id}</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-bold font-mono text-gray-900 break-all">{order.id}</p>
+                  {orderHasCustomization && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-red-600 text-white uppercase tracking-wide shadow-sm">Custom</span>
+                  )}
+                </div>
               </div>
               <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
                 <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Order Date</p>
@@ -700,10 +706,71 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
                             )}
                             {item.customization && item.customization.surfaces && item.customization.surfaces.length > 0 && (() => {
                               const METADATA_KEYS = new Set(['ASIN', 'asin', 'TITLE', 'title', 'ORDERID', 'orderId', 'OrderId', 'QUANTITY', 'quantity', 'Quantity', 'MERCHANTID', 'merchantId', 'MerchantId', 'ORDERITEMID', 'orderItemId', 'OrderItemId', 'MARKETPLACEID', 'marketplaceId', 'MarketplaceId', 'SKU', 'sku', 'FNSKU', 'fnsku', 'version', 'customizationId'])
-                              const filteredSurfaces = item.customization!.surfaces.map(s => ({
+                              let filteredSurfaces = item.customization!.surfaces.map(s => ({
                                 ...s,
                                 options: Object.fromEntries(Object.entries(s.options).filter(([k]) => !METADATA_KEYS.has(k)))
                               })).filter(s => Object.keys(s.options).length > 0)
+
+                              // If filtered surfaces are empty but raw data exists, re-parse from raw
+                              if (filteredSurfaces.length === 0 && item.customization!.raw) {
+                                const raw = item.customization!.raw as Record<string, unknown>
+                                // Try version3.0 format
+                                const v3 = raw['version3.0'] as Record<string, unknown> | undefined
+                                const custInfo = v3?.customizationInfo as Record<string, unknown> | undefined
+                                const v3Surfaces = custInfo?.surfaces as Array<Record<string, unknown>> | undefined
+                                if (Array.isArray(v3Surfaces)) {
+                                  for (const surface of v3Surfaces) {
+                                    const options: Record<string, string> = {}
+                                    const areas = (surface.areas || []) as Array<Record<string, unknown>>
+                                    for (const area of areas) {
+                                      const label = String(area.label || area.name || '')
+                                      const text = area.text ? String(area.text) : ''
+                                      const fontFamily = area.fontFamily ? String(area.fontFamily) : ''
+                                      const colorName = area.colorName ? String(area.colorName) : ''
+                                      const fill = area.fill ? String(area.fill) : ''
+                                      if (label && text) options[label] = text
+                                      if (fontFamily && !options['Font Text']) options['Font Text'] = fontFamily
+                                      if ((colorName || fill) && !options['Text Color']) {
+                                        options['Text Color'] = colorName && fill ? `${colorName} (${fill})` : (colorName || fill)
+                                      }
+                                    }
+                                    if (Object.keys(options).length > 0) {
+                                      filteredSurfaces.push({ label: String(surface.name || 'Surface 1'), options })
+                                    }
+                                  }
+                                }
+                                // Try customizationData tree format
+                                if (filteredSurfaces.length === 0 && raw.customizationData) {
+                                  const custData = raw.customizationData as Record<string, unknown>
+                                  const children = custData.children as Array<Record<string, unknown>> | undefined
+                                  if (Array.isArray(children)) {
+                                    for (const surfaceNode of children) {
+                                      if (surfaceNode.type !== 'PreviewContainerCustomization') continue
+                                      const options: Record<string, string> = {}
+                                      const extractFromTree = (node: Record<string, unknown>) => {
+                                        const nType = String(node.type || '')
+                                        const nLabel = String(node.label || node.name || '')
+                                        if (nType === 'TextCustomization' && node.inputValue) options[nLabel || 'Text'] = String(node.inputValue)
+                                        else if (nType === 'FontCustomization' && node.fontSelection) {
+                                          const f = node.fontSelection as Record<string, unknown>
+                                          options[nLabel || 'Font Text'] = String(f.family || '')
+                                        } else if (nType === 'ColorCustomization' && node.colorSelection) {
+                                          const c = node.colorSelection as Record<string, unknown>
+                                          options[nLabel || 'Text Color'] = c.name && c.value ? `${c.name} (${c.value})` : String(c.name || c.value || '')
+                                        }
+                                        if (Array.isArray(node.children)) {
+                                          for (const child of node.children as Array<Record<string, unknown>>) extractFromTree(child)
+                                        }
+                                      }
+                                      extractFromTree(surfaceNode)
+                                      if (Object.keys(options).length > 0) {
+                                        filteredSurfaces.push({ label: String(surfaceNode.label || surfaceNode.name || 'Surface 1'), options })
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+
                               if (filteredSurfaces.length === 0) return null
                               return (
                                 <div className="mt-1.5 pt-1.5 border-t border-dashed border-orange-300">

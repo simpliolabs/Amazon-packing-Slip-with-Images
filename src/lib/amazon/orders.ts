@@ -390,6 +390,97 @@ function parseCustomizationJson(
     }
   }
 
+  // Format 1b: { "version3.0": { customizationInfo: { surfaces: [{ name, areas: [...] }] } } }
+  // Amazon's newer format uses "version3.0" as a key name instead of a separate "version" field
+  if (surfaces.length === 0 && data['version3.0']) {
+    const v3 = data['version3.0'] as Record<string, unknown>
+    const custInfo = v3.customizationInfo as Record<string, unknown> | undefined
+    const v3Surfaces = custInfo?.surfaces as Array<Record<string, unknown>> | undefined
+
+    if (Array.isArray(v3Surfaces)) {
+      for (const surface of v3Surfaces) {
+        const options: Record<string, string> = {}
+        const areas = (surface.areas || []) as Array<Record<string, unknown>>
+
+        for (const area of areas) {
+          // Extract label as the key name (e.g. "Write Name", "Write Number")
+          const label = String(area.label || area.name || '')
+          const text = area.text ? String(area.text) : ''
+          const fontFamily = area.fontFamily ? String(area.fontFamily) : ''
+          const colorName = area.colorName ? String(area.colorName) : ''
+          const fill = area.fill ? String(area.fill) : ''
+
+          if (label && text) {
+            options[label] = text
+          }
+          if (fontFamily && !options['Font Text']) {
+            options['Font Text'] = fontFamily
+          }
+          if (colorName || fill) {
+            const colorDisplay = colorName && fill ? `${colorName} (${fill})` : (colorName || fill)
+            if (!options['Text Color']) {
+              options['Text Color'] = colorDisplay
+            }
+          }
+        }
+
+        if (Object.keys(options).length > 0) {
+          surfaces.push({
+            label: String(surface.name || `Surface ${surfaces.length + 1}`),
+            options,
+          })
+        }
+      }
+    }
+  }
+
+  // Format 1c: { customizationData: { children: [{ type: "PreviewContainerCustomization", children: [...] }] } }
+  // Amazon's tree-based customization format
+  if (surfaces.length === 0 && data.customizationData) {
+    const custData = data.customizationData as Record<string, unknown>
+    const children = custData.children as Array<Record<string, unknown>> | undefined
+
+    if (Array.isArray(children)) {
+      for (const surfaceNode of children) {
+        if (surfaceNode.type !== 'PreviewContainerCustomization') continue
+        const options: Record<string, string> = {}
+        const surfaceLabel = String(surfaceNode.label || surfaceNode.name || `Surface ${surfaces.length + 1}`)
+
+        // Recursively extract TextCustomization, FontCustomization, ColorCustomization
+        function extractFromTree(node: Record<string, unknown>) {
+          const nodeType = String(node.type || '')
+          const nodeLabel = String(node.label || node.name || '')
+
+          if (nodeType === 'TextCustomization' && node.inputValue) {
+            options[nodeLabel || 'Text'] = String(node.inputValue)
+          } else if (nodeType === 'FontCustomization' && node.fontSelection) {
+            const font = node.fontSelection as Record<string, unknown>
+            options[nodeLabel || 'Font Text'] = String(font.family || '')
+          } else if (nodeType === 'ColorCustomization' && node.colorSelection) {
+            const color = node.colorSelection as Record<string, unknown>
+            const colorStr = color.name && color.value
+              ? `${color.name} (${color.value})`
+              : String(color.name || color.value || '')
+            options[nodeLabel || 'Text Color'] = colorStr
+          }
+
+          // Recurse into children
+          if (Array.isArray(node.children)) {
+            for (const child of node.children as Array<Record<string, unknown>>) {
+              extractFromTree(child)
+            }
+          }
+        }
+
+        extractFromTree(surfaceNode)
+
+        if (Object.keys(options).length > 0) {
+          surfaces.push({ label: surfaceLabel, options })
+        }
+      }
+    }
+  }
+
   // Metadata keys that should never appear in customization display
   const METADATA_KEYS = new Set([
     'version', 'customizationId', 'ASIN', 'asin',
@@ -399,9 +490,10 @@ function parseCustomizationJson(
     'ORDERITEMID', 'orderItemId', 'OrderItemId',
     'MARKETPLACEID', 'marketplaceId', 'MarketplaceId',
     'SKU', 'sku', 'FNSKU', 'fnsku',
+    'vendorCode', 'customizationData', 'version3.0',
   ])
 
-  // Format 2: Flat key-value pairs
+  // Format 2: Flat key-value pairs (last resort)
   if (surfaces.length === 0) {
     const options: Record<string, string> = {}
     for (const [key, value] of Object.entries(data)) {
