@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { X, Printer, ChevronUp, ChevronDown } from 'lucide-react'
 import type { Order, OrderItem, ShipTo, CustomizationData } from '@/types/database'
-import { formatDate, formatDateShort } from '@/lib/utils'
+import { formatDate, formatDateShort, formatShipDate } from '@/lib/utils'
 
 // ─── Attribute parser (mirrors PackingSlipDocument logic) ────────────────────
 const SIZES = [
@@ -531,7 +531,7 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
     typeof order.raw_data === 'object' &&
     !Array.isArray(order.raw_data) &&
     'LatestShipDate' in order.raw_data
-    ? formatDateShort(String((order.raw_data as Record<string, unknown>).LatestShipDate))
+    ? formatShipDate(String((order.raw_data as Record<string, unknown>).LatestShipDate))
     : null
 
   return (

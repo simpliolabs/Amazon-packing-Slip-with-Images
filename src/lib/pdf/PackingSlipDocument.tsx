@@ -9,7 +9,7 @@ import {
   StyleSheet,
 } from '@react-pdf/renderer'
 import type { Order, OrderItem, ShipTo, CustomizationData } from '@/types/database'
-import { formatDateShort } from '@/lib/utils'
+import { formatDateShort, formatShipDate } from '@/lib/utils'
 
 // Brand colors
 const BRAND_BLUE = '#2E9CE6'
@@ -787,7 +787,7 @@ export default function PackingSlipDocument({
             <Text style={styles.infoLabel}>Ship By</Text>
             <Text style={styles.infoValueRed}>
               {order.raw_data && typeof order.raw_data === 'object' && !Array.isArray(order.raw_data) && 'LatestShipDate' in order.raw_data
-                ? formatDateShort(String((order.raw_data as Record<string, unknown>).LatestShipDate))
+                ? formatShipDate(String((order.raw_data as Record<string, unknown>).LatestShipDate))
                 : '—'}
             </Text>
             <Text style={[styles.infoLabel, { marginTop: 7 }]}>Total Items</Text>

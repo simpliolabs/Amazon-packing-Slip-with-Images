@@ -23,6 +23,21 @@ export function formatDateShort(dateString: string): string {
   })
 }
 
+/**
+ * Format a ship-by date from Amazon's UTC timestamp to the seller's timezone.
+ * Amazon's LatestShipDate is always in UTC (e.g., 2026-05-02T06:59:59Z means
+ * May 1, 11:59 PM PDT). We convert to America/Los_Angeles to match what
+ * Seller Central displays.
+ */
+export function formatShipDate(dateString: string): string {
+  return new Date(dateString).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'America/Los_Angeles',
+  })
+}
+
 export function getStatusColor(status: string): string {
   const statusMap: Record<string, string> = {
     Unshipped: 'bg-yellow-100 text-yellow-800 border-yellow-200',
