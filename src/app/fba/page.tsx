@@ -87,7 +87,7 @@ const STATUS_CONFIG: Record<ReplenishmentStatus, { label: string; color: string;
   watch:         { label: 'Monitor',               color: 'text-yellow-700', bg: 'bg-yellow-100', border: 'border-yellow-300' },
   healthy:       { label: 'FBA Covered',           color: 'text-green-700',  bg: 'bg-green-100',  border: 'border-green-300' },
   overstocked:   { label: 'Pause Shipments',       color: 'text-purple-700', bg: 'bg-purple-100', border: 'border-purple-300' },
-  no_data:       { label: 'Sync Required',         color: 'text-gray-500',   bg: 'bg-gray-100',   border: 'border-gray-200' },
+  no_data:       { label: 'No Data',              color: 'text-gray-500',   bg: 'bg-gray-100',   border: 'border-gray-200' },
 }
 
 const URGENCY_CONFIG = {
@@ -589,7 +589,7 @@ export default function FBAIntelligencePage() {
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBM 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Avail.</th>
-                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Inbound</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">On Way</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Sold 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Wks Cover</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Send Qty</th>
@@ -603,11 +603,11 @@ export default function FBAIntelligencePage() {
                         <tr key={rec.asin} className="hover:bg-gray-50 transition-colors">
                           <td className="px-4 py-3">
                             <div className="font-medium text-gray-900 text-xs leading-tight max-w-xs truncate">{rec.title}</div>
-                            <div className="flex items-center gap-2 mt-0.5">
+                            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                               <span className="text-xs text-gray-400 font-mono">{rec.asin}</span>
                               {rec.sku && <span className="text-xs text-gray-400">· {rec.sku}</span>}
-                              {rec.fba_asin && rec.fba_asin !== rec.asin && (
-                                <span className="text-xs text-blue-400">FBA: {rec.fba_asin}</span>
+                              {rec.fba_sku && rec.fba_sku !== rec.sku && (
+                                <span className="text-xs text-blue-500 font-mono">FBA: {rec.fba_sku}</span>
                               )}
                               {rec.has_customization && (
                                 <span className="px-1.5 py-0.5 text-xs font-bold bg-red-100 text-red-700 rounded">CUSTOM</span>

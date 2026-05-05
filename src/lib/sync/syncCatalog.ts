@@ -3,10 +3,10 @@
  *
  * Strategy:
  * 1. Extract unique ASINs from the orders table (only products we actually sell)
- * 2. Fetch FBA inventory ONLY for those ASINs (targeted, not full catalog)
- * 3. Fetch Sales & Traffic Report for FBA sales data
- * 4. Fetch Inventory Health Report for excess/storage data
- * 5. Store results in Supabase for the replenishment engine
+ * 2. Fetch ALL FBA inventory (SP-API doesn't support ASIN filtering on summaries)
+ * 3. Store only the ASINs we care about — keyed by (asin, sku)
+ * 4. Fetch Sales & Traffic Report for FBA sales data — UPDATE only, never INSERT
+ * 5. Fetch Inventory Health Report for excess/storage data
  */
 
 import { createClient } from '@supabase/supabase-js'
@@ -35,12 +35,7 @@ export interface SyncCatalogResult {
 }
 
 /**
- * Orders-driven FBA sync:
- * - Extracts unique ASINs from orders table
- * - Fetches FBA inventory for only those ASINs
- * - Fetches Sales & Traffic Report for FBA sales data
- * - Fetches Inventory Health Report for excess/storage data
- * - Stores results in Supabase
+ * Orders-driven FBA sync.
  */
 export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
   const start = Date.now()
@@ -76,28 +71,36 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     return { asinsFromOrders: 0, inventoryUpserted: 0, salesReportAsins: 0, excessItemsFound: 0, errors, durationMs: Date.now() - start }
   }
 
-  // ── 2. Fetch FBA inventory for those ASINs ──────────────────────────────
+  // ── 2. Fetch FBA inventory ──────────────────────────────────────────────
+  // The SP-API summaries endpoint returns ALL inventory — we filter to our ASINs
+  // inside fetchFBAInventoryForAsins. It also returns FBA-SKU variants (e.g. -FBA suffix)
+  // that share the same ASIN as the FBM listing.
   let inventory: FBAInventoryItem[] = []
   try {
     inventory = await fetchFBAInventoryForAsins(asins)
+    console.log(`[FBA Sync] Fetched ${inventory.length} FBA inventory records`)
   } catch (err) {
     errors.push(`FBA inventory fetch failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   // ── 3. Upsert fba_inventory ─────────────────────────────────────────────
+  // Key insight: store each (asin, sku) row separately.
+  // The replenishment engine will find FBA rows by ASIN, including -FBA SKU variants.
   if (inventory.length > 0) {
-    const invRows = inventory.map(i => ({
+    const now = new Date().toISOString()
+    const invRows = inventory.map((i: FBAInventoryItem) => ({
       asin: i.asin,
-      sku: i.sku,
-      fnsku: i.fnsku,
-      condition_type: i.condition_type,
-      quantity_available: i.quantity_available,
-      quantity_reserved: i.quantity_reserved,
-      quantity_inbound: i.quantity_inbound,
-      quantity_total: i.quantity_total,
-      last_synced_at: new Date().toISOString(),
+      sku: i.sku || '',
+      fnsku: i.fnsku || null,
+      condition_type: i.condition_type || 'NewItem',
+      quantity_available: i.quantity_available || 0,
+      quantity_reserved: i.quantity_reserved || 0,
+      quantity_inbound: i.quantity_inbound || 0,
+      quantity_total: i.quantity_total || 0,
+      last_synced_at: now,
     }))
 
+    // Upsert in batches of 100
     for (let i = 0; i < invRows.length; i += 100) {
       const chunk = invRows.slice(i, i + 100)
       const { error } = await supabase
@@ -105,34 +108,41 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
         .upsert(chunk, { onConflict: 'asin,sku' })
 
       if (error) {
-        errors.push(`Inventory upsert error: ${error.message}`)
+        errors.push(`Inventory upsert error (batch ${i}): ${error.message}`)
       } else {
         inventoryUpserted += chunk.length
       }
     }
+    console.log(`[FBA Sync] Upserted ${inventoryUpserted} inventory records`)
   }
 
   // ── 4. Fetch Sales & Traffic Report ────────────────────────────────────
+  // IMPORTANT: We UPDATE existing rows only — never INSERT new rows from this report.
+  // This prevents the Sales & Traffic report from creating ghost rows with blank SKUs
+  // that corrupt the inventory data.
   try {
     const salesMap = await fetchSalesAndTrafficReport(asins)
     salesReportAsins = salesMap.size
+    console.log(`[FBA Sync] Sales & Traffic Report: ${salesReportAsins} ASINs`)
 
     if (salesMap.size > 0) {
       for (const [asin, salesData] of salesMap) {
-        await supabase
+        // Only UPDATE rows that already exist — use a targeted update by ASIN
+        // This avoids creating phantom rows with empty SKUs
+        const { error } = await supabase
           .from('fba_inventory')
-          .upsert({
-            asin,
-            sku: '',
-            quantity_available: 0,
-            quantity_reserved: 0,
-            quantity_inbound: 0,
-            quantity_total: 0,
+          .update({
             units_sold_30d: salesData.units_ordered_fba,
             buy_box_percentage: salesData.buy_box_percentage,
             sessions_30d: salesData.sessions,
-            last_synced_at: new Date().toISOString(),
-          }, { onConflict: 'asin,sku', ignoreDuplicates: false })
+          })
+          .eq('asin', asin)
+          // Only update the primary FBA row (not the empty-SKU ghost)
+          .neq('sku', '')
+
+        if (error && !error.message.includes('column') && !error.message.includes('does not exist')) {
+          errors.push(`Sales data update for ${asin}: ${error.message}`)
+        }
       }
     }
   } catch (err) {
@@ -144,9 +154,7 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     const healthMap = await fetchInventoryHealthReport()
 
     if (healthMap.size > 0) {
-      // Compute FBM velocity for context in AI plans
       const velocityMap = await computeFBMVelocity()
-
       const now = new Date().toISOString()
       const excessItems = Array.from(healthMap.values()).filter(item => item.is_excess)
       excessItemsFound = excessItems.length
@@ -179,8 +187,6 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
           amazon_recommended_action: item.recommended_action,
           amazon_alert: item.alert,
           last_synced_at: now,
-          // Only update status to 'active' if it was previously 'dismissed' or doesn't exist
-          // Don't overwrite 'actioned' or 'resolved' statuses
           ...((!existing || existing.status === 'dismissed') ? { status: 'active' } : {}),
         }
 
@@ -193,20 +199,13 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
         }
       }
 
-      // Create notification for new excess items detected
+      // Notify about excess items
       if (excessItems.length > 0) {
-        const newExcessCount = excessItems.filter(item => {
-          // Count items that don't have an existing active record
-          return true // We'll refine this — for now notify on every sync
-        }).length
-
-        if (newExcessCount > 0) {
-          await supabase.from('fba_notifications').insert({
-            type: 'excess_detected',
-            title: `${excessItems.length} excess FBA item${excessItems.length !== 1 ? 's' : ''} detected`,
-            message: `Amazon's Inventory Health report flagged ${excessItems.length} item${excessItems.length !== 1 ? 's' : ''} as excess. Review the Clear FBA Stock tab for AI-powered action plans.`,
-          })
-        }
+        await supabase.from('fba_notifications').insert({
+          type: 'excess_detected',
+          title: `${excessItems.length} excess FBA item${excessItems.length !== 1 ? 's' : ''} detected`,
+          message: `Amazon's Inventory Health report flagged ${excessItems.length} item${excessItems.length !== 1 ? 's' : ''} as excess. Review the Clear FBA Stock tab for AI-powered action plans.`,
+        }).then(() => {}) // fire and forget
       }
     }
   } catch (err) {
@@ -225,7 +224,6 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
 
 /**
  * Compute 30-day FBM velocity per ASIN from the orders table.
- * Returns a map of ASIN → { units30d, velocityPerDay, title, sku, hasCustomization }
  */
 export async function computeFBMVelocity(): Promise<Map<string, {
   units30d: number
@@ -256,7 +254,7 @@ export async function computeFBMVelocity(): Promise<Map<string, {
   }>()
 
   for (const order of orders || []) {
-    const isFBM = !order.fulfillment_channel || order.fulfillment_channel === 'MFN'
+    // Count all orders for velocity — FBM and FBA both count toward demand
     const items = order.order_items as Array<{
       asin?: string
       title?: string
@@ -272,13 +270,13 @@ export async function computeFBMVelocity(): Promise<Map<string, {
       const existing = velocityMap.get(item.asin)
 
       if (existing) {
-        if (isFBM) existing.units30d += qty
+        existing.units30d += qty
         if (item.customization) existing.hasCustomization = true
         if (!existing.title && item.title) existing.title = item.title
         if (!existing.sku && item.sku) existing.sku = item.sku
       } else {
         velocityMap.set(item.asin, {
-          units30d: isFBM ? qty : 0,
+          units30d: qty,
           velocityPerDay: 0,
           title: item.title || '',
           sku: item.sku || '',

@@ -4,6 +4,11 @@
  * Data sources (all from Supabase — no live API calls at report time):
  * - orders table: FBM velocity, customization flags, product titles/SKUs
  * - fba_inventory table: current FBA stock (populated by sync)
+ *
+ * Matching strategy (in priority order):
+ * 1. Direct ASIN match — FBM and FBA share the same ASIN
+ * 2. Base-SKU match — FBM SKU "DAR-CCG-M-IVY" → FBA SKU "DAR-CCG-M-IVY-FBA"
+ *    (loads ALL fba_inventory rows, not just the ones matching order ASINs)
  */
 
 import { createClient } from '@supabase/supabase-js'
@@ -31,6 +36,7 @@ export interface ProductRecommendation {
   // Identity
   asin: string
   fba_asin: string | null
+  fba_sku: string | null
   sku: string
   title: string
 
@@ -42,8 +48,8 @@ export interface ProductRecommendation {
   fba_qty_available: number
   fba_qty_inbound: number
   fba_qty_total: number
-  fba_units_sold_30d: number      // From Sales & Traffic Report (if synced)
-  fba_buy_box_pct: number         // Buy Box % (if synced)
+  fba_units_sold_30d: number
+  fba_buy_box_pct: number
 
   // Scoring
   weeks_of_cover: number | null
@@ -56,21 +62,21 @@ export interface ProductRecommendation {
 
   // Flags
   has_customization: boolean
-  is_fba_only: boolean            // Has FBA inventory but no FBM orders (pure FBA product)
+  is_fba_only: boolean
 
   // Meta
   last_fba_sync: string | null
 }
 
 const STATUS_LABELS: Record<ReplenishmentStatus, string> = {
-  healthy: 'FBA Covered',
-  watch: 'Monitor',
-  replenish: 'Send Now',
-  critical: 'Send Urgently',
-  stocked_out: 'No FBA Stock',
+  healthy:       'FBA Covered',
+  watch:         'Monitor',
+  replenish:     'Send Now',
+  critical:      'Send Urgently',
+  stocked_out:   'No FBA Stock',
   new_candidate: 'Start Selling on FBA',
-  overstocked: 'Pause Shipments',
-  no_data: 'Sync Required',
+  overstocked:   'Pause Shipments',
+  no_data:       'No Data',
 }
 
 /**
@@ -79,6 +85,17 @@ const STATUS_LABELS: Record<ReplenishmentStatus, string> = {
  */
 function getBaseSku(sku: string): string {
   return sku.replace(/[-_]FBA$/i, '').trim()
+}
+
+interface FBAInvRow {
+  asin: string
+  sku: string
+  quantity_available: number
+  quantity_inbound: number
+  quantity_total: number
+  units_sold_30d: number
+  buy_box_percentage: number
+  last_synced_at: string | null
 }
 
 /**
@@ -92,38 +109,27 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   // ── 1. Compute FBM velocity from orders ──────────────────────────────────
   const velocityMap = await computeFBMVelocity()
 
-  // ── 2. Load FBA inventory from Supabase ──────────────────────────────────
+  // ── 2. Load ALL FBA inventory from Supabase ──────────────────────────────
+  // We load ALL rows (not just order ASINs) so we can match FBA-suffixed SKUs
+  // that may have a different ASIN than the FBM listing.
   const { data: invRows } = await supabase
     .from('fba_inventory')
-    .select('*')
+    .select('asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, last_synced_at')
 
-  // Build FBA inventory map keyed by ASIN
-  const fbaInvMap = new Map<string, {
-    asin: string
-    sku: string
-    quantity_available: number
-    quantity_inbound: number
-    quantity_total: number
-    units_sold_30d: number
-    buy_box_percentage: number
-    last_synced_at: string | null
-  }>()
+  // ── 3. Build lookup maps ──────────────────────────────────────────────────
 
-  // Build secondary map keyed by base SKU (strip -FBA suffix)
-  // This allows matching FBM SKU "DAR-CCG-M-IVY" → FBA SKU "DAR-CCG-M-IVY-FBA"
-  const fbaSkuMap = new Map<string, {
-    asin: string
-    sku: string
-    quantity_available: number
-    quantity_inbound: number
-    quantity_total: number
-    units_sold_30d: number
-    buy_box_percentage: number
-    last_synced_at: string | null
-  }>()
+  // Map A: ASIN → aggregated FBA inventory (for direct ASIN match)
+  const fbaByAsin = new Map<string, FBAInvRow>()
+
+  // Map B: base SKU → FBA inventory row (for SKU-based match)
+  // e.g. "DAR-CCG-M-IVY" → row with sku "DAR-CCG-M-IVY-FBA"
+  const fbaByBaseSku = new Map<string, FBAInvRow>()
 
   for (const inv of invRows || []) {
-    const invData = {
+    // Skip rows with no sync timestamp — they're phantom rows
+    if (!inv.last_synced_at) continue
+
+    const row: FBAInvRow = {
       asin: inv.asin,
       sku: inv.sku || '',
       quantity_available: inv.quantity_available || 0,
@@ -131,53 +137,55 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       quantity_total: inv.quantity_total || 0,
       units_sold_30d: inv.units_sold_30d || 0,
       buy_box_percentage: inv.buy_box_percentage || 0,
-      last_synced_at: inv.last_synced_at || null,
+      last_synced_at: inv.last_synced_at,
     }
 
-    // Primary map: ASIN → inventory
-    const existing = fbaInvMap.get(inv.asin)
+    // Map A: aggregate by ASIN (multiple SKUs for same ASIN get summed)
+    const existing = fbaByAsin.get(inv.asin)
     if (!existing) {
-      fbaInvMap.set(inv.asin, { ...invData })
+      fbaByAsin.set(inv.asin, { ...row })
     } else {
-      // Aggregate multiple SKUs for same ASIN
-      existing.quantity_available += invData.quantity_available
-      existing.quantity_inbound += invData.quantity_inbound
-      existing.quantity_total += invData.quantity_total
-      existing.units_sold_30d += invData.units_sold_30d
+      existing.quantity_available += row.quantity_available
+      existing.quantity_inbound += row.quantity_inbound
+      existing.quantity_total += row.quantity_total
+      existing.units_sold_30d += row.units_sold_30d
+      // Keep the most recent sync timestamp
+      if (row.last_synced_at && (!existing.last_synced_at || row.last_synced_at > existing.last_synced_at)) {
+        existing.last_synced_at = row.last_synced_at
+      }
     }
 
-    // Secondary map: base SKU → inventory (only for SKUs that have -FBA suffix)
+    // Map B: base SKU → row (only for FBA-suffixed SKUs)
     if (inv.sku && /[-_]FBA$/i.test(inv.sku)) {
       const baseSku = getBaseSku(inv.sku)
-      if (baseSku && !fbaSkuMap.has(baseSku)) {
-        fbaSkuMap.set(baseSku, { ...invData })
+      if (baseSku && !fbaByBaseSku.has(baseSku)) {
+        fbaByBaseSku.set(baseSku, { ...row })
       }
     }
   }
 
-  // ── 3. Build recommendations ──────────────────────────────────────────────
+  // ── 4. Build recommendations ──────────────────────────────────────────────
   const recommendations: ProductRecommendation[] = []
-
-  // Only include ASINs that appear in your orders — this is the source of truth.
-  // FBA inventory data enriches these ASINs but never adds new ones.
   const allAsins = new Set(velocityMap.keys())
 
   for (const asin of allAsins) {
     const fbmData = velocityMap.get(asin)
     const fbmSku = fbmData?.sku || ''
 
-    // Look up FBA inventory by:
-    // (a) Direct ASIN match (FBM and FBA share the same ASIN)
-    // (b) Base SKU match: FBM SKU "DAR-CCG-M-IVY" → FBA SKU "DAR-CCG-M-IVY-FBA"
-    let fbaInv = fbaInvMap.get(asin)
+    // Look up FBA inventory:
+    // Priority 1 — direct ASIN match
+    let fbaInv = fbaByAsin.get(asin)
     let matchedFbaAsin: string | null = fbaInv ? asin : null
+    let matchedFbaSku: string | null = fbaInv?.sku || null
 
+    // Priority 2 — base-SKU match (FBM SKU "X" → FBA SKU "X-FBA")
     if (!fbaInv && fbmSku) {
-      const skuMatch = fbaSkuMap.get(fbmSku)
+      const skuMatch = fbaByBaseSku.get(fbmSku)
       if (skuMatch) {
         fbaInv = skuMatch
         matchedFbaAsin = skuMatch.asin
-        console.log(`[Replenishment] SKU-paired: FBM ASIN ${asin} (SKU: ${fbmSku}) → FBA ASIN ${skuMatch.asin} (SKU: ${skuMatch.sku})`)
+        matchedFbaSku = skuMatch.sku
+        console.log(`[Replenishment] SKU-paired: FBM ASIN ${asin} (${fbmSku}) → FBA ASIN ${skuMatch.asin} (${skuMatch.sku})`)
       }
     }
 
@@ -185,20 +193,19 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const fbmVelocityPerDay = fbmData?.velocityPerDay || 0
     const hasCustomization = fbmData?.hasCustomization || false
     const title = fbmData?.title || `ASIN: ${asin}`
-    const sku = fbmSku
 
-    const fbaQtyAvailable = fbaInv?.quantity_available || 0
-    const fbaQtyInbound = fbaInv?.quantity_inbound || 0
-    const fbaQtyTotal = fbaInv?.quantity_total || 0
-    const fbaUnitsSold30d = fbaInv?.units_sold_30d || 0
-    const fbaBuyBoxPct = fbaInv?.buy_box_percentage || 0
-    const lastFbaSync = fbaInv?.last_synced_at || null
+    const fbaQtyAvailable = fbaInv?.quantity_available ?? 0
+    const fbaQtyInbound = fbaInv?.quantity_inbound ?? 0
+    const fbaQtyTotal = fbaInv?.quantity_total ?? 0
+    const fbaUnitsSold30d = fbaInv?.units_sold_30d ?? 0
+    const fbaBuyBoxPct = fbaInv?.buy_box_percentage ?? 0
+    const lastFbaSync = fbaInv?.last_synced_at ?? null
 
-    // hasFBAInventory = true only if the inventory was actually synced from Amazon
-    const hasFBAInventory = fbaInv !== undefined && fbaInv.last_synced_at !== null
+    // hasFBAInventory = true only if we found a real synced row
+    const hasFBAInventory = fbaInv !== undefined
     const isFBAOnly = hasFBAInventory && fbmUnits30d === 0
 
-    // Use combined velocity (FBM + FBA) for weeks-of-cover calculation
+    // Use combined velocity (FBM + FBA) for weeks-of-cover
     const combinedVelocityPerDay = fbaUnitsSold30d > 0
       ? (fbaUnitsSold30d / 30)
       : fbmVelocityPerDay
@@ -220,7 +227,6 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       status = 'no_data'
       sendRationale = 'Customized product — FBA not applicable'
     } else if (!hasFBAInventory) {
-      // No FBA record at all — check if it's a new candidate
       if (fbmUnits30d >= settings.newFBACandidateMinUnits) {
         status = 'new_candidate'
         recommendedSendQty = Math.ceil(fbmVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
@@ -232,7 +238,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     } else if (fbaQtyAvailable === 0 && fbaQtyInbound === 0) {
       status = 'stocked_out'
       recommendedSendQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      sendRationale = `FBA stocked out (confirmed by last sync). Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
+      sendRationale = `FBA stocked out. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
     } else if (weeksOfCover !== null && weeksOfCover < 2) {
       status = 'critical'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
@@ -257,7 +263,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     recommendations.push({
       asin,
       fba_asin: matchedFbaAsin,
-      sku,
+      fba_sku: matchedFbaSku,
+      sku: fbmSku,
       title,
       fbm_units_30d: fbmUnits30d,
       fbm_velocity_per_day: fbmVelocityPerDay,
@@ -279,14 +286,14 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
 
   // Sort: urgent first
   const statusOrder: Record<ReplenishmentStatus, number> = {
-    stocked_out: 0,
-    critical: 1,
-    replenish: 2,
+    stocked_out:   0,
+    critical:      1,
+    replenish:     2,
     new_candidate: 3,
-    watch: 4,
-    healthy: 5,
-    overstocked: 6,
-    no_data: 7,
+    watch:         4,
+    healthy:       5,
+    overstocked:   6,
+    no_data:       7,
   }
 
   recommendations.sort((a, b) => {
@@ -303,7 +310,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
  */
 export function generateTeamCSV(report: ProductRecommendation[]): string {
   const headers = [
-    'ASIN', 'FBA ASIN', 'SKU', 'Title', 'Status',
+    'ASIN', 'FBA ASIN', 'FBA SKU', 'FBM SKU', 'Title', 'Status',
     'FBM Units (30d)', 'FBM Velocity/Day',
     'FBA Available', 'FBA Inbound', 'FBA Sold (30d)', 'Buy Box %',
     'Weeks of Cover', 'Recommended Send Qty', 'Rationale',
@@ -314,6 +321,7 @@ export function generateTeamCSV(report: ProductRecommendation[]): string {
     .map(r => [
       r.asin,
       r.fba_asin || '',
+      r.fba_sku || '',
       r.sku,
       `"${r.title.replace(/"/g, '""')}"`,
       r.status_label,
@@ -333,7 +341,6 @@ export function generateTeamCSV(report: ProductRecommendation[]): string {
 
 /**
  * Generate Amazon Shipment-Ready CSV
- * Format: MSKU, ASIN, Quantity — ready for Amazon FBA Create Shipment bulk upload
  */
 export function generateAmazonShipmentCSV(report: ProductRecommendation[]): string {
   const headers = ['Merchant SKU', 'ASIN', 'Quantity to Ship', 'Condition', 'Notes']
@@ -341,8 +348,8 @@ export function generateAmazonShipmentCSV(report: ProductRecommendation[]): stri
   const rows = report
     .filter(r => r.recommended_send_qty > 0 && ['stocked_out', 'critical', 'replenish', 'new_candidate'].includes(r.status))
     .map(r => [
-      r.sku || r.asin,
-      r.asin,
+      r.fba_sku || r.sku || r.asin,
+      r.fba_asin || r.asin,
       r.recommended_send_qty,
       'NewItem',
       `"${r.status_label}: ${r.send_rationale.substring(0, 80).replace(/"/g, '""')}"`,
