@@ -1,20 +1,19 @@
 /**
- * FBA Intelligence Sync Service — Orders-Driven
+ * FBA Intelligence Sync Service — Reports-API-Free
  *
- * Strategy:
- * 1. Extract unique ASINs from the orders table (only products we actually sell)
- * 2. Fetch ALL FBA inventory (SP-API doesn't support ASIN filtering on summaries)
- * 3. Store only the ASINs we care about — keyed by (asin, sku)
- * 4. Fetch Sales & Traffic Report for FBA sales data — UPDATE only, never INSERT
- * 5. Fetch Inventory Health Report for excess/storage data
+ * Strategy (no Reports role required):
+ * 1. Extract unique ASINs + product titles from the orders table
+ * 2. Fetch ALL FBA inventory via FBA Inventory Summaries API (already authorized)
+ * 3. Store FBA inventory rows keyed by (asin, sku)
+ * 4. Compute 30/60/90-day sales velocity from the orders table directly
+ * 5. Update fba_inventory rows with computed velocity
+ * 6. Detect excess inventory: DoS > 90 days → flag as excess, upsert into excess_inventory
+ *
+ * This bypasses GET_FBA_INVENTORY_PLANNING_DATA and GET_SALES_AND_TRAFFIC_REPORT
+ * entirely — both require the Reports role which may not be approved.
  */
-
 import { createClient } from '@supabase/supabase-js'
-import {
-  fetchFBAInventoryForAsins,
-  fetchSalesAndTrafficReport,
-  fetchInventoryHealthReport,
-} from '@/lib/amazon/catalog'
+import { fetchFBAInventoryForAsins } from '@/lib/amazon/catalog'
 import type { FBAInventoryItem } from '@/lib/amazon/catalog'
 
 function getAdminSupabase() {
@@ -34,8 +33,13 @@ export interface SyncCatalogResult {
   durationMs: number
 }
 
+// Standard FBA storage fee per unit estimate (apparel/standard size)
+// Used only when Amazon's report is unavailable
+const ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT = 0.87 // $/unit/month (rough estimate)
+const EXCESS_DAYS_OF_SUPPLY_THRESHOLD = 90 // > 90 days = excess
+
 /**
- * Orders-driven FBA sync.
+ * Orders-driven FBA sync — no Reports API required.
  */
 export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
   const start = Date.now()
@@ -45,7 +49,7 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
   let salesReportAsins = 0
   let excessItemsFound = 0
 
-  // ── 1. Extract unique ASINs from orders table ───────────────────────────
+  // ── 1. Extract unique ASINs + product titles from orders table ──────────
   const { data: orderItems, error: ordErr } = await supabase
     .from('orders')
     .select('order_items')
@@ -56,25 +60,25 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     return { asinsFromOrders: 0, inventoryUpserted: 0, salesReportAsins: 0, excessItemsFound: 0, errors, durationMs: Date.now() - start }
   }
 
-  const asinSet = new Set<string>()
+  // Build ASIN → title map from order items
+  const asinTitleMap = new Map<string, string>()
   for (const row of orderItems || []) {
-    const items = row.order_items as Array<{ asin?: string }> || []
+    const items = row.order_items as Array<{ asin?: string; title?: string }> || []
     for (const item of items) {
-      if (item.asin) asinSet.add(item.asin)
+      if (item.asin && !asinTitleMap.has(item.asin)) {
+        asinTitleMap.set(item.asin, item.title || '')
+      }
     }
   }
 
-  const asins = Array.from(asinSet)
+  const asins = Array.from(asinTitleMap.keys())
   console.log(`[FBA Sync] Found ${asins.length} unique ASINs from orders`)
 
   if (asins.length === 0) {
     return { asinsFromOrders: 0, inventoryUpserted: 0, salesReportAsins: 0, excessItemsFound: 0, errors, durationMs: Date.now() - start }
   }
 
-  // ── 2. Fetch FBA inventory ──────────────────────────────────────────────
-  // The SP-API summaries endpoint returns ALL inventory — we filter to our ASINs
-  // inside fetchFBAInventoryForAsins. It also returns FBA-SKU variants (e.g. -FBA suffix)
-  // that share the same ASIN as the FBM listing.
+  // ── 2. Fetch FBA inventory from SP-API ──────────────────────────────────
   let inventory: FBAInventoryItem[] = []
   try {
     inventory = await fetchFBAInventoryForAsins(asins)
@@ -83,9 +87,7 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     errors.push(`FBA inventory fetch failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // ── 3. Upsert fba_inventory ─────────────────────────────────────────────
-  // Key insight: store each (asin, sku) row separately.
-  // The replenishment engine will find FBA rows by ASIN, including -FBA SKU variants.
+  // ── 3. Upsert fba_inventory rows ────────────────────────────────────────
   if (inventory.length > 0) {
     const now = new Date().toISOString()
     const invRows = inventory.map((i: FBAInventoryItem) => ({
@@ -100,7 +102,6 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
       last_synced_at: now,
     }))
 
-    // Upsert in batches of 100
     for (let i = 0; i < invRows.length; i += 100) {
       const chunk = invRows.slice(i, i + 100)
       const { error } = await supabase
@@ -116,100 +117,146 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     console.log(`[FBA Sync] Upserted ${inventoryUpserted} inventory records`)
   }
 
-  // ── 4. Fetch Sales & Traffic Report ────────────────────────────────────
-  // IMPORTANT: We UPDATE existing rows only — never INSERT new rows from this report.
-  // This prevents the Sales & Traffic report from creating ghost rows with blank SKUs
-  // that corrupt the inventory data.
-  try {
-    const salesMap = await fetchSalesAndTrafficReport(asins)
-    salesReportAsins = salesMap.size
-    console.log(`[FBA Sync] Sales & Traffic Report: ${salesReportAsins} ASINs`)
+  // ── 4. Compute velocity from orders table ───────────────────────────────
+  // We compute 30d, 60d, 90d velocity directly from stored orders — no Reports API needed.
+  const velocityMap = await computeVelocityFromOrders()
+  salesReportAsins = velocityMap.size
+  console.log(`[FBA Sync] Computed velocity for ${salesReportAsins} ASINs from orders`)
 
-    if (salesMap.size > 0) {
-      for (const [asin, salesData] of salesMap) {
-        // Only UPDATE rows that already exist — use a targeted update by ASIN
-        // This avoids creating phantom rows with empty SKUs
-        const { error } = await supabase
-          .from('fba_inventory')
-          .update({
-            units_sold_30d: salesData.units_ordered_fba,
-            buy_box_percentage: salesData.buy_box_percentage,
-            sessions_30d: salesData.sessions,
-          })
-          .eq('asin', asin)
-          // Only update the primary FBA row (not the empty-SKU ghost)
-          .neq('sku', '')
+  // Update fba_inventory rows with computed velocity
+  if (velocityMap.size > 0) {
+    for (const [asin, vel] of velocityMap) {
+      const { error } = await supabase
+        .from('fba_inventory')
+        .update({
+          units_sold_30d: vel.units30d,
+          sessions_30d: 0, // not available without Reports API
+          buy_box_percentage: 0, // not available without Reports API
+        })
+        .eq('asin', asin)
+        .neq('sku', '')
 
-        if (error && !error.message.includes('column') && !error.message.includes('does not exist')) {
-          errors.push(`Sales data update for ${asin}: ${error.message}`)
-        }
+      if (error && !error.message.includes('column') && !error.message.includes('does not exist')) {
+        errors.push(`Velocity update for ${asin}: ${error.message}`)
       }
     }
-  } catch (err) {
-    errors.push(`Sales & Traffic Report fetch failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // ── 5. Fetch Inventory Health Report (excess/storage data) ─────────────
+  // ── 5. Detect and upsert excess inventory ───────────────────────────────
+  // For each FBA inventory row, compute days of supply and flag excess.
+  // DoS = qty_available / (units_sold_30d / 30)
+  // Excess = DoS > 90 days AND qty_available > 0
   try {
-    const healthMap = await fetchInventoryHealthReport()
+    const now = new Date().toISOString()
+    const excessCandidates: Array<{
+      asin: string
+      sku: string
+      fnsku: string | null
+      product_name: string
+      qty_available: number
+      excess_qty: number
+      days_of_supply: number
+      units_sold_last_30_days: number
+      your_price: number
+      estimated_monthly_storage_fee: number
+      estimated_storage_cost_per_unit: number
+    }> = []
 
-    if (healthMap.size > 0) {
-      const velocityMap = await computeFBMVelocity()
-      const now = new Date().toISOString()
-      const excessItems = Array.from(healthMap.values()).filter(item => item.is_excess)
-      excessItemsFound = excessItems.length
+    for (const inv of inventory) {
+      if (!inv.asin || inv.quantity_available <= 0) continue
 
-      console.log(`[FBA Sync] Found ${excessItems.length} excess items from Inventory Health report`)
+      const vel = velocityMap.get(inv.asin)
+      const units30d = vel?.units30d || 0
+      const dailyRate = units30d / 30
 
-      for (const item of excessItems) {
-        const fbmData = velocityMap.get(item.asin)
-        const fbmUnits30d = fbmData?.units30d || 0
-
-        // Check if this item already has an active record
-        const { data: existing } = await supabase
-          .from('excess_inventory')
-          .select('id, status, ai_action_plan, action_taken, recheck_due_at')
-          .eq('sku', item.sku)
-          .single()
-
-        const upsertData = {
-          asin: item.asin,
-          sku: item.sku,
-          fnsku: item.fnsku,
-          product_name: item.product_name || `ASIN: ${item.asin}`,
-          qty_available: item.qty_available,
-          excess_qty: item.excess_qty,
-          days_of_supply: item.days_of_supply,
-          units_sold_last_30_days: item.units_sold_last_30_days,
-          your_price: item.your_price,
-          estimated_monthly_storage_fee: item.estimated_monthly_storage_fee,
-          estimated_storage_cost_per_unit: item.estimated_storage_cost_per_unit,
-          amazon_recommended_action: item.recommended_action,
-          amazon_alert: item.alert,
-          last_synced_at: now,
-          ...((!existing || existing.status === 'dismissed') ? { status: 'active' } : {}),
-        }
-
-        const { error: upsertErr } = await supabase
-          .from('excess_inventory')
-          .upsert(upsertData, { onConflict: 'sku' })
-
-        if (upsertErr) {
-          errors.push(`Excess inventory upsert error for SKU ${item.sku}: ${upsertErr.message}`)
-        }
+      // Skip if selling fast enough (DoS <= threshold)
+      if (dailyRate === 0) {
+        // Zero velocity — infinite DoS, definitely excess if stock > 0
+        // Only flag if we have meaningful stock (> 5 units to avoid noise)
+        if (inv.quantity_available < 5) continue
       }
 
-      // Notify about excess items
-      if (excessItems.length > 0) {
-        await supabase.from('fba_notifications').insert({
-          type: 'excess_detected',
-          title: `${excessItems.length} excess FBA item${excessItems.length !== 1 ? 's' : ''} detected`,
-          message: `Amazon's Inventory Health report flagged ${excessItems.length} item${excessItems.length !== 1 ? 's' : ''} as excess. Review the Clear FBA Stock tab for AI-powered action plans.`,
-        }).then(() => {}) // fire and forget
+      const daysOfSupply = dailyRate > 0
+        ? Math.round(inv.quantity_available / dailyRate)
+        : 999 // infinite supply
+
+      if (daysOfSupply <= EXCESS_DAYS_OF_SUPPLY_THRESHOLD) continue
+
+      // Compute excess quantity (units above 90-day supply)
+      const idealQty = Math.ceil(dailyRate * EXCESS_DAYS_OF_SUPPLY_THRESHOLD)
+      const excessQty = Math.max(0, inv.quantity_available - idealQty)
+
+      if (excessQty <= 0) continue
+
+      // Estimate storage fee (rough — $0.87/unit/month for standard apparel)
+      const monthlyStorageFee = parseFloat((excessQty * ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT).toFixed(2))
+      const storagePerUnit = ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT
+
+      const productName = asinTitleMap.get(inv.asin) || `ASIN: ${inv.asin}`
+
+      excessCandidates.push({
+        asin: inv.asin,
+        sku: inv.sku || '',
+        fnsku: inv.fnsku || null,
+        product_name: productName,
+        qty_available: inv.quantity_available,
+        excess_qty: excessQty,
+        days_of_supply: daysOfSupply > 999 ? 999 : daysOfSupply,
+        units_sold_last_30_days: units30d,
+        your_price: 0, // not available without catalog API
+        estimated_monthly_storage_fee: monthlyStorageFee,
+        estimated_storage_cost_per_unit: storagePerUnit,
+      })
+    }
+
+    excessItemsFound = excessCandidates.length
+    console.log(`[FBA Sync] Detected ${excessItemsFound} excess items (DoS > ${EXCESS_DAYS_OF_SUPPLY_THRESHOLD} days)`)
+
+    for (const item of excessCandidates) {
+      // Check if already tracked
+      const { data: existing } = await supabase
+        .from('excess_inventory')
+        .select('id, status, ai_action_plan, action_taken, recheck_due_at')
+        .eq('sku', item.sku)
+        .single()
+
+      const upsertData = {
+        asin: item.asin,
+        sku: item.sku,
+        fnsku: item.fnsku,
+        product_name: item.product_name,
+        qty_available: item.qty_available,
+        excess_qty: item.excess_qty,
+        days_of_supply: item.days_of_supply,
+        units_sold_last_30_days: item.units_sold_last_30_days,
+        your_price: item.your_price,
+        estimated_monthly_storage_fee: item.estimated_monthly_storage_fee,
+        estimated_storage_cost_per_unit: item.estimated_storage_cost_per_unit,
+        amazon_recommended_action: null,
+        amazon_alert: null,
+        last_synced_at: now,
+        ...((!existing || existing.status === 'dismissed') ? { status: 'active' } : {}),
+      }
+
+      const { error: upsertErr } = await supabase
+        .from('excess_inventory')
+        .upsert(upsertData, { onConflict: 'sku' })
+
+      if (upsertErr) {
+        errors.push(`Excess upsert error for SKU ${item.sku}: ${upsertErr.message}`)
       }
     }
+
+    // Fire notification if new excess items found
+    if (excessCandidates.length > 0) {
+      await supabase.from('fba_notifications').insert({
+        type: 'excess_detected',
+        title: `${excessCandidates.length} excess FBA item${excessCandidates.length !== 1 ? 's' : ''} detected`,
+        message: `${excessCandidates.length} item${excessCandidates.length !== 1 ? 's have' : ' has'} more than ${EXCESS_DAYS_OF_SUPPLY_THRESHOLD} days of supply. Review the Clear FBA Stock tab for AI-powered action plans.`,
+      }).then(() => {})
+    }
   } catch (err) {
-    errors.push(`Inventory Health Report fetch failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
+    errors.push(`Excess inventory detection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   return {
@@ -223,22 +270,27 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
 }
 
 /**
- * Compute 30-day FBM velocity per ASIN from the orders table.
+ * Compute 30-day, 60-day, and 90-day sales velocity per ASIN from the orders table.
+ * This replaces the Sales & Traffic Report — no Reports API role required.
  */
-export async function computeFBMVelocity(): Promise<Map<string, {
+export async function computeVelocityFromOrders(): Promise<Map<string, {
   units30d: number
+  units60d: number
+  units90d: number
   velocityPerDay: number
   title: string
   sku: string
   hasCustomization: boolean
 }>> {
   const supabase = getAdminSupabase()
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+  const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
   const { data: orders, error } = await supabase
     .from('orders')
     .select('order_items, purchase_date, fulfillment_channel')
-    .gte('purchase_date', thirtyDaysAgo)
+    .gte('purchase_date', ninetyDaysAgo)
 
   if (error) {
     console.error('[Velocity] Failed to fetch orders:', error.message)
@@ -247,6 +299,8 @@ export async function computeFBMVelocity(): Promise<Map<string, {
 
   const velocityMap = new Map<string, {
     units30d: number
+    units60d: number
+    units90d: number
     velocityPerDay: number
     title: string
     sku: string
@@ -254,7 +308,7 @@ export async function computeFBMVelocity(): Promise<Map<string, {
   }>()
 
   for (const order of orders || []) {
-    // Count all orders for velocity — FBM and FBA both count toward demand
+    const purchaseDate = order.purchase_date
     const items = order.order_items as Array<{
       asin?: string
       title?: string
@@ -267,30 +321,63 @@ export async function computeFBMVelocity(): Promise<Map<string, {
     for (const item of items) {
       if (!item.asin) continue
       const qty = item.qty || item.quantity_ordered || 1
-      const existing = velocityMap.get(item.asin)
-
-      if (existing) {
-        existing.units30d += qty
-        if (item.customization) existing.hasCustomization = true
-        if (!existing.title && item.title) existing.title = item.title
-        if (!existing.sku && item.sku) existing.sku = item.sku
-      } else {
-        velocityMap.set(item.asin, {
-          units30d: qty,
-          velocityPerDay: 0,
-          title: item.title || '',
-          sku: item.sku || '',
-          hasCustomization: !!item.customization,
-        })
+      const existing = velocityMap.get(item.asin) || {
+        units30d: 0, units60d: 0, units90d: 0,
+        velocityPerDay: 0,
+        title: item.title || '',
+        sku: item.sku || '',
+        hasCustomization: false,
       }
+
+      // Count in each window
+      if (purchaseDate >= thirtyDaysAgo) existing.units30d += qty
+      if (purchaseDate >= sixtyDaysAgo) existing.units60d += qty
+      existing.units90d += qty // all orders are within 90 days
+
+      if (item.customization) existing.hasCustomization = true
+      if (!existing.title && item.title) existing.title = item.title
+      if (!existing.sku && item.sku) existing.sku = item.sku
+
+      velocityMap.set(item.asin, existing)
     }
   }
 
+  // Compute daily velocity using 90-day average for stability
   for (const [, data] of velocityMap) {
-    data.velocityPerDay = data.units30d / 30
+    data.velocityPerDay = data.units90d / 90
   }
 
   return velocityMap
+}
+
+/**
+ * Alias for backward compatibility — used by replenishment engine.
+ */
+export async function computeFBMVelocity(): Promise<Map<string, {
+  units30d: number
+  velocityPerDay: number
+  title: string
+  sku: string
+  hasCustomization: boolean
+}>> {
+  const full = await computeVelocityFromOrders()
+  const result = new Map<string, {
+    units30d: number
+    velocityPerDay: number
+    title: string
+    sku: string
+    hasCustomization: boolean
+  }>()
+  for (const [asin, data] of full) {
+    result.set(asin, {
+      units30d: data.units30d,
+      velocityPerDay: data.velocityPerDay,
+      title: data.title,
+      sku: data.sku,
+      hasCustomization: data.hasCustomization,
+    })
+  }
+  return result
 }
 
 /**
