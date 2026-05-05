@@ -34,11 +34,18 @@ export async function middleware(request: NextRequest) {
   const publicRoutes = ['/login', '/auth/callback', '/auth/confirm', '/auth/invite', '/set-password']
   const isPublicRoute = publicRoutes.some((route) => pathname.startsWith(route))
   const isApiRoute = pathname.startsWith('/api/')
+  // MFA routes handle their own auth state — they must be accessible for AAL1 sessions
+  // (user logged in with password but MFA not yet verified). Blocking them causes a redirect loop.
   const isMFARoute = pathname.startsWith('/mfa/')
   const isPasswordResetRoute = pathname === '/reset-password'
 
   // Allow API routes to handle their own auth
   if (isApiRoute) {
+    return supabaseResponse
+  }
+
+  // Allow MFA routes to pass through — they handle their own session checks client-side
+  if (isMFARoute) {
     return supabaseResponse
   }
 
