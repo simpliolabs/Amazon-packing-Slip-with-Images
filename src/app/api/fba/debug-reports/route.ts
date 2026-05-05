@@ -9,7 +9,7 @@
  */
 
 import { NextResponse } from 'next/server'
-import { getAccessToken } from '@/lib/amazon/catalog'
+import { getAccessToken } from '@/lib/amazon/auth'
 
 const ENDPOINT = 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
