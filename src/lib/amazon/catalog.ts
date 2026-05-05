@@ -48,6 +48,31 @@ export interface CatalogProduct {
 }
 
 /**
+ * Sleep helper for retry backoff.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Fetch with retry on 429 (QuotaExceeded) — exponential backoff.
+ */
+async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 5): Promise<Response> {
+  let delay = 2000 // start at 2s
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const resp = await fetch(url, options)
+    if (resp.status !== 429) return resp
+    if (attempt === maxRetries) return resp
+    const retryAfter = parseInt(resp.headers.get('Retry-After') || '0', 10)
+    const waitMs = retryAfter > 0 ? retryAfter * 1000 : delay
+    console.warn(`[SP-API] 429 QuotaExceeded — waiting ${waitMs}ms before retry ${attempt + 1}/${maxRetries}`)
+    await sleep(waitMs)
+    delay = Math.min(delay * 2, 30000) // cap at 30s
+  }
+  return fetch(url, options) // final attempt
+}
+
+/**
  * Fetch FBA inventory ONLY for the given list of ASINs.
  * Much more targeted than fetching the full catalog.
  */
@@ -67,7 +92,7 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
     })
     if (nextToken) params.set('nextToken', nextToken)
 
-    const resp = await fetch(`${ENDPOINT}/fba/inventory/v1/summaries?${params}`, {
+    const resp = await fetchWithRetry(`${ENDPOINT}/fba/inventory/v1/summaries?${params}`, {
       headers: { 'x-amz-access-token': token },
     })
 
@@ -76,6 +101,9 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
       if (resp.status === 403 || resp.status === 404) {
         console.warn('[FBA Inventory] No access or no inventory:', err)
         return []
+      }
+      if (resp.status === 429) {
+        throw new Error(`FBA Inventory API rate limit exceeded after retries. Try again in a few minutes.`)
       }
       throw new Error(`FBA inventory API error (${resp.status}): ${err}`)
     }
@@ -149,12 +177,21 @@ export async function fetchSalesAndTrafficReport(asins: string[]): Promise<Map<s
   })
 
   if (!reportResp.ok) {
-    const err = await reportResp.text()
-    console.warn('[Sales Report] Failed to request report:', err)
+    const errBody = await reportResp.text()
+    console.warn(`[Sales Report] Failed to request report (${reportResp.status}):`, errBody)
+    // Common causes: Reports API not enabled in SP-API app, or missing scope
+    if (reportResp.status === 403) {
+      console.warn('[Sales Report] 403 Forbidden — ensure "Reports" scope is enabled in your SP-API app at solutionproviderportal.amazon.com')
+    }
     return new Map()
   }
 
-  const { reportId } = await reportResp.json()
+  const reportRespJson = await reportResp.json()
+  const reportId = reportRespJson.reportId
+  if (!reportId) {
+    console.warn('[Sales Report] No reportId in response:', JSON.stringify(reportRespJson))
+    return new Map()
+  }
   console.log(`[Sales Report] Requested report: ${reportId}`)
 
   // Poll for completion (max 4 minutes, 5s intervals)
@@ -205,8 +242,23 @@ export async function fetchSalesAndTrafficReport(asins: string[]): Promise<Map<s
     return new Map()
   }
 
-  const reportData = await dataResp.json()
-  return parseSalesAndTrafficReport(reportData, new Set(asins))
+  const rawText = await dataResp.text()
+  console.log(`[Sales Report] Downloaded ${rawText.length} bytes`)
+
+  let reportData: Record<string, unknown>
+  try {
+    reportData = JSON.parse(rawText)
+  } catch {
+    console.warn('[Sales Report] Failed to parse JSON, first 500 chars:', rawText.substring(0, 500))
+    return new Map()
+  }
+
+  // Log top-level keys to diagnose structure issues
+  console.log('[Sales Report] Top-level keys:', Object.keys(reportData))
+
+  const result = parseSalesAndTrafficReport(reportData, new Set(asins))
+  console.log(`[Sales Report] Parsed ${result.size} ASINs from report`)
+  return result
 }
 
 /**
@@ -218,11 +270,17 @@ function parseSalesAndTrafficReport(
 ): Map<string, ASINSalesData> {
   const result = new Map<string, ASINSalesData>()
 
-  // The report has salesAndTrafficByAsin array
-  const byAsin = (data?.salesAndTrafficByAsin as Array<Record<string, unknown>>) || []
+  // The report structure: { salesAndTrafficByAsin: [...] } or nested under reportSpecificationAndHeader
+  const byAsin = (
+    (data?.salesAndTrafficByAsin as Array<Record<string, unknown>>) ||
+    ((data?.salesAndTrafficByDate as Record<string, unknown>)?.salesAndTrafficByAsin as Array<Record<string, unknown>>) ||
+    []
+  )
+
+  console.log(`[Sales Report] Found ${byAsin.length} ASIN entries in report`)
 
   for (const entry of byAsin) {
-    const asin = entry.parentAsin as string || entry.childAsin as string || ''
+    const asin = (entry.childAsin as string) || (entry.parentAsin as string) || ''
     if (!asin || (asinFilter.size > 0 && !asinFilter.has(asin))) continue
 
     const sales = (entry.salesByAsin || {}) as Record<string, unknown>

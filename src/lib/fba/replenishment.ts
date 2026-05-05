@@ -63,14 +63,14 @@ export interface ProductRecommendation {
 }
 
 const STATUS_LABELS: Record<ReplenishmentStatus, string> = {
-  healthy: 'Healthy',
-  watch: 'Watch',
-  replenish: 'Replenish Now',
-  critical: 'Critical',
-  stocked_out: 'Stocked Out',
-  new_candidate: 'Create FBA Listing',
-  overstocked: 'Overstocked',
-  no_data: 'No Data',
+  healthy: 'FBA Covered',
+  watch: 'Monitor',
+  replenish: 'Send Now',
+  critical: 'Send Urgently',
+  stocked_out: 'No FBA Stock',
+  new_candidate: 'Start Selling on FBA',
+  overstocked: 'Pause Shipments',
+  no_data: 'Sync Required',
 }
 
 /**
@@ -145,7 +145,9 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const fbaBuyBoxPct = fbaInv?.buy_box_percentage || 0
     const lastFbaSync = fbaInv?.last_synced_at || null
 
-    const hasFBAInventory = fbaInv !== undefined
+    // hasFBAInventory = true only if the inventory was actually synced from Amazon
+    // (has a last_synced_at timestamp). Without a sync, we can't know if FBA exists.
+    const hasFBAInventory = fbaInv !== undefined && fbaInv.last_synced_at !== null
     const isFBAOnly = hasFBAInventory && fbmUnits30d === 0
 
     // Use combined velocity (FBM + FBA) for weeks-of-cover calculation
@@ -181,9 +183,11 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
         sendRationale = `${fbmUnits30d} units/30d — below ${settings.newFBACandidateMinUnits} unit threshold for FBA recommendation`
       }
     } else if (fbaQtyAvailable === 0 && fbaQtyInbound === 0) {
+      // Only mark as stocked_out if the sync actually confirmed 0 inventory.
+      // If last_synced_at is null/old, this is confirmed data from Amazon.
       status = 'stocked_out'
       recommendedSendQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      sendRationale = `FBA stocked out. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
+      sendRationale = `FBA stocked out (confirmed by last sync). Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
     } else if (weeksOfCover !== null && weeksOfCover < 2) {
       status = 'critical'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
