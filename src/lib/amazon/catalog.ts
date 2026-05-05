@@ -240,14 +240,17 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
 }
 
 /**
- * Fetch the FBA Inventory Health Report (GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA).
+ * Fetch the FBA Manage Inventory Health Report (GET_FBA_INVENTORY_PLANNING_DATA).
  *
  * This is a tab-delimited flat file report from Amazon that contains:
- * - All active FBA inventory items
- * - Excess/overstock flags and quantities
- * - Days of supply
- * - Estimated monthly storage fees
+ * - All active FBA inventory items with excess/overstock flags
+ * - Estimated excess quantities and days of supply
+ * - Estimated monthly storage fees and per-unit storage costs
  * - Amazon's recommended actions (Create Sale, Create Outlet Deal, Remove)
+ * - Inventory age buckets and long-term storage fee estimates
+ *
+ * NOTE: This is a DAILY report — Amazon generates it at most once every 4 hours.
+ * The first request after a long idle period may take up to 4 hours to complete.
  *
  * Returns a map of SKU → InventoryHealthItem for easy lookup.
  */
@@ -263,7 +266,7 @@ export async function fetchInventoryHealthReport(): Promise<Map<string, Inventor
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      reportType: 'GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA',
+      reportType: 'GET_FBA_INVENTORY_PLANNING_DATA',
       marketplaceIds: [MARKETPLACE_ID],
     }),
   })
@@ -283,7 +286,7 @@ export async function fetchInventoryHealthReport(): Promise<Map<string, Inventor
     console.warn('[Inventory Health] No reportId in response:', JSON.stringify(reportRespJson))
     return result
   }
-  console.log(`[Inventory Health] Requested report: ${reportId}`)
+  console.log(`[Inventory Health] Requested report: ${reportId} (GET_FBA_INVENTORY_PLANNING_DATA — daily report, may take up to 4 hours on first request)`)
 
   // Poll for completion
   const documentId = await pollReportUntilDone(reportId, token, 'Inventory Health')
@@ -303,7 +306,7 @@ export async function fetchInventoryHealthReport(): Promise<Map<string, Inventor
 }
 
 /**
- * Parse the GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA tab-delimited report.
+ * Parse the GET_FBA_INVENTORY_PLANNING_DATA tab-delimited report.
  *
  * Column reference (Amazon's standard column names):
  * sku, fnsku, asin, product-name, condition, your-price, mfn-listing-exists,
