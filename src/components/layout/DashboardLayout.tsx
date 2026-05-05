@@ -14,6 +14,7 @@ import {
   Menu,
   X,
   RefreshCw,
+  Package,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -41,6 +42,12 @@ export default function DashboardLayout({
       label: 'Orders',
       icon: LayoutDashboard,
       roles: ['admin', 'packer'],
+    },
+    {
+      href: '/fba',
+      label: 'FBA Intel',
+      icon: Package,
+      roles: ['admin'],
     },
     {
       href: '/settings',

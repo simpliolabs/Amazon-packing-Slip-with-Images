@@ -458,6 +458,9 @@ export default function SettingsPanel({
         </div>
       </div>
 
+      {/* FBA Intelligence Settings */}
+      <FBASettingsSection />
+
       {/* Security Compliance Status */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <div className="flex items-center gap-2 mb-3">
@@ -497,6 +500,148 @@ function ComplianceItem({ label, status }: { label: string; status: 'enforced' |
       }>
         {label}
       </span>
+    </div>
+  )
+}
+
+function FBASettingsSection() {
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [leadTime, setLeadTime] = useState('14')
+  const [safetyBuffer, setSafetyBuffer] = useState('15')
+  const [triggerWeeks, setTriggerWeeks] = useState('4')
+  const [minUnits, setMinUnits] = useState('5')
+  const [loaded, setLoaded] = useState(false)
+
+  // Load current settings on mount
+  useState(() => {
+    if (loaded) return
+    fetch('/api/fba/settings')
+      .then(r => r.json())
+      .then(data => {
+        if (data.leadTimeDays) setLeadTime(String(data.leadTimeDays))
+        if (data.safetyBufferDays) setSafetyBuffer(String(data.safetyBufferDays))
+        if (data.replenishTriggerWeeks) setTriggerWeeks(String(data.replenishTriggerWeeks))
+        if (data.newFBACandidateMinUnits) setMinUnits(String(data.newFBACandidateMinUnits))
+        setLoaded(true)
+      })
+      .catch(() => setLoaded(true))
+  })
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const resp = await fetch('/api/fba/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          leadTimeDays: parseInt(leadTime, 10),
+          safetyBufferDays: parseInt(safetyBuffer, 10),
+          replenishTriggerWeeks: parseFloat(triggerWeeks),
+          newFBACandidateMinUnits: parseInt(minUnits, 10),
+        }),
+      })
+      if (resp.ok) {
+        setSaved(true)
+        toast.success('FBA settings saved')
+        setTimeout(() => setSaved(false), 3000)
+      } else {
+        toast.error('Failed to save FBA settings')
+      }
+    } catch {
+      toast.error('Failed to save FBA settings')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
+      <div className="flex items-center gap-2 mb-1">
+        <svg className="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+        </svg>
+        <h2 className="text-sm font-bold text-gray-900">FBA Intelligence</h2>
+      </div>
+      <p className="text-xs text-gray-500 mb-4">
+        Configure replenishment thresholds for the FBA Intelligence dashboard.
+      </p>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">
+            Lead Time (days)
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="60"
+            value={leadTime}
+            onChange={e => setLeadTime(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">Days from ship to FBA check-in</p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">
+            Safety Buffer (days)
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="60"
+            value={safetyBuffer}
+            onChange={e => setSafetyBuffer(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">Extra days of stock after lead time</p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">
+            Replenish Trigger (weeks of cover)
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="12"
+            step="0.5"
+            value={triggerWeeks}
+            onChange={e => setTriggerWeeks(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">Send when FBA drops below this threshold</p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">
+            New FBA Candidate (min units/month)
+          </label>
+          <input
+            type="number"
+            min="1"
+            max="100"
+            value={minUnits}
+            onChange={e => setMinUnits(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <p className="text-xs text-gray-400 mt-1">Minimum FBM sales to recommend FBA listing</p>
+        </div>
+      </div>
+
+      <div className="mt-4 p-3 bg-blue-50 rounded-lg text-xs text-blue-700">
+        <strong>Send Qty Formula:</strong> (velocity/day × lead time) + (velocity/day × safety buffer) − current FBA stock
+      </div>
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="mt-4 flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+        {saved ? 'Saved!' : saving ? 'Saving…' : 'Save FBA Settings'}
+      </button>
     </div>
   )
 }
