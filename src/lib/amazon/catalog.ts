@@ -5,6 +5,7 @@
  * 1. Get unique ASINs from existing orders (no full catalog dump)
  * 2. Fetch FBA inventory ONLY for those ASINs
  * 3. Fetch Sales & Traffic Report for FBA sales data
+ * 4. Fetch Inventory Health Report for excess/storage data
  */
 
 import { getAccessToken } from './auth'
@@ -48,6 +49,38 @@ export interface CatalogProduct {
 }
 
 /**
+ * Inventory Health item — from GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA report.
+ * Contains excess flags, days of supply, and storage cost data from Amazon.
+ */
+export interface InventoryHealthItem {
+  asin: string
+  sku: string
+  fnsku: string
+  product_name: string
+  condition: string
+  // Inventory quantities
+  qty_available: number
+  qty_inbound_working: number
+  qty_inbound_shipped: number
+  qty_inbound_receiving: number
+  // Sales velocity
+  units_sold_last_30_days: number
+  // Excess / overstock data
+  is_excess: boolean
+  excess_qty: number
+  days_of_supply: number           // How many days of stock on hand
+  recommended_action: string       // Amazon's raw recommendation string
+  // Storage costs (from Amazon's report)
+  estimated_monthly_storage_fee: number   // USD
+  estimated_storage_cost_per_unit: number // USD per unit
+  // Pricing
+  your_price: number
+  sales_price: number | null
+  // Flags
+  alert: string                    // e.g. "Excess inventory", "Low inventory", etc.
+}
+
+/**
  * Sleep helper for retry backoff.
  */
 function sleep(ms: number): Promise<void> {
@@ -70,6 +103,69 @@ async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 5)
     delay = Math.min(delay * 2, 30000) // cap at 30s
   }
   return fetch(url, options) // final attempt
+}
+
+/**
+ * Poll for a report to complete and return its document ID.
+ * Shared helper used by multiple report fetchers.
+ */
+async function pollReportUntilDone(
+  reportId: string,
+  token: string,
+  label: string,
+  maxWaitMs = 300000 // 5 minutes
+): Promise<string | null> {
+  const pollInterval = 5000
+  const maxAttempts = Math.ceil(maxWaitMs / pollInterval)
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(pollInterval)
+
+    const statusResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports/${reportId}`, {
+      headers: { 'x-amz-access-token': token },
+    })
+
+    if (!statusResp.ok) continue
+
+    const status = await statusResp.json()
+    console.log(`[${label}] Status: ${status.processingStatus}`)
+
+    if (status.processingStatus === 'DONE') {
+      return status.reportDocumentId
+    }
+    if (status.processingStatus === 'FATAL' || status.processingStatus === 'CANCELLED') {
+      console.warn(`[${label}] Report failed: ${status.processingStatus}`)
+      return null
+    }
+  }
+
+  console.warn(`[${label}] Timed out waiting for report`)
+  return null
+}
+
+/**
+ * Download a report document by its document ID.
+ * Returns the raw text content.
+ */
+async function downloadReportDocument(documentId: string, token: string, label: string): Promise<string | null> {
+  const docResp = await fetch(`${ENDPOINT}/reports/2021-06-30/documents/${documentId}`, {
+    headers: { 'x-amz-access-token': token },
+  })
+
+  if (!docResp.ok) {
+    console.warn(`[${label}] Failed to get document URL (${docResp.status})`)
+    return null
+  }
+
+  const { url } = await docResp.json()
+  const dataResp = await fetch(url)
+
+  if (!dataResp.ok) {
+    console.warn(`[${label}] Failed to download report data`)
+    return null
+  }
+
+  return await dataResp.text()
 }
 
 /**
@@ -144,6 +240,174 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
 }
 
 /**
+ * Fetch the FBA Inventory Health Report (GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA).
+ *
+ * This is a tab-delimited flat file report from Amazon that contains:
+ * - All active FBA inventory items
+ * - Excess/overstock flags and quantities
+ * - Days of supply
+ * - Estimated monthly storage fees
+ * - Amazon's recommended actions (Create Sale, Create Outlet Deal, Remove)
+ *
+ * Returns a map of SKU → InventoryHealthItem for easy lookup.
+ */
+export async function fetchInventoryHealthReport(): Promise<Map<string, InventoryHealthItem>> {
+  const token = await getAccessToken()
+  const result = new Map<string, InventoryHealthItem>()
+
+  // Request the inventory health report
+  const reportResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+    method: 'POST',
+    headers: {
+      'x-amz-access-token': token,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      reportType: 'GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA',
+      marketplaceIds: [MARKETPLACE_ID],
+    }),
+  })
+
+  if (!reportResp.ok) {
+    const errBody = await reportResp.text()
+    console.warn(`[Inventory Health] Failed to request report (${reportResp.status}):`, errBody)
+    if (reportResp.status === 403) {
+      console.warn('[Inventory Health] 403 Forbidden — ensure "Reports" scope is enabled in your SP-API app')
+    }
+    return result
+  }
+
+  const reportRespJson = await reportResp.json()
+  const reportId = reportRespJson.reportId
+  if (!reportId) {
+    console.warn('[Inventory Health] No reportId in response:', JSON.stringify(reportRespJson))
+    return result
+  }
+  console.log(`[Inventory Health] Requested report: ${reportId}`)
+
+  // Poll for completion
+  const documentId = await pollReportUntilDone(reportId, token, 'Inventory Health')
+  if (!documentId) return result
+
+  // Download the report
+  const rawText = await downloadReportDocument(documentId, token, 'Inventory Health')
+  if (!rawText) return result
+
+  console.log(`[Inventory Health] Downloaded ${rawText.length} bytes`)
+
+  // Parse the tab-delimited report
+  parseInventoryHealthTSV(rawText, result)
+  console.log(`[Inventory Health] Parsed ${result.size} inventory health records`)
+
+  return result
+}
+
+/**
+ * Parse the GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA tab-delimited report.
+ *
+ * Column reference (Amazon's standard column names):
+ * sku, fnsku, asin, product-name, condition, your-price, mfn-listing-exists,
+ * mfn-fulfillable-quantity, afn-listing-exists, afn-warehouse-quantity,
+ * afn-fulfillable-quantity, afn-unsellable-quantity, afn-reserved-quantity,
+ * afn-total-quantity, per-unit-volume, afn-inbound-working-quantity,
+ * afn-inbound-shipped-quantity, afn-inbound-receiving-quantity,
+ * afn-researching-quantity, afn-reserved-future-supply, afn-future-supply-buyable,
+ * units-shipped-t7, units-shipped-t30, units-shipped-t90, units-shipped-t180,
+ * alert, your-30-day-units-sold, your-30-day-revenue, your-ltsf-12-mo,
+ * your-ltsf-6-mo, inv-age-0-to-90-days, inv-age-91-to-180-days,
+ * inv-age-181-to-270-days, inv-age-271-to-365-days, inv-age-365-plus-days,
+ * estimated-excess-quantity, weeks-of-cover-t30, weeks-of-cover-t90,
+ * recommended-action, healthy-inventory-level, recommended-removal-quantity,
+ * estimated-monthly-storage-fee, estimated-storage-cost-per-unit,
+ * sales-price
+ */
+function parseInventoryHealthTSV(
+  rawText: string,
+  result: Map<string, InventoryHealthItem>
+): void {
+  const lines = rawText.split('\n').filter(l => l.trim())
+  if (lines.length < 2) return
+
+  // Parse header row — Amazon uses tab-delimited with hyphenated column names
+  const headers = lines[0].split('\t').map(h => h.trim().toLowerCase())
+
+  const col = (name: string) => headers.indexOf(name)
+
+  // Map column indices
+  const iSku = col('sku')
+  const iFnsku = col('fnsku')
+  const iAsin = col('asin')
+  const iProductName = col('product-name')
+  const iCondition = col('condition')
+  const iYourPrice = col('your-price')
+  const iSalesPrice = col('sales-price')
+  const iAfnFulfillable = col('afn-fulfillable-quantity')
+  const iAfnInboundWorking = col('afn-inbound-working-quantity')
+  const iAfnInboundShipped = col('afn-inbound-shipped-quantity')
+  const iAfnInboundReceiving = col('afn-inbound-receiving-quantity')
+  const iUnits30d = col('your-30-day-units-sold')
+  const iAlert = col('alert')
+  const iExcessQty = col('estimated-excess-quantity')
+  const iWeeksCoverT30 = col('weeks-of-cover-t30')
+  const iRecommendedAction = col('recommended-action')
+  const iEstMonthlyStorageFee = col('estimated-monthly-storage-fee')
+  const iEstStorageCostPerUnit = col('estimated-storage-cost-per-unit')
+
+  const parseNum = (val: string | undefined): number => {
+    if (!val || val === '' || val === '--') return 0
+    return parseFloat(val.replace(/[,$]/g, '')) || 0
+  }
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split('\t')
+    if (cols.length < 3) continue
+
+    const sku = cols[iSku]?.trim()
+    const asin = cols[iAsin]?.trim()
+    if (!sku || !asin) continue
+
+    const excessQty = parseNum(cols[iExcessQty])
+    const alertText = cols[iAlert]?.trim() || ''
+    const recommendedAction = cols[iRecommendedAction]?.trim() || ''
+
+    // Determine if this item is flagged as excess by Amazon
+    const isExcess = excessQty > 0 ||
+      alertText.toLowerCase().includes('excess') ||
+      recommendedAction.toLowerCase().includes('sale') ||
+      recommendedAction.toLowerCase().includes('outlet') ||
+      recommendedAction.toLowerCase().includes('remov')
+
+    const weeksOfCoverRaw = parseNum(cols[iWeeksCoverT30])
+    // Convert weeks of cover to days of supply
+    const daysOfSupply = weeksOfCoverRaw > 0 ? Math.round(weeksOfCoverRaw * 7) : 0
+
+    const item: InventoryHealthItem = {
+      asin,
+      sku,
+      fnsku: cols[iFnsku]?.trim() || '',
+      product_name: cols[iProductName]?.trim() || '',
+      condition: cols[iCondition]?.trim() || 'New',
+      qty_available: parseNum(cols[iAfnFulfillable]),
+      qty_inbound_working: parseNum(cols[iAfnInboundWorking]),
+      qty_inbound_shipped: parseNum(cols[iAfnInboundShipped]),
+      qty_inbound_receiving: parseNum(cols[iAfnInboundReceiving]),
+      units_sold_last_30_days: parseNum(cols[iUnits30d]),
+      is_excess: isExcess,
+      excess_qty: excessQty,
+      days_of_supply: daysOfSupply,
+      recommended_action: recommendedAction,
+      estimated_monthly_storage_fee: parseNum(cols[iEstMonthlyStorageFee]),
+      estimated_storage_cost_per_unit: parseNum(cols[iEstStorageCostPerUnit]),
+      your_price: parseNum(cols[iYourPrice]),
+      sales_price: iSalesPrice >= 0 ? parseNum(cols[iSalesPrice]) : null,
+      alert: alertText,
+    }
+
+    result.set(sku, item)
+  }
+}
+
+/**
  * Fetch Sales & Traffic Report (GET_SALES_AND_TRAFFIC_REPORT) for the last 30 days.
  * Returns per-ASIN FBA sales data including units, revenue, Buy Box %, conversion.
  */
@@ -179,7 +443,6 @@ export async function fetchSalesAndTrafficReport(asins: string[]): Promise<Map<s
   if (!reportResp.ok) {
     const errBody = await reportResp.text()
     console.warn(`[Sales Report] Failed to request report (${reportResp.status}):`, errBody)
-    // Common causes: Reports API not enabled in SP-API app, or missing scope
     if (reportResp.status === 403) {
       console.warn('[Sales Report] 403 Forbidden — ensure "Reports" scope is enabled in your SP-API app at solutionproviderportal.amazon.com')
     }
@@ -194,55 +457,14 @@ export async function fetchSalesAndTrafficReport(asins: string[]): Promise<Map<s
   }
   console.log(`[Sales Report] Requested report: ${reportId}`)
 
-  // Poll for completion (max 4 minutes, 5s intervals)
-  let reportDocumentId: string | null = null
-  for (let i = 0; i < 48; i++) {
-    await new Promise(r => setTimeout(r, 5000))
+  // Poll for completion
+  const documentId = await pollReportUntilDone(reportId, token, 'Sales Report')
+  if (!documentId) return new Map()
 
-    const statusResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports/${reportId}`, {
-      headers: { 'x-amz-access-token': token },
-    })
+  // Download the report
+  const rawText = await downloadReportDocument(documentId, token, 'Sales Report')
+  if (!rawText) return new Map()
 
-    if (!statusResp.ok) continue
-
-    const status = await statusResp.json()
-    console.log(`[Sales Report] Status: ${status.processingStatus}`)
-
-    if (status.processingStatus === 'DONE') {
-      reportDocumentId = status.reportDocumentId
-      break
-    }
-    if (status.processingStatus === 'FATAL' || status.processingStatus === 'CANCELLED') {
-      console.warn(`[Sales Report] Report failed: ${status.processingStatus}`)
-      return new Map()
-    }
-  }
-
-  if (!reportDocumentId) {
-    console.warn('[Sales Report] Timed out waiting for report')
-    return new Map()
-  }
-
-  // Get document URL
-  const docResp = await fetch(`${ENDPOINT}/reports/2021-06-30/documents/${reportDocumentId}`, {
-    headers: { 'x-amz-access-token': token },
-  })
-
-  if (!docResp.ok) {
-    console.warn('[Sales Report] Failed to get document URL')
-    return new Map()
-  }
-
-  const { url } = await docResp.json()
-
-  // Download and parse the JSON report
-  const dataResp = await fetch(url)
-  if (!dataResp.ok) {
-    console.warn('[Sales Report] Failed to download report data')
-    return new Map()
-  }
-
-  const rawText = await dataResp.text()
   console.log(`[Sales Report] Downloaded ${rawText.length} bytes`)
 
   let reportData: Record<string, unknown>
@@ -253,7 +475,6 @@ export async function fetchSalesAndTrafficReport(asins: string[]): Promise<Map<s
     return new Map()
   }
 
-  // Log top-level keys to diagnose structure issues
   console.log('[Sales Report] Top-level keys:', Object.keys(reportData))
 
   const result = parseSalesAndTrafficReport(reportData, new Set(asins))
@@ -270,7 +491,6 @@ function parseSalesAndTrafficReport(
 ): Map<string, ASINSalesData> {
   const result = new Map<string, ASINSalesData>()
 
-  // The report structure: { salesAndTrafficByAsin: [...] } or nested under reportSpecificationAndHeader
   const byAsin = (
     (data?.salesAndTrafficByAsin as Array<Record<string, unknown>>) ||
     ((data?.salesAndTrafficByDate as Record<string, unknown>)?.salesAndTrafficByAsin as Array<Record<string, unknown>>) ||
@@ -294,7 +514,6 @@ function parseSalesAndTrafficReport(
     const conversion = parseFloat(String(traffic.unitSessionPercentage || 0))
 
     if (existing) {
-      // Aggregate multiple entries for same ASIN
       existing.units_ordered_fba += unitsOrdered
       existing.ordered_product_sales += revenue
       existing.sessions += sessions
@@ -302,7 +521,7 @@ function parseSalesAndTrafficReport(
       result.set(asin, {
         asin,
         units_ordered_fba: unitsOrdered,
-        units_ordered_fbm: 0, // filled in by caller from orders table
+        units_ordered_fbm: 0,
         ordered_product_sales: revenue,
         sessions,
         buy_box_percentage: buyBox,
