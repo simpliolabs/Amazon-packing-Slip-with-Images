@@ -122,11 +122,10 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   // ── 3. Build recommendations ──────────────────────────────────────────────
   const recommendations: ProductRecommendation[] = []
 
-  // All ASINs we know about = union of FBM orders + FBA inventory
-  const allAsins = new Set([
-    ...velocityMap.keys(),
-    ...fbaInvMap.keys(),
-  ])
+  // Only include ASINs that appear in your orders — this is the source of truth.
+  // FBA inventory data enriches these ASINs but never adds new ones.
+  // This prevents FBA-only ASINs (old listings, test products, etc.) from polluting the report.
+  const allAsins = new Set(velocityMap.keys())
 
   for (const asin of allAsins) {
     const fbmData = velocityMap.get(asin)
