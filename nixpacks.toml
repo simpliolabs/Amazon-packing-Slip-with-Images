@@ -1,0 +1,6 @@
+[variables]
+NODE_OPTIONS = "--max-old-space-size=1024"
+NEXT_TELEMETRY_DISABLED = "1"
+
+[phases.build]
+cmds = ["pnpm run build"]
