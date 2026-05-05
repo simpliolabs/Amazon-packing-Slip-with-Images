@@ -126,9 +126,6 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   const fbaByBaseSku = new Map<string, FBAInvRow>()
 
   for (const inv of invRows || []) {
-    // Skip rows with no sync timestamp — they're phantom rows
-    if (!inv.last_synced_at) continue
-
     const row: FBAInvRow = {
       asin: inv.asin,
       sku: inv.sku || '',
