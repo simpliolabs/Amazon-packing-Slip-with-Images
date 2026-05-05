@@ -242,15 +242,10 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
 /**
  * Fetch the FBA Manage Inventory Health Report (GET_FBA_INVENTORY_PLANNING_DATA).
  *
- * This is a tab-delimited flat file report from Amazon that contains:
- * - All active FBA inventory items with excess/overstock flags
- * - Estimated excess quantities and days of supply
- * - Estimated monthly storage fees and per-unit storage costs
- * - Amazon's recommended actions (Create Sale, Create Outlet Deal, Remove)
- * - Inventory age buckets and long-term storage fee estimates
- *
- * NOTE: This is a DAILY report — Amazon generates it at most once every 4 hours.
- * The first request after a long idle period may take up to 4 hours to complete.
+ * Strategy (avoids the 4-hour daily report wait):
+ * 1. First check if Amazon already has a recent DONE report (last 24 hours)
+ * 2. If yes → download it immediately (no wait)
+ * 3. If no → request a new report and poll up to 5 minutes
  *
  * Returns a map of SKU → InventoryHealthItem for easy lookup.
  */
@@ -258,47 +253,81 @@ export async function fetchInventoryHealthReport(): Promise<Map<string, Inventor
   const token = await getAccessToken()
   const result = new Map<string, InventoryHealthItem>()
 
-  // Request the inventory health report
-  const reportResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
-    method: 'POST',
-    headers: {
-      'x-amz-access-token': token,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      reportType: 'GET_FBA_INVENTORY_PLANNING_DATA',
-      marketplaceIds: [MARKETPLACE_ID],
-    }),
-  })
+  // ── Step 1: Check for an existing recent report ─────────────────────────
+  // Amazon keeps completed reports for 90 days. We look for any DONE report
+  // from the last 24 hours to avoid requesting a new daily report unnecessarily.
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const listUrl = `${ENDPOINT}/reports/2021-06-30/reports?reportTypes=GET_FBA_INVENTORY_PLANNING_DATA&processingStatuses=DONE&marketplaceIds=${MARKETPLACE_ID}&createdSince=${encodeURIComponent(since)}&pageSize=1`
 
-  if (!reportResp.ok) {
-    const errBody = await reportResp.text()
-    console.warn(`[Inventory Health] Failed to request report (${reportResp.status}):`, errBody)
-    if (reportResp.status === 403) {
-      console.warn('[Inventory Health] 403 Forbidden — ensure "Reports" scope is enabled in your SP-API app')
+  let documentId: string | null = null
+
+  try {
+    const listResp = await fetch(listUrl, {
+      headers: { 'x-amz-access-token': token },
+    })
+
+    if (listResp.ok) {
+      const listJson = await listResp.json()
+      const reports: Array<{ reportId: string; reportDocumentId?: string; processingStatus: string; createdTime: string }> =
+        listJson.reports || []
+
+      if (reports.length > 0 && reports[0].reportDocumentId) {
+        documentId = reports[0].reportDocumentId
+        console.log(`[Inventory Health] Using existing report from ${reports[0].createdTime} (documentId: ${documentId})`)
+      } else {
+        console.log(`[Inventory Health] No recent DONE report found — will request a new one`)
+      }
+    } else {
+      console.warn(`[Inventory Health] Could not list reports (${listResp.status}) — will request a new one`)
     }
-    return result
+  } catch (err) {
+    console.warn('[Inventory Health] Error listing reports:', err)
   }
 
-  const reportRespJson = await reportResp.json()
-  const reportId = reportRespJson.reportId
-  if (!reportId) {
-    console.warn('[Inventory Health] No reportId in response:', JSON.stringify(reportRespJson))
-    return result
+  // ── Step 2: If no existing report, request a new one ────────────────────
+  if (!documentId) {
+    const reportResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+      method: 'POST',
+      headers: {
+        'x-amz-access-token': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        reportType: 'GET_FBA_INVENTORY_PLANNING_DATA',
+        marketplaceIds: [MARKETPLACE_ID],
+      }),
+    })
+
+    if (!reportResp.ok) {
+      const errBody = await reportResp.text()
+      console.warn(`[Inventory Health] Failed to request report (${reportResp.status}):`, errBody)
+      if (reportResp.status === 403) {
+        console.warn('[Inventory Health] 403 Forbidden — ensure "Reports" scope is enabled in your SP-API app')
+      }
+      return result
+    }
+
+    const reportRespJson = await reportResp.json()
+    const reportId = reportRespJson.reportId
+    if (!reportId) {
+      console.warn('[Inventory Health] No reportId in response:', JSON.stringify(reportRespJson))
+      return result
+    }
+    console.log(`[Inventory Health] Requested new report: ${reportId}`)
+
+    // Poll up to 5 minutes for the new report to complete
+    documentId = await pollReportUntilDone(reportId, token, 'Inventory Health')
+    if (!documentId) {
+      console.warn('[Inventory Health] New report did not complete within 5 minutes — try syncing again in a few hours')
+      return result
+    }
   }
-  console.log(`[Inventory Health] Requested report: ${reportId} (GET_FBA_INVENTORY_PLANNING_DATA — daily report, may take up to 4 hours on first request)`)
 
-  // Poll for completion
-  const documentId = await pollReportUntilDone(reportId, token, 'Inventory Health')
-  if (!documentId) return result
-
-  // Download the report
+  // ── Step 3: Download and parse the report ───────────────────────────────
   const rawText = await downloadReportDocument(documentId, token, 'Inventory Health')
   if (!rawText) return result
 
   console.log(`[Inventory Health] Downloaded ${rawText.length} bytes`)
-
-  // Parse the tab-delimited report
   parseInventoryHealthTSV(rawText, result)
   console.log(`[Inventory Health] Parsed ${result.size} inventory health records`)
 
