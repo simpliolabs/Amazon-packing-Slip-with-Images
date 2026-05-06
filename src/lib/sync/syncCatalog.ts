@@ -165,15 +165,32 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     for (const inv of inventory) {
       if (!inv.asin || inv.quantity_available <= 0) continue
 
+      // HARD RULE: If Amazon has inbound units for this ASIN, Amazon itself wants
+      // more stock sent — this product is NOT excess, skip it unconditionally.
+      if ((inv.quantity_inbound || 0) > 0) {
+        console.log(`[Excess] Skipping ${inv.asin} — has ${inv.quantity_inbound} inbound units (Amazon wants more stock)`)
+        continue
+      }
+
       const vel = velocityMap.get(inv.asin)
       const units30d = vel?.units30d || 0
+      const units90d = vel?.units90d || 0
       const dailyRate = units30d / 30
+
+      // HARD RULE: If we have NO order history for this ASIN in our orders table,
+      // it likely sells exclusively via FBA (FBA orders aren't in our orders table).
+      // We cannot compute accurate velocity — skip to avoid false positives.
+      // Only flag if we have at least 3 orders in 90 days to establish a real pattern.
+      if (units90d < 3 && inv.quantity_available < 20) {
+        console.log(`[Excess] Skipping ${inv.asin} — insufficient order history (${units90d} orders/90d, likely FBA-only seller)`)
+        continue
+      }
 
       // Skip if selling fast enough (DoS <= threshold)
       if (dailyRate === 0) {
-        // Zero velocity — infinite DoS, definitely excess if stock > 0
-        // Only flag if we have meaningful stock (> 5 units to avoid noise)
-        if (inv.quantity_available < 5) continue
+        // Zero velocity AND no inbound — only flag if substantial stock (> 20 units)
+        // to avoid noise from products that just haven't had orders synced yet
+        if (inv.quantity_available < 20) continue
       }
 
       const daysOfSupply = dailyRate > 0
