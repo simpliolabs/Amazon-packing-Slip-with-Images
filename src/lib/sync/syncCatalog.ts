@@ -264,6 +264,47 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
       }
     }
 
+    // ── AUTO-CLEANUP: Remove stale excess records that no longer qualify ──────
+    // After every sync, any excess_inventory row whose SKU is NOT in the current
+    // excess candidates list should be auto-resolved. This means the item either:
+    //   - Sold down (DoS is now healthy)
+    //   - Has inbound units (Amazon wants more stock)
+    //   - Was a false positive (FBA-only product with no order history)
+    // We only auto-remove rows with status 'active' — rows with action_taken
+    // or ai_action_plan are moved to 'resolved' so history is preserved.
+    try {
+      const currentExcessSkus = new Set(excessCandidates.map(c => c.sku))
+
+      const { data: allTracked } = await supabase
+        .from('excess_inventory')
+        .select('id, sku, status, action_taken, ai_action_plan')
+        .in('status', ['active', 'needs_action'])
+
+      for (const tracked of allTracked || []) {
+        if (currentExcessSkus.has(tracked.sku)) continue // still excess, keep it
+
+        const hasHistory = tracked.action_taken || tracked.ai_action_plan
+
+        if (hasHistory) {
+          // Preserve history — mark as resolved with a note
+          await supabase
+            .from('excess_inventory')
+            .update({ status: 'resolved', last_synced_at: now })
+            .eq('id', tracked.id)
+          console.log(`[Excess Cleanup] Resolved ${tracked.sku} — no longer excess`)
+        } else {
+          // No history — safe to delete (was a false positive or already cleared)
+          await supabase
+            .from('excess_inventory')
+            .delete()
+            .eq('id', tracked.id)
+          console.log(`[Excess Cleanup] Deleted stale record for ${tracked.sku} — no longer excess`)
+        }
+      }
+    } catch (cleanupErr) {
+      errors.push(`Excess cleanup error: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`)
+    }
+
     // Fire notification if new excess items found
     if (excessCandidates.length > 0) {
       await supabase.from('fba_notifications').insert({
