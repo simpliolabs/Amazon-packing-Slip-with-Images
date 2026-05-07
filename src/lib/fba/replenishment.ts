@@ -152,12 +152,17 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       }
     }
 
-    // Map B: base SKU → row (only for FBA-suffixed SKUs)
+    // Map B: base SKU → row
+    // Case 1: FBA-suffixed SKU (DAR-CCG-M-IVY-FBA → key: DAR-CCG-M-IVY)
     if (inv.sku && /[-_]FBA$/i.test(inv.sku)) {
       const baseSku = getBaseSku(inv.sku)
       if (baseSku && !fbaByBaseSku.has(baseSku)) {
         fbaByBaseSku.set(baseSku, { ...row })
       }
+    }
+    // Case 2: Non-suffixed FBA SKU — store as-is so FBM SKU can match directly
+    if (inv.sku && !fbaByBaseSku.has(inv.sku)) {
+      fbaByBaseSku.set(inv.sku, { ...row })
     }
   }
 
@@ -175,7 +180,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     let matchedFbaAsin: string | null = fbaInv ? asin : null
     let matchedFbaSku: string | null = fbaInv?.sku || null
 
-    // Priority 2 — base-SKU match (FBM SKU "X" → FBA SKU "X-FBA")
+    // Priority 2 — base-SKU match (FBM SKU "X" → FBA SKU "X-FBA" or exact match)
     if (!fbaInv && fbmSku) {
       const skuMatch = fbaByBaseSku.get(fbmSku)
       if (skuMatch) {
@@ -183,6 +188,17 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
         matchedFbaAsin = skuMatch.asin
         matchedFbaSku = skuMatch.sku
         console.log(`[Replenishment] SKU-paired: FBM ASIN ${asin} (${fbmSku}) → FBA ASIN ${skuMatch.asin} (${skuMatch.sku})`)
+      }
+    }
+
+    // Priority 3 — FBM ASIN matches FBA base SKU (FBA SKU "B0FKKSTR12-FBA" → base "B0FKKSTR12")
+    if (!fbaInv) {
+      const asinSkuMatch = fbaByBaseSku.get(asin)
+      if (asinSkuMatch) {
+        fbaInv = asinSkuMatch
+        matchedFbaAsin = asinSkuMatch.asin
+        matchedFbaSku = asinSkuMatch.sku
+        console.log(`[Replenishment] ASIN-as-SKU-paired: FBM ASIN ${asin} → FBA ${asinSkuMatch.asin} (${asinSkuMatch.sku})`)
       }
     }
 
@@ -226,7 +242,9 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     } else if (!hasFBAInventory) {
       if (fbmUnits30d >= settings.newFBACandidateMinUnits) {
         status = 'new_candidate'
-        recommendedSendQty = Math.ceil(fbmVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
+        // Minimum send qty is the new-candidate threshold, not 1
+        const calcQty = Math.ceil(fbmVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
+        recommendedSendQty = Math.max(calcQty, settings.newFBACandidateMinUnits)
         sendRationale = `${fbmUnits30d} units/30d via FBM. No FBA listing found. Initial send covers lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
       } else {
         status = 'no_data'
@@ -234,7 +252,9 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       }
     } else if (fbaQtyAvailable === 0 && fbaQtyInbound === 0) {
       status = 'stocked_out'
-      recommendedSendQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
+      // If velocity is 0 (FBA-only product we can't measure), use minimum send qty
+      const calcQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
+      recommendedSendQty = Math.max(calcQty, combinedVelocityPerDay > 0 ? 1 : settings.newFBACandidateMinUnits)
       sendRationale = `FBA stocked out. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
     } else if (weeksOfCover !== null && weeksOfCover < 2) {
       status = 'critical'

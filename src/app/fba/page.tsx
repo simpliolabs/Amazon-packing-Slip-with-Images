@@ -327,7 +327,11 @@ export default function FBAIntelligencePage() {
   }, [fetchReport, fetchExcess, fetchNotifications])
 
   // ── Filtered replenishment ──────────────────────────────────────────────────
+  const [showNoData, setShowNoData] = useState(false)
+
   const filteredReport = report.filter(r => {
+    // Hide no_data rows by default unless toggled on or explicitly filtered
+    if (!showNoData && filter === 'all' && r.status === 'no_data') return false
     if (filter !== 'all' && r.status !== filter) return false
     if (search) {
       const q = search.toLowerCase()
@@ -337,6 +341,8 @@ export default function FBAIntelligencePage() {
     }
     return true
   })
+
+  const noDataCount = report.filter(r => r.status === 'no_data').length
 
   // ── Filtered excess ─────────────────────────────────────────────────────────
   const filteredExcess = excessItems.filter(i => {
@@ -559,10 +565,22 @@ export default function FBAIntelligencePage() {
             </div>
           )}
 
-          <div className="mb-4">
+          <div className="mb-4 flex items-center gap-3">
             <input type="text" placeholder="Search by ASIN, SKU, or title…" value={search}
               onChange={e => setSearch(e.target.value)}
-              className="w-full px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            {noDataCount > 0 && (
+              <button
+                onClick={() => setShowNoData(!showNoData)}
+                className={`px-3 py-2 text-xs rounded-lg border transition-colors whitespace-nowrap ${
+                  showNoData
+                    ? 'bg-gray-100 border-gray-300 text-gray-700'
+                    : 'border-gray-200 text-gray-400 hover:text-gray-600'
+                }`}
+              >
+                {showNoData ? `Hide` : `Show`} {noDataCount} No Data
+              </button>
+            )}
           </div>
 
           {replenishLoading ? (
