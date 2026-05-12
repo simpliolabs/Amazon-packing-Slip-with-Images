@@ -19,6 +19,8 @@ export interface Database {
           order_items: OrderItem[]
           fulfillment_channel: string | null
           order_status: string | null
+          ship_service_level: string | null
+          is_prime: boolean
           raw_data: Json | null
           synced_at: string
           created_at: string
@@ -32,6 +34,8 @@ export interface Database {
           order_items?: OrderItem[]
           fulfillment_channel?: string | null
           order_status?: string | null
+          ship_service_level?: string | null
+          is_prime?: boolean
           raw_data?: Json | null
           synced_at?: string
           created_at?: string
@@ -45,6 +49,8 @@ export interface Database {
           order_items?: OrderItem[]
           fulfillment_channel?: string | null
           order_status?: string | null
+          ship_service_level?: string | null
+          is_prime?: boolean
           raw_data?: Json | null
           synced_at?: string
           created_at?: string

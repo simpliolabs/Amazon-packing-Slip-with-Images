@@ -61,6 +61,13 @@ export interface AmazonOrder {
   }
   OrderStatus: string
   FulfillmentChannel: string
+  ShipmentServiceLevelCategory?: string
+  IsPrime?: boolean
+  IsBusinessOrder?: boolean
+  EarliestShipDate?: string
+  LatestShipDate?: string
+  EarliestDeliveryDate?: string
+  LatestDeliveryDate?: string
   NumberOfItemsShipped?: number
   NumberOfItemsUnshipped?: number
   OrderTotal?: {

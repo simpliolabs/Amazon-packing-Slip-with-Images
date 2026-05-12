@@ -371,6 +371,83 @@ const styles = StyleSheet.create({
     objectFit: 'contain',
   },
 
+  // ── Shipping service level badge ──
+  shipBadgeWrap: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+  },
+  shipBadgeStandard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2563EB',
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    gap: 4,
+  },
+  shipBadgeExpedited: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EA580C',
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    gap: 4,
+  },
+  shipBadgePriority: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#DC2626',
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    gap: 4,
+  },
+  shipBadgeFree: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#6B7280',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+  },
+  shipBadgeIcon: {
+    fontSize: 14,
+    color: '#FFFFFF',
+  },
+  shipBadgeText: {
+    fontSize: 9,
+    fontFamily: 'Helvetica-Bold',
+    color: '#FFFFFF',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  shipBadgeTextSmall: {
+    fontSize: 7,
+    fontFamily: 'Helvetica-Bold',
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  shipNowBanner: {
+    backgroundColor: '#DC2626',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginBottom: 8,
+    borderRadius: 3,
+    alignItems: 'center',
+  },
+  shipNowText: {
+    fontSize: 11,
+    fontFamily: 'Helvetica-Bold',
+    color: '#FFFFFF',
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+  },
+
   // Info boxes row
   infoRow: {
     flexDirection: 'row',
@@ -679,6 +756,34 @@ function buildDesignImageMap(items: OrderItem[]): Map<string, { url: string; asi
   return map
 }
 
+// ─── Shipping badge helper ────────────────────────────────────────────────────
+
+function getShipBadgeInfo(level: string | null | undefined): {
+  tier: 'free' | 'standard' | 'expedited' | 'priority' | 'overnight' | null
+  icon: string
+  label: string
+} {
+  if (!level) return { tier: null, icon: '', label: '' }
+  const l = level.toLowerCase()
+  if (l.includes('sameday') || l.includes('same_day') || l.includes('overnight') || l.includes('nextday') || l.includes('next_day')) {
+    return { tier: 'overnight', icon: '!', label: 'SHIP NOW' }
+  }
+  if (l.includes('priority') || l.includes('secondday') || l.includes('second_day') || l.includes('2day') || l.includes('twoday')) {
+    return { tier: 'priority', icon: '*', label: 'PRIORITY — SHIP TODAY' }
+  }
+  if (l.includes('expedited') || l.includes('express')) {
+    return { tier: 'expedited', icon: '>', label: 'EXPEDITED' }
+  }
+  if (l.includes('standard') || l.includes('ground')) {
+    return { tier: 'standard', icon: 'PKG', label: 'STANDARD' }
+  }
+  if (l.includes('free') || l.includes('economy') || l.includes('free_economy')) {
+    return { tier: 'free', icon: '', label: 'FREE Shipping' }
+  }
+  // Unknown level — show it as-is in standard style
+  return { tier: 'standard', icon: 'PKG', label: level.toUpperCase() }
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface PackingSlipDocumentProps {
@@ -748,11 +853,36 @@ export default function PackingSlipDocument({
       <Page size="LETTER" style={styles.page}>
 
         {/* ── Header: CEO® logo | Store is on | Amazon logo ── */}
-        <View style={styles.headerRow}>
-          <Image src={logoSrc} style={styles.ceoLogo} />
-          <Text style={styles.headerConnector}>Store is on</Text>
-          <Image src={amazonLogoSrc} style={styles.amazonLogo} />
-        </View>
+        {(() => {
+          const badge = getShipBadgeInfo((order as Order & { ship_service_level?: string | null }).ship_service_level)
+          return (
+            <>
+              {badge.tier === 'overnight' && (
+                <View style={styles.shipNowBanner}>
+                  <Text style={styles.shipNowText}>SHIP NOW — OVERNIGHT / SAME-DAY ORDER</Text>
+                </View>
+              )}
+              <View style={[styles.headerRow, { position: 'relative' }]}>
+                <Image src={logoSrc} style={styles.ceoLogo} />
+                <Text style={styles.headerConnector}>Store is on</Text>
+                <Image src={amazonLogoSrc} style={styles.amazonLogo} />
+                {badge.tier && badge.tier !== 'overnight' && (
+                  <View style={styles.shipBadgeWrap}>
+                    <View style={
+                      badge.tier === 'priority' ? styles.shipBadgePriority
+                      : badge.tier === 'expedited' ? styles.shipBadgeExpedited
+                      : badge.tier === 'free' ? styles.shipBadgeFree
+                      : styles.shipBadgeStandard
+                    }>
+                      {badge.icon ? <Text style={styles.shipBadgeIcon}>{badge.icon}</Text> : null}
+                      <Text style={badge.tier === 'free' ? styles.shipBadgeTextSmall : styles.shipBadgeText}>{badge.label}</Text>
+                    </View>
+                  </View>
+                )}
+              </View>
+            </>
+          )
+        })()}
 
         {/* ── Order Number + Date ── */}
         <View style={styles.infoRow}>

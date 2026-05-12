@@ -15,6 +15,53 @@ import { formatDate, getStatusColor, getTotalItems, cn } from '@/lib/utils'
 import type { Order, OrderItem, ShipTo } from '@/types/database'
 import PackingSlipModal from '@/components/pdf/PackingSlipModal'
 
+// ── Shipping service level badge helper ──────────────────────────────────────
+function ShipBadge({ level }: { level: string | null | undefined }) {
+  if (!level) return null
+  const l = level.toLowerCase()
+  if (l.includes('sameday') || l.includes('same_day') || l.includes('overnight') || l.includes('nextday') || l.includes('next_day')) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-red-600 text-white uppercase tracking-wide animate-pulse">
+        !! SHIP NOW
+      </span>
+    )
+  }
+  if (l.includes('priority') || l.includes('secondday') || l.includes('second_day') || l.includes('2day') || l.includes('twoday')) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-red-500 text-white uppercase tracking-wide">
+        🚀 PRIORITY
+      </span>
+    )
+  }
+  if (l.includes('expedited') || l.includes('express')) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-orange-500 text-white uppercase tracking-wide">
+        ⚡ EXPEDITED
+      </span>
+    )
+  }
+  if (l.includes('standard') || l.includes('ground')) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold bg-blue-600 text-white uppercase tracking-wide">
+        📦 STANDARD
+      </span>
+    )
+  }
+  if (l.includes('free') || l.includes('economy')) {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-gray-200 text-gray-600">
+        FREE Shipping
+      </span>
+    )
+  }
+  // Fallback: show the raw level in a neutral badge
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700 uppercase tracking-wide">
+      {level}
+    </span>
+  )
+}
+
 interface OrdersTableProps {
   userRole: 'admin' | 'packer'
 }
@@ -378,14 +425,17 @@ export default function OrdersTable({ userRole }: OrdersTableProps) {
                       {getItemCount(order)}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span
-                        className={cn(
-                          'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
-                          getStatusColor(order.order_status ?? '')
-                        )}
-                      >
-                        {order.order_status}
-                      </span>
+                      <div className="flex flex-col items-center gap-1">
+                        <span
+                          className={cn(
+                            'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
+                            getStatusColor(order.order_status ?? '')
+                          )}
+                        >
+                          {order.order_status}
+                        </span>
+                        <ShipBadge level={(order as Order & { ship_service_level?: string | null }).ship_service_level} />
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button

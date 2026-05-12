@@ -311,13 +311,29 @@ export async function syncOrders(): Promise<SyncResult> {
             order_items: orderItems,
             fulfillment_channel: order.FulfillmentChannel,
             order_status: order.OrderStatus,
+            ship_service_level: order.ShipmentServiceLevelCategory || null,
+            is_prime: order.IsPrime || false,
             raw_data: sanitizedRawData,
             synced_at: new Date().toISOString(),
           },
           { onConflict: 'id' }
         )
 
-        if (!error) ordersInserted++
+        if (!error) {
+          ordersInserted++
+          // Trigger urgent-shipping notification for Priority / Overnight / SameDay orders
+          const urgentLevels = ['Priority', 'NextDay', 'SameDay', 'SecondDay']
+          const svcLevel = order.ShipmentServiceLevelCategory || ''
+          if (urgentLevels.some(u => svcLevel.toLowerCase().includes(u.toLowerCase()))) {
+            await supabase.from('fba_notifications').insert({
+              type: 'urgent_shipping',
+              title: `URGENT: ${svcLevel} order received`,
+              message: `Order ${order.AmazonOrderId} requires ${svcLevel} shipping. Ship immediately.`,
+              metadata: { order_id: order.AmazonOrderId, ship_service_level: svcLevel },
+              is_read: false,
+            })
+          }
+        }
       } catch (itemError) {
         console.error(`Error processing order ${order.AmazonOrderId}:`, itemError)
       }
