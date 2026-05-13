@@ -1,10 +1,10 @@
 /**
  * FBA Replenishment API
- * GET  /api/fba/replenishment  — returns full replenishment report
- * POST /api/fba/replenishment  — triggers a catalog + inventory sync then returns report
+ * GET  /api/fba/replenishment  — returns full replenishment report (+ optional format=csv|shipment)
+ * POST /api/fba/replenishment  — triggers sync in background, returns immediately with status
+ * GET  /api/fba/replenishment?status=1  — returns sync status (is it running?)
  */
 
-// Allow up to 5 minutes for the sync (self-hosted, no Vercel limits)
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
@@ -21,33 +21,23 @@ function getAdminSupabase() {
   )
 }
 
-async function requireAdmin(req: NextRequest): Promise<boolean> {
-  const authHeader = req.headers.get('authorization')
-  if (!authHeader) return false
-
-  const token = authHeader.replace('Bearer ', '')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  )
-
-  const { data: { user } } = await supabase.auth.getUser(token)
-  if (!user) return false
-
-  const adminSupabase = getAdminSupabase()
-  const { data: profile } = await adminSupabase
-    .from('user_profiles')
-    .select('role')
-    .eq('id', user.id)
-    .single()
-
-  return profile?.role === 'admin'
-}
+// Simple in-memory sync state (works for single-instance deployment)
+let syncRunning = false
+let lastSyncResult: { completedAt: string; result: unknown } | null = null
 
 // GET — return current replenishment report from stored data
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const format = searchParams.get('format') // 'json' | 'csv' | 'shipment'
+  const statusCheck = searchParams.get('status')
+
+  // Status check endpoint
+  if (statusCheck) {
+    return NextResponse.json({
+      syncRunning,
+      lastSync: lastSyncResult,
+    })
+  }
 
   try {
     const report = await generateReplenishmentReport()
@@ -94,36 +84,67 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// POST — trigger a fresh sync then return updated report
+// POST — fire-and-forget sync, return immediately
 export async function POST(req: NextRequest) {
-  try {
-    console.log('[FBA API] Starting catalog + inventory sync...')
-    const syncResult = await syncCatalogAndInventory()
-    console.log('[FBA API] Sync complete:', syncResult)
-
-    const report = await generateReplenishmentReport()
-
-    const summary = {
-      total: report.length,
-      critical: report.filter(r => r.status === 'critical').length,
-      stocked_out: report.filter(r => r.status === 'stocked_out').length,
-      replenish: report.filter(r => r.status === 'replenish').length,
-      new_candidates: report.filter(r => r.status === 'new_candidate').length,
-      watch: report.filter(r => r.status === 'watch').length,
-      healthy: report.filter(r => r.status === 'healthy').length,
-      overstocked: report.filter(r => r.status === 'overstocked').length,
-    }
-
+  if (syncRunning) {
     return NextResponse.json({
-      sync: syncResult,
-      report,
-      summary,
+      message: 'Sync already in progress — please wait.',
+      syncRunning: true,
     })
-  } catch (err) {
-    console.error('[FBA API] Sync error:', err)
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Sync failed' },
-      { status: 500 }
-    )
+  }
+
+  // Start sync in background (fire and forget)
+  syncRunning = true
+  const syncPromise = (async () => {
+    try {
+      console.log('[FBA API] Background sync starting...')
+      const syncResult = await syncCatalogAndInventory()
+      console.log('[FBA API] Background sync complete:', syncResult)
+      lastSyncResult = { completedAt: new Date().toISOString(), result: syncResult }
+    } catch (err) {
+      console.error('[FBA API] Background sync error:', err)
+      lastSyncResult = { completedAt: new Date().toISOString(), result: { error: String(err) } }
+    } finally {
+      syncRunning = false
+    }
+  })()
+
+  // Wait up to 55 seconds for the sync to complete (within proxy timeout)
+  // If it finishes in time, return the full report. Otherwise return partial.
+  const timeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 55000))
+  const raceResult = await Promise.race([syncPromise.then(() => 'done' as const), timeout])
+
+  if (raceResult === 'done') {
+    // Sync finished within 55s — return full report
+    try {
+      const report = await generateReplenishmentReport()
+      const summary = {
+        total: report.length,
+        critical: report.filter(r => r.status === 'critical').length,
+        stocked_out: report.filter(r => r.status === 'stocked_out').length,
+        replenish: report.filter(r => r.status === 'replenish').length,
+        new_candidates: report.filter(r => r.status === 'new_candidate').length,
+        watch: report.filter(r => r.status === 'watch').length,
+        healthy: report.filter(r => r.status === 'healthy').length,
+        overstocked: report.filter(r => r.status === 'overstocked').length,
+      }
+      return NextResponse.json({
+        sync: lastSyncResult?.result,
+        report,
+        summary,
+      })
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : 'Failed to generate report after sync' },
+        { status: 500 }
+      )
+    }
+  } else {
+    // Sync still running — return partial response so the frontend doesn't get a 502
+    return NextResponse.json({
+      message: 'Sync started — still running in background. Data will update shortly. Refresh in 30 seconds.',
+      syncRunning: true,
+      partial: true,
+    })
   }
 }

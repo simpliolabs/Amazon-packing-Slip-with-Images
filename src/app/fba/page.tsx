@@ -247,10 +247,36 @@ export default function FBAIntelligencePage() {
       if (!resp.ok) {
         const text = await resp.text()
         let errMsg = 'Sync failed'
-        try { errMsg = JSON.parse(text).error || errMsg } catch { errMsg = resp.status === 502 ? 'Sync timed out — data is still syncing in the background. Click Sync again in 30 seconds.' : text || errMsg }
+        try { errMsg = JSON.parse(text).error || errMsg } catch { errMsg = resp.status === 502 ? 'Sync is running in the background. Refreshing data...' : text || errMsg }
+        // Even on 502, the sync is running server-side. Wait and reload.
+        if (resp.status === 502) {
+          setError('Sync is running in the background. Refreshing data in 15 seconds...')
+          await new Promise(r => setTimeout(r, 15000))
+          await fetchReport()
+          await fetchExcess()
+          await fetchNotifications()
+          await fetchSalesAnalytics()
+          await fetchListingHealth()
+          setError(null)
+          setLastSynced(new Date().toLocaleString())
+          return
+        }
         throw new Error(errMsg)
       }
       const data = await resp.json()
+      // Handle partial response (sync still running in background)
+      if (data.partial) {
+        setError('Sync is running in the background. Refreshing data in 15 seconds...')
+        await new Promise(r => setTimeout(r, 15000))
+        await fetchReport()
+        await fetchExcess()
+        await fetchNotifications()
+        await fetchSalesAnalytics()
+        await fetchListingHealth()
+        setError(null)
+        setLastSynced(new Date().toLocaleString())
+        return
+      }
       setReport(data.report || [])
       setReplenishSummary(data.summary || null)
       setSyncResult(data.sync || null)
