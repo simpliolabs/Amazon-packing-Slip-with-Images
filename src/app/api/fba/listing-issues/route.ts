@@ -52,19 +52,51 @@ const ISSUE_SEVERITY: Record<string, 'critical' | 'warning' | 'opportunity'> = {
   fbm_no_fba: 'opportunity',
 }
 
+// Helper: fetch ALL rows from a table, paginating in chunks of 1000
+// Supabase defaults to 1000-row limit; this ensures we get everything.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAll<T>(supabase: any, table: string, select: string): Promise<T[]> {
+  const PAGE_SIZE = 1000
+  const allRows: T[] = []
+  let offset = 0
+  let hasMore = true
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(select)
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) {
+      console.error(`[ListingIssues] Error fetching ${table} at offset ${offset}:`, error.message)
+      break
+    }
+    if (data && data.length > 0) {
+      allRows.push(...(data as T[]))
+      offset += data.length
+      hasMore = data.length === PAGE_SIZE // if we got a full page, there might be more
+    } else {
+      hasMore = false
+    }
+  }
+  return allRows
+}
+
 export async function GET(req: NextRequest) {
   const supabase = getAdminSupabase()
   const issues: ListingIssue[] = []
 
-  // Load listing health data
-  const { data: listings } = await supabase
-    .from('listing_health')
-    .select('sku, asin, product_name, price, quantity, status, fulfillment_channel')
+  // Load ALL listing health data (paginated — table has 10k+ rows)
+  const listings = await fetchAll<{
+    sku: string; asin: string | null; product_name: string | null;
+    price: number | null; quantity: number | null; status: string | null;
+    fulfillment_channel: string | null;
+  }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel')
 
-  // Load sales analytics for cross-reference
-  const { data: salesData } = await supabase
-    .from('sku_sales_analytics')
-    .select('sku, asin, product_name, units_sold_30d, revenue_30d, fulfillment_channel')
+  // Load ALL sales analytics for cross-reference
+  const salesData = await fetchAll<{
+    sku: string; asin: string | null; product_name: string | null;
+    units_sold_30d: number | null; revenue_30d: number | null;
+    fulfillment_channel: string | null;
+  }>(supabase, 'sku_sales_analytics', 'sku, asin, product_name, units_sold_30d, revenue_30d, fulfillment_channel')
 
   // Build sales lookup by SKU and ASIN
   const salesBySku = new Map<string, { units_sold_30d: number; revenue_30d: number; channel: string }>()
@@ -80,7 +112,7 @@ export async function GET(req: NextRequest) {
     if (s.asin) {
       // Aggregate by ASIN (sum all SKU variants)
       const existing = salesByAsin.get(s.asin)
-      if (!existing || s.units_sold_30d > existing.units_sold_30d) {
+      if (!existing || (s.units_sold_30d || 0) > existing.units_sold_30d) {
         salesByAsin.set(s.asin, {
           units_sold_30d: s.units_sold_30d || 0,
           revenue_30d: s.revenue_30d || 0,
@@ -116,6 +148,10 @@ export async function GET(req: NextRequest) {
     if (s.fulfillment_channel === 'Amazon' && s.sku && /[-_]FBA$/i.test(s.sku)) {
       const baseSku = s.sku.replace(/[-_]FBA$/i, '')
       fbaBaseSkus.add(baseSku)
+    }
+    // Also check by ASIN for Amazon channel (direct ASIN match)
+    if (s.fulfillment_channel === 'Amazon' && s.asin) {
+      fbaAsinSet.add(s.asin)
     }
   }
 
@@ -275,19 +311,7 @@ export async function GET(req: NextRequest) {
     total_lost_revenue: issues.reduce((sum, i) => sum + (i.estimated_lost_revenue_30d || 0), 0),
   }
 
-  return NextResponse.json({
-    issues,
-    summary,
-    _debug: {
-      totalListings: (listings || []).length,
-      fbaListingAsins: fbaListingAsins.size,
-      fbaBaseSkus: fbaBaseSkus.size,
-      fbaAsinSet: fbaAsinSet.size,
-      fbaBaseSkuSample: Array.from(fbaBaseSkus).slice(0, 20),
-      hasDarCcgSIvy: fbaBaseSkus.has('DAR-CCG-S-IVY'),
-      hasDarCcgXlIvy: fbaBaseSkus.has('DAR-CCG-XL-IVY'),
-    }
-  }, {
+  return NextResponse.json({ issues, summary }, {
     headers: { 'Cache-Control': 'no-store, max-age=0' },
   })
 }

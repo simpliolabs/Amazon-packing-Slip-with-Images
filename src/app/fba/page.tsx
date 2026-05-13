@@ -183,6 +183,10 @@ export default function FBAIntelligencePage() {
   const [error, setError] = useState<string | null>(null)
   const [lastSynced, setLastSynced] = useState<string | null>(null)
 
+  // Initial loading overlay state
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false)
+  const [loadedSources, setLoadedSources] = useState<Set<string>>(new Set())
+
   const getToken = async () => {
     const supabase = createClient()
     const { data: { session } } = await supabase.auth.getSession()
@@ -202,8 +206,10 @@ export default function FBAIntelligencePage() {
       const data = await resp.json()
       setReport(data.report || [])
       setReplenishSummary(data.summary || null)
+      setLoadedSources(prev => new Set(prev).add('replenishment'))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
+      setLoadedSources(prev => new Set(prev).add('replenishment'))
     } finally {
       setReplenishLoading(false)
     }
@@ -221,8 +227,10 @@ export default function FBAIntelligencePage() {
       const data = await resp.json()
       setExcessItems(data.items || [])
       setExcessSummary(data.summary || null)
+      setLoadedSources(prev => new Set(prev).add('excess'))
     } catch (err) {
       console.error('Excess fetch error:', err)
+      setLoadedSources(prev => new Set(prev).add('excess'))
     } finally {
       setExcessLoading(false)
     }
@@ -239,8 +247,9 @@ export default function FBAIntelligencePage() {
       const data = await resp.json()
       setNotifications(data.notifications || [])
       setUnreadCount(data.unreadCount || 0)
+      setLoadedSources(prev => new Set(prev).add('notifications'))
     } catch {
-      // Non-fatal
+      setLoadedSources(prev => new Set(prev).add('notifications'))
     }
   }, [])
 
@@ -398,6 +407,15 @@ export default function FBAIntelligencePage() {
     return () => clearInterval(interval)
   }, [fetchReport, fetchExcess, fetchNotifications])
 
+  // Mark initial load complete once all 3 primary sources are loaded
+  useEffect(() => {
+    if (loadedSources.has('replenishment') && loadedSources.has('excess') && loadedSources.has('notifications')) {
+      // Small delay for smooth transition
+      const timer = setTimeout(() => setInitialLoadComplete(true), 300)
+      return () => clearTimeout(timer)
+    }
+  }, [loadedSources])
+
   // ── Filtered replenishment ──────────────────────────────────────────────────
   const [showNoData, setShowNoData] = useState(false)
 
@@ -470,8 +488,51 @@ export default function FBAIntelligencePage() {
     if (activeTab === 'listings' && listingIssues.length === 0) fetchListingIssues()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Data source labels for the loading overlay
+  const DATA_SOURCES = [
+    { key: 'replenishment', label: 'Replenishment recommendations' },
+    { key: 'excess', label: 'Excess inventory' },
+    { key: 'notifications', label: 'Notifications' },
+  ] as const
+
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 max-w-7xl mx-auto relative">
+      {/* ── Gathering Data Overlay ──────────────────────────────────────────── */}
+      {!initialLoadComplete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/80 backdrop-blur-sm transition-opacity duration-500">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-200 px-10 py-8 max-w-md w-full mx-4 text-center">
+            {/* Spinner */}
+            <div className="mx-auto mb-5 w-12 h-12 relative">
+              <div className="absolute inset-0 rounded-full border-4 border-gray-200" />
+              <div className="absolute inset-0 rounded-full border-4 border-t-[#2E9CE6] animate-spin" />
+            </div>
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Gathering Data</h2>
+            <p className="text-sm text-gray-500 mb-5">Loading your FBA intelligence dashboard&hellip;</p>
+
+            {/* Progress checklist */}
+            <div className="space-y-2.5 text-left">
+              {DATA_SOURCES.map(src => {
+                const done = loadedSources.has(src.key)
+                return (
+                  <div key={src.key} className="flex items-center gap-3">
+                    {done ? (
+                      <svg className="w-5 h-5 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <div className="w-5 h-5 flex-shrink-0 flex items-center justify-center">
+                        <div className="w-4 h-4 rounded-full border-2 border-gray-300 border-t-[#2E9CE6] animate-spin" />
+                      </div>
+                    )}
+                    <span className={`text-sm ${done ? 'text-gray-600' : 'text-gray-400'}`}>{src.label}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="flex items-start justify-between mb-5">
         <div>
