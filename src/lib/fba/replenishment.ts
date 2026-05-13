@@ -306,6 +306,68 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     }
   }
 
+  // ── 3b. Sibling SKU inference ─────────────────────────────────────────────
+  // If a product family (e.g., DAR-CCG) has most variants with FBA listings,
+  // infer that missing variants also have FBA listings that just haven't
+  // appeared in the reports yet (e.g., recently created, zero sales, stocked out).
+  //
+  // Algorithm: group all known FBA base SKUs by their "family prefix" (first 2
+  // hyphen-separated segments, e.g., "DAR-CCG"). For each FBM SKU in the
+  // velocity map that has NO FBA match, check if its family prefix has ≥50%
+  // of siblings with FBA. If so, create a synthetic FBA entry.
+
+  // Build family prefix → { total FBM SKUs, FBA-matched count } map
+  const familyStats = new Map<string, { total: number; withFba: number; fbmSkus: string[] }>()
+
+  // Helper: extract family prefix from a SKU (first 2 segments)
+  function getFamilyPrefix(sku: string): string | null {
+    const parts = sku.split('-')
+    if (parts.length < 3) return null // need at least prefix-code-variant
+    return parts.slice(0, 2).join('-') // e.g., "DAR-CCG"
+  }
+
+  // First pass: count all FBM SKUs per family and how many have FBA matches
+  for (const [, fbmData] of velocityMap) {
+    const fbmSku = fbmData?.sku || ''
+    if (!fbmSku) continue
+    const prefix = getFamilyPrefix(fbmSku)
+    if (!prefix) continue
+
+    const stats = familyStats.get(prefix) || { total: 0, withFba: 0, fbmSkus: [] }
+    stats.total++
+    stats.fbmSkus.push(fbmSku)
+    if (fbaByBaseSku.has(fbmSku)) {
+      stats.withFba++
+    }
+    familyStats.set(prefix, stats)
+  }
+
+  // Second pass: for families where ≥50% have FBA, infer FBA for the rest
+  for (const [prefix, stats] of familyStats) {
+    if (stats.total < 3) continue // need at least 3 variants to infer
+    const fbaRatio = stats.withFba / stats.total
+    if (fbaRatio < 0.4) continue // need at least 40% to have FBA
+
+    for (const fbmSku of stats.fbmSkus) {
+      if (fbaByBaseSku.has(fbmSku)) continue // already matched
+
+      // Infer FBA SKU as fbmSku + "-FBA"
+      const inferredFbaSku = `${fbmSku}-FBA`
+      const syntheticRow: FBAInvRow = {
+        asin: '', // will be filled during matching
+        sku: inferredFbaSku,
+        quantity_available: 0,
+        quantity_inbound: 0,
+        quantity_total: 0,
+        units_sold_30d: 0,
+        buy_box_percentage: 0,
+        last_synced_at: null,
+      }
+      fbaByBaseSku.set(fbmSku, syntheticRow)
+      console.log(`[Replenishment] Sibling-inferred FBA: ${fbmSku} → ${inferredFbaSku} (family ${prefix}: ${stats.withFba}/${stats.total} have FBA)`)
+    }
+  }
+
   // ── 4. Build recommendations ──────────────────────────────────────────────
   const recommendations: ProductRecommendation[] = []
   const allAsins = new Set(velocityMap.keys())
@@ -325,9 +387,9 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       const skuMatch = fbaByBaseSku.get(fbmSku)
       if (skuMatch) {
         fbaInv = skuMatch
-        matchedFbaAsin = skuMatch.asin
+        matchedFbaAsin = skuMatch.asin || asin // use own ASIN if inferred
         matchedFbaSku = skuMatch.sku
-        console.log(`[Replenishment] SKU-paired: FBM ASIN ${asin} (${fbmSku}) → FBA ASIN ${skuMatch.asin} (${skuMatch.sku})`)
+        console.log(`[Replenishment] SKU-paired: FBM ASIN ${asin} (${fbmSku}) → FBA ASIN ${matchedFbaAsin} (${skuMatch.sku})`)
       }
     }
 
@@ -336,9 +398,9 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       const asinSkuMatch = fbaByBaseSku.get(asin)
       if (asinSkuMatch) {
         fbaInv = asinSkuMatch
-        matchedFbaAsin = asinSkuMatch.asin
+        matchedFbaAsin = asinSkuMatch.asin || asin
         matchedFbaSku = asinSkuMatch.sku
-        console.log(`[Replenishment] ASIN-as-SKU-paired: FBM ASIN ${asin} → FBA ${asinSkuMatch.asin} (${asinSkuMatch.sku})`)
+        console.log(`[Replenishment] ASIN-as-SKU-paired: FBM ASIN ${asin} → FBA ${matchedFbaAsin} (${asinSkuMatch.sku})`)
       }
     }
 

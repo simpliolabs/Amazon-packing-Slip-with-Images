@@ -276,6 +276,35 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // ── Sibling SKU inference for listing-issues ──────────────────────────────
+  // If a product family (e.g., DAR-CCG) has most variants with FBA listings,
+  // infer that missing variants also have FBA (just not in reports yet).
+  // This prevents false "No FBA" alerts for products that clearly have FBA.
+  const familyFbaStats = new Map<string, { total: number; withFba: number; skus: string[] }>()
+  for (const s of salesData || []) {
+    if (s.fulfillment_channel !== 'Merchant' || !s.sku) continue
+    const parts = s.sku.split('-')
+    if (parts.length < 3) continue
+    const prefix = parts.slice(0, 2).join('-')
+    const stats = familyFbaStats.get(prefix) || { total: 0, withFba: 0, skus: [] }
+    stats.total++
+    stats.skus.push(s.sku)
+    if (fbaBaseSkus.has(s.sku) || (s.asin && (fbaAsinSet.has(s.asin) || fbaListingAsins.has(s.asin)))) {
+      stats.withFba++
+    }
+    familyFbaStats.set(prefix, stats)
+  }
+  // For families where ≥40% have FBA, add remaining SKUs to fbaBaseSkus
+  for (const [prefix, stats] of familyFbaStats) {
+    if (stats.total < 3 || stats.withFba / stats.total < 0.4) continue
+    for (const sku of stats.skus) {
+      if (!fbaBaseSkus.has(sku)) {
+        fbaBaseSkus.add(sku)
+        console.log(`[ListingIssues] Sibling-inferred FBA for ${sku} (family ${prefix}: ${stats.withFba}/${stats.total})`)
+      }
+    }
+  }
+
   // Issue 4: High-velocity FBM-only ASINs with no FBA counterpart
   // (Only from sales data — these are ASINs selling well via Merchant with no FBA listing)
   const processedAsins = new Set<string>()
@@ -286,6 +315,7 @@ export async function GET(req: NextRequest) {
     // 1. Direct ASIN match in sku_sales_analytics Amazon channel
     // 2. Direct ASIN match in listing_health FBA listings
     // 3. Base-SKU match (FBM SKU "X" has FBA counterpart "X-FBA" in listing_health or sales)
+    // 4. Sibling inference (family has ≥40% FBA coverage)
     if (fbaAsinSet.has(s.asin) || fbaListingAsins.has(s.asin) || fbaBaseSkus.has(s.sku)) continue // already has FBA
     if ((s.units_sold_30d || 0) < 10) continue // only flag if selling 10+/month
 
