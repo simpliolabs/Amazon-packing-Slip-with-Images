@@ -1,101 +1,174 @@
 /**
- * Debug route — tests SP-API report access and returns raw diagnostic info.
+ * Debug route — tests SP-API report access across all key report types.
  * GET /api/fba/debug-reports
  *
- * Returns:
- * - Whether we can list existing reports
- * - The most recent report of each type and its status
- * - Raw first 2000 chars of the report content if available
+ * Tests:
+ *   - GET_FBA_INVENTORY_PLANNING_DATA        (inventory health, days of supply, recommended reorder)
+ *   - GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL  (all orders flat file)
+ *   - GET_SALES_AND_TRAFFIC_REPORT           (sales/traffic by ASIN)
+ *   - GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA (FBA managed inventory)
+ *   - GET_MERCHANT_LISTINGS_ALL_DATA         (all listings — Product Listing role)
+ *   - GET_FBA_ESTIMATED_FBA_FEES_TXT_DATA    (FBA fee estimates)
+ *   - GET_FBA_REIMBURSEMENTS_DATA            (reimbursements)
+ *   - GET_STRANDED_INVENTORY_UI_DATA         (stranded inventory)
+ *
+ * For each type: lists existing reports, downloads sample if DONE, or requests a new one.
  */
-
 import { NextResponse } from 'next/server'
 import { getAccessToken } from '@/lib/amazon/auth'
 
 const ENDPOINT = 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
 
+const REPORT_TYPES = [
+  { key: 'inventory_planning',    type: 'GET_FBA_INVENTORY_PLANNING_DATA' },
+  { key: 'all_orders',            type: 'GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL' },
+  { key: 'sales_traffic',         type: 'GET_SALES_AND_TRAFFIC_REPORT' },
+  { key: 'fba_managed_inventory', type: 'GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA' },
+  { key: 'all_listings',          type: 'GET_MERCHANT_LISTINGS_ALL_DATA' },
+  { key: 'fba_fees',              type: 'GET_FBA_ESTIMATED_FBA_FEES_TXT_DATA' },
+  { key: 'reimbursements',        type: 'GET_FBA_REIMBURSEMENTS_DATA' },
+  { key: 'stranded_inventory',    type: 'GET_STRANDED_INVENTORY_UI_DATA' },
+]
+
+async function downloadSample(
+  token: string,
+  reportDocumentId: string
+): Promise<{ sample: string; compression: string }> {
+  const docResp = await fetch(
+    `${ENDPOINT}/reports/2021-06-30/documents/${reportDocumentId}`,
+    { headers: { 'x-amz-access-token': token } }
+  )
+  if (!docResp.ok) {
+    return { sample: `doc fetch failed: ${docResp.status}`, compression: 'unknown' }
+  }
+  const docJson = await docResp.json()
+  const { url, compressionAlgorithm } = docJson
+  if (!url) return { sample: 'no url in document response', compression: 'none' }
+  const dataResp = await fetch(url)
+  if (!dataResp.ok) {
+    return { sample: `data fetch failed: ${dataResp.status}`, compression: compressionAlgorithm || 'none' }
+  }
+  if (compressionAlgorithm === 'GZIP') {
+    return { sample: '[GZIP compressed — will be decompressed in production]', compression: 'GZIP' }
+  }
+  const text = await dataResp.text()
+  return { sample: text.substring(0, 3000), compression: compressionAlgorithm || 'none' }
+}
+
 export async function GET() {
   const results: Record<string, unknown> = {}
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
   try {
     const token = await getAccessToken()
-    results.token_obtained = true
+    results._token_ok = true
 
-    // ── Test 1: List recent Inventory Health reports ─────────────────────────
-    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const since7d  = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-
-    for (const [label, reportType] of [
-      ['inventory_health', 'GET_FBA_INVENTORY_PLANNING_DATA'],
-      ['sales_traffic',    'GET_SALES_AND_TRAFFIC_REPORT'],
-    ] as const) {
+    for (const { key, type } of REPORT_TYPES) {
       try {
-        // Check last 7 days for any status
-        const listUrl = `${ENDPOINT}/reports/2021-06-30/reports?reportTypes=${reportType}&marketplaceIds=${MARKETPLACE_ID}&createdSince=${encodeURIComponent(since7d)}&pageSize=5`
-        const listResp = await fetch(listUrl, {
-          headers: { 'x-amz-access-token': token },
-        })
-        const listStatus = listResp.status
+        // 1. List existing reports in the last 7 days
+        const listUrl =
+          `${ENDPOINT}/reports/2021-06-30/reports` +
+          `?reportTypes=${type}` +
+          `&marketplaceIds=${MARKETPLACE_ID}` +
+          `&createdSince=${encodeURIComponent(since7d)}` +
+          `&pageSize=5`
+
+        const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
 
         if (!listResp.ok) {
           const errText = await listResp.text()
-          results[label] = { list_status: listStatus, error: errText }
+          results[key] = {
+            accessible: false,
+            http_status: listResp.status,
+            error: errText.substring(0, 500),
+          }
           continue
         }
 
         const listJson = await listResp.json()
-        const reports = listJson.reports || []
+        const reports: Record<string, unknown>[] = listJson.reports || []
+        const doneReport = reports.find(
+          r => r.processingStatus === 'DONE' && r.reportDocumentId
+        )
+        const inProgressReport = reports.find(
+          r => r.processingStatus === 'IN_PROGRESS' || r.processingStatus === 'IN_QUEUE'
+        )
 
-        results[label] = {
-          list_status: listStatus,
+        const entry: Record<string, unknown> = {
+          accessible: true,
           report_count_last_7d: reports.length,
-          reports: reports.map((r: Record<string, unknown>) => ({
-            reportId: r.reportId,
-            processingStatus: r.processingStatus,
-            createdTime: r.createdTime,
-            reportDocumentId: r.reportDocumentId || null,
-          })),
+          statuses: reports.map(r => r.processingStatus),
         }
 
-        // If there's a DONE report, try to download a sample
-        const doneReport = reports.find((r: Record<string, unknown>) => r.processingStatus === 'DONE' && r.reportDocumentId)
+        // 2. Download sample if DONE report exists
         if (doneReport) {
+          entry.has_done_report = true
+          entry.report_id = doneReport.reportId
+          entry.created_time = doneReport.createdTime
           try {
-            // Get the document URL
-            const docResp = await fetch(`${ENDPOINT}/reports/2021-06-30/documents/${doneReport.reportDocumentId}`, {
-              headers: { 'x-amz-access-token': token },
-            })
-            if (docResp.ok) {
-              const docJson = await docResp.json()
-              const downloadUrl = docJson.url
-              const compressionAlgorithm = docJson.compressionAlgorithm
-
-              if (downloadUrl) {
-                const dataResp = await fetch(downloadUrl)
-                if (dataResp.ok) {
-                  let rawText: string
-                  if (compressionAlgorithm === 'GZIP') {
-                    // Can't decompress in edge runtime easily — just note it
-                    rawText = '[GZIP compressed — cannot preview in debug mode]'
-                  } else {
-                    const text = await dataResp.text()
-                    rawText = text.substring(0, 2000)
-                  }
-                  ;(results[label] as Record<string, unknown>).sample_content = rawText
-                  ;(results[label] as Record<string, unknown>).compression = compressionAlgorithm || 'none'
-                }
-              }
-            }
+            const { sample, compression } = await downloadSample(
+              token,
+              doneReport.reportDocumentId as string
+            )
+            entry.sample = sample
+            entry.compression = compression
           } catch (dlErr) {
-            ;(results[label] as Record<string, unknown>).download_error = String(dlErr)
+            entry.download_error = String(dlErr)
+          }
+        } else if (inProgressReport) {
+          entry.has_done_report = false
+          entry.in_progress = true
+          entry.report_id = inProgressReport.reportId
+          entry.note = 'Report is processing — check back in a few minutes'
+        } else {
+          // 3. No recent report — request one now
+          entry.has_done_report = false
+          entry.requesting_new = true
+          try {
+            const reqBody: Record<string, unknown> = {
+              reportType: type,
+              marketplaceIds: [MARKETPLACE_ID],
+            }
+            // Sales & Traffic requires a date range and options
+            if (type === 'GET_SALES_AND_TRAFFIC_REPORT') {
+              reqBody.reportOptions = { dateGranularity: 'DAY', asinGranularity: 'CHILD' }
+              reqBody.dataStartTime = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+              reqBody.dataEndTime = new Date().toISOString()
+            }
+            // Orders report needs a date range too
+            if (type === 'GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL') {
+              reqBody.dataStartTime = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+              reqBody.dataEndTime = new Date().toISOString()
+            }
+            const reqResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+              method: 'POST',
+              headers: {
+                'x-amz-access-token': token,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(reqBody),
+            })
+            if (reqResp.ok) {
+              const reqJson = await reqResp.json()
+              entry.new_report_id = reqJson.reportId
+              entry.note = 'Report requested — check /api/fba/debug-reports again in 1-5 minutes'
+            } else {
+              const reqErr = await reqResp.text()
+              entry.request_error = `${reqResp.status}: ${reqErr.substring(0, 400)}`
+            }
+          } catch (reqErr) {
+            entry.request_error = String(reqErr)
           }
         }
+
+        results[key] = entry
       } catch (err) {
-        results[label] = { error: String(err) }
+        results[key] = { accessible: false, error: String(err) }
       }
     }
 
-    // ── Test 2: Check fba_inventory table ────────────────────────────────────
+    // Also check fba_inventory table health
     try {
       const { createClient } = await import('@supabase/supabase-js')
       const supabase = createClient(
@@ -103,24 +176,22 @@ export async function GET() {
         process.env.SUPABASE_SERVICE_ROLE_KEY!,
         { auth: { autoRefreshToken: false, persistSession: false } }
       )
-
       const { data: invRows, error: invErr } = await supabase
         .from('fba_inventory')
         .select('asin, sku, quantity_available, quantity_inbound, last_synced_at')
         .order('last_synced_at', { ascending: false })
-        .limit(10)
-
-      results.fba_inventory_table = {
+        .limit(5)
+      results._fba_inventory_table = {
         error: invErr?.message || null,
         row_count_sample: invRows?.length || 0,
-        sample_rows: invRows?.slice(0, 5) || [],
+        sample_rows: invRows || [],
       }
     } catch (dbErr) {
-      results.fba_inventory_table = { error: String(dbErr) }
+      results._fba_inventory_table = { error: String(dbErr) }
     }
 
   } catch (err) {
-    results.token_error = String(err)
+    results._token_error = String(err)
   }
 
   return NextResponse.json(results, { status: 200 })
