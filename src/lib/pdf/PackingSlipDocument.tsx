@@ -232,6 +232,17 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
     }
   }
 
+  // Check for storage capacity as size (e.g., "128GB", "256GB", "1TB")
+  if (!result.size) {
+    for (const seg of segments) {
+      const capMatch = seg.match(/^(\d+)(GB|TB|MB)$/i)
+      if (capMatch) {
+        result.size = `${capMatch[1]}${capMatch[2].toUpperCase()}`
+        break
+      }
+    }
+  }
+
   return result
 }
 
