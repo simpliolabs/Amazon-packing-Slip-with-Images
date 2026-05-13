@@ -97,10 +97,25 @@ export async function GET(req: NextRequest) {
   // Track ASINs that have FBA listings — use SKU suffix pattern as primary detection
   // (fulfillment_channel in listing_health may show 'DEFAULT' for all rows due to report type)
   const fbaListingAsins = new Set<string>()
+  // Also build a set of base SKUs that have FBA counterparts
+  // e.g. if DAR-CCG-S-IVY-FBA exists, base SKU is DAR-CCG-S-IVY
+  const fbaBaseSkus = new Set<string>()
   for (const l of listings || []) {
     if (l.fulfillment_channel === 'AMAZON_NA' || l.fulfillment_channel === 'AMAZON_EU' ||
         (l.sku && /[-_]FBA$/i.test(l.sku))) {
       if (l.asin) fbaListingAsins.add(l.asin)
+      // Extract base SKU (strip -FBA or _FBA suffix)
+      if (l.sku && /[-_]FBA$/i.test(l.sku)) {
+        const baseSku = l.sku.replace(/[-_]FBA$/i, '')
+        fbaBaseSkus.add(baseSku)
+      }
+    }
+  }
+  // Also add base SKUs from sku_sales_analytics Amazon channel
+  for (const s of salesData || []) {
+    if (s.fulfillment_channel === 'Amazon' && s.sku && /[-_]FBA$/i.test(s.sku)) {
+      const baseSku = s.sku.replace(/[-_]FBA$/i, '')
+      fbaBaseSkus.add(baseSku)
     }
   }
 
@@ -200,7 +215,11 @@ export async function GET(req: NextRequest) {
   for (const s of salesData || []) {
     if (!s.asin || processedAsins.has(s.asin)) continue
     if (s.fulfillment_channel !== 'Merchant') continue
-    if (fbaAsinSet.has(s.asin) || fbaListingAsins.has(s.asin)) continue // already has FBA
+    // Check if this ASIN already has FBA via:
+    // 1. Direct ASIN match in sku_sales_analytics Amazon channel
+    // 2. Direct ASIN match in listing_health FBA listings
+    // 3. Base-SKU match (FBM SKU "X" has FBA counterpart "X-FBA" in listing_health or sales)
+    if (fbaAsinSet.has(s.asin) || fbaListingAsins.has(s.asin) || fbaBaseSkus.has(s.sku)) continue // already has FBA
     if ((s.units_sold_30d || 0) < 10) continue // only flag if selling 10+/month
 
     processedAsins.add(s.asin)
