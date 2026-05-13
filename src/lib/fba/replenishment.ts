@@ -4,11 +4,15 @@
  * Data sources (all from Supabase — no live API calls at report time):
  * - orders table: FBM velocity, customization flags, product titles/SKUs
  * - fba_inventory table: current FBA stock (populated by sync)
+ * - sku_sales_analytics table: FBA sales data (from All Orders report)
+ * - listing_health table: ALL listings including FBA SKUs (from All Listings report)
  *
  * Matching strategy (in priority order):
  * 1. Direct ASIN match — FBM and FBA share the same ASIN
  * 2. Base-SKU match — FBM SKU "DAR-CCG-M-IVY" → FBA SKU "DAR-CCG-M-IVY-FBA"
  *    (loads ALL fba_inventory rows, not just the ones matching order ASINs)
+ * 3. listing_health SKU suffix — if a SKU ending in -FBA exists in listing_health,
+ *    the ASIN has an FBA listing even if stocked out and not in fba_inventory
  */
 
 import { createClient } from '@supabase/supabase-js'
@@ -73,7 +77,7 @@ const STATUS_LABELS: Record<ReplenishmentStatus, string> = {
   watch:         'Monitor',
   replenish:     'Send Now',
   critical:      'Send Urgently',
-  stocked_out:   'No FBA Stock',
+  stocked_out:   'FBA Stocked Out',
   new_candidate: 'Start Selling on FBA',
   overstocked:   'Pause Shipments',
   no_data:       'No Data',
@@ -124,6 +128,36 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     .select('asin, sku, units_sold_30d, fulfillment_channel')
     .eq('fulfillment_channel', 'Amazon')
 
+  // ── 2c. Load FBA SKUs from listing_health as THIRD source ─────────────────
+  // listing_health has ALL 10k+ listings. FBA SKUs are identified by the -FBA
+  // suffix in the SKU field (fulfillment_channel may show 'DEFAULT' for all rows
+  // due to the report type). This catches FBA listings that:
+  // - Are stocked out (not in fba_inventory)
+  // - Had zero or negligible sales (not in sku_sales_analytics Amazon channel)
+  // - But DO exist as active listings on Amazon
+  const { data: listingFbaRows } = await supabase
+    .from('listing_health')
+    .select('asin, sku, product_name')
+    .ilike('sku', '%-FBA')
+
+  // Also get rows with _FBA suffix
+  const { data: listingFbaRows2 } = await supabase
+    .from('listing_health')
+    .select('asin, sku, product_name')
+    .ilike('sku', '%\\_FBA')
+
+  // Combine both FBA listing patterns
+  const allListingFbaRows = [...(listingFbaRows || []), ...(listingFbaRows2 || [])]
+  // Deduplicate by SKU
+  const seenListingSkus = new Set<string>()
+  const dedupedListingFbaRows = allListingFbaRows.filter(r => {
+    if (seenListingSkus.has(r.sku)) return false
+    seenListingSkus.add(r.sku)
+    return true
+  })
+
+  console.log(`[Replenishment] Data sources loaded: fba_inventory=${(invRows || []).length}, sku_sales_analytics(Amazon)=${(fbaSalesRows || []).length}, listing_health(FBA SKUs)=${dedupedListingFbaRows.length}`)
+
   // ── 3. Build lookup maps ──────────────────────────────────────────────────
 
   // Map A: ASIN → aggregated FBA inventory (for direct ASIN match)
@@ -172,6 +206,41 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     fbaInvAsins.add(sale.asin) // prevent duplicates
   }
 
+  // ── 2c continued: Add listing_health FBA rows as synthetic entries ────────
+  // These are FBA SKUs that exist as listings but may have zero inventory AND
+  // zero sales in the analytics table. They prove the FBA listing EXISTS.
+  for (const listing of dedupedListingFbaRows) {
+    if (!listing.asin) continue
+    // Skip if already found via fba_inventory or sku_sales_analytics
+    if (fbaInvAsins.has(listing.asin)) continue
+
+    const syntheticRow: FBAInvRow = {
+      asin: listing.asin,
+      sku: listing.sku || '',
+      quantity_available: 0,
+      quantity_inbound: 0,
+      quantity_total: 0,
+      units_sold_30d: 0,
+      buy_box_percentage: 0,
+      last_synced_at: null,
+    }
+
+    // Add to ASIN map
+    if (!fbaByAsin.has(listing.asin)) {
+      fbaByAsin.set(listing.asin, { ...syntheticRow })
+      console.log(`[Replenishment] listing_health FBA detected: ASIN ${listing.asin} via SKU ${listing.sku}`)
+    }
+
+    // Add to base-SKU map (strip -FBA suffix → base SKU)
+    const baseSku = getBaseSku(listing.sku)
+    if (baseSku && !fbaByBaseSku.has(baseSku)) {
+      fbaByBaseSku.set(baseSku, { ...syntheticRow })
+    }
+
+    fbaInvAsins.add(listing.asin) // prevent duplicates
+  }
+
+  // Now process actual fba_inventory rows (these override synthetic entries)
   for (const inv of invRows || []) {
     const row: FBAInvRow = {
       asin: inv.asin,
@@ -267,6 +336,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
 
     // Use TOTAL velocity (FBM + FBA combined) for weeks-of-cover and send qty.
     // If both channels sell, we need to cover ALL demand, not just one channel.
+    // When FBA is stocked out (qty=0, units_sold_30d=0), the FBM velocity alone
+    // represents the TOTAL demand (all customers buying via FBM because FBA is out).
     const fbaVelocityPerDay = fbaUnitsSold30d / 30
     const combinedVelocityPerDay = Math.max(
       fbmVelocityPerDay + fbaVelocityPerDay,  // both channels combined
@@ -303,10 +374,11 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       }
     } else if (fbaQtyAvailable === 0 && fbaQtyInbound === 0) {
       status = 'stocked_out'
-      // If velocity is 0 (FBA-only product we can't measure), use minimum send qty
+      // When FBA is stocked out, ALL demand is served by FBM. Use combinedVelocity
+      // (which equals fbmVelocityPerDay when fbaUnitsSold30d=0) to calculate send qty.
       const calcQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
       recommendedSendQty = Math.max(calcQty, 3) // HARD RULE: never send fewer than 3 units
-      sendRationale = `FBA stocked out. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
+      sendRationale = `FBA stocked out. Total demand: ${(combinedVelocityPerDay * 30).toFixed(0)} units/30d. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
     } else if (weeksOfCover !== null && weeksOfCover < 2) {
       status = 'critical'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))

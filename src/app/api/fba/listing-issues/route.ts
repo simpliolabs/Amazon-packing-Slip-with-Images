@@ -64,7 +64,7 @@ export async function GET(req: NextRequest) {
   // Load sales analytics for cross-reference
   const { data: salesData } = await supabase
     .from('sku_sales_analytics')
-    .select('sku, asin, units_sold_30d, revenue_30d, fulfillment_channel')
+    .select('sku, asin, product_name, units_sold_30d, revenue_30d, fulfillment_channel')
 
   // Build sales lookup by SKU and ASIN
   const salesBySku = new Map<string, { units_sold_30d: number; revenue_30d: number; channel: string }>()
@@ -94,7 +94,8 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Track ASINs that have FBA listings (from listing_health)
+  // Track ASINs that have FBA listings — use SKU suffix pattern as primary detection
+  // (fulfillment_channel in listing_health may show 'DEFAULT' for all rows due to report type)
   const fbaListingAsins = new Set<string>()
   for (const l of listings || []) {
     if (l.fulfillment_channel === 'AMAZON_NA' || l.fulfillment_channel === 'AMAZON_EU' ||
@@ -103,18 +104,38 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Build product name lookup from BOTH listing_health and sku_sales_analytics
+  // This ensures we can always resolve a product name for any ASIN
+  const productNameByAsin = new Map<string, string>()
+  const productNameBySku = new Map<string, string>()
+  for (const l of listings || []) {
+    if (l.product_name) {
+      if (l.asin) productNameByAsin.set(l.asin, l.product_name)
+      if (l.sku) productNameBySku.set(l.sku, l.product_name)
+    }
+  }
+  for (const s of salesData || []) {
+    if (s.product_name) {
+      if (s.asin && !productNameByAsin.has(s.asin)) {
+        productNameByAsin.set(s.asin, s.product_name)
+      }
+      if (s.sku && !productNameBySku.has(s.sku)) {
+        productNameBySku.set(s.sku, s.product_name)
+      }
+    }
+  }
+
   for (const listing of listings || []) {
     const sales = salesBySku.get(listing.sku)
     const asinSales = listing.asin ? salesByAsin.get(listing.asin) : null
     const unitsSold = sales?.units_sold_30d || 0
-    const revenue = sales?.revenue_30d || 0
 
     // Issue 1: Suppressed / Inactive listing
     if (listing.status && listing.status !== 'Active' && listing.status !== 'Incomplete') {
       issues.push({
         sku: listing.sku,
         asin: listing.asin,
-        product_name: listing.product_name,
+        product_name: listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
         issue_type: 'suppressed',
         issue_label: ISSUE_LABELS.suppressed,
         severity: ISSUE_SEVERITY.suppressed,
@@ -133,7 +154,7 @@ export async function GET(req: NextRequest) {
       issues.push({
         sku: listing.sku,
         asin: listing.asin,
-        product_name: listing.product_name,
+        product_name: listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
         issue_type: 'zero_price',
         issue_label: ISSUE_LABELS.zero_price,
         severity: ISSUE_SEVERITY.zero_price,
@@ -157,7 +178,7 @@ export async function GET(req: NextRequest) {
         issues.push({
           sku: listing.sku,
           asin: listing.asin,
-          product_name: listing.product_name,
+          product_name: listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
           issue_type: 'fba_no_stock',
           issue_label: ISSUE_LABELS.fba_no_stock,
           severity: ISSUE_SEVERITY.fba_no_stock,
@@ -183,10 +204,17 @@ export async function GET(req: NextRequest) {
     if ((s.units_sold_30d || 0) < 10) continue // only flag if selling 10+/month
 
     processedAsins.add(s.asin)
+
+    // Resolve product name from multiple sources
+    const resolvedName = s.product_name
+      || productNameByAsin.get(s.asin)
+      || productNameBySku.get(s.sku)
+      || null
+
     issues.push({
       sku: s.sku,
       asin: s.asin,
-      product_name: null, // will be enriched from listing_health if available
+      product_name: resolvedName,
       issue_type: 'fbm_no_fba',
       issue_label: ISSUE_LABELS.fbm_no_fba,
       severity: ISSUE_SEVERITY.fbm_no_fba,
@@ -199,14 +227,15 @@ export async function GET(req: NextRequest) {
     })
   }
 
-  // Enrich product names for fbm_no_fba issues from listing_health
-  const listingsByAsin = new Map<string, string>()
-  for (const l of listings || []) {
-    if (l.asin && l.product_name) listingsByAsin.set(l.asin, l.product_name)
-  }
+  // Final enrichment pass: fill any remaining null product_names
   for (const issue of issues) {
-    if (!issue.product_name && issue.asin) {
-      issue.product_name = listingsByAsin.get(issue.asin) || null
+    if (!issue.product_name) {
+      if (issue.asin) {
+        issue.product_name = productNameByAsin.get(issue.asin) || null
+      }
+      if (!issue.product_name && issue.sku) {
+        issue.product_name = productNameBySku.get(issue.sku) || null
+      }
     }
   }
 
