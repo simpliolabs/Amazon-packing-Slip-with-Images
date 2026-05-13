@@ -534,6 +534,25 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
     ? formatShipDate(String((order.raw_data as Record<string, unknown>).LatestShipDate))
     : null
 
+  // Shipping method badge for print
+  const shipLevel = (order as Order & { ship_service_level?: string | null }).ship_service_level || null
+  const getShipBadge = (level: string | null): { label: string; bgColor: string; textColor: string } | null => {
+    if (!level) return null
+    const l = level.toLowerCase()
+    if (l.includes('sameday') || l.includes('same_day') || l.includes('overnight') || l.includes('nextday') || l.includes('next_day'))
+      return { label: 'SHIP NOW — OVERNIGHT', bgColor: '#DC2626', textColor: '#FFFFFF' }
+    if (l.includes('priority') || l.includes('secondday') || l.includes('second_day') || l.includes('2day') || l.includes('twoday'))
+      return { label: 'PRIORITY — SHIP TODAY', bgColor: '#EF4444', textColor: '#FFFFFF' }
+    if (l.includes('expedited') || l.includes('express'))
+      return { label: 'EXPEDITED', bgColor: '#F97316', textColor: '#FFFFFF' }
+    if (l.includes('standard') || l.includes('ground'))
+      return { label: 'STANDARD', bgColor: '#2563EB', textColor: '#FFFFFF' }
+    if (l.includes('free') || l.includes('economy'))
+      return { label: 'FREE Shipping', bgColor: '#E5E7EB', textColor: '#6B7280' }
+    return { label: level.toUpperCase(), bgColor: '#DBEAFE', textColor: '#1D4ED8' }
+  }
+  const shipBadge = getShipBadge(shipLevel)
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
@@ -593,13 +612,26 @@ export default function PackingSlipModal({ order, orders = [], onClose, onNaviga
             id="packing-slip-print"
             className="bg-white rounded-lg shadow-sm max-w-2xl mx-auto p-8"
           >
+            {/* ── Shipping urgency banner (overnight/priority) ── */}
+            {shipBadge && (shipBadge.label.includes('OVERNIGHT') || shipBadge.label.includes('PRIORITY')) && (
+              <div className="text-center py-2 mb-3 rounded-lg font-bold text-sm tracking-wide" style={{ backgroundColor: shipBadge.bgColor, color: shipBadge.textColor }}>
+                {shipBadge.label}
+              </div>
+            )}
+
             {/* ── Header: CEO logo | Store is on | Amazon logo ── */}
-            <div className="flex items-center justify-center gap-4 mb-5 pb-4 border-b-2 border-[#2E9CE6]">
+            <div className="flex items-center justify-center gap-4 mb-5 pb-4 border-b-2 border-[#2E9CE6] relative">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/theceo_logo_registered.png" alt="TheCEO" className="h-14 w-14 object-contain" />
               <span className="text-sm text-gray-500 font-medium">Store is on</span>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/amazon_logo.png" alt="Amazon" className="h-7 object-contain" />
+              {/* Shipping method badge (non-urgent) */}
+              {shipBadge && !shipBadge.label.includes('OVERNIGHT') && !shipBadge.label.includes('PRIORITY') && (
+                <span className="absolute right-0 top-1/2 -translate-y-1/2 inline-flex items-center px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wide" style={{ backgroundColor: shipBadge.bgColor, color: shipBadge.textColor }}>
+                  {shipBadge.label}
+                </span>
+              )}
             </div>
 
             {/* Order Info */}

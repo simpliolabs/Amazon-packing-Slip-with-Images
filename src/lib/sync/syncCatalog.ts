@@ -13,8 +13,8 @@
  * entirely — both require the Reports role which may not be approved.
  */
 import { createClient } from '@supabase/supabase-js'
-import { fetchFBAInventoryForAsins } from '@/lib/amazon/catalog'
-import type { FBAInventoryItem } from '@/lib/amazon/catalog'
+import { fetchFBAInventoryForAsins, fetchInventoryHealthReport } from '@/lib/amazon/catalog'
+import type { FBAInventoryItem, InventoryHealthItem } from '@/lib/amazon/catalog'
 import { syncSalesReport } from './syncSalesReport'
 import { syncListings } from './syncListings'
 
@@ -226,6 +226,54 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
         estimated_monthly_storage_fee: monthlyStorageFee,
         estimated_storage_cost_per_unit: storagePerUnit,
       })
+    }
+
+    // ── 5b. Supplement with Amazon's Inventory Health Report ────────────
+    // The orders-based heuristic above misses FBA-only products (no FBM orders).
+    // Amazon's own report has authoritative excess data, prices, and storage fees.
+    try {
+      const healthMap = await fetchInventoryHealthReport()
+      console.log(`[Excess] Inventory Health Report returned ${healthMap.size} SKUs`)
+
+      const alreadyTrackedSkus = new Set(excessCandidates.map(c => c.sku))
+
+      for (const [sku, health] of healthMap) {
+        // Skip if already caught by orders-based heuristic
+        if (alreadyTrackedSkus.has(sku)) {
+          // But update price + storage fees from Amazon's real data
+          const existing = excessCandidates.find(c => c.sku === sku)
+          if (existing) {
+            if (health.your_price > 0) existing.your_price = health.your_price
+            if (health.estimated_monthly_storage_fee > 0) existing.estimated_monthly_storage_fee = health.estimated_monthly_storage_fee
+            if (health.estimated_storage_cost_per_unit > 0) existing.estimated_storage_cost_per_unit = health.estimated_storage_cost_per_unit
+          }
+          continue
+        }
+
+        // Only add items Amazon flags as excess or that have very high DoS
+        if (!health.is_excess && health.days_of_supply <= EXCESS_DAYS_OF_SUPPLY_THRESHOLD * 7) continue
+        if (health.qty_available <= 0) continue
+
+        const productName = health.product_name || asinTitleMap.get(health.asin) || `ASIN: ${health.asin}`
+
+        excessCandidates.push({
+          asin: health.asin,
+          sku,
+          fnsku: health.fnsku || null,
+          product_name: productName,
+          qty_available: health.qty_available,
+          excess_qty: health.excess_qty > 0 ? health.excess_qty : health.qty_available,
+          days_of_supply: health.days_of_supply > 0 ? health.days_of_supply : 999,
+          units_sold_last_30_days: health.units_sold_last_30_days,
+          your_price: health.your_price,
+          estimated_monthly_storage_fee: health.estimated_monthly_storage_fee,
+          estimated_storage_cost_per_unit: health.estimated_storage_cost_per_unit,
+        })
+      }
+    } catch (healthErr) {
+      // Non-fatal — the orders-based heuristic still works as fallback
+      console.warn('[Excess] Inventory Health Report failed (non-fatal):', healthErr)
+      errors.push(`Inventory Health Report: ${healthErr instanceof Error ? healthErr.message : String(healthErr)}`)
     }
 
     excessItemsFound = excessCandidates.length

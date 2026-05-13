@@ -298,7 +298,31 @@ function buildSlipHTML(
     'LatestShipDate' in order.raw_data
     ? formatDateShort(String((order.raw_data as Record<string, unknown>).LatestShipDate))
     : null
-
+  // Shipping method badge
+  const shipLevel = (order as Order & { ship_service_level?: string | null }).ship_service_level || null
+  let shipBadgeHtml = ''
+  if (shipLevel) {
+    const sl = shipLevel.toLowerCase()
+    let label = '', bg = '', fg = '', isUrgent = false
+    if (sl.includes('sameday') || sl.includes('same_day') || sl.includes('overnight') || sl.includes('nextday') || sl.includes('next_day')) {
+      label = 'SHIP NOW \u2014 OVERNIGHT'; bg = '#DC2626'; fg = '#fff'; isUrgent = true
+    } else if (sl.includes('priority') || sl.includes('secondday') || sl.includes('second_day') || sl.includes('2day') || sl.includes('twoday')) {
+      label = 'PRIORITY \u2014 SHIP TODAY'; bg = '#EF4444'; fg = '#fff'; isUrgent = true
+    } else if (sl.includes('expedited') || sl.includes('express')) {
+      label = 'EXPEDITED'; bg = '#F97316'; fg = '#fff'
+    } else if (sl.includes('standard') || sl.includes('ground')) {
+      label = 'STANDARD'; bg = '#2563EB'; fg = '#fff'
+    } else if (sl.includes('free') || sl.includes('economy')) {
+      label = 'FREE Shipping'; bg = '#E5E7EB'; fg = '#6B7280'
+    } else {
+      label = shipLevel.toUpperCase(); bg = '#DBEAFE'; fg = '#1D4ED8'
+    }
+    if (isUrgent) {
+      shipBadgeHtml = `<div style="text-align:center;padding:8px;margin-bottom:12px;border-radius:8px;font-weight:700;font-size:13px;letter-spacing:0.05em;background:${bg};color:${fg}">${escapeHtml(label)}</div>`
+    } else {
+      shipBadgeHtml = `<span style="position:absolute;right:0;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;padding:4px 10px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:${bg};color:${fg}">${escapeHtml(label)}</span>`
+    }
+  }
   const itemRows = items.map((item, index) => {
     const attrs = parseAttrs(item.title, item.sku, item.ai_detected_color)
     const title = cleanTitle(item.title)
@@ -334,11 +358,13 @@ function buildSlipHTML(
 
   return `
     <div class="slip-page">
+      ${shipBadgeHtml && shipBadgeHtml.startsWith('<div') ? shipBadgeHtml : ''}
       <!-- Header -->
-      <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:16px;padding-bottom:14px;border-bottom:2px solid #2E9CE6">
+      <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:16px;padding-bottom:14px;border-bottom:2px solid #2E9CE6;position:relative">
         <img src="${escapeHtml(logos.ceo)}" alt="" style="height:56px;width:56px;object-fit:contain" />
         <span style="font-size:13px;color:#6b7280;font-weight:500">Store is on</span>
         <img src="${escapeHtml(logos.amazon)}" alt="" style="height:28px;object-fit:contain" />
+        ${shipBadgeHtml && shipBadgeHtml.startsWith('<span') ? shipBadgeHtml : ''}
       </div>
 
       <!-- Order Info -->

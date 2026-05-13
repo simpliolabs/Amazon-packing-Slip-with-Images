@@ -201,7 +201,25 @@ export async function GET(req: NextRequest) {
     }
 
     // Issue 2: $0 price (broken listing)
+    // BUT: The All Listings Report often has blank/null prices for FBA listings
+    // or listings where Amazon controls the price. If the listing has recent sales
+    // (proving it IS purchasable), or if we can find a price from sales analytics,
+    // it's NOT truly broken — skip the false positive.
     if (listing.status === 'Active' && (!listing.price || listing.price <= 0)) {
+      // Check if this listing has sales revenue (proves price exists on Amazon)
+      const hasSalesRevenue = (sales?.revenue_30d && sales.revenue_30d > 0) ||
+        (asinSales?.revenue_30d && asinSales.revenue_30d > 0)
+      // Check if this is an FBA SKU (FBA prices are often missing from All Listings Report)
+      const isFbaListing = listing.sku && /[-_]FBA$/i.test(listing.sku)
+      // Check if the ASIN has any sales at all (even via other SKUs)
+      const hasAnySales = unitsSold > 0 || (asinSales?.units_sold_30d && asinSales.units_sold_30d > 0)
+
+      // Skip false positives: FBA listings with sales, or any listing with proven revenue
+      if (hasSalesRevenue || (isFbaListing && hasAnySales)) {
+        // Not a real issue — price exists on Amazon, just missing from the report
+        continue
+      }
+
       issues.push({
         sku: listing.sku,
         asin: listing.asin,
