@@ -422,9 +422,12 @@ export default function FBAIntelligencePage() {
   }
 
   // Fetch sales analytics
-  const fetchSalesAnalytics = useCallback(async () => {
+  const fetchSalesAnalytics = useCallback(async (triggerSync = false) => {
     setAnalyticsLoading(true)
     try {
+      if (triggerSync) {
+        await fetch('/api/fba/sync-reports').catch(() => {})
+      }
       const sb = createClient()
       const { data } = await sb
         .from('sku_sales_analytics')
@@ -437,9 +440,12 @@ export default function FBAIntelligencePage() {
   }, [])
 
   // Fetch listing health
-  const fetchListingHealth = useCallback(async () => {
+  const fetchListingHealth = useCallback(async (triggerSync = false) => {
     setListingsLoading(true)
     try {
+      if (triggerSync) {
+        await fetch('/api/fba/sync-reports').catch(() => {})
+      }
       const sb = createClient()
       const { data } = await sb
         .from('listing_health')
@@ -1133,11 +1139,11 @@ export default function FBAIntelligencePage() {
               <p className="text-sm text-gray-500 mt-0.5">Per-SKU sales velocity from the Amazon All Orders report · Last 7 / 30 / 90 days</p>
             </div>
             <button
-              onClick={fetchSalesAnalytics}
+              onClick={() => fetchSalesAnalytics(true)}
               disabled={analyticsLoading}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
             >
-              {analyticsLoading ? 'Refreshing…' : 'Refresh'}
+              {analyticsLoading ? 'Syncing from Amazon…' : 'Sync & Refresh'}
             </button>
           </div>
           {analyticsLoading ? (
@@ -1206,11 +1212,11 @@ export default function FBAIntelligencePage() {
               <p className="text-sm text-gray-500 mt-0.5">All active and inactive listings from Amazon · Suppressed or inactive listings cause excess FBA stock</p>
             </div>
             <button
-              onClick={fetchListingHealth}
+              onClick={() => fetchListingHealth(true)}
               disabled={listingsLoading}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
             >
-              {listingsLoading ? 'Refreshing…' : 'Refresh'}
+              {listingsLoading ? 'Syncing from Amazon…' : 'Sync & Refresh'}
             </button>
           </div>
           {listingsLoading ? (
