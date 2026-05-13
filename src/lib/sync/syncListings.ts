@@ -29,15 +29,15 @@ function getAdminSupabase() {
  * If none exists, request a new one but return immediately.
  */
 async function getReportDocumentId(token: string): Promise<{ documentId: string | null; requested: boolean }> {
-  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const since2h = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
 
-  // Check for an existing DONE report in the last 7 days
+  // Check for an existing DONE report in the last 2 hours (URLs expire quickly)
   const listUrl =
     `${ENDPOINT}/reports/2021-06-30/reports` +
     `?reportTypes=${REPORT_TYPE}` +
     `&marketplaceIds=${MARKETPLACE_ID}` +
     `&processingStatuses=DONE` +
-    `&createdSince=${encodeURIComponent(since7d)}` +
+    `&createdSince=${encodeURIComponent(since2h)}` +
     `&pageSize=1`
 
   const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
@@ -85,17 +85,31 @@ async function getReportDocumentId(token: string): Promise<{ documentId: string 
  * Download and decompress the report document.
  */
 async function downloadReport(documentId: string, token: string): Promise<string | null> {
+  console.log(`[Listings] Fetching document metadata for ${documentId}`)
   const docResp = await fetch(`${ENDPOINT}/reports/2021-06-30/documents/${documentId}`, {
     headers: { 'x-amz-access-token': token },
   })
-  if (!docResp.ok) return null
-  const { url, compressionAlgorithm } = await docResp.json()
-  if (!url) return null
+  if (!docResp.ok) {
+    console.error(`[Listings] Document metadata fetch failed: ${docResp.status} ${docResp.statusText}`)
+    return null
+  }
+  const docJson = await docResp.json()
+  const { url, compressionAlgorithm } = docJson
+  if (!url) {
+    console.error('[Listings] No URL in document response:', JSON.stringify(docJson).slice(0, 200))
+    return null
+  }
+  console.log(`[Listings] Downloading report (compression: ${compressionAlgorithm || 'none'})`)
   const dataResp = await fetch(url)
-  if (!dataResp.ok) return null
+  if (!dataResp.ok) {
+    console.error(`[Listings] Report download failed: ${dataResp.status} ${dataResp.statusText}`)
+    return null
+  }
   if (compressionAlgorithm === 'GZIP') {
     const buffer = Buffer.from(await dataResp.arrayBuffer())
-    return gunzipSync(buffer).toString('utf-8')
+    const decompressed = gunzipSync(buffer).toString('utf-8')
+    console.log(`[Listings] Decompressed ${buffer.length} bytes -> ${decompressed.length} chars`)
+    return decompressed
   }
   return await dataResp.text()
 }
@@ -165,7 +179,18 @@ export async function syncListings(): Promise<{ synced: number; error: string | 
 
     const tsv = await downloadReport(documentId, token)
     if (!tsv) {
-      return { synced: 0, error: 'Failed to download report content' }
+      // Download failed (likely expired URL) — request a fresh report
+      console.log('[Listings] Download failed — requesting fresh report')
+      const reqResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+        method: 'POST',
+        headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reportType: REPORT_TYPE, marketplaceIds: [MARKETPLACE_ID] }),
+      })
+      if (reqResp.ok) {
+        const { reportId } = await reqResp.json()
+        console.log(`[Listings] Requested fresh report ${reportId}`)
+      }
+      return { synced: 0, error: null, pending: true }
     }
 
     const rows = parseTSV(tsv)

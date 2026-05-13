@@ -66,14 +66,14 @@ async function requestOrdersReport(token: string): Promise<string | null> {
  * but return null immediately (don't poll). The next sync will pick it up.
  */
 async function getReportDocumentId(token: string): Promise<{ documentId: string | null; requested: boolean }> {
-  // Check for an existing DONE report in the last 7 days (recent enough to be useful)
-  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  // Check for an existing DONE report in the last 2 hours (URLs expire quickly)
+  const since2h = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
   const listUrl =
     `${ENDPOINT}/reports/2021-06-30/reports` +
     `?reportTypes=${REPORT_TYPE}` +
     `&marketplaceIds=${MARKETPLACE_ID}` +
     `&processingStatuses=DONE` +
-    `&createdSince=${encodeURIComponent(since7d)}` +
+    `&createdSince=${encodeURIComponent(since2h)}` +
     `&pageSize=1`
   const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
   if (listResp.ok) {
@@ -234,7 +234,23 @@ export async function syncSalesReport(): Promise<{ synced: number; error: string
 
     const tsv = await downloadReport(documentId, token)
     if (!tsv) {
-      return { synced: 0, error: 'Failed to download report content' }
+      // Download failed (likely expired URL) — request a fresh report
+      console.log('[SalesReport] Download failed — requesting fresh report')
+      const reqResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+        method: 'POST',
+        headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reportType: REPORT_TYPE,
+          marketplaceIds: [MARKETPLACE_ID],
+          dataStartTime: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(),
+          dataEndTime: new Date().toISOString(),
+        }),
+      })
+      if (reqResp.ok) {
+        const { reportId } = await reqResp.json()
+        console.log(`[SalesReport] Requested fresh report ${reportId}`)
+      }
+      return { synced: 0, error: null, pending: true }
     }
 
     const rows = parseTSV(tsv)
