@@ -265,10 +265,14 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const hasFBAInventory = fbaInv !== undefined
     const isFBAOnly = hasFBAInventory && fbmUnits30d === 0
 
-    // Use combined velocity (FBM + FBA) for weeks-of-cover
-    const combinedVelocityPerDay = fbaUnitsSold30d > 0
-      ? (fbaUnitsSold30d / 30)
-      : fbmVelocityPerDay
+    // Use TOTAL velocity (FBM + FBA combined) for weeks-of-cover and send qty.
+    // If both channels sell, we need to cover ALL demand, not just one channel.
+    const fbaVelocityPerDay = fbaUnitsSold30d / 30
+    const combinedVelocityPerDay = Math.max(
+      fbmVelocityPerDay + fbaVelocityPerDay,  // both channels combined
+      fbmVelocityPerDay,                       // at minimum, FBM velocity alone
+      fbaVelocityPerDay                        // or FBA velocity alone
+    )
 
     // Compute weeks of cover
     let weeksOfCover: number | null = null
