@@ -427,14 +427,12 @@ export default function FBAIntelligencePage() {
     try {
       if (triggerSync) {
         await fetch('/api/fba/sync-reports').catch(() => {})
+        // Wait a moment for sync to complete
+        await new Promise(r => setTimeout(r, 2000))
       }
-      const sb = createClient()
-      const { data } = await sb
-        .from('sku_sales_analytics')
-        .select('*')
-        .order('units_sold_30d', { ascending: false })
-        .limit(200)
-      setSalesAnalytics(data || [])
+      const resp = await fetch('/api/fba/reports-data?type=sales')
+      const json = await resp.json()
+      setSalesAnalytics(json.data || [])
     } catch (e) { console.error(e) }
     finally { setAnalyticsLoading(false) }
   }, [])
@@ -445,14 +443,11 @@ export default function FBAIntelligencePage() {
     try {
       if (triggerSync) {
         await fetch('/api/fba/sync-reports').catch(() => {})
+        await new Promise(r => setTimeout(r, 2000))
       }
-      const sb = createClient()
-      const { data } = await sb
-        .from('listing_health')
-        .select('*')
-        .order('status', { ascending: true })
-        .limit(500)
-      setListingHealth(data || [])
+      const resp = await fetch('/api/fba/reports-data?type=listings')
+      const json = await resp.json()
+      setListingHealth(json.data || [])
     } catch (e) { console.error(e) }
     finally { setListingsLoading(false) }
   }, [])
