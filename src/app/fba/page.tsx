@@ -250,9 +250,11 @@ export default function FBAIntelligencePage() {
       setReplenishSummary(data.summary || null)
       setSyncResult(data.sync || null)
       setLastSynced(new Date().toLocaleString())
-      // Refresh excess data after sync
+      // Refresh all tabs after sync
       await fetchExcess()
       await fetchNotifications()
+      await fetchSalesAnalytics()
+      await fetchListingHealth()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed')
     } finally {

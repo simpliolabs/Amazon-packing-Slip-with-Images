@@ -5,7 +5,8 @@
  * parses the TSV, aggregates sales velocity per SKU (7d / 30d / 90d), and upserts
  * into the sku_sales_analytics table.
  *
- * Called from syncCatalog.ts after the FBA inventory sync.
+ * NON-BLOCKING: If no DONE report exists, requests one and returns immediately.
+ * On the next sync call, the DONE report will be picked up and processed.
  */
 import { createClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
@@ -23,10 +24,6 @@ function getAdminSupabase() {
   )
 }
 
-function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
 interface OrderRow {
   'amazon-order-id': string
   'purchase-date': string
@@ -41,7 +38,7 @@ interface OrderRow {
 
 /**
  * Request a fresh All Orders report covering the last 90 days.
- * Returns the report ID.
+ * Returns the report ID (fire-and-forget).
  */
 async function requestOrdersReport(token: string): Promise<string | null> {
   const dataStartTime = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
@@ -65,18 +62,18 @@ async function requestOrdersReport(token: string): Promise<string | null> {
 }
 
 /**
- * Find the most recent DONE report, or request a new one and poll until done.
- * Returns the reportDocumentId.
+ * NON-BLOCKING: Find the most recent DONE report. If none exists, request a new one
+ * but return null immediately (don't poll). The next sync will pick it up.
  */
-async function getReportDocumentId(token: string): Promise<string | null> {
-  const since90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
-  // Check for an existing DONE report in the last 90 days
+async function getReportDocumentId(token: string): Promise<{ documentId: string | null; requested: boolean }> {
+  // Check for an existing DONE report in the last 7 days (recent enough to be useful)
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
   const listUrl =
     `${ENDPOINT}/reports/2021-06-30/reports` +
     `?reportTypes=${REPORT_TYPE}` +
     `&marketplaceIds=${MARKETPLACE_ID}` +
     `&processingStatuses=DONE` +
-    `&createdSince=${encodeURIComponent(since90d)}` +
+    `&createdSince=${encodeURIComponent(since7d)}` +
     `&pageSize=1`
   const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
   if (listResp.ok) {
@@ -84,33 +81,34 @@ async function getReportDocumentId(token: string): Promise<string | null> {
     const reports: Record<string, string>[] = listJson.reports || []
     if (reports.length > 0 && reports[0].reportDocumentId) {
       console.log(`[SalesReport] Using existing DONE report ${reports[0].reportId}`)
-      return reports[0].reportDocumentId
+      return { documentId: reports[0].reportDocumentId, requested: false }
     }
   }
 
-  // No DONE report — request a new one
-  console.log('[SalesReport] No recent DONE report found — requesting new one')
+  // Also check for IN_QUEUE or IN_PROGRESS reports (already requested, still processing)
+  const pendingUrl =
+    `${ENDPOINT}/reports/2021-06-30/reports` +
+    `?reportTypes=${REPORT_TYPE}` +
+    `&marketplaceIds=${MARKETPLACE_ID}` +
+    `&processingStatuses=IN_QUEUE,IN_PROGRESS` +
+    `&pageSize=1`
+  const pendingResp = await fetch(pendingUrl, { headers: { 'x-amz-access-token': token } })
+  if (pendingResp.ok) {
+    const pendingJson = await pendingResp.json()
+    const pending: Record<string, string>[] = pendingJson.reports || []
+    if (pending.length > 0) {
+      console.log(`[SalesReport] Report ${pending[0].reportId} still processing — will pick up on next sync`)
+      return { documentId: null, requested: true }
+    }
+  }
+
+  // No DONE or pending report — request a new one (fire and forget)
+  console.log('[SalesReport] No recent report found — requesting new one (non-blocking)')
   const reportId = await requestOrdersReport(token)
-  if (!reportId) return null
-
-  // Poll up to 5 minutes
-  const maxAttempts = 60
-  for (let i = 0; i < maxAttempts; i++) {
-    await sleep(5000)
-    const statusResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports/${reportId}`, {
-      headers: { 'x-amz-access-token': token },
-    })
-    if (!statusResp.ok) continue
-    const status = await statusResp.json()
-    console.log(`[SalesReport] Status: ${status.processingStatus}`)
-    if (status.processingStatus === 'DONE') return status.reportDocumentId
-    if (status.processingStatus === 'FATAL' || status.processingStatus === 'CANCELLED') {
-      console.warn('[SalesReport] Report failed')
-      return null
-    }
+  if (reportId) {
+    console.log(`[SalesReport] Requested report ${reportId} — will be ready on next sync`)
   }
-  console.warn('[SalesReport] Timed out waiting for report')
-  return null
+  return { documentId: null, requested: true }
 }
 
 /**
@@ -218,13 +216,19 @@ function aggregateOrders(rows: OrderRow[]): Map<string, {
 
 /**
  * Main export — fetch the All Orders report and upsert sku_sales_analytics.
+ * NON-BLOCKING: returns immediately if report is still generating.
  */
-export async function syncSalesReport(): Promise<{ synced: number; error: string | null }> {
+export async function syncSalesReport(): Promise<{ synced: number; error: string | null; pending?: boolean }> {
   console.log('[SalesReport] Starting sync')
   try {
     const token = await getAccessToken()
-    const documentId = await getReportDocumentId(token)
+    const { documentId, requested } = await getReportDocumentId(token)
+
     if (!documentId) {
+      if (requested) {
+        console.log('[SalesReport] Report requested/pending — will process on next sync')
+        return { synced: 0, error: null, pending: true }
+      }
       return { synced: 0, error: 'Could not obtain report document ID' }
     }
 
