@@ -222,6 +222,17 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
 
 function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null) {
   const t = title || ''
+  const titleLowerForCheck = t.toLowerCase()
+
+  // Detect if this is an apparel product (shirts, hoodies, etc.)
+  // Non-apparel products should NOT show apparel-specific color names like "Blue Jean"
+  const APPAREL_KEYWORDS = [
+    'shirt', 'tee', 'hoodie', 'sweatshirt', 'crewneck', 'tank', 'pullover',
+    'raglan', 'crop', 'jersey', 'polo', 'blouse', 'dress', 'jacket', 'vest',
+    'comfort colors', 'gildan', 'bella canvas', 'hanes', 'next level',
+    'long sleeve', 'short sleeve', 'v-neck', 'vneck',
+  ]
+  const isApparel = APPAREL_KEYWORDS.some(kw => titleLowerForCheck.includes(kw))
 
   // ── 1. Parse SKU codes FIRST (most reliable per-variant source) ──
   const skuData = parseSkuCodes(sku)
@@ -237,21 +248,21 @@ function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null)
     color = skuData.color
   }
 
-  // Layer 2: AI-detected color (good when SKU has no color code)
-  if (!color && aiDetectedColor) {
+  // Layer 2: AI-detected color (only for apparel — AI color detection uses apparel color catalogs)
+  if (!color && aiDetectedColor && isApparel) {
     color = aiDetectedColor
   }
 
-  // Layer 3: Known color name in title
-  if (!color) {
+  // Layer 3: Known color name in title (only for apparel — COLORS list is apparel-specific)
+  if (!color && isApparel) {
     color = COLORS.find(c => {
       const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
       return re.test(t)
     }) || ''
   }
 
-  // Layer 4: Fallback — extract color from title segments
-  if (!color) {
+  // Layer 4: Fallback — extract color from title segments (only for apparel)
+  if (!color && isApparel) {
     const segments = t.split(/\s*[-–—,]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 2) {
       for (let i = segments.length - 1; i >= Math.max(0, segments.length - 3); i--) {

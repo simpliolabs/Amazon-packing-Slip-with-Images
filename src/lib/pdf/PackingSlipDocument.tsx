@@ -248,6 +248,16 @@ function extractVariantFromSku(sku: string): string | null {
 function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: string | null): ProductAttributes {
   const result: ProductAttributes = { size: null, color: null, style: null, variant: null }
 
+  // Detect if this is an apparel product — non-apparel should NOT show apparel color names
+  const titleLowerForCheck = title.toLowerCase()
+  const APPAREL_KEYWORDS = [
+    'shirt', 'tee', 'hoodie', 'sweatshirt', 'crewneck', 'tank', 'pullover',
+    'raglan', 'crop', 'jersey', 'polo', 'blouse', 'dress', 'jacket', 'vest',
+    'comfort colors', 'gildan', 'bella canvas', 'hanes', 'next level',
+    'long sleeve', 'short sleeve', 'v-neck', 'vneck',
+  ]
+  const isApparel = APPAREL_KEYWORDS.some(kw => titleLowerForCheck.includes(kw))
+
   // ── 1. Parse SKU codes FIRST (most reliable per-variant source) ──
   const skuData = parseSkuCodes(sku || '')
 
@@ -274,12 +284,12 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
   }
 
   // Layer 2: AI-detected color (good when SKU has no color code)
-  if (!result.color && aiDetectedColor) {
+  if (!result.color && aiDetectedColor && isApparel) {
     result.color = aiDetectedColor
   }
 
   // Layer 3: Known color name in title
-  if (!result.color) {
+  if (!result.color && isApparel) {
     const sortedColors = [...COLORS].sort((a, b) => b.length - a.length)
     for (const color of sortedColors) {
       const escaped = color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -289,7 +299,7 @@ function parseProductAttributes(title: string, sku?: string, aiDetectedColor?: s
   }
 
   // Layer 4: Fallback — extract color from title trailing segments
-  if (!result.color) {
+  if (!result.color && isApparel) {
     const segments = title.split(/\s*[-\u2013]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 3 && result.size) {
       for (let i = segments.length - 1; i >= 0; i--) {

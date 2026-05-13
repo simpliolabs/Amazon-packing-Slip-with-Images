@@ -181,14 +181,29 @@ function parseSkuCodes(sku: string): { color?: string; size?: string; style?: st
 
 function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null) {
   const t = title || ''
+  const titleLowerForCheck = t.toLowerCase()
+  // Detect if this is an apparel product — non-apparel should NOT show apparel color names
+  const APPAREL_KEYWORDS = [
+    'shirt', 'tee', 'hoodie', 'sweatshirt', 'crewneck', 'tank', 'pullover',
+    'raglan', 'crop', 'jersey', 'polo', 'blouse', 'dress', 'jacket', 'vest',
+    'comfort colors', 'gildan', 'bella canvas', 'hanes', 'next level',
+    'long sleeve', 'short sleeve', 'v-neck', 'vneck',
+  ]
+  const isApparel = APPAREL_KEYWORDS.some(kw => titleLowerForCheck.includes(kw))
   // Parse SKU codes FIRST (most reliable per-variant source)
   const skuData = parseSkuCodes(sku)
   let size = skuData.size || SIZES.find(s => t.toLowerCase().includes(s.toLowerCase())) || ''
-  let color = skuData.color || COLORS.find(c => {
-    const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-    return re.test(t)
-  }) || ''
-  if (!color) {
+  // SKU color code always applies (seller-assigned)
+  let color = skuData.color || ''
+  // Apparel-only: check COLORS list in title
+  if (!color && isApparel) {
+    color = COLORS.find(c => {
+      const re = new RegExp(`\\b${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+      return re.test(t)
+    }) || ''
+  }
+  // Apparel-only: segment fallback
+  if (!color && isApparel) {
     const segments = t.split(/\s*[-–—,]\s*/).map(s => s.trim()).filter(Boolean)
     if (segments.length >= 2) {
       for (let i = segments.length - 1; i >= Math.max(0, segments.length - 3); i--) {
@@ -201,8 +216,8 @@ function parseAttrs(title: string, sku: string, aiDetectedColor?: string | null)
       }
     }
   }
-  // AI-detected color fallback (Layer 2)
-  if (!color && aiDetectedColor) { color = aiDetectedColor }
+  // AI-detected color fallback (only for apparel)
+  if (!color && aiDetectedColor && isApparel) { color = aiDetectedColor }
   if (!color) color = '—'
   if (!size) size = '—'
   let style = '—'
