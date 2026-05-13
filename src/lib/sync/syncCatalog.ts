@@ -319,28 +319,22 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     errors.push(`Excess inventory detection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // ── Sales Report Sync (All Orders flat file — SP-API) ───────────────────────
-  try {
-    const salesResult = await syncSalesReport()
-    if (salesResult.error) {
-      errors.push(`Sales report sync: ${salesResult.error}`)
-    } else {
-      console.log(`[FBA Sync] Sales analytics synced: ${salesResult.synced} SKUs`)
-    }
-  } catch (err) {
-    errors.push(`Sales report sync failed: ${err instanceof Error ? err.message : String(err)}`)
+  // ── Sales Report + Listings Sync (parallel, non-blocking) ─────────────────────
+  const [salesResult, listingsResult] = await Promise.allSettled([
+    syncSalesReport(),
+    syncListings(),
+  ])
+  if (salesResult.status === 'fulfilled') {
+    if (salesResult.value.error) errors.push(`Sales report sync: ${salesResult.value.error}`)
+    else console.log(`[FBA Sync] Sales analytics synced: ${salesResult.value.synced} SKUs`)
+  } else {
+    errors.push(`Sales report sync failed: ${salesResult.reason}`)
   }
-
-  // ── Listings Health Sync (All Listings report — SP-API) ───────────────────────
-  try {
-    const listingsResult = await syncListings()
-    if (listingsResult.error) {
-      errors.push(`Listings sync: ${listingsResult.error}`)
-    } else {
-      console.log(`[FBA Sync] Listing health synced: ${listingsResult.synced} SKUs`)
-    }
-  } catch (err) {
-    errors.push(`Listings sync failed: ${err instanceof Error ? err.message : String(err)}`)
+  if (listingsResult.status === 'fulfilled') {
+    if (listingsResult.value.error) errors.push(`Listings sync: ${listingsResult.value.error}`)
+    else console.log(`[FBA Sync] Listing health synced: ${listingsResult.value.synced} SKUs`)
+  } else {
+    errors.push(`Listings sync failed: ${listingsResult.reason}`)
   }
 
   return {

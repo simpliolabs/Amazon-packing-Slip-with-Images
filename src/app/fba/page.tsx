@@ -244,7 +244,12 @@ export default function FBAIntelligencePage() {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
-      if (!resp.ok) throw new Error((await resp.json()).error || 'Sync failed')
+      if (!resp.ok) {
+        const text = await resp.text()
+        let errMsg = 'Sync failed'
+        try { errMsg = JSON.parse(text).error || errMsg } catch { errMsg = resp.status === 502 ? 'Sync timed out — data is still syncing in the background. Click Sync again in 30 seconds.' : text || errMsg }
+        throw new Error(errMsg)
+      }
       const data = await resp.json()
       setReport(data.report || [])
       setReplenishSummary(data.summary || null)

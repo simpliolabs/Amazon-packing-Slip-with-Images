@@ -4,6 +4,10 @@
  * POST /api/fba/replenishment  — triggers a catalog + inventory sync then returns report
  */
 
+// Allow up to 5 minutes for the sync (self-hosted, no Vercel limits)
+export const maxDuration = 300
+export const dynamic = 'force-dynamic'
+
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { generateReplenishmentReport, generateTeamCSV, generateAmazonShipmentCSV } from '@/lib/fba/replenishment'
