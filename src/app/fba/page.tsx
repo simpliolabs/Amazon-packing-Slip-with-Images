@@ -114,7 +114,7 @@ interface SyncResult {
 // ─── Status config ────────────────────────────────────────────────────────────
 
 const STATUS_CONFIG: Record<ReplenishmentStatus, { label: string; color: string; bg: string; border: string }> = {
-  stocked_out:   { label: 'No FBA Stock',         color: 'text-red-700',    bg: 'bg-red-100',    border: 'border-red-300' },
+  stocked_out:   { label: 'FBA Stocked Out',       color: 'text-red-700',    bg: 'bg-red-100',    border: 'border-red-300' },
   critical:      { label: 'Send Urgently',         color: 'text-red-600',    bg: 'bg-red-50',     border: 'border-red-200' },
   replenish:     { label: 'Send Now',              color: 'text-orange-700', bg: 'bg-orange-100', border: 'border-orange-300' },
   new_candidate: { label: 'Start Selling on FBA',  color: 'text-blue-700',   bg: 'bg-blue-100',   border: 'border-blue-300' },
@@ -675,7 +675,7 @@ export default function FBAIntelligencePage() {
                 <p className="text-sm font-semibold text-red-800">{urgentReplenishCount} product{urgentReplenishCount !== 1 ? 's' : ''} need immediate attention</p>
                 <p className="text-xs text-red-600 mt-0.5">
                   {[
-                    replenishSummary?.stocked_out ? `${replenishSummary.stocked_out} no FBA stock` : '',
+                    replenishSummary?.stocked_out ? `${replenishSummary.stocked_out} FBA stocked out` : '',
                     replenishSummary?.critical ? `${replenishSummary.critical} critical` : '',
                     replenishSummary?.replenish ? `${replenishSummary.replenish} need replenishment` : '',
                   ].filter(Boolean).join(', ')}
@@ -688,7 +688,7 @@ export default function FBAIntelligencePage() {
             <div className="grid grid-cols-4 gap-3 mb-5">
               {[
                 { key: 'all', label: 'All Products', count: replenishSummary.total, color: 'text-gray-700', bg: 'bg-white' },
-                { key: 'stocked_out', label: 'No FBA Stock', count: replenishSummary.stocked_out, color: 'text-red-700', bg: 'bg-red-50' },
+                { key: 'stocked_out', label: 'FBA Stocked Out', count: replenishSummary.stocked_out, color: 'text-red-700', bg: 'bg-red-50' },
                 { key: 'critical', label: 'Send Urgently', count: replenishSummary.critical, color: 'text-red-600', bg: 'bg-red-50' },
                 { key: 'replenish', label: 'Send Now', count: replenishSummary.replenish, color: 'text-orange-700', bg: 'bg-orange-50' },
                 { key: 'new_candidate', label: 'Start on FBA', count: replenishSummary.new_candidates, color: 'text-blue-700', bg: 'bg-blue-50' },

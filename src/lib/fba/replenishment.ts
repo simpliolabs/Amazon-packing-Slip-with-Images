@@ -128,6 +128,30 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     .select('asin, sku, units_sold_30d, fulfillment_channel')
     .eq('fulfillment_channel', 'Amazon')
 
+  // ── 2b2. Load ALL Merchant-channel sales for velocity cross-reference ──────
+  // The orders table may have incomplete history (only synced orders), while
+  // sku_sales_analytics has the full All Orders report. We use the HIGHER of
+  // the two velocity sources to avoid undercounting demand.
+  const { data: fbmSalesRows } = await supabase
+    .from('sku_sales_analytics')
+    .select('asin, sku, units_sold_30d, avg_daily_units')
+    .eq('fulfillment_channel', 'Merchant')
+
+  // Build FBM sales velocity map by ASIN (aggregate all Merchant SKUs per ASIN)
+  const fbmSalesVelocityByAsin = new Map<string, { units30d: number; velocityPerDay: number }>()
+  for (const row of fbmSalesRows || []) {
+    if (!row.asin) continue
+    const existing = fbmSalesVelocityByAsin.get(row.asin)
+    const units = row.units_sold_30d || 0
+    const velocity = row.avg_daily_units || units / 30
+    if (!existing) {
+      fbmSalesVelocityByAsin.set(row.asin, { units30d: units, velocityPerDay: velocity })
+    } else {
+      existing.units30d += units
+      existing.velocityPerDay += velocity
+    }
+  }
+
   // ── 2c. Load FBA SKUs from listing_health as THIRD source ─────────────────
   // listing_health has ALL 10k+ listings. FBA SKUs are identified by the -FBA
   // suffix in the SKU field (fulfillment_channel may show 'DEFAULT' for all rows
@@ -318,8 +342,19 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       }
     }
 
-    const fbmUnits30d = fbmData?.units30d || 0
-    const fbmVelocityPerDay = fbmData?.velocityPerDay || 0
+    // Use the HIGHER velocity between orders table and sku_sales_analytics.
+    // The orders table uses 90-day average (units90d/90) which may undercount
+    // recent demand spikes. The sales analytics uses the All Orders report
+    // which captures ALL orders regardless of sync status.
+    const ordersUnits30d = fbmData?.units30d || 0
+    const ordersVelocityPerDay = fbmData?.velocityPerDay || 0
+    const salesAnalytics = fbmSalesVelocityByAsin.get(asin)
+    const salesUnits30d = salesAnalytics?.units30d || 0
+    const salesVelocityPerDay = salesAnalytics?.velocityPerDay || 0
+
+    // Take the higher of the two sources for more accurate demand signal
+    const fbmUnits30d = Math.max(ordersUnits30d, salesUnits30d)
+    const fbmVelocityPerDay = Math.max(ordersVelocityPerDay, salesVelocityPerDay)
     const hasCustomization = fbmData?.hasCustomization || false
     const title = fbmData?.title || `ASIN: ${asin}`
 
