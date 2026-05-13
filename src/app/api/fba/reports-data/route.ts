@@ -8,6 +8,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 function getAdminSupabase() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -27,7 +30,7 @@ export async function GET(req: NextRequest) {
       .order('units_sold_30d', { ascending: false })
       .limit(200)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    return NextResponse.json({ data })
+    return NextResponse.json({ data }, { headers: { 'Cache-Control': 'no-store, max-age=0' } })
   }
 
   if (type === 'listings') {
@@ -37,7 +40,7 @@ export async function GET(req: NextRequest) {
       .order('status', { ascending: true })
       .limit(500)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    return NextResponse.json({ data })
+    return NextResponse.json({ data }, { headers: { 'Cache-Control': 'no-store, max-age=0' } })
   }
 
   return NextResponse.json({ error: 'Invalid type parameter' }, { status: 400 })
