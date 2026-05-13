@@ -155,6 +155,15 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Build ASIN → valid price map from listing_health
+  // If ANY SKU for an ASIN has a valid price, all $0 variants are report artifacts
+  const asinHasValidPrice = new Set<string>()
+  for (const l of listings || []) {
+    if (l.asin && l.price && l.price > 0) {
+      asinHasValidPrice.add(l.asin)
+    }
+  }
+
   // Build product name lookup from BOTH listing_health and sku_sales_analytics
   // This ensures we can always resolve a product name for any ASIN
   const productNameByAsin = new Map<string, string>()
@@ -214,8 +223,12 @@ export async function GET(req: NextRequest) {
       // Check if the ASIN has any sales at all (even via other SKUs)
       const hasAnySales = unitsSold > 0 || (asinSales?.units_sold_30d && asinSales.units_sold_30d > 0)
 
-      // Skip false positives: FBA listings with sales, or any listing with proven revenue
-      if (hasSalesRevenue || (isFbaListing && hasAnySales)) {
+      // Check if another SKU for the same ASIN has a valid price (proves the ASIN is priced)
+      const asinHasPrice = listing.asin ? asinHasValidPrice.has(listing.asin) : false
+
+      // Skip false positives: FBA listings with sales, any listing with proven revenue,
+      // or any listing whose ASIN has a valid price on another variant
+      if (hasSalesRevenue || (isFbaListing && hasAnySales) || asinHasPrice) {
         // Not a real issue — price exists on Amazon, just missing from the report
         continue
       }
