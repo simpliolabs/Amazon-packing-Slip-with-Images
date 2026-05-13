@@ -15,6 +15,8 @@
 import { createClient } from '@supabase/supabase-js'
 import { fetchFBAInventoryForAsins } from '@/lib/amazon/catalog'
 import type { FBAInventoryItem } from '@/lib/amazon/catalog'
+import { syncSalesReport } from './syncSalesReport'
+import { syncListings } from './syncListings'
 
 function getAdminSupabase() {
   return createClient(
@@ -315,6 +317,30 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     }
   } catch (err) {
     errors.push(`Excess inventory detection failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // ── Sales Report Sync (All Orders flat file — SP-API) ───────────────────────
+  try {
+    const salesResult = await syncSalesReport()
+    if (salesResult.error) {
+      errors.push(`Sales report sync: ${salesResult.error}`)
+    } else {
+      console.log(`[FBA Sync] Sales analytics synced: ${salesResult.synced} SKUs`)
+    }
+  } catch (err) {
+    errors.push(`Sales report sync failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // ── Listings Health Sync (All Listings report — SP-API) ───────────────────────
+  try {
+    const listingsResult = await syncListings()
+    if (listingsResult.error) {
+      errors.push(`Listings sync: ${listingsResult.error}`)
+    } else {
+      console.log(`[FBA Sync] Listing health synced: ${listingsResult.synced} SKUs`)
+    }
+  } catch (err) {
+    errors.push(`Listings sync failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   return {

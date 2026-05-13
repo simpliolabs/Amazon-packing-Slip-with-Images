@@ -46,6 +46,30 @@ interface ExcessSummary {
   needs_ai_plan: number
 }
 
+interface SkuSalesRow {
+  sku: string
+  asin: string | null
+  product_name: string | null
+  units_sold_7d: number
+  units_sold_30d: number
+  units_sold_90d: number
+  revenue_30d: number
+  avg_daily_units: number
+  fulfillment_channel: string | null
+  last_order_date: string | null
+  last_synced_at: string
+}
+interface ListingHealthRow {
+  sku: string
+  asin: string | null
+  product_name: string | null
+  price: number | null
+  quantity: number
+  status: string | null
+  fulfillment_channel: string | null
+  open_date: string | null
+  last_synced_at: string
+}
 interface FBANotification {
   id: string
   type: string
@@ -116,7 +140,11 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function FBAIntelligencePage() {
-  const [activeTab, setActiveTab] = useState<'replenishment' | 'excess'>('replenishment')
+  const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings'>('replenishment')
+  const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
+  const [listingHealth, setListingHealth] = useState<ListingHealthRow[]>([])
+  const [analyticsLoading, setAnalyticsLoading] = useState(false)
+  const [listingsLoading, setListingsLoading] = useState(false)
 
   // Replenishment state
   const [report, setReport] = useState<ProductRecommendation[]>([])
@@ -360,6 +388,42 @@ export default function FBAIntelligencePage() {
     return 'low'
   }
 
+  // Fetch sales analytics
+  const fetchSalesAnalytics = useCallback(async () => {
+    setAnalyticsLoading(true)
+    try {
+      const sb = createClient()
+      const { data } = await sb
+        .from('sku_sales_analytics')
+        .select('*')
+        .order('units_sold_30d', { ascending: false })
+        .limit(200)
+      setSalesAnalytics(data || [])
+    } catch (e) { console.error(e) }
+    finally { setAnalyticsLoading(false) }
+  }, [])
+
+  // Fetch listing health
+  const fetchListingHealth = useCallback(async () => {
+    setListingsLoading(true)
+    try {
+      const sb = createClient()
+      const { data } = await sb
+        .from('listing_health')
+        .select('*')
+        .order('status', { ascending: true })
+        .limit(500)
+      setListingHealth(data || [])
+    } catch (e) { console.error(e) }
+    finally { setListingsLoading(false) }
+  }, [])
+
+  // Load data when switching to analytics/listings tabs
+  useEffect(() => {
+    if (activeTab === 'analytics' && salesAnalytics.length === 0) fetchSalesAnalytics()
+    if (activeTab === 'listings' && listingHealth.length === 0) fetchListingHealth()
+  }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       {/* ── Header ──────────────────────────────────────────────────────────── */}
@@ -497,6 +561,36 @@ export default function FBAIntelligencePage() {
           {(excessSummary?.active || 0) > 0 && (
             <span className="ml-2 px-1.5 py-0.5 bg-orange-100 text-orange-700 text-xs rounded-full font-bold">
               {excessSummary?.active}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab('analytics')}
+          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'analytics'
+              ? 'border-green-600 text-green-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Sales Analytics
+          {salesAnalytics.length > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 bg-green-100 text-green-700 text-xs rounded-full font-bold">
+              {salesAnalytics.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab('listings')}
+          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'listings'
+              ? 'border-purple-600 text-purple-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Listing Health
+          {listingHealth.filter(l => l.status !== 'Active').length > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full font-bold">
+              {listingHealth.filter(l => l.status !== 'Active').length}
             </span>
           )}
         </button>
@@ -992,6 +1086,162 @@ export default function FBAIntelligencePage() {
               Showing {filteredExcess.length} of {excessItems.length} items · Data from Amazon&apos;s Inventory Health report
             </div>
           )}
+        </>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB: SALES ANALYTICS
+      ═══════════════════════════════════════════════════════════════════════ */}
+      {activeTab === 'analytics' && (
+        <>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Sales Analytics</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Per-SKU sales velocity from the Amazon All Orders report · Last 7 / 30 / 90 days</p>
+            </div>
+            <button
+              onClick={fetchSalesAnalytics}
+              disabled={analyticsLoading}
+              className="inline-flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              {analyticsLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+          {analyticsLoading ? (
+            <div className="text-center py-12 text-gray-400">Loading sales data…</div>
+          ) : salesAnalytics.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">
+              <p className="font-medium">No sales analytics data yet.</p>
+              <p className="text-sm mt-1">Trigger a sync from the Replenishment tab to populate this table.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-gray-200">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Product</th>
+                    <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Channel</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">7d Units</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">30d Units</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">90d Units</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">30d Revenue</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Avg/Day</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Order</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {salesAnalytics.map(row => (
+                    <tr key={row.sku} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-4 py-3 font-mono text-xs text-gray-700">{row.sku}</td>
+                      <td className="px-4 py-3 text-gray-700 max-w-[200px] truncate" title={row.product_name || ''}>{row.product_name || '—'}</td>
+                      <td className="px-4 py-3 text-center">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          row.fulfillment_channel === 'Amazon' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          {row.fulfillment_channel === 'Amazon' ? 'FBA' : row.fulfillment_channel || 'MFN'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">{row.units_sold_7d}</td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">{row.units_sold_30d}</td>
+                      <td className="px-4 py-3 text-right text-gray-600">{row.units_sold_90d}</td>
+                      <td className="px-4 py-3 text-right text-green-700 font-medium">${row.revenue_30d.toFixed(2)}</td>
+                      <td className="px-4 py-3 text-right text-gray-600">{row.avg_daily_units.toFixed(2)}</td>
+                      <td className="px-4 py-3 text-right text-gray-400 text-xs">
+                        {row.last_order_date ? new Date(row.last_order_date).toLocaleDateString() : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="mt-3 text-xs text-gray-400 text-center">
+            Data sourced from Amazon All Orders flat-file report · Updated on every sync
+          </div>
+        </>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB: LISTING HEALTH
+      ═══════════════════════════════════════════════════════════════════════ */}
+      {activeTab === 'listings' && (
+        <>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Listing Health</h2>
+              <p className="text-sm text-gray-500 mt-0.5">All active and inactive listings from Amazon · Suppressed or inactive listings cause excess FBA stock</p>
+            </div>
+            <button
+              onClick={fetchListingHealth}
+              disabled={listingsLoading}
+              className="inline-flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              {listingsLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+          {listingsLoading ? (
+            <div className="text-center py-12 text-gray-400">Loading listing data…</div>
+          ) : listingHealth.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">
+              <p className="font-medium">No listing health data yet.</p>
+              <p className="text-sm mt-1">Trigger a sync from the Replenishment tab to populate this table.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-gray-200">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Product</th>
+                    <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                    <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Channel</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Price</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Qty</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Listed</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {listingHealth.map(row => {
+                    const isActive = row.status === 'Active'
+                    const isSuppressed = row.status?.toLowerCase().includes('suppress')
+                    return (
+                      <tr key={row.sku} className={`hover:bg-gray-50 transition-colors ${!isActive ? 'bg-red-50/30' : ''}`}>
+                        <td className="px-4 py-3 font-mono text-xs text-gray-700">{row.sku}</td>
+                        <td className="px-4 py-3 text-gray-700 max-w-[220px] truncate" title={row.product_name || ''}>{row.product_name || '—'}</td>
+                        <td className="px-4 py-3 text-center">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            isActive ? 'bg-green-100 text-green-700'
+                            : isSuppressed ? 'bg-red-100 text-red-700'
+                            : 'bg-yellow-100 text-yellow-700'
+                          }`}>
+                            {row.status || 'Unknown'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            row.fulfillment_channel === 'AMAZON_NA' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {row.fulfillment_channel === 'AMAZON_NA' ? 'FBA' : 'MFN'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right text-gray-900 font-medium">
+                          {row.price != null ? `$${row.price.toFixed(2)}` : '—'}
+                        </td>
+                        <td className="px-4 py-3 text-right text-gray-600">{row.quantity}</td>
+                        <td className="px-4 py-3 text-right text-gray-400 text-xs">
+                          {row.open_date ? new Date(row.open_date).toLocaleDateString() : '—'}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="mt-3 text-xs text-gray-400 text-center">
+            Data sourced from Amazon All Listings report · Updated on every sync
+          </div>
         </>
       )}
     </div>
