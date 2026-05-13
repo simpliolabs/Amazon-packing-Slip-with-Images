@@ -116,6 +116,14 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     .from('fba_inventory')
     .select('asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, last_synced_at')
 
+  // ── 2b. Load FBA SKUs from sku_sales_analytics as secondary source ────────
+  // This catches FBA listings that are stocked out and no longer returned by
+  // the FBA Inventory Summaries API but DID have sales via the All Orders report.
+  const { data: fbaSalesRows } = await supabase
+    .from('sku_sales_analytics')
+    .select('asin, sku, units_sold_30d, fulfillment_channel')
+    .eq('fulfillment_channel', 'Amazon')
+
   // ── 3. Build lookup maps ──────────────────────────────────────────────────
 
   // Map A: ASIN → aggregated FBA inventory (for direct ASIN match)
@@ -124,6 +132,45 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   // Map B: base SKU → FBA inventory row (for SKU-based match)
   // e.g. "DAR-CCG-M-IVY" → row with sku "DAR-CCG-M-IVY-FBA"
   const fbaByBaseSku = new Map<string, FBAInvRow>()
+
+  // Build a set of ASINs already in fba_inventory so we don't double-count
+  const fbaInvAsins = new Set<string>()
+  for (const inv of invRows || []) {
+    if (inv.asin) fbaInvAsins.add(inv.asin)
+  }
+
+  // Add FBA sales rows as synthetic inventory entries (qty=0) for ASINs NOT
+  // already in fba_inventory. This ensures items with FBA listings that are
+  // stocked out still get matched as "has FBA" instead of "new_candidate".
+  for (const sale of fbaSalesRows || []) {
+    if (!sale.asin || fbaInvAsins.has(sale.asin)) continue
+    // Only add if the SKU looks like an FBA SKU (ends in -FBA) or channel is Amazon
+    const syntheticRow: FBAInvRow = {
+      asin: sale.asin,
+      sku: sale.sku || '',
+      quantity_available: 0,
+      quantity_inbound: 0,
+      quantity_total: 0,
+      units_sold_30d: sale.units_sold_30d || 0,
+      buy_box_percentage: 0,
+      last_synced_at: null,
+    }
+    // Add to ASIN map
+    if (!fbaByAsin.has(sale.asin)) {
+      fbaByAsin.set(sale.asin, { ...syntheticRow })
+    }
+    // Add to base-SKU map
+    if (sale.sku && /[-_]FBA$/i.test(sale.sku)) {
+      const baseSku = getBaseSku(sale.sku)
+      if (baseSku && !fbaByBaseSku.has(baseSku)) {
+        fbaByBaseSku.set(baseSku, { ...syntheticRow })
+      }
+    }
+    if (sale.sku && !fbaByBaseSku.has(sale.sku)) {
+      fbaByBaseSku.set(sale.sku, { ...syntheticRow })
+    }
+    fbaInvAsins.add(sale.asin) // prevent duplicates
+  }
 
   for (const inv of invRows || []) {
     const row: FBAInvRow = {
@@ -244,7 +291,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
         status = 'new_candidate'
         // Minimum send qty is the new-candidate threshold, not 1
         const calcQty = Math.ceil(fbmVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-        recommendedSendQty = Math.max(calcQty, settings.newFBACandidateMinUnits)
+        recommendedSendQty = Math.max(calcQty, settings.newFBACandidateMinUnits, 3) // min 3
         sendRationale = `${fbmUnits30d} units/30d via FBM. No FBA listing found. Initial send covers lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
       } else {
         status = 'no_data'
@@ -254,17 +301,17 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       status = 'stocked_out'
       // If velocity is 0 (FBA-only product we can't measure), use minimum send qty
       const calcQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      recommendedSendQty = Math.max(calcQty, combinedVelocityPerDay > 0 ? 1 : settings.newFBACandidateMinUnits)
+      recommendedSendQty = Math.max(calcQty, 3) // HARD RULE: never send fewer than 3 units
       sendRationale = `FBA stocked out. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
     } else if (weeksOfCover !== null && weeksOfCover < 2) {
       status = 'critical'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      recommendedSendQty = Math.max(0, targetQty - fbaQtyAvailable - fbaQtyInbound)
+      recommendedSendQty = Math.max(3, targetQty - fbaQtyAvailable - fbaQtyInbound) // min 3
       sendRationale = `Only ${weeksOfCover.toFixed(1)} weeks of cover. FBM is carrying load. Send immediately.`
     } else if (weeksOfCover !== null && weeksOfCover < settings.replenishTriggerWeeks) {
       status = 'replenish'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      recommendedSendQty = Math.max(0, targetQty - fbaQtyAvailable - fbaQtyInbound)
+      recommendedSendQty = Math.max(3, targetQty - fbaQtyAvailable - fbaQtyInbound) // min 3
       sendRationale = `${weeksOfCover.toFixed(1)} weeks of cover remaining. Send now to avoid stockout.`
     } else if (weeksOfCover !== null && weeksOfCover < settings.replenishTriggerWeeks * 2) {
       status = 'watch'

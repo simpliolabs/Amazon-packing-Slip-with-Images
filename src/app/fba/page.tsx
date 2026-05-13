@@ -59,16 +59,26 @@ interface SkuSalesRow {
   last_order_date: string | null
   last_synced_at: string
 }
-interface ListingHealthRow {
+interface ListingIssue {
   sku: string
   asin: string | null
   product_name: string | null
+  issue_type: 'suppressed' | 'zero_price' | 'fba_no_stock' | 'fbm_no_fba'
+  issue_label: string
+  severity: 'critical' | 'warning' | 'opportunity'
+  detail: string
   price: number | null
   quantity: number
-  status: string | null
   fulfillment_channel: string | null
-  open_date: string | null
-  last_synced_at: string
+  units_sold_30d: number
+  estimated_lost_revenue_30d: number | null
+}
+interface ListingIssuesSummary {
+  total: number
+  critical: number
+  warning: number
+  opportunity: number
+  total_lost_revenue: number
 }
 interface FBANotification {
   id: string
@@ -142,7 +152,8 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 export default function FBAIntelligencePage() {
   const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings'>('replenishment')
   const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
-  const [listingHealth, setListingHealth] = useState<ListingHealthRow[]>([])
+  const [listingIssues, setListingIssues] = useState<ListingIssue[]>([])
+  const [listingIssuesSummary, setListingIssuesSummary] = useState<ListingIssuesSummary | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [listingsLoading, setListingsLoading] = useState(false)
 
@@ -256,7 +267,7 @@ export default function FBAIntelligencePage() {
           await fetchExcess()
           await fetchNotifications()
           await fetchSalesAnalytics()
-          await fetchListingHealth()
+          await fetchListingIssues()
           setError(null)
           setLastSynced(new Date().toLocaleString())
           return
@@ -272,7 +283,7 @@ export default function FBAIntelligencePage() {
         await fetchExcess()
         await fetchNotifications()
         await fetchSalesAnalytics()
-        await fetchListingHealth()
+        await fetchListingIssues()
         setError(null)
         setLastSynced(new Date().toLocaleString())
         return
@@ -285,7 +296,7 @@ export default function FBAIntelligencePage() {
       await fetchExcess()
       await fetchNotifications()
       await fetchSalesAnalytics()
-      await fetchListingHealth()
+      await fetchListingIssues()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed')
     } finally {
@@ -438,16 +449,17 @@ export default function FBAIntelligencePage() {
   }, [])
 
   // Fetch listing health
-  const fetchListingHealth = useCallback(async (triggerSync = false) => {
+  const fetchListingIssues = useCallback(async (triggerSync = false) => {
     setListingsLoading(true)
     try {
       if (triggerSync) {
         await fetch('/api/fba/sync-reports').catch(() => {})
         await new Promise(r => setTimeout(r, 2000))
       }
-      const resp = await fetch('/api/fba/reports-data?type=listings')
+      const resp = await fetch('/api/fba/listing-issues')
       const json = await resp.json()
-      setListingHealth(json.data || [])
+      setListingIssues(json.issues || [])
+      setListingIssuesSummary(json.summary || null)
     } catch (e) { console.error(e) }
     finally { setListingsLoading(false) }
   }, [])
@@ -455,7 +467,7 @@ export default function FBAIntelligencePage() {
   // Load data when switching to analytics/listings tabs
   useEffect(() => {
     if (activeTab === 'analytics' && salesAnalytics.length === 0) fetchSalesAnalytics()
-    if (activeTab === 'listings' && listingHealth.length === 0) fetchListingHealth()
+    if (activeTab === 'listings' && listingIssues.length === 0) fetchListingIssues()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
@@ -621,10 +633,10 @@ export default function FBAIntelligencePage() {
               : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
-          Listing Health
-          {listingHealth.filter(l => l.status !== 'Active').length > 0 && (
+          Listing Issues
+          {listingIssuesSummary && listingIssuesSummary.total > 0 && (
             <span className="ml-2 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full font-bold">
-              {listingHealth.filter(l => l.status !== 'Active').length}
+              {listingIssuesSummary.total}
             </span>
           )}
         </button>
@@ -1197,84 +1209,102 @@ export default function FBAIntelligencePage() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════════════════
-          TAB: LISTING HEALTH
+          TAB: LISTING ISSUES
       ═══════════════════════════════════════════════════════════════════════ */}
       {activeTab === 'listings' && (
         <>
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Listing Health</h2>
-              <p className="text-sm text-gray-500 mt-0.5">All active and inactive listings from Amazon · Suppressed or inactive listings cause excess FBA stock</p>
+              <h2 className="text-lg font-semibold text-gray-900">Listing Issues</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Only showing listings that need your attention — suppressed, broken, stocked out, or missing FBA</p>
             </div>
             <button
-              onClick={() => fetchListingHealth(true)}
+              onClick={() => fetchListingIssues(true)}
               disabled={listingsLoading}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
             >
-              {listingsLoading ? 'Syncing from Amazon…' : 'Sync & Refresh'}
+              {listingsLoading ? 'Scanning…' : 'Refresh Issues'}
             </button>
           </div>
+
+          {/* Summary Cards */}
+          {listingIssuesSummary && listingIssuesSummary.total > 0 && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-red-700">{listingIssuesSummary.critical}</div>
+                <div className="text-xs text-red-600 font-medium">Critical</div>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-amber-700">{listingIssuesSummary.warning}</div>
+                <div className="text-xs text-amber-600 font-medium">Warnings</div>
+              </div>
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-blue-700">{listingIssuesSummary.opportunity}</div>
+                <div className="text-xs text-blue-600 font-medium">Opportunities</div>
+              </div>
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-gray-900">${listingIssuesSummary.total_lost_revenue.toLocaleString()}</div>
+                <div className="text-xs text-gray-500 font-medium">Est. Lost Revenue/mo</div>
+              </div>
+            </div>
+          )}
+
           {listingsLoading ? (
-            <div className="text-center py-12 text-gray-400">Loading listing data…</div>
-          ) : listingHealth.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">
-              <p className="font-medium">No listing health data yet.</p>
-              <p className="text-sm mt-1">Trigger a sync from the Replenishment tab to populate this table.</p>
+            <div className="text-center py-12 text-gray-400">Scanning listings for issues…</div>
+          ) : listingIssues.length === 0 ? (
+            <div className="text-center py-12">
+              <div className="text-4xl mb-3">&#10003;</div>
+              <p className="font-medium text-green-700">All Clear — No Listing Issues Found</p>
+              <p className="text-sm mt-1 text-gray-500">All your listings are active, priced correctly, and stocked. Nice work.</p>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-gray-200">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Product</th>
-                    <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                    <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Channel</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Price</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Qty</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Listed</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {listingHealth.map(row => {
-                    const isActive = row.status === 'Active'
-                    const isSuppressed = row.status?.toLowerCase().includes('suppress')
-                    return (
-                      <tr key={row.sku} className={`hover:bg-gray-50 transition-colors ${!isActive ? 'bg-red-50/30' : ''}`}>
-                        <td className="px-4 py-3 font-mono text-xs text-gray-700">{row.sku}</td>
-                        <td className="px-4 py-3 text-gray-700 max-w-[220px] truncate" title={row.product_name || ''}>{row.product_name || '—'}</td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                            isActive ? 'bg-green-100 text-green-700'
-                            : isSuppressed ? 'bg-red-100 text-red-700'
-                            : 'bg-yellow-100 text-yellow-700'
-                          }`}>
-                            {row.status || 'Unknown'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                            row.fulfillment_channel === 'AMAZON_NA' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
-                          }`}>
-                            {row.fulfillment_channel === 'AMAZON_NA' ? 'FBA' : 'MFN'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-right text-gray-900 font-medium">
-                          {row.price != null ? `$${row.price.toFixed(2)}` : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-right text-gray-600">{row.quantity}</td>
-                        <td className="px-4 py-3 text-right text-gray-400 text-xs">
-                          {row.open_date ? new Date(row.open_date).toLocaleDateString() : '—'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+            <div className="space-y-3">
+              {listingIssues.map((issue, idx) => (
+                <div key={`${issue.sku}-${idx}`} className={`rounded-xl border p-4 ${
+                  issue.severity === 'critical' ? 'border-red-200 bg-red-50/50'
+                  : issue.severity === 'warning' ? 'border-amber-200 bg-amber-50/50'
+                  : 'border-blue-200 bg-blue-50/50'
+                }`}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          issue.severity === 'critical' ? 'bg-red-100 text-red-700'
+                          : issue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
+                          : 'bg-blue-100 text-blue-700'
+                        }`}>
+                          {issue.issue_label}
+                        </span>
+                        <span className="text-xs text-gray-400 font-mono">{issue.sku}</span>
+                        {issue.asin && (
+                          <a href={`https://amazon.com/dp/${issue.asin}`} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 hover:underline">
+                            {issue.asin}
+                          </a>
+                        )}
+                      </div>
+                      <p className="text-sm font-medium text-gray-900 truncate" title={issue.product_name || ''}>
+                        {issue.product_name || 'Unknown Product'}
+                      </p>
+                      <p className="text-xs text-gray-600 mt-1">{issue.detail}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      {issue.units_sold_30d > 0 && (
+                        <div className="text-sm font-bold text-gray-900">{issue.units_sold_30d} units/30d</div>
+                      )}
+                      {issue.estimated_lost_revenue_30d != null && issue.estimated_lost_revenue_30d > 0 && (
+                        <div className="text-xs text-red-600 font-medium">~${issue.estimated_lost_revenue_30d.toLocaleString()} lost/mo</div>
+                      )}
+                      {issue.price != null && issue.price > 0 && (
+                        <div className="text-xs text-gray-400">${issue.price.toFixed(2)}</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           <div className="mt-3 text-xs text-gray-400 text-center">
-            Data sourced from Amazon All Listings report · Updated on every sync
+            Cross-references All Listings report with Sales Analytics · Only shows actionable issues
           </div>
         </>
       )}
