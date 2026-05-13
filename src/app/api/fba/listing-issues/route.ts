@@ -275,7 +275,19 @@ export async function GET(req: NextRequest) {
     total_lost_revenue: issues.reduce((sum, i) => sum + (i.estimated_lost_revenue_30d || 0), 0),
   }
 
-  return NextResponse.json({ issues, summary }, {
+  return NextResponse.json({
+    issues,
+    summary,
+    _debug: {
+      totalListings: (listings || []).length,
+      fbaListingAsins: fbaListingAsins.size,
+      fbaBaseSkus: fbaBaseSkus.size,
+      fbaAsinSet: fbaAsinSet.size,
+      fbaBaseSkuSample: Array.from(fbaBaseSkus).slice(0, 20),
+      hasDarCcgSIvy: fbaBaseSkus.has('DAR-CCG-S-IVY'),
+      hasDarCcgXlIvy: fbaBaseSkus.has('DAR-CCG-XL-IVY'),
+    }
+  }, {
     headers: { 'Cache-Control': 'no-store, max-age=0' },
   })
 }
