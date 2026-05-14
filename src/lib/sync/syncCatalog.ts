@@ -162,6 +162,8 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
       your_price: number
       estimated_monthly_storage_fee: number
       estimated_storage_cost_per_unit: number
+      amazon_recommended_action: string | null
+      amazon_alert: string | null
     }> = []
 
     for (const inv of inventory) {
@@ -225,6 +227,8 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
         your_price: 0, // not available without catalog API
         estimated_monthly_storage_fee: monthlyStorageFee,
         estimated_storage_cost_per_unit: storagePerUnit,
+        amazon_recommended_action: null,
+        amazon_alert: null,
       })
     }
 
@@ -240,12 +244,19 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
       for (const [sku, health] of healthMap) {
         // Skip if already caught by orders-based heuristic
         if (alreadyTrackedSkus.has(sku)) {
-          // But update price + storage fees from Amazon's real data
+          // But update with Amazon's real data (authoritative source)
           const existing = excessCandidates.find(c => c.sku === sku)
           if (existing) {
             if (health.your_price > 0) existing.your_price = health.your_price
             if (health.estimated_monthly_storage_fee > 0) existing.estimated_monthly_storage_fee = health.estimated_monthly_storage_fee
             if (health.estimated_storage_cost_per_unit > 0) existing.estimated_storage_cost_per_unit = health.estimated_storage_cost_per_unit
+            // Use Amazon's authoritative days_of_supply and excess_qty
+            if (health.days_of_supply > 0) existing.days_of_supply = health.days_of_supply
+            if (health.excess_qty > 0) existing.excess_qty = health.excess_qty
+            if (health.units_sold_last_30_days > 0) existing.units_sold_last_30_days = health.units_sold_last_30_days
+            // Preserve Amazon's alert and recommended action
+            existing.amazon_recommended_action = health.recommended_action || null
+            existing.amazon_alert = health.alert || null
           }
           continue
         }
@@ -268,6 +279,8 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
           your_price: health.your_price,
           estimated_monthly_storage_fee: health.estimated_monthly_storage_fee,
           estimated_storage_cost_per_unit: health.estimated_storage_cost_per_unit,
+          amazon_recommended_action: health.recommended_action || null,
+          amazon_alert: health.alert || null,
         })
       }
     } catch (healthErr) {
@@ -299,8 +312,8 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
         your_price: item.your_price,
         estimated_monthly_storage_fee: item.estimated_monthly_storage_fee,
         estimated_storage_cost_per_unit: item.estimated_storage_cost_per_unit,
-        amazon_recommended_action: null,
-        amazon_alert: null,
+        amazon_recommended_action: item.amazon_recommended_action,
+        amazon_alert: item.amazon_alert,
         last_synced_at: now,
         ...((!existing || existing.status === 'dismissed') ? { status: 'active' } : {}),
       }
