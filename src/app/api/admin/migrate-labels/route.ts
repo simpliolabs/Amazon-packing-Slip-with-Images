@@ -91,7 +91,7 @@ export async function GET(req: NextRequest) {
 
   const { data, error } = await supabase
     .from('fba_inventory')
-    .select('label_created_at, shipment_status, shipment_id, label_notes')
+    .select('label_created_at, shipment_status')
     .limit(1)
 
   if (error) {

@@ -22,7 +22,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from('fba_inventory')
-    .select('asin, sku, fnsku, quantity_available, quantity_inbound, label_created_at, shipment_status, shipment_id, label_notes')
+    .select('asin, sku, fnsku, quantity_available, quantity_inbound, label_created_at, shipment_status')
     .not('shipment_status', 'is', null)
     .order('label_created_at', { ascending: false })
 
@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { asin, sku, status, shipment_id, notes } = body
+  const { asin, sku, status } = body
 
   if (!asin) {
     return NextResponse.json({ error: 'asin is required' }, { status: 400 })
@@ -62,18 +62,9 @@ export async function POST(req: NextRequest) {
     // Clear the label status (e.g., when Amazon receives the inventory)
     update.shipment_status = null
     update.label_created_at = null
-    update.shipment_id = null
-    update.label_notes = null
+
   } else if (status) {
     update.shipment_status = status
-  }
-
-  if (shipment_id !== undefined) {
-    update.shipment_id = shipment_id
-  }
-
-  if (notes !== undefined) {
-    update.label_notes = notes
   }
 
   if (Object.keys(update).length === 0) {
