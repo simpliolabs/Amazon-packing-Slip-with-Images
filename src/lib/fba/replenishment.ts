@@ -386,6 +386,20 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   const recommendations: ProductRecommendation[] = []
   const allAsins = new Set(velocityMap.keys())
 
+  // ── 4a. Add FBA-only ASINs (no FBM orders) ────────────────────────────────
+  // ASINs that exist in fba_inventory (or were added as synthetic entries from
+  // sku_sales_analytics / listing_health) but have ZERO FBM orders will never
+  // appear in velocityMap, which is built exclusively from the orders table.
+  // We must add them so stocked-out FBA-only products are surfaced in the report.
+  // Their fbmUnits30d and fbmVelocityPerDay will be 0; their FBA sales velocity
+  // from sku_sales_analytics drives the stocked_out / replenish status.
+  for (const [asin] of fbaByAsin) {
+    if (!allAsins.has(asin)) {
+      allAsins.add(asin)
+      console.log(`[Replenishment] FBA-only ASIN added to report: ${asin} (not in orders table)`)
+    }
+  }
+
   for (const asin of allAsins) {
     const fbmData = velocityMap.get(asin)
     const fbmSku = fbmData?.sku || ''
@@ -432,7 +446,12 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const fbmUnits30d = Math.max(ordersUnits30d, salesUnits30d)
     const fbmVelocityPerDay = Math.max(ordersVelocityPerDay, salesVelocityPerDay)
     const hasCustomization = fbmData?.hasCustomization || false
-    const title = fbmData?.title || `ASIN: ${asin}`
+    // For FBA-only ASINs (not in orders table), try to get the title from
+    // listing_health product_name (most reliable), then fba_inventory SKU,
+    // then fall back to the ASIN itself.
+    const listingTitle = dedupedListingFbaRows.find(r => r.asin === asin)?.product_name || null
+    const fbaInvTitle = fbaInv?.sku ? `SKU: ${fbaInv.sku}` : null
+    const title = fbmData?.title || listingTitle || fbaInvTitle || `ASIN: ${asin}`
 
     const fbaQtyAvailable = fbaInv?.quantity_available ?? 0
     const fbaQtyInbound = fbaInv?.quantity_inbound ?? 0
