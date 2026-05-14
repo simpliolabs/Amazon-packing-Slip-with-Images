@@ -357,6 +357,43 @@ export default function FBAIntelligencePage() {
     }
   }
 
+  // ── Mark label created / shipped ─────────────────────────────────────────────
+  const markLabelCreated = async (asin: string, sku: string) => {
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/label-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ asin, sku, status: 'label_created' }),
+      })
+      if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to mark label')
+      await fetchReport()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to mark label created')
+    }
+  }
+
+  const markShipped = async (asin: string, sku: string) => {
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/label-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ asin, sku, status: 'shipped' }),
+      })
+      if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to mark shipped')
+      await fetchReport()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to mark shipped')
+    }
+  }
+
   // ── Mark notifications read ─────────────────────────────────────────────────
   const markAllRead = async () => {
     try {
@@ -848,7 +885,19 @@ export default function FBAIntelligencePage() {
                             </span>
                           </td>
                           <td className="px-4 py-3 text-right text-gray-500">
-                            {rec.fba_qty_inbound > 0 ? <span className="text-blue-600">+{rec.fba_qty_inbound}</span> : <span className="text-gray-300">—</span>}
+                            {rec.fba_qty_inbound > 0 ? (
+                              <span className="text-blue-600">+{rec.fba_qty_inbound}</span>
+                            ) : rec.shipment_status === 'label_created' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800" title={rec.label_created_at ? `Label created ${new Date(rec.label_created_at).toLocaleDateString()}` : 'Label created'}>
+                                📦 Label
+                              </span>
+                            ) : rec.shipment_status === 'shipped' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                🚚 Shipped
+                              </span>
+                            ) : (
+                              <span className="text-gray-300">—</span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-right text-gray-500">
                             {rec.fba_units_sold_30d > 0 ? rec.fba_units_sold_30d : <span className="text-gray-300">—</span>}
@@ -866,15 +915,34 @@ export default function FBAIntelligencePage() {
                               : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-4 py-3">
-                            {rec.status === 'new_candidate' ? (
-                              <a href={`https://sellercentral.amazon.com/inventory/ref=xx_invmgr_dnav_xx?tbla_myitable=sort:%7B%22sortOrder%22%3A%22DESCENDING%22%2C%22sortedColumnId%22%3A%22date%22%7D;search:${rec.asin};`}
-                                target="_blank" rel="noopener noreferrer"
-                                className="text-xs text-blue-600 hover:text-blue-800 underline whitespace-nowrap">
-                                Create in SC →
-                              </a>
-                            ) : rec.recommended_send_qty > 0 ? (
-                              <span className="text-xs text-gray-400 italic">Send {rec.recommended_send_qty} units</span>
-                            ) : null}
+                            <div className="flex flex-col gap-1">
+                              {rec.status === 'new_candidate' ? (
+                                <a href={`https://sellercentral.amazon.com/inventory/ref=xx_invmgr_dnav_xx?tbla_myitable=sort:%7B%22sortOrder%22%3A%22DESCENDING%22%2C%22sortedColumnId%22%3A%22date%22%7D;search:${rec.asin};`}
+                                  target="_blank" rel="noopener noreferrer"
+                                  className="text-xs text-blue-600 hover:text-blue-800 underline whitespace-nowrap">
+                                  Create in SC →
+                                </a>
+                              ) : rec.recommended_send_qty > 0 ? (
+                                <span className="text-xs text-gray-400 italic">Send {rec.recommended_send_qty} units</span>
+                              ) : null}
+                              {/* Label Created toggle */}
+                              {rec.fba_qty_inbound === 0 && !rec.shipment_status && rec.status !== 'new_candidate' && (
+                                <button
+                                  onClick={() => markLabelCreated(rec.asin, rec.fba_sku || rec.sku)}
+                                  className="text-xs px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded hover:bg-amber-100 whitespace-nowrap"
+                                >
+                                  🏷️ Mark Label
+                                </button>
+                              )}
+                              {rec.shipment_status === 'label_created' && (
+                                <button
+                                  onClick={() => markShipped(rec.asin, rec.fba_sku || rec.sku)}
+                                  className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100 whitespace-nowrap"
+                                >
+                                  🚚 Mark Shipped
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       )

@@ -68,6 +68,10 @@ export interface ProductRecommendation {
   has_customization: boolean
   is_fba_only: boolean
 
+  // Label/Shipment tracking
+  label_created_at: string | null
+  shipment_status: string | null
+
   // Meta
   last_fba_sync: string | null
 }
@@ -99,6 +103,8 @@ interface FBAInvRow {
   quantity_total: number
   units_sold_30d: number
   buy_box_percentage: number
+  label_created_at: string | null
+  shipment_status: string | null
   last_synced_at: string | null
 }
 
@@ -118,7 +124,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   // that may have a different ASIN than the FBM listing.
   const { data: invRows } = await supabase
     .from('fba_inventory')
-    .select('asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, last_synced_at')
+    .select('asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, label_created_at, shipment_status, last_synced_at')
 
   // ── 2b. Load FBA SKUs from sku_sales_analytics as secondary source ────────
   // This catches FBA listings that are stocked out and no longer returned by
@@ -211,6 +217,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       quantity_total: 0,
       units_sold_30d: sale.units_sold_30d || 0,
       buy_box_percentage: 0,
+      label_created_at: null,
+      shipment_status: null,
       last_synced_at: null,
     }
     // Add to ASIN map
@@ -246,6 +254,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       quantity_total: 0,
       units_sold_30d: 0,
       buy_box_percentage: 0,
+      label_created_at: null,
+      shipment_status: null,
       last_synced_at: null,
     }
 
@@ -274,6 +284,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       quantity_total: inv.quantity_total || 0,
       units_sold_30d: inv.units_sold_30d || 0,
       buy_box_percentage: inv.buy_box_percentage || 0,
+      label_created_at: inv.label_created_at || null,
+      shipment_status: inv.shipment_status || null,
       last_synced_at: inv.last_synced_at,
     }
 
@@ -361,6 +373,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
         quantity_total: 0,
         units_sold_30d: 0,
         buy_box_percentage: 0,
+        label_created_at: null,
+        shipment_status: null,
         last_synced_at: null,
       }
       fbaByBaseSku.set(fbmSku, syntheticRow)
@@ -517,6 +531,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       send_rationale: sendRationale,
       has_customization: hasCustomization,
       is_fba_only: isFBAOnly,
+      label_created_at: fbaInv?.label_created_at ?? null,
+      shipment_status: fbaInv?.shipment_status ?? null,
       last_fba_sync: lastFbaSync,
     })
   }
