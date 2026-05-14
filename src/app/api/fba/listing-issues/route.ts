@@ -91,6 +91,23 @@ export async function GET(req: NextRequest) {
     fulfillment_channel: string | null;
   }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel')
 
+  // Load FBA inventory data to cross-reference actual stock levels
+  // (listing_health quantity may be stale; fba_inventory has real-time FBA stock)
+  const { data: fbaInvData } = await supabase
+    .from('fba_inventory')
+    .select('asin, sku, quantity_available, quantity_inbound, quantity_total')
+  const fbaStockByAsin = new Map<string, number>()
+  const fbaStockBySku = new Map<string, number>()
+  for (const inv of fbaInvData || []) {
+    const qty = (inv.quantity_available || 0) + (inv.quantity_inbound || 0)
+    if (inv.asin) {
+      fbaStockByAsin.set(inv.asin, (fbaStockByAsin.get(inv.asin) || 0) + qty)
+    }
+    if (inv.sku) {
+      fbaStockBySku.set(inv.sku, (fbaStockBySku.get(inv.sku) || 0) + qty)
+    }
+  }
+
   // Load ALL sales analytics for cross-reference
   const salesData = await fetchAll<{
     sku: string; asin: string | null; product_name: string | null;
@@ -253,6 +270,16 @@ export async function GET(req: NextRequest) {
     // Issue 3: FBA listing active but 0 stock, with proven velocity
     const isFbaSku = listing.sku && /[-_]FBA$/i.test(listing.sku)
     if (isFbaSku && listing.status === 'Active' && (listing.quantity || 0) === 0) {
+      // Cross-reference with fba_inventory for ACTUAL stock levels
+      // The listing_health quantity may be stale (from All Listings Report)
+      // while fba_inventory has real-time data from FBA Inventory Summaries API
+      const actualFbaStock = (fbaStockBySku.get(listing.sku) || 0) ||
+        (listing.asin ? (fbaStockByAsin.get(listing.asin) || 0) : 0)
+      if (actualFbaStock > 0) {
+        // FBA inventory exists — this is NOT a "no stock" issue
+        continue
+      }
+
       // Check if this ASIN has sales velocity
       const asinVelocity = asinSales?.units_sold_30d || unitsSold
       if (asinVelocity > 0) {

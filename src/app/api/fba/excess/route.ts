@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { generateExcessActionPlan, buildExcessContext } from '@/lib/fba/excessActionPlan'
+import { generateReplenishmentReport } from '@/lib/fba/replenishment'
 import type { InventoryHealthItem } from '@/lib/amazon/catalog'
 
 function getAdminSupabase() {
@@ -61,7 +62,64 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  const items = data || []
+  let items = data || []
+
+  // ── Auto-populate from replenishment engine when table is empty ──────────
+  // The excess_inventory table only gets populated during heavy "Sync FBA Data".
+  // If it's empty, we can still show overstocked items from the replenishment engine.
+  if (items.length === 0 && format !== 'csv') {
+    try {
+      const report = await generateReplenishmentReport()
+      const overstocked = report.filter(r =>
+        r.status === 'overstocked' && r.fba_qty_available > 0
+      )
+
+      if (overstocked.length > 0) {
+        // Insert overstocked items into excess_inventory
+        const inserts = overstocked.map(r => {
+          const weeksOfCover = r.weeks_of_cover || 0
+          const daysOfSupply = Math.round(weeksOfCover * 7)
+          // Estimate excess: anything beyond 12 weeks of cover is excess
+          const dailyVelocity = r.fbm_velocity_per_day + (r.fba_units_sold_30d / 30)
+          const healthyStock = Math.ceil(dailyVelocity * 90) // 90 days = healthy
+          const excessQty = Math.max(0, r.fba_qty_available - healthyStock)
+
+          return {
+            asin: r.fba_asin || r.asin,
+            sku: r.fba_sku || r.sku,
+            product_name: r.title || '',
+            qty_available: r.fba_qty_available,
+            excess_qty: excessQty,
+            days_of_supply: daysOfSupply,
+            units_sold_last_30_days: r.fba_units_sold_30d + r.fbm_units_30d,
+            your_price: 0, // Will be enriched when Inventory Health Report is synced
+            estimated_monthly_storage_fee: 0,
+            estimated_storage_cost_per_unit: 0,
+            amazon_alert: `Overstocked: ${weeksOfCover.toFixed(0)} weeks of cover (${r.fba_qty_available} units on hand)`,
+            status: 'active',
+          }
+        })
+
+        // Upsert into excess_inventory (on conflict by SKU, update)
+        const { error: insertErr } = await supabase
+          .from('excess_inventory')
+          .upsert(inserts, { onConflict: 'sku' })
+
+        if (!insertErr) {
+          // Re-fetch the newly inserted items
+          const { data: freshData } = await supabase
+            .from('excess_inventory')
+            .select('*')
+            .order('days_of_supply', { ascending: false })
+          items = freshData || []
+        } else {
+          console.error('[Excess] Auto-populate insert error:', insertErr.message)
+        }
+      }
+    } catch (err) {
+      console.error('[Excess] Auto-populate from replenishment error:', err)
+    }
+  }
 
   // CSV export
   if (format === 'csv') {
