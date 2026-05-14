@@ -1,14 +1,22 @@
 /**
  * Listing Issues API
  *
- * Cross-references listing_health + sku_sales_analytics to surface ONLY
- * actionable problems — not a data dump of all 10k+ listings.
+ * Cross-references listing_health + fba_inventory + sku_sales_analytics to surface
+ * ONLY actionable problems — not a data dump of all 10k+ listings.
  *
  * Issue categories:
- * 1. suppressed    — Amazon blocked the listing (status != 'Active')
- * 2. zero_price    — Listing has $0 price (broken)
- * 3. fba_no_stock  — FBA listing is active but qty = 0, with proven sales velocity
- * 4. fbm_no_fba    — High-velocity FBM listing with no FBA counterpart (opportunity)
+ * 1. suppressed        — Amazon explicitly blocked the listing (status = 'Suppressed')
+ * 2. zero_price        — Listing is Active but has $0 price (broken)
+ * 3. fba_no_stock      — FBA listing is Active but qty = 0, with proven sales velocity
+ * 4. fba_stockout      — FBA listing is Inactive due to 0 stock (needs restock, not suppressed)
+ * 5. inactive_no_stock — Listing is Inactive with no stock anywhere (FBA + FBM both 0)
+ * 6. fbm_no_fba        — High-velocity FBM listing with no FBA counterpart (opportunity)
+ *
+ * Key fix (v2): status = 'Inactive' is NOT the same as 'Suppressed'.
+ *   - 'Suppressed' = Amazon blocked it (requires Seller Central fix)
+ *   - 'Inactive'   = listing exists but is not buyable (could be 0 stock, FBA taking over, etc.)
+ *   FBM listings go Inactive when the FBA counterpart wins the Buy Box — this is NORMAL and
+ *   should NOT be flagged as suppressed.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -27,7 +35,7 @@ interface ListingIssue {
   sku: string
   asin: string | null
   product_name: string | null
-  issue_type: 'suppressed' | 'zero_price' | 'fba_no_stock' | 'fbm_no_fba'
+  issue_type: 'suppressed' | 'zero_price' | 'fba_no_stock' | 'fba_stockout' | 'inactive_no_stock' | 'fbm_no_fba'
   issue_label: string
   severity: 'critical' | 'warning' | 'opportunity'
   detail: string
@@ -39,17 +47,21 @@ interface ListingIssue {
 }
 
 const ISSUE_LABELS: Record<string, string> = {
-  suppressed: 'Listing Suppressed',
-  zero_price: 'Price Missing ($0)',
-  fba_no_stock: 'FBA Active — No Stock',
-  fbm_no_fba: 'High Velocity — No FBA',
+  suppressed:        'Listing Suppressed',
+  zero_price:        'Price Missing ($0)',
+  fba_no_stock:      'FBA Active — No Stock',
+  fba_stockout:      'FBA Stocked Out',
+  inactive_no_stock: 'Inactive — No Stock',
+  fbm_no_fba:        'High Velocity — No FBA',
 }
 
 const ISSUE_SEVERITY: Record<string, 'critical' | 'warning' | 'opportunity'> = {
-  suppressed: 'critical',
-  zero_price: 'critical',
-  fba_no_stock: 'warning',
-  fbm_no_fba: 'opportunity',
+  suppressed:        'critical',
+  zero_price:        'critical',
+  fba_no_stock:      'warning',
+  fba_stockout:      'warning',
+  inactive_no_stock: 'warning',
+  fbm_no_fba:        'opportunity',
 }
 
 // Helper: fetch ALL rows from a table, paginating in chunks of 1000
@@ -72,7 +84,7 @@ async function fetchAll<T>(supabase: any, table: string, select: string): Promis
     if (data && data.length > 0) {
       allRows.push(...(data as T[]))
       offset += data.length
-      hasMore = data.length === PAGE_SIZE // if we got a full page, there might be more
+      hasMore = data.length === PAGE_SIZE
     } else {
       hasMore = false
     }
@@ -84,23 +96,28 @@ export async function GET(req: NextRequest) {
   const supabase = getAdminSupabase()
   const issues: ListingIssue[] = []
 
-  // Load ALL listing health data (paginated — table has 10k+ rows)
+  // ── 1. Load ALL listing health data (paginated — table has 10k+ rows) ──────
   const listings = await fetchAll<{
     sku: string; asin: string | null; product_name: string | null;
     price: number | null; quantity: number | null; status: string | null;
     fulfillment_channel: string | null;
   }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel')
 
-  // Load FBA inventory data to cross-reference actual stock levels
-  // (listing_health quantity may be stale; fba_inventory has real-time FBA stock)
+  // ── 2. Load FBA inventory data (real-time stock + shipment status) ──────────
   const { data: fbaInvData, error: fbaInvErr } = await supabase
     .from('fba_inventory')
-    .select('asin, sku, quantity_available, quantity_inbound')
+    .select('asin, sku, quantity_available, quantity_inbound, shipment_status, label_created_at')
   if (fbaInvErr) {
     console.error('[ListingIssues] fba_inventory query error:', fbaInvErr.message)
   }
+
+  // Build FBA stock maps — by ASIN and by SKU
   const fbaStockByAsin = new Map<string, number>()
-  const fbaStockBySku = new Map<string, number>()
+  const fbaStockBySku  = new Map<string, number>()
+  // Track ASINs with a recently-created shipment label (in-transit, not truly stocked out)
+  const asinShipmentInProgress = new Set<string>()
+  const skuShipmentInProgress  = new Set<string>()
+
   for (const inv of fbaInvData || []) {
     const qty = (inv.quantity_available || 0) + (inv.quantity_inbound || 0)
     if (inv.asin) {
@@ -109,9 +126,19 @@ export async function GET(req: NextRequest) {
     if (inv.sku) {
       fbaStockBySku.set(inv.sku, (fbaStockBySku.get(inv.sku) || 0) + qty)
     }
+    // If a label was created in the last 30 days OR shipment_status is label_created/shipped,
+    // treat this as "shipment in progress" — don't flag as a critical stockout
+    const recentLabel = inv.label_created_at
+      ? (Date.now() - new Date(inv.label_created_at).getTime()) < 30 * 24 * 60 * 60 * 1000
+      : false
+    const activeShipment = inv.shipment_status === 'label_created' || inv.shipment_status === 'shipped'
+    if (recentLabel || activeShipment) {
+      if (inv.asin) asinShipmentInProgress.add(inv.asin)
+      if (inv.sku)  skuShipmentInProgress.add(inv.sku)
+    }
   }
 
-  // Load ALL sales analytics for cross-reference
+  // ── 3. Load ALL sales analytics for cross-reference ─────────────────────────
   const salesData = await fetchAll<{
     sku: string; asin: string | null; product_name: string | null;
     units_sold_30d: number | null; revenue_30d: number | null;
@@ -126,18 +153,17 @@ export async function GET(req: NextRequest) {
   for (const s of salesData || []) {
     salesBySku.set(s.sku, {
       units_sold_30d: s.units_sold_30d || 0,
-      revenue_30d: s.revenue_30d || 0,
-      channel: s.fulfillment_channel || '',
+      revenue_30d:    s.revenue_30d    || 0,
+      channel:        s.fulfillment_channel || '',
     })
     if (s.asin) {
-      // Aggregate by ASIN (sum all SKU variants)
       const existing = salesByAsin.get(s.asin)
       if (!existing || (s.units_sold_30d || 0) > existing.units_sold_30d) {
         salesByAsin.set(s.asin, {
           units_sold_30d: s.units_sold_30d || 0,
-          revenue_30d: s.revenue_30d || 0,
-          channel: s.fulfillment_channel || '',
-          sku: s.sku,
+          revenue_30d:    s.revenue_30d    || 0,
+          channel:        s.fulfillment_channel || '',
+          sku:            s.sku,
         })
       }
       if (s.fulfillment_channel === 'Amazon') {
@@ -146,6 +172,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // ── 4. Build FBA listing sets ─────────────────────────────────────────────
   // Track ASINs that have FBA listings — use SKU suffix pattern as primary detection
   // (fulfillment_channel in listing_health may show 'DEFAULT' for all rows due to report type)
   const fbaListingAsins = new Set<string>()
@@ -156,26 +183,23 @@ export async function GET(req: NextRequest) {
     if (l.fulfillment_channel === 'AMAZON_NA' || l.fulfillment_channel === 'AMAZON_EU' ||
         (l.sku && /[-_]FBA$/i.test(l.sku))) {
       if (l.asin) fbaListingAsins.add(l.asin)
-      // Extract base SKU (strip -FBA or _FBA suffix)
       if (l.sku && /[-_]FBA$/i.test(l.sku)) {
         const baseSku = l.sku.replace(/[-_]FBA$/i, '')
         fbaBaseSkus.add(baseSku)
       }
     }
   }
-  // Also add base SKUs from sku_sales_analytics Amazon channel
   for (const s of salesData || []) {
     if (s.fulfillment_channel === 'Amazon' && s.sku && /[-_]FBA$/i.test(s.sku)) {
       const baseSku = s.sku.replace(/[-_]FBA$/i, '')
       fbaBaseSkus.add(baseSku)
     }
-    // Also check by ASIN for Amazon channel (direct ASIN match)
     if (s.fulfillment_channel === 'Amazon' && s.asin) {
       fbaAsinSet.add(s.asin)
     }
   }
 
-  // Build ASIN → valid price map from listing_health
+  // ── 5. Build ASIN → valid price map ──────────────────────────────────────
   // If ANY SKU for an ASIN has a valid price, all $0 variants are report artifacts
   const asinHasValidPrice = new Set<string>()
   for (const l of listings || []) {
@@ -184,85 +208,154 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Build product name lookup from BOTH listing_health and sku_sales_analytics
-  // This ensures we can always resolve a product name for any ASIN
+  // ── 6. Build product name lookup ─────────────────────────────────────────
   const productNameByAsin = new Map<string, string>()
-  const productNameBySku = new Map<string, string>()
+  const productNameBySku  = new Map<string, string>()
   for (const l of listings || []) {
     if (l.product_name) {
       if (l.asin) productNameByAsin.set(l.asin, l.product_name)
-      if (l.sku) productNameBySku.set(l.sku, l.product_name)
+      if (l.sku)  productNameBySku.set(l.sku, l.product_name)
     }
   }
   for (const s of salesData || []) {
     if (s.product_name) {
-      if (s.asin && !productNameByAsin.has(s.asin)) {
-        productNameByAsin.set(s.asin, s.product_name)
-      }
-      if (s.sku && !productNameBySku.has(s.sku)) {
-        productNameBySku.set(s.sku, s.product_name)
-      }
+      if (s.asin && !productNameByAsin.has(s.asin)) productNameByAsin.set(s.asin, s.product_name)
+      if (s.sku  && !productNameBySku.has(s.sku))   productNameBySku.set(s.sku, s.product_name)
     }
   }
 
+  // ── 7. Main listing scan ──────────────────────────────────────────────────
   for (const listing of listings || []) {
-    const sales = salesBySku.get(listing.sku)
+    const sales     = salesBySku.get(listing.sku)
     const asinSales = listing.asin ? salesByAsin.get(listing.asin) : null
     const unitsSold = sales?.units_sold_30d || 0
 
-    // Issue 1: Suppressed / Inactive listing
-    if (listing.status && listing.status !== 'Active' && listing.status !== 'Incomplete') {
+    const isFbaSku = listing.sku && /[-_]FBA$/i.test(listing.sku)
+
+    // ── Issue 1: TRULY Suppressed listing ──────────────────────────────────
+    // ONLY flag status = 'Suppressed' — Amazon explicitly blocked this listing.
+    // Do NOT flag 'Inactive' here — Inactive is a separate category below.
+    if (listing.status === 'Suppressed') {
       issues.push({
-        sku: listing.sku,
-        asin: listing.asin,
-        product_name: listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
-        issue_type: 'suppressed',
-        issue_label: ISSUE_LABELS.suppressed,
-        severity: ISSUE_SEVERITY.suppressed,
-        detail: `Status: "${listing.status}". This listing is not visible to buyers. Fix in Seller Central → Manage Inventory → Suppressed.`,
-        price: listing.price,
-        quantity: listing.quantity || 0,
+        sku:           listing.sku,
+        asin:          listing.asin,
+        product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+        issue_type:    'suppressed',
+        issue_label:   ISSUE_LABELS.suppressed,
+        severity:      ISSUE_SEVERITY.suppressed,
+        detail:        `Amazon has suppressed this listing. It is not visible to buyers. Fix in Seller Central → Manage Inventory → Suppressed.`,
+        price:         listing.price,
+        quantity:      listing.quantity || 0,
         fulfillment_channel: listing.fulfillment_channel,
         units_sold_30d: unitsSold,
         estimated_lost_revenue_30d: asinSales ? asinSales.revenue_30d : null,
       })
-      continue // Don't double-flag
+      continue
     }
 
-    // Issue 2: $0 price (broken listing)
-    // BUT: The All Listings Report often has blank/null prices for FBA listings
-    // or listings where Amazon controls the price. If the listing has recent sales
-    // (proving it IS purchasable), or if we can find a price from sales analytics,
-    // it's NOT truly broken — skip the false positive.
-    if (listing.status === 'Active' && (!listing.price || listing.price <= 0)) {
-      // Check if this listing has sales revenue (proves price exists on Amazon)
-      const hasSalesRevenue = (sales?.revenue_30d && sales.revenue_30d > 0) ||
-        (asinSales?.revenue_30d && asinSales.revenue_30d > 0)
-      // Check if this is an FBA SKU (FBA prices are often missing from All Listings Report)
-      const isFbaListing = listing.sku && /[-_]FBA$/i.test(listing.sku)
-      // Check if the ASIN has any sales at all (even via other SKUs)
-      const hasAnySales = unitsSold > 0 || (asinSales?.units_sold_30d && asinSales.units_sold_30d > 0)
+    // ── Issue 2: Inactive listing ──────────────────────────────────────────
+    // 'Inactive' means the listing exists but is not currently buyable.
+    // This has multiple causes — we need to distinguish them carefully.
+    if (listing.status === 'Inactive') {
+      const actualFbaStock = (fbaStockBySku.get(listing.sku) || 0) ||
+        (listing.asin ? (fbaStockByAsin.get(listing.asin) || 0) : 0)
 
-      // Check if another SKU for the same ASIN has a valid price (proves the ASIN is priced)
-      const asinHasPrice = listing.asin ? asinHasValidPrice.has(listing.asin) : false
+      if (isFbaSku) {
+        // FBA SKU is Inactive — this means 0 FBA stock (not suppressed)
+        // Check if a shipment is already in progress
+        const shipmentPending = skuShipmentInProgress.has(listing.sku) ||
+          (listing.asin ? asinShipmentInProgress.has(listing.asin) : false)
 
-      // Skip false positives: FBA listings with sales, any listing with proven revenue,
-      // or any listing whose ASIN has a valid price on another variant
-      if (hasSalesRevenue || (isFbaListing && hasAnySales) || asinHasPrice) {
-        // Not a real issue — price exists on Amazon, just missing from the report
+        const asinVelocity = asinSales?.units_sold_30d || unitsSold
+        if (shipmentPending) {
+          // Shipment label created recently — not a critical issue, just informational
+          // Skip flagging — the user already knows and is acting on it
+          continue
+        }
+        // Flag as fba_stockout (not suppressed)
+        const avgPrice = listing.price || (asinSales?.revenue_30d && asinSales.units_sold_30d
+          ? asinSales.revenue_30d / asinSales.units_sold_30d : 0)
+        issues.push({
+          sku:           listing.sku,
+          asin:          listing.asin,
+          product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+          issue_type:    'fba_stockout',
+          issue_label:   ISSUE_LABELS.fba_stockout,
+          severity:      ISSUE_SEVERITY.fba_stockout,
+          detail:        `FBA listing is Inactive due to 0 stock. ${asinVelocity > 0 ? `This ASIN sold ${asinVelocity} units in 30d — send a restock shipment now.` : 'Send a restock shipment to reactivate.'}`,
+          price:         listing.price,
+          quantity:      0,
+          fulfillment_channel: listing.fulfillment_channel,
+          units_sold_30d: asinVelocity,
+          estimated_lost_revenue_30d: avgPrice > 0 && asinVelocity > 0
+            ? Math.round(avgPrice * asinVelocity * 0.5) : null,
+        })
         continue
       }
 
+      // FBM SKU is Inactive
+      // CRITICAL FIX: If this ASIN has FBA stock in fba_inventory, the FBM listing
+      // going Inactive is NORMAL — FBA is handling the sales. Do NOT flag this.
+      if (actualFbaStock > 0) {
+        // FBA is active and has stock for this ASIN — FBM Inactive is expected behaviour
+        continue
+      }
+
+      // Also check: does this ASIN have an FBA listing at all (even if currently 0 stock)?
+      const asinHasFbaListing = listing.asin
+        ? (fbaListingAsins.has(listing.asin) || fbaAsinSet.has(listing.asin))
+        : false
+      const baseSkuHasFba = fbaBaseSkus.has(listing.sku)
+
+      if (asinHasFbaListing || baseSkuHasFba) {
+        // FBA listing exists for this ASIN — FBM Inactive is likely because FBA is active
+        // or FBA is also stocked out (the FBA SKU will be flagged separately)
+        continue
+      }
+
+      // Genuinely inactive with no FBA anywhere — flag as inactive_no_stock
       issues.push({
-        sku: listing.sku,
-        asin: listing.asin,
-        product_name: listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
-        issue_type: 'zero_price',
-        issue_label: ISSUE_LABELS.zero_price,
-        severity: ISSUE_SEVERITY.zero_price,
-        detail: `Listing is active but has no price set. Buyers cannot purchase. Update price immediately.`,
-        price: 0,
-        quantity: listing.quantity || 0,
+        sku:           listing.sku,
+        asin:          listing.asin,
+        product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+        issue_type:    'inactive_no_stock',
+        issue_label:   ISSUE_LABELS.inactive_no_stock,
+        severity:      ISSUE_SEVERITY.inactive_no_stock,
+        detail:        `Listing is Inactive with no FBA stock and no FBM quantity. Reactivate by adding stock or creating an FBA shipment.`,
+        price:         listing.price,
+        quantity:      listing.quantity || 0,
+        fulfillment_channel: listing.fulfillment_channel,
+        units_sold_30d: unitsSold,
+        estimated_lost_revenue_30d: asinSales ? Math.round(asinSales.revenue_30d * 0.5) : null,
+      })
+      continue
+    }
+
+    // ── Issue 3: $0 price (broken listing) ────────────────────────────────
+    // The All Listings Report often has blank/null prices for FBA listings
+    // or listings where Amazon controls the price. If the listing has recent sales
+    // (proving it IS purchasable), or if another SKU for the ASIN has a valid price,
+    // it's NOT truly broken — skip the false positive.
+    if (listing.status === 'Active' && (!listing.price || listing.price <= 0)) {
+      const hasSalesRevenue = (sales?.revenue_30d && sales.revenue_30d > 0) ||
+        (asinSales?.revenue_30d && asinSales.revenue_30d > 0)
+      const hasAnySales = unitsSold > 0 || (asinSales?.units_sold_30d && asinSales.units_sold_30d > 0)
+      const asinHasPrice = listing.asin ? asinHasValidPrice.has(listing.asin) : false
+
+      if (hasSalesRevenue || (isFbaSku && hasAnySales) || asinHasPrice) {
+        continue // Not a real issue — price exists on Amazon, just missing from the report
+      }
+
+      issues.push({
+        sku:           listing.sku,
+        asin:          listing.asin,
+        product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+        issue_type:    'zero_price',
+        issue_label:   ISSUE_LABELS.zero_price,
+        severity:      ISSUE_SEVERITY.zero_price,
+        detail:        `Listing is active but has no price set. Buyers cannot purchase. Update price immediately in Seller Central.`,
+        price:         0,
+        quantity:      listing.quantity || 0,
         fulfillment_channel: listing.fulfillment_channel,
         units_sold_30d: unitsSold,
         estimated_lost_revenue_30d: null,
@@ -270,43 +363,45 @@ export async function GET(req: NextRequest) {
       continue
     }
 
-    // Issue 3: FBA listing active but 0 stock, with proven velocity
-    const isFbaSku = listing.sku && /[-_]FBA$/i.test(listing.sku)
-    if (isFbaSku && listing.status === 'Active' && (listing.quantity || 0) === 0) {
+    // ── Issue 4: FBA listing Active but 0 stock, with proven velocity ─────
+    // This is an Active FBA listing that will soon go Inactive — catch it early.
+    if (isFbaSku && listing.status === 'Active' && (listing.quantity === 0 || listing.quantity === null)) {
       // Cross-reference with fba_inventory for ACTUAL stock levels
-      // The listing_health quantity may be stale (from All Listings Report)
-      // while fba_inventory has real-time data from FBA Inventory Summaries API
       const actualFbaStock = (fbaStockBySku.get(listing.sku) || 0) ||
         (listing.asin ? (fbaStockByAsin.get(listing.asin) || 0) : 0)
       if (actualFbaStock > 0) {
-        // FBA inventory exists — this is NOT a "no stock" issue
-        continue
+        continue // FBA inventory exists — not a "no stock" issue
       }
 
-      // Check if this ASIN has sales velocity
+      // Check if a shipment is already in progress
+      const shipmentPending = skuShipmentInProgress.has(listing.sku) ||
+        (listing.asin ? asinShipmentInProgress.has(listing.asin) : false)
+      if (shipmentPending) continue
+
       const asinVelocity = asinSales?.units_sold_30d || unitsSold
       if (asinVelocity > 0) {
-        const avgPrice = listing.price || (asinSales?.revenue_30d ? asinSales.revenue_30d / asinSales.units_sold_30d : 0)
+        const avgPrice = listing.price || (asinSales?.revenue_30d && asinSales.units_sold_30d
+          ? asinSales.revenue_30d / asinSales.units_sold_30d : 0)
         issues.push({
-          sku: listing.sku,
-          asin: listing.asin,
-          product_name: listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
-          issue_type: 'fba_no_stock',
-          issue_label: ISSUE_LABELS.fba_no_stock,
-          severity: ISSUE_SEVERITY.fba_no_stock,
-          detail: `FBA listing is live but has 0 units in FBA. This ASIN sold ${asinVelocity} units in 30d. You're losing FBA sales every day.`,
-          price: listing.price,
-          quantity: 0,
+          sku:           listing.sku,
+          asin:          listing.asin,
+          product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+          issue_type:    'fba_no_stock',
+          issue_label:   ISSUE_LABELS.fba_no_stock,
+          severity:      ISSUE_SEVERITY.fba_no_stock,
+          detail:        `FBA listing is live but has 0 units in FBA. This ASIN sold ${asinVelocity} units in 30d. Send a restock shipment before it goes Inactive.`,
+          price:         listing.price,
+          quantity:      0,
           fulfillment_channel: listing.fulfillment_channel,
           units_sold_30d: asinVelocity,
-          estimated_lost_revenue_30d: avgPrice > 0 ? Math.round(avgPrice * asinVelocity * 0.5) : null, // estimate 50% could be FBA
+          estimated_lost_revenue_30d: avgPrice > 0 ? Math.round(avgPrice * asinVelocity * 0.5) : null,
         })
       }
       continue
     }
   }
 
-  // ── Sibling SKU inference for listing-issues ──────────────────────────────
+  // ── 8. Sibling SKU inference ──────────────────────────────────────────────
   // If a product family (e.g., DAR-CCG) has most variants with FBA listings,
   // infer that missing variants also have FBA (just not in reports yet).
   // This prevents false "No FBA" alerts for products that clearly have FBA.
@@ -335,57 +430,46 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Issue 4: High-velocity FBM-only ASINs with no FBA counterpart
-  // (Only from sales data — these are ASINs selling well via Merchant with no FBA listing)
+  // ── 9. Issue 6: High-velocity FBM-only ASINs with no FBA counterpart ─────
   const processedAsins = new Set<string>()
   for (const s of salesData || []) {
     if (!s.asin || processedAsins.has(s.asin)) continue
     if (s.fulfillment_channel !== 'Merchant') continue
-    // Check if this ASIN already has FBA via:
-    // 1. Direct ASIN match in sku_sales_analytics Amazon channel
-    // 2. Direct ASIN match in listing_health FBA listings
-    // 3. Base-SKU match (FBM SKU "X" has FBA counterpart "X-FBA" in listing_health or sales)
-    // 4. Sibling inference (family has ≥40% FBA coverage)
-    if (fbaAsinSet.has(s.asin) || fbaListingAsins.has(s.asin) || fbaBaseSkus.has(s.sku)) continue // already has FBA
-    if ((s.units_sold_30d || 0) < 10) continue // only flag if selling 10+/month
+    if (fbaAsinSet.has(s.asin) || fbaListingAsins.has(s.asin) || fbaBaseSkus.has(s.sku)) continue
+    if ((s.units_sold_30d || 0) < 10) continue
 
     processedAsins.add(s.asin)
 
-    // Resolve product name from multiple sources
     const resolvedName = s.product_name
       || productNameByAsin.get(s.asin)
       || productNameBySku.get(s.sku)
       || null
 
     issues.push({
-      sku: s.sku,
-      asin: s.asin,
-      product_name: resolvedName,
-      issue_type: 'fbm_no_fba',
-      issue_label: ISSUE_LABELS.fbm_no_fba,
-      severity: ISSUE_SEVERITY.fbm_no_fba,
-      detail: `Selling ${s.units_sold_30d} units/30d via FBM only. No FBA listing exists. Creating an FBA listing could increase sales and reduce your shipping workload.`,
-      price: null,
-      quantity: 0,
+      sku:           s.sku,
+      asin:          s.asin,
+      product_name:  resolvedName,
+      issue_type:    'fbm_no_fba',
+      issue_label:   ISSUE_LABELS.fbm_no_fba,
+      severity:      ISSUE_SEVERITY.fbm_no_fba,
+      detail:        `Selling ${s.units_sold_30d} units/30d via FBM only. No FBA listing exists. Creating an FBA listing could increase sales and reduce your shipping workload.`,
+      price:         null,
+      quantity:      0,
       fulfillment_channel: 'Merchant',
       units_sold_30d: s.units_sold_30d || 0,
-      estimated_lost_revenue_30d: Math.round((s.revenue_30d || 0) * 0.3), // estimate 30% uplift from FBA
+      estimated_lost_revenue_30d: Math.round((s.revenue_30d || 0) * 0.3),
     })
   }
 
-  // Final enrichment pass: fill any remaining null product_names
+  // ── 10. Final enrichment: fill any remaining null product_names ───────────
   for (const issue of issues) {
     if (!issue.product_name) {
-      if (issue.asin) {
-        issue.product_name = productNameByAsin.get(issue.asin) || null
-      }
-      if (!issue.product_name && issue.sku) {
-        issue.product_name = productNameBySku.get(issue.sku) || null
-      }
+      if (issue.asin) issue.product_name = productNameByAsin.get(issue.asin) || null
+      if (!issue.product_name && issue.sku) issue.product_name = productNameBySku.get(issue.sku) || null
     }
   }
 
-  // Sort: critical first, then by lost revenue
+  // ── 11. Sort: critical first, then by lost revenue ────────────────────────
   const severityOrder = { critical: 0, warning: 1, opportunity: 2 }
   issues.sort((a, b) => {
     const sevDiff = severityOrder[a.severity] - severityOrder[b.severity]
@@ -393,12 +477,12 @@ export async function GET(req: NextRequest) {
     return (b.estimated_lost_revenue_30d || 0) - (a.estimated_lost_revenue_30d || 0)
   })
 
-  // Summary
+  // ── 12. Summary ───────────────────────────────────────────────────────────
   const summary = {
-    total: issues.length,
-    critical: issues.filter(i => i.severity === 'critical').length,
-    warning: issues.filter(i => i.severity === 'warning').length,
-    opportunity: issues.filter(i => i.severity === 'opportunity').length,
+    total:              issues.length,
+    critical:           issues.filter(i => i.severity === 'critical').length,
+    warning:            issues.filter(i => i.severity === 'warning').length,
+    opportunity:        issues.filter(i => i.severity === 'opportunity').length,
     total_lost_revenue: issues.reduce((sum, i) => sum + (i.estimated_lost_revenue_30d || 0), 0),
   }
 

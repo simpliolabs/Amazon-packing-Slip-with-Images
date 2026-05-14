@@ -63,7 +63,7 @@ interface ListingIssue {
   sku: string
   asin: string | null
   product_name: string | null
-  issue_type: 'suppressed' | 'zero_price' | 'fba_no_stock' | 'fbm_no_fba'
+  issue_type: 'suppressed' | 'zero_price' | 'fba_no_stock' | 'fba_stockout' | 'inactive_no_stock' | 'fbm_no_fba'
   issue_label: string
   severity: 'critical' | 'warning' | 'opportunity'
   detail: string
@@ -150,7 +150,7 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function FBAIntelligencePage() {
-  const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings'>('replenishment')
+  const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings' | 'ads'>('replenishment')
   const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
   const [listingIssues, setListingIssues] = useState<ListingIssue[]>([])
   const [listingIssuesSummary, setListingIssuesSummary] = useState<ListingIssuesSummary | null>(null)
@@ -171,6 +171,22 @@ export default function FBAIntelligencePage() {
   const [excessFilter, setExcessFilter] = useState<string>('all')
   const [generatingPlan, setGeneratingPlan] = useState<string | null>(null) // SKU being generated
   const [expandedItem, setExpandedItem] = useState<string | null>(null)     // SKU expanded
+
+  // Ads Manager state
+  const [adsStatus, setAdsStatus] = useState<{
+    configured: boolean; valid: boolean; message: string;
+    stats: { campaigns: number; keywords: number; lastSynced: string | null }
+  } | null>(null)
+  const [adsCampaigns, setAdsCampaigns] = useState<{
+    campaign_id: string; name: string; state: string; campaign_type: string;
+    daily_budget: number | null;
+    perf_30d: { impressions: number; clicks: number; cost: number; sales: number; acos: number | null; roas: number | null }
+  }[]>([])
+  const [adsSummary, setAdsSummary] = useState<{
+    totalSpend: number; totalSales: number; avgAcos: number | null; activeCampaigns: number; totalCampaigns: number
+  } | null>(null)
+  const [adsLoading, setAdsLoading] = useState(false)
+  const [adsSyncing, setAdsSyncing] = useState(false)
 
   // Notifications
   const [notifications, setNotifications] = useState<FBANotification[]>([])
@@ -504,6 +520,30 @@ export default function FBAIntelligencePage() {
     finally { setAnalyticsLoading(false) }
   }, [])
 
+  // Fetch Ads Manager data
+  const fetchAdsData = useCallback(async () => {
+    setAdsLoading(true)
+    try {
+      const [statusResp, campaignsResp] = await Promise.all([
+        fetch('/api/ads/status'),
+        fetch('/api/ads/campaigns'),
+      ])
+      if (statusResp.ok) {
+        const status = await statusResp.json()
+        setAdsStatus(status)
+      }
+      if (campaignsResp.ok) {
+        const data = await campaignsResp.json()
+        setAdsCampaigns(data.campaigns || [])
+        setAdsSummary(data.summary || null)
+      }
+    } catch (err) {
+      console.error('[AdsManager] Failed to load ads data:', err)
+    } finally {
+      setAdsLoading(false)
+    }
+  }, [])
+
   // Fetch listing health
   const fetchListingIssues = useCallback(async (triggerSync = false) => {
     setListingsLoading(true)
@@ -524,6 +564,7 @@ export default function FBAIntelligencePage() {
   useEffect(() => {
     if (activeTab === 'analytics' && salesAnalytics.length === 0) fetchSalesAnalytics()
     if (activeTab === 'listings' && listingIssues.length === 0) fetchListingIssues()
+    if (activeTab === 'ads' && !adsStatus) fetchAdsData()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Data source labels for the loading overlay
@@ -736,6 +777,21 @@ export default function FBAIntelligencePage() {
           {listingIssuesSummary && listingIssuesSummary.total > 0 && (
             <span className="ml-2 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full font-bold">
               {listingIssuesSummary.total}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab('ads')}
+          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'ads'
+              ? 'border-yellow-600 text-yellow-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Ads Manager
+          {adsSummary && adsSummary.activeCampaigns > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 bg-yellow-100 text-yellow-700 text-xs rounded-full font-bold">
+              {adsSummary.activeCampaigns}
             </span>
           )}
         </button>
@@ -1454,6 +1510,165 @@ export default function FBAIntelligencePage() {
           </div>
         </>
       )}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB: ADS MANAGER
+      ═══════════════════════════════════════════════════════════════════════ */}
+      {activeTab === 'ads' && (
+        <>
+          {/* Header */}
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Ads Manager</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Amazon Advertising — Sponsored Products campaigns, keywords, and performance</p>
+            </div>
+            {adsStatus?.configured && (
+              <button
+                onClick={async () => {
+                  setAdsSyncing(true)
+                  try {
+                    await fetch('/api/ads/sync', { method: 'POST' })
+                    await fetchAdsData()
+                  } finally {
+                    setAdsSyncing(false)
+                  }
+                }}
+                disabled={adsSyncing}
+                className="px-4 py-2 text-sm bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 disabled:opacity-50 transition-colors"
+              >
+                {adsSyncing ? 'Syncing…' : 'Sync Now'}
+              </button>
+            )}
+          </div>
+
+          {adsLoading ? (
+            <div className="text-center py-12 text-gray-400">Loading Ads data…</div>
+          ) : !adsStatus?.configured ? (
+            /* ── Setup Wizard ── */
+            <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-8 text-center">
+              <div className="text-4xl mb-3">📣</div>
+              <h3 className="text-lg font-semibold text-yellow-900 mb-2">Amazon Ads API — Setup Required</h3>
+              <p className="text-sm text-yellow-800 mb-6 max-w-lg mx-auto">
+                Your Ads API application is being processed by Amazon. Once approved, add your credentials
+                in <strong>Settings → Amazon Ads</strong> to unlock campaign management, keyword bidding,
+                and performance analytics.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl mx-auto text-left">
+                {[
+                  { step: '1', title: 'Register LWA App', desc: 'Go to advertising.amazon.com → Developer Center → Create Application' },
+                  { step: '2', title: 'Get Credentials', desc: 'Copy Client ID, Client Secret, and Refresh Token from your LWA app' },
+                  { step: '3', title: 'Add to Settings', desc: 'Paste credentials in Settings → Amazon Ads and save' },
+                ].map(s => (
+                  <div key={s.step} className="bg-white rounded-lg border border-yellow-200 p-4">
+                    <div className="w-7 h-7 rounded-full bg-yellow-600 text-white text-sm font-bold flex items-center justify-center mb-2">{s.step}</div>
+                    <div className="text-sm font-semibold text-gray-900 mb-1">{s.title}</div>
+                    <div className="text-xs text-gray-500">{s.desc}</div>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-400 mt-6">
+                Ads API approval typically takes 1–2 business days after submitting your application.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* ── Summary Cards ── */}
+              {adsSummary && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs text-gray-500 mb-1">30d Ad Spend</div>
+                    <div className="text-2xl font-bold text-gray-900">${adsSummary.totalSpend.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs text-gray-500 mb-1">30d Ad Sales</div>
+                    <div className="text-2xl font-bold text-green-700">${adsSummary.totalSales.toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs text-gray-500 mb-1">Avg ACoS</div>
+                    <div className={`text-2xl font-bold ${
+                      adsSummary.avgAcos === null ? 'text-gray-400'
+                      : adsSummary.avgAcos < 20 ? 'text-green-700'
+                      : adsSummary.avgAcos < 35 ? 'text-yellow-700'
+                      : 'text-red-700'
+                    }`}>
+                      {adsSummary.avgAcos !== null ? `${adsSummary.avgAcos}%` : '—'}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs text-gray-500 mb-1">Active Campaigns</div>
+                    <div className="text-2xl font-bold text-blue-700">{adsSummary.activeCampaigns}</div>
+                    <div className="text-xs text-gray-400">{adsSummary.totalCampaigns} total</div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Campaigns Table ── */}
+              {adsCampaigns.length === 0 ? (
+                <div className="text-center py-12">
+                  <div className="text-4xl mb-3">📊</div>
+                  <p className="font-medium text-gray-700">No campaigns synced yet</p>
+                  <p className="text-sm mt-1 text-gray-500">Click &quot;Sync Now&quot; to pull your campaigns from Amazon Ads.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {adsCampaigns.map(c => (
+                    <div key={c.campaign_id} className={`rounded-xl border p-4 ${
+                      c.state === 'enabled' ? 'border-gray-200 bg-white' : 'border-gray-100 bg-gray-50'
+                    }`}>
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                              c.state === 'enabled' ? 'bg-green-100 text-green-700'
+                              : c.state === 'paused' ? 'bg-yellow-100 text-yellow-700'
+                              : 'bg-gray-100 text-gray-500'
+                            }`}>
+                              {c.state}
+                            </span>
+                            <span className="text-xs text-gray-400">{c.campaign_type}</span>
+                            {c.daily_budget && (
+                              <span className="text-xs text-gray-400">${c.daily_budget}/day</span>
+                            )}
+                          </div>
+                          <p className="text-sm font-medium text-gray-900 truncate" title={c.name}>{c.name}</p>
+                        </div>
+                        <div className="text-right shrink-0 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                          <div className="text-xs text-gray-500">Spend</div>
+                          <div className="text-xs text-gray-500">Sales</div>
+                          <div className="text-sm font-bold text-gray-900">${c.perf_30d.cost.toLocaleString()}</div>
+                          <div className="text-sm font-bold text-green-700">${c.perf_30d.sales.toLocaleString()}</div>
+                          {c.perf_30d.acos !== null && (
+                            <>
+                              <div className="text-xs text-gray-500">ACoS</div>
+                              <div className="text-xs text-gray-500">RoAS</div>
+                              <div className={`text-xs font-semibold ${
+                                c.perf_30d.acos < 20 ? 'text-green-700'
+                                : c.perf_30d.acos < 35 ? 'text-yellow-700'
+                                : 'text-red-700'
+                              }`}>{c.perf_30d.acos}%</div>
+                              <div className="text-xs font-semibold text-blue-700">
+                                {c.perf_30d.roas !== null ? `${c.perf_30d.roas}x` : '—'}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {adsStatus?.stats.lastSynced && (
+                <div className="mt-3 text-xs text-gray-400 text-center">
+                  Last synced: {new Date(adsStatus.stats.lastSynced).toLocaleString()}
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
     </div>
   )
 }
+
+
