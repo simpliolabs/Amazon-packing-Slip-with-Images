@@ -17,6 +17,7 @@ import { fetchFBAInventoryForAsins, fetchInventoryHealthReport } from '@/lib/ama
 import type { FBAInventoryItem, InventoryHealthItem } from '@/lib/amazon/catalog'
 import { syncSalesReport } from './syncSalesReport'
 import { syncListings } from './syncListings'
+import { syncTrafficReport } from './syncTrafficReport'
 
 function getAdminSupabase() {
   return createClient(
@@ -377,10 +378,11 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     errors.push(`Excess inventory detection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // ── Sales Report + Listings Sync (parallel, non-blocking) ─────────────────────
-  const [salesResult, listingsResult] = await Promise.allSettled([
+  // ── Sales Report + Listings + Traffic Sync (parallel, non-blocking) ──────────
+  const [salesResult, listingsResult, trafficResult] = await Promise.allSettled([
     syncSalesReport(),
     syncListings(),
+    syncTrafficReport(),
   ])
   if (salesResult.status === 'fulfilled') {
     if (salesResult.value.error) errors.push(`Sales report sync: ${salesResult.value.error}`)
@@ -393,6 +395,12 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     else console.log(`[FBA Sync] Listing health synced: ${listingsResult.value.synced} SKUs`)
   } else {
     errors.push(`Listings sync failed: ${listingsResult.reason}`)
+  }
+  if (trafficResult.status === 'fulfilled') {
+    if (trafficResult.value.error) errors.push(`Traffic sync: ${trafficResult.value.error}`)
+    else console.log(`[FBA Sync] Traffic intelligence synced: ${trafficResult.value.asinsSynced} ASINs, ${trafficResult.value.parentRollupsCreated} parent rollups`)
+  } else {
+    errors.push(`Traffic sync failed: ${trafficResult.reason}`)
   }
 
   return {

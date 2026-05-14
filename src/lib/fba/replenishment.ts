@@ -1,18 +1,19 @@
 /**
- * FBA Replenishment Scoring Engine
+ * FBA Replenishment Scoring Engine v2 — Full Intelligence
  *
  * Data sources (all from Supabase — no live API calls at report time):
  * - orders table: FBM velocity, customization flags, product titles/SKUs
  * - fba_inventory table: current FBA stock (populated by sync)
  * - sku_sales_analytics table: FBA sales data (from All Orders report)
  * - listing_health table: ALL listings including FBA SKUs (from All Listings report)
+ * - asin_traffic table: sessions, page views, buy box %, conversion rate (from Sales & Traffic Report)
+ * - parent_asin_rollup table: parent-level aggregated demand signals
  *
- * Matching strategy (in priority order):
- * 1. Direct ASIN match — FBM and FBA share the same ASIN
- * 2. Base-SKU match — FBM SKU "DAR-CCG-M-IVY" → FBA SKU "DAR-CCG-M-IVY-FBA"
- *    (loads ALL fba_inventory rows, not just the ones matching order ASINs)
- * 3. listing_health SKU suffix — if a SKU ending in -FBA exists in listing_health,
- *    the ASIN has an FBA listing even if stocked out and not in fba_inventory
+ * Scoring model:
+ * 1. Products with parent demand + traffic but 0 child sales → REPLENISH (parent proves demand)
+ * 2. Products with high sessions but 0 sales → FBA CONVERSION CANDIDATE (traffic proves demand)
+ * 3. Products with 0 sessions + 0 parent demand → IGNORE (truly dead)
+ * 4. Standard velocity-based scoring for everything else
  */
 
 import { createClient } from '@supabase/supabase-js'
@@ -32,7 +33,7 @@ export type ReplenishmentStatus =
   | 'replenish'      // FBA weeks of cover below trigger — send now
   | 'critical'       // FBA weeks of cover < 2 weeks — FBM carrying load
   | 'stocked_out'    // FBA qty = 0
-  | 'new_candidate'  // No FBA twin, FBM velocity >= threshold
+  | 'new_candidate'  // No FBA twin, FBM velocity >= threshold OR high traffic FBM
   | 'overstocked'    // FBA weeks of cover > 3x trigger
   | 'no_data'        // Not enough data to score
 
@@ -55,10 +56,22 @@ export interface ProductRecommendation {
   fba_units_sold_30d: number
   fba_buy_box_pct: number
 
+  // Traffic intelligence (from asin_traffic table)
+  sessions_30d: number
+  page_views_30d: number
+  conversion_rate: number
+
+  // Parent demand context (from parent_asin_rollup table)
+  parent_asin: string | null
+  parent_units_30d: number
+  parent_sessions_30d: number
+  sibling_count: number
+
   // Scoring
   weeks_of_cover: number | null
   status: ReplenishmentStatus
   status_label: string
+  intelligence_score: number  // 0-100 composite score
 
   // Recommendation
   recommended_send_qty: number
@@ -89,7 +102,6 @@ const STATUS_LABELS: Record<ReplenishmentStatus, string> = {
 
 /**
  * Strip the -FBA (or _FBA) suffix from a SKU to get the base SKU.
- * e.g. "DAR-CCG-M-IVY-FBA" → "DAR-CCG-M-IVY"
  */
 function getBaseSku(sku: string): string {
   return sku.replace(/[-_]FBA$/i, '').trim()
@@ -108,9 +120,114 @@ interface FBAInvRow {
   last_synced_at: string | null
 }
 
+interface TrafficData {
+  sessions: number
+  pageViews: number
+  buyBoxPct: number
+  conversionRate: number
+  parentAsin: string | null
+}
+
+interface ParentRollup {
+  childCount: number
+  totalUnits30d: number
+  totalSessions30d: number
+  totalPageViews30d: number
+  avgConversionRate: number
+  avgBuyBoxPct: number
+  topChildAsin: string | null
+  topChildUnits: number
+}
+
 /**
- * Generate full replenishment recommendations.
- * Uses only data already in Supabase — no live API calls.
+ * Compute an intelligence score (0-100) that combines all signals.
+ * Higher = more urgent / more confident to replenish.
+ */
+function computeIntelligenceScore(
+  childSales30d: number,
+  sessions30d: number,
+  conversionRate: number,
+  buyBoxPct: number,
+  parentUnits30d: number,
+  parentSessions30d: number,
+  fbaQtyAvailable: number,
+  fbaQtyInbound: number,
+): number {
+  let score = 0
+
+  // ── Child demand signal (0-30 points) ──
+  if (childSales30d >= 50) score += 30
+  else if (childSales30d >= 20) score += 25
+  else if (childSales30d >= 10) score += 20
+  else if (childSales30d >= 5) score += 15
+  else if (childSales30d >= 1) score += 10
+  else score += 0
+
+  // ── Traffic signal (0-25 points) ──
+  // High sessions with 0 sales = suppressed demand (FBA stockout)
+  if (sessions30d >= 500) score += 25
+  else if (sessions30d >= 200) score += 20
+  else if (sessions30d >= 100) score += 15
+  else if (sessions30d >= 50) score += 10
+  else if (sessions30d >= 20) score += 5
+
+  // ── Parent demand signal (0-25 points) ──
+  if (parentUnits30d >= 1000) score += 25
+  else if (parentUnits30d >= 500) score += 20
+  else if (parentUnits30d >= 100) score += 15
+  else if (parentUnits30d >= 30) score += 10
+  else if (parentUnits30d >= 10) score += 5
+
+  // ── Conversion context (0-10 points) ──
+  // Low conversion + high traffic = FBA stockout suppressing conversion
+  if (conversionRate > 0 && conversionRate < 3 && sessions30d > 50) {
+    score += 10 // conversion is being killed — likely by FBA stockout
+  } else if (conversionRate >= 10) {
+    score += 8 // great conversion — product converts well
+  } else if (conversionRate >= 5) {
+    score += 5
+  }
+
+  // ── Urgency boost (0-10 points) ──
+  if (fbaQtyAvailable === 0 && fbaQtyInbound === 0) {
+    score += 10 // completely out of stock, nothing coming
+  } else if (fbaQtyAvailable === 0 && fbaQtyInbound > 0) {
+    score += 3 // out but shipment coming
+  }
+
+  return Math.min(100, score)
+}
+
+/**
+ * Determine if an ASIN qualifies for the replenishment report.
+ * This is the GATE that prevents 1,984 dead listings from flooding the report.
+ *
+ * An ASIN qualifies if ANY of these are true:
+ * 1. It has FBM orders in the last 90 days (in velocityMap)
+ * 2. It has FBA sales > 0 (in sku_sales_analytics Amazon channel)
+ * 3. It has FBA stock > 0 or inbound > 0
+ * 4. It has sessions > 50 in the last 30 days (traffic proves demand even with 0 sales)
+ * 5. Its parent ASIN has > 30 units sold in 30 days (sibling demand proves family value)
+ */
+function qualifiesForReport(
+  asin: string,
+  fbmUnits30d: number,
+  fbaUnits30d: number,
+  fbaQtyAvailable: number,
+  fbaQtyInbound: number,
+  sessions30d: number,
+  parentUnits30d: number,
+): boolean {
+  if (fbmUnits30d > 0) return true
+  if (fbaUnits30d > 0) return true
+  if (fbaQtyAvailable > 0 || fbaQtyInbound > 0) return true
+  if (sessions30d >= 50) return true
+  if (parentUnits30d >= 30) return true
+  return false
+}
+
+/**
+ * Generate full replenishment recommendations with traffic intelligence.
  */
 export async function generateReplenishmentReport(): Promise<ProductRecommendation[]> {
   const supabase = getAdminSupabase()
@@ -120,30 +237,79 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   const velocityMap = await computeFBMVelocity()
 
   // ── 2. Load ALL FBA inventory from Supabase ──────────────────────────────
-  // We load ALL rows (not just order ASINs) so we can match FBA-suffixed SKUs
-  // that may have a different ASIN than the FBM listing.
   const { data: invRows } = await supabase
     .from('fba_inventory')
     .select('asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, label_created_at, shipment_status, last_synced_at')
 
-  // ── 2b. Load FBA SKUs from sku_sales_analytics as secondary source ────────
-  // This catches FBA listings that are stocked out and no longer returned by
-  // the FBA Inventory Summaries API but DID have sales via the All Orders report.
+  // ── 2b. Load FBA SKUs from sku_sales_analytics ────────────────────────────
   const { data: fbaSalesRows } = await supabase
     .from('sku_sales_analytics')
     .select('asin, sku, units_sold_30d, fulfillment_channel')
     .eq('fulfillment_channel', 'Amazon')
 
-  // ── 2b2. Load ALL Merchant-channel sales for velocity cross-reference ──────
-  // The orders table may have incomplete history (only synced orders), while
-  // sku_sales_analytics has the full All Orders report. We use the HIGHER of
-  // the two velocity sources to avoid undercounting demand.
+  // ── 2b2. Load Merchant-channel sales ──────────────────────────────────────
   const { data: fbmSalesRows } = await supabase
     .from('sku_sales_analytics')
     .select('asin, sku, units_sold_30d, avg_daily_units')
     .eq('fulfillment_channel', 'Merchant')
 
-  // Build FBM sales velocity map by ASIN (aggregate all Merchant SKUs per ASIN)
+  // ── 2c. Load FBA SKUs from listing_health ─────────────────────────────────
+  const { data: listingFbaRows } = await supabase
+    .from('listing_health')
+    .select('asin, sku, product_name')
+    .ilike('sku', '%-FBA')
+
+  const { data: listingFbaRows2 } = await supabase
+    .from('listing_health')
+    .select('asin, sku, product_name')
+    .ilike('sku', '%\\_FBA')
+
+  const allListingFbaRows = [...(listingFbaRows || []), ...(listingFbaRows2 || [])]
+  const seenListingSkus = new Set<string>()
+  const dedupedListingFbaRows = allListingFbaRows.filter(r => {
+    if (seenListingSkus.has(r.sku)) return false
+    seenListingSkus.add(r.sku)
+    return true
+  })
+
+  // ── 3. Load TRAFFIC INTELLIGENCE ──────────────────────────────────────────
+  const { data: trafficRows } = await supabase
+    .from('asin_traffic')
+    .select('child_asin, parent_asin, sessions, page_views, buy_box_pct, conversion_rate')
+
+  const trafficByAsin = new Map<string, TrafficData>()
+  for (const row of trafficRows || []) {
+    trafficByAsin.set(row.child_asin, {
+      sessions: row.sessions || 0,
+      pageViews: row.page_views || 0,
+      buyBoxPct: parseFloat(String(row.buy_box_pct || 0)),
+      conversionRate: parseFloat(String(row.conversion_rate || 0)),
+      parentAsin: row.parent_asin || null,
+    })
+  }
+
+  // ── 4. Load PARENT DEMAND ROLLUPS ─────────────────────────────────────────
+  const { data: parentRows } = await supabase
+    .from('parent_asin_rollup')
+    .select('parent_asin, child_count, total_units_30d, total_sessions_30d, total_page_views_30d, avg_conversion_rate, avg_buy_box_pct, top_child_asin, top_child_units')
+
+  const parentRollupMap = new Map<string, ParentRollup>()
+  for (const row of parentRows || []) {
+    parentRollupMap.set(row.parent_asin, {
+      childCount: row.child_count || 0,
+      totalUnits30d: row.total_units_30d || 0,
+      totalSessions30d: row.total_sessions_30d || 0,
+      totalPageViews30d: row.total_page_views_30d || 0,
+      avgConversionRate: parseFloat(String(row.avg_conversion_rate || 0)),
+      avgBuyBoxPct: parseFloat(String(row.avg_buy_box_pct || 0)),
+      topChildAsin: row.top_child_asin || null,
+      topChildUnits: row.top_child_units || 0,
+    })
+  }
+
+  console.log(`[Replenishment] Data sources: fba_inventory=${(invRows || []).length}, fbaSales=${(fbaSalesRows || []).length}, listingFBA=${dedupedListingFbaRows.length}, traffic=${trafficByAsin.size}, parentRollups=${parentRollupMap.size}`)
+
+  // ── 5. Build velocity maps ────────────────────────────────────────────────
   const fbmSalesVelocityByAsin = new Map<string, { units30d: number; velocityPerDay: number }>()
   for (const row of fbmSalesRows || []) {
     if (!row.asin) continue
@@ -158,9 +324,6 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     }
   }
 
-  // Build FBA sales velocity map by ASIN (aggregate all Amazon-channel SKUs per ASIN).
-  // This is the SOURCE OF TRUTH for FBA velocity — fba_inventory.units_sold_30d is often
-  // stale or incomplete (e.g., showing 1 when sku_sales_analytics shows 8).
   const fbaSalesVelocityByAsin = new Map<string, { units30d: number; velocityPerDay: number }>()
   for (const row of fbaSalesRows || []) {
     if (!row.asin) continue
@@ -175,73 +338,18 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     }
   }
 
-  // Build a set of ASINs with any demand signal (sales > 0 in either channel,
-  // or stock > 0 in fba_inventory). Only these qualify for the report.
-  // This prevents 1,984 dead listings (0 stock + 0 sales) from flooding the report.
-  const asinsWithDemand = new Set<string>()
-  for (const row of fbaSalesRows || []) {
-    if (row.asin && (row.units_sold_30d || 0) > 0) asinsWithDemand.add(row.asin)
-  }
-  for (const row of fbmSalesRows || []) {
-    if (row.asin && (row.units_sold_30d || 0) > 0) asinsWithDemand.add(row.asin)
-  }
-  for (const inv of invRows || []) {
-    if (inv.asin && ((inv.quantity_available || 0) > 0 || (inv.quantity_inbound || 0) > 0)) {
-      asinsWithDemand.add(inv.asin)
-    }
-  }
-
-  // ── 2c. Load FBA SKUs from listing_health as THIRD source ─────────────────
-  // listing_health has ALL 10k+ listings. FBA SKUs are identified by the -FBA
-  // suffix in the SKU field (fulfillment_channel may show 'DEFAULT' for all rows
-  // due to the report type). This catches FBA listings that:
-  // - Are stocked out (not in fba_inventory)
-  // - Had zero or negligible sales (not in sku_sales_analytics Amazon channel)
-  // - But DO exist as active listings on Amazon
-  const { data: listingFbaRows } = await supabase
-    .from('listing_health')
-    .select('asin, sku, product_name')
-    .ilike('sku', '%-FBA')
-
-  // Also get rows with _FBA suffix
-  const { data: listingFbaRows2 } = await supabase
-    .from('listing_health')
-    .select('asin, sku, product_name')
-    .ilike('sku', '%\\_FBA')
-
-  // Combine both FBA listing patterns
-  const allListingFbaRows = [...(listingFbaRows || []), ...(listingFbaRows2 || [])]
-  // Deduplicate by SKU
-  const seenListingSkus = new Set<string>()
-  const dedupedListingFbaRows = allListingFbaRows.filter(r => {
-    if (seenListingSkus.has(r.sku)) return false
-    seenListingSkus.add(r.sku)
-    return true
-  })
-
-  console.log(`[Replenishment] Data sources loaded: fba_inventory=${(invRows || []).length}, sku_sales_analytics(Amazon)=${(fbaSalesRows || []).length}, listing_health(FBA SKUs)=${dedupedListingFbaRows.length}`)
-
-  // ── 3. Build lookup maps ──────────────────────────────────────────────────
-
-  // Map A: ASIN → aggregated FBA inventory (for direct ASIN match)
+  // ── 6. Build FBA inventory lookup maps ────────────────────────────────────
   const fbaByAsin = new Map<string, FBAInvRow>()
-
-  // Map B: base SKU → FBA inventory row (for SKU-based match)
-  // e.g. "DAR-CCG-M-IVY" → row with sku "DAR-CCG-M-IVY-FBA"
   const fbaByBaseSku = new Map<string, FBAInvRow>()
-
-  // Build a set of ASINs already in fba_inventory so we don't double-count
   const fbaInvAsins = new Set<string>()
+
   for (const inv of invRows || []) {
     if (inv.asin) fbaInvAsins.add(inv.asin)
   }
 
-  // Add FBA sales rows as synthetic inventory entries (qty=0) for ASINs NOT
-  // already in fba_inventory. This ensures items with FBA listings that are
-  // stocked out still get matched as "has FBA" instead of "new_candidate".
+  // Add FBA sales rows as synthetic inventory entries for stocked-out ASINs
   for (const sale of fbaSalesRows || []) {
     if (!sale.asin || fbaInvAsins.has(sale.asin)) continue
-    // Only add if the SKU looks like an FBA SKU (ends in -FBA) or channel is Amazon
     const syntheticRow: FBAInvRow = {
       asin: sale.asin,
       sku: sale.sku || '',
@@ -254,31 +362,18 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       shipment_status: null,
       last_synced_at: null,
     }
-    // Add to ASIN map
-    if (!fbaByAsin.has(sale.asin)) {
-      fbaByAsin.set(sale.asin, { ...syntheticRow })
-    }
-    // Add to base-SKU map
+    if (!fbaByAsin.has(sale.asin)) fbaByAsin.set(sale.asin, { ...syntheticRow })
     if (sale.sku && /[-_]FBA$/i.test(sale.sku)) {
       const baseSku = getBaseSku(sale.sku)
-      if (baseSku && !fbaByBaseSku.has(baseSku)) {
-        fbaByBaseSku.set(baseSku, { ...syntheticRow })
-      }
+      if (baseSku && !fbaByBaseSku.has(baseSku)) fbaByBaseSku.set(baseSku, { ...syntheticRow })
     }
-    if (sale.sku && !fbaByBaseSku.has(sale.sku)) {
-      fbaByBaseSku.set(sale.sku, { ...syntheticRow })
-    }
-    fbaInvAsins.add(sale.asin) // prevent duplicates
+    if (sale.sku && !fbaByBaseSku.has(sale.sku)) fbaByBaseSku.set(sale.sku, { ...syntheticRow })
+    fbaInvAsins.add(sale.asin)
   }
 
-  // ── 2c continued: Add listing_health FBA rows as synthetic entries ────────
-  // These are FBA SKUs that exist as listings but may have zero inventory AND
-  // zero sales in the analytics table. They prove the FBA listing EXISTS.
+  // Add listing_health FBA rows as synthetic entries
   for (const listing of dedupedListingFbaRows) {
-    if (!listing.asin) continue
-    // Skip if already found via fba_inventory or sku_sales_analytics
-    if (fbaInvAsins.has(listing.asin)) continue
-
+    if (!listing.asin || fbaInvAsins.has(listing.asin)) continue
     const syntheticRow: FBAInvRow = {
       asin: listing.asin,
       sku: listing.sku || '',
@@ -291,23 +386,13 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       shipment_status: null,
       last_synced_at: null,
     }
-
-    // Add to ASIN map
-    if (!fbaByAsin.has(listing.asin)) {
-      fbaByAsin.set(listing.asin, { ...syntheticRow })
-      console.log(`[Replenishment] listing_health FBA detected: ASIN ${listing.asin} via SKU ${listing.sku}`)
-    }
-
-    // Add to base-SKU map (strip -FBA suffix → base SKU)
+    if (!fbaByAsin.has(listing.asin)) fbaByAsin.set(listing.asin, { ...syntheticRow })
     const baseSku = getBaseSku(listing.sku)
-    if (baseSku && !fbaByBaseSku.has(baseSku)) {
-      fbaByBaseSku.set(baseSku, { ...syntheticRow })
-    }
-
-    fbaInvAsins.add(listing.asin) // prevent duplicates
+    if (baseSku && !fbaByBaseSku.has(baseSku)) fbaByBaseSku.set(baseSku, { ...syntheticRow })
+    fbaInvAsins.add(listing.asin)
   }
 
-  // Now process actual fba_inventory rows (these override synthetic entries)
+  // Process actual fba_inventory rows (override synthetic entries)
   for (const inv of invRows || []) {
     const row: FBAInvRow = {
       asin: inv.asin,
@@ -322,7 +407,6 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       last_synced_at: inv.last_synced_at,
     }
 
-    // Map A: aggregate by ASIN (multiple SKUs for same ASIN get summed)
     const existing = fbaByAsin.get(inv.asin)
     if (!existing) {
       fbaByAsin.set(inv.asin, { ...row })
@@ -331,75 +415,47 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       existing.quantity_inbound += row.quantity_inbound
       existing.quantity_total += row.quantity_total
       existing.units_sold_30d += row.units_sold_30d
-      // Keep the most recent sync timestamp
       if (row.last_synced_at && (!existing.last_synced_at || row.last_synced_at > existing.last_synced_at)) {
         existing.last_synced_at = row.last_synced_at
       }
     }
 
-    // Map B: base SKU → row
-    // Case 1: FBA-suffixed SKU (DAR-CCG-M-IVY-FBA → key: DAR-CCG-M-IVY)
     if (inv.sku && /[-_]FBA$/i.test(inv.sku)) {
       const baseSku = getBaseSku(inv.sku)
-      if (baseSku && !fbaByBaseSku.has(baseSku)) {
-        fbaByBaseSku.set(baseSku, { ...row })
-      }
+      if (baseSku && !fbaByBaseSku.has(baseSku)) fbaByBaseSku.set(baseSku, { ...row })
     }
-    // Case 2: Non-suffixed FBA SKU — store as-is so FBM SKU can match directly
-    if (inv.sku && !fbaByBaseSku.has(inv.sku)) {
-      fbaByBaseSku.set(inv.sku, { ...row })
-    }
+    if (inv.sku && !fbaByBaseSku.has(inv.sku)) fbaByBaseSku.set(inv.sku, { ...row })
   }
 
-  // ── 3b. Sibling SKU inference ─────────────────────────────────────────────
-  // If a product family (e.g., DAR-CCG) has most variants with FBA listings,
-  // infer that missing variants also have FBA listings that just haven't
-  // appeared in the reports yet (e.g., recently created, zero sales, stocked out).
-  //
-  // Algorithm: group all known FBA base SKUs by their "family prefix" (first 2
-  // hyphen-separated segments, e.g., "DAR-CCG"). For each FBM SKU in the
-  // velocity map that has NO FBA match, check if its family prefix has ≥50%
-  // of siblings with FBA. If so, create a synthetic FBA entry.
-
-  // Build family prefix → { total FBM SKUs, FBA-matched count } map
-  const familyStats = new Map<string, { total: number; withFba: number; fbmSkus: string[] }>()
-
-  // Helper: extract family prefix from a SKU (first 2 segments)
+  // ── 7. Sibling SKU inference ──────────────────────────────────────────────
   function getFamilyPrefix(sku: string): string | null {
     const parts = sku.split('-')
-    if (parts.length < 3) return null // need at least prefix-code-variant
-    return parts.slice(0, 2).join('-') // e.g., "DAR-CCG"
+    if (parts.length < 3) return null
+    return parts.slice(0, 2).join('-')
   }
 
-  // First pass: count all FBM SKUs per family and how many have FBA matches
+  const familyStats = new Map<string, { total: number; withFba: number; fbmSkus: string[] }>()
   for (const [, fbmData] of velocityMap) {
     const fbmSku = fbmData?.sku || ''
     if (!fbmSku) continue
     const prefix = getFamilyPrefix(fbmSku)
     if (!prefix) continue
-
     const stats = familyStats.get(prefix) || { total: 0, withFba: 0, fbmSkus: [] }
     stats.total++
     stats.fbmSkus.push(fbmSku)
-    if (fbaByBaseSku.has(fbmSku)) {
-      stats.withFba++
-    }
+    if (fbaByBaseSku.has(fbmSku)) stats.withFba++
     familyStats.set(prefix, stats)
   }
 
-  // Second pass: for families where ≥50% have FBA, infer FBA for the rest
   for (const [prefix, stats] of familyStats) {
-    if (stats.total < 3) continue // need at least 3 variants to infer
+    if (stats.total < 3) continue
     const fbaRatio = stats.withFba / stats.total
-    if (fbaRatio < 0.4) continue // need at least 40% to have FBA
-
+    if (fbaRatio < 0.4) continue
     for (const fbmSku of stats.fbmSkus) {
-      if (fbaByBaseSku.has(fbmSku)) continue // already matched
-
-      // Infer FBA SKU as fbmSku + "-FBA"
+      if (fbaByBaseSku.has(fbmSku)) continue
       const inferredFbaSku = `${fbmSku}-FBA`
       const syntheticRow: FBAInvRow = {
-        asin: '', // will be filled during matching
+        asin: '',
         sku: inferredFbaSku,
         quantity_available: 0,
         quantity_inbound: 0,
@@ -411,21 +467,33 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
         last_synced_at: null,
       }
       fbaByBaseSku.set(fbmSku, syntheticRow)
-      console.log(`[Replenishment] Sibling-inferred FBA: ${fbmSku} → ${inferredFbaSku} (family ${prefix}: ${stats.withFba}/${stats.total} have FBA)`)
     }
   }
 
-  // ── 4. Build recommendations ──────────────────────────────────────────────
+  // ── 8. Build recommendations with FULL INTELLIGENCE ───────────────────────
   const recommendations: ProductRecommendation[] = []
   const allAsins = new Set(velocityMap.keys())
 
-  // ── 4a. Add FBA-only ASINs that have a DEMAND SIGNAL ─────────────────────
-  // Only add FBA ASINs that have sales > 0 OR stock > 0 OR inbound > 0.
-  // This prevents 1,984 dead listings (0 stock + 0 sales) from flooding the report.
+  // Add FBA-only ASINs that pass the qualification gate
   for (const [asin] of fbaByAsin) {
-    if (!allAsins.has(asin) && asinsWithDemand.has(asin)) {
+    if (allAsins.has(asin)) continue
+
+    const fbaVel = fbaSalesVelocityByAsin.get(asin)
+    const traffic = trafficByAsin.get(asin)
+    const parentAsin = traffic?.parentAsin || null
+    const parentRollup = parentAsin ? parentRollupMap.get(parentAsin) : null
+    const fbaInv = fbaByAsin.get(asin)
+
+    if (qualifiesForReport(
+      asin,
+      0, // no FBM orders
+      fbaVel?.units30d || 0,
+      fbaInv?.quantity_available || 0,
+      fbaInv?.quantity_inbound || 0,
+      traffic?.sessions || 0,
+      parentRollup?.totalUnits30d || 0,
+    )) {
       allAsins.add(asin)
-      console.log(`[Replenishment] FBA-only ASIN added (has demand signal): ${asin}`)
     }
   }
 
@@ -433,90 +501,104 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const fbmData = velocityMap.get(asin)
     const fbmSku = fbmData?.sku || ''
 
-    // Look up FBA inventory:
-    // Priority 1 — direct ASIN match
+    // Look up FBA inventory (same 3-priority matching as before)
     let fbaInv = fbaByAsin.get(asin)
     let matchedFbaAsin: string | null = fbaInv ? asin : null
     let matchedFbaSku: string | null = fbaInv?.sku || null
 
-    // Priority 2 — base-SKU match (FBM SKU "X" → FBA SKU "X-FBA" or exact match)
     if (!fbaInv && fbmSku) {
       const skuMatch = fbaByBaseSku.get(fbmSku)
       if (skuMatch) {
         fbaInv = skuMatch
-        matchedFbaAsin = skuMatch.asin || asin // use own ASIN if inferred
+        matchedFbaAsin = skuMatch.asin || asin
         matchedFbaSku = skuMatch.sku
-        console.log(`[Replenishment] SKU-paired: FBM ASIN ${asin} (${fbmSku}) → FBA ASIN ${matchedFbaAsin} (${skuMatch.sku})`)
       }
     }
 
-    // Priority 3 — FBM ASIN matches FBA base SKU (FBA SKU "B0FKKSTR12-FBA" → base "B0FKKSTR12")
     if (!fbaInv) {
       const asinSkuMatch = fbaByBaseSku.get(asin)
       if (asinSkuMatch) {
         fbaInv = asinSkuMatch
         matchedFbaAsin = asinSkuMatch.asin || asin
         matchedFbaSku = asinSkuMatch.sku
-        console.log(`[Replenishment] ASIN-as-SKU-paired: FBM ASIN ${asin} → FBA ${matchedFbaAsin} (${asinSkuMatch.sku})`)
       }
     }
 
-    // Use the HIGHER velocity between orders table and sku_sales_analytics.
-    // The orders table uses 90-day average (units90d/90) which may undercount
-    // recent demand spikes. The sales analytics uses the All Orders report
-    // which captures ALL orders regardless of sync status.
+    // ── Velocity from multiple sources ──
     const ordersUnits30d = fbmData?.units30d || 0
     const ordersVelocityPerDay = fbmData?.velocityPerDay || 0
     const salesAnalytics = fbmSalesVelocityByAsin.get(asin)
     const salesUnits30d = salesAnalytics?.units30d || 0
     const salesVelocityPerDay = salesAnalytics?.velocityPerDay || 0
-
-    // Take the higher of the two sources for more accurate demand signal
     const fbmUnits30d = Math.max(ordersUnits30d, salesUnits30d)
     const fbmVelocityPerDay = Math.max(ordersVelocityPerDay, salesVelocityPerDay)
     const hasCustomization = fbmData?.hasCustomization || false
-    // For FBA-only ASINs (not in orders table), try to get the title from
-    // listing_health product_name (most reliable), then fba_inventory SKU,
-    // then fall back to the ASIN itself.
+
+    // ── Traffic intelligence ──
+    const traffic = trafficByAsin.get(asin)
+    const sessions30d = traffic?.sessions || 0
+    const pageViews30d = traffic?.pageViews || 0
+    const conversionRate = traffic?.conversionRate || 0
+    const buyBoxPct = traffic?.buyBoxPct || 0
+    const parentAsin = traffic?.parentAsin || null
+
+    // ── Parent demand ──
+    const parentRollup = parentAsin ? parentRollupMap.get(parentAsin) : null
+    const parentUnits30d = parentRollup?.totalUnits30d || 0
+    const parentSessions30d = parentRollup?.totalSessions30d || 0
+    const siblingCount = parentRollup?.childCount || 0
+
+    // ── Title resolution ──
     const listingTitle = dedupedListingFbaRows.find(r => r.asin === asin)?.product_name || null
     const fbaInvTitle = fbaInv?.sku ? `SKU: ${fbaInv.sku}` : null
     const title = fbmData?.title || listingTitle || fbaInvTitle || `ASIN: ${asin}`
 
+    // ── FBA inventory data ──
     const fbaQtyAvailable = fbaInv?.quantity_available ?? 0
     const fbaQtyInbound = fbaInv?.quantity_inbound ?? 0
     const fbaQtyTotal = fbaInv?.quantity_total ?? 0
-    // Use sku_sales_analytics Amazon channel as source of truth for FBA velocity.
-    // fba_inventory.units_sold_30d is often stale (e.g., shows 1 when real is 8).
     const fbaSalesAnalytics = fbaSalesVelocityByAsin.get(asin)
     const fbaUnitsSold30d = fbaSalesAnalytics?.units30d ?? fbaInv?.units_sold_30d ?? 0
-    const fbaBuyBoxPct = fbaInv?.buy_box_percentage ?? 0
     const lastFbaSync = fbaInv?.last_synced_at ?? null
-
-    // hasFBAInventory = true only if we found a real synced row
     const hasFBAInventory = fbaInv !== undefined
     const isFBAOnly = hasFBAInventory && fbmUnits30d === 0
 
-    // Use TOTAL velocity (FBM + FBA combined) for weeks-of-cover and send qty.
-    // If both channels sell, we need to cover ALL demand, not just one channel.
-    // When FBA is stocked out (qty=0, units_sold_30d=0), the FBM velocity alone
-    // represents the TOTAL demand (all customers buying via FBM because FBA is out).
-    // Use sku_sales_analytics velocity if available (more accurate), else derive from units
+    // ── Combined velocity ──
     const fbaVelocityPerDay = fbaSalesAnalytics?.velocityPerDay ?? (fbaUnitsSold30d / 30)
     const combinedVelocityPerDay = Math.max(
-      fbmVelocityPerDay + fbaVelocityPerDay,  // both channels combined
-      fbmVelocityPerDay,                       // at minimum, FBM velocity alone
-      fbaVelocityPerDay                        // or FBA velocity alone
+      fbmVelocityPerDay + fbaVelocityPerDay,
+      fbmVelocityPerDay,
+      fbaVelocityPerDay,
     )
 
-    // Compute weeks of cover
+    // ── Intelligence score ──
+    const totalChildSales = fbmUnits30d + fbaUnitsSold30d
+    const intelligenceScore = computeIntelligenceScore(
+      totalChildSales,
+      sessions30d,
+      conversionRate,
+      buyBoxPct,
+      parentUnits30d,
+      parentSessions30d,
+      fbaQtyAvailable,
+      fbaQtyInbound,
+    )
+
+    // ── QUALIFICATION GATE (final check) ──
+    // Skip products that don't qualify — this is the filter that prevents 1300+ items
+    if (!qualifiesForReport(asin, fbmUnits30d, fbaUnitsSold30d, fbaQtyAvailable, fbaQtyInbound, sessions30d, parentUnits30d)) {
+      continue
+    }
+
+    // ── Weeks of cover ──
     let weeksOfCover: number | null = null
     if (hasFBAInventory && combinedVelocityPerDay > 0) {
       weeksOfCover = fbaQtyAvailable / (combinedVelocityPerDay * 7)
     } else if (hasFBAInventory && fbaQtyAvailable > 0) {
-      weeksOfCover = 999 // has stock but no velocity — treat as infinite
+      weeksOfCover = 999
     }
 
-    // Determine status
+    // ── Status determination (with intelligence) ──
     let status: ReplenishmentStatus = 'no_data'
     let recommendedSendQty = 0
     let sendRationale = ''
@@ -525,42 +607,65 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       status = 'no_data'
       sendRationale = 'Customized product — FBA not applicable'
     } else if (!hasFBAInventory) {
-      if (fbmUnits30d >= settings.newFBACandidateMinUnits) {
+      // ── NEW CANDIDATE LOGIC (enhanced with traffic intelligence) ──
+      // Old: only looked at fbmUnits30d >= threshold
+      // New: also considers sessions, parent demand, and conversion context
+      const hasDirectDemand = fbmUnits30d >= settings.newFBACandidateMinUnits
+      const hasTrafficDemand = sessions30d >= 100 && fbmUnits30d >= 1
+      const hasParentDemand = parentUnits30d >= 50 && sessions30d >= 20
+      const hasHighTrafficLowConversion = sessions30d >= 200 && conversionRate < 5
+
+      if (hasDirectDemand || hasTrafficDemand || hasParentDemand || hasHighTrafficLowConversion) {
         status = 'new_candidate'
-        // Minimum send qty is the new-candidate threshold, not 1
         const calcQty = Math.ceil(fbmVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-        recommendedSendQty = Math.max(calcQty, settings.newFBACandidateMinUnits, 3) // min 3
-        sendRationale = `${fbmUnits30d} units/30d via FBM. No FBA listing found. Initial send covers lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
+        recommendedSendQty = Math.max(calcQty, settings.newFBACandidateMinUnits, 3)
+
+        // Build intelligent rationale
+        const reasons: string[] = []
+        if (hasDirectDemand) reasons.push(`${fbmUnits30d} FBM units/30d`)
+        if (sessions30d > 0) reasons.push(`${sessions30d} sessions`)
+        if (parentUnits30d > 0) reasons.push(`parent sells ${parentUnits30d} units/30d`)
+        if (hasHighTrafficLowConversion) reasons.push(`${conversionRate.toFixed(1)}% conversion (low — FBA would boost)`)
+        sendRationale = `${reasons.join(', ')}. No FBA listing found. Initial send covers ${settings.leadTimeDays}d lead + ${settings.safetyBufferDays}d buffer.`
       } else {
         status = 'no_data'
-        sendRationale = `${fbmUnits30d} units/30d — below ${settings.newFBACandidateMinUnits} unit threshold for FBA recommendation`
+        const reasons: string[] = []
+        reasons.push(`${fbmUnits30d} FBM units/30d`)
+        if (sessions30d > 0) reasons.push(`${sessions30d} sessions`)
+        if (parentUnits30d > 0) reasons.push(`parent: ${parentUnits30d} units`)
+        sendRationale = `${reasons.join(', ')} — below thresholds for FBA recommendation`
       }
     } else if (fbaQtyAvailable === 0 && fbaQtyInbound === 0) {
       status = 'stocked_out'
-      // When FBA is stocked out, ALL demand is served by FBM. Use combinedVelocity
-      // (which equals fbmVelocityPerDay when fbaUnitsSold30d=0) to calculate send qty.
       const calcQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      recommendedSendQty = Math.max(calcQty, 3) // HARD RULE: never send fewer than 3 units
-      sendRationale = `FBA stocked out. Total demand: ${(combinedVelocityPerDay * 30).toFixed(0)} units/30d. Send to cover lead time (${settings.leadTimeDays}d) + buffer (${settings.safetyBufferDays}d).`
+      recommendedSendQty = Math.max(calcQty, 3)
+
+      // Build intelligent rationale with context
+      const reasons: string[] = []
+      reasons.push(`Total demand: ${(combinedVelocityPerDay * 30).toFixed(0)} units/30d`)
+      if (sessions30d > 0) reasons.push(`${sessions30d} sessions (traffic still coming)`)
+      if (parentUnits30d > 0) reasons.push(`parent family: ${parentUnits30d} units/30d`)
+      if (conversionRate > 0 && conversionRate < 5) reasons.push(`conversion dropped to ${conversionRate.toFixed(1)}% (stockout impact)`)
+      sendRationale = `FBA stocked out. ${reasons.join('. ')}. Send ${recommendedSendQty} to cover ${settings.leadTimeDays}d lead + ${settings.safetyBufferDays}d buffer.`
     } else if (weeksOfCover !== null && weeksOfCover < 2) {
       status = 'critical'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      recommendedSendQty = Math.max(3, targetQty - fbaQtyAvailable - fbaQtyInbound) // min 3
-      sendRationale = `Only ${weeksOfCover.toFixed(1)} weeks of cover. FBM is carrying load. Send immediately.`
+      recommendedSendQty = Math.max(3, targetQty - fbaQtyAvailable - fbaQtyInbound)
+      sendRationale = `Only ${weeksOfCover.toFixed(1)} weeks of cover. ${sessions30d > 0 ? `${sessions30d} sessions still driving traffic.` : ''} Send immediately.`
     } else if (weeksOfCover !== null && weeksOfCover < settings.replenishTriggerWeeks) {
       status = 'replenish'
       const targetQty = Math.ceil(combinedVelocityPerDay * (settings.leadTimeDays + settings.safetyBufferDays))
-      recommendedSendQty = Math.max(3, targetQty - fbaQtyAvailable - fbaQtyInbound) // min 3
-      sendRationale = `${weeksOfCover.toFixed(1)} weeks of cover remaining. Send now to avoid stockout.`
+      recommendedSendQty = Math.max(3, targetQty - fbaQtyAvailable - fbaQtyInbound)
+      sendRationale = `${weeksOfCover.toFixed(1)} weeks of cover remaining. ${sessions30d > 0 ? `${sessions30d} sessions/30d.` : ''} Send now to avoid stockout.`
     } else if (weeksOfCover !== null && weeksOfCover < settings.replenishTriggerWeeks * 2) {
       status = 'watch'
-      sendRationale = `${weeksOfCover.toFixed(1)} weeks of cover. Monitor — approaching replenishment threshold.`
+      sendRationale = `${weeksOfCover.toFixed(1)} weeks of cover. ${sessions30d > 0 ? `${sessions30d} sessions.` : ''} Monitor — approaching threshold.`
     } else if (weeksOfCover !== null && weeksOfCover > settings.replenishTriggerWeeks * 3) {
       status = 'overstocked'
-      sendRationale = `${weeksOfCover === 999 ? 'No recent sales' : `${weeksOfCover.toFixed(0)} weeks`} of cover. Consider pausing FBA shipments.`
+      sendRationale = `${weeksOfCover === 999 ? 'No recent sales' : `${weeksOfCover.toFixed(0)} weeks`} of cover. ${sessions30d > 0 ? `Still getting ${sessions30d} sessions — may recover.` : 'Low traffic.'} Consider pausing shipments.`
     } else if (weeksOfCover !== null) {
       status = 'healthy'
-      sendRationale = `${weeksOfCover === 999 ? 'Sufficient' : `${weeksOfCover.toFixed(1)} weeks`} of FBA cover. No action needed.`
+      sendRationale = `${weeksOfCover === 999 ? 'Sufficient' : `${weeksOfCover.toFixed(1)} weeks`} of FBA cover. ${sessions30d > 0 ? `${sessions30d} sessions, ${conversionRate.toFixed(1)}% conversion.` : ''} No action needed.`
     }
 
     recommendations.push({
@@ -575,10 +680,18 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       fba_qty_inbound: fbaQtyInbound,
       fba_qty_total: fbaQtyTotal,
       fba_units_sold_30d: fbaUnitsSold30d,
-      fba_buy_box_pct: fbaBuyBoxPct,
+      fba_buy_box_pct: buyBoxPct > 0 ? buyBoxPct : (fbaInv?.buy_box_percentage ?? 0),
+      sessions_30d: sessions30d,
+      page_views_30d: pageViews30d,
+      conversion_rate: conversionRate,
+      parent_asin: parentAsin,
+      parent_units_30d: parentUnits30d,
+      parent_sessions_30d: parentSessions30d,
+      sibling_count: siblingCount,
       weeks_of_cover: weeksOfCover === 999 ? null : weeksOfCover,
       status,
       status_label: STATUS_LABELS[status],
+      intelligence_score: intelligenceScore,
       recommended_send_qty: recommendedSendQty,
       send_rationale: sendRationale,
       has_customization: hasCustomization,
@@ -589,7 +702,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     })
   }
 
-  // Sort: urgent first
+  // Sort: intelligence score (desc) within each status tier
   const statusOrder: Record<ReplenishmentStatus, number> = {
     stocked_out:   0,
     critical:      1,
@@ -604,7 +717,7 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   recommendations.sort((a, b) => {
     const orderDiff = statusOrder[a.status] - statusOrder[b.status]
     if (orderDiff !== 0) return orderDiff
-    return b.fbm_units_30d - a.fbm_units_30d
+    return b.intelligence_score - a.intelligence_score // higher score first within same status
   })
 
   return recommendations
@@ -615,9 +728,10 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
  */
 export function generateTeamCSV(report: ProductRecommendation[]): string {
   const headers = [
-    'ASIN', 'FBA ASIN', 'FBA SKU', 'FBM SKU', 'Title', 'Status',
+    'ASIN', 'FBA ASIN', 'FBA SKU', 'FBM SKU', 'Title', 'Status', 'Score',
     'FBM Units (30d)', 'FBM Velocity/Day',
     'FBA Available', 'FBA Inbound', 'FBA Sold (30d)', 'Buy Box %',
+    'Sessions (30d)', 'Conversion %', 'Parent ASIN', 'Parent Units (30d)', 'Siblings',
     'Weeks of Cover', 'Recommended Send Qty', 'Rationale',
   ]
 
@@ -630,12 +744,18 @@ export function generateTeamCSV(report: ProductRecommendation[]): string {
       r.sku,
       `"${r.title.replace(/"/g, '""')}"`,
       r.status_label,
+      r.intelligence_score,
       r.fbm_units_30d,
       r.fbm_velocity_per_day.toFixed(2),
       r.fba_qty_available,
       r.fba_qty_inbound,
       r.fba_units_sold_30d,
       r.fba_buy_box_pct > 0 ? `${r.fba_buy_box_pct.toFixed(1)}%` : 'N/A',
+      r.sessions_30d,
+      r.conversion_rate > 0 ? `${r.conversion_rate.toFixed(1)}%` : 'N/A',
+      r.parent_asin || '',
+      r.parent_units_30d,
+      r.sibling_count,
       r.weeks_of_cover !== null ? r.weeks_of_cover.toFixed(1) : 'N/A',
       r.recommended_send_qty,
       `"${r.send_rationale.replace(/"/g, '""')}"`,

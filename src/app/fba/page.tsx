@@ -900,10 +900,14 @@ export default function FBAIntelligencePage() {
                     <tr>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Product</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Intelligence Score (0-100)">Score</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBM 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Avail.</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">On Way</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Sold 30d</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Sessions from Sales & Traffic Report">Sessions</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Conversion Rate (unitSessionPercentage)">Conv%</th>
+                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Parent ASIN total units sold in 30 days">Parent 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Wks Cover</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Send Qty</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Action</th>
@@ -913,7 +917,7 @@ export default function FBAIntelligencePage() {
                     {filteredReport.map((rec) => {
                       const cfg = STATUS_CONFIG[rec.status]
                       return (
-                        <tr key={rec.asin} className="hover:bg-gray-50 transition-colors">
+                        <tr key={rec.asin} className="hover:bg-gray-50 transition-colors" title={rec.send_rationale}>
                           <td className="px-4 py-3">
                             <div className="font-medium text-gray-900 text-xs leading-tight max-w-xs truncate">{rec.title}</div>
                             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -922,15 +926,38 @@ export default function FBAIntelligencePage() {
                               {rec.fba_sku && rec.fba_sku !== rec.sku && (
                                 <span className="text-xs text-blue-500 font-mono">FBA: {rec.fba_sku}</span>
                               )}
+                              {rec.parent_asin && (
+                                <a href={`https://www.amazon.com/dp/${rec.parent_asin}`} target="_blank" rel="noopener noreferrer"
+                                  className="text-xs text-purple-500 hover:text-purple-700 font-mono" title={`Parent: ${rec.parent_asin} (${rec.sibling_count} variants)`}>
+                                  Parent: {rec.parent_asin}
+                                </a>
+                              )}
                               {rec.has_customization && (
                                 <span className="px-1.5 py-0.5 text-xs font-bold bg-red-100 text-red-700 rounded">CUSTOM</span>
                               )}
                             </div>
+                            {rec.send_rationale && (
+                              <div className="text-xs text-gray-400 mt-0.5 max-w-sm truncate" title={rec.send_rationale}>
+                                {rec.send_rationale}
+                              </div>
+                            )}
                           </td>
                           <td className="px-4 py-3">
                             <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${cfg.bg} ${cfg.color} border ${cfg.border}`}>
                               {cfg.label}
                             </span>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {rec.intelligence_score > 0 ? (
+                              <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-bold ${
+                                rec.intelligence_score >= 70 ? 'bg-red-100 text-red-700' :
+                                rec.intelligence_score >= 40 ? 'bg-orange-100 text-orange-700' :
+                                rec.intelligence_score >= 20 ? 'bg-yellow-100 text-yellow-700' :
+                                'bg-gray-100 text-gray-500'
+                              }`} title={`Intelligence Score: ${rec.intelligence_score}/100\nSessions: ${rec.sessions_30d}\nConversion: ${rec.conversion_rate?.toFixed(1) || 0}%\nParent units: ${rec.parent_units_30d}`}>
+                                {rec.intelligence_score}
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-4 py-3 text-right text-gray-700 font-medium">
                             {rec.fbm_units_30d > 0 ? rec.fbm_units_30d : <span className="text-gray-300">—</span>}
@@ -957,6 +984,27 @@ export default function FBAIntelligencePage() {
                           </td>
                           <td className="px-4 py-3 text-right text-gray-500">
                             {rec.fba_units_sold_30d > 0 ? rec.fba_units_sold_30d : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {rec.sessions_30d > 0 ? (
+                              <span className={rec.sessions_30d >= 200 ? 'text-green-600 font-medium' : rec.sessions_30d >= 50 ? 'text-gray-700' : 'text-gray-400'}>
+                                {rec.sessions_30d >= 1000 ? `${(rec.sessions_30d / 1000).toFixed(1)}k` : rec.sessions_30d}
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {rec.conversion_rate > 0 ? (
+                              <span className={rec.conversion_rate >= 10 ? 'text-green-600 font-medium' : rec.conversion_rate >= 5 ? 'text-gray-700' : rec.conversion_rate < 3 && rec.sessions_30d > 50 ? 'text-red-500 font-medium' : 'text-gray-500'}>
+                                {rec.conversion_rate.toFixed(1)}%
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {rec.parent_units_30d > 0 ? (
+                              <span className="text-purple-600 font-medium" title={`Parent: ${rec.parent_asin || 'unknown'}\n${rec.sibling_count} variants\n${rec.parent_sessions_30d} total sessions`}>
+                                {rec.parent_units_30d >= 1000 ? `${(rec.parent_units_30d / 1000).toFixed(1)}k` : rec.parent_units_30d}
+                              </span>
+                            ) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-4 py-3 text-right text-gray-500">
                             {rec.weeks_of_cover !== null ? (
