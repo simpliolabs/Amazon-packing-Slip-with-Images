@@ -181,14 +181,43 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
           // Skip items with 0 available
           if (health.qty_available <= 0) continue
 
-          // Use Amazon's own excess flag OR high days-of-supply
-          const isExcess = health.is_excess ||
-            health.excess_qty > 0 ||
-            health.days_of_supply > EXCESS_DAYS_OF_SUPPLY_THRESHOLD
+          // ── Trust Amazon's data for excess determination ──
+          // Only flag as excess when Amazon explicitly says so:
+          //   1. estimated-excess-quantity > 0
+          //   2. alert contains excess/overstock keywords
+          //   3. recommended-action suggests removal/sale (not restock)
+          // Do NOT use days-of-supply threshold alone — Amazon may say
+          // "GoToRestock" for items with >90 DoS (they're selling well).
+          const alertLower = (health.alert || '').toLowerCase()
+          const actionLower = (health.recommended_action || '').toLowerCase()
 
-          if (!isExcess) continue
+          const amazonSaysExcess = health.excess_qty > 0 ||
+            alertLower.includes('excess') ||
+            alertLower.includes('overstock') ||
+            alertLower.includes('low traffic') ||
+            actionLower.includes('sale') ||
+            actionLower.includes('outlet') ||
+            actionLower.includes('remov') ||
+            actionLower.includes('liquidat')
+
+          // Also flag items with very high days-of-supply AND zero sales
+          // (Amazon may not flag these if they're new listings)
+          const noSalesExcess = health.units_sold_last_30_days === 0 &&
+            health.units_sold_last_90_days === 0 &&
+            health.qty_available >= 5 &&
+            health.days_of_supply === 0  // Amazon shows 0 DoS when no sales forecast
+
+          if (!amazonSaysExcess && !noSalesExcess) continue
 
           const productName = health.product_name || asinTitleMap.get(health.asin) || `ASIN: ${health.asin}`
+
+          // Use Amazon's excess_qty directly — NEVER fall back to available qty
+          const excessQty = health.excess_qty > 0
+            ? health.excess_qty
+            : (noSalesExcess ? health.qty_available : 0)
+
+          // Skip if we end up with 0 excess
+          if (excessQty <= 0) continue
 
           excessCandidates.push({
             asin: health.asin,
@@ -196,7 +225,7 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
             fnsku: health.fnsku || null,
             product_name: productName,
             qty_available: health.qty_available,
-            excess_qty: health.excess_qty > 0 ? health.excess_qty : health.qty_available,
+            excess_qty: excessQty,
             days_of_supply: health.days_of_supply > 0 ? health.days_of_supply : 999,
             units_sold_last_30_days: health.units_sold_last_30_days,
             your_price: health.your_price || health.featured_offer_price || 0,
