@@ -63,21 +63,39 @@ export interface InventoryHealthItem {
   qty_inbound_working: number
   qty_inbound_shipped: number
   qty_inbound_receiving: number
+  qty_inbound_total: number          // Sum of all inbound
+  qty_reserved: number               // Total reserved quantity
   // Sales velocity
+  units_sold_last_7_days: number
   units_sold_last_30_days: number
+  units_sold_last_60_days: number
+  units_sold_last_90_days: number
   // Excess / overstock data
   is_excess: boolean
   excess_qty: number
-  days_of_supply: number           // How many days of stock on hand
-  recommended_action: string       // Amazon's raw recommendation string
+  days_of_supply: number             // Amazon's direct days-of-supply
+  days_of_supply_with_inbound: number // Including open shipments
+  historical_days_of_supply: number
+  weeks_of_cover_t30: number
+  weeks_of_cover_t90: number
+  recommended_action: string         // Amazon's raw recommendation string
   // Storage costs (from Amazon's report)
   estimated_monthly_storage_fee: number   // USD
   estimated_storage_cost_per_unit: number // USD per unit
   // Pricing
   your_price: number
   sales_price: number | null
+  featured_offer_price: number
+  // Inventory health
+  fba_inventory_level_health: string // Healthy, Excess, etc.
   // Flags
-  alert: string                    // e.g. "Excess inventory", "Low inventory", etc.
+  alert: string                      // e.g. "Excess inventory", "Low traffic", etc.
+  // Age breakdown
+  inv_age_0_to_90: number
+  inv_age_91_to_180: number
+  inv_age_181_to_270: number
+  inv_age_271_to_365: number
+  inv_age_366_plus: number
 }
 
 /**
@@ -360,7 +378,7 @@ function parseInventoryHealthTSV(
 
   const col = (name: string) => headers.indexOf(name)
 
-  // Map column indices
+  // Map column indices — using exact column names from GET_FBA_INVENTORY_PLANNING_DATA
   const iSku = col('sku')
   const iFnsku = col('fnsku')
   const iAsin = col('asin')
@@ -368,17 +386,43 @@ function parseInventoryHealthTSV(
   const iCondition = col('condition')
   const iYourPrice = col('your-price')
   const iSalesPrice = col('sales-price')
-  const iAfnFulfillable = col('afn-fulfillable-quantity')
-  const iAfnInboundWorking = col('afn-inbound-working-quantity')
-  const iAfnInboundShipped = col('afn-inbound-shipped-quantity')
-  const iAfnInboundReceiving = col('afn-inbound-receiving-quantity')
-  const iUnits30d = col('your-30-day-units-sold')
+  const iFeaturedOfferPrice = col('featuredoffer-price')
+  // Inventory quantities — report uses 'available' (not afn-fulfillable-quantity)
+  const iAvailable = col('available')
+  const iInboundQuantity = col('inbound-quantity')
+  const iInboundWorking = col('inbound-working')
+  const iInboundShipped = col('inbound-shipped')
+  const iInboundReceived = col('inbound-received')
+  const iReserved = col('total reserved quantity')
+  // Sales velocity — report uses units-shipped-tN columns
+  const iUnits7d = col('units-shipped-t7')
+  const iUnits30d = col('units-shipped-t30')
+  const iUnits60d = col('units-shipped-t60')
+  const iUnits90d = col('units-shipped-t90')
+  // Also check sales-shipped columns (alternate names)
+  const iSales7d = col('sales-shipped-last-7-days')
+  const iSales30d = col('sales-shipped-last-30-days')
+  const iSales60d = col('sales-shipped-last-60-days')
+  const iSales90d = col('sales-shipped-last-90-days')
+  // Excess / overstock
   const iAlert = col('alert')
   const iExcessQty = col('estimated-excess-quantity')
+  const iDaysOfSupply = col('days-of-supply')
+  const iTotalDaysOfSupply = col('total days of supply (including units from open shipments)')
+  const iHistoricalDaysOfSupply = col('historical-days-of-supply')
   const iWeeksCoverT30 = col('weeks-of-cover-t30')
+  const iWeeksCoverT90 = col('weeks-of-cover-t90')
   const iRecommendedAction = col('recommended-action')
-  const iEstMonthlyStorageFee = col('estimated-monthly-storage-fee')
-  const iEstStorageCostPerUnit = col('estimated-storage-cost-per-unit')
+  const iHealthStatus = col('fba-inventory-level-health-status')
+  // Storage costs
+  const iEstMonthlyStorage = col('estimated-storage-cost-next-month')
+  // Age breakdown
+  const iAge0to90 = col('inv-age-0-to-90-days')
+  const iAge91to180 = col('inv-age-91-to-180-days')
+  const iAge181to270 = col('inv-age-181-to-270-days')
+  const iAge271to365 = col('inv-age-271-to-365-days')
+  const iAge366to455 = col('inv-age-366-to-455-days')
+  const iAge456plus = col('inv-age-456-plus-days')
 
   const parseNum = (val: string | undefined): number => {
     if (!val || val === '' || val === '--') return 0
@@ -400,13 +444,40 @@ function parseInventoryHealthTSV(
     // Determine if this item is flagged as excess by Amazon
     const isExcess = excessQty > 0 ||
       alertText.toLowerCase().includes('excess') ||
+      alertText.toLowerCase().includes('overstock') ||
       recommendedAction.toLowerCase().includes('sale') ||
       recommendedAction.toLowerCase().includes('outlet') ||
       recommendedAction.toLowerCase().includes('remov')
 
-    const weeksOfCoverRaw = parseNum(cols[iWeeksCoverT30])
-    // Convert weeks of cover to days of supply
-    const daysOfSupply = weeksOfCoverRaw > 0 ? Math.round(weeksOfCoverRaw * 7) : 0
+    // Use Amazon's direct days-of-supply (preferred) or fall back to weeks-of-cover * 7
+    const directDaysOfSupply = parseNum(cols[iDaysOfSupply])
+    const weeksOfCoverT30 = parseNum(cols[iWeeksCoverT30])
+    const daysOfSupply = directDaysOfSupply > 0
+      ? directDaysOfSupply
+      : (weeksOfCoverT30 > 0 ? Math.round(weeksOfCoverT30 * 7) : 0)
+
+    const qtyAvailable = parseNum(cols[iAvailable])
+    const inboundWorking = parseNum(cols[iInboundWorking])
+    const inboundShipped = parseNum(cols[iInboundShipped])
+    const inboundReceived = parseNum(cols[iInboundReceived])
+    const inboundTotal = parseNum(cols[iInboundQuantity]) || (inboundWorking + inboundShipped + inboundReceived)
+
+    // Units sold — try units-shipped-tN first, then sales-shipped-last-N-days
+    const unitsSold7d = parseNum(cols[iUnits7d]) || parseNum(cols[iSales7d])
+    const unitsSold30d = parseNum(cols[iUnits30d]) || parseNum(cols[iSales30d])
+    const unitsSold60d = parseNum(cols[iUnits60d]) || parseNum(cols[iSales60d])
+    const unitsSold90d = parseNum(cols[iUnits90d]) || parseNum(cols[iSales90d])
+
+    // Storage cost per unit estimate
+    const monthlyStorage = parseNum(cols[iEstMonthlyStorage])
+    const storageCostPerUnit = qtyAvailable > 0 ? monthlyStorage / qtyAvailable : 0
+
+    // Age breakdown
+    const age0to90 = parseNum(cols[iAge0to90])
+    const age91to180 = parseNum(cols[iAge91to180])
+    const age181to270 = parseNum(cols[iAge181to270])
+    const age271to365 = parseNum(cols[iAge271to365])
+    const age366plus = parseNum(cols[iAge366to455]) + parseNum(cols[iAge456plus])
 
     const item: InventoryHealthItem = {
       asin,
@@ -414,20 +485,36 @@ function parseInventoryHealthTSV(
       fnsku: cols[iFnsku]?.trim() || '',
       product_name: cols[iProductName]?.trim() || '',
       condition: cols[iCondition]?.trim() || 'New',
-      qty_available: parseNum(cols[iAfnFulfillable]),
-      qty_inbound_working: parseNum(cols[iAfnInboundWorking]),
-      qty_inbound_shipped: parseNum(cols[iAfnInboundShipped]),
-      qty_inbound_receiving: parseNum(cols[iAfnInboundReceiving]),
-      units_sold_last_30_days: parseNum(cols[iUnits30d]),
+      qty_available: qtyAvailable,
+      qty_inbound_working: inboundWorking,
+      qty_inbound_shipped: inboundShipped,
+      qty_inbound_receiving: inboundReceived,
+      qty_inbound_total: inboundTotal,
+      qty_reserved: parseNum(cols[iReserved]),
+      units_sold_last_7_days: unitsSold7d,
+      units_sold_last_30_days: unitsSold30d,
+      units_sold_last_60_days: unitsSold60d,
+      units_sold_last_90_days: unitsSold90d,
       is_excess: isExcess,
       excess_qty: excessQty,
       days_of_supply: daysOfSupply,
+      days_of_supply_with_inbound: parseNum(cols[iTotalDaysOfSupply]),
+      historical_days_of_supply: parseNum(cols[iHistoricalDaysOfSupply]),
+      weeks_of_cover_t30: weeksOfCoverT30,
+      weeks_of_cover_t90: parseNum(cols[iWeeksCoverT90]),
       recommended_action: recommendedAction,
-      estimated_monthly_storage_fee: parseNum(cols[iEstMonthlyStorageFee]),
-      estimated_storage_cost_per_unit: parseNum(cols[iEstStorageCostPerUnit]),
+      estimated_monthly_storage_fee: monthlyStorage,
+      estimated_storage_cost_per_unit: storageCostPerUnit,
       your_price: parseNum(cols[iYourPrice]),
       sales_price: iSalesPrice >= 0 ? parseNum(cols[iSalesPrice]) : null,
+      featured_offer_price: parseNum(cols[iFeaturedOfferPrice]),
+      fba_inventory_level_health: cols[iHealthStatus]?.trim() || '',
       alert: alertText,
+      inv_age_0_to_90: age0to90,
+      inv_age_91_to_180: age91to180,
+      inv_age_181_to_270: age181to270,
+      inv_age_271_to_365: age271to365,
+      inv_age_366_plus: age366plus,
     }
 
     result.set(sku, item)

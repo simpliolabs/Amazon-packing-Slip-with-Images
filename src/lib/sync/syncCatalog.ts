@@ -145,9 +145,8 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
   }
 
   // ── 5. Detect and upsert excess inventory ───────────────────────────────
-  // For each FBA inventory row, compute days of supply and flag excess.
-  // DoS = qty_available / (units_sold_30d / 30)
-  // Excess = DoS > 90 days AND qty_available > 0
+  // PRIMARY SOURCE: Amazon's Inventory Health Report (GET_FBA_INVENTORY_PLANNING_DATA)
+  // FALLBACK: Orders-based heuristic (only if report fails)
   try {
     const now = new Date().toISOString()
     const excessCandidates: Array<{
@@ -166,119 +165,97 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
       amazon_alert: string | null
     }> = []
 
-    for (const inv of inventory) {
-      if (!inv.asin || inv.quantity_available <= 0) continue
+    let usedHealthReport = false
 
-      // Only skip if inbound units exceed available stock (major restock in progress).
-      // A few inbound units with hundreds available is still excess.
-      const inbound = inv.quantity_inbound || 0
-      if (inbound > 0 && inbound > inv.quantity_available) {
-        console.log(`[Excess] Skipping ${inv.asin} — major restock: ${inbound} inbound > ${inv.quantity_available} available`)
-        continue
-      }
-
-      const vel = velocityMap.get(inv.asin)
-      const units30d = vel?.units30d || 0
-      const units90d = vel?.units90d || 0
-      const dailyRate = units30d / 30
-
-      // For FBA-only products (no FBM orders), we can't compute velocity from orders.
-      // Flag any item with qty >= 5 and zero/low velocity as potentially excess.
-      // Items with < 5 units are too small to worry about.
-      if (dailyRate === 0 && inv.quantity_available < 5) {
-        continue // Too few units to flag as excess
-      }
-
-      const daysOfSupply = dailyRate > 0
-        ? Math.round(inv.quantity_available / dailyRate)
-        : 999 // infinite supply
-
-      if (daysOfSupply <= EXCESS_DAYS_OF_SUPPLY_THRESHOLD) continue
-
-      // Compute excess quantity (units above 90-day supply)
-      const idealQty = Math.ceil(dailyRate * EXCESS_DAYS_OF_SUPPLY_THRESHOLD)
-      const excessQty = Math.max(0, inv.quantity_available - idealQty)
-
-      if (excessQty <= 0) continue
-
-      // Estimate storage fee (rough — $0.87/unit/month for standard apparel)
-      const monthlyStorageFee = parseFloat((excessQty * ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT).toFixed(2))
-      const storagePerUnit = ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT
-
-      const productName = asinTitleMap.get(inv.asin) || `ASIN: ${inv.asin}`
-
-      excessCandidates.push({
-        asin: inv.asin,
-        sku: inv.sku || '',
-        fnsku: inv.fnsku || null,
-        product_name: productName,
-        qty_available: inv.quantity_available,
-        excess_qty: excessQty,
-        days_of_supply: daysOfSupply > 999 ? 999 : daysOfSupply,
-        units_sold_last_30_days: units30d,
-        your_price: 0, // not available without catalog API
-        estimated_monthly_storage_fee: monthlyStorageFee,
-        estimated_storage_cost_per_unit: storagePerUnit,
-        amazon_recommended_action: null,
-        amazon_alert: null,
-      })
-    }
-
-    // ── 5b. Supplement with Amazon's Inventory Health Report ────────────
-    // The orders-based heuristic above misses FBA-only products (no FBM orders).
-    // Amazon's own report has authoritative excess data, prices, and storage fees.
+    // ── 5a. PRIMARY: Amazon's Inventory Health Report ────────────────────
+    // This is the authoritative source for excess data, days of supply,
+    // recommended actions, alerts, and storage costs.
     try {
       const healthMap = await fetchInventoryHealthReport()
       console.log(`[Excess] Inventory Health Report returned ${healthMap.size} SKUs`)
 
-      const alreadyTrackedSkus = new Set(excessCandidates.map(c => c.sku))
+      if (healthMap.size > 0) {
+        usedHealthReport = true
 
-      for (const [sku, health] of healthMap) {
-        // Skip if already caught by orders-based heuristic
-        if (alreadyTrackedSkus.has(sku)) {
-          // But update with Amazon's real data (authoritative source)
-          const existing = excessCandidates.find(c => c.sku === sku)
-          if (existing) {
-            if (health.your_price > 0) existing.your_price = health.your_price
-            if (health.estimated_monthly_storage_fee > 0) existing.estimated_monthly_storage_fee = health.estimated_monthly_storage_fee
-            if (health.estimated_storage_cost_per_unit > 0) existing.estimated_storage_cost_per_unit = health.estimated_storage_cost_per_unit
-            // Use Amazon's authoritative days_of_supply and excess_qty
-            if (health.days_of_supply > 0) existing.days_of_supply = health.days_of_supply
-            if (health.excess_qty > 0) existing.excess_qty = health.excess_qty
-            if (health.units_sold_last_30_days > 0) existing.units_sold_last_30_days = health.units_sold_last_30_days
-            // Preserve Amazon's alert and recommended action
-            existing.amazon_recommended_action = health.recommended_action || null
-            existing.amazon_alert = health.alert || null
-          }
-          continue
+        for (const [sku, health] of healthMap) {
+          // Skip items with 0 available
+          if (health.qty_available <= 0) continue
+
+          // Use Amazon's own excess flag OR high days-of-supply
+          const isExcess = health.is_excess ||
+            health.excess_qty > 0 ||
+            health.days_of_supply > EXCESS_DAYS_OF_SUPPLY_THRESHOLD
+
+          if (!isExcess) continue
+
+          const productName = health.product_name || asinTitleMap.get(health.asin) || `ASIN: ${health.asin}`
+
+          excessCandidates.push({
+            asin: health.asin,
+            sku,
+            fnsku: health.fnsku || null,
+            product_name: productName,
+            qty_available: health.qty_available,
+            excess_qty: health.excess_qty > 0 ? health.excess_qty : health.qty_available,
+            days_of_supply: health.days_of_supply > 0 ? health.days_of_supply : 999,
+            units_sold_last_30_days: health.units_sold_last_30_days,
+            your_price: health.your_price || health.featured_offer_price || 0,
+            estimated_monthly_storage_fee: health.estimated_monthly_storage_fee,
+            estimated_storage_cost_per_unit: health.estimated_storage_cost_per_unit,
+            amazon_recommended_action: health.recommended_action || null,
+            amazon_alert: health.alert || null,
+          })
         }
-
-        // Only add items Amazon flags as excess or that have very high DoS
-        if (!health.is_excess && health.days_of_supply <= EXCESS_DAYS_OF_SUPPLY_THRESHOLD * 7) continue
-        if (health.qty_available <= 0) continue
-
-        const productName = health.product_name || asinTitleMap.get(health.asin) || `ASIN: ${health.asin}`
-
-        excessCandidates.push({
-          asin: health.asin,
-          sku,
-          fnsku: health.fnsku || null,
-          product_name: productName,
-          qty_available: health.qty_available,
-          excess_qty: health.excess_qty > 0 ? health.excess_qty : health.qty_available,
-          days_of_supply: health.days_of_supply > 0 ? health.days_of_supply : 999,
-          units_sold_last_30_days: health.units_sold_last_30_days,
-          your_price: health.your_price,
-          estimated_monthly_storage_fee: health.estimated_monthly_storage_fee,
-          estimated_storage_cost_per_unit: health.estimated_storage_cost_per_unit,
-          amazon_recommended_action: health.recommended_action || null,
-          amazon_alert: health.alert || null,
-        })
       }
     } catch (healthErr) {
-      // Non-fatal — the orders-based heuristic still works as fallback
-      console.warn('[Excess] Inventory Health Report failed (non-fatal):', healthErr)
+      console.warn('[Excess] Inventory Health Report failed, using heuristic fallback:', healthErr)
       errors.push(`Inventory Health Report: ${healthErr instanceof Error ? healthErr.message : String(healthErr)}`)
+    }
+
+    // ── 5b. FALLBACK: Orders-based heuristic (only if report unavailable) ───
+    if (!usedHealthReport) {
+      console.log('[Excess] Using orders-based heuristic fallback')
+      for (const inv of inventory) {
+        if (!inv.asin || inv.quantity_available <= 0) continue
+
+        const inbound = inv.quantity_inbound || 0
+        if (inbound > 0 && inbound > inv.quantity_available) continue
+
+        const vel = velocityMap.get(inv.asin)
+        const units30d = vel?.units30d || 0
+        const dailyRate = units30d / 30
+
+        if (dailyRate === 0 && inv.quantity_available < 5) continue
+
+        const daysOfSupply = dailyRate > 0
+          ? Math.round(inv.quantity_available / dailyRate)
+          : 999
+
+        if (daysOfSupply <= EXCESS_DAYS_OF_SUPPLY_THRESHOLD) continue
+
+        const idealQty = Math.ceil(dailyRate * EXCESS_DAYS_OF_SUPPLY_THRESHOLD)
+        const excessQty = Math.max(0, inv.quantity_available - idealQty)
+        if (excessQty <= 0) continue
+
+        const monthlyStorageFee = parseFloat((excessQty * ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT).toFixed(2))
+        const productName = asinTitleMap.get(inv.asin) || `ASIN: ${inv.asin}`
+
+        excessCandidates.push({
+          asin: inv.asin,
+          sku: inv.sku || '',
+          fnsku: inv.fnsku || null,
+          product_name: productName,
+          qty_available: inv.quantity_available,
+          excess_qty: excessQty,
+          days_of_supply: daysOfSupply > 999 ? 999 : daysOfSupply,
+          units_sold_last_30_days: units30d,
+          your_price: 0,
+          estimated_monthly_storage_fee: monthlyStorageFee,
+          estimated_storage_cost_per_unit: ESTIMATED_MONTHLY_STORAGE_FEE_PER_UNIT,
+          amazon_recommended_action: null,
+          amazon_alert: null,
+        })
+      }
     }
 
     excessItemsFound = excessCandidates.length
