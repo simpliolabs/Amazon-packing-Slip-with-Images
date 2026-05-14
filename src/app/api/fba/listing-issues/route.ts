@@ -99,7 +99,6 @@ export async function GET(req: NextRequest) {
   if (fbaInvErr) {
     console.error('[ListingIssues] fba_inventory query error:', fbaInvErr.message)
   }
-  console.log(`[ListingIssues] fba_inventory rows loaded: ${fbaInvData?.length || 0}`)
   const fbaStockByAsin = new Map<string, number>()
   const fbaStockBySku = new Map<string, number>()
   for (const inv of fbaInvData || []) {
@@ -111,8 +110,6 @@ export async function GET(req: NextRequest) {
       fbaStockBySku.set(inv.sku, (fbaStockBySku.get(inv.sku) || 0) + qty)
     }
   }
-  console.log(`[ListingIssues] fbaStockByAsin entries: ${fbaStockByAsin.size}, sample:`, 
-    Array.from(fbaStockByAsin.entries()).slice(0, 3))
 
   // Load ALL sales analytics for cross-reference
   const salesData = await fetchAll<{
@@ -405,34 +402,7 @@ export async function GET(req: NextRequest) {
     total_lost_revenue: issues.reduce((sum, i) => sum + (i.estimated_lost_revenue_30d || 0), 0),
   }
 
-  // Temporary debug info — find the listing_health rows for memory card FBA SKUs
-  const targetFbaSkus = ['DAFEI-482-128GB-FBA', 'DAFEI-482-32G-FBA', 'DAFEI-482-64G.-FBA']
-  const targetListings = (listings || []).filter(l => targetFbaSkus.includes(l.sku))
-  const debug = {
-    fba_inventory_rows: fbaInvData?.length || 0,
-    fba_inventory_error: fbaInvErr?.message || null,
-    fbaStockByAsin_size: fbaStockByAsin.size,
-    fbaStockBySku_size: fbaStockBySku.size,
-    target_asins_in_fba_inv: {
-      B0B4STMBS7: fbaStockByAsin.get('B0B4STMBS7') ?? 'NOT_FOUND',
-      B0FH39GY4R: fbaStockByAsin.get('B0FH39GY4R') ?? 'NOT_FOUND',
-      B0B4ST1RS4: fbaStockByAsin.get('B0B4ST1RS4') ?? 'NOT_FOUND',
-    },
-    target_skus_in_fba_inv: {
-      'DAFEI-482-128GB-FBA': fbaStockBySku.get('DAFEI-482-128GB-FBA') ?? 'NOT_FOUND',
-      'DAFEI-482-32G-FBA': fbaStockBySku.get('DAFEI-482-32G-FBA') ?? 'NOT_FOUND',
-      'DAFEI-482-64G.-FBA': fbaStockBySku.get('DAFEI-482-64G.-FBA') ?? 'NOT_FOUND',
-    },
-    listing_health_fba_rows: targetListings.map(l => ({
-      sku: l.sku,
-      asin: l.asin,
-      status: l.status,
-      quantity: l.quantity,
-      price: l.price,
-    })),
-  }
-
-  return NextResponse.json({ issues, summary, _debug: debug }, {
+  return NextResponse.json({ issues, summary }, {
     headers: { 'Cache-Control': 'no-store, max-age=0' },
   })
 }
