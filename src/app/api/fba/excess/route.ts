@@ -5,15 +5,15 @@
  * POST /api/fba/excess          — generate AI action plan for a specific item
  * PATCH /api/fba/excess         — update action taken for an item
  *
- * When the excess_inventory table is empty, auto-populates from Amazon's
- * Inventory Health Report (GET_FBA_INVENTORY_PLANNING_DATA) which has the
- * REAL excess data, days of supply, and recommended actions.
+ * Data is populated by syncCatalogAndInventory() (called via Sync FBA Data button).
+ * The sync uses heuristic-based detection + Amazon Inventory Health Report supplement.
+ *
+ * GET ?refresh=true triggers a background sync to re-populate excess data.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { generateExcessActionPlan, buildExcessContext } from '@/lib/fba/excessActionPlan'
-import { fetchInventoryHealthReport } from '@/lib/amazon/catalog'
 import type { InventoryHealthItem } from '@/lib/amazon/catalog'
 
 function getAdminSupabase() {
@@ -40,7 +40,7 @@ async function requireAuth(req: NextRequest): Promise<boolean> {
 /**
  * GET /api/fba/excess
  * Returns all excess inventory items with their AI plans and action history.
- * Auto-populates from Amazon's Inventory Health Report when table is empty.
+ * If ?refresh=true, triggers a background sync to re-populate excess data.
  */
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) {
@@ -52,6 +52,20 @@ export async function GET(req: NextRequest) {
   const status = searchParams.get('status') || 'all'
   const format = searchParams.get('format')
   const forceRefresh = searchParams.get('refresh') === 'true'
+
+  // If refresh requested, trigger a background sync
+  if (forceRefresh) {
+    try {
+      // Import dynamically to avoid circular deps
+      const { syncCatalogAndInventory } = await import('@/lib/sync/syncCatalog')
+      console.log('[Excess] Refresh requested — triggering background sync...')
+      const syncResult = await syncCatalogAndInventory()
+      console.log(`[Excess] Sync complete: ${syncResult.excessItemsFound} excess items found`)
+    } catch (err) {
+      console.error('[Excess] Background sync error:', err)
+      // Continue to return whatever data we have
+    }
+  }
 
   let query = supabase
     .from('excess_inventory')
@@ -68,99 +82,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  let items = data || []
-
-  // ── Auto-populate from Amazon's Inventory Health Report ──────────────────
-  // Triggers when:
-  // 1. Table is empty (first load)
-  // 2. Force refresh requested (?refresh=true)
-  // 3. Data is stale (all items last synced > 6 hours ago)
-  // This uses GET_FBA_INVENTORY_PLANNING_DATA which has:
-  // - Real days of supply (Amazon's calculation, not ours)
-  // - Estimated excess quantity
-  // - Recommended actions (Create sale, Create outlet deal, etc.)
-  // - Storage fees
-  // - Actual units sold in 30 days
-  const SIX_HOURS = 6 * 60 * 60 * 1000
-  const isStale = items.length > 0 && items.every(i => {
-    const lastSynced = new Date(i.last_synced_at).getTime()
-    return Date.now() - lastSynced > SIX_HOURS
-  })
-  const shouldRefresh = items.length === 0 || forceRefresh || isStale
-
-  if (shouldRefresh && format !== 'csv') {
-    try {
-      console.log('[Excess] Auto-populating from Amazon Inventory Health Report...')
-      const healthMap = await fetchInventoryHealthReport()
-      console.log(`[Excess] Fetched ${healthMap.size} inventory health records`)
-
-      // Filter to items Amazon flags as excess
-      const excessItems: InventoryHealthItem[] = []
-      for (const [, item] of healthMap) {
-        if (item.is_excess) {
-          excessItems.push(item)
-        }
-      }
-
-      console.log(`[Excess] Found ${excessItems.length} excess items from Amazon`)
-
-      if (excessItems.length > 0) {
-        // Build upsert records from Amazon's real data
-        const inserts = excessItems.map(h => ({
-          asin: h.asin,
-          sku: h.sku,
-          fnsku: h.fnsku || null,
-          product_name: h.product_name || '',
-          qty_available: h.qty_available,
-          excess_qty: h.excess_qty,
-          days_of_supply: h.days_of_supply,
-          units_sold_last_30_days: h.units_sold_last_30_days,
-          your_price: h.your_price,
-          estimated_monthly_storage_fee: h.estimated_monthly_storage_fee,
-          estimated_storage_cost_per_unit: h.estimated_storage_cost_per_unit,
-          amazon_recommended_action: h.recommended_action || null,
-          amazon_alert: h.alert || 'Excess inventory',
-          status: 'active',
-          last_synced_at: new Date().toISOString(),
-        }))
-
-        // Upsert into excess_inventory (on conflict by SKU, update data but preserve AI plans and actions)
-        // We do this in batches to avoid Supabase payload limits
-        const batchSize = 50
-        for (let i = 0; i < inserts.length; i += batchSize) {
-          const batch = inserts.slice(i, i + batchSize)
-          const { error: insertErr } = await supabase
-            .from('excess_inventory')
-            .upsert(batch, {
-              onConflict: 'sku',
-              // Only update data fields, not AI plan or action tracking fields
-              ignoreDuplicates: false,
-            })
-
-          if (insertErr) {
-            console.error(`[Excess] Upsert batch ${i / batchSize + 1} error:`, insertErr.message)
-          }
-        }
-
-        // Re-fetch the newly inserted items
-        let refetchQuery = supabase
-          .from('excess_inventory')
-          .select('*')
-          .order('excess_qty', { ascending: false })
-
-        if (status !== 'all') {
-          refetchQuery = refetchQuery.eq('status', status)
-        }
-
-        const { data: freshData } = await refetchQuery
-        items = freshData || []
-        console.log(`[Excess] Now showing ${items.length} excess items`)
-      }
-    } catch (err) {
-      console.error('[Excess] Auto-populate from Inventory Health Report error:', err)
-      // Return whatever we have (possibly empty)
-    }
-  }
+  const items = data || []
 
   // CSV export
   if (format === 'csv') {
@@ -431,7 +353,6 @@ export async function PATCH(req: NextRequest) {
     type: 'action_reminder',
     title: `Action logged — re-analysis scheduled in ${days} days`,
     message: `You ${actionLabels[body.action]} on this item. Auto re-analysis will run on ${new Date(recheckDate).toLocaleDateString()}.`,
-    asin: item?.id ? undefined : undefined,
     sku: body.sku,
     excess_id: item?.id || null,
   })
