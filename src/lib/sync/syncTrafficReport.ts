@@ -1,5 +1,5 @@
 /**
- * Traffic & Conversion Intelligence Sync
+ * Traffic & Conversion Intelligence Sync — NON-BLOCKING
  *
  * Fetches GET_SALES_AND_TRAFFIC_REPORT from SP-API (30-day window, CHILD granularity)
  * and writes the results to:
@@ -8,17 +8,18 @@
  *   3. sku_sales_analytics — enriches existing rows with traffic columns
  *   4. listing_health — backfills parent_asin
  *
- * This is the MISSING LINK that gives the replenishment engine:
- *   - Sessions (demand signal even when 0 sales)
- *   - Buy Box % (are we winning?)
- *   - Conversion Rate (unitSessionPercentage)
- *   - Parent ASIN grouping (sibling demand context)
+ * NON-BLOCKING PATTERN (same as syncListings):
+ *   - First sync: check for DONE report → if none, request new one → return immediately
+ *   - Next sync: check for DONE report → if found, download + parse + write to DB
+ *   - No polling. No waiting. Guaranteed to complete within the 55s sync window.
  */
 import { createClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
+import { gunzipSync } from 'zlib'
 
 const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
+const REPORT_TYPE = 'GET_SALES_AND_TRAFFIC_REPORT'
 
 function getAdminSupabase() {
   return createClient(
@@ -28,14 +29,11 @@ function getAdminSupabase() {
   )
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
 export interface TrafficSyncResult {
   asinsSynced: number
   parentRollupsCreated: number
   error: string | null
+  pending?: boolean
   durationMs: number
 }
 
@@ -43,15 +41,12 @@ interface RawTrafficEntry {
   parentAsin: string
   childAsin: string
   sku: string
-  // Sales
   unitsOrdered: number
   orderedRevenue: number
-  // Traffic
   sessions: number
   pageViews: number
   buyBoxPct: number
   conversionRate: number
-  // Mobile breakdown
   browserSessions: number
   mobileAppSessions: number
   browserPageViews: number
@@ -59,7 +54,121 @@ interface RawTrafficEntry {
 }
 
 /**
- * Main entry point: fetch, parse, and persist traffic intelligence.
+ * NON-BLOCKING: Get the most recent DONE report document ID.
+ * If none exists, request a new one but return immediately.
+ */
+async function getReportDocumentId(token: string): Promise<{ documentId: string | null; requested: boolean }> {
+  // Check for DONE reports in the last 24 hours
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+  const listUrl =
+    `${ENDPOINT}/reports/2021-06-30/reports` +
+    `?reportTypes=${REPORT_TYPE}` +
+    `&marketplaceIds=${MARKETPLACE_ID}` +
+    `&processingStatuses=DONE` +
+    `&createdSince=${encodeURIComponent(since24h)}` +
+    `&pageSize=1`
+
+  const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
+  if (listResp.ok) {
+    const listJson = await listResp.json()
+    const reports: Record<string, string>[] = listJson.reports || []
+    if (reports.length > 0 && reports[0].reportDocumentId) {
+      console.log(`[Traffic Sync] Using existing DONE report ${reports[0].reportId}`)
+      return { documentId: reports[0].reportDocumentId, requested: false }
+    }
+  }
+
+  // Check for pending reports (IN_QUEUE or IN_PROGRESS)
+  const pendingUrl =
+    `${ENDPOINT}/reports/2021-06-30/reports` +
+    `?reportTypes=${REPORT_TYPE}` +
+    `&marketplaceIds=${MARKETPLACE_ID}` +
+    `&processingStatuses=IN_QUEUE,IN_PROGRESS` +
+    `&pageSize=1`
+  const pendingResp = await fetch(pendingUrl, { headers: { 'x-amz-access-token': token } })
+  if (pendingResp.ok) {
+    const pendingJson = await pendingResp.json()
+    const pending: Record<string, string>[] = pendingJson.reports || []
+    if (pending.length > 0) {
+      console.log(`[Traffic Sync] Report ${pending[0].reportId} still processing — will pick up on next sync`)
+      return { documentId: null, requested: true }
+    }
+  }
+
+  // No DONE or pending reports — request a new one (fire and forget)
+  console.log('[Traffic Sync] No recent report — requesting new one (non-blocking)')
+  const endDate = new Date()
+  const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+  const formatDate = (d: Date) => d.toISOString().split('T')[0]
+
+  const reqResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+    method: 'POST',
+    headers: {
+      'x-amz-access-token': token,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      reportType: REPORT_TYPE,
+      marketplaceIds: [MARKETPLACE_ID],
+      reportOptions: {
+        dateGranularity: 'MONTH',
+        asinGranularity: 'CHILD',
+      },
+      dataStartTime: `${formatDate(startDate)}T00:00:00Z`,
+      dataEndTime: `${formatDate(endDate)}T23:59:59Z`,
+    }),
+  })
+
+  if (reqResp.ok) {
+    const { reportId } = await reqResp.json()
+    console.log(`[Traffic Sync] Requested report ${reportId} — will be ready on next sync`)
+  } else {
+    const errBody = await reqResp.text()
+    console.warn(`[Traffic Sync] Failed to request report (${reqResp.status}):`, errBody)
+  }
+
+  return { documentId: null, requested: true }
+}
+
+/**
+ * Download and optionally decompress the report document.
+ */
+async function downloadReport(documentId: string, token: string): Promise<string | null> {
+  console.log(`[Traffic Sync] Fetching document metadata for ${documentId}`)
+  const docResp = await fetch(`${ENDPOINT}/reports/2021-06-30/documents/${documentId}`, {
+    headers: { 'x-amz-access-token': token },
+  })
+  if (!docResp.ok) {
+    console.error(`[Traffic Sync] Document metadata fetch failed: ${docResp.status}`)
+    return null
+  }
+  const docJson = await docResp.json()
+  const { url, compressionAlgorithm } = docJson
+  if (!url) {
+    console.error('[Traffic Sync] No URL in document response')
+    return null
+  }
+
+  console.log(`[Traffic Sync] Downloading report (compression: ${compressionAlgorithm || 'none'})`)
+  const dataResp = await fetch(url)
+  if (!dataResp.ok) {
+    console.error(`[Traffic Sync] Report download failed: ${dataResp.status}`)
+    return null
+  }
+
+  if (compressionAlgorithm === 'GZIP') {
+    const buffer = Buffer.from(await dataResp.arrayBuffer())
+    const decompressed = gunzipSync(buffer).toString('utf-8')
+    console.log(`[Traffic Sync] Decompressed ${buffer.length} bytes -> ${decompressed.length} chars`)
+    return decompressed
+  }
+
+  return await dataResp.text()
+}
+
+/**
+ * Main entry point: NON-BLOCKING fetch, parse, and persist traffic intelligence.
  */
 export async function syncTrafficReport(): Promise<TrafficSyncResult> {
   const start = Date.now()
@@ -67,127 +176,77 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
 
   try {
     const token = await getAccessToken()
+    const { documentId, requested } = await getReportDocumentId(token)
 
-    const endDate = new Date()
-    const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-    const formatDate = (d: Date) => d.toISOString().split('T')[0]
-
-    // ── 1. Check for existing DONE report (avoid re-requesting) ─────────
-    const recentReportsResp = await fetch(
-      `${ENDPOINT}/reports/2021-06-30/reports` +
-      `?reportTypes=GET_SALES_AND_TRAFFIC_REPORT` +
-      `&processingStatuses=DONE` +
-      `&marketplaceIds=${MARKETPLACE_ID}` +
-      `&createdSince=${encodeURIComponent(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())}` +
-      `&pageSize=1`,
-      { headers: { 'x-amz-access-token': token } }
-    )
-
-    let documentId: string | null = null
-
-    if (recentReportsResp.ok) {
-      const recentData = await recentReportsResp.json()
-      const reports = recentData.reports || []
-      if (reports.length > 0 && reports[0].reportDocumentId) {
-        documentId = reports[0].reportDocumentId
-        console.log(`[Traffic Sync] Reusing existing DONE report: ${reports[0].reportId}`)
+    if (!documentId) {
+      if (requested) {
+        console.log('[Traffic Sync] Report requested/pending — will process on next sync')
+        return { asinsSynced: 0, parentRollupsCreated: 0, error: null, pending: true, durationMs: Date.now() - start }
       }
+      return { asinsSynced: 0, parentRollupsCreated: 0, error: 'Could not obtain report document ID', durationMs: Date.now() - start }
     }
 
-    // ── 2. If no recent report, request a new one ───────────────────────
-    if (!documentId) {
-      const reportResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
+    const rawText = await downloadReport(documentId, token)
+    if (!rawText) {
+      // Download failed (likely expired URL) — request a fresh report
+      console.log('[Traffic Sync] Download failed — requesting fresh report')
+      const reqResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
         method: 'POST',
         headers: {
           'x-amz-access-token': token,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          reportType: 'GET_SALES_AND_TRAFFIC_REPORT',
+          reportType: REPORT_TYPE,
           marketplaceIds: [MARKETPLACE_ID],
           reportOptions: {
             dateGranularity: 'MONTH',
             asinGranularity: 'CHILD',
           },
-          dataStartTime: `${formatDate(startDate)}T00:00:00Z`,
-          dataEndTime: `${formatDate(endDate)}T23:59:59Z`,
+          dataStartTime: `${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}T00:00:00Z`,
+          dataEndTime: `${new Date().toISOString().split('T')[0]}T23:59:59Z`,
         }),
       })
-
-      if (!reportResp.ok) {
-        const errBody = await reportResp.text()
-        console.warn(`[Traffic Sync] Failed to request report (${reportResp.status}):`, errBody)
-        return { asinsSynced: 0, parentRollupsCreated: 0, error: `Report request failed: ${reportResp.status}`, durationMs: Date.now() - start }
+      if (reqResp.ok) {
+        const { reportId } = await reqResp.json()
+        console.log(`[Traffic Sync] Requested fresh report ${reportId}`)
       }
-
-      const reportJson = await reportResp.json()
-      const reportId = reportJson.reportId
-      if (!reportId) {
-        return { asinsSynced: 0, parentRollupsCreated: 0, error: 'No reportId returned', durationMs: Date.now() - start }
-      }
-
-      console.log(`[Traffic Sync] Requested new report: ${reportId}`)
-
-      // Poll for completion (up to 5 minutes)
-      const maxAttempts = 60
-      for (let i = 0; i < maxAttempts; i++) {
-        await sleep(5000)
-        const statusResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports/${reportId}`, {
-          headers: { 'x-amz-access-token': token },
-        })
-        if (!statusResp.ok) continue
-        const status = await statusResp.json()
-        console.log(`[Traffic Sync] Poll ${i + 1}: ${status.processingStatus}`)
-
-        if (status.processingStatus === 'DONE') {
-          documentId = status.reportDocumentId
-          break
-        }
-        if (status.processingStatus === 'FATAL' || status.processingStatus === 'CANCELLED') {
-          return { asinsSynced: 0, parentRollupsCreated: 0, error: `Report ${status.processingStatus}`, durationMs: Date.now() - start }
-        }
-      }
-
-      if (!documentId) {
-        return { asinsSynced: 0, parentRollupsCreated: 0, error: 'Report timed out after 5 minutes', durationMs: Date.now() - start }
-      }
+      return { asinsSynced: 0, parentRollupsCreated: 0, error: null, pending: true, durationMs: Date.now() - start }
     }
 
-    // ── 3. Download the report document ─────────────────────────────────
-    const docResp = await fetch(`${ENDPOINT}/reports/2021-06-30/documents/${documentId}`, {
-      headers: { 'x-amz-access-token': token },
-    })
-    if (!docResp.ok) {
-      return { asinsSynced: 0, parentRollupsCreated: 0, error: `Failed to get document URL (${docResp.status})`, durationMs: Date.now() - start }
-    }
-    const { url } = await docResp.json()
-    const dataResp = await fetch(url)
-    if (!dataResp.ok) {
-      return { asinsSynced: 0, parentRollupsCreated: 0, error: 'Failed to download report data', durationMs: Date.now() - start }
-    }
-    const rawText = await dataResp.text()
     console.log(`[Traffic Sync] Downloaded ${rawText.length} bytes`)
 
-    // ── 4. Parse the JSON report ────────────────────────────────────────
+    // ── Parse the JSON report ────────────────────────────────────────────
     let reportData: Record<string, unknown>
     try {
       reportData = JSON.parse(rawText)
     } catch {
+      console.error('[Traffic Sync] Failed to parse report JSON. First 500 chars:', rawText.slice(0, 500))
       return { asinsSynced: 0, parentRollupsCreated: 0, error: 'Failed to parse report JSON', durationMs: Date.now() - start }
     }
+
+    // Log top-level keys for debugging
+    console.log(`[Traffic Sync] Report top-level keys: ${Object.keys(reportData).join(', ')}`)
 
     const entries = parseTrafficReport(reportData)
     console.log(`[Traffic Sync] Parsed ${entries.length} ASIN entries`)
 
     if (entries.length === 0) {
+      // Log a sample of the data for debugging
+      const sample = JSON.stringify(reportData).slice(0, 1000)
+      console.warn(`[Traffic Sync] 0 entries parsed. Report sample: ${sample}`)
       return { asinsSynced: 0, parentRollupsCreated: 0, error: null, durationMs: Date.now() - start }
     }
 
-    // ── 5. Upsert asin_traffic table ────────────────────────────────────
+    // ── Upsert asin_traffic table ────────────────────────────────────────
     const now = new Date().toISOString()
+    const endDate = new Date()
+    const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    const formatDate = (d: Date) => d.toISOString().split('T')[0]
     const periodStart = formatDate(startDate)
     const periodEnd = formatDate(endDate)
 
+    let asinsSynced = 0
     for (let i = 0; i < entries.length; i += 100) {
       const chunk = entries.slice(i, i + 100)
       const rows = chunk.map(e => ({
@@ -214,11 +273,13 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
         .upsert(rows, { onConflict: 'child_asin' })
 
       if (error) {
-        console.error(`[Traffic Sync] Upsert error (batch ${i}):`, error.message)
+        console.error(`[Traffic Sync] asin_traffic upsert error (batch ${i}):`, error.message)
+      } else {
+        asinsSynced += chunk.length
       }
     }
 
-    // ── 6. Compute and upsert parent_asin_rollup ────────────────────────
+    // ── Compute and upsert parent_asin_rollup ────────────────────────────
     const parentMap = new Map<string, {
       children: RawTrafficEntry[]
       totalUnits: number
@@ -234,7 +295,7 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
     }>()
 
     for (const entry of entries) {
-      const parent = entry.parentAsin || entry.childAsin // self-parent if no parent
+      const parent = entry.parentAsin || entry.childAsin
       const existing = parentMap.get(parent) || {
         children: [],
         totalUnits: 0,
@@ -289,6 +350,7 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
       last_synced_at: now,
     }))
 
+    let parentRollupsCreated = 0
     for (let i = 0; i < parentRows.length; i += 100) {
       const chunk = parentRows.slice(i, i + 100)
       const { error } = await supabase
@@ -296,31 +358,31 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
         .upsert(chunk, { onConflict: 'parent_asin' })
 
       if (error) {
-        console.error(`[Traffic Sync] Parent rollup upsert error (batch ${i}):`, error.message)
+        console.error(`[Traffic Sync] parent_asin_rollup upsert error (batch ${i}):`, error.message)
+      } else {
+        parentRollupsCreated += chunk.length
       }
     }
 
-    // ── 7. Enrich sku_sales_analytics with traffic data ─────────────────
-    // Update rows that match by ASIN with the new traffic columns
+    // ── Enrich sku_sales_analytics with traffic data ─────────────────────
     for (const entry of entries) {
       if (!entry.childAsin) continue
       const { error } = await supabase
         .from('sku_sales_analytics')
         .update({
-          parent_asin: entry.parentAsin || null,
           sessions_30d: entry.sessions,
           page_views_30d: entry.pageViews,
-          buy_box_pct: entry.buyBoxPct,
           conversion_rate: entry.conversionRate,
+          buy_box_pct: entry.buyBoxPct,
         })
         .eq('asin', entry.childAsin)
 
       if (error && !error.message.includes('0 rows')) {
-        // Silently skip — not all ASINs in traffic report have sku_sales_analytics rows
+        // Ignore "no rows matched" — not all traffic ASINs are in sku_sales_analytics
       }
     }
 
-    // ── 8. Backfill parent_asin into listing_health ─────────────────────
+    // ── Backfill parent_asin into listing_health ─────────────────────────
     for (const entry of entries) {
       if (!entry.parentAsin || !entry.childAsin) continue
       await supabase
@@ -329,14 +391,8 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
         .eq('asin', entry.childAsin)
     }
 
-    console.log(`[Traffic Sync] Complete: ${entries.length} ASINs, ${parentRows.length} parent rollups`)
-
-    return {
-      asinsSynced: entries.length,
-      parentRollupsCreated: parentRows.length,
-      error: null,
-      durationMs: Date.now() - start,
-    }
+    console.log(`[Traffic Sync] Complete: ${asinsSynced} ASINs, ${parentRollupsCreated} parent rollups`)
+    return { asinsSynced, parentRollupsCreated, error: null, durationMs: Date.now() - start }
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -347,16 +403,45 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
 
 /**
  * Parse the raw Sales & Traffic Report JSON into structured entries.
- * Handles both flat and nested response formats from Amazon.
+ * Handles multiple possible response formats from Amazon:
+ *   - Direct: { salesAndTrafficByAsin: [...] }
+ *   - Nested: { reportData: { salesAndTrafficByAsin: [...] } }
+ *   - Array wrapper: [{ salesAndTrafficByAsin: [...] }]
  */
 function parseTrafficReport(data: Record<string, unknown>): RawTrafficEntry[] {
   const entries: RawTrafficEntry[] = []
 
-  // The report can have salesAndTrafficByAsin at the top level or nested
-  const byAsin = (
-    (data?.salesAndTrafficByAsin as Array<Record<string, unknown>>) ||
-    []
-  )
+  // Try multiple paths to find the salesAndTrafficByAsin array
+  let byAsin: Array<Record<string, unknown>> | null = null
+
+  // Path 1: Direct top-level (per official schema)
+  if (Array.isArray(data?.salesAndTrafficByAsin)) {
+    byAsin = data.salesAndTrafficByAsin as Array<Record<string, unknown>>
+    console.log(`[Traffic Sync] Found salesAndTrafficByAsin at top level (${byAsin.length} entries)`)
+  }
+
+  // Path 2: Nested under reportData
+  if (!byAsin && data?.reportData && typeof data.reportData === 'object') {
+    const rd = data.reportData as Record<string, unknown>
+    if (Array.isArray(rd.salesAndTrafficByAsin)) {
+      byAsin = rd.salesAndTrafficByAsin as Array<Record<string, unknown>>
+      console.log(`[Traffic Sync] Found salesAndTrafficByAsin under reportData (${byAsin.length} entries)`)
+    }
+  }
+
+  // Path 3: Array wrapper
+  if (!byAsin && Array.isArray(data)) {
+    const first = (data as unknown[])[0] as Record<string, unknown> | undefined
+    if (first && Array.isArray(first.salesAndTrafficByAsin)) {
+      byAsin = first.salesAndTrafficByAsin as Array<Record<string, unknown>>
+      console.log(`[Traffic Sync] Found salesAndTrafficByAsin in array wrapper (${byAsin.length} entries)`)
+    }
+  }
+
+  if (!byAsin) {
+    console.warn('[Traffic Sync] Could not find salesAndTrafficByAsin in report. Keys found:', Object.keys(data))
+    return entries
+  }
 
   for (const entry of byAsin) {
     const childAsin = (entry.childAsin as string) || ''
@@ -368,12 +453,21 @@ function parseTrafficReport(data: Record<string, unknown>): RawTrafficEntry[] {
     const sales = (entry.salesByAsin || {}) as Record<string, unknown>
     const traffic = (entry.trafficByAsin || {}) as Record<string, unknown>
 
+    // orderedProductSales can be { amount: number, currencyCode: string } or just a number
+    let orderedRevenue = 0
+    const ops = sales.orderedProductSales
+    if (typeof ops === 'number') {
+      orderedRevenue = ops
+    } else if (ops && typeof ops === 'object') {
+      orderedRevenue = parseFloat(String((ops as Record<string, unknown>).amount || 0))
+    }
+
     entries.push({
       parentAsin,
       childAsin,
       sku,
       unitsOrdered: (sales.unitsOrdered as number) || 0,
-      orderedRevenue: parseFloat(String((sales.orderedProductSales as Record<string, unknown>)?.amount || 0)),
+      orderedRevenue,
       sessions: (traffic.sessions as number) || 0,
       pageViews: (traffic.pageViews as number) || 0,
       buyBoxPct: parseFloat(String(traffic.buyBoxPercentage || 0)),
