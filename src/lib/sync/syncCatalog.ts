@@ -18,6 +18,7 @@ import type { FBAInventoryItem, InventoryHealthItem } from '@/lib/amazon/catalog
 import { syncSalesReport } from './syncSalesReport'
 import { syncListings } from './syncListings'
 import { syncTrafficReport } from './syncTrafficReport'
+import { syncParentAsins } from './syncParentAsins'
 
 function getAdminSupabase() {
   return createClient(
@@ -401,6 +402,22 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     else console.log(`[FBA Sync] Traffic intelligence synced: ${trafficResult.value.asinsSynced} ASINs, ${trafficResult.value.parentRollupsCreated} parent rollups`)
   } else {
     errors.push(`Traffic sync failed: ${trafficResult.reason}`)
+  }
+
+  // ── Parent ASIN Sync (Catalog Items API) ──────────────────────────────────
+  // Fetch parent-child relationships for all active ASINs that don't have one yet.
+  // This runs AFTER traffic sync so it can skip ASINs already mapped by the traffic report.
+  try {
+    const activeAsins = [...new Set([...asins, ...inventory.map(r => r.asin).filter(Boolean)])]
+    console.log(`[FBA Sync] Starting parent ASIN lookup for ${activeAsins.length} active ASINs...`)
+    const parentResult = await syncParentAsins(activeAsins)
+    if (parentResult.result.error) {
+      errors.push(`Parent ASIN sync: ${parentResult.result.error}`)
+    } else {
+      console.log(`[FBA Sync] Parent ASINs mapped: ${parentResult.result.parentsMapped} (looked up ${parentResult.result.totalLookedUp} via Catalog API) in ${parentResult.result.durationMs}ms`)
+    }
+  } catch (err) {
+    errors.push(`Parent ASIN sync failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   return {

@@ -288,6 +288,21 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     })
   }
 
+  // ── 3b. Load parent_asin from listing_health (covers more ASINs than traffic) ──
+  const { data: lhParentRows } = await supabase
+    .from('listing_health')
+    .select('asin, parent_asin')
+    .not('parent_asin', 'is', null)
+
+  const listingHealthParentMap = new Map<string, string>()
+  for (const row of lhParentRows || []) {
+    if (row.asin && row.parent_asin) {
+      listingHealthParentMap.set(row.asin, row.parent_asin)
+    }
+  }
+
+  console.log(`[Replenishment] Parent sources: asin_traffic=${trafficByAsin.size}, listing_health=${listingHealthParentMap.size}`)
+
   // ── 4. Load PARENT DEMAND ROLLUPS ─────────────────────────────────────────
   const { data: parentRows } = await supabase
     .from('parent_asin_rollup')
@@ -540,7 +555,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const pageViews30d = traffic?.pageViews || 0
     const conversionRate = traffic?.conversionRate || 0
     const buyBoxPct = traffic?.buyBoxPct || 0
-    const parentAsin = traffic?.parentAsin || null
+    // Parent ASIN: check traffic table first, then listing_health fallback
+    const parentAsin = traffic?.parentAsin || listingHealthParentMap.get(asin) || null
 
     // ── Parent demand ──
     const parentRollup = parentAsin ? parentRollupMap.get(parentAsin) : null
