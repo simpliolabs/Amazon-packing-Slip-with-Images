@@ -168,6 +168,57 @@ export async function GET() {
       }
     }
 
+    // Test Fulfillment Inbound API v2024 (listInboundPlans)
+    try {
+      const inboundUrl = `${ENDPOINT}/inbound/fba/2024-03-20/inboundPlans?pageSize=5&status=ACTIVE`
+      const inboundResp = await fetch(inboundUrl, {
+        headers: { 'x-amz-access-token': token },
+      })
+      if (inboundResp.ok) {
+        const inboundJson = await inboundResp.json()
+        results._inbound_api_v2024 = {
+          accessible: true,
+          plan_count: inboundJson.inboundPlans?.length || 0,
+          sample: JSON.stringify(inboundJson).substring(0, 2000),
+        }
+      } else {
+        const errText = await inboundResp.text()
+        results._inbound_api_v2024 = {
+          accessible: false,
+          http_status: inboundResp.status,
+          error: errText.substring(0, 500),
+        }
+      }
+    } catch (err) {
+      results._inbound_api_v2024 = { accessible: false, error: String(err) }
+    }
+
+    // Test old Fulfillment Inbound Shipments API v0 (getShipments)
+    try {
+      const shipmentsUrl = `${ENDPOINT}/fba/inbound/v0/shipments?ShipmentStatusList=WORKING,READY_TO_SHIP,SHIPPED,IN_TRANSIT,RECEIVING,CHECKED_IN&MarketplaceId=${MARKETPLACE_ID}&QueryType=SHIPMENT`
+      const shipmentsResp = await fetch(shipmentsUrl, {
+        headers: { 'x-amz-access-token': token },
+      })
+      if (shipmentsResp.ok) {
+        const shipmentsJson = await shipmentsResp.json()
+        const shipments = shipmentsJson.payload?.ShipmentData || []
+        results._inbound_shipments_v0 = {
+          accessible: true,
+          shipment_count: shipments.length,
+          sample: JSON.stringify(shipmentsJson).substring(0, 3000),
+        }
+      } else {
+        const errText = await shipmentsResp.text()
+        results._inbound_shipments_v0 = {
+          accessible: false,
+          http_status: shipmentsResp.status,
+          error: errText.substring(0, 500),
+        }
+      }
+    } catch (err) {
+      results._inbound_shipments_v0 = { accessible: false, error: String(err) }
+    }
+
     // Also check fba_inventory table health
     try {
       const { createClient } = await import('@supabase/supabase-js')
