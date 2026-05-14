@@ -907,7 +907,6 @@ export default function FBAIntelligencePage() {
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Avail.</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">On Way</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Sold 30d</th>
-                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Parent ASIN total units sold in 30 days">Parent 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Wks Cover</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Send Qty</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Action</th>
@@ -973,13 +972,7 @@ export default function FBAIntelligencePage() {
                           <td className="px-4 py-3 text-right text-gray-500">
                             {rec.fba_units_sold_30d > 0 ? rec.fba_units_sold_30d : <span className="text-gray-300">—</span>}
                           </td>
-                          <td className="px-4 py-3 text-right">
-                            {rec.parent_units_30d > 0 ? (
-                              <span className="text-purple-600 font-medium" title={`Parent: ${rec.parent_asin || 'unknown'}\n${rec.sibling_count} variants\n${rec.parent_sessions_30d} total sessions`}>
-                                {rec.parent_units_30d >= 1000 ? `${(rec.parent_units_30d / 1000).toFixed(1)}k` : rec.parent_units_30d}
-                              </span>
-                            ) : <span className="text-gray-300">—</span>}
-                          </td>
+
                           <td className="px-4 py-3 text-right text-gray-500">
                             {rec.weeks_of_cover !== null ? (
                               <span className={rec.weeks_of_cover < 2 ? 'text-red-600 font-bold' : rec.weeks_of_cover < 4 ? 'text-orange-600' : 'text-gray-600'}>
