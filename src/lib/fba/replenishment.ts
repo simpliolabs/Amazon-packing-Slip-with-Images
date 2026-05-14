@@ -702,25 +702,26 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     })
   }
 
-  // Sort: intelligence score (desc) within each status tier
-  const statusOrder: Record<ReplenishmentStatus, number> = {
-    stocked_out:   0,
-    critical:      1,
-    replenish:     2,
-    new_candidate: 3,
-    watch:         4,
-    healthy:       5,
-    overstocked:   6,
-    no_data:       7,
-  }
+  // ── FILTER: Only show ACTIONABLE items ──
+  // Remove healthy (FBA Covered), watch (Monitor), overstocked (Pause Shipments)
+  // These statuses mean "no action needed" — they don't belong in a replenishment list
+  const actionableStatuses: ReplenishmentStatus[] = ['stocked_out', 'critical', 'replenish', 'new_candidate']
+  const actionable = recommendations.filter(r =>
+    actionableStatuses.includes(r.status) || (r.status === 'no_data' && r.recommended_send_qty > 0)
+  )
 
-  recommendations.sort((a, b) => {
-    const orderDiff = statusOrder[a.status] - statusOrder[b.status]
-    if (orderDiff !== 0) return orderDiff
-    return b.intelligence_score - a.intelligence_score // higher score first within same status
+  // ── SORT: By recommended send quantity descending ──
+  // The items that need the most units sent go to the top
+  actionable.sort((a, b) => {
+    // Primary: send qty descending (most needed at top)
+    if (b.recommended_send_qty !== a.recommended_send_qty) {
+      return b.recommended_send_qty - a.recommended_send_qty
+    }
+    // Secondary: intelligence score descending (tie-breaker)
+    return b.intelligence_score - a.intelligence_score
   })
 
-  return recommendations
+  return actionable
 }
 
 /**

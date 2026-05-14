@@ -113,14 +113,12 @@ interface SyncResult {
 
 // ─── Status config ────────────────────────────────────────────────────────────
 
-const STATUS_CONFIG: Record<ReplenishmentStatus, { label: string; color: string; bg: string; border: string }> = {
+const STATUS_CONFIG: Partial<Record<ReplenishmentStatus, { label: string; color: string; bg: string; border: string }>> & Record<string, { label: string; color: string; bg: string; border: string }> = {
   stocked_out:   { label: 'FBA Stocked Out',       color: 'text-red-700',    bg: 'bg-red-100',    border: 'border-red-300' },
   critical:      { label: 'Send Urgently',         color: 'text-red-600',    bg: 'bg-red-50',     border: 'border-red-200' },
   replenish:     { label: 'Send Now',              color: 'text-orange-700', bg: 'bg-orange-100', border: 'border-orange-300' },
   new_candidate: { label: 'Start Selling on FBA',  color: 'text-blue-700',   bg: 'bg-blue-100',   border: 'border-blue-300' },
-  watch:         { label: 'Monitor',               color: 'text-yellow-700', bg: 'bg-yellow-100', border: 'border-yellow-300' },
-  healthy:       { label: 'FBA Covered',           color: 'text-green-700',  bg: 'bg-green-100',  border: 'border-green-300' },
-  overstocked:   { label: 'Pause Shipments',       color: 'text-purple-700', bg: 'bg-purple-100', border: 'border-purple-300' },
+
   no_data:       { label: 'No Data',              color: 'text-gray-500',   bg: 'bg-gray-100',   border: 'border-gray-200' },
 }
 
@@ -484,7 +482,14 @@ export default function FBAIntelligencePage() {
              r.title.toLowerCase().includes(q)
     }
     return true
-  }).sort((a, b) => (b.intelligence_score || 0) - (a.intelligence_score || 0))
+  }).sort((a, b) => {
+    // Primary: send qty descending (most units needed at top)
+    if ((b.recommended_send_qty || 0) !== (a.recommended_send_qty || 0)) {
+      return (b.recommended_send_qty || 0) - (a.recommended_send_qty || 0)
+    }
+    // Secondary: intelligence score descending
+    return (b.intelligence_score || 0) - (a.intelligence_score || 0)
+  })
 
   const noDataCount = report.filter(r => r.status === 'no_data').length
 
@@ -847,9 +852,7 @@ export default function FBAIntelligencePage() {
                 { key: 'critical', label: 'Send Urgently', count: replenishSummary.critical, color: 'text-red-600', bg: 'bg-red-50' },
                 { key: 'replenish', label: 'Send Now', count: replenishSummary.replenish, color: 'text-orange-700', bg: 'bg-orange-50' },
                 { key: 'new_candidate', label: 'Start on FBA', count: replenishSummary.new_candidates, color: 'text-blue-700', bg: 'bg-blue-50' },
-                { key: 'watch', label: 'Monitor', count: replenishSummary.watch, color: 'text-yellow-700', bg: 'bg-yellow-50' },
-                { key: 'healthy', label: 'FBA Covered', count: replenishSummary.healthy, color: 'text-green-700', bg: 'bg-green-50' },
-                { key: 'overstocked', label: 'Pause Shipments', count: replenishSummary.overstocked, color: 'text-purple-700', bg: 'bg-purple-50' },
+
               ].map(card => (
                 <button key={card.key} onClick={() => setFilter(card.key as ReplenishmentStatus | 'all')}
                   className={`${card.bg} border rounded-xl p-3 text-left transition-all ${filter === card.key ? 'border-blue-400 ring-2 ring-blue-200' : 'border-gray-200 hover:border-gray-300'}`}>
@@ -912,7 +915,7 @@ export default function FBAIntelligencePage() {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {filteredReport.map((rec) => {
-                      const cfg = STATUS_CONFIG[rec.status]
+                      const cfg = STATUS_CONFIG[rec.status] || { label: rec.status_label || rec.status, color: 'text-gray-500', bg: 'bg-gray-100', border: 'border-gray-200' }
                       return (
                         <tr key={rec.asin} className="hover:bg-gray-50 transition-colors" title={rec.send_rationale}>
                           <td className="px-4 py-3">
