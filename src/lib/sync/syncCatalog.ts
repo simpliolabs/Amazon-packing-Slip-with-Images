@@ -194,7 +194,6 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
           const amazonSaysExcess = health.excess_qty > 0 ||
             alertLower.includes('excess') ||
             alertLower.includes('overstock') ||
-            alertLower.includes('low traffic') ||
             actionLower.includes('sale') ||
             actionLower.includes('outlet') ||
             actionLower.includes('remov') ||
