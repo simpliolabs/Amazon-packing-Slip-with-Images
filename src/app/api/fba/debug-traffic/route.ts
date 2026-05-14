@@ -183,15 +183,71 @@ export async function GET() {
       addLog(`UPSERT SUCCESS: ${JSON.stringify(upsertData)}`)
     }
 
-    // Clean up test row
-    await supabase.from('asin_traffic').delete().eq('child_asin', testRow.child_asin)
+    // Now do the FULL sync — write all entries to asin_traffic
+    addLog(`Starting full sync of ${byAsin.length} entries`)
+    let totalSynced = 0
+    const errors: string[] = []
+
+    for (const rawEntry of byAsin) {
+      const entry = rawEntry as Record<string, unknown>
+      const childAsin = (entry.childAsin as string) || ''
+      const parentAsin = (entry.parentAsin as string) || ''
+      if (!childAsin) continue
+
+      const sales = (entry.salesByAsin || {}) as Record<string, unknown>
+      const traffic = (entry.trafficByAsin || {}) as Record<string, unknown>
+
+      let orderedRevenue = 0
+      const ops = sales.orderedProductSales
+      if (typeof ops === 'number') orderedRevenue = ops
+      else if (ops && typeof ops === 'object') orderedRevenue = parseFloat(String((ops as Record<string, unknown>).amount || 0))
+
+      const row = {
+        child_asin: childAsin,
+        parent_asin: parentAsin || null,
+        sku: (entry.sku as string) || null,
+        units_ordered: (sales.unitsOrdered as number) || 0,
+        ordered_revenue: orderedRevenue,
+        sessions: (traffic.sessions as number) || 0,
+        page_views: (traffic.pageViews as number) || 0,
+        buy_box_pct: parseFloat(String(traffic.buyBoxPercentage || 0)),
+        conversion_rate: parseFloat(String(traffic.unitSessionPercentage || 0)),
+        browser_sessions: (traffic.browserSessions as number) || 0,
+        mobile_app_sessions: (traffic.mobileAppSessions as number) || 0,
+        browser_page_views: (traffic.browserPageViews as number) || 0,
+        mobile_page_views: (traffic.mobileAppPageViews as number) || 0,
+        report_period_start: '2026-04-14',
+        report_period_end: '2026-05-14',
+        last_synced_at: new Date().toISOString(),
+      }
+
+      const { error: rowErr } = await supabase
+        .from('asin_traffic')
+        .upsert([row], { onConflict: 'child_asin' })
+        .select('child_asin')
+
+      if (rowErr) {
+        errors.push(`${childAsin}: ${rowErr.message}`)
+      } else {
+        totalSynced++
+      }
+
+      // Also backfill parent_asin into listing_health
+      if (parentAsin) {
+        await supabase.from('listing_health').update({ parent_asin: parentAsin }).eq('asin', childAsin)
+      }
+    }
+
+    addLog(`Full sync complete: ${totalSynced} synced, ${errors.length} errors`)
+    if (errors.length > 0) addLog(`Errors: ${errors.slice(0, 5).join('; ')}`)
 
     return NextResponse.json({
-      status: 'debug_complete',
+      status: 'full_sync_complete',
       reportEntries: byAsin.length,
+      totalSynced,
+      errors: errors.slice(0, 10),
       firstEntryKeys: Object.keys(firstEntry),
-      firstEntrySample: JSON.stringify(firstEntry).slice(0, 1000),
-      upsertError: upsertError ? JSON.stringify(upsertError) : null,
+      upsertTestError: upsertError ? JSON.stringify(upsertError) : null,
       log,
     })
 

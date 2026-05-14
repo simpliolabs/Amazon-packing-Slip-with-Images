@@ -268,14 +268,28 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
         last_synced_at: now,
       }))
 
-      const { error } = await supabase
+      const { data: upsertData, error } = await supabase
         .from('asin_traffic')
         .upsert(rows, { onConflict: 'child_asin' })
+        .select('child_asin')
 
       if (error) {
-        console.error(`[Traffic Sync] asin_traffic upsert error (batch ${i}):`, error.message)
+        console.error(`[Traffic Sync] asin_traffic upsert error (batch ${i}):`, error.message, JSON.stringify(error))
+        // Try individual inserts as fallback
+        for (const row of rows) {
+          const { error: singleErr } = await supabase
+            .from('asin_traffic')
+            .upsert([row], { onConflict: 'child_asin' })
+            .select('child_asin')
+          if (singleErr) {
+            console.error(`[Traffic Sync] Single upsert failed for ${row.child_asin}:`, singleErr.message)
+          } else {
+            asinsSynced++
+          }
+        }
       } else {
-        asinsSynced += chunk.length
+        asinsSynced += upsertData?.length || chunk.length
+        console.log(`[Traffic Sync] Batch ${i}: upserted ${upsertData?.length || chunk.length} rows`)
       }
     }
 
