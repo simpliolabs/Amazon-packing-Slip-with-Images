@@ -484,7 +484,7 @@ export default function FBAIntelligencePage() {
              r.title.toLowerCase().includes(q)
     }
     return true
-  })
+  }).sort((a, b) => (b.intelligence_score || 0) - (a.intelligence_score || 0))
 
   const noDataCount = report.filter(r => r.status === 'no_data').length
 
@@ -900,13 +900,10 @@ export default function FBAIntelligencePage() {
                     <tr>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Product</th>
                       <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
-                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Intelligence Score (0-100)">Score</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBM 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Avail.</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">On Way</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">FBA Sold 30d</th>
-                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Sessions from Sales & Traffic Report">Sessions</th>
-                      <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Conversion Rate (unitSessionPercentage)">Conv%</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide" title="Parent ASIN total units sold in 30 days">Parent 30d</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Wks Cover</th>
                       <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Send Qty</th>
@@ -947,18 +944,6 @@ export default function FBAIntelligencePage() {
                               {cfg.label}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-right">
-                            {rec.intelligence_score > 0 ? (
-                              <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-bold ${
-                                rec.intelligence_score >= 70 ? 'bg-red-100 text-red-700' :
-                                rec.intelligence_score >= 40 ? 'bg-orange-100 text-orange-700' :
-                                rec.intelligence_score >= 20 ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-gray-100 text-gray-500'
-                              }`} title={`Intelligence Score: ${rec.intelligence_score}/100\nSessions: ${rec.sessions_30d}\nConversion: ${rec.conversion_rate?.toFixed(1) || 0}%\nParent units: ${rec.parent_units_30d}`}>
-                                {rec.intelligence_score}
-                              </span>
-                            ) : <span className="text-gray-300">—</span>}
-                          </td>
                           <td className="px-4 py-3 text-right text-gray-700 font-medium">
                             {rec.fbm_units_30d > 0 ? rec.fbm_units_30d : <span className="text-gray-300">—</span>}
                           </td>
@@ -984,20 +969,6 @@ export default function FBAIntelligencePage() {
                           </td>
                           <td className="px-4 py-3 text-right text-gray-500">
                             {rec.fba_units_sold_30d > 0 ? rec.fba_units_sold_30d : <span className="text-gray-300">—</span>}
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            {rec.sessions_30d > 0 ? (
-                              <span className={rec.sessions_30d >= 200 ? 'text-green-600 font-medium' : rec.sessions_30d >= 50 ? 'text-gray-700' : 'text-gray-400'}>
-                                {rec.sessions_30d >= 1000 ? `${(rec.sessions_30d / 1000).toFixed(1)}k` : rec.sessions_30d}
-                              </span>
-                            ) : <span className="text-gray-300">—</span>}
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            {rec.conversion_rate > 0 ? (
-                              <span className={rec.conversion_rate >= 10 ? 'text-green-600 font-medium' : rec.conversion_rate >= 5 ? 'text-gray-700' : rec.conversion_rate < 3 && rec.sessions_30d > 50 ? 'text-red-500 font-medium' : 'text-gray-500'}>
-                                {rec.conversion_rate.toFixed(1)}%
-                              </span>
-                            ) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-4 py-3 text-right">
                             {rec.parent_units_30d > 0 ? (
