@@ -22,7 +22,7 @@ export default async function FBALayout({ children }: { children: React.ReactNod
     .eq('id', user.id)
     .single()
 
-  if (profile?.role !== 'admin') redirect('/')
+  if (!profile || !['admin', 'packer'].includes(profile.role)) redirect('/')
 
   return (
     <DashboardLayout userRole={profile.role} userEmail={profile.email}>

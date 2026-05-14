@@ -47,7 +47,7 @@ export default function DashboardLayout({
       href: '/fba',
       label: 'FBA Intel',
       icon: Package,
-      roles: ['admin'],
+      roles: ['admin', 'packer'],
     },
     {
       href: '/settings',
