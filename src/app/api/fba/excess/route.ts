@@ -4,12 +4,16 @@
  * GET  /api/fba/excess          — list all excess inventory items
  * POST /api/fba/excess          — generate AI action plan for a specific item
  * PATCH /api/fba/excess         — update action taken for an item
+ *
+ * When the excess_inventory table is empty, auto-populates from Amazon's
+ * Inventory Health Report (GET_FBA_INVENTORY_PLANNING_DATA) which has the
+ * REAL excess data, days of supply, and recommended actions.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { generateExcessActionPlan, buildExcessContext } from '@/lib/fba/excessActionPlan'
-import { generateReplenishmentReport } from '@/lib/fba/replenishment'
+import { fetchInventoryHealthReport } from '@/lib/amazon/catalog'
 import type { InventoryHealthItem } from '@/lib/amazon/catalog'
 
 function getAdminSupabase() {
@@ -36,6 +40,7 @@ async function requireAuth(req: NextRequest): Promise<boolean> {
 /**
  * GET /api/fba/excess
  * Returns all excess inventory items with their AI plans and action history.
+ * Auto-populates from Amazon's Inventory Health Report when table is empty.
  */
 export async function GET(req: NextRequest) {
   if (!await requireAuth(req)) {
@@ -46,11 +51,12 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const status = searchParams.get('status') || 'all'
   const format = searchParams.get('format')
+  const forceRefresh = searchParams.get('refresh') === 'true'
 
   let query = supabase
     .from('excess_inventory')
     .select('*')
-    .order('days_of_supply', { ascending: false })
+    .order('excess_qty', { ascending: false })
 
   if (status !== 'all') {
     query = query.eq('status', status)
@@ -64,60 +70,85 @@ export async function GET(req: NextRequest) {
 
   let items = data || []
 
-  // ── Auto-populate from replenishment engine when table is empty ──────────
-  // The excess_inventory table only gets populated during heavy "Sync FBA Data".
-  // If it's empty, we can still show overstocked items from the replenishment engine.
-  if (items.length === 0 && format !== 'csv') {
+  // ── Auto-populate from Amazon's Inventory Health Report ──────────────────
+  // When the table is empty (or force refresh), fetch Amazon's real excess data.
+  // This uses GET_FBA_INVENTORY_PLANNING_DATA which has:
+  // - Real days of supply (Amazon's calculation, not ours)
+  // - Estimated excess quantity
+  // - Recommended actions (Create sale, Create outlet deal, etc.)
+  // - Storage fees
+  // - Actual units sold in 30 days
+  if ((items.length === 0 || forceRefresh) && format !== 'csv') {
     try {
-      const report = await generateReplenishmentReport()
-      const overstocked = report.filter(r =>
-        r.status === 'overstocked' && r.fba_qty_available > 0
-      )
+      console.log('[Excess] Auto-populating from Amazon Inventory Health Report...')
+      const healthMap = await fetchInventoryHealthReport()
+      console.log(`[Excess] Fetched ${healthMap.size} inventory health records`)
 
-      if (overstocked.length > 0) {
-        // Insert overstocked items into excess_inventory
-        const inserts = overstocked.map(r => {
-          const weeksOfCover = r.weeks_of_cover || 0
-          const daysOfSupply = Math.round(weeksOfCover * 7)
-          // Estimate excess: anything beyond 12 weeks of cover is excess
-          const dailyVelocity = r.fbm_velocity_per_day + (r.fba_units_sold_30d / 30)
-          const healthyStock = Math.ceil(dailyVelocity * 90) // 90 days = healthy
-          const excessQty = Math.max(0, r.fba_qty_available - healthyStock)
-
-          return {
-            asin: r.fba_asin || r.asin,
-            sku: r.fba_sku || r.sku,
-            product_name: r.title || '',
-            qty_available: r.fba_qty_available,
-            excess_qty: excessQty,
-            days_of_supply: daysOfSupply,
-            units_sold_last_30_days: r.fba_units_sold_30d + r.fbm_units_30d,
-            your_price: 0, // Will be enriched when Inventory Health Report is synced
-            estimated_monthly_storage_fee: 0,
-            estimated_storage_cost_per_unit: 0,
-            amazon_alert: `Overstocked: ${weeksOfCover.toFixed(0)} weeks of cover (${r.fba_qty_available} units on hand)`,
-            status: 'active',
-          }
-        })
-
-        // Upsert into excess_inventory (on conflict by SKU, update)
-        const { error: insertErr } = await supabase
-          .from('excess_inventory')
-          .upsert(inserts, { onConflict: 'sku' })
-
-        if (!insertErr) {
-          // Re-fetch the newly inserted items
-          const { data: freshData } = await supabase
-            .from('excess_inventory')
-            .select('*')
-            .order('days_of_supply', { ascending: false })
-          items = freshData || []
-        } else {
-          console.error('[Excess] Auto-populate insert error:', insertErr.message)
+      // Filter to items Amazon flags as excess
+      const excessItems: InventoryHealthItem[] = []
+      for (const [, item] of healthMap) {
+        if (item.is_excess) {
+          excessItems.push(item)
         }
       }
+
+      console.log(`[Excess] Found ${excessItems.length} excess items from Amazon`)
+
+      if (excessItems.length > 0) {
+        // Build upsert records from Amazon's real data
+        const inserts = excessItems.map(h => ({
+          asin: h.asin,
+          sku: h.sku,
+          fnsku: h.fnsku || null,
+          product_name: h.product_name || '',
+          qty_available: h.qty_available,
+          excess_qty: h.excess_qty,
+          days_of_supply: h.days_of_supply,
+          units_sold_last_30_days: h.units_sold_last_30_days,
+          your_price: h.your_price,
+          estimated_monthly_storage_fee: h.estimated_monthly_storage_fee,
+          estimated_storage_cost_per_unit: h.estimated_storage_cost_per_unit,
+          amazon_recommended_action: h.recommended_action || null,
+          amazon_alert: h.alert || 'Excess inventory',
+          status: 'active',
+          last_synced_at: new Date().toISOString(),
+        }))
+
+        // Upsert into excess_inventory (on conflict by SKU, update data but preserve AI plans and actions)
+        // We do this in batches to avoid Supabase payload limits
+        const batchSize = 50
+        for (let i = 0; i < inserts.length; i += batchSize) {
+          const batch = inserts.slice(i, i + batchSize)
+          const { error: insertErr } = await supabase
+            .from('excess_inventory')
+            .upsert(batch, {
+              onConflict: 'sku',
+              // Only update data fields, not AI plan or action tracking fields
+              ignoreDuplicates: false,
+            })
+
+          if (insertErr) {
+            console.error(`[Excess] Upsert batch ${i / batchSize + 1} error:`, insertErr.message)
+          }
+        }
+
+        // Re-fetch the newly inserted items
+        let refetchQuery = supabase
+          .from('excess_inventory')
+          .select('*')
+          .order('excess_qty', { ascending: false })
+
+        if (status !== 'all') {
+          refetchQuery = refetchQuery.eq('status', status)
+        }
+
+        const { data: freshData } = await refetchQuery
+        items = freshData || []
+        console.log(`[Excess] Now showing ${items.length} excess items`)
+      }
     } catch (err) {
-      console.error('[Excess] Auto-populate from replenishment error:', err)
+      console.error('[Excess] Auto-populate from Inventory Health Report error:', err)
+      // Return whatever we have (possibly empty)
     }
   }
 
@@ -412,7 +443,7 @@ function generateExcessCSV(items: Record<string, unknown>[]): string {
     'FBA On-Hand', 'Excess Units', 'Days of Supply',
     'Units Sold (30d)', 'Your Price',
     'Monthly Storage Fee', 'Storage Cost/Unit',
-    'Amazon Alert', 'Action Taken',
+    'Amazon Alert', 'Amazon Recommended Action', 'Action Taken',
     'AI Action Plan',
     'Recheck Due',
   ]
@@ -430,6 +461,7 @@ function generateExcessCSV(items: Record<string, unknown>[]): string {
     `$${Number(i.estimated_monthly_storage_fee || 0).toFixed(2)}`,
     `$${Number(i.estimated_storage_cost_per_unit || 0).toFixed(2)}`,
     `"${String(i.amazon_alert || '').replace(/"/g, '""')}"`,
+    `"${String(i.amazon_recommended_action || '').replace(/"/g, '""')}"`,
     i.action_taken || 'none',
     `"${String(i.ai_action_plan || '').replace(/"/g, '""').substring(0, 200)}"`,
     i.recheck_due_at ? new Date(String(i.recheck_due_at)).toLocaleDateString() : '',
