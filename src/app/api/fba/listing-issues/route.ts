@@ -93,9 +93,13 @@ export async function GET(req: NextRequest) {
 
   // Load FBA inventory data to cross-reference actual stock levels
   // (listing_health quantity may be stale; fba_inventory has real-time FBA stock)
-  const { data: fbaInvData } = await supabase
+  const { data: fbaInvData, error: fbaInvErr } = await supabase
     .from('fba_inventory')
-    .select('asin, sku, quantity_available, quantity_inbound, quantity_total')
+    .select('asin, sku, quantity_available, quantity_inbound')
+  if (fbaInvErr) {
+    console.error('[ListingIssues] fba_inventory query error:', fbaInvErr.message)
+  }
+  console.log(`[ListingIssues] fba_inventory rows loaded: ${fbaInvData?.length || 0}`)
   const fbaStockByAsin = new Map<string, number>()
   const fbaStockBySku = new Map<string, number>()
   for (const inv of fbaInvData || []) {
@@ -107,6 +111,8 @@ export async function GET(req: NextRequest) {
       fbaStockBySku.set(inv.sku, (fbaStockBySku.get(inv.sku) || 0) + qty)
     }
   }
+  console.log(`[ListingIssues] fbaStockByAsin entries: ${fbaStockByAsin.size}, sample:`, 
+    Array.from(fbaStockByAsin.entries()).slice(0, 3))
 
   // Load ALL sales analytics for cross-reference
   const salesData = await fetchAll<{
@@ -399,7 +405,21 @@ export async function GET(req: NextRequest) {
     total_lost_revenue: issues.reduce((sum, i) => sum + (i.estimated_lost_revenue_30d || 0), 0),
   }
 
-  return NextResponse.json({ issues, summary }, {
+  // Temporary debug info
+  const debug = {
+    fba_inventory_rows: fbaInvData?.length || 0,
+    fba_inventory_error: fbaInvErr?.message || null,
+    fbaStockByAsin_size: fbaStockByAsin.size,
+    fbaStockBySku_size: fbaStockBySku.size,
+    sample_asin_stock: Object.fromEntries(Array.from(fbaStockByAsin.entries()).slice(0, 5)),
+    target_asins: {
+      B0B4STMBS7: fbaStockByAsin.get('B0B4STMBS7') ?? 'NOT_FOUND',
+      B0FH39GY4R: fbaStockByAsin.get('B0FH39GY4R') ?? 'NOT_FOUND',
+      B0B4ST1RS4: fbaStockByAsin.get('B0B4ST1RS4') ?? 'NOT_FOUND',
+    },
+  }
+
+  return NextResponse.json({ issues, summary, _debug: debug }, {
     headers: { 'Cache-Control': 'no-store, max-age=0' },
   })
 }
