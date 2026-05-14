@@ -169,12 +169,11 @@ async function downloadReportDocument(documentId: string, token: string, label: 
 }
 
 /**
- * Fetch FBA inventory ONLY for the given list of ASINs.
- * Much more targeted than fetching the full catalog.
+ * Fetch ALL FBA inventory from Amazon.
+ * Returns every item in FBA inventory (not filtered by ASIN list).
+ * The `asins` parameter is accepted for backward compatibility but no longer used for filtering.
  */
 export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInventoryItem[]> {
-  if (asins.length === 0) return []
-
   const token = await getAccessToken()
   const items: FBAInventoryItem[] = []
   let nextToken: string | undefined
@@ -207,11 +206,7 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
     const data = await resp.json()
     const summaries = data?.payload?.inventorySummaries || []
 
-    // Filter to only the ASINs we care about
-    const asinSet = new Set(asins)
     for (const item of summaries) {
-      if (!asinSet.has(item.asin)) continue
-
       const inv = item.inventoryDetails || {}
       const fulfillable = inv.fulfillableQuantity || 0
       const reserved = inv.reservedQuantity?.totalReservedQuantity || 0
@@ -235,7 +230,7 @@ export async function fetchFBAInventoryForAsins(asins: string[]): Promise<FBAInv
     nextToken = data?.pagination?.nextToken
   } while (nextToken)
 
-  console.log(`[FBA Inventory] Fetched ${items.length} records for ${asins.length} requested ASINs`)
+  console.log(`[FBA Inventory] Fetched ${items.length} total FBA inventory records (${asins.length} ASINs in products table)`)
   return items
 }
 

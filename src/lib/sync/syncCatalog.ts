@@ -169,10 +169,11 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
     for (const inv of inventory) {
       if (!inv.asin || inv.quantity_available <= 0) continue
 
-      // HARD RULE: If Amazon has inbound units for this ASIN, Amazon itself wants
-      // more stock sent — this product is NOT excess, skip it unconditionally.
-      if ((inv.quantity_inbound || 0) > 0) {
-        console.log(`[Excess] Skipping ${inv.asin} — has ${inv.quantity_inbound} inbound units (Amazon wants more stock)`)
+      // Only skip if inbound units exceed available stock (major restock in progress).
+      // A few inbound units with hundreds available is still excess.
+      const inbound = inv.quantity_inbound || 0
+      if (inbound > 0 && inbound > inv.quantity_available) {
+        console.log(`[Excess] Skipping ${inv.asin} — major restock: ${inbound} inbound > ${inv.quantity_available} available`)
         continue
       }
 
