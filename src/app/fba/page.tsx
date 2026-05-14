@@ -920,9 +920,9 @@ export default function FBAIntelligencePage() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <button onClick={() => fetchExcess(true)} disabled={excessLoading}
+              <button onClick={triggerSync} disabled={syncing || excessLoading}
                 className="px-3 py-2 text-xs border border-blue-200 rounded-lg text-blue-700 hover:bg-blue-50 disabled:opacity-40 transition-colors inline-flex items-center gap-1.5">
-                {excessLoading ? (
+                {syncing ? (
                   <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
@@ -932,7 +932,7 @@ export default function FBAIntelligencePage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
                 )}
-                Refresh from Amazon
+                {syncing ? 'Syncing FBA Data…' : 'Refresh from Amazon'}
               </button>
               <button onClick={() => downloadCSV('excess')} disabled={excessItems.length === 0}
                 className="px-3 py-2 text-xs border border-orange-200 rounded-lg text-orange-700 hover:bg-orange-50 disabled:opacity-40 transition-colors">

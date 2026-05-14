@@ -181,20 +181,11 @@ export async function syncCatalogAndInventory(): Promise<SyncCatalogResult> {
       const units90d = vel?.units90d || 0
       const dailyRate = units30d / 30
 
-      // HARD RULE: If we have NO order history for this ASIN in our orders table,
-      // it likely sells exclusively via FBA (FBA orders aren't in our orders table).
-      // We cannot compute accurate velocity — skip to avoid false positives.
-      // Only flag if we have at least 3 orders in 90 days to establish a real pattern.
-      if (units90d < 3 && inv.quantity_available < 20) {
-        console.log(`[Excess] Skipping ${inv.asin} — insufficient order history (${units90d} orders/90d, likely FBA-only seller)`)
-        continue
-      }
-
-      // Skip if selling fast enough (DoS <= threshold)
-      if (dailyRate === 0) {
-        // Zero velocity AND no inbound — only flag if substantial stock (> 20 units)
-        // to avoid noise from products that just haven't had orders synced yet
-        if (inv.quantity_available < 20) continue
+      // For FBA-only products (no FBM orders), we can't compute velocity from orders.
+      // Flag any item with qty >= 5 and zero/low velocity as potentially excess.
+      // Items with < 5 units are too small to worry about.
+      if (dailyRate === 0 && inv.quantity_available < 5) {
+        continue // Too few units to flag as excess
       }
 
       const daysOfSupply = dailyRate > 0

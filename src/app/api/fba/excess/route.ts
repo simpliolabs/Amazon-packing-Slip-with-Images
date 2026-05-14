@@ -53,19 +53,8 @@ export async function GET(req: NextRequest) {
   const format = searchParams.get('format')
   const forceRefresh = searchParams.get('refresh') === 'true'
 
-  // If refresh requested, trigger a background sync
-  if (forceRefresh) {
-    try {
-      // Import dynamically to avoid circular deps
-      const { syncCatalogAndInventory } = await import('@/lib/sync/syncCatalog')
-      console.log('[Excess] Refresh requested — triggering background sync...')
-      const syncResult = await syncCatalogAndInventory()
-      console.log(`[Excess] Sync complete: ${syncResult.excessItemsFound} excess items found`)
-    } catch (err) {
-      console.error('[Excess] Background sync error:', err)
-      // Continue to return whatever data we have
-    }
-  }
+  // Note: refresh is handled by the UI calling the sync endpoint first,
+  // then re-fetching this endpoint. No inline sync here to avoid timeouts.
 
   let query = supabase
     .from('excess_inventory')
