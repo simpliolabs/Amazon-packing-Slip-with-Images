@@ -63,7 +63,7 @@ interface ListingIssue {
   sku: string
   asin: string | null
   product_name: string | null
-  issue_type: 'suppressed' | 'zero_price' | 'fba_no_stock' | 'fba_stockout' | 'inactive_no_stock' | 'fbm_no_fba'
+  issue_type: 'suppressed' | 'zero_price' | 'fbm_no_fba'
   issue_label: string
   severity: 'critical' | 'warning' | 'opportunity'
   detail: string

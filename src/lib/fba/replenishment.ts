@@ -158,6 +158,39 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     }
   }
 
+  // Build FBA sales velocity map by ASIN (aggregate all Amazon-channel SKUs per ASIN).
+  // This is the SOURCE OF TRUTH for FBA velocity — fba_inventory.units_sold_30d is often
+  // stale or incomplete (e.g., showing 1 when sku_sales_analytics shows 8).
+  const fbaSalesVelocityByAsin = new Map<string, { units30d: number; velocityPerDay: number }>()
+  for (const row of fbaSalesRows || []) {
+    if (!row.asin) continue
+    const existing = fbaSalesVelocityByAsin.get(row.asin)
+    const units = row.units_sold_30d || 0
+    const velocity = units / 30
+    if (!existing) {
+      fbaSalesVelocityByAsin.set(row.asin, { units30d: units, velocityPerDay: velocity })
+    } else {
+      existing.units30d += units
+      existing.velocityPerDay += velocity
+    }
+  }
+
+  // Build a set of ASINs with any demand signal (sales > 0 in either channel,
+  // or stock > 0 in fba_inventory). Only these qualify for the report.
+  // This prevents 1,984 dead listings (0 stock + 0 sales) from flooding the report.
+  const asinsWithDemand = new Set<string>()
+  for (const row of fbaSalesRows || []) {
+    if (row.asin && (row.units_sold_30d || 0) > 0) asinsWithDemand.add(row.asin)
+  }
+  for (const row of fbmSalesRows || []) {
+    if (row.asin && (row.units_sold_30d || 0) > 0) asinsWithDemand.add(row.asin)
+  }
+  for (const inv of invRows || []) {
+    if (inv.asin && ((inv.quantity_available || 0) > 0 || (inv.quantity_inbound || 0) > 0)) {
+      asinsWithDemand.add(inv.asin)
+    }
+  }
+
   // ── 2c. Load FBA SKUs from listing_health as THIRD source ─────────────────
   // listing_health has ALL 10k+ listings. FBA SKUs are identified by the -FBA
   // suffix in the SKU field (fulfillment_channel may show 'DEFAULT' for all rows
@@ -386,17 +419,13 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   const recommendations: ProductRecommendation[] = []
   const allAsins = new Set(velocityMap.keys())
 
-  // ── 4a. Add FBA-only ASINs (no FBM orders) ────────────────────────────────
-  // ASINs that exist in fba_inventory (or were added as synthetic entries from
-  // sku_sales_analytics / listing_health) but have ZERO FBM orders will never
-  // appear in velocityMap, which is built exclusively from the orders table.
-  // We must add them so stocked-out FBA-only products are surfaced in the report.
-  // Their fbmUnits30d and fbmVelocityPerDay will be 0; their FBA sales velocity
-  // from sku_sales_analytics drives the stocked_out / replenish status.
+  // ── 4a. Add FBA-only ASINs that have a DEMAND SIGNAL ─────────────────────
+  // Only add FBA ASINs that have sales > 0 OR stock > 0 OR inbound > 0.
+  // This prevents 1,984 dead listings (0 stock + 0 sales) from flooding the report.
   for (const [asin] of fbaByAsin) {
-    if (!allAsins.has(asin)) {
+    if (!allAsins.has(asin) && asinsWithDemand.has(asin)) {
       allAsins.add(asin)
-      console.log(`[Replenishment] FBA-only ASIN added to report: ${asin} (not in orders table)`)
+      console.log(`[Replenishment] FBA-only ASIN added (has demand signal): ${asin}`)
     }
   }
 
@@ -456,7 +485,10 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     const fbaQtyAvailable = fbaInv?.quantity_available ?? 0
     const fbaQtyInbound = fbaInv?.quantity_inbound ?? 0
     const fbaQtyTotal = fbaInv?.quantity_total ?? 0
-    const fbaUnitsSold30d = fbaInv?.units_sold_30d ?? 0
+    // Use sku_sales_analytics Amazon channel as source of truth for FBA velocity.
+    // fba_inventory.units_sold_30d is often stale (e.g., shows 1 when real is 8).
+    const fbaSalesAnalytics = fbaSalesVelocityByAsin.get(asin)
+    const fbaUnitsSold30d = fbaSalesAnalytics?.units30d ?? fbaInv?.units_sold_30d ?? 0
     const fbaBuyBoxPct = fbaInv?.buy_box_percentage ?? 0
     const lastFbaSync = fbaInv?.last_synced_at ?? null
 
@@ -468,7 +500,8 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     // If both channels sell, we need to cover ALL demand, not just one channel.
     // When FBA is stocked out (qty=0, units_sold_30d=0), the FBM velocity alone
     // represents the TOTAL demand (all customers buying via FBM because FBA is out).
-    const fbaVelocityPerDay = fbaUnitsSold30d / 30
+    // Use sku_sales_analytics velocity if available (more accurate), else derive from units
+    const fbaVelocityPerDay = fbaSalesAnalytics?.velocityPerDay ?? (fbaUnitsSold30d / 30)
     const combinedVelocityPerDay = Math.max(
       fbmVelocityPerDay + fbaVelocityPerDay,  // both channels combined
       fbmVelocityPerDay,                       // at minimum, FBM velocity alone
