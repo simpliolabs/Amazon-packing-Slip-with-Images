@@ -71,14 +71,24 @@ export async function GET(req: NextRequest) {
   let items = data || []
 
   // ── Auto-populate from Amazon's Inventory Health Report ──────────────────
-  // When the table is empty (or force refresh), fetch Amazon's real excess data.
+  // Triggers when:
+  // 1. Table is empty (first load)
+  // 2. Force refresh requested (?refresh=true)
+  // 3. Data is stale (all items last synced > 6 hours ago)
   // This uses GET_FBA_INVENTORY_PLANNING_DATA which has:
   // - Real days of supply (Amazon's calculation, not ours)
   // - Estimated excess quantity
   // - Recommended actions (Create sale, Create outlet deal, etc.)
   // - Storage fees
   // - Actual units sold in 30 days
-  if ((items.length === 0 || forceRefresh) && format !== 'csv') {
+  const SIX_HOURS = 6 * 60 * 60 * 1000
+  const isStale = items.length > 0 && items.every(i => {
+    const lastSynced = new Date(i.last_synced_at).getTime()
+    return Date.now() - lastSynced > SIX_HOURS
+  })
+  const shouldRefresh = items.length === 0 || forceRefresh || isStale
+
+  if (shouldRefresh && format !== 'csv') {
     try {
       console.log('[Excess] Auto-populating from Amazon Inventory Health Report...')
       const healthMap = await fetchInventoryHealthReport()
