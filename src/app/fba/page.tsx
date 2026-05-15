@@ -91,6 +91,43 @@ interface FBANotification {
   created_at: string
 }
 
+// ─── Missing Inventory Types ────────────────────────────────────────────────
+
+interface MissingInventoryGap {
+  sku: string
+  asin: string
+  product_name: string
+  quantity: number
+  status: string
+  family: string
+  size_token: string
+  color_token: string
+  total_colors_for_size: number
+  stocked_colors: number
+  max_qty_in_sibling: number
+  family_total_colors: number
+  severity: 'critical' | 'warning'
+  last_synced_at: string | null
+}
+
+interface MissingInventorySummary {
+  family: string
+  total_gaps: number
+  critical_gaps: number
+  warning_gaps: number
+  sizes_affected: number
+  colors_affected: number
+  missing_sizes: string[]
+  last_synced_at: string | null
+}
+
+interface MissingInventoryTotals {
+  total_gaps: number
+  critical_gaps: number
+  warning_gaps: number
+  families_affected: number
+}
+
 // ─── Work Log Types ──────────────────────────────────────────────────────────
 
 interface WorkLogEntry {
@@ -177,12 +214,20 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function FBAIntelligencePage() {
-  const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings' | 'ads'>('replenishment')
+  const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings' | 'missing' | 'ads'>('replenishment')
   const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
   const [listingIssues, setListingIssues] = useState<ListingIssue[]>([])
   const [listingIssuesSummary, setListingIssuesSummary] = useState<ListingIssuesSummary | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [listingsLoading, setListingsLoading] = useState(false)
+
+  // Missing Inventory state
+  const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
+  const [missingSummary, setMissingSummary] = useState<MissingInventorySummary[]>([])
+  const [missingTotals, setMissingTotals] = useState<MissingInventoryTotals | null>(null)
+  const [missingLoading, setMissingLoading] = useState(false)
+  const [missingFamily, setMissingFamily] = useState<string>('')
+  const [missingSeverity, setMissingSeverity] = useState<string>('all')
 
   // Replenishment state
   const [report, setReport] = useState<ProductRecommendation[]>([])
@@ -667,6 +712,26 @@ export default function FBAIntelligencePage() {
     }
   }, [])
 
+  // Fetch missing inventory gaps
+  const fetchMissingInventory = useCallback(async (family = '', severity = 'all') => {
+    setMissingLoading(true)
+    try {
+      const token = await getToken()
+      const params = new URLSearchParams({ limit: '500' })
+      if (family) params.set('family', family)
+      if (severity !== 'all') params.set('severity', severity)
+      const resp = await fetch(`/api/fba/missing-inventory?${params}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to load missing inventory')
+      const data = await resp.json()
+      setMissingGaps(data.gaps || [])
+      setMissingSummary(data.summary || [])
+      setMissingTotals(data.totals || null)
+    } catch (e) { console.error('[missing-inventory]', e) }
+    finally { setMissingLoading(false) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Fetch listing health
   const fetchListingIssues = useCallback(async (triggerSync = false) => {
     setListingsLoading(true)
@@ -687,6 +752,7 @@ export default function FBAIntelligencePage() {
   useEffect(() => {
     if (activeTab === 'analytics' && salesAnalytics.length === 0) fetchSalesAnalytics()
     if (activeTab === 'listings' && listingIssues.length === 0) fetchListingIssues()
+    if (activeTab === 'missing' && missingGaps.length === 0) fetchMissingInventory()
     if (activeTab === 'ads' && !adsStatus) fetchAdsData()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -900,6 +966,21 @@ export default function FBAIntelligencePage() {
           {listingIssuesSummary && listingIssuesSummary.total > 0 && (
             <span className="ml-2 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full font-bold">
               {listingIssuesSummary.total}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab('missing')}
+          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'missing'
+              ? 'border-rose-600 text-rose-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Missing Inventory
+          {missingTotals && missingTotals.critical_gaps > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 bg-rose-100 text-rose-700 text-xs rounded-full font-bold">
+              {missingTotals.critical_gaps}
             </span>
           )}
         </button>
@@ -1851,6 +1932,192 @@ export default function FBAIntelligencePage() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════════════════
+          TAB: MISSING INVENTORY
+      ══════════════════════════════════════════════════════════════════════ */}
+      {activeTab === 'missing' && (
+        <>
+          {/* Header */}
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Missing Inventory</h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                FBM size/color combinations that are out of stock while sibling SKUs in the same family are still available
+              </p>
+            </div>
+            <button
+              onClick={() => fetchMissingInventory(missingFamily, missingSeverity)}
+              disabled={missingLoading}
+              className="inline-flex items-center gap-2 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              {missingLoading ? 'Scanning…' : 'Refresh'}
+            </button>
+          </div>
+
+          {/* Totals banner */}
+          {missingTotals && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-red-700">{missingTotals.critical_gaps}</div>
+                <div className="text-xs text-red-600 font-medium">Critical (Out of Stock)</div>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-amber-700">{missingTotals.warning_gaps}</div>
+                <div className="text-xs text-amber-600 font-medium">Warning (&lt;5 units)</div>
+              </div>
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-gray-700">{missingTotals.total_gaps}</div>
+                <div className="text-xs text-gray-500 font-medium">Total Gaps</div>
+              </div>
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
+                <div className="text-2xl font-bold text-blue-700">{missingTotals.families_affected}</div>
+                <div className="text-xs text-blue-600 font-medium">Families Affected</div>
+              </div>
+            </div>
+          )}
+
+          {/* Filters */}
+          <div className="flex items-center gap-3 mb-4">
+            <select
+              value={missingSeverity}
+              onChange={e => {
+                setMissingSeverity(e.target.value)
+                fetchMissingInventory(missingFamily, e.target.value)
+              }}
+              className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-rose-300"
+            >
+              <option value="all">All Severities</option>
+              <option value="critical">Critical Only</option>
+              <option value="warning">Warning Only</option>
+            </select>
+            <select
+              value={missingFamily}
+              onChange={e => {
+                setMissingFamily(e.target.value)
+                fetchMissingInventory(e.target.value, missingSeverity)
+              }}
+              className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-rose-300 max-w-xs"
+            >
+              <option value="">All Families</option>
+              {missingSummary.map(s => (
+                <option key={s.family} value={s.family}>
+                  {s.family} ({s.critical_gaps} critical)
+                </option>
+              ))}
+            </select>
+            {(missingFamily || missingSeverity !== 'all') && (
+              <button
+                onClick={() => { setMissingFamily(''); setMissingSeverity('all'); fetchMissingInventory('', 'all') }}
+                className="text-xs text-gray-400 hover:text-gray-600 underline"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
+
+          {/* Family summary cards (top 10) */}
+          {!missingFamily && missingSummary.length > 0 && (
+            <div className="mb-5">
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">Top Families by Gap Count</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {missingSummary.slice(0, 9).map(s => (
+                  <button
+                    key={s.family}
+                    onClick={() => { setMissingFamily(s.family); fetchMissingInventory(s.family, missingSeverity) }}
+                    className="text-left p-3 rounded-xl border border-gray-200 bg-white hover:border-rose-300 hover:bg-rose-50 transition-colors"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-xs font-semibold text-gray-800 truncate max-w-[140px]">{s.family}</span>
+                      <span className="flex items-center gap-1">
+                        {s.critical_gaps > 0 && (
+                          <span className="px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full font-bold">{s.critical_gaps}</span>
+                        )}
+                        {s.warning_gaps > 0 && (
+                          <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full font-bold">{s.warning_gaps}</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {s.sizes_affected} size{s.sizes_affected !== 1 ? 's' : ''} · {s.colors_affected} color{s.colors_affected !== 1 ? 's' : ''} · missing: {s.missing_sizes.join(', ')}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Gap detail table */}
+          {missingLoading ? (
+            <div className="text-center py-12 text-gray-400">Scanning inventory gaps…</div>
+          ) : missingGaps.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">
+              <div className="text-4xl mb-3">✅</div>
+              <p className="font-medium text-gray-600">No inventory gaps detected</p>
+              <p className="text-sm mt-1">All size/color combinations in each family are stocked.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-gray-200">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-200">
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Family</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Size</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Color</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Qty</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Siblings Stocked</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Max Sibling Qty</th>
+                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Severity</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {missingGaps.map(gap => (
+                    <tr key={gap.sku} className={`hover:bg-gray-50 transition-colors ${
+                      gap.severity === 'critical' ? 'bg-red-50/30' : 'bg-amber-50/20'
+                    }`}>
+                      <td className="px-4 py-2.5 font-mono text-xs text-gray-700">{gap.sku}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{gap.family}</td>
+                      <td className="px-3 py-2.5 text-center">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-gray-100 text-gray-700">
+                          {gap.size_token}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 text-center font-mono text-xs text-gray-600">{gap.color_token}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-gray-900">{gap.quantity}</td>
+                      <td className="px-3 py-2.5 text-center">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          gap.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                        }`}>
+                          {gap.status}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-gray-600">
+                        {gap.stocked_colors} / {gap.total_colors_for_size}
+                      </td>
+                      <td className="px-3 py-2.5 text-center font-medium text-gray-700">{gap.max_qty_in_sibling}</td>
+                      <td className="px-3 py-2.5 text-center">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          gap.severity === 'critical'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {gap.severity}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="mt-3 text-xs text-gray-400 text-center">
+            Gaps detected by comparing FBM stock levels across all SKUs in the same design family · Refreshed on every inventory sync
+          </div>
+        </>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
           TAB: ADS MANAGER
       ═══════════════════════════════════════════════════════════════════════ */}
       {activeTab === 'ads' && (
