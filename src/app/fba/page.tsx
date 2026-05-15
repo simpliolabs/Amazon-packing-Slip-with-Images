@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import type { ProductRecommendation, ReplenishmentStatus } from '@/lib/fba/replenishment'
 
@@ -91,6 +91,35 @@ interface FBANotification {
   created_at: string
 }
 
+// ─── Work Log Types ──────────────────────────────────────────────────────────
+
+interface WorkLogEntry {
+  id: string
+  asin: string
+  sku: string
+  qty_planned: number
+  note: string | null
+  logged_by: string | null
+  logged_by_name: string | null
+  logged_at: string
+  edited_at: string | null
+  edited_by: string | null
+  edited_by_name: string | null
+  edit_history: Array<{
+    prev_qty_planned: number
+    prev_note: string | null
+    edited_by: string
+    edited_at: string
+  }>
+}
+
+interface WorkLogState {
+  entries: WorkLogEntry[]
+  total_planned: number
+  loading: boolean
+  error: string | null
+}
+
 interface ReplenishmentSummary {
   total: number
   critical: number
@@ -169,6 +198,15 @@ export default function FBAIntelligencePage() {
   const [excessFilter, setExcessFilter] = useState<string>('all')
   const [generatingPlan, setGeneratingPlan] = useState<string | null>(null) // SKU being generated
   const [expandedItem, setExpandedItem] = useState<string | null>(null)     // SKU expanded
+
+  // Work Log state — keyed by ASIN
+  const [workLogs, setWorkLogs] = useState<Record<string, WorkLogState>>({})
+  const [expandedWorkLog, setExpandedWorkLog] = useState<string | null>(null)
+  // Work Log form state
+  const [workLogForm, setWorkLogForm] = useState<Record<string, { qty: string; note: string; submitting: boolean }>>({})
+  // Work Log edit state — keyed by entry id
+  const [editingEntry, setEditingEntry] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState<{ qty: string; note: string }>({ qty: '', note: '' })
 
   // Ads Manager state
   const [adsStatus, setAdsStatus] = useState<{
@@ -405,6 +443,86 @@ export default function FBAIntelligencePage() {
       await fetchReport()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to mark shipped')
+    }
+  }
+
+  // ── Work Log functions ────────────────────────────────────────────────────
+  const fetchWorkLog = async (asin: string) => {
+    setWorkLogs(prev => ({
+      ...prev,
+      [asin]: { ...(prev[asin] || { entries: [], total_planned: 0 }), loading: true, error: null },
+    }))
+    try {
+      const token = await getToken()
+      const resp = await fetch(`/api/fba/work-log?asin=${encodeURIComponent(asin)}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to load work log')
+      const data = await resp.json()
+      setWorkLogs(prev => ({
+        ...prev,
+        [asin]: { entries: data.entries || [], total_planned: data.total_planned || 0, loading: false, error: null },
+      }))
+    } catch (err) {
+      setWorkLogs(prev => ({
+        ...prev,
+        [asin]: { ...(prev[asin] || { entries: [], total_planned: 0 }), loading: false, error: err instanceof Error ? err.message : 'Error' },
+      }))
+    }
+  }
+
+  const toggleWorkLog = (asin: string) => {
+    if (expandedWorkLog === asin) {
+      setExpandedWorkLog(null)
+    } else {
+      setExpandedWorkLog(asin)
+      if (!workLogs[asin] || workLogs[asin].entries.length === 0) {
+        fetchWorkLog(asin)
+      }
+    }
+  }
+
+  const submitWorkLog = async (asin: string, sku: string) => {
+    const form = workLogForm[asin]
+    if (!form || !form.qty || parseInt(form.qty) < 1) return
+    setWorkLogForm(prev => ({ ...prev, [asin]: { ...prev[asin], submitting: true } }))
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/work-log', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ asin, sku, qty_planned: parseInt(form.qty), note: form.note || undefined }),
+      })
+      if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to log')
+      setWorkLogForm(prev => ({ ...prev, [asin]: { qty: '', note: '', submitting: false } }))
+      await fetchWorkLog(asin)
+    } catch (err) {
+      setWorkLogForm(prev => ({ ...prev, [asin]: { ...prev[asin], submitting: false } }))
+      setError(err instanceof Error ? err.message : 'Failed to save work log')
+    }
+  }
+
+  const saveEditEntry = async (entryId: string, asin: string) => {
+    const qty = parseInt(editForm.qty)
+    if (!qty || qty < 1) return
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/work-log', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ id: entryId, qty_planned: qty, note: editForm.note }),
+      })
+      if (!resp.ok) throw new Error((await resp.json()).error || 'Failed to update')
+      setEditingEntry(null)
+      await fetchWorkLog(asin)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update work log entry')
     }
   }
 
@@ -916,7 +1034,8 @@ export default function FBAIntelligencePage() {
                     {filteredReport.map((rec) => {
                       const cfg = STATUS_CONFIG[rec.status] || { label: rec.status_label || rec.status, color: 'text-gray-500', bg: 'bg-gray-100', border: 'border-gray-200' }
                       return (
-                        <tr key={rec.asin} className="hover:bg-gray-50 transition-colors" title={rec.send_rationale}>
+                        <React.Fragment key={rec.asin}>
+                        <tr className="hover:bg-gray-50 transition-colors" title={rec.send_rationale}>
                           <td className="px-4 py-3">
                             <div className="font-medium text-gray-900 text-xs leading-tight max-w-xs truncate">{rec.title}</div>
                             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -1013,9 +1132,214 @@ export default function FBAIntelligencePage() {
                                   🚚 Mark Shipped
                                 </button>
                               )}
+                              {/* Work Log toggle */}
+                              <button
+                                onClick={() => toggleWorkLog(rec.asin)}
+                                className={`text-xs px-2 py-0.5 rounded border transition-colors whitespace-nowrap ${
+                                  expandedWorkLog === rec.asin
+                                    ? 'bg-blue-100 text-blue-700 border-blue-300'
+                                    : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200'
+                                }`}
+                              >
+                                {expandedWorkLog === rec.asin ? '▲ Log' : '▼ Log'}
+                                {workLogs[rec.asin]?.total_planned > 0 && (
+                                  <span className="ml-1 font-bold text-blue-700">{workLogs[rec.asin].total_planned}</span>
+                                )}
+                              </button>
                             </div>
                           </td>
                         </tr>
+                        {/* ── Work Log expandable row ── */}
+                        {expandedWorkLog === rec.asin && (
+                          <tr key={`wl-${rec.asin}`}>
+                            <td colSpan={9} className="px-0 py-0 bg-blue-50/40 border-b border-blue-100">
+                              <div className="px-6 py-4">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-xs font-semibold text-blue-800 uppercase tracking-wide">Print Run Log — {rec.asin}</span>
+                                  <button
+                                    onClick={() => setExpandedWorkLog(null)}
+                                    className="text-gray-400 hover:text-gray-600"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  </button>
+                                </div>
+
+                                {/* Summary bar */}
+                                {(() => {
+                                  const wl = workLogs[rec.asin]
+                                  const totalPlanned = wl?.total_planned || 0
+                                  const onWay = rec.fba_qty_inbound || 0
+                                  const sendQty = rec.recommended_send_qty || 0
+                                  const remaining = Math.max(0, sendQty - totalPlanned)
+                                  return (
+                                    <div className="flex items-center gap-6 mb-4 p-3 bg-white rounded-lg border border-blue-100 text-xs">
+                                      <div>
+                                        <span className="text-gray-500">Planned to print:</span>{' '}
+                                        <span className="font-bold text-blue-700">{totalPlanned}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-gray-500">On Way (Amazon):</span>{' '}
+                                        <span className="font-bold text-green-700">{onWay > 0 ? `+${onWay}` : '—'}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-gray-500">Send Qty:</span>{' '}
+                                        <span className="font-bold text-gray-700">{sendQty}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-gray-500">Remaining:</span>{' '}
+                                        <span className={`font-bold ${remaining > 0 ? 'text-orange-600' : 'text-green-600'}`}>
+                                          {remaining > 0 ? remaining : '✓ Complete'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  )
+                                })()}
+
+                                {/* Log entries table */}
+                                {workLogs[rec.asin]?.loading ? (
+                                  <div className="text-xs text-gray-400 py-2">Loading log…</div>
+                                ) : workLogs[rec.asin]?.error ? (
+                                  <div className="text-xs text-red-500 py-2">{workLogs[rec.asin].error}</div>
+                                ) : (workLogs[rec.asin]?.entries || []).length === 0 ? (
+                                  <div className="text-xs text-gray-400 italic py-2">No print runs logged yet for this ASIN.</div>
+                                ) : (
+                                  <div className="mb-3 rounded-lg border border-gray-200 overflow-hidden bg-white">
+                                    <table className="w-full text-xs">
+                                      <thead className="bg-gray-50 border-b border-gray-200">
+                                        <tr>
+                                          <th className="text-left px-3 py-2 text-gray-500 font-semibold">Date</th>
+                                          <th className="text-left px-3 py-2 text-gray-500 font-semibold">SKU</th>
+                                          <th className="text-right px-3 py-2 text-gray-500 font-semibold">Qty Planned</th>
+                                          <th className="text-left px-3 py-2 text-gray-500 font-semibold">Note</th>
+                                          <th className="text-left px-3 py-2 text-gray-500 font-semibold">Logged By</th>
+                                          <th className="text-left px-3 py-2 text-gray-500 font-semibold">History</th>
+                                          <th className="px-3 py-2"></th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-gray-100">
+                                        {(workLogs[rec.asin]?.entries || []).map(entry => (
+                                          <tr key={entry.id} className="hover:bg-gray-50">
+                                            <td className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                                              {new Date(entry.logged_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                            </td>
+                                            <td className="px-3 py-2 text-gray-500 font-mono">{entry.sku}</td>
+                                            <td className="px-3 py-2 text-right">
+                                              {editingEntry === entry.id ? (
+                                                <input
+                                                  type="number"
+                                                  min="1"
+                                                  value={editForm.qty}
+                                                  onChange={e => setEditForm(f => ({ ...f, qty: e.target.value }))}
+                                                  className="w-16 px-1 py-0.5 border border-blue-300 rounded text-right text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                                />
+                                              ) : (
+                                                <span className="font-bold text-gray-900">{entry.qty_planned}</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-2 text-gray-500 max-w-xs">
+                                              {editingEntry === entry.id ? (
+                                                <input
+                                                  type="text"
+                                                  value={editForm.note}
+                                                  onChange={e => setEditForm(f => ({ ...f, note: e.target.value }))}
+                                                  placeholder="Note…"
+                                                  className="w-full px-1 py-0.5 border border-blue-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                                />
+                                              ) : (
+                                                entry.note || <span className="text-gray-300">—</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-2 text-gray-500">{entry.logged_by_name || '—'}</td>
+                                            <td className="px-3 py-2">
+                                              {entry.edit_history && entry.edit_history.length > 0 ? (
+                                                <span
+                                                  className="text-blue-500 cursor-pointer hover:underline"
+                                                  title={entry.edit_history.map(h =>
+                                                    `${new Date(h.edited_at).toLocaleString()}: was ${h.prev_qty_planned} units${h.prev_note ? ` / "${h.prev_note}"` : ''}`
+                                                  ).join('\n')}
+                                                >
+                                                  {entry.edit_history.length} edit{entry.edit_history.length !== 1 ? 's' : ''}
+                                                </span>
+                                              ) : (
+                                                <span className="text-gray-300">—</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-2">
+                                              {editingEntry === entry.id ? (
+                                                <div className="flex items-center gap-1">
+                                                  <button
+                                                    onClick={() => saveEditEntry(entry.id, rec.asin)}
+                                                    className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+                                                  >
+                                                    Save
+                                                  </button>
+                                                  <button
+                                                    onClick={() => setEditingEntry(null)}
+                                                    className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200"
+                                                  >
+                                                    Cancel
+                                                  </button>
+                                                </div>
+                                              ) : (
+                                                <button
+                                                  onClick={() => {
+                                                    setEditingEntry(entry.id)
+                                                    setEditForm({ qty: String(entry.qty_planned), note: entry.note || '' })
+                                                  }}
+                                                  className="text-gray-400 hover:text-blue-600 transition-colors"
+                                                  title="Edit this entry"
+                                                >
+                                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                                  </svg>
+                                                </button>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+
+                                {/* New entry form */}
+                                <div className="flex items-center gap-2 mt-2">
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    placeholder="Qty"
+                                    value={workLogForm[rec.asin]?.qty || ''}
+                                    onChange={e => setWorkLogForm(prev => ({
+                                      ...prev,
+                                      [rec.asin]: { ...(prev[rec.asin] || { qty: '', note: '', submitting: false }), qty: e.target.value },
+                                    }))}
+                                    className="w-20 px-2 py-1.5 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                  />
+                                  <input
+                                    type="text"
+                                    placeholder="Note (optional)"
+                                    value={workLogForm[rec.asin]?.note || ''}
+                                    onChange={e => setWorkLogForm(prev => ({
+                                      ...prev,
+                                      [rec.asin]: { ...(prev[rec.asin] || { qty: '', note: '', submitting: false }), note: e.target.value },
+                                    }))}
+                                    className="flex-1 px-2 py-1.5 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                  />
+                                  <button
+                                    onClick={() => submitWorkLog(rec.asin, rec.fba_sku || rec.sku)}
+                                    disabled={!workLogForm[rec.asin]?.qty || workLogForm[rec.asin]?.submitting}
+                                    className="px-3 py-1.5 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 disabled:opacity-40 transition-colors whitespace-nowrap"
+                                  >
+                                    {workLogForm[rec.asin]?.submitting ? 'Saving…' : '+ Log Print Run'}
+                                  </button>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
                       )
                     })}
                   </tbody>
