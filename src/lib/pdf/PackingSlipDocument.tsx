@@ -133,6 +133,8 @@ const SKU_COLOR_CODES: Record<string, string> = {
   BJN: 'Blue Jean',
 
   FBL: 'Flo Blue',
+  ICB: 'Ice Blue',
+  MG: 'Military Green', MILG: 'Military Green',
   IRF: 'Island Reef',
   ORC: 'Orchid',
   PRW: 'Periwinkle',
