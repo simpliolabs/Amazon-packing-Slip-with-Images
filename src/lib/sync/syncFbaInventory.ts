@@ -182,7 +182,7 @@ export async function syncFbaInventory(): Promise<{
       const { error } = await supabase
         .from('fba_inventory')
         .upsert(batch, {
-          onConflict: 'sku',
+          onConflict: 'asin,sku',
           ignoreDuplicates: false,
         })
 
