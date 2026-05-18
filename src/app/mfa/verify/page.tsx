@@ -17,29 +17,23 @@ export default function MFAVerifyPage() {
   const [debugInfo, setDebugInfo] = useState<string>('')
 
   useEffect(() => {
+    // Safety timeout: if auth check takes more than 8 seconds, show an error
+    // instead of hanging forever. This prevents the infinite "Loading security check"
+    // spinner that occurs when Supabase auth is slow.
+    const timeoutId = setTimeout(() => {
+      setDebugInfo('Auth check timed out. Please refresh the page or try logging in again.')
+      setLoading(false)
+    }, 8000)
+
     async function checkFactors() {
       try {
         const supabase = createClient()
 
-        // Step 1: Check if user has any session at all
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-
-        if (sessionError) {
-          setDebugInfo(`Session error: ${sessionError.message}`)
-          setLoading(false)
-          return
-        }
-
-        if (!session) {
-          // No session — redirect to login
-          router.push('/login')
-          return
-        }
-
-        // Step 2: Check AAL level
+        // Step 1: Check AAL level — reads JWT claims, fast local operation
         const { data: aalData, error: aalError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
 
         if (aalError) {
+          clearTimeout(timeoutId)
           setDebugInfo(`AAL error: ${aalError.message}`)
           setLoading(false)
           return
@@ -50,14 +44,23 @@ export default function MFAVerifyPage() {
 
         // If already at AAL2, redirect to dashboard
         if (currentLevel === 'aal2') {
+          clearTimeout(timeoutId)
           router.push('/')
           return
         }
 
-        // Step 3: List factors — works with AAL1 session
+        // If no session at all, redirect to login
+        if (!currentLevel) {
+          clearTimeout(timeoutId)
+          router.push('/login')
+          return
+        }
+
+        // Step 2: List factors to get the factor ID for the verify call
         const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors()
 
         if (factorsError) {
+          clearTimeout(timeoutId)
           setDebugInfo(`Factors error: ${factorsError.message} | AAL: ${currentLevel} → ${nextLevel}`)
           setLoading(false)
           return
@@ -68,19 +71,23 @@ export default function MFAVerifyPage() {
 
         if (verifiedFactors.length === 0) {
           // No verified MFA — redirect to enroll
+          clearTimeout(timeoutId)
           router.push('/mfa/enroll')
           return
         }
 
+        clearTimeout(timeoutId)
         setFactorId(verifiedFactors[0].id)
         setLoading(false)
       } catch (err) {
+        clearTimeout(timeoutId)
         setDebugInfo(`Unexpected error: ${err instanceof Error ? err.message : String(err)}`)
         setLoading(false)
       }
     }
 
     checkFactors()
+    return () => clearTimeout(timeoutId)
   }, [router])
 
   async function handleVerify(e: React.FormEvent) {
@@ -132,6 +139,7 @@ export default function MFAVerifyPage() {
         <div className="flex flex-col items-center gap-3">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#2E9CE6]"></div>
           <p className="text-xs text-gray-400">Loading security check…</p>
+          <p className="text-xs text-gray-300">This should take less than 5 seconds</p>
         </div>
       </div>
     )
@@ -162,7 +170,13 @@ export default function MFAVerifyPage() {
 
           {debugInfo && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
-              <p className="text-xs text-yellow-800 font-mono">{debugInfo}</p>
+              <p className="text-xs text-yellow-800 font-mono mb-2">{debugInfo}</p>
+              <button
+                onClick={() => window.location.reload()}
+                className="text-xs text-[#2E9CE6] hover:underline font-medium"
+              >
+                Refresh page to try again
+              </button>
             </div>
           )}
 

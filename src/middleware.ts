@@ -62,26 +62,26 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/', request.url))
   }
 
-  // For authenticated users on protected routes, check MFA and password expiration
+  // For authenticated users on protected routes, check MFA
   if (user && !isPublicRoute && !isMFARoute && !isPasswordResetRoute) {
-    // Check MFA: if user has verified TOTP factors, verify AAL level
+    // getAuthenticatorAssuranceLevel reads JWT claims locally — no extra network call.
+    // nextLevel === 'aal2' means the user has MFA enrolled but this session is only AAL1.
+    // nextLevel === 'aal1' means no MFA factors enrolled at all.
+    // This replaces the previous listFactors() call which was making an extra network
+    // request on every page load and causing the auth API flood.
     const { data: aalData } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
     const currentLevel = aalData?.currentLevel ?? null
+    const nextLevel = aalData?.nextLevel ?? null
 
-    // If user has MFA enrolled but current session is only AAL1, redirect to verify
-    const { data: factors } = await supabase.auth.mfa.listFactors()
-    const verifiedFactors = factors?.totp?.filter(f => f.status === 'verified') || []
-
-    if (verifiedFactors.length > 0 && currentLevel === 'aal1') {
-      // User has MFA but hasn't verified this session
+    // User has MFA enrolled but hasn't verified this session → send to verify
+    if (nextLevel === 'aal2' && currentLevel === 'aal1') {
       const url = request.nextUrl.clone()
       url.pathname = '/mfa/verify'
       return NextResponse.redirect(url)
     }
 
-    // If user has NO MFA enrolled, redirect to enroll (required by policy)
-    // Skip this check for the enroll page itself
-    if (verifiedFactors.length === 0 && !pathname.startsWith('/mfa/enroll')) {
+    // No MFA enrolled → send to enroll (policy requires MFA for all users)
+    if (nextLevel === 'aal1' && currentLevel === 'aal1' && !pathname.startsWith('/mfa/enroll')) {
       const url = request.nextUrl.clone()
       url.pathname = '/mfa/enroll'
       return NextResponse.redirect(url)
