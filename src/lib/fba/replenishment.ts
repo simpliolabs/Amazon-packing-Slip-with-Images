@@ -645,11 +645,12 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       continue
     }
 
-    // ── Weeks of cover ──
+    // ── Weeks of cover (includes inbound units already on the way) ──
     let weeksOfCover: number | null = null
+    const effectiveStock = fbaQtyAvailable + fbaQtyInbound
     if (hasFBAInventory && combinedVelocityPerDay > 0) {
-      weeksOfCover = fbaQtyAvailable / (combinedVelocityPerDay * 7)
-    } else if (hasFBAInventory && fbaQtyAvailable > 0) {
+      weeksOfCover = effectiveStock / (combinedVelocityPerDay * 7)
+    } else if (hasFBAInventory && effectiveStock > 0) {
       weeksOfCover = 999
     }
 
