@@ -27,6 +27,40 @@ function getAdminSupabase() {
   )
 }
 
+/**
+ * Fetch ALL rows from a Supabase table, paginating past the 1000-row default limit.
+ * Uses range-based pagination with 1000-row pages.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAllRows(table: string, select: string, filterFn?: (q: any) => any): Promise<any[]> {
+  const supabase = getAdminSupabase()
+  const PAGE_SIZE = 1000
+  const allRows: any[] = []
+  let from = 0
+  let hasMore = true
+
+  while (hasMore) {
+    let query = supabase.from(table).select(select).range(from, from + PAGE_SIZE - 1)
+    if (filterFn) {
+      query = filterFn(query)
+    }
+    const { data, error } = await query
+    if (error) {
+      console.error(`[fetchAllRows] Error fetching ${table} (offset ${from}):`, error.message)
+      break
+    }
+    if (data && data.length > 0) {
+      allRows.push(...data)
+      from += data.length
+      hasMore = data.length === PAGE_SIZE
+    } else {
+      hasMore = false
+    }
+  }
+
+  return allRows
+}
+
 export type ReplenishmentStatus =
   | 'healthy'        // FBA weeks of cover > trigger threshold
   | 'watch'          // FBA weeks of cover between 50%-100% of trigger
@@ -236,10 +270,12 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   // ── 1. Compute FBM velocity from orders ──────────────────────────────────
   const velocityMap = await computeFBMVelocity()
 
-  // ── 2. Load ALL FBA inventory from Supabase ──────────────────────────────
-  const { data: invRows } = await supabase
-    .from('fba_inventory')
-    .select('asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, label_created_at, shipment_status, last_synced_at')
+  // ── 2. Load ALL FBA inventory from Supabase (paginated — table has 2000+ rows) ──
+  const invRows = await fetchAllRows(
+    'fba_inventory',
+    'asin, sku, quantity_available, quantity_reserved, quantity_inbound, quantity_total, units_sold_30d, buy_box_percentage, label_created_at, shipment_status, last_synced_at'
+  )
+  console.log(`[Replenishment] Loaded ${invRows.length} fba_inventory rows`)
 
   // ── 2b. Load FBA SKUs from sku_sales_analytics ────────────────────────────
   const { data: fbaSalesRows } = await supabase
@@ -253,16 +289,18 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     .select('asin, sku, units_sold_30d, avg_daily_units')
     .eq('fulfillment_channel', 'Merchant')
 
-  // ── 2c. Load FBA SKUs from listing_health ─────────────────────────────────
-  const { data: listingFbaRows } = await supabase
-    .from('listing_health')
-    .select('asin, sku, product_name')
-    .ilike('sku', '%-FBA')
+  // ── 2c. Load FBA SKUs from listing_health (paginated — table has 15000+ rows) ──
+  const listingFbaRows = await fetchAllRows(
+    'listing_health',
+    'asin, sku, product_name',
+    (q: any) => q.ilike('sku', '%-FBA')
+  )
 
-  const { data: listingFbaRows2 } = await supabase
-    .from('listing_health')
-    .select('asin, sku, product_name')
-    .ilike('sku', '%\\_FBA')
+  const listingFbaRows2 = await fetchAllRows(
+    'listing_health',
+    'asin, sku, product_name',
+    (q: any) => q.ilike('sku', '%\_FBA')
+  )
 
   const allListingFbaRows = [...(listingFbaRows || []), ...(listingFbaRows2 || [])]
   const seenListingSkus = new Set<string>()
@@ -289,10 +327,11 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
   }
 
   // ── 3b. Load parent_asin from listing_health (covers more ASINs than traffic) ──
-  const { data: lhParentRows } = await supabase
-    .from('listing_health')
-    .select('asin, parent_asin')
-    .not('parent_asin', 'is', null)
+  const lhParentRows = await fetchAllRows(
+    'listing_health',
+    'asin, parent_asin',
+    (q: any) => q.not('parent_asin', 'is', null)
+  )
 
   const listingHealthParentMap = new Map<string, string>()
   for (const row of lhParentRows || []) {
