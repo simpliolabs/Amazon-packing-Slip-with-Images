@@ -223,6 +223,7 @@ export default function FBAIntelligencePage() {
   const [listingIssuesSummary, setListingIssuesSummary] = useState<ListingIssuesSummary | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [listingsLoading, setListingsLoading] = useState(false)
+  const [listingsSyncPending, setListingsSyncPending] = useState(false)
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -740,8 +741,19 @@ export default function FBAIntelligencePage() {
     setListingsLoading(true)
     try {
       if (triggerSync) {
-        await fetch('/api/fba/sync-reports').catch(() => {})
-        await new Promise(r => setTimeout(r, 2000))
+        // syncListings is non-blocking: it requests a report from Amazon and returns immediately.
+        // The report is only available on the NEXT call (usually 1-3 minutes later).
+        // So we fire the sync, then re-read the DB (which may still be stale on first click).
+        const syncResp = await fetch('/api/fba/sync-reports').catch(() => null)
+        const syncJson = syncResp ? await syncResp.json().catch(() => null) : null
+        // If listings sync said it requested a new report (not picked up yet), show pending banner
+        const listingsResult = syncJson?.listings
+        if (listingsResult?.status === 'requested' || listingsResult?.requested === true) {
+          setListingsSyncPending(true)
+        } else {
+          setListingsSyncPending(false)
+        }
+        await new Promise(r => setTimeout(r, 1000))
       }
       const resp = await fetch('/api/fba/listing-issues')
       const json = await resp.json()
@@ -1908,6 +1920,17 @@ export default function FBAIntelligencePage() {
               {listingsLoading ? 'Scanning…' : 'Refresh Issues'}
             </button>
           </div>
+
+          {/* Sync pending banner */}
+          {listingsSyncPending && (
+            <div className="mb-4 flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-800">
+              <svg className="w-4 h-4 mt-0.5 flex-shrink-0 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <div>
+                <span className="font-semibold">Amazon report requested.</span> The listings data is being refreshed from Amazon — this usually takes 1–3 minutes.
+                {' '}<button onClick={() => fetchListingIssues(true)} className="underline font-medium hover:text-amber-900">Click here to check again</button> once ready. Issues you fixed in Seller Central will disappear after the report is processed.
+              </div>
+            </div>
+          )}
 
           {/* Summary Cards */}
           {listingIssuesSummary && listingIssuesSummary.total > 0 && (

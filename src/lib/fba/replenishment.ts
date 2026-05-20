@@ -781,9 +781,22 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
 }
 
 /**
+ * Escape a value for RFC 4180 CSV.
+ * Always wraps in double-quotes and escapes internal double-quotes by doubling them.
+ * This ensures Excel correctly splits columns even when values contain commas.
+ */
+function csvCell(value: string | number | null | undefined): string {
+  const str = value == null ? '' : String(value)
+  // Always quote — safest for Excel compatibility
+  return '"' + str.replace(/"/g, '""') + '"'
+}
+
+/**
  * Generate Team Report CSV
+ * UTF-8 BOM prefix ensures Excel opens the file with correct encoding and column splitting.
  */
 export function generateTeamCSV(report: ProductRecommendation[]): string {
+  const BOM = '\uFEFF'
   const headers = [
     'ASIN', 'FBA ASIN', 'FBA SKU', 'FBM SKU', 'Title', 'Status', 'Score',
     'FBM Units (30d)', 'FBM Velocity/Day',
@@ -795,47 +808,49 @@ export function generateTeamCSV(report: ProductRecommendation[]): string {
   const rows = report
     .filter(r => r.status !== 'no_data')
     .map(r => [
-      r.asin,
-      r.fba_asin || '',
-      r.fba_sku || '',
-      r.sku,
-      `"${r.title.replace(/"/g, '""')}"`,
-      r.status_label,
-      r.intelligence_score,
-      r.fbm_units_30d,
-      r.fbm_velocity_per_day.toFixed(2),
-      r.fba_qty_available,
-      r.fba_qty_inbound,
-      r.fba_units_sold_30d,
-      r.fba_buy_box_pct > 0 ? `${r.fba_buy_box_pct.toFixed(1)}%` : 'N/A',
-      r.sessions_30d,
-      r.conversion_rate > 0 ? `${r.conversion_rate.toFixed(1)}%` : 'N/A',
-      r.parent_asin || '',
-      r.parent_units_30d,
-      r.sibling_count,
-      r.weeks_of_cover !== null ? r.weeks_of_cover.toFixed(1) : 'N/A',
-      r.recommended_send_qty,
-      `"${r.send_rationale.replace(/"/g, '""')}"`,
+      csvCell(r.asin),
+      csvCell(r.fba_asin),
+      csvCell(r.fba_sku),
+      csvCell(r.sku),
+      csvCell(r.title),
+      csvCell(r.status_label),
+      csvCell(r.intelligence_score),
+      csvCell(r.fbm_units_30d),
+      csvCell(r.fbm_velocity_per_day.toFixed(2)),
+      csvCell(r.fba_qty_available),
+      csvCell(r.fba_qty_inbound),
+      csvCell(r.fba_units_sold_30d),
+      csvCell(r.fba_buy_box_pct > 0 ? `${r.fba_buy_box_pct.toFixed(1)}%` : 'N/A'),
+      csvCell(r.sessions_30d),
+      csvCell(r.conversion_rate > 0 ? `${r.conversion_rate.toFixed(1)}%` : 'N/A'),
+      csvCell(r.parent_asin),
+      csvCell(r.parent_units_30d),
+      csvCell(r.sibling_count),
+      csvCell(r.weeks_of_cover !== null ? r.weeks_of_cover.toFixed(1) : 'N/A'),
+      csvCell(r.recommended_send_qty),
+      csvCell(r.send_rationale),
     ])
 
-  return [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+  return BOM + [headers.map(h => csvCell(h)).join(','), ...rows.map(r => r.join(','))].join('\r\n')
 }
 
 /**
  * Generate Amazon Shipment-Ready CSV
+ * UTF-8 BOM prefix ensures Excel opens the file with correct encoding and column splitting.
  */
 export function generateAmazonShipmentCSV(report: ProductRecommendation[]): string {
+  const BOM = '\uFEFF'
   const headers = ['Merchant SKU', 'ASIN', 'Quantity to Ship', 'Condition', 'Notes']
 
   const rows = report
     .filter(r => r.recommended_send_qty > 0 && ['stocked_out', 'critical', 'replenish', 'new_candidate'].includes(r.status))
     .map(r => [
-      r.fba_sku || r.sku || r.asin,
-      r.fba_asin || r.asin,
-      r.recommended_send_qty,
-      'NewItem',
-      `"${r.status_label}: ${r.send_rationale.substring(0, 80).replace(/"/g, '""')}"`,
+      csvCell(r.fba_sku || r.sku || r.asin),
+      csvCell(r.fba_asin || r.asin),
+      csvCell(r.recommended_send_qty),
+      csvCell('NewItem'),
+      csvCell(`${r.status_label}: ${r.send_rationale}`),
     ])
 
-  return [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+  return BOM + [headers.map(h => csvCell(h)).join(','), ...rows.map(r => r.join(','))].join('\r\n')
 }
