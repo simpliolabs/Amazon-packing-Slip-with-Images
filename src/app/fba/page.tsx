@@ -216,6 +216,9 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 export default function FBAIntelligencePage() {
   const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings' | 'missing' | 'ads'>('replenishment')
   const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
+  const [salesSearch, setSalesSearch] = useState('')
+  const [salesSortCol, setSalesSortCol] = useState<keyof SkuSalesRow>('units_sold_30d')
+  const [salesSortDir, setSalesSortDir] = useState<'asc' | 'desc'>('desc')
   const [listingIssues, setListingIssues] = useState<ListingIssue[]>([])
   const [listingIssuesSummary, setListingIssuesSummary] = useState<ListingIssuesSummary | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
@@ -1760,7 +1763,44 @@ export default function FBAIntelligencePage() {
       {/* ═══════════════════════════════════════════════════════════════════════
           TAB: SALES ANALYTICS
       ═══════════════════════════════════════════════════════════════════════ */}
-      {activeTab === 'analytics' && (
+      {activeTab === 'analytics' && (() => {
+        // Sort handler
+        const handleSalesSort = (col: keyof SkuSalesRow) => {
+          if (salesSortCol === col) {
+            setSalesSortDir(salesSortDir === 'asc' ? 'desc' : 'asc')
+          } else {
+            setSalesSortCol(col)
+            setSalesSortDir('desc')
+          }
+        }
+        const sortArrow = (col: keyof SkuSalesRow) => salesSortCol === col ? (salesSortDir === 'asc' ? ' ▲' : ' ▼') : ''
+
+        // Filter + sort
+        const filteredSales = salesAnalytics
+          .filter(row => {
+            if (!salesSearch) return true
+            const q = salesSearch.toLowerCase()
+            return (
+              row.sku.toLowerCase().includes(q) ||
+              (row.asin || '').toLowerCase().includes(q) ||
+              (row.product_name || '').toLowerCase().includes(q)
+            )
+          })
+          .sort((a, b) => {
+            const aVal = a[salesSortCol]
+            const bVal = b[salesSortCol]
+            if (aVal == null && bVal == null) return 0
+            if (aVal == null) return 1
+            if (bVal == null) return -1
+            if (typeof aVal === 'number' && typeof bVal === 'number') {
+              return salesSortDir === 'asc' ? aVal - bVal : bVal - aVal
+            }
+            const aStr = String(aVal)
+            const bStr = String(bVal)
+            return salesSortDir === 'asc' ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr)
+          })
+
+        return (
         <>
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -1775,6 +1815,23 @@ export default function FBAIntelligencePage() {
               {analyticsLoading ? 'Syncing from Amazon…' : 'Sync & Refresh'}
             </button>
           </div>
+
+          {/* Search bar */}
+          <div className="mb-4">
+            <input
+              type="text"
+              placeholder="Search by SKU, ASIN, or title…"
+              value={salesSearch}
+              onChange={e => setSalesSearch(e.target.value)}
+              className="w-full max-w-md px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            />
+            {salesSearch && (
+              <span className="ml-3 text-xs text-gray-500">
+                {filteredSales.length} of {salesAnalytics.length} results
+              </span>
+            )}
+          </div>
+
           {analyticsLoading ? (
             <div className="text-center py-12 text-gray-400">Loading sales data…</div>
           ) : salesAnalytics.length === 0 ? (
@@ -1787,21 +1844,23 @@ export default function FBAIntelligencePage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Product</th>
-                    <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Channel</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">7d Units</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">30d Units</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">90d Units</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">30d Revenue</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Avg/Day</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Order</th>
+                    <th onClick={() => handleSalesSort('sku')} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">SKU{sortArrow('sku')}</th>
+                    <th onClick={() => handleSalesSort('asin')} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">ASIN{sortArrow('asin')}</th>
+                    <th onClick={() => handleSalesSort('product_name')} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">Product{sortArrow('product_name')}</th>
+                    <th onClick={() => handleSalesSort('fulfillment_channel')} className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">Channel{sortArrow('fulfillment_channel')}</th>
+                    <th onClick={() => handleSalesSort('units_sold_7d')} className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">7D Units{sortArrow('units_sold_7d')}</th>
+                    <th onClick={() => handleSalesSort('units_sold_30d')} className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">30D Units{sortArrow('units_sold_30d')}</th>
+                    <th onClick={() => handleSalesSort('units_sold_90d')} className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">90D Units{sortArrow('units_sold_90d')}</th>
+                    <th onClick={() => handleSalesSort('revenue_30d')} className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">30D Revenue{sortArrow('revenue_30d')}</th>
+                    <th onClick={() => handleSalesSort('avg_daily_units')} className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">Avg/Day{sortArrow('avg_daily_units')}</th>
+                    <th onClick={() => handleSalesSort('last_order_date')} className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none">Last Order{sortArrow('last_order_date')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {salesAnalytics.map(row => (
+                  {filteredSales.map(row => (
                     <tr key={row.sku} className="hover:bg-gray-50 transition-colors">
                       <td className="px-4 py-3 font-mono text-xs text-gray-700">{row.sku}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-blue-600">{row.asin || '—'}</td>
                       <td className="px-4 py-3 text-gray-700 max-w-[200px] truncate" title={row.product_name || ''}>{row.product_name || '—'}</td>
                       <td className="px-4 py-3 text-center">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
@@ -1825,10 +1884,11 @@ export default function FBAIntelligencePage() {
             </div>
           )}
           <div className="mt-3 text-xs text-gray-400 text-center">
-            Data sourced from Amazon All Orders flat-file report · Updated on every sync
+            Data sourced from Amazon All Orders flat-file report (3×30-day windows for full 90-day coverage) · Updated on every sync
           </div>
         </>
-      )}
+        )
+      })()}
 
       {/* ═══════════════════════════════════════════════════════════════════════
           TAB: LISTING ISSUES

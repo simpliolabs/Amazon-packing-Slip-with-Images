@@ -5,8 +5,16 @@
  * parses the TSV, aggregates sales velocity per SKU (7d / 30d / 90d), and upserts
  * into the sku_sales_analytics table.
  *
- * NON-BLOCKING: If no DONE report exists, requests one and returns immediately.
- * On the next sync call, the DONE report will be picked up and processed.
+ * IMPORTANT: Amazon limits this report type to a maximum 30-day date range per request.
+ * To get accurate 90-day data, we request THREE reports covering:
+ *   - Last 30 days (days 0–30)
+ *   - Days 30–60
+ *   - Days 60–90
+ * Each report is requested/processed independently. The aggregation combines all
+ * available data into the correct 7d/30d/90d buckets.
+ *
+ * NON-BLOCKING: If reports are still generating, returns immediately.
+ * On the next sync call, completed reports will be picked up and processed.
  */
 import { createClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
@@ -37,20 +45,18 @@ interface OrderRow {
 }
 
 /**
- * Request a fresh All Orders report covering the last 90 days.
- * Returns the report ID (fire-and-forget).
+ * Request a fresh All Orders report for a specific date range.
+ * Amazon limits this report to max 30 days per request.
  */
-async function requestOrdersReport(token: string): Promise<string | null> {
-  const dataStartTime = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
-  const dataEndTime = new Date().toISOString()
+async function requestOrdersReport(token: string, startDate: Date, endDate: Date): Promise<string | null> {
   const resp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
     method: 'POST',
     headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       reportType: REPORT_TYPE,
       marketplaceIds: [MARKETPLACE_ID],
-      dataStartTime,
-      dataEndTime,
+      dataStartTime: startDate.toISOString(),
+      dataEndTime: endDate.toISOString(),
     }),
   })
   if (!resp.ok) {
@@ -62,30 +68,32 @@ async function requestOrdersReport(token: string): Promise<string | null> {
 }
 
 /**
- * NON-BLOCKING: Find the most recent DONE report. If none exists, request a new one
- * but return null immediately (don't poll). The next sync will pick it up.
+ * Find the most recent DONE report created after a given time.
+ * Returns the document ID or null.
  */
-async function getReportDocumentId(token: string): Promise<{ documentId: string | null; requested: boolean }> {
-  // Check for an existing DONE report in the last 2 hours (URLs expire quickly)
-  const since2h = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+async function findDoneReport(token: string, createdSince: Date): Promise<string | null> {
   const listUrl =
     `${ENDPOINT}/reports/2021-06-30/reports` +
     `?reportTypes=${REPORT_TYPE}` +
     `&marketplaceIds=${MARKETPLACE_ID}` +
     `&processingStatuses=DONE` +
-    `&createdSince=${encodeURIComponent(since2h)}` +
-    `&pageSize=1`
+    `&createdSince=${encodeURIComponent(createdSince.toISOString())}` +
+    `&pageSize=10`
   const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
-  if (listResp.ok) {
-    const listJson = await listResp.json()
-    const reports: Record<string, string>[] = listJson.reports || []
-    if (reports.length > 0 && reports[0].reportDocumentId) {
-      console.log(`[SalesReport] Using existing DONE report ${reports[0].reportId}`)
-      return { documentId: reports[0].reportDocumentId, requested: false }
-    }
+  if (!listResp.ok) return null
+  const listJson = await listResp.json()
+  const reports: Record<string, string>[] = listJson.reports || []
+  // Return the most recent one
+  if (reports.length > 0 && reports[0].reportDocumentId) {
+    return reports[0].reportDocumentId
   }
+  return null
+}
 
-  // Also check for IN_QUEUE or IN_PROGRESS reports (already requested, still processing)
+/**
+ * Check if there's a pending (IN_QUEUE or IN_PROGRESS) report.
+ */
+async function hasPendingReport(token: string): Promise<boolean> {
   const pendingUrl =
     `${ENDPOINT}/reports/2021-06-30/reports` +
     `?reportTypes=${REPORT_TYPE}` +
@@ -93,22 +101,10 @@ async function getReportDocumentId(token: string): Promise<{ documentId: string 
     `&processingStatuses=IN_QUEUE,IN_PROGRESS` +
     `&pageSize=1`
   const pendingResp = await fetch(pendingUrl, { headers: { 'x-amz-access-token': token } })
-  if (pendingResp.ok) {
-    const pendingJson = await pendingResp.json()
-    const pending: Record<string, string>[] = pendingJson.reports || []
-    if (pending.length > 0) {
-      console.log(`[SalesReport] Report ${pending[0].reportId} still processing — will pick up on next sync`)
-      return { documentId: null, requested: true }
-    }
-  }
-
-  // No DONE or pending report — request a new one (fire and forget)
-  console.log('[SalesReport] No recent report found — requesting new one (non-blocking)')
-  const reportId = await requestOrdersReport(token)
-  if (reportId) {
-    console.log(`[SalesReport] Requested report ${reportId} — will be ready on next sync`)
-  }
-  return { documentId: null, requested: true }
+  if (!pendingResp.ok) return false
+  const pendingJson = await pendingResp.json()
+  const pending: Record<string, string>[] = pendingJson.reports || []
+  return pending.length > 0
 }
 
 /**
@@ -149,6 +145,7 @@ function parseTSV(tsv: string): OrderRow[] {
 
 /**
  * Aggregate orders into per-SKU sales analytics.
+ * Uses the actual purchase dates to bucket into 7d/30d/90d windows.
  */
 function aggregateOrders(rows: OrderRow[]): Map<string, {
   sku: string
@@ -166,7 +163,17 @@ function aggregateOrders(rows: OrderRow[]): Map<string, {
   const cutoff30d = now - 30 * 24 * 60 * 60 * 1000
   const cutoff90d = now - 90 * 24 * 60 * 60 * 1000
 
-  const map = new Map<string, ReturnType<typeof aggregateOrders> extends Map<string, infer V> ? V : never>()
+  const map = new Map<string, {
+    sku: string
+    asin: string
+    productName: string
+    fulfillmentChannel: string
+    units7d: number
+    units30d: number
+    units90d: number
+    revenue30d: number
+    lastOrderDate: Date | null
+  }>()
 
   for (const row of rows) {
     const sku = row.sku
@@ -215,80 +222,165 @@ function aggregateOrders(rows: OrderRow[]): Map<string, {
 }
 
 /**
- * Main export — fetch the All Orders report and upsert sku_sales_analytics.
- * NON-BLOCKING: returns immediately if report is still generating.
+ * Main export — fetch All Orders reports covering the full 90-day window and upsert sku_sales_analytics.
+ *
+ * Strategy: Amazon limits reports to 30 days max. We need 3 reports:
+ *   Report A: days 0–30 (most recent)
+ *   Report B: days 30–60
+ *   Report C: days 60–90
+ *
+ * On each sync call:
+ *   1. Try to find/download all 3 DONE reports from the last 6 hours
+ *   2. If any are missing, request them (non-blocking)
+ *   3. Process whatever reports are available — even partial data is better than stale data
+ *   4. Combine all order rows and aggregate into 7d/30d/90d buckets
+ *
+ * NON-BLOCKING: returns immediately if reports are still generating.
  */
 export async function syncSalesReport(): Promise<{ synced: number; error: string | null; pending?: boolean }> {
-  console.log('[SalesReport] Starting sync')
+  console.log('[SalesReport] Starting sync (3-window strategy for full 90-day coverage)')
   try {
     const token = await getAccessToken()
-    const { documentId, requested } = await getReportDocumentId(token)
+    const now = new Date()
 
-    if (!documentId) {
-      if (requested) {
-        console.log('[SalesReport] Report requested/pending — will process on next sync')
+    // Define the 3 date windows (each ≤ 30 days)
+    const windows = [
+      { label: '0-30d',  start: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), end: now },
+      { label: '30-60d', start: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000), end: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) },
+      { label: '60-90d', start: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000), end: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000) },
+    ]
+
+    // Try to find DONE reports from the last 6 hours
+    const lookbackTime = new Date(now.getTime() - 6 * 60 * 60 * 1000)
+    const documentId = await findDoneReport(token, lookbackTime)
+
+    // If we have at least one DONE report, download and process it
+    // For the multi-window approach, we'll request all 3 but process whatever is available
+    let allOrderRows: OrderRow[] = []
+    let anyPending = false
+    let reportsProcessed = 0
+
+    if (documentId) {
+      // Download the most recent report (covers the most recent 30-day window)
+      const tsv = await downloadReport(documentId, token)
+      if (tsv) {
+        const rows = parseTSV(tsv)
+        console.log(`[SalesReport] Downloaded report with ${rows.length} order rows`)
+        allOrderRows.push(...rows)
+        reportsProcessed++
+      }
+    }
+
+    // Check for additional DONE reports (Amazon keeps multiple)
+    // We search for all DONE reports in the last 24 hours to find the 30-60d and 60-90d reports
+    const lookback24h = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+    const allReportsUrl =
+      `${ENDPOINT}/reports/2021-06-30/reports` +
+      `?reportTypes=${REPORT_TYPE}` +
+      `&marketplaceIds=${MARKETPLACE_ID}` +
+      `&processingStatuses=DONE` +
+      `&createdSince=${encodeURIComponent(lookback24h.toISOString())}` +
+      `&pageSize=10`
+    const allReportsResp = await fetch(allReportsUrl, { headers: { 'x-amz-access-token': token } })
+    if (allReportsResp.ok) {
+      const allReportsJson = await allReportsResp.json()
+      const doneReports: Record<string, string>[] = allReportsJson.reports || []
+      
+      // Download all available DONE reports (skip the first one if already downloaded)
+      for (const report of doneReports) {
+        if (report.reportDocumentId && report.reportDocumentId !== documentId) {
+          const tsv = await downloadReport(report.reportDocumentId, token)
+          if (tsv) {
+            const rows = parseTSV(tsv)
+            console.log(`[SalesReport] Additional report ${report.reportId}: ${rows.length} rows`)
+            allOrderRows.push(...rows)
+            reportsProcessed++
+          }
+        }
+      }
+    }
+
+    // If we got fewer than 3 reports, request the missing windows
+    if (reportsProcessed < 3) {
+      // Check if there's already a pending report
+      const pending = await hasPendingReport(token)
+      if (!pending) {
+        // Request reports for all 3 windows (Amazon will process them)
+        // We request the oldest window first since the recent one likely already exists
+        for (const window of windows.reverse()) {
+          const reportId = await requestOrdersReport(token, window.start, window.end)
+          if (reportId) {
+            console.log(`[SalesReport] Requested report for ${window.label} (ID: ${reportId})`)
+          }
+          // Small delay to avoid throttling
+          await new Promise(r => setTimeout(r, 500))
+        }
+        anyPending = true
+      } else {
+        console.log('[SalesReport] Reports still pending — will pick up on next sync')
+        anyPending = true
+      }
+    }
+
+    // If we have no data at all, return pending
+    if (allOrderRows.length === 0) {
+      if (anyPending) {
         return { synced: 0, error: null, pending: true }
       }
-      return { synced: 0, error: 'Could not obtain report document ID' }
+      return { synced: 0, error: 'No report data available' }
     }
 
-    const tsv = await downloadReport(documentId, token)
-    if (!tsv) {
-      // Download failed (likely expired URL) — request a fresh report
-      console.log('[SalesReport] Download failed — requesting fresh report')
-      const reqResp = await fetch(`${ENDPOINT}/reports/2021-06-30/reports`, {
-        method: 'POST',
-        headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          reportType: REPORT_TYPE,
-          marketplaceIds: [MARKETPLACE_ID],
-          dataStartTime: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(),
-          dataEndTime: new Date().toISOString(),
-        }),
-      })
-      if (reqResp.ok) {
-        const { reportId } = await reqResp.json()
-        console.log(`[SalesReport] Requested fresh report ${reportId}`)
+    // Deduplicate orders by order-id + sku (in case reports overlap)
+    const seen = new Set<string>()
+    const dedupedRows: OrderRow[] = []
+    for (const row of allOrderRows) {
+      const key = `${row['amazon-order-id']}|${row.sku}|${row.quantity}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        dedupedRows.push(row)
       }
-      return { synced: 0, error: null, pending: true }
     }
+    console.log(`[SalesReport] After dedup: ${dedupedRows.length} unique order rows (from ${allOrderRows.length} total)`)
 
-    const rows = parseTSV(tsv)
-    console.log(`[SalesReport] Parsed ${rows.length} order rows`)
-
-    const aggregated = aggregateOrders(rows)
+    // Aggregate into per-SKU analytics
+    const aggregated = aggregateOrders(dedupedRows)
     console.log(`[SalesReport] Aggregated ${aggregated.size} unique SKUs`)
 
     const supabase = getAdminSupabase()
-    const now = new Date().toISOString()
+    const syncTime = new Date().toISOString()
     let synced = 0
 
-    for (const entry of aggregated.values()) {
-      const avgDaily = entry.units30d > 0 ? +(entry.units30d / 30).toFixed(4) : 0
+    // Batch upsert in chunks of 50 for performance
+    const entries = Array.from(aggregated.values())
+    const BATCH_SIZE = 50
+    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      const batch = entries.slice(i, i + BATCH_SIZE).map(entry => ({
+        sku:                  entry.sku,
+        asin:                 entry.asin || null,
+        product_name:         entry.productName || null,
+        units_sold_7d:        entry.units7d,
+        units_sold_30d:       entry.units30d,
+        units_sold_90d:       entry.units90d,
+        revenue_30d:          +entry.revenue30d.toFixed(2),
+        avg_daily_units:      entry.units30d > 0 ? +(entry.units30d / 30).toFixed(4) : 0,
+        fulfillment_channel:  entry.fulfillmentChannel || null,
+        last_order_date:      entry.lastOrderDate?.toISOString() || null,
+        last_synced_at:       syncTime,
+      }))
+
       const { error } = await supabase
         .from('sku_sales_analytics')
-        .upsert({
-          sku:                  entry.sku,
-          asin:                 entry.asin || null,
-          product_name:         entry.productName || null,
-          units_sold_7d:        entry.units7d,
-          units_sold_30d:       entry.units30d,
-          units_sold_90d:       entry.units90d,
-          revenue_30d:          +entry.revenue30d.toFixed(2),
-          avg_daily_units:      avgDaily,
-          fulfillment_channel:  entry.fulfillmentChannel || null,
-          last_order_date:      entry.lastOrderDate?.toISOString() || null,
-          last_synced_at:       now,
-        }, { onConflict: 'sku' })
+        .upsert(batch, { onConflict: 'sku' })
+
       if (error) {
-        console.warn(`[SalesReport] Upsert error for SKU ${entry.sku}: ${error.message}`)
+        console.warn(`[SalesReport] Batch upsert error (offset ${i}): ${error.message}`)
       } else {
-        synced++
+        synced += batch.length
       }
     }
 
-    console.log(`[SalesReport] Synced ${synced} SKUs`)
-    return { synced, error: null }
+    console.log(`[SalesReport] Synced ${synced} SKUs (${reportsProcessed} reports processed)`)
+    return { synced, error: null, pending: anyPending }
   } catch (err) {
     const msg = String(err)
     console.error('[SalesReport] Fatal error:', msg)
