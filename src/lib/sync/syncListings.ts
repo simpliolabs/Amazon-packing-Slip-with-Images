@@ -27,27 +27,33 @@ function getAdminSupabase() {
 /**
  * NON-BLOCKING: Get the most recent DONE report document ID.
  * If none exists, request a new one but return immediately.
+ * @param force - if true, skip the 2-hour cache and always request a fresh report
  */
-async function getReportDocumentId(token: string): Promise<{ documentId: string | null; requested: boolean }> {
+async function getReportDocumentId(token: string, force = false): Promise<{ documentId: string | null; requested: boolean }> {
   const since2h = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
 
   // Check for an existing DONE report in the last 2 hours (URLs expire quickly)
-  const listUrl =
-    `${ENDPOINT}/reports/2021-06-30/reports` +
-    `?reportTypes=${REPORT_TYPE}` +
-    `&marketplaceIds=${MARKETPLACE_ID}` +
-    `&processingStatuses=DONE` +
-    `&createdSince=${encodeURIComponent(since2h)}` +
-    `&pageSize=1`
+  // Skip this check if force=true so we always request a brand-new report
+  if (!force) {
+    const listUrl =
+      `${ENDPOINT}/reports/2021-06-30/reports` +
+      `?reportTypes=${REPORT_TYPE}` +
+      `&marketplaceIds=${MARKETPLACE_ID}` +
+      `&processingStatuses=DONE` +
+      `&createdSince=${encodeURIComponent(since2h)}` +
+      `&pageSize=1`
 
-  const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
-  if (listResp.ok) {
-    const listJson = await listResp.json()
-    const reports: Record<string, string>[] = listJson.reports || []
-    if (reports.length > 0 && reports[0].reportDocumentId) {
-      console.log(`[Listings] Using existing DONE report ${reports[0].reportId}`)
-      return { documentId: reports[0].reportDocumentId, requested: false }
+    const listResp = await fetch(listUrl, { headers: { 'x-amz-access-token': token } })
+    if (listResp.ok) {
+      const listJson = await listResp.json()
+      const reports: Record<string, string>[] = listJson.reports || []
+      if (reports.length > 0 && reports[0].reportDocumentId) {
+        console.log(`[Listings] Using existing DONE report ${reports[0].reportId}`)
+        return { documentId: reports[0].reportDocumentId, requested: false }
+      }
     }
+  } else {
+    console.log('[Listings] force=true — skipping cached report, requesting fresh one')
   }
 
   // Check for pending reports
@@ -163,11 +169,11 @@ function parseTSV(tsv: string): ListingRow[] {
  * Main export — fetch the All Listings report and upsert listing_health.
  * NON-BLOCKING: returns immediately if report is still generating.
  */
-export async function syncListings(): Promise<{ synced: number; error: string | null; pending?: boolean }> {
-  console.log('[Listings] Starting sync')
+export async function syncListings(force = false): Promise<{ synced: number; error: string | null; pending?: boolean }> {
+  console.log(`[Listings] Starting sync${force ? ' (force=true)' : ''}`)
   try {
     const token = await getAccessToken()
-    const { documentId, requested } = await getReportDocumentId(token)
+    const { documentId, requested } = await getReportDocumentId(token, force)
 
     if (!documentId) {
       if (requested) {

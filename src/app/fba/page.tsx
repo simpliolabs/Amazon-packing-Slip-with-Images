@@ -232,6 +232,7 @@ export default function FBAIntelligencePage() {
   const [missingLoading, setMissingLoading] = useState(false)
   const [missingFamily, setMissingFamily] = useState<string>('')
   const [missingSeverity, setMissingSeverity] = useState<string>('all')
+  const [missingSearchQuery, setMissingSearchQuery] = useState<string>('')
 
   // Replenishment state
   const [report, setReport] = useState<ProductRecommendation[]>([])
@@ -741,15 +742,46 @@ export default function FBAIntelligencePage() {
     setListingsLoading(true)
     try {
       if (triggerSync) {
-        // syncListings is non-blocking: it requests a report from Amazon and returns immediately.
+        // Use force=listings to bypass the 2-hour cache and always request a fresh Amazon report.
+        // syncListings is non-blocking: it requests the report and returns immediately.
         // The report is only available on the NEXT call (usually 1-3 minutes later).
-        // So we fire the sync, then re-read the DB (which may still be stale on first click).
-        const syncResp = await fetch('/api/fba/sync-reports').catch(() => null)
+        const syncResp = await fetch('/api/fba/sync-reports?force=listings').catch(() => null)
         const syncJson = syncResp ? await syncResp.json().catch(() => null) : null
         // If listings sync said it requested a new report (not picked up yet), show pending banner
+        // and start auto-polling every 30 seconds until the report is ready.
         const listingsResult = syncJson?.listings
-        if (listingsResult?.status === 'requested' || listingsResult?.requested === true) {
+        const isPending = listingsResult?.pending === true
+        if (isPending) {
           setListingsSyncPending(true)
+          setListingsLoading(false)
+          // Auto-poll: try picking up the report every 30s for up to 5 minutes
+          let attempts = 0
+          const maxAttempts = 10
+          const pollInterval = setInterval(async () => {
+            attempts++
+            try {
+              // Non-force call — picks up the DONE report if it's ready now
+              const pollResp = await fetch('/api/fba/sync-reports').catch(() => null)
+              const pollJson = pollResp ? await pollResp.json().catch(() => null) : null
+              const pollListings = pollJson?.listings
+              const stillPending = pollListings?.pending === true
+              if (!stillPending && (pollListings?.synced ?? 0) > 0) {
+                // Report is ready — refresh issues and clear the banner
+                clearInterval(pollInterval)
+                setListingsSyncPending(false)
+                setListingsLoading(true)
+                const resp = await fetch('/api/fba/listing-issues')
+                const json = await resp.json()
+                setListingIssues(json.issues || [])
+                setListingIssuesSummary(json.summary || null)
+                setListingsLoading(false)
+              } else if (attempts >= maxAttempts) {
+                // Gave up after 5 minutes — leave banner visible so user can retry manually
+                clearInterval(pollInterval)
+              }
+            } catch { /* ignore poll errors */ }
+          }, 30_000)
+          return // Don't fall through to the normal issues fetch below
         } else {
           setListingsSyncPending(false)
         }
@@ -2059,7 +2091,18 @@ export default function FBAIntelligencePage() {
           )}
 
           {/* Filters */}
-          <div className="flex items-center gap-3 mb-4">
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            {/* Search bar */}
+            <div className="relative flex-1 min-w-[200px] max-w-sm">
+              <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" /></svg>
+              <input
+                type="text"
+                placeholder="Search SKU, ASIN, or family…"
+                value={missingSearchQuery}
+                onChange={e => setMissingSearchQuery(e.target.value)}
+                className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-rose-300"
+              />
+            </div>
             <select
               value={missingSeverity}
               onChange={e => {
@@ -2087,9 +2130,9 @@ export default function FBAIntelligencePage() {
                 </option>
               ))}
             </select>
-            {(missingFamily || missingSeverity !== 'all') && (
+            {(missingFamily || missingSeverity !== 'all' || missingSearchQuery) && (
               <button
-                onClick={() => { setMissingFamily(''); setMissingSeverity('all'); fetchMissingInventory('', 'all') }}
+                onClick={() => { setMissingFamily(''); setMissingSeverity('all'); setMissingSearchQuery(''); fetchMissingInventory('', 'all') }}
                 className="text-xs text-gray-400 hover:text-gray-600 underline"
               >
                 Clear filters
@@ -2129,70 +2172,103 @@ export default function FBAIntelligencePage() {
           )}
 
           {/* Gap detail table */}
-          {missingLoading ? (
-            <div className="text-center py-12 text-gray-400">Scanning inventory gaps…</div>
-          ) : missingGaps.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">
-              <div className="text-4xl mb-3">✅</div>
-              <p className="font-medium text-gray-600">No inventory gaps detected</p>
-              <p className="text-sm mt-1">All size/color combinations in each family are stocked.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto rounded-xl border border-gray-200">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
-                    <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Family</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Size</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Color</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Qty</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Siblings Stocked</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Max Sibling Qty</th>
-                    <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Severity</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {missingGaps.map(gap => (
-                    <tr key={gap.sku} className={`hover:bg-gray-50 transition-colors ${
-                      gap.severity === 'critical' ? 'bg-red-50/30' : 'bg-amber-50/20'
-                    }`}>
-                      <td className="px-4 py-2.5 font-mono text-xs text-gray-700">{gap.sku}</td>
-                      <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{gap.family}</td>
-                      <td className="px-3 py-2.5 text-center">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-gray-100 text-gray-700">
-                          {gap.size_token}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2.5 text-center font-mono text-xs text-gray-600">{gap.color_token}</td>
-                      <td className="px-3 py-2.5 text-center font-bold text-gray-900">{gap.quantity}</td>
-                      <td className="px-3 py-2.5 text-center">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          gap.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                        }`}>
-                          {gap.status}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2.5 text-center text-gray-600">
-                        {gap.stocked_colors} / {gap.total_colors_for_size}
-                      </td>
-                      <td className="px-3 py-2.5 text-center font-medium text-gray-700">{gap.max_qty_in_sibling}</td>
-                      <td className="px-3 py-2.5 text-center">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          gap.severity === 'critical'
-                            ? 'bg-red-100 text-red-700'
-                            : 'bg-amber-100 text-amber-700'
-                        }`}>
-                          {gap.severity}
-                        </span>
-                      </td>
+          {(() => {
+            const q = missingSearchQuery.trim().toLowerCase()
+            const filteredGaps = q
+              ? missingGaps.filter(g =>
+                  g.sku.toLowerCase().includes(q) ||
+                  (g.asin || '').toLowerCase().includes(q) ||
+                  g.family.toLowerCase().includes(q)
+                )
+              : missingGaps
+            return missingLoading ? (
+              <div className="text-center py-12 text-gray-400">Scanning inventory gaps…</div>
+            ) : filteredGaps.length === 0 ? (
+              <div className="text-center py-12 text-gray-400">
+                {q ? (
+                  <>
+                    <div className="text-4xl mb-3">🔍</div>
+                    <p className="font-medium text-gray-600">No gaps match &ldquo;{missingSearchQuery}&rdquo;</p>
+                    <p className="text-sm mt-1">Try a different SKU, ASIN, or family name.</p>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-4xl mb-3">✅</div>
+                    <p className="font-medium text-gray-600">No inventory gaps detected</p>
+                    <p className="text-sm mt-1">All size/color combinations in each family are stocked.</p>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-gray-200">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">SKU</th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">ASIN</th>
+                      <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Family</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Size</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Color</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Qty</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Siblings Stocked</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Max Sibling Qty</th>
+                      <th className="text-center px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Severity</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {filteredGaps.map(gap => (
+                      <tr key={gap.sku} className={`hover:bg-gray-50 transition-colors ${
+                        gap.severity === 'critical' ? 'bg-red-50/30' : 'bg-amber-50/20'
+                      }`}>
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-700">{gap.sku}</td>
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-500">
+                          {gap.asin ? (
+                            <a
+                              href={`https://www.amazon.com/dp/${gap.asin}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline"
+                            >
+                              {gap.asin}
+                            </a>
+                          ) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-500">{gap.family}</td>
+                        <td className="px-3 py-2.5 text-center">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-gray-100 text-gray-700">
+                            {gap.size_token}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-center font-mono text-xs text-gray-600">{gap.color_token}</td>
+                        <td className="px-3 py-2.5 text-center font-bold text-gray-900">{gap.quantity}</td>
+                        <td className="px-3 py-2.5 text-center">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            gap.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                          }`}>
+                            {gap.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-center text-gray-600">
+                          {gap.stocked_colors} / {gap.total_colors_for_size}
+                        </td>
+                        <td className="px-3 py-2.5 text-center font-medium text-gray-700">{gap.max_qty_in_sibling}</td>
+                        <td className="px-3 py-2.5 text-center">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            gap.severity === 'critical'
+                              ? 'bg-red-100 text-red-700'
+                              : 'bg-amber-100 text-amber-700'
+                          }`}>
+                            {gap.severity}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          })()}
 
           <div className="mt-3 text-xs text-gray-400 text-center">
             Gaps detected by comparing FBM stock levels across all SKUs in the same design family · Refreshed on every inventory sync
