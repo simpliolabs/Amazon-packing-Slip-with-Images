@@ -71,7 +71,27 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  const items = data || []
+  let items = data || []
+
+  // Overlay current prices from listing_health (FBA channel) to avoid stale prices
+  // The excess_inventory.your_price is only updated on full sync; listing_health
+  // is updated on every listings sync (much more frequent).
+  if (items.length > 0) {
+    const skus = items.map((i: { sku: string }) => i.sku)
+    const { data: priceRows } = await supabase
+      .from('listing_health')
+      .select('sku, price')
+      .in('sku', skus)
+      .not('price', 'is', null)
+      .gt('price', 0)
+    if (priceRows && priceRows.length > 0) {
+      const priceMap = new Map(priceRows.map((r: { sku: string; price: number }) => [r.sku, r.price]))
+      items = items.map((i: { sku: string; your_price: number }) => ({
+        ...i,
+        your_price: priceMap.has(i.sku) ? priceMap.get(i.sku) : i.your_price,
+      }))
+    }
+  }
 
   // CSV export
   if (format === 'csv') {
