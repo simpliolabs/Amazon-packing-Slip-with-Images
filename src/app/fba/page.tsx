@@ -222,6 +222,7 @@ export default function FBAIntelligencePage() {
   const [listingIssues, setListingIssues] = useState<ListingIssue[]>([])
   const [listingIssuesSummary, setListingIssuesSummary] = useState<ListingIssuesSummary | null>(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
+  const [analyticsSyncPending, setAnalyticsSyncPending] = useState(false)
   const [listingsLoading, setListingsLoading] = useState(false)
   const [listingsSyncPending, setListingsSyncPending] = useState(false)
 
@@ -680,17 +681,44 @@ export default function FBAIntelligencePage() {
   // Fetch sales analytics
   const fetchSalesAnalytics = useCallback(async (triggerSync = false) => {
     setAnalyticsLoading(true)
+    setAnalyticsSyncPending(false)
     try {
       if (triggerSync) {
-        await fetch('/api/fba/sync-reports').catch(() => {})
-        // Wait a moment for sync to complete
-        await new Promise(r => setTimeout(r, 2000))
+        // Force a fresh Amazon report (bypasses the 6-hour cache)
+        const syncResp = await fetch('/api/fba/sync-reports?force=sales').catch(() => null)
+        const syncJson = syncResp ? await syncResp.json().catch(() => ({})) : {}
+        const isPending = syncJson?.sales?.pending === true
+
+        if (isPending) {
+          // Report is generating — show banner and poll every 30s for up to 5 min
+          setAnalyticsSyncPending(true)
+          setAnalyticsLoading(false)
+          const MAX_POLLS = 10
+          for (let i = 0; i < MAX_POLLS; i++) {
+            await new Promise(r => setTimeout(r, 30_000))
+            const pollResp = await fetch('/api/fba/sync-reports').catch(() => null)
+            const pollJson = pollResp ? await pollResp.json().catch(() => ({})) : {}
+            if (!pollJson?.sales?.pending) {
+              // Report is ready — fetch fresh data
+              setAnalyticsSyncPending(false)
+              setAnalyticsLoading(true)
+              break
+            }
+          }
+          setAnalyticsSyncPending(false)
+        } else {
+          // Report was ready immediately — small delay for DB write to settle
+          await new Promise(r => setTimeout(r, 1500))
+        }
       }
       const resp = await fetch('/api/fba/reports-data?type=sales')
       const json = await resp.json()
       setSalesAnalytics(json.data || [])
     } catch (e) { console.error(e) }
-    finally { setAnalyticsLoading(false) }
+    finally {
+      setAnalyticsLoading(false)
+      setAnalyticsSyncPending(false)
+    }
   }, [])
 
   // Fetch Ads Manager data
@@ -1853,12 +1881,25 @@ export default function FBAIntelligencePage() {
             </div>
             <button
               onClick={() => fetchSalesAnalytics(true)}
-              disabled={analyticsLoading}
+              disabled={analyticsLoading || analyticsSyncPending}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
             >
-              {analyticsLoading ? 'Syncing from Amazon…' : 'Sync & Refresh'}
+              {analyticsLoading ? 'Syncing from Amazon…' : analyticsSyncPending ? 'Waiting for report…' : 'Sync & Refresh'}
             </button>
           </div>
+
+          {/* Pending banner — shown while Amazon is generating the fresh report */}
+          {analyticsSyncPending && (
+            <div className="mb-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <svg className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-500" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              <div>
+                <span className="font-semibold">Amazon report requested.</span> Fresh sales data is being generated — this usually takes 1–3 minutes. The table will update automatically when ready.
+              </div>
+            </div>
+          )}
 
           {/* Search bar */}
           <div className="mb-4">
@@ -2068,22 +2109,57 @@ export default function FBAIntelligencePage() {
             </button>
           </div>
 
-          {/* Totals banner */}
+          {/* Totals banner — cards are clickable to filter by severity */}
           {missingTotals && (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
+              <button
+                onClick={() => {
+                  const next = missingSeverity === 'critical' ? 'all' : 'critical'
+                  setMissingSeverity(next)
+                  fetchMissingInventory(missingFamily, next)
+                }}
+                className={`rounded-xl p-3 text-center transition-all border-2 ${
+                  missingSeverity === 'critical'
+                    ? 'bg-red-100 border-red-400 ring-2 ring-red-300'
+                    : 'bg-red-50 border-red-200 hover:border-red-400 hover:bg-red-100'
+                }`}
+              >
                 <div className="text-2xl font-bold text-red-700">{missingTotals.critical_gaps}</div>
                 <div className="text-xs text-red-600 font-medium">Critical (Out of Stock)</div>
-              </div>
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                <div className="text-[10px] text-red-400 mt-0.5">{missingSeverity === 'critical' ? 'Click to clear filter' : 'Click to filter'}</div>
+              </button>
+              <button
+                onClick={() => {
+                  const next = missingSeverity === 'warning' ? 'all' : 'warning'
+                  setMissingSeverity(next)
+                  fetchMissingInventory(missingFamily, next)
+                }}
+                className={`rounded-xl p-3 text-center transition-all border-2 ${
+                  missingSeverity === 'warning'
+                    ? 'bg-amber-100 border-amber-400 ring-2 ring-amber-300'
+                    : 'bg-amber-50 border-amber-200 hover:border-amber-400 hover:bg-amber-100'
+                }`}
+              >
                 <div className="text-2xl font-bold text-amber-700">{missingTotals.warning_gaps}</div>
                 <div className="text-xs text-amber-600 font-medium">Warning (&lt;5 units)</div>
-              </div>
-              <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+                <div className="text-[10px] text-amber-400 mt-0.5">{missingSeverity === 'warning' ? 'Click to clear filter' : 'Click to filter'}</div>
+              </button>
+              <button
+                onClick={() => {
+                  setMissingSeverity('all')
+                  fetchMissingInventory(missingFamily, 'all')
+                }}
+                className={`rounded-xl p-3 text-center transition-all border-2 ${
+                  missingSeverity === 'all'
+                    ? 'bg-gray-100 border-gray-400 ring-2 ring-gray-300'
+                    : 'bg-gray-50 border-gray-200 hover:border-gray-400 hover:bg-gray-100'
+                }`}
+              >
                 <div className="text-2xl font-bold text-gray-700">{missingTotals.total_gaps}</div>
                 <div className="text-xs text-gray-500 font-medium">Total Gaps</div>
-              </div>
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
+                <div className="text-[10px] text-gray-400 mt-0.5">Click to show all</div>
+              </button>
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-3 text-center">
                 <div className="text-2xl font-bold text-blue-700">{missingTotals.families_affected}</div>
                 <div className="text-xs text-blue-600 font-medium">Families Affected</div>
               </div>

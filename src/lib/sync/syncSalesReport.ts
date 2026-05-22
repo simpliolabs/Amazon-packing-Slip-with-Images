@@ -237,8 +237,8 @@ function aggregateOrders(rows: OrderRow[]): Map<string, {
  *
  * NON-BLOCKING: returns immediately if reports are still generating.
  */
-export async function syncSalesReport(): Promise<{ synced: number; error: string | null; pending?: boolean }> {
-  console.log('[SalesReport] Starting sync (3-window strategy for full 90-day coverage)')
+export async function syncSalesReport(force = false): Promise<{ synced: number; error: string | null; pending?: boolean }> {
+  console.log(`[SalesReport] Starting sync (3-window strategy for full 90-day coverage)${force ? ' [FORCE]' : ''}`)
   try {
     const token = await getAccessToken()
     const now = new Date()
@@ -250,8 +250,11 @@ export async function syncSalesReport(): Promise<{ synced: number; error: string
       { label: '60-90d', start: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000), end: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000) },
     ]
 
-    // Try to find DONE reports from the last 6 hours
-    const lookbackTime = new Date(now.getTime() - 6 * 60 * 60 * 1000)
+    // When force=true, skip cached reports and always request fresh ones
+    // Otherwise try to find DONE reports from the last 6 hours
+    const lookbackTime = force
+      ? new Date(now.getTime() - 5 * 60 * 1000)  // only look back 5 min — effectively forces new requests
+      : new Date(now.getTime() - 6 * 60 * 60 * 1000)
     const documentId = await findDoneReport(token, lookbackTime)
 
     // If we have at least one DONE report, download and process it
