@@ -1,23 +1,20 @@
 /**
- * Listing Issues API
+ * Listing Issues API v4
  *
  * Cross-references listing_health + fba_inventory + sku_sales_analytics to surface
- * ONLY actionable LISTING problems — not inventory/replenishment concerns.
+ * ALL actionable listing problems — not just the original 3 categories.
  *
  * Issue categories:
- * 1. suppressed   — Amazon explicitly blocked the listing (status = 'Suppressed')
- * 2. zero_price   — Listing is Active but has $0 price (broken)
- * 3. fbm_no_fba   — High-velocity FBM listing with no FBA counterpart (opportunity)
+ * 1. suppressed          — Amazon explicitly blocked the listing (status = 'Suppressed')
+ * 2. inactive_removed    — Listing is Inactive because the detail page was removed
+ * 3. missing_offer       — Listing has no offer (price = $0 AND status = 'Inactive' or 'Missing Offer')
+ * 4. zero_price          — Listing is Active but has $0 price (broken)
+ * 5. missing_info        — Listing has status = 'Incomplete' or 'Missing Information'
+ * 6. fbm_no_fba          — High-velocity FBM listing with no FBA counterpart (opportunity)
  *
  * IMPORTANT: Stock-related issues (FBA stocked out, FBA no stock, Inactive due to
  * 0 inventory) are NOT listing issues — they are REPLENISHMENT issues and belong
- * exclusively in the Replenishment tab. This route does NOT surface them.
- *
- * Key fix (v3): Removed fba_stockout, fba_no_stock, and inactive_no_stock.
- *   - 'Suppressed' = Amazon blocked it (requires Seller Central fix) → LISTING issue
- *   - 'Inactive'   = listing not buyable due to stock → REPLENISHMENT issue
- *   - '$0 price'   = pricing error → LISTING issue
- *   - 'FBM only'   = opportunity to create FBA listing → LISTING opportunity
+ * exclusively in the Replenishment tab.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -36,7 +33,7 @@ interface ListingIssue {
   sku: string
   asin: string | null
   product_name: string | null
-  issue_type: 'suppressed' | 'zero_price' | 'fbm_no_fba'
+  issue_type: 'suppressed' | 'inactive_removed' | 'missing_offer' | 'zero_price' | 'missing_info' | 'fbm_no_fba'
   issue_label: string
   severity: 'critical' | 'warning' | 'opportunity'
   detail: string
@@ -48,19 +45,24 @@ interface ListingIssue {
 }
 
 const ISSUE_LABELS: Record<string, string> = {
-  suppressed: 'Listing Suppressed',
-  zero_price: 'Price Missing ($0)',
-  fbm_no_fba: 'High Velocity — No FBA',
+  suppressed:       'Listing Suppressed',
+  inactive_removed: 'Inactive — Detail Page Removed',
+  missing_offer:    'Missing Offer',
+  zero_price:       'Price Missing ($0)',
+  missing_info:     'Missing Information',
+  fbm_no_fba:       'High Velocity — No FBA',
 }
 
 const ISSUE_SEVERITY: Record<string, 'critical' | 'warning' | 'opportunity'> = {
-  suppressed: 'critical',
-  zero_price: 'critical',
-  fbm_no_fba: 'opportunity',
+  suppressed:       'critical',
+  inactive_removed: 'critical',
+  missing_offer:    'critical',
+  zero_price:       'critical',
+  missing_info:     'warning',
+  fbm_no_fba:       'opportunity',
 }
 
 // Helper: fetch ALL rows from a table, paginating in chunks of 1000
-// Supabase defaults to 1000-row limit; this ensures we get everything.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function fetchAll<T>(supabase: any, table: string, select: string): Promise<T[]> {
   const PAGE_SIZE = 1000
@@ -95,8 +97,8 @@ export async function GET(req: NextRequest) {
   const listings = await fetchAll<{
     sku: string; asin: string | null; product_name: string | null;
     price: number | null; quantity: number | null; status: string | null;
-    fulfillment_channel: string | null;
-  }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel')
+    fulfillment_channel: string | null; issue_description: string | null;
+  }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel, issue_description')
 
   // ── 2. Load ALL sales analytics for cross-reference ─────────────────────────
   const salesData = await fetchAll<{
@@ -133,7 +135,6 @@ export async function GET(req: NextRequest) {
   }
 
   // ── 3. Build FBA listing sets ─────────────────────────────────────────────
-  // Track ASINs that have FBA listings — use SKU suffix pattern as primary detection
   const fbaListingAsins = new Set<string>()
   const fbaBaseSkus = new Set<string>()
   for (const l of listings || []) {
@@ -157,7 +158,6 @@ export async function GET(req: NextRequest) {
   }
 
   // ── 4. Build ASIN → valid price map ──────────────────────────────────────
-  // If ANY SKU for an ASIN has a valid price, all $0 variants are report artifacts
   const asinHasValidPrice = new Set<string>()
   for (const l of listings || []) {
     if (l.asin && l.price && l.price > 0) {
@@ -182,16 +182,20 @@ export async function GET(req: NextRequest) {
   }
 
   // ── 6. Main listing scan ──────────────────────────────────────────────────
+  // Track which SKUs we've already flagged to avoid double-counting
+  const flaggedSkus = new Set<string>()
+
   for (const listing of listings || []) {
     const sales     = salesBySku.get(listing.sku)
     const asinSales = listing.asin ? salesByAsin.get(listing.asin) : null
     const unitsSold = sales?.units_sold_30d || 0
+    const status    = (listing.status || '').trim()
 
     const isFbaSku = listing.sku && /[-_]FBA$/i.test(listing.sku)
 
     // ── Issue 1: TRULY Suppressed listing ──────────────────────────────────
-    // ONLY flag status = 'Suppressed' — Amazon explicitly blocked this listing.
-    if (listing.status === 'Suppressed') {
+    if (status === 'Suppressed') {
+      flaggedSkus.add(listing.sku)
       issues.push({
         sku:           listing.sku,
         asin:          listing.asin,
@@ -209,14 +213,95 @@ export async function GET(req: NextRequest) {
       continue
     }
 
-    // ── Inactive listings: SKIP entirely ──────────────────────────────────
-    // Inactive = stock/inventory issue → belongs in Replenishment tab, not here.
-    if (listing.status === 'Inactive') {
+    // ── Issue 2: Inactive — Detail Page Removed ────────────────────────────
+    // These are listings where Amazon removed the product detail page entirely.
+    // The issue_description column may contain "Detail page removed" or similar.
+    // We detect them by: status = Inactive AND (issue_description contains "removed"
+    // OR price = 0 AND no inventory AND no recent sales — indicating a dead listing
+    // that was blocked by Amazon, not just a stockout).
+    if (status === 'Inactive') {
+      const issueDesc = (listing.issue_description || '').toLowerCase()
+      const isDetailPageRemoved = issueDesc.includes('detail page removed') ||
+        issueDesc.includes('page removed') ||
+        issueDesc.includes('removed by amazon') ||
+        issueDesc.includes('blocked')
+
+      // Also catch inactive FBA SKUs with $0 price and no recent sales
+      // (these are almost always detail-page-removed or search-suppressed)
+      const isLikelyRemoved = isFbaSku &&
+        (!listing.price || listing.price <= 0) &&
+        unitsSold === 0 &&
+        (asinSales?.units_sold_30d || 0) === 0
+
+      if (isDetailPageRemoved || isLikelyRemoved) {
+        flaggedSkus.add(listing.sku)
+        issues.push({
+          sku:           listing.sku,
+          asin:          listing.asin,
+          product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+          issue_type:    'inactive_removed',
+          issue_label:   ISSUE_LABELS.inactive_removed,
+          severity:      ISSUE_SEVERITY.inactive_removed,
+          detail:        isDetailPageRemoved
+            ? `Listing is inactive because the Amazon detail page was removed. Review in Seller Central → Manage Inventory → Inactive → Detail page removed.`
+            : `FBA listing is inactive with no price and no recent sales. The detail page may have been removed by Amazon. Review in Seller Central.`,
+          price:         listing.price,
+          quantity:      listing.quantity || 0,
+          fulfillment_channel: listing.fulfillment_channel,
+          units_sold_30d: unitsSold,
+          estimated_lost_revenue_30d: null,
+        })
+        continue
+      }
+
+      // Other Inactive listings (stockout, etc.) → skip (Replenishment tab handles these)
       continue
     }
 
-    // ── Issue 2: $0 price (broken listing) ────────────────────────────────
-    if (listing.status === 'Active' && (!listing.price || listing.price <= 0)) {
+    // ── Issue 3: Missing Offer ─────────────────────────────────────────────
+    // Listings with status = 'Missing Offer' or similar — no offer attached.
+    if (status === 'Missing Offer' || status === 'MissingOffer' || status === 'No Offer') {
+      flaggedSkus.add(listing.sku)
+      issues.push({
+        sku:           listing.sku,
+        asin:          listing.asin,
+        product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+        issue_type:    'missing_offer',
+        issue_label:   ISSUE_LABELS.missing_offer,
+        severity:      ISSUE_SEVERITY.missing_offer,
+        detail:        `This listing has no offer attached. Buyers cannot purchase. Add offer details in Seller Central → Manage Inventory → Missing Offer.`,
+        price:         listing.price,
+        quantity:      listing.quantity || 0,
+        fulfillment_channel: listing.fulfillment_channel,
+        units_sold_30d: unitsSold,
+        estimated_lost_revenue_30d: asinSales ? asinSales.revenue_30d : null,
+      })
+      continue
+    }
+
+    // ── Issue 4: Missing Information / Incomplete ──────────────────────────
+    // Listings that need catalog data filled in before they can go live.
+    if (status === 'Incomplete' || status === 'Missing Information' || status === 'MissingInformation') {
+      flaggedSkus.add(listing.sku)
+      issues.push({
+        sku:           listing.sku,
+        asin:          listing.asin,
+        product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+        issue_type:    'missing_info',
+        issue_label:   ISSUE_LABELS.missing_info,
+        severity:      ISSUE_SEVERITY.missing_info,
+        detail:        `This listing is missing required catalog information. Complete the listing in Seller Central → Manage Inventory → Incomplete / Missing Information.`,
+        price:         listing.price,
+        quantity:      listing.quantity || 0,
+        fulfillment_channel: listing.fulfillment_channel,
+        units_sold_30d: unitsSold,
+        estimated_lost_revenue_30d: null,
+      })
+      continue
+    }
+
+    // ── Issue 5: $0 price (broken active listing) ─────────────────────────
+    if (status === 'Active' && (!listing.price || listing.price <= 0)) {
       const hasSalesRevenue = (sales?.revenue_30d && sales.revenue_30d > 0) ||
         (asinSales?.revenue_30d && asinSales.revenue_30d > 0)
       const hasAnySales = unitsSold > 0 || (asinSales?.units_sold_30d && asinSales.units_sold_30d > 0)
@@ -226,6 +311,7 @@ export async function GET(req: NextRequest) {
         continue // Not a real issue — price exists on Amazon, just missing from the report
       }
 
+      flaggedSkus.add(listing.sku)
       issues.push({
         sku:           listing.sku,
         asin:          listing.asin,
@@ -269,7 +355,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // ── 8. Issue 3: High-velocity FBM-only ASINs with no FBA counterpart ─────
+  // ── 8. Issue 6: High-velocity FBM-only ASINs with no FBA counterpart ─────
   const processedAsins = new Set<string>()
   for (const s of salesData || []) {
     if (!s.asin || processedAsins.has(s.asin)) continue
@@ -322,6 +408,12 @@ export async function GET(req: NextRequest) {
     critical:           issues.filter(i => i.severity === 'critical').length,
     warning:            issues.filter(i => i.severity === 'warning').length,
     opportunity:        issues.filter(i => i.severity === 'opportunity').length,
+    suppressed:         issues.filter(i => i.issue_type === 'suppressed').length,
+    inactive_removed:   issues.filter(i => i.issue_type === 'inactive_removed').length,
+    missing_offer:      issues.filter(i => i.issue_type === 'missing_offer').length,
+    missing_info:       issues.filter(i => i.issue_type === 'missing_info').length,
+    zero_price:         issues.filter(i => i.issue_type === 'zero_price').length,
+    fbm_no_fba:         issues.filter(i => i.issue_type === 'fbm_no_fba').length,
     total_lost_revenue: issues.reduce((sum, i) => sum + (i.estimated_lost_revenue_30d || 0), 0),
   }
 

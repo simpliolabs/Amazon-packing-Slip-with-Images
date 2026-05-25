@@ -446,8 +446,23 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
     fbaInvAsins.add(listing.asin)
   }
 
-  // Process actual fba_inventory rows (override synthetic entries)
-  for (const inv of invRows || []) {
+  // Process actual fba_inventory rows (override synthetic entries).
+  //
+  // IMPORTANT: The fba_inventory table contains rows for BOTH FBA SKUs (e.g. DAR-CCG-L-IVY-FBA)
+  // and FBM SKUs (e.g. DAR-CCG-L-IVY) because Amazon's FBA Inventory API returns every SKU
+  // that has ever had FBA inventory, including FBM variants with 0 qty.
+  //
+  // Bug fix: When building fbaByAsin we must ONLY sum FBA-channel SKUs (ending in -FBA or _FBA).
+  // FBM SKUs for the same ASIN must NOT be summed in — they would dilute the SKU name shown in
+  // the portal and could cause incorrect 0-qty entries to overwrite real FBA data.
+  //
+  // Two-pass approach:
+  //   Pass 1: Process all -FBA SKUs and build the primary fbaByAsin map.
+  //   Pass 2: For any ASIN not yet seen (no -FBA SKU in inventory), fall back to non-FBA rows.
+  const fbaSkuRows = (invRows || []).filter(inv => inv.sku && /[-_]FBA$/i.test(inv.sku))
+  const nonFbaSkuRows = (invRows || []).filter(inv => !inv.sku || !/[-_]FBA$/i.test(inv.sku))
+
+  for (const inv of fbaSkuRows) {
     const row: FBAInvRow = {
       asin: inv.asin,
       sku: inv.sku || '',
@@ -461,23 +476,50 @@ export async function generateReplenishmentReport(): Promise<ProductRecommendati
       last_synced_at: inv.last_synced_at,
     }
 
+    // Always prefer the FBA SKU row — overwrite any synthetic entry for this ASIN
     const existing = fbaByAsin.get(inv.asin)
     if (!existing) {
       fbaByAsin.set(inv.asin, { ...row })
     } else {
+      // If existing entry was a synthetic (qty=0) or another FBA SKU, sum the quantities
+      // (handles rare cases where one ASIN has two separate FBA SKUs)
       existing.quantity_available += row.quantity_available
       existing.quantity_inbound += row.quantity_inbound
       existing.quantity_total += row.quantity_total
       existing.units_sold_30d += row.units_sold_30d
+      // Prefer the FBA SKU name over any previously stored name
+      if (/[-_]FBA$/i.test(row.sku)) existing.sku = row.sku
       if (row.last_synced_at && (!existing.last_synced_at || row.last_synced_at > existing.last_synced_at)) {
         existing.last_synced_at = row.last_synced_at
       }
     }
 
-    if (inv.sku && /[-_]FBA$/i.test(inv.sku)) {
-      const baseSku = getBaseSku(inv.sku)
-      if (baseSku && !fbaByBaseSku.has(baseSku)) fbaByBaseSku.set(baseSku, { ...row })
+    const baseSku = getBaseSku(inv.sku)
+    if (baseSku && !fbaByBaseSku.has(baseSku)) fbaByBaseSku.set(baseSku, { ...row })
+    if (!fbaByBaseSku.has(inv.sku)) fbaByBaseSku.set(inv.sku, { ...row })
+  }
+
+  // Pass 2: For ASINs with no -FBA SKU in fba_inventory, fall back to non-FBA rows
+  // (e.g. FBM-only products that were previously enrolled in FBA)
+  for (const inv of nonFbaSkuRows) {
+    const row: FBAInvRow = {
+      asin: inv.asin,
+      sku: inv.sku || '',
+      quantity_available: inv.quantity_available || 0,
+      quantity_inbound: inv.quantity_inbound || 0,
+      quantity_total: inv.quantity_total || 0,
+      units_sold_30d: inv.units_sold_30d || 0,
+      buy_box_percentage: inv.buy_box_percentage || 0,
+      label_created_at: inv.label_created_at || null,
+      shipment_status: inv.shipment_status || null,
+      last_synced_at: inv.last_synced_at,
     }
+
+    // Only use non-FBA row if no FBA-SKU row already covers this ASIN
+    if (!fbaByAsin.has(inv.asin)) {
+      fbaByAsin.set(inv.asin, { ...row })
+    }
+
     if (inv.sku && !fbaByBaseSku.has(inv.sku)) fbaByBaseSku.set(inv.sku, { ...row })
   }
 
@@ -840,7 +882,21 @@ export function generateTeamCSV(report: ProductRecommendation[]): string {
  */
 export function generateAmazonShipmentCSV(report: ProductRecommendation[]): string {
   const BOM = '\uFEFF'
-  const headers = ['Merchant SKU', 'ASIN', 'Quantity to Ship', 'Condition', 'Notes']
+  // Split the old combined Notes column into discrete, spreadsheet-friendly columns:
+  //   Action          — the urgency label only (e.g. "Send Urgently", "Send Now", "FBA Stocked Out")
+  //   Weeks of Cover  — numeric weeks remaining (or blank if N/A)
+  //   Sessions/30d    — session count from traffic data (or blank if 0)
+  //   Notes           — the full rationale sentence for reference
+  const headers = [
+    'Merchant SKU',
+    'ASIN',
+    'Quantity to Ship',
+    'Condition',
+    'Action',
+    'Weeks of Cover',
+    'Sessions / 30d',
+    'Notes',
+  ]
 
   const rows = report
     .filter(r => r.recommended_send_qty > 0 && ['stocked_out', 'critical', 'replenish', 'new_candidate'].includes(r.status))
@@ -849,7 +905,10 @@ export function generateAmazonShipmentCSV(report: ProductRecommendation[]): stri
       csvCell(r.fba_asin || r.asin),
       csvCell(r.recommended_send_qty),
       csvCell('NewItem'),
-      csvCell(`${r.status_label}: ${r.send_rationale}`),
+      csvCell(r.status_label),
+      csvCell(r.weeks_of_cover !== null && r.weeks_of_cover !== undefined ? r.weeks_of_cover.toFixed(1) : ''),
+      csvCell(r.sessions_30d > 0 ? r.sessions_30d : ''),
+      csvCell(r.send_rationale),
     ])
 
   return BOM + [headers.map(h => csvCell(h)).join(','), ...rows.map(r => r.join(','))].join('\r\n')

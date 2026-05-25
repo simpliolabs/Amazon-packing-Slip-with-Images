@@ -63,7 +63,7 @@ interface ListingIssue {
   sku: string
   asin: string | null
   product_name: string | null
-  issue_type: 'suppressed' | 'zero_price' | 'fbm_no_fba'
+  issue_type: 'suppressed' | 'inactive_removed' | 'missing_offer' | 'zero_price' | 'missing_info' | 'fbm_no_fba'
   issue_label: string
   severity: 'critical' | 'warning' | 'opportunity'
   detail: string
@@ -78,6 +78,12 @@ interface ListingIssuesSummary {
   critical: number
   warning: number
   opportunity: number
+  suppressed: number
+  inactive_removed: number
+  missing_offer: number
+  missing_info: number
+  zero_price: number
+  fbm_no_fba: number
   total_lost_revenue: number
 }
 interface FBANotification {
@@ -1983,7 +1989,7 @@ export default function FBAIntelligencePage() {
           <div className="flex items-center justify-between mb-4">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Listing Issues</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Only showing listings that need your attention — suppressed, broken, stocked out, or missing FBA</p>
+              <p className="text-sm text-gray-500 mt-0.5">Suppressed, inactive (detail page removed), missing offers, missing info, broken prices, and FBM-only opportunities</p>
             </div>
             <button
               onClick={() => fetchListingIssues(true)}
@@ -2007,22 +2013,64 @@ export default function FBAIntelligencePage() {
 
           {/* Summary Cards */}
           {listingIssuesSummary && listingIssuesSummary.total > 0 && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
-                <div className="text-2xl font-bold text-red-700">{listingIssuesSummary.critical}</div>
-                <div className="text-xs text-red-600 font-medium">Critical</div>
+            <div className="mb-5 space-y-3">
+              {/* Top-level severity row */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
+                  <div className="text-2xl font-bold text-red-700">{listingIssuesSummary.critical}</div>
+                  <div className="text-xs text-red-600 font-medium">Critical</div>
+                </div>
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
+                  <div className="text-2xl font-bold text-amber-700">{listingIssuesSummary.warning}</div>
+                  <div className="text-xs text-amber-600 font-medium">Warnings</div>
+                </div>
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
+                  <div className="text-2xl font-bold text-blue-700">{listingIssuesSummary.opportunity}</div>
+                  <div className="text-xs text-blue-600 font-medium">Opportunities</div>
+                </div>
+                <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+                  <div className="text-2xl font-bold text-gray-900">${listingIssuesSummary.total_lost_revenue.toLocaleString()}</div>
+                  <div className="text-xs text-gray-500 font-medium">Est. Lost Revenue/mo</div>
+                </div>
               </div>
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-center">
-                <div className="text-2xl font-bold text-amber-700">{listingIssuesSummary.warning}</div>
-                <div className="text-xs text-amber-600 font-medium">Warnings</div>
-              </div>
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
-                <div className="text-2xl font-bold text-blue-700">{listingIssuesSummary.opportunity}</div>
-                <div className="text-xs text-blue-600 font-medium">Opportunities</div>
-              </div>
-              <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
-                <div className="text-2xl font-bold text-gray-900">${listingIssuesSummary.total_lost_revenue.toLocaleString()}</div>
-                <div className="text-xs text-gray-500 font-medium">Est. Lost Revenue/mo</div>
+              {/* Per-category breakdown row */}
+              <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                {(listingIssuesSummary.suppressed ?? 0) > 0 && (
+                  <div className="bg-red-50 border border-red-100 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-red-700">{listingIssuesSummary.suppressed}</div>
+                    <div className="text-[10px] text-red-500 font-medium leading-tight">Suppressed</div>
+                  </div>
+                )}
+                {(listingIssuesSummary.inactive_removed ?? 0) > 0 && (
+                  <div className="bg-red-50 border border-red-100 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-red-700">{listingIssuesSummary.inactive_removed}</div>
+                    <div className="text-[10px] text-red-500 font-medium leading-tight">Page Removed</div>
+                  </div>
+                )}
+                {(listingIssuesSummary.missing_offer ?? 0) > 0 && (
+                  <div className="bg-red-50 border border-red-100 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-red-700">{listingIssuesSummary.missing_offer}</div>
+                    <div className="text-[10px] text-red-500 font-medium leading-tight">Missing Offer</div>
+                  </div>
+                )}
+                {(listingIssuesSummary.zero_price ?? 0) > 0 && (
+                  <div className="bg-red-50 border border-red-100 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-red-700">{listingIssuesSummary.zero_price}</div>
+                    <div className="text-[10px] text-red-500 font-medium leading-tight">Price Missing</div>
+                  </div>
+                )}
+                {(listingIssuesSummary.missing_info ?? 0) > 0 && (
+                  <div className="bg-amber-50 border border-amber-100 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-amber-700">{listingIssuesSummary.missing_info}</div>
+                    <div className="text-[10px] text-amber-500 font-medium leading-tight">Missing Info</div>
+                  </div>
+                )}
+                {(listingIssuesSummary.fbm_no_fba ?? 0) > 0 && (
+                  <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 text-center">
+                    <div className="text-lg font-bold text-blue-700">{listingIssuesSummary.fbm_no_fba}</div>
+                    <div className="text-[10px] text-blue-500 font-medium leading-tight">FBM Only</div>
+                  </div>
+                )}
               </div>
             </div>
           )}
