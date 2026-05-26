@@ -300,6 +300,38 @@ export async function syncOrders(): Promise<SyncResult> {
         delete sanitizedRawData.BuyerEmail
         delete sanitizedRawData.DefaultShipFromLocationAddress
 
+        // ── Customization preservation guard ────────────────────────────
+        // Before writing order_items, check if the order already exists in DB
+        // and has customization data stored. If so, merge it into the freshly-
+        // fetched items so we never overwrite existing customization with null.
+        const { data: existingOrderData } = await supabase
+          .from('orders')
+          .select('order_items')
+          .eq('id', order.AmazonOrderId)
+          .single()
+
+        if (existingOrderData?.order_items) {
+          const existingItems = existingOrderData.order_items as (OrderItem & { customization_checked?: boolean | number })[]
+          for (const freshItem of orderItems) {
+            const existingItem = existingItems.find(
+              (ei) => ei.order_item_id === freshItem.order_item_id || ei.asin === freshItem.asin
+            )
+            // Preserve customization if fresh fetch didn't get it but DB has it
+            if (existingItem?.customization && !freshItem.customization) {
+              freshItem.customization = existingItem.customization
+              console.log(`[Customization Guard] Preserved customization for ${freshItem.asin} on order ${order.AmazonOrderId}`)
+            }
+            // Preserve customization_checked flag
+            if (existingItem && 'customization_checked' in existingItem && !('customization_checked' in freshItem)) {
+              ;(freshItem as OrderItem & { customization_checked?: boolean | number }).customization_checked = existingItem.customization_checked
+            }
+            // Preserve ai_detected_color if fresh fetch didn't get it
+            if (existingItem?.ai_detected_color && !freshItem.ai_detected_color) {
+              freshItem.ai_detected_color = existingItem.ai_detected_color
+            }
+          }
+        }
+
         // Upsert order into Supabase
         const { error } = await supabase.from('orders').upsert(
           {
@@ -370,10 +402,38 @@ export async function syncOrders(): Promise<SyncResult> {
           try {
             await batchDetectColors(items)
 
-            // Update the order with AI-detected colors
+            // Re-read the latest order_items from DB before writing back.
+            // This prevents a race where the customization backfill ran between
+            // our read and this write, which would cause us to overwrite the
+            // freshly-stored customization with the stale items array we read earlier.
+            const { data: latestOrder } = await supabase
+              .from('orders')
+              .select('order_items')
+              .eq('id', order.id)
+              .single()
+
+            let itemsToWrite = items
+            if (latestOrder?.order_items) {
+              const latestItems = latestOrder.order_items as (OrderItem & { customization_checked?: boolean | number })[]
+              itemsToWrite = items.map((item) => {
+                const latestItem = latestItems.find(
+                  (li) => li.order_item_id === item.order_item_id || li.asin === item.asin
+                )
+                // Preserve any customization that was added to DB since we read
+                if (latestItem?.customization && !item.customization) {
+                  item.customization = latestItem.customization
+                }
+                if (latestItem && 'customization_checked' in latestItem && !('customization_checked' in item)) {
+                  ;(item as OrderItem & { customization_checked?: boolean | number }).customization_checked = latestItem.customization_checked
+                }
+                return item
+              })
+            }
+
+            // Update the order with AI-detected colors (customization preserved)
             await supabase
               .from('orders')
-              .update({ order_items: items as unknown as Record<string, unknown>[] })
+              .update({ order_items: itemsToWrite as unknown as Record<string, unknown>[] })
               .eq('id', order.id)
 
             backfillCount++
@@ -474,10 +534,39 @@ export async function syncOrders(): Promise<SyncResult> {
               }
             }
 
+            // Re-read the latest order_items from DB before writing back.
+            // This prevents a race where the AI color backfill ran between
+            // our read and this write, which would cause us to overwrite
+            // freshly-detected colors with the stale items array we read earlier.
+            const { data: latestCustOrder } = await supabase
+              .from('orders')
+              .select('order_items')
+              .eq('id', order.id)
+              .single()
+
+            let custItemsToWrite = items as (OrderItem & { customization_checked?: boolean | number })[]
+            if (latestCustOrder?.order_items) {
+              const latestCustItems = latestCustOrder.order_items as (OrderItem & { customization_checked?: boolean | number })[]
+              custItemsToWrite = items.map((item) => {
+                const latestItem = latestCustItems.find(
+                  (li) => li.order_item_id === item.order_item_id || li.asin === item.asin
+                )
+                // Preserve ai_detected_color added by color backfill since we read
+                if (latestItem?.ai_detected_color && !item.ai_detected_color) {
+                  item.ai_detected_color = latestItem.ai_detected_color
+                }
+                // NEVER overwrite existing customization with null
+                if (latestItem?.customization && !item.customization) {
+                  item.customization = latestItem.customization
+                }
+                return item
+              })
+            }
+
             // Always update — either with customization data or with checked flags
             await supabase
               .from('orders')
-              .update({ order_items: items as unknown as Record<string, unknown>[] })
+              .update({ order_items: custItemsToWrite as unknown as Record<string, unknown>[] })
               .eq('id', order.id)
 
             if (hasCustomization) {
