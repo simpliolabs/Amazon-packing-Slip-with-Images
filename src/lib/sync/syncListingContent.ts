@@ -89,6 +89,29 @@ interface ChildSku {
 
 // ── Listings Items API ────────────────────────────────────────────────────────
 
+/** Fetch real image count for an ASIN from the Catalog Items API */
+async function fetchImageCount(token: string, asin: string): Promise<number> {
+  const url =
+    `${ENDPOINT}/catalog/2022-04-01/items/${asin}` +
+    `?marketplaceIds=${MARKETPLACE_ID}` +
+    `&includedData=images`
+  const resp = await fetch(url, {
+    headers: { 'x-amz-access-token': token },
+  })
+  if (!resp.ok) return 0
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const json: any = await resp.json()
+  // images is an array of { marketplaceId, images: [{variant, link}] }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const imagesArr: any[] = json.images || []
+  if (imagesArr.length === 0) return 0
+  // Find the entry for our marketplace
+  const mktEntry = imagesArr.find((e: { marketplaceId?: string }) => e.marketplaceId === MARKETPLACE_ID) || imagesArr[0]
+  // Count unique image variants (MAIN, PT01, PT02, etc.)
+  const imgs: { variant?: string }[] = mktEntry?.images || []
+  return imgs.length
+}
+
 async function fetchListingContent(
   token: string,
   sellerId: string,
@@ -173,13 +196,12 @@ async function fetchListingContent(
     base.backend_keywords = kwArr.map((k: { value?: string }) => k?.value || '').filter(Boolean).join(' ')
   }
 
-  // Image count from summaries
+  // Image count from summaries (mainImage only — otherImages not in Listings Items API)
+  // We'll fetch the real count from Catalog Items API after this call.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const summaries: any[] = json.summaries || []
   if (summaries.length > 0) {
-    const mainImageCount = summaries[0]?.mainImage ? 1 : 0
-    const otherImages: number = summaries[0]?.otherImages?.length || 0
-    base.image_count = mainImageCount + otherImages
+    base.image_count = summaries[0]?.mainImage ? 1 : 0
   }
 
   return base
@@ -638,6 +660,14 @@ export async function syncListingContent(
       for (const child of uniqueChildren) {
         try {
           const content = await fetchListingContent(token, sellerId, child.sku, child.asin, parentAsin)
+          // Fetch real image count from Catalog Items API (Listings Items API only returns mainImage)
+          try {
+            const imgCount = await fetchImageCount(token, child.asin)
+            if (imgCount > 0) content.image_count = imgCount
+            await sleep(100) // Catalog Items API: 2 req/sec burst
+          } catch {
+            // Non-fatal: keep whatever image_count was set from summaries
+          }
           contentRows.push(content)
           skusSynced++
         } catch (err) {
