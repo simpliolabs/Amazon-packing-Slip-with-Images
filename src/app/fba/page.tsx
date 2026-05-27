@@ -2346,7 +2346,7 @@ export default function FBAIntelligencePage() {
                 <p className="text-xs text-gray-500 mt-1">Click &quot;Scan Listings&quot; to analyse your top sellers for SEO gaps.</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {seoScores.map(score => {
                   const isExpanded = expandedSeoCard === score.parent_asin
                   const scoreColor =
@@ -2357,8 +2357,7 @@ export default function FBAIntelligencePage() {
                     score.overall_score >= 80 ? 'bg-green-50 border-green-200'
                     : score.overall_score >= 60 ? 'bg-amber-50 border-amber-200'
                     : 'bg-red-50 border-red-200'
-                  const topIssue = score.issues?.[0]
-                  const autoFixableIssues = (score.issues || []).filter(i => i.auto_fixable)
+                  const allIssues = score.issues || []
 
                   return (
                     <div key={score.parent_asin} className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col`}>
@@ -2418,52 +2417,36 @@ export default function FBAIntelligencePage() {
                           ))}
                         </div>
 
-                        {/* Top issue */}
-                        {topIssue && (
-                          <div className={`text-[10px] rounded-lg px-2 py-1.5 ${
-                            topIssue.severity === 'critical' ? 'bg-red-100 text-red-700'
-                            : topIssue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
-                            : 'bg-blue-100 text-blue-700'
-                          }`}>
-                            {topIssue.message}
-                          </div>
-                        )}
-
-                        {/* Child override warning */}
-                        {score.child_override_count > 0 && (
-                          <div className="mt-1.5 text-[10px] bg-purple-100 text-purple-700 rounded-lg px-2 py-1">
-                            {score.child_override_count} child(ren) have overridden content
+                        {/* All issues as instructional action list */}
+                        {allIssues.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">What to fix</p>
+                            {allIssues.map((issue, idx) => (
+                              <div key={idx} className={`text-[10px] rounded-lg px-2 py-1.5 flex gap-1.5 ${
+                                issue.severity === 'critical' ? 'bg-red-100 text-red-700'
+                                : issue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
+                                : 'bg-blue-50 text-blue-700'
+                              }`}>
+                                <span className="shrink-0 mt-px">
+                                  {issue.severity === 'critical' ? '⚠️' : issue.severity === 'warning' ? '⚠️' : 'ℹ️'}
+                                </span>
+                                <span>{issue.message}</span>
+                              </div>
+                            ))}
                           </div>
                         )}
                       </div>
 
-                      {/* Card actions */}
+                      {/* Card actions — no Auto-fix, just Seller Central link + details toggle */}
                       <div className="border-t border-gray-200 px-3 py-2 flex items-center gap-2 bg-white/60">
-                        {autoFixableIssues.length > 0 && (
-                          <button
-                            onClick={async () => {
-                              // Auto-fix: handle backend_keywords for all children
-                              const kwIssue = autoFixableIssues.find(i => i.field === 'backend_keywords')
-                              if (kwIssue && score.children.length > 0) {
-                                const child = score.children[0]
-                                const key = `${score.parent_asin}:backend_keywords`
-                                setFixingField(key)
-                                try {
-                                  await fetch('/api/fba/optimize-listing', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ sku: child.sku, field: 'backend_keywords', value: (child.backend_keywords || '') + ' ' }),
-                                  })
-                                  await fetchSeoScores()
-                                } finally { setFixingField(null) }
-                              }
-                            }}
-                            disabled={fixingField === `${score.parent_asin}:backend_keywords`}
-                            className="flex-1 text-[10px] font-medium bg-violet-600 hover:bg-violet-700 text-white rounded-md px-2 py-1 transition-colors disabled:opacity-50"
-                          >
-                            {fixingField === `${score.parent_asin}:backend_keywords` ? 'Fixing…' : `Auto-fix (${autoFixableIssues.length})`}
-                          </button>
-                        )}
+                        <a
+                          href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex-1 text-center text-[10px] font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1 transition-colors"
+                        >
+                          Edit in Seller Central →
+                        </a>
                         <button
                           onClick={() => setExpandedSeoCard(isExpanded ? null : score.parent_asin)}
                           className="flex-1 text-[10px] font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1 transition-colors"
@@ -2492,7 +2475,10 @@ export default function FBAIntelligencePage() {
                                     <span className="font-mono font-medium text-gray-800">{child.sku}</span>
                                     <div className="flex items-center gap-1">
                                       {hasOverride && <span className="bg-purple-100 text-purple-700 px-1 rounded">Override</span>}
-                                      {child.has_aplus ? <span className="bg-green-100 text-green-700 px-1 rounded">A+</span> : <span className="bg-red-100 text-red-700 px-1 rounded">No A+</span>}
+                                      {child.has_aplus
+                                        ? <span className="bg-green-100 text-green-700 px-1 rounded">A+ ✓</span>
+                                        : <span className="bg-red-100 text-red-700 px-1 rounded">No A+</span>
+                                      }
                                     </div>
                                   </div>
                                   <div className="text-gray-600 truncate" title={child.title || ''}>

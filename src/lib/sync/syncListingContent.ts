@@ -70,6 +70,9 @@ interface ListingContentRow {
   backend_keywords:        string | null
   image_count:             number
   has_aplus:               boolean
+  aplus_module_count:      number
+  aplus_has_brand_story:   boolean
+  aplus_has_headline:      boolean
   aplus_images_missing_alt: number
   content_synced_at:       string
 }
@@ -112,6 +115,9 @@ async function fetchListingContent(
     backend_keywords: null,
     image_count: 0,
     has_aplus: false,
+    aplus_module_count: 0,
+    aplus_has_brand_story: false,
+    aplus_has_headline: false,
     aplus_images_missing_alt: 0,
     content_synced_at: new Date().toISOString(),
   }
@@ -168,51 +174,70 @@ async function fetchListingContent(
 
 // ── A+ Content API ────────────────────────────────────────────────────────────
 
+interface AplusStatus {
+  hasAplus:       boolean
+  moduleCount:    number
+  missingAltCount: number
+  hasBrandStory:  boolean
+  hasHeadline:    boolean
+}
+
 async function fetchAplusStatus(
   token: string,
   asin: string
-): Promise<{ hasAplus: boolean; missingAltCount: number }> {
+): Promise<AplusStatus> {
+  // Try the summary list endpoint (no CONTENTS — faster, works on parent ASINs)
   const url =
     `${ENDPOINT}/aplus/2020-11-01/contentDocuments` +
     `?marketplaceId=${MARKETPLACE_ID}` +
-    `&asinSet=${asin}` +
-    `&includedDataSet=CONTENTS`
+    `&asinSet=${asin}`
 
   const resp = await fetch(url, {
     headers: { 'x-amz-access-token': token },
   })
 
-  if (!resp.ok) {
-    return { hasAplus: false, missingAltCount: 0 }
-  }
+  const base: AplusStatus = { hasAplus: false, moduleCount: 0, missingAltCount: 0, hasBrandStory: false, hasHeadline: false }
+
+  if (!resp.ok) return base
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const json: any = await resp.json()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const docs: any[] = json.contentDocumentSummaryList || []
 
-  if (docs.length === 0) {
-    return { hasAplus: false, missingAltCount: 0 }
-  }
+  if (docs.length === 0) return base
 
-  // Count images missing alt text across all A+ modules
-  let missingAlt = 0
+  base.hasAplus = true
+
+  // Analyse each document summary for optimization signals
   for (const doc of docs) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const modules: any[] = doc.contentDocument?.contentModuleList || []
-    for (const mod of modules) {
-      // Check all image fields in the module for missing image_keywords (alt text)
-      const moduleStr = JSON.stringify(mod)
-      const imageMatches = moduleStr.match(/"image":\s*\{[^}]*\}/g) || []
-      for (const imgStr of imageMatches) {
-        if (!imgStr.includes('"image_keywords"') || imgStr.includes('"image_keywords":""')) {
-          missingAlt++
+    const contentType: string = doc.contentType || ''
+    if (contentType === 'STANDARD') {
+      // Standard A+ — check module count from summary
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const modules: any[] = doc.contentDocument?.contentModuleList || []
+      base.moduleCount += modules.length
+
+      for (const mod of modules) {
+        const modType: string = mod.contentModuleType || ''
+        if (modType.includes('HEADLINE') || modType.includes('HEADER')) base.hasHeadline = true
+
+        // Check images for missing alt text
+        const modStr = JSON.stringify(mod)
+        const imageMatches = modStr.match(/"image":\s*\{[^}]*\}/g) || []
+        for (const imgStr of imageMatches) {
+          if (!imgStr.includes('"image_keywords"') || imgStr.includes('"image_keywords":""')) {
+            base.missingAltCount++
+          }
         }
       }
+    } else if (contentType === 'EMC') {
+      // Brand Story (Enhanced Marketing Content)
+      base.hasBrandStory = true
     }
   }
 
-  return { hasAplus: true, missingAltCount: missingAlt }
+  return base
 }
 
 // ── Scoring Engine ────────────────────────────────────────────────────────────
@@ -256,29 +281,29 @@ function scoreListingContent(
   const title = representativeContent.title || ''
   if (!title) {
     titleScore = 0
-    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing', auto_fixable: false })
+    issues.push({ field: 'title', severity: 'critical', message: 'Add a title in Seller Central → Edit Listing → Vital Info', auto_fixable: false })
   } else {
     const titleLen = title.length
     if (titleLen < 80) {
       titleScore -= 10
-      issues.push({ field: 'title', severity: 'warning', message: `Title too short (${titleLen} chars, aim for 150-200)`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Expand title to 150-200 chars (currently ${titleLen}) — add color, size, use case, or target audience`, auto_fixable: false })
     } else if (titleLen < 150) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'info', message: `Title could be longer (${titleLen} chars, aim for 150-200)`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'info', message: `Expand title to 150-200 chars (currently ${titleLen}) — add key attributes like material, occasion, or compatibility`, auto_fixable: false })
     } else if (titleLen > 200) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Title too long (${titleLen} chars, max 200)`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Shorten title to under 200 chars (currently ${titleLen}) — Amazon truncates long titles in search results`, auto_fixable: false })
     }
     // Check for ALL CAPS words (more than 2 consecutive caps words)
     const capsWords = title.split(' ').filter(w => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w))
     if (capsWords.length > 2) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Title has ${capsWords.length} ALL CAPS words — Amazon may suppress`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Remove ALL CAPS words from title (found ${capsWords.length}: ${capsWords.slice(0, 3).join(', ')}) — Amazon suppresses listings with 3+ caps words`, auto_fixable: false })
     }
     // Check for forbidden characters
     if (/[!?$%^*]/.test(title)) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: 'Title contains forbidden characters (!, ?, $, etc.)', auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: 'Remove special characters (!, ?, $, %, ^, *) from title — Amazon policy violation that can cause suppression', auto_fixable: false })
     }
   }
   titleScore = Math.max(0, titleScore)
@@ -295,16 +320,16 @@ function scoreListingContent(
   const bulletCount = bullets.length
   if (bulletCount === 0) {
     bulletScore = 0
-    issues.push({ field: 'bullets', severity: 'critical', message: 'No bullet points found', auto_fixable: false })
+    issues.push({ field: 'bullets', severity: 'critical', message: 'Add 5 bullet points in Seller Central → Edit Listing → Product Description — each bullet should be 100+ chars with key features and search terms', auto_fixable: false })
   } else {
     if (bulletCount < 5) {
       bulletScore -= 10
-      issues.push({ field: 'bullets', severity: 'warning', message: `Only ${bulletCount}/5 bullet points used`, auto_fixable: false })
+      issues.push({ field: 'bullets', severity: 'warning', message: `Add ${5 - bulletCount} more bullet point(s) to reach the 5-bullet maximum — each unused bullet is a missed keyword opportunity`, auto_fixable: false })
     }
     const shortBullets = bullets.filter(b => b.length < 100)
     if (shortBullets.length > 0) {
       bulletScore -= Math.min(15, shortBullets.length * 5)
-      issues.push({ field: 'bullets', severity: 'warning', message: `${shortBullets.length} bullet(s) under 100 chars — add more detail and keywords`, auto_fixable: false })
+      issues.push({ field: 'bullets', severity: 'warning', message: `Expand ${shortBullets.length} short bullet(s) to 100+ chars — include benefits, materials, dimensions, and relevant search terms`, auto_fixable: false })
     }
   }
   bulletScore = Math.max(0, bulletScore)
@@ -314,31 +339,49 @@ function scoreListingContent(
   const kwLen = keywords.length
   if (kwLen === 0) {
     keywordScore = 0
-    issues.push({ field: 'backend_keywords', severity: 'critical', message: 'Backend keywords are empty (250 chars available)', auto_fixable: true })
+    issues.push({ field: 'backend_keywords', severity: 'critical', message: 'Add backend keywords in Seller Central → Edit Listing → Keywords tab — use all 250 chars with space-separated terms, no commas needed', auto_fixable: false })
   } else if (kwLen < 100) {
     keywordScore -= 15
-    issues.push({ field: 'backend_keywords', severity: 'warning', message: `Backend keywords only ${kwLen}/250 chars used — add more`, auto_fixable: true })
+    issues.push({ field: 'backend_keywords', severity: 'warning', message: `Backend keywords only ${kwLen}/250 chars — add more space-separated terms in Seller Central → Edit Listing → Keywords tab to fill the remaining ${250 - kwLen} chars`, auto_fixable: false })
   } else if (kwLen < 200) {
     keywordScore -= 10
-    issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords ${kwLen}/250 chars — room for more`, auto_fixable: true })
+    issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords at ${kwLen}/250 chars — ${250 - kwLen} chars still available in Seller Central → Edit Listing → Keywords tab`, auto_fixable: false })
   }
   // Check for commas (waste space)
   if (keywords.includes(',')) {
     keywordScore -= 5
-    issues.push({ field: 'backend_keywords', severity: 'info', message: 'Backend keywords contain commas — remove them to save space', auto_fixable: true })
+    issues.push({ field: 'backend_keywords', severity: 'info', message: 'Remove commas from backend keywords — Amazon ignores them and they waste character space', auto_fixable: false })
   }
   keywordScore = Math.max(0, keywordScore)
 
   // ── A+ Content scoring ─────────────────────────────────────────────────────
-  const hasAplus = representativeContent.has_aplus
-  const missingAlt = representativeContent.aplus_images_missing_alt
+  const hasAplus           = representativeContent.has_aplus
+  const missingAlt         = representativeContent.aplus_images_missing_alt
+  const moduleCount        = representativeContent.aplus_module_count || 0
+  const hasBrandStory      = representativeContent.aplus_has_brand_story
+  const hasHeadline        = representativeContent.aplus_has_headline
 
   if (!hasAplus) {
     aplusScore = 0
-    issues.push({ field: 'aplus', severity: 'critical', message: 'No A+ Content — add Enhanced Brand Content to boost conversion', auto_fixable: false })
-  } else if (missingAlt > 0) {
-    aplusScore -= 10
-    issues.push({ field: 'aplus', severity: 'warning', message: `${missingAlt} A+ image(s) missing alt text — hurts Amazon search indexing`, auto_fixable: true })
+    issues.push({ field: 'aplus', severity: 'critical', message: 'Create A+ Content in Seller Central → Advertising → A+ Content Manager — add images, comparison charts, and brand story to increase conversion by 3-10%', auto_fixable: false })
+  } else {
+    // A+ exists — check optimization quality
+    if (moduleCount > 0 && moduleCount < 5) {
+      aplusScore -= 8
+      issues.push({ field: 'aplus', severity: 'warning', message: `A+ Content has only ${moduleCount} module(s) — add more modules (aim for 5+) in A+ Content Manager to maximise page coverage`, auto_fixable: false })
+    }
+    if (!hasBrandStory) {
+      aplusScore -= 7
+      issues.push({ field: 'aplus', severity: 'warning', message: 'No Brand Story module — add a Brand Story in A+ Content Manager to appear on all your ASINs and build brand recognition', auto_fixable: false })
+    }
+    if (!hasHeadline) {
+      aplusScore -= 5
+      issues.push({ field: 'aplus', severity: 'info', message: 'Add a headline/header module to your A+ Content — it anchors the page and improves readability', auto_fixable: false })
+    }
+    if (missingAlt > 0) {
+      aplusScore -= 5
+      issues.push({ field: 'aplus', severity: 'warning', message: `${missingAlt} A+ image(s) missing alt text — add image keywords in A+ Content Manager to improve Amazon search indexing`, auto_fixable: false })
+    }
   }
   aplusScore = Math.max(0, aplusScore)
 
@@ -356,7 +399,7 @@ function scoreListingContent(
       issues.push({
         field:        'child_overrides',
         severity:     'warning',
-        message:      `${overrideCount} child SKU(s) have individually overridden content — review and consolidate`,
+        message:      `${overrideCount} child variant(s) have different content from the parent — review in Seller Central and consolidate to a single consistent listing`,
         auto_fixable: false,
       })
     }
@@ -454,7 +497,7 @@ export async function syncListingContent(
       if (contentRows.length === 0) continue
 
       // ── Step 4: Fetch A+ status for the parent ASIN ──────────────────────
-      let aplusData = { hasAplus: false, missingAltCount: 0 }
+      let aplusData: AplusStatus = { hasAplus: false, moduleCount: 0, missingAltCount: 0, hasBrandStory: false, hasHeadline: false }
       try {
         aplusData = await fetchAplusStatus(token, parentAsin)
         await sleep(100) // A+ API: 10 req/sec
@@ -464,7 +507,10 @@ export async function syncListingContent(
 
       // Apply A+ data to all content rows for this parent
       for (const row of contentRows) {
-        row.has_aplus               = aplusData.hasAplus
+        row.has_aplus                = aplusData.hasAplus
+        row.aplus_module_count       = aplusData.moduleCount
+        row.aplus_has_brand_story    = aplusData.hasBrandStory
+        row.aplus_has_headline       = aplusData.hasHeadline
         row.aplus_images_missing_alt = aplusData.missingAltCount
       }
 
