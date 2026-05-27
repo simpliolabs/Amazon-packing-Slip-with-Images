@@ -2394,352 +2394,366 @@ export default function FBAIntelligencePage() {
                 <p className="text-xs text-gray-500 mt-1">Click &quot;Scan Listings&quot; to analyse your top sellers for SEO gaps.</p>
               </div>
             ) : (
+              <>
+              {/* ── Optimizer Modal ─────────────────────────────────────────────── */}
+              {expandedSeoCard && (() => {
+                const score = seoScores.find(s => s.parent_asin === expandedSeoCard)
+                if (!score) return null
+                const allIssues = score.issues || []
+                const rec = aiRecs[score.parent_asin] || null
+                const isAiLoading = aiLoadingSet.has(score.parent_asin)
+                const copyToClipboard = (text: string) => navigator.clipboard.writeText(text)
+                const categories: { key: string; label: string; emoji: string }[] = [
+                  { key: 'title',           label: 'Title',             emoji: '📝' },
+                  { key: 'bullets',         label: 'Bullets',           emoji: '•'  },
+                  { key: 'description',     label: 'Description',       emoji: '📄' },
+                  { key: 'backend_keywords',label: 'Keywords',          emoji: '🔑' },
+                  { key: 'images',          label: 'Images',            emoji: '🖼'  },
+                  { key: 'aplus',           label: 'A+ Content',        emoji: '✨' },
+                  { key: 'child_overrides', label: 'Variant Conflicts', emoji: '⚡' },
+                ]
+                return (
+                  <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm overflow-y-auto py-6 px-4">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl">
+                      {/* Modal header */}
+                      <div className="flex items-start gap-4 p-6 border-b border-gray-200">
+                        {score.image_url
+                          ? <img src={score.image_url} alt="" className="w-16 h-16 rounded-xl object-cover shrink-0" />
+                          : <div className="w-16 h-16 rounded-xl bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xs">IMG</div>
+                        }
+                        <div className="flex-1 min-w-0">
+                          <h2 className="text-base font-bold text-gray-900 leading-snug">{score.product_title || score.parent_asin}</h2>
+                          <div className="flex items-center gap-3 mt-1 flex-wrap">
+                            <a href={`https://amazon.com/dp/${score.parent_asin}`} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 hover:underline font-mono">{score.parent_asin}</a>
+                            <span className="text-xs text-gray-400">{score.child_count} variants · {score.total_units_30d} units/30d</span>
+                          </div>
+                          {/* Score bars */}
+                          <div className="grid grid-cols-4 gap-3 mt-3">
+                            {[{ label: 'Title', s: score.title_score }, { label: 'Bullets', s: score.bullet_score }, { label: 'Keywords', s: score.keyword_score }, { label: 'A+', s: score.aplus_score }].map(({ label, s }) => (
+                              <div key={label}>
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <span className="text-[10px] text-gray-500">{label}</span>
+                                  <span className="text-[10px] font-semibold text-gray-700">{s}/25</span>
+                                </div>
+                                <div className="bg-gray-200 rounded-full h-1.5">
+                                  <div className={`h-1.5 rounded-full ${s >= 20 ? 'bg-green-500' : s >= 15 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${(s / 25) * 100}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        {/* Overall score */}
+                        <div className={`shrink-0 w-16 h-16 rounded-full border-2 flex flex-col items-center justify-center font-bold ${
+                          score.overall_score >= 80 ? 'text-green-600 border-green-400'
+                          : score.overall_score >= 60 ? 'text-amber-600 border-amber-400'
+                          : 'text-red-600 border-red-400'
+                        }`}>
+                          <span className="text-xl leading-none">{score.overall_score}</span>
+                          <span className="text-[9px] font-normal text-gray-400">/ 100</span>
+                        </div>
+                        <button onClick={() => setExpandedSeoCard(null)} className="shrink-0 text-gray-400 hover:text-gray-700 text-2xl leading-none ml-2">×</button>
+                      </div>
+
+                      {/* Modal body — two columns */}
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-gray-200">
+
+                        {/* Left: Issues */}
+                        <div className="p-6 space-y-3 overflow-y-auto max-h-[60vh]">
+                          <h3 className="text-sm font-bold text-gray-800 mb-3">What to Fix <span className="text-xs font-normal text-gray-400">({allIssues.length} issues)</span></h3>
+                          {allIssues.length === 0 ? (
+                            <div className="text-center py-8">
+                              <div className="text-3xl mb-2">🎉</div>
+                              <p className="text-sm font-medium text-green-700">No issues found — this listing is well optimized!</p>
+                            </div>
+                          ) : (
+                            categories.map(cat => {
+                              const catIssues = allIssues.filter(i => i.field === cat.key)
+                              if (catIssues.length === 0) return null
+                              const hasCritical = catIssues.some(i => i.severity === 'critical')
+                              const hasWarning  = catIssues.some(i => i.severity === 'warning')
+                              const headerColor = hasCritical ? 'bg-red-50 border-red-200 text-red-800'
+                                : hasWarning ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                : 'bg-blue-50 border-blue-200 text-blue-800'
+                              return (
+                                <div key={cat.key} className={`rounded-lg border overflow-hidden ${headerColor}`}>
+                                  <div className="px-3 py-2 flex items-center gap-1.5">
+                                    <span className="text-sm">{cat.emoji}</span>
+                                    <span className="text-xs font-semibold flex-1">{cat.label}</span>
+                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                                      hasCritical ? 'bg-red-200 text-red-800'
+                                      : hasWarning ? 'bg-amber-200 text-amber-800'
+                                      : 'bg-blue-200 text-blue-800'
+                                    }`}>{catIssues.length}</span>
+                                  </div>
+                                  <div className="border-t border-current/10 divide-y divide-current/10">
+                                    {catIssues.map((issue, idx) => (
+                                      <div key={idx} className="px-3 py-2.5 text-xs leading-relaxed">{issue.message}</div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )
+                            })
+                          )}
+
+                          {/* Variant Breakdown */}
+                          {score.children.length > 0 && (
+                            <div className="mt-4">
+                              <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown</h4>
+                              <div className="space-y-2">
+                                {score.children.map((child, childIdx) => {
+                                  const firstTitle = score.children[0].title || ''
+                                  const hasTitleDiff = childIdx > 0 && child.title && child.title !== firstTitle
+                                  const firstKw = score.children[0].backend_keywords || ''
+                                  const hasKwDiff = childIdx > 0 && child.backend_keywords && child.backend_keywords !== firstKw
+                                  const hasAnyDiff = hasTitleDiff || hasKwDiff
+                                  const bulletCount = [child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length
+                                  const kwLen = child.backend_keywords?.length || 0
+                                  return (
+                                    <div key={child.sku} className={`rounded-lg p-2.5 text-xs ${
+                                      hasAnyDiff ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50 border border-gray-100'
+                                    }`}>
+                                      <div className="flex items-center justify-between mb-1">
+                                        <a href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${child.asin}`} target="_blank" rel="noopener noreferrer" className="font-mono font-semibold text-blue-600 hover:underline">{child.sku}</a>
+                                        <div className="flex items-center gap-1">
+                                          {hasAnyDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Conflict</span>}
+                                          {child.has_aplus
+                                            ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full">A+ ✓</span>
+                                            : <span className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded-full">No A+</span>
+                                          }
+                                        </div>
+                                      </div>
+                                      <div className={`mb-1 ${hasTitleDiff ? 'text-purple-800' : 'text-gray-700'}`}>
+                                        <span className="font-semibold">Title: </span>
+                                        {child.title ? <span title={child.title}>{child.title.slice(0, 80)}{child.title.length > 80 ? '…' : ''}</span>
+                                          : <span className="text-red-500 font-medium">Missing</span>}
+                                        {hasTitleDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600">
+                                        <span><span className="font-semibold">Bullets:</span> <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span></span>
+                                        <span><span className="font-semibold">Keywords:</span> {child.backend_keywords ? <span className={`font-medium ${kwLen < 100 ? 'text-amber-600' : kwLen < 200 ? 'text-amber-500' : 'text-green-600'}`}>{kwLen}/250</span> : <span className="text-red-500 font-medium">Empty</span>}{hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}</span>
+                                        <span><span className="font-semibold">Images:</span> <span className={(child.image_count || 0) < 7 ? 'text-amber-600 font-medium' : 'text-green-600'}>{child.image_count || 0}/7</span></span>
+                                      </div>
+                                      {child.description
+                                        ? <div className="mt-1 text-gray-500"><span className="font-semibold text-gray-600">Desc: </span><span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 120)}{child.description.length > 120 ? '…' : ''}</span></div>
+                                        : <div className="mt-1 text-red-500 font-medium">Description: Missing</div>
+                                      }
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Right: AI Recommendations */}
+                        <div className="p-6 overflow-y-auto max-h-[60vh]">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm">✨</span>
+                              <h3 className="text-sm font-bold text-violet-800">AI SEO Recommendations</h3>
+                              <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full">gemini-2.5-flash</span>
+                            </div>
+                            {rec && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-gray-400">{new Date(rec.generated_at).toLocaleDateString()}</span>
+                                <button onClick={() => { setAiRecs(prev => { const n = { ...prev }; delete n[score.parent_asin]; return n }); fetchAiRecs(score.parent_asin) }} className="text-[10px] text-violet-600 hover:underline">Regenerate</button>
+                              </div>
+                            )}
+                          </div>
+
+                          {isAiLoading ? (
+                            <div className="flex flex-col items-center justify-center py-16 gap-3">
+                              <div className="w-8 h-8 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
+                              <p className="text-sm text-violet-600 font-medium">Analyzing listing with Amazon SEO expert AI…</p>
+                              <p className="text-xs text-gray-400">This takes 10-20 seconds</p>
+                            </div>
+                          ) : !rec ? (
+                            <div className="flex flex-col items-center justify-center py-16 gap-3">
+                              <div className="w-8 h-8 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
+                              <p className="text-sm text-violet-600">Loading recommendations…</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-4">
+                              {/* Recommended Title */}
+                              <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title?.length || 0} chars)</span></span>
+                                  <button onClick={() => copyToClipboard(rec.recommended_title)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                </div>
+                                <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
+                              </div>
+                              {/* Recommended Bullets */}
+                              <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
+                                  <button onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
+                                </div>
+                                <div className="space-y-2">
+                                  {rec.recommended_bullets.map((bullet, bi) => (
+                                    <div key={bi} className="flex items-start gap-2">
+                                      <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
+                                      <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
+                                      <button onClick={() => copyToClipboard(bullet)} className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0">Copy</button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                              {/* Recommended Keywords */}
+                              <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className="text-gray-400 font-normal">({rec.recommended_keywords?.length || 0} chars)</span></span>
+                                  <button onClick={() => copyToClipboard(rec.recommended_keywords)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                </div>
+                                <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
+                              </div>
+                              {/* Recommended Description */}
+                              <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
+                                  <button onClick={() => copyToClipboard(rec.recommended_description)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy HTML</button>
+                                </div>
+                                <div className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none" dangerouslySetInnerHTML={{ __html: rec.recommended_description }} />
+                              </div>
+                              {/* A+ Suggestions */}
+                              <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-semibold text-gray-700">✨ A+ Content Strategy</span>
+                                  <button onClick={() => copyToClipboard(rec.aplus_suggestions)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                </div>
+                                <p className="text-xs text-gray-800 leading-relaxed whitespace-pre-line">{rec.aplus_suggestions}</p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Modal footer */}
+                      <div className="border-t border-gray-200 px-6 py-4 flex items-center justify-between bg-gray-50 rounded-b-2xl">
+                        <div className="flex items-center gap-3">
+                          <a href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`} target="_blank" rel="noopener noreferrer" className="text-sm font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-lg px-4 py-2 transition-colors">Edit Listing in Seller Central →</a>
+                          <a href="https://sellercentral.amazon.com/enhanced-content/content-manager" target="_blank" rel="noopener noreferrer" className="text-sm font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-lg px-4 py-2 transition-colors">Edit A+ Content →</a>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={() => fetchAiRecs(score.parent_asin)}
+                            disabled={aiLoadingSet.has(score.parent_asin)}
+                            className="text-sm font-medium bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white rounded-lg px-4 py-2 transition-colors disabled:opacity-60 disabled:cursor-wait"
+                          >
+                            {aiLoadingSet.has(score.parent_asin) ? '✨ Analyzing…' : aiRecs[score.parent_asin] ? '✨ Regenerate AI Audit' : '✨ Run AI Audit'}
+                          </button>
+                          <button onClick={() => setExpandedSeoCard(null)} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
+
+              {/* ── Compact Cards Grid ──────────────────────────────────────────── */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {seoScores.map(score => {
-                  const isExpanded = expandedSeoCard === score.parent_asin
                   const scoreColor =
                     score.overall_score >= 80 ? 'text-green-600'
                     : score.overall_score >= 60 ? 'text-amber-600'
                     : 'text-red-600'
                   const scoreBg =
-                    score.overall_score >= 80 ? 'bg-green-50 border-green-200'
-                    : score.overall_score >= 60 ? 'bg-amber-50 border-amber-200'
-                    : 'bg-red-50 border-red-200'
+                    score.overall_score >= 80 ? 'bg-green-50 border-green-200 hover:border-green-400'
+                    : score.overall_score >= 60 ? 'bg-amber-50 border-amber-200 hover:border-amber-400'
+                    : 'bg-red-50 border-red-200 hover:border-red-400'
                   const allIssues = score.issues || []
+                  const issueCounts: Record<string, number> = {}
+                  allIssues.forEach(i => { issueCounts[i.field] = (issueCounts[i.field] || 0) + 1 })
+                  const categoryBadges = [
+                    { key: 'title',            emoji: '📝', label: 'Title'    },
+                    { key: 'bullets',          emoji: '•',  label: 'Bullets'  },
+                    { key: 'description',      emoji: '📄', label: 'Desc'     },
+                    { key: 'backend_keywords', emoji: '🔑', label: 'Keywords' },
+                    { key: 'images',           emoji: '🖼', label: 'Images'   },
+                    { key: 'aplus',            emoji: '✨', label: 'A+'       },
+                    { key: 'child_overrides',  emoji: '⚡', label: 'Variants' },
+                  ].filter(c => issueCounts[c.key])
+                  const hasCritical = allIssues.some(i => i.severity === 'critical')
 
                   return (
-                    <div key={score.parent_asin} className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col`}>
-                      {/* Card header */}
-                      <div className="p-4 flex-1">
-                        {/* Product image + score ring */}
-                        <div className="flex items-start gap-3 mb-4">
-                          {score.image_url ? (
-                            <img src={score.image_url} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0 bg-gray-100" />
-                          ) : (
-                            <div className="w-14 h-14 rounded-lg bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xs">IMG</div>
-                          )}
+                    <button
+                      key={score.parent_asin}
+                      onClick={() => setExpandedSeoCard(score.parent_asin)}
+                      className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
+                    >
+                      <div className="p-4">
+                        {/* Header row: image + title + score */}
+                        <div className="flex items-start gap-3 mb-3">
+                          {score.image_url
+                            ? <img src={score.image_url} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0 bg-gray-100" />
+                            : <div className="w-14 h-14 rounded-lg bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xs">IMG</div>
+                          }
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm font-semibold text-gray-900 leading-tight line-clamp-2" title={score.product_title || ''}>
-                              {score.product_title || score.parent_asin}
-                            </p>
-                            <div className="flex items-center gap-1.5 mt-1">
-                              <a href={`https://amazon.com/dp/${score.parent_asin}`} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 hover:underline font-mono">
-                                {score.parent_asin}
-                              </a>
-                              <span className="text-xs text-gray-400">· {score.child_count} vars</span>
-                            </div>
-                            <div className="text-xs text-gray-500 mt-0.5">{score.total_units_30d} units/30d</div>
+                            <p className="text-sm font-semibold text-gray-900 leading-tight line-clamp-2">{score.product_title || score.parent_asin}</p>
+                            <p className="text-xs text-gray-400 mt-0.5 font-mono">{score.parent_asin}</p>
+                            <p className="text-xs text-gray-400">{score.child_count} vars · {score.total_units_30d} units/30d</p>
                           </div>
-                          {/* Score badge */}
-                          <div className={`shrink-0 w-12 h-12 rounded-full border-2 flex items-center justify-center font-bold text-base ${scoreColor} ${
-                            score.overall_score >= 80 ? 'border-green-400'
-                            : score.overall_score >= 60 ? 'border-amber-400'
-                            : 'border-red-400'
+                          <div className={`shrink-0 w-12 h-12 rounded-full border-2 flex flex-col items-center justify-center font-bold ${
+                            score.overall_score >= 80 ? 'text-green-600 border-green-400'
+                            : score.overall_score >= 60 ? 'text-amber-600 border-amber-400'
+                            : 'text-red-600 border-red-400'
                           }`}>
-                            {score.overall_score}
+                            <span className="text-base leading-none">{score.overall_score}</span>
+                            <span className="text-[9px] text-gray-400 leading-none">/100</span>
                           </div>
                         </div>
 
-                        {/* Score breakdown bars */}
-                        <div className="space-y-1.5 mb-4">
+                        {/* Score bars */}
+                        <div className="space-y-1.5 mb-3">
                           {[
-                            { label: 'Title', score: score.title_score, max: 25 },
-                            { label: 'Bullets', score: score.bullet_score, max: 25 },
-                            { label: 'Keywords', score: score.keyword_score, max: 25 },
-                            { label: 'A+', score: score.aplus_score, max: 25 },
-                          ].map(({ label, score: s, max }) => (
+                            { label: 'Title',    s: score.title_score   },
+                            { label: 'Bullets',  s: score.bullet_score  },
+                            { label: 'Keywords', s: score.keyword_score },
+                            { label: 'A+',       s: score.aplus_score   },
+                          ].map(({ label, s }) => (
                             <div key={label} className="flex items-center gap-2">
                               <span className="text-xs text-gray-500 w-16 shrink-0">{label}</span>
                               <div className="flex-1 bg-gray-200 rounded-full h-2">
                                 <div
-                                  className={`h-2 rounded-full ${
-                                    s >= max * 0.8 ? 'bg-green-500'
-                                    : s >= max * 0.6 ? 'bg-amber-500'
-                                    : 'bg-red-500'
-                                  }`}
-                                  style={{ width: `${(s / max) * 100}%` }}
+                                  className={`h-2 rounded-full ${s >= 20 ? 'bg-green-500' : s >= 15 ? 'bg-amber-500' : 'bg-red-500'}`}
+                                  style={{ width: `${(s / 25) * 100}%` }}
                                 />
                               </div>
-                              <span className="text-xs text-gray-500 w-10 text-right">{s}/{max}</span>
+                              <span className="text-xs text-gray-500 w-8 text-right">{s}/25</span>
                             </div>
                           ))}
                         </div>
 
-                        {/* Issues grouped by category */}
-                        {allIssues.length > 0 && (() => {
-                          const categories: { key: string; label: string; emoji: string }[] = [
-                            { key: 'title',          label: 'Title',              emoji: '📝' },
-                            { key: 'bullets',        label: 'Bullets',            emoji: '•' },
-                            { key: 'description',    label: 'Description',        emoji: '📄' },
-                            { key: 'backend_keywords', label: 'Keywords',         emoji: '🔑' },
-                            { key: 'images',         label: 'Images',             emoji: '🖼' },
-                            { key: 'aplus',          label: 'A+ Content',         emoji: '✨' },
-                            { key: 'child_overrides', label: 'Variant Conflicts', emoji: '⚡' },
-                          ]
-                          return (
-                            <div className="space-y-2">
-                              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">What to Fix</p>
-                              {categories.map(cat => {
-                                const catIssues = allIssues.filter(i => i.field === cat.key)
-                                if (catIssues.length === 0) return null
-                                const hasCritical = catIssues.some(i => i.severity === 'critical')
-                                const hasWarning  = catIssues.some(i => i.severity === 'warning')
-                                const headerColor = hasCritical ? 'bg-red-50 border-red-200 text-red-800'
-                                  : hasWarning ? 'bg-amber-50 border-amber-200 text-amber-800'
-                                  : 'bg-blue-50 border-blue-200 text-blue-800'
-                                return (
-                                  <div key={cat.key} className={`rounded-lg border overflow-hidden ${headerColor}`}>
-                                    <div className="px-3 py-1.5 flex items-center gap-1.5">
-                                      <span className="text-sm">{cat.emoji}</span>
-                                      <span className="text-xs font-semibold flex-1">{cat.label}</span>
-                                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                                        hasCritical ? 'bg-red-200 text-red-800'
-                                        : hasWarning ? 'bg-amber-200 text-amber-800'
-                                        : 'bg-blue-200 text-blue-800'
-                                      }`}>{catIssues.length}</span>
-                                    </div>
-                                    <div className="border-t border-current/10 divide-y divide-current/10">
-                                      {catIssues.map((issue, idx) => (
-                                        <div key={idx} className="px-3 py-2 text-xs leading-relaxed">
-                                          {issue.message}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          )
-                        })()}
-                      </div>
-
-                      {/* Card actions */}
-                      <div className="border-t border-gray-200 px-4 py-3 flex items-center gap-2 bg-white/60">
-                        <a
-                          href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
-                        >
-                          Edit Listing →
-                        </a>
-                        <a
-                          href="https://sellercentral.amazon.com/enhanced-content/content-manager"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
-                        >
-                          Edit A+ →
-                        </a>
-                        <button
-                          onClick={() => fetchAiRecs(score.parent_asin)}
-                          disabled={aiLoadingSet.has(score.parent_asin)}
-                          className="flex-1 text-xs font-medium bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white rounded-md px-2 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-wait"
-                        >
-                          {aiLoadingSet.has(score.parent_asin) ? '✨ Analyzing…' : expandedAiCard === score.parent_asin ? '✨ Hide AI' : '✨ AI Fix'}
-                        </button>
-                        <button
-                          onClick={() => setExpandedSeoCard(isExpanded ? null : score.parent_asin)}
-                          className="text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
-                        >
-                          {isExpanded ? 'Hide' : 'Details'}
-                        </button>
-                      </div>
-
-                      {/* AI Recommendations Panel */}
-                      {expandedAiCard === score.parent_asin && aiRecs[score.parent_asin] && (() => {
-                        const rec = aiRecs[score.parent_asin]!
-                        const copyToClipboard = (text: string) => navigator.clipboard.writeText(text)
-                        return (
-                          <div className="border-t-2 border-violet-300 bg-gradient-to-b from-violet-50 to-white p-4 space-y-4">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="text-base">✨</span>
-                                <span className="text-sm font-bold text-violet-800">AI SEO Recommendations</span>
-                                <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full">gemini-2.5-flash</span>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-400">{new Date(rec.generated_at).toLocaleDateString()}</span>
-                                <button
-                                  onClick={() => fetchAiRecs(score.parent_asin)}
-                                  className="text-[10px] text-violet-600 hover:underline"
-                                >Regenerate</button>
-                              </div>
-                            </div>
-
-                            {/* Recommended Title */}
-                            <div className="bg-white rounded-lg border border-violet-200 p-3">
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title?.length || 0} chars)</span></span>
-                                <button
-                                  onClick={() => copyToClipboard(rec.recommended_title)}
-                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
-                                >Copy</button>
-                              </div>
-                              <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
-                            </div>
-
-                            {/* Recommended Bullets */}
-                            <div className="bg-white rounded-lg border border-violet-200 p-3">
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
-                                <button
-                                  onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))}
-                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
-                                >Copy All</button>
-                              </div>
-                              <div className="space-y-2">
-                                {rec.recommended_bullets.map((bullet, bi) => (
-                                  <div key={bi} className="flex items-start gap-2">
-                                    <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
-                                    <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
-                                    <button
-                                      onClick={() => copyToClipboard(bullet)}
-                                      className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0"
-                                    >Copy</button>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Recommended Keywords */}
-                            <div className="bg-white rounded-lg border border-violet-200 p-3">
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords to Add <span className="text-gray-400 font-normal">({rec.recommended_keywords?.length || 0} chars)</span></span>
-                                <button
-                                  onClick={() => copyToClipboard(rec.recommended_keywords)}
-                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
-                                >Copy</button>
-                              </div>
-                              <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
-                            </div>
-
-                            {/* Recommended Description */}
-                            <div className="bg-white rounded-lg border border-violet-200 p-3">
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
-                                <button
-                                  onClick={() => copyToClipboard(rec.recommended_description)}
-                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
-                                >Copy HTML</button>
-                              </div>
-                              <div
-                                className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none"
-                                dangerouslySetInnerHTML={{ __html: rec.recommended_description }}
-                              />
-                            </div>
-
-                            {/* A+ Suggestions */}
-                            <div className="bg-white rounded-lg border border-violet-200 p-3">
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-xs font-semibold text-gray-700">✨ A+ Content Strategy</span>
-                                <button
-                                  onClick={() => copyToClipboard(rec.aplus_suggestions)}
-                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
-                                >Copy</button>
-                              </div>
-                              <p className="text-xs text-gray-800 leading-relaxed whitespace-pre-line">{rec.aplus_suggestions}</p>
-                            </div>
-                          </div>
-                        )
-                      })()}
-
-                      {/* Expanded child breakdown */}
-                      {isExpanded && (
-                        <div className="border-t border-gray-200 bg-white p-3 space-y-2">
-                          <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown</p>
-                          {score.children.length === 0 ? (
-                            <p className="text-xs text-gray-400">No child content synced yet. Click Scan Listings.</p>
-                          ) : (
-                            score.children.map((child, childIdx) => {
-                              // Detect title diff vs first child (canonical)
-                              const firstTitle = score.children[0].title || ''
-                              const hasTitleDiff = childIdx > 0 && child.title && child.title !== firstTitle
-                              // Detect keyword diff vs first child
-                              const firstKw = score.children[0].backend_keywords || ''
-                              const hasKwDiff = childIdx > 0 && child.backend_keywords && child.backend_keywords !== firstKw
-                              const hasAnyDiff = hasTitleDiff || hasKwDiff
-                              const bulletCount = [child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length
-                              const kwLen = child.backend_keywords?.length || 0
+                        {/* Issue category badges */}
+                        {categoryBadges.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {categoryBadges.map(cat => {
+                              const count = issueCounts[cat.key]
+                              const catIssues = allIssues.filter(i => i.field === cat.key)
+                              const isCritical = catIssues.some(i => i.severity === 'critical')
                               return (
-                                <div key={child.sku} className={`rounded-lg p-2.5 text-xs ${
-                                  hasAnyDiff ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50 border border-gray-100'
+                                <span key={cat.key} className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${
+                                  isCritical
+                                    ? 'bg-red-100 text-red-700'
+                                    : 'bg-amber-100 text-amber-700'
                                 }`}>
-                                  {/* SKU header row */}
-                                  <div className="flex items-center justify-between mb-1.5">
-                                    <a
-                                      href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${child.asin}`}
-                                      target="_blank" rel="noopener noreferrer"
-                                      className="font-mono font-semibold text-blue-600 hover:underline"
-                                    >{child.sku}</a>
-                                    <div className="flex items-center gap-1">
-                                      {hasAnyDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium">Conflict</span>}
-                                      {child.has_aplus
-                                        ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full">A+ ✓</span>
-                                        : <span className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded-full">No A+</span>
-                                      }
-                                    </div>
-                                  </div>
-                                  {/* Title */}
-                                  <div className={`mb-1 ${hasTitleDiff ? 'text-purple-800' : 'text-gray-700'}`}>
-                                    <span className="font-semibold">Title: </span>
-                                    {child.title
-                                      ? <span title={child.title}>{child.title.slice(0, 70)}{child.title.length > 70 ? '…' : ''}</span>
-                                      : <span className="text-red-500 font-medium">Missing — add in Seller Central</span>
-                                    }
-                                    {hasTitleDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs from variant 1</span>}
-                                  </div>
-                                  {/* Stats row */}
-                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600">
-                                    <span>
-                                      <span className="font-semibold">Bullets:</span>{' '}
-                                      <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span>
-                                    </span>
-                                    <span>
-                                      <span className="font-semibold">Keywords:</span>{' '}
-                                      {child.backend_keywords
-                                        ? <span className={`font-medium ${kwLen < 100 ? 'text-amber-600' : kwLen < 200 ? 'text-amber-500' : 'text-green-600'}`}>{kwLen}/250</span>
-                                        : <span className="text-red-500 font-medium">Empty</span>
-                                      }
-                                      {hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
-                                    </span>
-                                    <span>
-                                      <span className="font-semibold">Images:</span>{' '}
-                                      <span className={(child.image_count || 0) < 7 ? 'text-amber-600 font-medium' : 'text-green-600'}>{child.image_count || 0}/7</span>
-                                    </span>
-                                    {child.aplus_images_missing_alt > 0 && (
-                                      <span className="text-amber-600">{child.aplus_images_missing_alt} A+ img missing alt</span>
-                                    )}
-                                  </div>
-                                  {/* Description preview */}
-                                  {child.description ? (
-                                    <div className="mt-1 text-gray-500">
-                                      <span className="font-semibold text-gray-600">Desc: </span>
-                                      <span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 100)}{child.description.length > 100 ? '…' : ''}</span>
-                                    </div>
-                                  ) : (
-                                    <div className="mt-1 text-red-500 font-medium">Description: Missing — add in Seller Central → Edit Listing → Product Description</div>
-                                  )}
-                                </div>
+                                  {cat.emoji} {cat.label}
+                                  <span className={`text-[10px] font-bold px-1 py-0.5 rounded-full ml-0.5 ${
+                                    isCritical ? 'bg-red-200 text-red-800' : 'bg-amber-200 text-amber-800'
+                                  }`}>{count}</span>
+                                </span>
                               )
-                            })
-                          )}
-                          <div className="pt-1">
-                            <a
-                              href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-[10px] text-blue-500 hover:underline"
-                            >
-                              Edit in Seller Central →
-                            </a>
+                            })}
                           </div>
-                        </div>
-                      )}
-                    </div>
+                        )}
+
+                        {/* Click hint */}
+                        <p className="text-[10px] text-gray-400 mt-3 text-right">Click to view full audit →</p>
+                      </div>
+                    </button>
                   )
                 })}
               </div>
+            </>
             )}
           </div>
           )}
