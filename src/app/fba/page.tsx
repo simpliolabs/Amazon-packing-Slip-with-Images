@@ -2362,28 +2362,28 @@ export default function FBAIntelligencePage() {
                   return (
                     <div key={score.parent_asin} className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col`}>
                       {/* Card header */}
-                      <div className="p-3 flex-1">
+                      <div className="p-4 flex-1">
                         {/* Product image + score ring */}
-                        <div className="flex items-start gap-3 mb-3">
+                        <div className="flex items-start gap-3 mb-4">
                           {score.image_url ? (
-                            <img src={score.image_url} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0 bg-gray-100" />
+                            <img src={score.image_url} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0 bg-gray-100" />
                           ) : (
-                            <div className="w-12 h-12 rounded-lg bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xs">IMG</div>
+                            <div className="w-14 h-14 rounded-lg bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xs">IMG</div>
                           )}
                           <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium text-gray-900 leading-tight line-clamp-2" title={score.product_title || ''}>
+                            <p className="text-sm font-semibold text-gray-900 leading-tight line-clamp-2" title={score.product_title || ''}>
                               {score.product_title || score.parent_asin}
                             </p>
                             <div className="flex items-center gap-1.5 mt-1">
-                              <a href={`https://amazon.com/dp/${score.parent_asin}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-blue-500 hover:underline font-mono">
+                              <a href={`https://amazon.com/dp/${score.parent_asin}`} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 hover:underline font-mono">
                                 {score.parent_asin}
                               </a>
-                              <span className="text-[10px] text-gray-400">· {score.child_count} vars</span>
+                              <span className="text-xs text-gray-400">· {score.child_count} vars</span>
                             </div>
-                            <div className="text-[10px] text-gray-500 mt-0.5">{score.total_units_30d} units/30d</div>
+                            <div className="text-xs text-gray-500 mt-0.5">{score.total_units_30d} units/30d</div>
                           </div>
                           {/* Score badge */}
-                          <div className={`shrink-0 w-10 h-10 rounded-full border-2 flex items-center justify-center font-bold text-sm ${scoreColor} ${
+                          <div className={`shrink-0 w-12 h-12 rounded-full border-2 flex items-center justify-center font-bold text-base ${scoreColor} ${
                             score.overall_score >= 80 ? 'border-green-400'
                             : score.overall_score >= 60 ? 'border-amber-400'
                             : 'border-red-400'
@@ -2393,18 +2393,18 @@ export default function FBAIntelligencePage() {
                         </div>
 
                         {/* Score breakdown bars */}
-                        <div className="space-y-1 mb-3">
+                        <div className="space-y-1.5 mb-4">
                           {[
                             { label: 'Title', score: score.title_score, max: 25 },
                             { label: 'Bullets', score: score.bullet_score, max: 25 },
                             { label: 'Keywords', score: score.keyword_score, max: 25 },
                             { label: 'A+', score: score.aplus_score, max: 25 },
                           ].map(({ label, score: s, max }) => (
-                            <div key={label} className="flex items-center gap-1.5">
-                              <span className="text-[10px] text-gray-500 w-12 shrink-0">{label}</span>
-                              <div className="flex-1 bg-gray-200 rounded-full h-1.5">
+                            <div key={label} className="flex items-center gap-2">
+                              <span className="text-xs text-gray-500 w-16 shrink-0">{label}</span>
+                              <div className="flex-1 bg-gray-200 rounded-full h-2">
                                 <div
-                                  className={`h-1.5 rounded-full ${
+                                  className={`h-2 rounded-full ${
                                     s >= max * 0.8 ? 'bg-green-500'
                                     : s >= max * 0.6 ? 'bg-amber-500'
                                     : 'bg-red-500'
@@ -2412,46 +2412,54 @@ export default function FBAIntelligencePage() {
                                   style={{ width: `${(s / max) * 100}%` }}
                                 />
                               </div>
-                              <span className="text-[10px] text-gray-500 w-8 text-right">{s}/{max}</span>
+                              <span className="text-xs text-gray-500 w-10 text-right">{s}/{max}</span>
                             </div>
                           ))}
                         </div>
 
                         {/* All issues as instructional action list */}
                         {allIssues.length > 0 && (
-                          <div className="space-y-1">
-                            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">What to fix</p>
+                          <div className="space-y-1.5">
+                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">What to fix</p>
                             {allIssues.map((issue, idx) => (
-                              <div key={idx} className={`text-[10px] rounded-lg px-2 py-1.5 flex gap-1.5 ${
-                                issue.severity === 'critical' ? 'bg-red-100 text-red-700'
-                                : issue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
-                                : 'bg-blue-50 text-blue-700'
+                              <div key={idx} className={`text-xs rounded-lg px-3 py-2 flex gap-2 ${
+                                issue.severity === 'critical' ? 'bg-red-100 text-red-800'
+                                : issue.severity === 'warning' ? 'bg-amber-100 text-amber-800'
+                                : 'bg-blue-50 text-blue-800'
                               }`}>
-                                <span className="shrink-0 mt-px">
+                                <span className="shrink-0 mt-0.5">
                                   {issue.severity === 'critical' ? '⚠️' : issue.severity === 'warning' ? '⚠️' : 'ℹ️'}
                                 </span>
-                                <span>{issue.message}</span>
+                                <span className="leading-relaxed">{issue.message}</span>
                               </div>
                             ))}
                           </div>
                         )}
                       </div>
 
-                      {/* Card actions — no Auto-fix, just Seller Central link + details toggle */}
-                      <div className="border-t border-gray-200 px-3 py-2 flex items-center gap-2 bg-white/60">
+                      {/* Card actions */}
+                      <div className="border-t border-gray-200 px-4 py-3 flex items-center gap-2 bg-white/60">
                         <a
                           href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex-1 text-center text-[10px] font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1 transition-colors"
+                          className="flex-1 text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
                         >
-                          Edit in Seller Central →
+                          Edit Listing →
+                        </a>
+                        <a
+                          href="https://sellercentral.amazon.com/enhanced-content/content-manager"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex-1 text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
+                        >
+                          Edit A+ →
                         </a>
                         <button
                           onClick={() => setExpandedSeoCard(isExpanded ? null : score.parent_asin)}
-                          className="flex-1 text-[10px] font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1 transition-colors"
+                          className="flex-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
                         >
-                          {isExpanded ? 'Hide Details' : 'View Details'}
+                          {isExpanded ? 'Hide' : 'Details'}
                         </button>
                       </div>
 

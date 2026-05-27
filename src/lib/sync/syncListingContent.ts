@@ -281,29 +281,30 @@ function scoreListingContent(
   const title = representativeContent.title || ''
   if (!title) {
     titleScore = 0
-    issues.push({ field: 'title', severity: 'critical', message: 'Add a title in Seller Central → Edit Listing → Vital Info', auto_fixable: false })
+    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info and add a keyword-rich title (150-200 chars). Lead with your primary keyword, then brand, then key attributes (size, color, material, use case).', auto_fixable: false })
   } else {
     const titleLen = title.length
     if (titleLen < 80) {
       titleScore -= 10
-      issues.push({ field: 'title', severity: 'warning', message: `Expand title to 150-200 chars (currently ${titleLen}) — add color, size, use case, or target audience`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — well below the 150-200 char sweet spot. Expand it by appending key attributes: compatible devices, material, pack size, target audience, and primary use case. Example tail: "– Compatible with Canon, Nikon, GoPro | Class 10 | For Photographers & Videographers"`, auto_fixable: false })
     } else if (titleLen < 150) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'info', message: `Expand title to 150-200 chars (currently ${titleLen}) — add key attributes like material, occasion, or compatibility`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'info', message: `Title is ${titleLen} chars — you have ${150 - titleLen}+ chars of unused keyword real estate. Add secondary attributes at the end: compatible devices, material type, gift occasion, or pack size. Every extra keyword in the title boosts search rank.`, auto_fixable: false })
     } else if (titleLen > 200) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Shorten title to under 200 chars (currently ${titleLen}) — Amazon truncates long titles in search results`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — Amazon truncates at ~200 chars in search results, hiding your tail keywords from shoppers. Trim filler phrases like "Get a Durable" or "Ideal for" and keep only high-value keywords.`, auto_fixable: false })
     }
     // Check for ALL CAPS words (more than 2 consecutive caps words)
     const capsWords = title.split(' ').filter(w => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w))
     if (capsWords.length > 2) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Remove ALL CAPS words from title (found ${capsWords.length}: ${capsWords.slice(0, 3).join(', ')}) — Amazon suppresses listings with 3+ caps words`, auto_fixable: false })
+      const exampleFix = capsWords.slice(0, 3).map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(', ')
+      issues.push({ field: 'title', severity: 'warning', message: `Title has ${capsWords.length} ALL CAPS words (${capsWords.slice(0, 3).join(', ')}) — Amazon policy flags 3+ caps words and can suppress the listing. Change to Title Case: e.g. "${exampleFix}". Only brand names and acronyms (e.g. UHS-I, SDHC) are allowed in caps.`, auto_fixable: false })
     }
     // Check for forbidden characters
     if (/[!?$%^*]/.test(title)) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: 'Remove special characters (!, ?, $, %, ^, *) from title — Amazon policy violation that can cause suppression', auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: 'Title contains special characters (!, ?, $, %, ^, or *) which violate Amazon style guidelines and can trigger suppression. Remove them — use plain descriptive language instead. Punctuation like commas, dashes, and pipes (|) are allowed.', auto_fixable: false })
     }
   }
   titleScore = Math.max(0, titleScore)
@@ -320,16 +321,16 @@ function scoreListingContent(
   const bulletCount = bullets.length
   if (bulletCount === 0) {
     bulletScore = 0
-    issues.push({ field: 'bullets', severity: 'critical', message: 'Add 5 bullet points in Seller Central → Edit Listing → Product Description — each bullet should be 100+ chars with key features and search terms', auto_fixable: false })
+    issues.push({ field: 'bullets', severity: 'critical', message: 'No bullet points found. Go to Seller Central → Edit Listing → Product Description and add 5 bullets. Format: Lead with the benefit in caps (e.g. "FAST TRANSFER SPEEDS –"), then explain the feature in plain language. Each bullet should be 100-200 chars and include secondary keywords naturally.', auto_fixable: false })
   } else {
     if (bulletCount < 5) {
       bulletScore -= 10
-      issues.push({ field: 'bullets', severity: 'warning', message: `Add ${5 - bulletCount} more bullet point(s) to reach the 5-bullet maximum — each unused bullet is a missed keyword opportunity`, auto_fixable: false })
+      issues.push({ field: 'bullets', severity: 'warning', message: `Only ${bulletCount}/5 bullets used — you are leaving ${5 - bulletCount} keyword slots empty. Add bullet(s) covering: compatibility, warranty/guarantee, gift-readiness, or a comparison to competitors. Each bullet Amazon indexes independently for search.`, auto_fixable: false })
     }
     const shortBullets = bullets.filter(b => b.length < 100)
     if (shortBullets.length > 0) {
       bulletScore -= Math.min(15, shortBullets.length * 5)
-      issues.push({ field: 'bullets', severity: 'warning', message: `Expand ${shortBullets.length} short bullet(s) to 100+ chars — include benefits, materials, dimensions, and relevant search terms`, auto_fixable: false })
+      issues.push({ field: 'bullets', severity: 'warning', message: `${shortBullets.length} bullet(s) are under 100 chars — too thin to rank. Expand each one: add the "so that" benefit ("90MB/s read speed so you never miss a shot during burst photography"), mention compatible devices, and weave in long-tail keywords like "for Canon EOS" or "for GoPro Hero".`, auto_fixable: false })
     }
   }
   bulletScore = Math.max(0, bulletScore)
@@ -339,18 +340,18 @@ function scoreListingContent(
   const kwLen = keywords.length
   if (kwLen === 0) {
     keywordScore = 0
-    issues.push({ field: 'backend_keywords', severity: 'critical', message: 'Add backend keywords in Seller Central → Edit Listing → Keywords tab — use all 250 chars with space-separated terms, no commas needed', auto_fixable: false })
+    issues.push({ field: 'backend_keywords', severity: 'critical', message: `Backend keywords field is completely empty — this is 250 chars of free indexing you are not using. Go to Seller Central → Edit Listing → Keywords tab. Fill with space-separated terms NOT already in your title or bullets: misspellings, synonyms, competitor brand names (generic terms only), and long-tail phrases. Example: "micro sd card 128gb class 10 high speed memory card for camera drone dashcam"`, auto_fixable: false })
   } else if (kwLen < 100) {
     keywordScore -= 15
-    issues.push({ field: 'backend_keywords', severity: 'warning', message: `Backend keywords only ${kwLen}/250 chars — add more space-separated terms in Seller Central → Edit Listing → Keywords tab to fill the remaining ${250 - kwLen} chars`, auto_fixable: false })
+    issues.push({ field: 'backend_keywords', severity: 'warning', message: `Backend keywords only ${kwLen}/250 chars — ${250 - kwLen} chars of free indexing wasted. Add terms NOT in your title: common misspellings, related use cases, compatible device models, and gift search terms like "gifts for photographers". No commas, no repetition of title words.`, auto_fixable: false })
   } else if (kwLen < 200) {
     keywordScore -= 10
-    issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords at ${kwLen}/250 chars — ${250 - kwLen} chars still available in Seller Central → Edit Listing → Keywords tab`, auto_fixable: false })
+    issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords at ${kwLen}/250 chars — ${250 - kwLen} chars still available. Use them for: long-tail device compatibility terms ("for Sony A7 III", "for DJI Mini 3"), seasonal terms ("holiday gift", "back to school"), and common misspellings of your product category.`, auto_fixable: false })
   }
   // Check for commas (waste space)
   if (keywords.includes(',')) {
     keywordScore -= 5
-    issues.push({ field: 'backend_keywords', severity: 'info', message: 'Remove commas from backend keywords — Amazon ignores them and they waste character space', auto_fixable: false })
+    issues.push({ field: 'backend_keywords', severity: 'info', message: 'Backend keywords contain commas — Amazon treats commas as characters, not separators, wasting space. Remove all commas and use spaces only. "128gb, sd card" → "128gb sd card" saves 2 chars per term.', auto_fixable: false })
   }
   keywordScore = Math.max(0, keywordScore)
 
@@ -363,24 +364,24 @@ function scoreListingContent(
 
   if (!hasAplus) {
     aplusScore = 0
-    issues.push({ field: 'aplus', severity: 'critical', message: 'Create A+ Content in Seller Central → Advertising → A+ Content Manager — add images, comparison charts, and brand story to increase conversion by 3-10%', auto_fixable: false })
+    issues.push({ field: 'aplus', severity: 'critical', message: 'No A+ Content detected. Go to sellercentral.amazon.com/enhanced-content/content-manager and create a Standard A+ page. Minimum recommended: 1 hero image module + 3 feature image/text modules + 1 comparison chart. Listings with A+ convert 3-10% better and rank higher. This is the single highest-ROI improvement you can make.', auto_fixable: false })
   } else {
     // A+ exists — check optimization quality
     if (moduleCount > 0 && moduleCount < 5) {
       aplusScore -= 8
-      issues.push({ field: 'aplus', severity: 'warning', message: `A+ Content has only ${moduleCount} module(s) — add more modules (aim for 5+) in A+ Content Manager to maximise page coverage`, auto_fixable: false })
+      issues.push({ field: 'aplus', severity: 'warning', message: `A+ page has only ${moduleCount} module(s) — Amazon allows up to 7 standard modules. Add: a comparison chart (shows your variants side-by-side), a "How to Use" image+text module, and a technical specs module. More modules = more keyword indexing surface area.`, auto_fixable: false })
     }
     if (!hasBrandStory) {
       aplusScore -= 7
-      issues.push({ field: 'aplus', severity: 'warning', message: 'No Brand Story module — add a Brand Story in A+ Content Manager to appear on all your ASINs and build brand recognition', auto_fixable: false })
+      issues.push({ field: 'aplus', severity: 'warning', message: 'No Brand Story (EMC) module found. Add a Brand Story at sellercentral.amazon.com/enhanced-content/content-manager — it auto-appears on ALL your ASINs, builds brand trust, and links shoppers to your full catalog. Takes 30 minutes to create and runs forever.', auto_fixable: false })
     }
     if (!hasHeadline) {
       aplusScore -= 5
-      issues.push({ field: 'aplus', severity: 'info', message: 'Add a headline/header module to your A+ Content — it anchors the page and improves readability', auto_fixable: false })
+      issues.push({ field: 'aplus', severity: 'info', message: 'A+ page is missing a header/headline module. Add one as the first module — it should reinforce your primary keyword and brand positioning (e.g. "Professional-Grade Storage for Serious Creators"). It anchors the page and signals quality to shoppers.', auto_fixable: false })
     }
     if (missingAlt > 0) {
       aplusScore -= 5
-      issues.push({ field: 'aplus', severity: 'warning', message: `${missingAlt} A+ image(s) missing alt text — add image keywords in A+ Content Manager to improve Amazon search indexing`, auto_fixable: false })
+      issues.push({ field: 'aplus', severity: 'warning', message: `${missingAlt} A+ image(s) have no alt text (image keywords). In A+ Content Manager, edit each image module and fill the "Image Keywords" field with descriptive terms (e.g. "128gb sd card high speed class 10 for canon camera"). Amazon indexes these for search — missing alt text = missing keyword coverage.`, auto_fixable: false })
     }
   }
   aplusScore = Math.max(0, aplusScore)
@@ -399,7 +400,7 @@ function scoreListingContent(
       issues.push({
         field:        'child_overrides',
         severity:     'warning',
-        message:      `${overrideCount} child variant(s) have different content from the parent — review in Seller Central and consolidate to a single consistent listing`,
+        message:      `${overrideCount} variant(s) have content that differs from the parent listing — this means Amazon is showing inconsistent titles/bullets across your variations, which confuses shoppers and dilutes keyword coverage. Go to Seller Central → Manage Inventory → Edit each variant and sync the title and bullets to match the parent. Use the parent's optimised content as the master template.`,
         auto_fixable: false,
       })
     }
@@ -496,10 +497,18 @@ export async function syncListingContent(
 
       if (contentRows.length === 0) continue
 
-      // ── Step 4: Fetch A+ status for the parent ASIN ──────────────────────
+      // ── Step 4: Fetch A+ status using a child ASIN ─────────────────────────
+      // A+ content is associated with child ASINs, not the parent ASIN.
+      // Query using the first child ASIN — if A+ exists for any child it exists for the parent.
       let aplusData: AplusStatus = { hasAplus: false, moduleCount: 0, missingAltCount: 0, hasBrandStory: false, hasHeadline: false }
+      const firstChildAsin = uniqueChildren[0]?.asin || parentAsin
       try {
-        aplusData = await fetchAplusStatus(token, parentAsin)
+        aplusData = await fetchAplusStatus(token, firstChildAsin)
+        // If first child returns nothing, try the parent ASIN as fallback
+        if (!aplusData.hasAplus && firstChildAsin !== parentAsin) {
+          const fallback = await fetchAplusStatus(token, parentAsin)
+          if (fallback.hasAplus) aplusData = fallback
+        }
         await sleep(100) // A+ API: 10 req/sec
       } catch (err) {
         console.warn(`[ListingContent] A+ fetch failed for ${parentAsin}:`, err instanceof Error ? err.message : String(err))
