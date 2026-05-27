@@ -93,7 +93,9 @@ interface ChildContentRow {
   bullet_3:                string | null
   bullet_4:                string | null
   bullet_5:                string | null
+  description:             string | null
   backend_keywords:        string | null
+  image_count:             number
   has_aplus:               boolean
   aplus_images_missing_alt: number
   content_synced_at:       string
@@ -2537,7 +2539,7 @@ export default function FBAIntelligencePage() {
                                     {hasTitleDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs from variant 1</span>}
                                   </div>
                                   {/* Stats row */}
-                                  <div className="flex items-center gap-3 text-gray-600">
+                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600">
                                     <span>
                                       <span className="font-semibold">Bullets:</span>{' '}
                                       <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span>
@@ -2550,10 +2552,23 @@ export default function FBAIntelligencePage() {
                                       }
                                       {hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
                                     </span>
+                                    <span>
+                                      <span className="font-semibold">Images:</span>{' '}
+                                      <span className={(child.image_count || 0) < 7 ? 'text-amber-600 font-medium' : 'text-green-600'}>{child.image_count || 0}/7</span>
+                                    </span>
                                     {child.aplus_images_missing_alt > 0 && (
                                       <span className="text-amber-600">{child.aplus_images_missing_alt} A+ img missing alt</span>
                                     )}
                                   </div>
+                                  {/* Description preview */}
+                                  {child.description ? (
+                                    <div className="mt-1 text-gray-500">
+                                      <span className="font-semibold text-gray-600">Desc: </span>
+                                      <span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 100)}{child.description.length > 100 ? '…' : ''}</span>
+                                    </div>
+                                  ) : (
+                                    <div className="mt-1 text-red-500 font-medium">Description: Missing — add in Seller Central → Edit Listing → Product Description</div>
+                                  )}
                                 </div>
                               )
                             })
