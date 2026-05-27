@@ -59,6 +59,46 @@ interface SkuSalesRow {
   last_order_date: string | null
   last_synced_at: string
 }
+// ─── Listing Optimizer Types ────────────────────────────────────────────────
+interface SeoIssue {
+  field:        string
+  severity:     'critical' | 'warning' | 'info'
+  message:      string
+  auto_fixable: boolean
+}
+interface SeoScoreRow {
+  parent_asin:          string
+  title_score:          number
+  bullet_score:         number
+  keyword_score:        number
+  aplus_score:          number
+  overall_score:        number
+  issues:               SeoIssue[]
+  child_count:          number
+  child_override_count: number
+  top_child_asin:       string | null
+  product_title:        string | null
+  image_url:            string | null
+  total_units_30d:      number
+  scored_at:            string
+  children:             ChildContentRow[]
+}
+interface ChildContentRow {
+  sku:                     string
+  asin:                    string
+  parent_asin:             string
+  title:                   string | null
+  bullet_1:                string | null
+  bullet_2:                string | null
+  bullet_3:                string | null
+  bullet_4:                string | null
+  bullet_5:                string | null
+  backend_keywords:        string | null
+  has_aplus:               boolean
+  aplus_images_missing_alt: number
+  content_synced_at:       string
+}
+
 interface ListingIssue {
   sku: string
   asin: string | null
@@ -231,6 +271,14 @@ export default function FBAIntelligencePage() {
   const [analyticsSyncPending, setAnalyticsSyncPending] = useState(false)
   const [listingsLoading, setListingsLoading] = useState(false)
   const [listingsSyncPending, setListingsSyncPending] = useState(false)
+
+  // Listing Optimizer state
+  const [seoScores, setSeoScores] = useState<SeoScoreRow[]>([])
+  const [seoLoading, setSeoLoading] = useState(false)
+  const [seoSyncing, setSeoSyncing] = useState(false)
+  const [seoLastSynced, setSeoLastSynced] = useState<string | null>(null)
+  const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
+  const [fixingField, setFixingField] = useState<string | null>(null) // 'parentAsin:field'
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -829,10 +877,49 @@ export default function FBAIntelligencePage() {
     finally { setListingsLoading(false) }
   }, [])
 
+  // Fetch SEO scores for the Listing Optimizer section
+  const fetchSeoScores = useCallback(async (triggerSync = false) => {
+    setSeoLoading(true)
+    try {
+      if (triggerSync) {
+        setSeoSyncing(true)
+        // Fire the sync in the background — it can take 2-5 min due to Amazon rate limits
+        fetch('/api/fba/listing-optimizer', { method: 'POST' }).catch(() => null)
+        // Poll for results every 30s for up to 5 minutes
+        let attempts = 0
+        const maxAttempts = 10
+        const pollInterval = setInterval(async () => {
+          attempts++
+          try {
+            const resp = await fetch('/api/fba/listing-optimizer')
+            const json = await resp.json()
+            if (json.scores && json.scores.length > 0) {
+              setSeoScores(json.scores)
+              setSeoLastSynced(json.lastSyncedAt)
+              setSeoSyncing(false)
+              clearInterval(pollInterval)
+            } else if (attempts >= maxAttempts) {
+              setSeoSyncing(false)
+              clearInterval(pollInterval)
+            }
+          } catch { /* ignore */ }
+        }, 30_000)
+        setSeoLoading(false)
+        return
+      }
+      const resp = await fetch('/api/fba/listing-optimizer')
+      const json = await resp.json()
+      setSeoScores(json.scores || [])
+      setSeoLastSynced(json.lastSyncedAt || null)
+    } catch (e) { console.error(e) }
+    finally { setSeoLoading(false) }
+  }, [])
+
   // Load data when switching to analytics/listings tabs
   useEffect(() => {
     if (activeTab === 'analytics' && salesAnalytics.length === 0) fetchSalesAnalytics()
     if (activeTab === 'listings' && listingIssues.length === 0) fetchListingIssues()
+    if (activeTab === 'listings' && seoScores.length === 0) fetchSeoScores()
     if (activeTab === 'missing' && missingGaps.length === 0) fetchMissingInventory()
     if (activeTab === 'ads' && !adsStatus) fetchAdsData()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -2131,6 +2218,238 @@ export default function FBAIntelligencePage() {
           )}
           <div className="mt-3 text-xs text-gray-400 text-center">
             Cross-references All Listings report with Sales Analytics · Only shows actionable issues
+          </div>
+
+          {/* ─────────────────────────────────────────────────────────────────
+              LISTING OPTIMIZER — Top 10 parents with SEO issues
+          ───────────────────────────────────────────────────────────────── */}
+          <div className="mt-8 pt-6 border-t border-gray-200">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900">Listing Optimizer</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Top 10 best-selling parent ASINs with SEO gaps — fix title, bullets, keywords, and A+ content
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {seoLastSynced && (
+                  <span className="text-[10px] text-gray-400">
+                    Last scanned {new Date(seoLastSynced).toLocaleDateString()}
+                  </span>
+                )}
+                <button
+                  onClick={() => fetchSeoScores(true)}
+                  disabled={seoSyncing || seoLoading}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {seoSyncing ? (
+                    <><span className="animate-spin">&#8635;</span> Scanning Amazon…</>
+                  ) : (
+                    'Scan Listings'
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Syncing banner */}
+            {seoSyncing && (
+              <div className="mb-4 flex items-center gap-3 bg-violet-50 border border-violet-200 rounded-xl px-4 py-3 text-sm text-violet-800">
+                <span className="animate-spin text-lg">&#8635;</span>
+                <span>Fetching listing content from Amazon — this takes 2–5 minutes due to API rate limits. The cards will appear automatically when ready.</span>
+              </div>
+            )}
+
+            {seoLoading && !seoSyncing ? (
+              <div className="text-center py-8 text-gray-400 text-sm">Loading scores…</div>
+            ) : seoScores.length === 0 && !seoSyncing ? (
+              <div className="text-center py-8">
+                <div className="text-3xl mb-2">&#128269;</div>
+                <p className="text-sm font-medium text-gray-700">No scan data yet</p>
+                <p className="text-xs text-gray-500 mt-1">Click &quot;Scan Listings&quot; to analyse your top sellers for SEO gaps.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+                {seoScores.map(score => {
+                  const isExpanded = expandedSeoCard === score.parent_asin
+                  const scoreColor =
+                    score.overall_score >= 80 ? 'text-green-600'
+                    : score.overall_score >= 60 ? 'text-amber-600'
+                    : 'text-red-600'
+                  const scoreBg =
+                    score.overall_score >= 80 ? 'bg-green-50 border-green-200'
+                    : score.overall_score >= 60 ? 'bg-amber-50 border-amber-200'
+                    : 'bg-red-50 border-red-200'
+                  const topIssue = score.issues?.[0]
+                  const autoFixableIssues = (score.issues || []).filter(i => i.auto_fixable)
+
+                  return (
+                    <div key={score.parent_asin} className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col`}>
+                      {/* Card header */}
+                      <div className="p-3 flex-1">
+                        {/* Product image + score ring */}
+                        <div className="flex items-start gap-3 mb-3">
+                          {score.image_url ? (
+                            <img src={score.image_url} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0 bg-gray-100" />
+                          ) : (
+                            <div className="w-12 h-12 rounded-lg bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xs">IMG</div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium text-gray-900 leading-tight line-clamp-2" title={score.product_title || ''}>
+                              {score.product_title || score.parent_asin}
+                            </p>
+                            <div className="flex items-center gap-1.5 mt-1">
+                              <a href={`https://amazon.com/dp/${score.parent_asin}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-blue-500 hover:underline font-mono">
+                                {score.parent_asin}
+                              </a>
+                              <span className="text-[10px] text-gray-400">· {score.child_count} vars</span>
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-0.5">{score.total_units_30d} units/30d</div>
+                          </div>
+                          {/* Score badge */}
+                          <div className={`shrink-0 w-10 h-10 rounded-full border-2 flex items-center justify-center font-bold text-sm ${scoreColor} ${
+                            score.overall_score >= 80 ? 'border-green-400'
+                            : score.overall_score >= 60 ? 'border-amber-400'
+                            : 'border-red-400'
+                          }`}>
+                            {score.overall_score}
+                          </div>
+                        </div>
+
+                        {/* Score breakdown bars */}
+                        <div className="space-y-1 mb-3">
+                          {[
+                            { label: 'Title', score: score.title_score, max: 25 },
+                            { label: 'Bullets', score: score.bullet_score, max: 25 },
+                            { label: 'Keywords', score: score.keyword_score, max: 25 },
+                            { label: 'A+', score: score.aplus_score, max: 25 },
+                          ].map(({ label, score: s, max }) => (
+                            <div key={label} className="flex items-center gap-1.5">
+                              <span className="text-[10px] text-gray-500 w-12 shrink-0">{label}</span>
+                              <div className="flex-1 bg-gray-200 rounded-full h-1.5">
+                                <div
+                                  className={`h-1.5 rounded-full ${
+                                    s >= max * 0.8 ? 'bg-green-500'
+                                    : s >= max * 0.6 ? 'bg-amber-500'
+                                    : 'bg-red-500'
+                                  }`}
+                                  style={{ width: `${(s / max) * 100}%` }}
+                                />
+                              </div>
+                              <span className="text-[10px] text-gray-500 w-8 text-right">{s}/{max}</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Top issue */}
+                        {topIssue && (
+                          <div className={`text-[10px] rounded-lg px-2 py-1.5 ${
+                            topIssue.severity === 'critical' ? 'bg-red-100 text-red-700'
+                            : topIssue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
+                            : 'bg-blue-100 text-blue-700'
+                          }`}>
+                            {topIssue.message}
+                          </div>
+                        )}
+
+                        {/* Child override warning */}
+                        {score.child_override_count > 0 && (
+                          <div className="mt-1.5 text-[10px] bg-purple-100 text-purple-700 rounded-lg px-2 py-1">
+                            {score.child_override_count} child(ren) have overridden content
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Card actions */}
+                      <div className="border-t border-gray-200 px-3 py-2 flex items-center gap-2 bg-white/60">
+                        {autoFixableIssues.length > 0 && (
+                          <button
+                            onClick={async () => {
+                              // Auto-fix: handle backend_keywords for all children
+                              const kwIssue = autoFixableIssues.find(i => i.field === 'backend_keywords')
+                              if (kwIssue && score.children.length > 0) {
+                                const child = score.children[0]
+                                const key = `${score.parent_asin}:backend_keywords`
+                                setFixingField(key)
+                                try {
+                                  await fetch('/api/fba/optimize-listing', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ sku: child.sku, field: 'backend_keywords', value: (child.backend_keywords || '') + ' ' }),
+                                  })
+                                  await fetchSeoScores()
+                                } finally { setFixingField(null) }
+                              }
+                            }}
+                            disabled={fixingField === `${score.parent_asin}:backend_keywords`}
+                            className="flex-1 text-[10px] font-medium bg-violet-600 hover:bg-violet-700 text-white rounded-md px-2 py-1 transition-colors disabled:opacity-50"
+                          >
+                            {fixingField === `${score.parent_asin}:backend_keywords` ? 'Fixing…' : `Auto-fix (${autoFixableIssues.length})`}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setExpandedSeoCard(isExpanded ? null : score.parent_asin)}
+                          className="flex-1 text-[10px] font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1 transition-colors"
+                        >
+                          {isExpanded ? 'Hide Details' : 'View Details'}
+                        </button>
+                      </div>
+
+                      {/* Expanded child breakdown */}
+                      {isExpanded && (
+                        <div className="border-t border-gray-200 bg-white p-3 space-y-2">
+                          <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wide mb-2">Child SKU Breakdown</p>
+                          {score.children.length === 0 ? (
+                            <p className="text-[10px] text-gray-400">No child content synced yet.</p>
+                          ) : (
+                            score.children.map(child => {
+                              const hasOverride = score.children.length > 1 && (
+                                (child.title && score.children[0].title && child.title !== score.children[0].title) ||
+                                (child.bullet_1 && score.children[0].bullet_1 && child.bullet_1 !== score.children[0].bullet_1)
+                              )
+                              return (
+                                <div key={child.sku} className={`rounded-lg p-2 text-[10px] ${
+                                  hasOverride ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50 border border-gray-100'
+                                }`}>
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="font-mono font-medium text-gray-800">{child.sku}</span>
+                                    <div className="flex items-center gap-1">
+                                      {hasOverride && <span className="bg-purple-100 text-purple-700 px-1 rounded">Override</span>}
+                                      {child.has_aplus ? <span className="bg-green-100 text-green-700 px-1 rounded">A+</span> : <span className="bg-red-100 text-red-700 px-1 rounded">No A+</span>}
+                                    </div>
+                                  </div>
+                                  <div className="text-gray-600 truncate" title={child.title || ''}>
+                                    <span className="font-medium">Title:</span> {child.title ? `${child.title.slice(0, 60)}…` : <span className="text-red-500">Missing</span>}
+                                  </div>
+                                  <div className="text-gray-600 mt-0.5">
+                                    <span className="font-medium">Bullets:</span> {[child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length}/5
+                                  </div>
+                                  <div className="text-gray-600 mt-0.5">
+                                    <span className="font-medium">Keywords:</span> {child.backend_keywords ? `${child.backend_keywords.length}/250 chars` : <span className="text-red-500">Empty</span>}
+                                  </div>
+                                  {child.aplus_images_missing_alt > 0 && (
+                                    <div className="text-amber-600 mt-0.5">{child.aplus_images_missing_alt} A+ image(s) missing alt text</div>
+                                  )}
+                                </div>
+                              )
+                            })
+                          )}
+                          <div className="pt-1">
+                            <a
+                              href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-blue-500 hover:underline"
+                            >
+                              Edit in Seller Central →
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
         </>
       )}

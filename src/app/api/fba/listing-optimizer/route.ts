@@ -1,0 +1,125 @@
+/**
+ * GET  /api/fba/listing-optimizer
+ *   Returns the top 10 parent ASINs (by 30d sales) with overall_score < 100,
+ *   plus their issues array and child content details.
+ *
+ * POST /api/fba/listing-optimizer
+ *   Triggers a fresh syncListingContent run for the top 50 parents.
+ *   Returns { status: 'syncing' } immediately; the sync runs in the background.
+ */
+
+import { NextRequest, NextResponse } from 'next/server'
+import { createAdminClient } from '@/lib/supabase/server'
+import { syncListingContent } from '@/lib/sync/syncListingContent'
+
+// ── GET ───────────────────────────────────────────────────────────────────────
+
+export async function GET() {
+  try {
+    const supabase = await createAdminClient()
+
+    // Top 10 parents with issues (score < 100), ranked by 30d sales
+    const { data: scores, error: scoresErr } = await supabase
+      .from('listing_seo_scores')
+      .select('*')
+      .lt('overall_score', 100)
+      .order('total_units_30d', { ascending: false })
+      .limit(10)
+
+    if (scoresErr) {
+      return NextResponse.json({ error: scoresErr.message }, { status: 500 })
+    }
+
+    if (!scores || scores.length === 0) {
+      return NextResponse.json({ scores: [], lastSyncedAt: null })
+    }
+
+    // For each parent, fetch the child content breakdown
+    const parentAsins = (scores as ScoreRow[]).map(s => s.parent_asin)
+
+    const { data: childContent } = await supabase
+      .from('listing_content')
+      .select('sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, backend_keywords, has_aplus, aplus_images_missing_alt, content_synced_at')
+      .in('parent_asin', parentAsins)
+      .order('sku', { ascending: true })
+
+    // Group child content by parent_asin
+    type ChildRow = {
+      sku: string; asin: string; parent_asin: string; title: string | null
+      bullet_1: string | null; bullet_2: string | null; bullet_3: string | null
+      bullet_4: string | null; bullet_5: string | null; backend_keywords: string | null
+      has_aplus: boolean; aplus_images_missing_alt: number; content_synced_at: string
+    }
+    const childMap: Record<string, ChildRow[]> = {}
+    for (const row of (childContent || []) as ChildRow[]) {
+      if (!childMap[row.parent_asin]) childMap[row.parent_asin] = []
+      childMap[row.parent_asin]!.push(row)
+    }
+
+    // Get the most recent sync timestamp
+    const { data: latestSyncRaw } = await supabase
+      .from('listing_seo_scores')
+      .select('scored_at')
+      .order('scored_at', { ascending: false })
+      .limit(1)
+      .single()
+    const latestSync = latestSyncRaw as { scored_at: string } | null
+
+    type ScoreRow = {
+      parent_asin: string; title_score: number; bullet_score: number; keyword_score: number
+      aplus_score: number; overall_score: number; issues: unknown[]; child_count: number
+      child_override_count: number; top_child_asin: string | null; product_title: string | null
+      image_url: string | null; total_units_30d: number; scored_at: string
+    }
+    const result = (scores as ScoreRow[]).map(score => ({
+      ...score,
+      children: childMap[score.parent_asin] || [],
+    }))
+
+    return NextResponse.json({
+      scores: result,
+      lastSyncedAt: latestSync?.scored_at || null,
+    })
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
+}
+
+// ── POST ──────────────────────────────────────────────────────────────────────
+
+export async function POST(request: NextRequest) {
+  try {
+    // Kick off the sync in the background (don't await)
+    // The sync can take several minutes due to Amazon API rate limits
+    const syncPromise = syncListingContent(50)
+
+    // We can't truly background in Next.js serverless, so we await but with a
+    // generous timeout. For production, consider a cron job instead.
+    const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 25000))
+
+    const result = await Promise.race([syncPromise, timeoutPromise])
+
+    if (result === null) {
+      // Timed out — sync is still running
+      return NextResponse.json({
+        status: 'syncing',
+        message: 'Sync started — this may take 2-5 minutes due to Amazon API rate limits. Refresh in a few minutes.',
+      })
+    }
+
+    return NextResponse.json({
+      status: 'done',
+      parentsSynced: result.parentsSynced,
+      skusSynced:    result.skusSynced,
+      parentsScored: result.parentsScored,
+      durationMs:    result.durationMs,
+      error:         result.error,
+    })
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
+}
