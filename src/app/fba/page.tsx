@@ -280,6 +280,7 @@ export default function FBAIntelligencePage() {
   const [seoError, setSeoError] = useState<string | null>(null)
   const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
   const [fixingField, setFixingField] = useState<string | null>(null) // 'parentAsin:field'
+  const [listingSubTab, setListingSubTab] = useState<'issues' | 'optimizer'>('issues')
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -943,10 +944,14 @@ export default function FBAIntelligencePage() {
   useEffect(() => {
     if (activeTab === 'analytics' && salesAnalytics.length === 0) fetchSalesAnalytics()
     if (activeTab === 'listings' && listingIssues.length === 0) fetchListingIssues()
-    if (activeTab === 'listings' && seoScores.length === 0) fetchSeoScores()
     if (activeTab === 'missing' && missingGaps.length === 0) fetchMissingInventory()
     if (activeTab === 'ads' && !adsStatus) fetchAdsData()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load SEO scores when optimizer sub-tab is opened
+  useEffect(() => {
+    if (activeTab === 'listings' && listingSubTab === 'optimizer' && seoScores.length === 0) fetchSeoScores()
+  }, [activeTab, listingSubTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Data source labels for the loading overlay
   const DATA_SOURCES = [
@@ -2097,19 +2102,53 @@ export default function FBAIntelligencePage() {
       ═══════════════════════════════════════════════════════════════════════ */}
       {activeTab === 'listings' && (
         <>
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Listing Issues</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Suppressed, inactive (detail page removed), missing offers, missing info, broken prices, and FBM-only opportunities</p>
+          {/* Sub-tab navigation */}
+          <div className="flex items-center justify-between mb-5">
+            <div className="flex gap-1 bg-gray-100 rounded-xl p-1">
+              <button
+                onClick={() => setListingSubTab('issues')}
+                className={`px-4 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                  listingSubTab === 'issues'
+                    ? 'bg-white text-purple-700 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                Issues
+                {listingIssuesSummary && listingIssuesSummary.total > 0 && (
+                  <span className="ml-1.5 px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded-full font-bold">
+                    {listingIssuesSummary.total}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setListingSubTab('optimizer')}
+                className={`px-4 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                  listingSubTab === 'optimizer'
+                    ? 'bg-white text-violet-700 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                Optimizer
+                {seoScores.length > 0 && (
+                  <span className="ml-1.5 px-1.5 py-0.5 bg-violet-100 text-violet-700 text-xs rounded-full font-bold">
+                    {seoScores.length}
+                  </span>
+                )}
+              </button>
             </div>
-            <button
-              onClick={() => fetchListingIssues(true)}
-              disabled={listingsLoading}
-              className="inline-flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
-            >
-              {listingsLoading ? 'Scanning…' : 'Refresh Issues'}
-            </button>
+            {listingSubTab === 'issues' && (
+              <button
+                onClick={() => fetchListingIssues(true)}
+                disabled={listingsLoading}
+                className="inline-flex items-center gap-2 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+              >
+                {listingsLoading ? 'Scanning…' : 'Refresh Issues'}
+              </button>
+            )}
           </div>
+
+          {/* ── SUB-TAB: ISSUES ── */}
+          {listingSubTab === 'issues' && (<>
 
           {/* Sync pending banner */}
           {listingsSyncPending && (
@@ -2243,11 +2282,11 @@ export default function FBAIntelligencePage() {
           <div className="mt-3 text-xs text-gray-400 text-center">
             Cross-references All Listings report with Sales Analytics · Only shows actionable issues
           </div>
+          </>)}
 
-          {/* ─────────────────────────────────────────────────────────────────
-              LISTING OPTIMIZER — Top 10 parents with SEO issues
-          ───────────────────────────────────────────────────────────────── */}
-          <div className="mt-8 pt-6 border-t border-gray-200">
+          {/* ── SUB-TAB: OPTIMIZER ── */}
+          {listingSubTab === 'optimizer' && (
+          <div>
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-base font-semibold text-gray-900">Listing Optimizer</h3>
@@ -2490,6 +2529,7 @@ export default function FBAIntelligencePage() {
               </div>
             )}
           </div>
+          )}
         </>
       )}
 
