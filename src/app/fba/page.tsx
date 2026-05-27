@@ -101,6 +101,16 @@ interface ChildContentRow {
   content_synced_at:       string
 }
 
+interface AiRecommendations {
+  parent_asin:              string
+  recommended_title:        string
+  recommended_bullets:      string[]
+  recommended_keywords:     string
+  recommended_description:  string
+  aplus_suggestions:        string
+  generated_at:             string
+}
+
 interface ListingIssue {
   sku: string
   asin: string | null
@@ -283,6 +293,9 @@ export default function FBAIntelligencePage() {
   const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
   const [fixingField, setFixingField] = useState<string | null>(null) // 'parentAsin:field'
   const [listingSubTab, setListingSubTab] = useState<'issues' | 'optimizer'>('issues')
+  const [aiRecs, setAiRecs] = useState<Record<string, AiRecommendations | null>>({})
+  const [aiLoadingSet, setAiLoadingSet] = useState<Set<string>>(new Set())
+  const [expandedAiCard, setExpandedAiCard] = useState<string | null>(null)
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -941,6 +954,39 @@ export default function FBAIntelligencePage() {
     } catch (e) { console.error(e) }
     finally { setSeoLoading(false) }
   }, [])
+
+  // Fetch AI recommendations for a specific parent ASIN
+  const fetchAiRecs = useCallback(async (parentAsin: string) => {
+    // First check if we already have cached recs
+    const cached = aiRecs[parentAsin]
+    if (cached) {
+      setExpandedAiCard(parentAsin)
+      return
+    }
+    // Check if already stored in DB
+    setAiLoadingSet(prev => new Set(prev).add(parentAsin))
+    try {
+      const getResp = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${parentAsin}`)
+      const getJson = await getResp.json()
+      if (getJson.recommendations) {
+        setAiRecs(prev => ({ ...prev, [parentAsin]: getJson.recommendations }))
+        setExpandedAiCard(parentAsin)
+        return
+      }
+      // Not cached — generate new
+      const resp = await fetch('/api/fba/listing-optimizer/ai-recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: parentAsin }),
+      })
+      const json = await resp.json()
+      if (json.recommendations) {
+        setAiRecs(prev => ({ ...prev, [parentAsin]: json.recommendations }))
+        setExpandedAiCard(parentAsin)
+      }
+    } catch (e) { console.error('[AI Recs]', e) }
+    finally { setAiLoadingSet(prev => { const s = new Set(prev); s.delete(parentAsin); return s }) }
+  }, [aiRecs])
 
   // Load data when switching to analytics/listings tabs
   useEffect(() => {
@@ -2473,7 +2519,7 @@ export default function FBAIntelligencePage() {
                           href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${score.parent_asin}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex-1 text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
+                          className="text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
                         >
                           Edit Listing →
                         </a>
@@ -2481,17 +2527,122 @@ export default function FBAIntelligencePage() {
                           href="https://sellercentral.amazon.com/enhanced-content/content-manager"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex-1 text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
+                          className="text-center text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
                         >
                           Edit A+ →
                         </a>
                         <button
+                          onClick={() => fetchAiRecs(score.parent_asin)}
+                          disabled={aiLoadingSet.has(score.parent_asin)}
+                          className="flex-1 text-xs font-medium bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white rounded-md px-2 py-1.5 transition-colors disabled:opacity-60 disabled:cursor-wait"
+                        >
+                          {aiLoadingSet.has(score.parent_asin) ? '✨ Analyzing…' : expandedAiCard === score.parent_asin ? '✨ Hide AI' : '✨ AI Fix'}
+                        </button>
+                        <button
                           onClick={() => setExpandedSeoCard(isExpanded ? null : score.parent_asin)}
-                          className="flex-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
+                          className="text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-md px-2 py-1.5 transition-colors"
                         >
                           {isExpanded ? 'Hide' : 'Details'}
                         </button>
                       </div>
+
+                      {/* AI Recommendations Panel */}
+                      {expandedAiCard === score.parent_asin && aiRecs[score.parent_asin] && (() => {
+                        const rec = aiRecs[score.parent_asin]!
+                        const copyToClipboard = (text: string) => navigator.clipboard.writeText(text)
+                        return (
+                          <div className="border-t-2 border-violet-300 bg-gradient-to-b from-violet-50 to-white p-4 space-y-4">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <span className="text-base">✨</span>
+                                <span className="text-sm font-bold text-violet-800">AI SEO Recommendations</span>
+                                <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full">gemini-2.5-flash</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-gray-400">{new Date(rec.generated_at).toLocaleDateString()}</span>
+                                <button
+                                  onClick={() => fetchAiRecs(score.parent_asin)}
+                                  className="text-[10px] text-violet-600 hover:underline"
+                                >Regenerate</button>
+                              </div>
+                            </div>
+
+                            {/* Recommended Title */}
+                            <div className="bg-white rounded-lg border border-violet-200 p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title?.length || 0} chars)</span></span>
+                                <button
+                                  onClick={() => copyToClipboard(rec.recommended_title)}
+                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
+                                >Copy</button>
+                              </div>
+                              <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
+                            </div>
+
+                            {/* Recommended Bullets */}
+                            <div className="bg-white rounded-lg border border-violet-200 p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
+                                <button
+                                  onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))}
+                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
+                                >Copy All</button>
+                              </div>
+                              <div className="space-y-2">
+                                {rec.recommended_bullets.map((bullet, bi) => (
+                                  <div key={bi} className="flex items-start gap-2">
+                                    <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
+                                    <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
+                                    <button
+                                      onClick={() => copyToClipboard(bullet)}
+                                      className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0"
+                                    >Copy</button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Recommended Keywords */}
+                            <div className="bg-white rounded-lg border border-violet-200 p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords to Add <span className="text-gray-400 font-normal">({rec.recommended_keywords?.length || 0} chars)</span></span>
+                                <button
+                                  onClick={() => copyToClipboard(rec.recommended_keywords)}
+                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
+                                >Copy</button>
+                              </div>
+                              <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
+                            </div>
+
+                            {/* Recommended Description */}
+                            <div className="bg-white rounded-lg border border-violet-200 p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
+                                <button
+                                  onClick={() => copyToClipboard(rec.recommended_description)}
+                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
+                                >Copy HTML</button>
+                              </div>
+                              <div
+                                className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none"
+                                dangerouslySetInnerHTML={{ __html: rec.recommended_description }}
+                              />
+                            </div>
+
+                            {/* A+ Suggestions */}
+                            <div className="bg-white rounded-lg border border-violet-200 p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs font-semibold text-gray-700">✨ A+ Content Strategy</span>
+                                <button
+                                  onClick={() => copyToClipboard(rec.aplus_suggestions)}
+                                  className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors"
+                                >Copy</button>
+                              </div>
+                              <p className="text-xs text-gray-800 leading-relaxed whitespace-pre-line">{rec.aplus_suggestions}</p>
+                            </div>
+                          </div>
+                        )
+                      })()}
 
                       {/* Expanded child breakdown */}
                       {isExpanded && (
