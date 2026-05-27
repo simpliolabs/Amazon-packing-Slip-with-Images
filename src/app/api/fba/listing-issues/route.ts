@@ -97,8 +97,8 @@ export async function GET(req: NextRequest) {
   const listings = await fetchAll<{
     sku: string; asin: string | null; product_name: string | null;
     price: number | null; quantity: number | null; status: string | null;
-    fulfillment_channel: string | null; issue_description: string | null;
-  }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel, issue_description')
+    fulfillment_channel: string | null; status_message: string | null;
+  }>(supabase, 'listing_health', 'sku, asin, product_name, price, quantity, status, fulfillment_channel, status_message')
 
   // ── 2. Load ALL sales analytics for cross-reference ─────────────────────────
   const salesData = await fetchAll<{
@@ -213,45 +213,118 @@ export async function GET(req: NextRequest) {
       continue
     }
 
-    // ── Issue 2: Inactive — Detail Page Removed ────────────────────────────
-    // These are listings where Amazon removed the product detail page entirely.
-    // The issue_description column may contain "Detail page removed" or similar.
-    // We detect them by: status = Inactive AND (issue_description contains "removed"
-    // OR price = 0 AND no inventory AND no recent sales — indicating a dead listing
-    // that was blocked by Amazon, not just a stockout).
+    // ── Issue 2: Inactive — Detail Page Removed, Missing Offer, or Suppressed ──
+    // Amazon's All Listings report stores all inactive listings as status = 'Inactive'.
+    // The GET_MERCHANT_LISTINGS_INACTIVE_DATA report (synced separately) provides a
+    // 'Status Message' column that tells us WHY the listing is inactive.
+    // We use status_message (populated by syncInactiveListings) for accurate detection.
+    //
+    // If status_message is populated: use it directly.
+    // If not yet populated (first sync): fall back to heuristics.
     if (status === 'Inactive') {
-      const issueDesc = (listing.issue_description || '').toLowerCase()
-      const isDetailPageRemoved = issueDesc.includes('detail page removed') ||
-        issueDesc.includes('page removed') ||
-        issueDesc.includes('removed by amazon') ||
-        issueDesc.includes('blocked')
+      const statusMsg = (listing.status_message || '').toLowerCase()
+      const hasNoPrice = !listing.price || listing.price <= 0
+      const isAmazonChannel = listing.fulfillment_channel === 'AMAZON_NA' || listing.fulfillment_channel === 'AMAZON_EU'
+      const isDefaultChannel = listing.fulfillment_channel === 'DEFAULT' || listing.fulfillment_channel === null
 
-      // Also catch inactive FBA SKUs with $0 price and no recent sales
-      // (these are almost always detail-page-removed or search-suppressed)
-      const isLikelyRemoved = isFbaSku &&
-        (!listing.price || listing.price <= 0) &&
-        unitsSold === 0 &&
-        (asinSales?.units_sold_30d || 0) === 0
-
-      if (isDetailPageRemoved || isLikelyRemoved) {
-        flaggedSkus.add(listing.sku)
-        issues.push({
-          sku:           listing.sku,
-          asin:          listing.asin,
-          product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
-          issue_type:    'inactive_removed',
-          issue_label:   ISSUE_LABELS.inactive_removed,
-          severity:      ISSUE_SEVERITY.inactive_removed,
-          detail:        isDetailPageRemoved
-            ? `Listing is inactive because the Amazon detail page was removed. Review in Seller Central → Manage Inventory → Inactive → Detail page removed.`
-            : `FBA listing is inactive with no price and no recent sales. The detail page may have been removed by Amazon. Review in Seller Central.`,
-          price:         listing.price,
-          quantity:      listing.quantity || 0,
-          fulfillment_channel: listing.fulfillment_channel,
-          units_sold_30d: unitsSold,
-          estimated_lost_revenue_30d: null,
-        })
+      // ── Case A: status_message is populated (accurate detection) ──────────
+      if (listing.status_message) {
+        if (statusMsg.includes('detail page removed') || statusMsg.includes('page removed')) {
+          flaggedSkus.add(listing.sku)
+          issues.push({
+            sku:           listing.sku,
+            asin:          listing.asin,
+            product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+            issue_type:    'inactive_removed',
+            issue_label:   ISSUE_LABELS.inactive_removed,
+            severity:      ISSUE_SEVERITY.inactive_removed,
+            detail:        `Amazon removed the detail page for this listing. It is no longer visible to buyers. Review in Seller Central → Manage Inventory → Inactive → Detail page removed.`,
+            price:         listing.price,
+            quantity:      listing.quantity || 0,
+            fulfillment_channel: listing.fulfillment_channel,
+            units_sold_30d: unitsSold,
+            estimated_lost_revenue_30d: null,
+          })
+          continue
+        }
+        if (statusMsg.includes('missing offer') || statusMsg.includes('no offer')) {
+          flaggedSkus.add(listing.sku)
+          issues.push({
+            sku:           listing.sku,
+            asin:          listing.asin,
+            product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+            issue_type:    'missing_offer',
+            issue_label:   ISSUE_LABELS.missing_offer,
+            severity:      ISSUE_SEVERITY.missing_offer,
+            detail:        `This listing has no offer attached. Buyers cannot purchase. Add offer details in Seller Central → Manage Inventory → Inactive → Missing offer.`,
+            price:         listing.price,
+            quantity:      listing.quantity || 0,
+            fulfillment_channel: listing.fulfillment_channel,
+            units_sold_30d: unitsSold,
+            estimated_lost_revenue_30d: asinSales ? asinSales.revenue_30d : null,
+          })
+          continue
+        }
+        if (statusMsg.includes('search suppressed') || statusMsg.includes('suppressed') || statusMsg.includes('blocked')) {
+          flaggedSkus.add(listing.sku)
+          issues.push({
+            sku:           listing.sku,
+            asin:          listing.asin,
+            product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+            issue_type:    'suppressed',
+            issue_label:   ISSUE_LABELS.suppressed,
+            severity:      ISSUE_SEVERITY.suppressed,
+            detail:        `Amazon has suppressed or blocked this listing. It is not visible to buyers. Fix in Seller Central → Manage Inventory → Suppressed.`,
+            price:         listing.price,
+            quantity:      listing.quantity || 0,
+            fulfillment_channel: listing.fulfillment_channel,
+            units_sold_30d: unitsSold,
+            estimated_lost_revenue_30d: asinSales ? asinSales.revenue_30d : null,
+          })
+          continue
+        }
+        // Other known status messages (e.g. 'Out of stock', 'Inactive') → skip
         continue
+      }
+
+      // ── Case B: status_message not yet populated — use heuristics ─────────
+      if (hasNoPrice) {
+        if (isFbaSku || isAmazonChannel) {
+          flaggedSkus.add(listing.sku)
+          issues.push({
+            sku:           listing.sku,
+            asin:          listing.asin,
+            product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+            issue_type:    'inactive_removed',
+            issue_label:   ISSUE_LABELS.inactive_removed,
+            severity:      ISSUE_SEVERITY.inactive_removed,
+            detail:        `FBA listing is inactive with no price. The detail page may have been removed by Amazon. Run Refresh Issues to get the exact reason.`,
+            price:         listing.price,
+            quantity:      listing.quantity || 0,
+            fulfillment_channel: listing.fulfillment_channel,
+            units_sold_30d: unitsSold,
+            estimated_lost_revenue_30d: null,
+          })
+          continue
+        }
+        if (isDefaultChannel) {
+          flaggedSkus.add(listing.sku)
+          issues.push({
+            sku:           listing.sku,
+            asin:          listing.asin,
+            product_name:  listing.product_name || (listing.asin ? productNameByAsin.get(listing.asin) : null) || null,
+            issue_type:    'missing_offer',
+            issue_label:   ISSUE_LABELS.missing_offer,
+            severity:      ISSUE_SEVERITY.missing_offer,
+            detail:        `This listing is inactive with no offer attached. Buyers cannot purchase. Add offer details in Seller Central → Manage Inventory → Inactive → Missing offer.`,
+            price:         listing.price,
+            quantity:      listing.quantity || 0,
+            fulfillment_channel: listing.fulfillment_channel,
+            units_sold_30d: unitsSold,
+            estimated_lost_revenue_30d: asinSales ? asinSales.revenue_30d : null,
+          })
+          continue
+        }
       }
 
       // Other Inactive listings (stockout, etc.) → skip (Replenishment tab handles these)
