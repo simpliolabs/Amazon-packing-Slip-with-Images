@@ -186,11 +186,13 @@ async function fetchAplusStatus(
   token: string,
   asin: string
 ): Promise<AplusStatus> {
-  // Try the summary list endpoint (no CONTENTS — faster, works on parent ASINs)
+  // Use searchContentPublishRecords — the correct endpoint to check if a specific
+  // ASIN has published A+ content. Takes a single child ASIN, not a set.
+  // Docs: GET /aplus/2020-11-01/contentPublishRecords?marketplaceId=...&asin=...
   const url =
-    `${ENDPOINT}/aplus/2020-11-01/contentDocuments` +
+    `${ENDPOINT}/aplus/2020-11-01/contentPublishRecords` +
     `?marketplaceId=${MARKETPLACE_ID}` +
-    `&asinSet=${asin}`
+    `&asin=${asin}`
 
   const resp = await fetch(url, {
     headers: { 'x-amz-access-token': token },
@@ -203,36 +205,24 @@ async function fetchAplusStatus(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const json: any = await resp.json()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const docs: any[] = json.contentDocumentSummaryList || []
+  const records: any[] = json.publishRecordList || []
 
-  if (docs.length === 0) return base
+  if (records.length === 0) return base
 
   base.hasAplus = true
 
-  // Analyse each document summary for optimization signals
-  for (const doc of docs) {
-    const contentType: string = doc.contentType || ''
-    if (contentType === 'STANDARD') {
-      // Standard A+ — check module count from summary
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const modules: any[] = doc.contentDocument?.contentModuleList || []
-      base.moduleCount += modules.length
-
-      for (const mod of modules) {
-        const modType: string = mod.contentModuleType || ''
-        if (modType.includes('HEADLINE') || modType.includes('HEADER')) base.hasHeadline = true
-
-        // Check images for missing alt text
-        const modStr = JSON.stringify(mod)
-        const imageMatches = modStr.match(/"image":\s*\{[^}]*\}/g) || []
-        for (const imgStr of imageMatches) {
-          if (!imgStr.includes('"image_keywords"') || imgStr.includes('"image_keywords":""')) {
-            base.missingAltCount++
-          }
-        }
-      }
+  // Analyse each publish record for optimization signals
+  for (const record of records) {
+    const contentType: string = record.contentType || ''
+    if (contentType === 'EBC') {
+      // Standard A+ (EBC = Enhanced Brand Content via Seller Central)
+      // publishRecordList only contains metadata; count records as module proxy
+      base.moduleCount += 1
+      // EBC records don't carry full module data — mark headline as present
+      // if there is at least one EBC record (standard A+ always has a headline)
+      base.hasHeadline = true
     } else if (contentType === 'EMC') {
-      // Brand Story (Enhanced Marketing Content)
+      // Brand Story (Enhanced Marketing Content via Vendor Central)
       base.hasBrandStory = true
     }
   }
