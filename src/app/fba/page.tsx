@@ -277,6 +277,7 @@ export default function FBAIntelligencePage() {
   const [seoLoading, setSeoLoading] = useState(false)
   const [seoSyncing, setSeoSyncing] = useState(false)
   const [seoLastSynced, setSeoLastSynced] = useState<string | null>(null)
+  const [seoError, setSeoError] = useState<string | null>(null)
   const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
   const [fixingField, setFixingField] = useState<string | null>(null) // 'parentAsin:field'
 
@@ -880,12 +881,35 @@ export default function FBAIntelligencePage() {
   // Fetch SEO scores for the Listing Optimizer section
   const fetchSeoScores = useCallback(async (triggerSync = false) => {
     setSeoLoading(true)
+    setSeoError(null)
     try {
       if (triggerSync) {
         setSeoSyncing(true)
-        // Fire the sync in the background — it can take 2-5 min due to Amazon rate limits
-        fetch('/api/fba/listing-optimizer', { method: 'POST' }).catch(() => null)
-        // Poll for results every 30s for up to 5 minutes
+        // Fire the sync — check immediately for seller ID errors
+        const syncResp = await fetch('/api/fba/listing-optimizer', { method: 'POST' })
+        const syncJson = await syncResp.json()
+        if (syncJson.error) {
+          // Check for seller ID not configured error
+          if (syncJson.error.includes('amazon_seller_id')) {
+            setSeoError('setup_required')
+          } else {
+            setSeoError(syncJson.error)
+          }
+          setSeoSyncing(false)
+          setSeoLoading(false)
+          return
+        }
+        if (syncJson.status === 'done') {
+          // Sync completed within timeout — fetch scores immediately
+          const resp = await fetch('/api/fba/listing-optimizer')
+          const json = await resp.json()
+          setSeoScores(json.scores || [])
+          setSeoLastSynced(json.lastSyncedAt || null)
+          setSeoSyncing(false)
+          setSeoLoading(false)
+          return
+        }
+        // Still syncing — poll for results every 30s for up to 5 minutes
         let attempts = 0
         const maxAttempts = 10
         const pollInterval = setInterval(async () => {
@@ -2259,7 +2283,22 @@ export default function FBAIntelligencePage() {
               </div>
             )}
 
-            {seoLoading && !seoSyncing ? (
+            {seoError === 'setup_required' ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-4">
+                <p className="text-sm font-semibold text-amber-800 mb-1">&#9888; Setup Required — Amazon Seller ID Missing</p>
+                <p className="text-xs text-amber-700 mb-3">The Listing Optimizer needs your Amazon Seller ID to read listing content via the SP-API. Add it in one of two ways:</p>
+                <ol className="text-xs text-amber-700 space-y-1 list-decimal list-inside mb-3">
+                  <li>Go to <strong>Supabase → Table Editor → app_settings</strong> and add a row with <code className="bg-amber-100 px-1 rounded">key = amazon_seller_id</code> and your Seller ID as the value.</li>
+                  <li>Or add <code className="bg-amber-100 px-1 rounded">AMAZON_MERCHANT_TOKEN=your_seller_id</code> to your Vercel Environment Variables.</li>
+                </ol>
+                <p className="text-xs text-amber-600">Your Seller ID is visible in Seller Central → Account Info → Merchant Token (format: A1XXXXXXXXXX).</p>
+              </div>
+            ) : seoError ? (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4">
+                <p className="text-sm font-semibold text-red-800 mb-1">Scan Failed</p>
+                <p className="text-xs text-red-700">{seoError}</p>
+              </div>
+            ) : seoLoading && !seoSyncing ? (
               <div className="text-center py-8 text-gray-400 text-sm">Loading scores…</div>
             ) : seoScores.length === 0 && !seoSyncing ? (
               <div className="text-center py-8">

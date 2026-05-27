@@ -81,9 +81,25 @@ export async function POST(request: NextRequest) {
 
 /**
  * GET /api/sync
- * Returns the last sync status
+ * - Vercel Cron: triggers order sync when Authorization: Bearer <CRON_SECRET> is present
+ * - Authenticated users: returns the last sync status
  */
 export async function GET(request: NextRequest) {
+  // Allow Vercel Cron (sends Authorization: Bearer <CRON_SECRET>)
+  const authHeader = request.headers.get('authorization')
+  const secret = process.env.CRON_SECRET
+  if (secret && authHeader === `Bearer ${secret}`) {
+    await logAudit({
+      userId: null,
+      action: 'sync.trigger_cron',
+      resourceType: 'sync',
+      details: { trigger: 'vercel_cron' },
+    })
+    const result = await syncOrders()
+    return NextResponse.json(result)
+  }
+
+  // Otherwise return last sync status for authenticated users
   const supabase = await createClient()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
 
