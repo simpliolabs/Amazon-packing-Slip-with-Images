@@ -2417,24 +2417,52 @@ export default function FBAIntelligencePage() {
                           ))}
                         </div>
 
-                        {/* All issues as instructional action list */}
-                        {allIssues.length > 0 && (
-                          <div className="space-y-1.5">
-                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">What to fix</p>
-                            {allIssues.map((issue, idx) => (
-                              <div key={idx} className={`text-xs rounded-lg px-3 py-2 flex gap-2 ${
-                                issue.severity === 'critical' ? 'bg-red-100 text-red-800'
-                                : issue.severity === 'warning' ? 'bg-amber-100 text-amber-800'
-                                : 'bg-blue-50 text-blue-800'
-                              }`}>
-                                <span className="shrink-0 mt-0.5">
-                                  {issue.severity === 'critical' ? '⚠️' : issue.severity === 'warning' ? '⚠️' : 'ℹ️'}
-                                </span>
-                                <span className="leading-relaxed">{issue.message}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                        {/* Issues grouped by category */}
+                        {allIssues.length > 0 && (() => {
+                          const categories: { key: string; label: string; emoji: string }[] = [
+                            { key: 'title',          label: 'Title',              emoji: '📝' },
+                            { key: 'bullets',        label: 'Bullets',            emoji: '•' },
+                            { key: 'description',    label: 'Description',        emoji: '📄' },
+                            { key: 'backend_keywords', label: 'Keywords',         emoji: '🔑' },
+                            { key: 'images',         label: 'Images',             emoji: '🖼' },
+                            { key: 'aplus',          label: 'A+ Content',         emoji: '✨' },
+                            { key: 'child_overrides', label: 'Variant Conflicts', emoji: '⚡' },
+                          ]
+                          return (
+                            <div className="space-y-2">
+                              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">What to Fix</p>
+                              {categories.map(cat => {
+                                const catIssues = allIssues.filter(i => i.field === cat.key)
+                                if (catIssues.length === 0) return null
+                                const hasCritical = catIssues.some(i => i.severity === 'critical')
+                                const hasWarning  = catIssues.some(i => i.severity === 'warning')
+                                const headerColor = hasCritical ? 'bg-red-50 border-red-200 text-red-800'
+                                  : hasWarning ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                  : 'bg-blue-50 border-blue-200 text-blue-800'
+                                return (
+                                  <div key={cat.key} className={`rounded-lg border overflow-hidden ${headerColor}`}>
+                                    <div className="px-3 py-1.5 flex items-center gap-1.5">
+                                      <span className="text-sm">{cat.emoji}</span>
+                                      <span className="text-xs font-semibold flex-1">{cat.label}</span>
+                                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                                        hasCritical ? 'bg-red-200 text-red-800'
+                                        : hasWarning ? 'bg-amber-200 text-amber-800'
+                                        : 'bg-blue-200 text-blue-800'
+                                      }`}>{catIssues.length}</span>
+                                    </div>
+                                    <div className="border-t border-current/10 divide-y divide-current/10">
+                                      {catIssues.map((issue, idx) => (
+                                        <div key={idx} className="px-3 py-2 text-xs leading-relaxed">
+                                          {issue.message}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )
+                        })()}
                       </div>
 
                       {/* Card actions */}
@@ -2466,41 +2494,66 @@ export default function FBAIntelligencePage() {
                       {/* Expanded child breakdown */}
                       {isExpanded && (
                         <div className="border-t border-gray-200 bg-white p-3 space-y-2">
-                          <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wide mb-2">Child SKU Breakdown</p>
+                          <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown</p>
                           {score.children.length === 0 ? (
-                            <p className="text-[10px] text-gray-400">No child content synced yet.</p>
+                            <p className="text-xs text-gray-400">No child content synced yet. Click Scan Listings.</p>
                           ) : (
-                            score.children.map(child => {
-                              const hasOverride = score.children.length > 1 && (
-                                (child.title && score.children[0].title && child.title !== score.children[0].title) ||
-                                (child.bullet_1 && score.children[0].bullet_1 && child.bullet_1 !== score.children[0].bullet_1)
-                              )
+                            score.children.map((child, childIdx) => {
+                              // Detect title diff vs first child (canonical)
+                              const firstTitle = score.children[0].title || ''
+                              const hasTitleDiff = childIdx > 0 && child.title && child.title !== firstTitle
+                              // Detect keyword diff vs first child
+                              const firstKw = score.children[0].backend_keywords || ''
+                              const hasKwDiff = childIdx > 0 && child.backend_keywords && child.backend_keywords !== firstKw
+                              const hasAnyDiff = hasTitleDiff || hasKwDiff
+                              const bulletCount = [child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length
+                              const kwLen = child.backend_keywords?.length || 0
                               return (
-                                <div key={child.sku} className={`rounded-lg p-2 text-[10px] ${
-                                  hasOverride ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50 border border-gray-100'
+                                <div key={child.sku} className={`rounded-lg p-2.5 text-xs ${
+                                  hasAnyDiff ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50 border border-gray-100'
                                 }`}>
-                                  <div className="flex items-center justify-between mb-1">
-                                    <span className="font-mono font-medium text-gray-800">{child.sku}</span>
+                                  {/* SKU header row */}
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <a
+                                      href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${child.asin}`}
+                                      target="_blank" rel="noopener noreferrer"
+                                      className="font-mono font-semibold text-blue-600 hover:underline"
+                                    >{child.sku}</a>
                                     <div className="flex items-center gap-1">
-                                      {hasOverride && <span className="bg-purple-100 text-purple-700 px-1 rounded">Override</span>}
+                                      {hasAnyDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium">Conflict</span>}
                                       {child.has_aplus
-                                        ? <span className="bg-green-100 text-green-700 px-1 rounded">A+ ✓</span>
-                                        : <span className="bg-red-100 text-red-700 px-1 rounded">No A+</span>
+                                        ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full">A+ ✓</span>
+                                        : <span className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded-full">No A+</span>
                                       }
                                     </div>
                                   </div>
-                                  <div className="text-gray-600 truncate" title={child.title || ''}>
-                                    <span className="font-medium">Title:</span> {child.title ? `${child.title.slice(0, 60)}…` : <span className="text-red-500">Missing</span>}
+                                  {/* Title */}
+                                  <div className={`mb-1 ${hasTitleDiff ? 'text-purple-800' : 'text-gray-700'}`}>
+                                    <span className="font-semibold">Title: </span>
+                                    {child.title
+                                      ? <span title={child.title}>{child.title.slice(0, 70)}{child.title.length > 70 ? '…' : ''}</span>
+                                      : <span className="text-red-500 font-medium">Missing — add in Seller Central</span>
+                                    }
+                                    {hasTitleDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs from variant 1</span>}
                                   </div>
-                                  <div className="text-gray-600 mt-0.5">
-                                    <span className="font-medium">Bullets:</span> {[child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length}/5
+                                  {/* Stats row */}
+                                  <div className="flex items-center gap-3 text-gray-600">
+                                    <span>
+                                      <span className="font-semibold">Bullets:</span>{' '}
+                                      <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span>
+                                    </span>
+                                    <span>
+                                      <span className="font-semibold">Keywords:</span>{' '}
+                                      {child.backend_keywords
+                                        ? <span className={`font-medium ${kwLen < 100 ? 'text-amber-600' : kwLen < 200 ? 'text-amber-500' : 'text-green-600'}`}>{kwLen}/250</span>
+                                        : <span className="text-red-500 font-medium">Empty</span>
+                                      }
+                                      {hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
+                                    </span>
+                                    {child.aplus_images_missing_alt > 0 && (
+                                      <span className="text-amber-600">{child.aplus_images_missing_alt} A+ img missing alt</span>
+                                    )}
                                   </div>
-                                  <div className="text-gray-600 mt-0.5">
-                                    <span className="font-medium">Keywords:</span> {child.backend_keywords ? `${child.backend_keywords.length}/250 chars` : <span className="text-red-500">Empty</span>}
-                                  </div>
-                                  {child.aplus_images_missing_alt > 0 && (
-                                    <div className="text-amber-600 mt-0.5">{child.aplus_images_missing_alt} A+ image(s) missing alt text</div>
-                                  )}
                                 </div>
                               )
                             })
