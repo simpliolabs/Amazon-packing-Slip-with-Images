@@ -49,13 +49,21 @@ interface ChildRow {
   aplus_images_missing_alt: number
 }
 
+export interface VariantCorrection {
+  sku: string
+  field: string
+  current: string
+  replace_with: string
+  reason: string
+}
+
 export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
   recommended_bullets: string[]
   recommended_keywords: string
   recommended_description: string
-  variant_corrections: string[]
+  variant_corrections: VariantCorrection[]
   generated_at: string
 }
 
@@ -87,15 +95,15 @@ export async function POST(req: NextRequest) {
     const kwLen = rep.backend_keywords?.trim().length || 0
     const kwRemaining = 250 - kwLen
 
-    // Build variant summary — show all SKUs and what makes them different
-    const variantSummary = children.map((c: ChildRow) => {
-      // Extract the differentiator from SKU or title (e.g., size, color)
-      const titleShort = c.title ? c.title.slice(0, 100) : '[no title]'
-      return `  - ${c.sku} (${c.asin}): ${titleShort}`
-    }).join('\n')
-
-    // Extract unique differentiators from titles (sizes, colors, etc.)
-    const allTitles = children.map((c: ChildRow) => c.title || '').filter(Boolean)
+    // Build per-variant detail for conflict analysis
+    const variantDetails = children.map((c: ChildRow, idx: number) => {
+      const cBullets = [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean) as string[]
+      return `VARIANT ${idx + 1}: ${c.sku} (${c.asin})
+  Title: ${c.title || '[MISSING]'}
+  Bullets: ${cBullets.length > 0 ? cBullets.map((b, i) => `\n    ${i + 1}. ${b}`).join('') : '[NONE]'}
+  Keywords (${(c.backend_keywords?.length || 0)}/250): ${c.backend_keywords || '[EMPTY]'}
+  Description: ${c.description ? c.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 200) + '...' : '[MISSING]'}`
+    }).join('\n\n')
     
     // Build the prompt with actual listing data
     const listingContext = `
@@ -103,24 +111,13 @@ PRODUCT LISTING DATA (Amazon US):
 Parent ASIN: ${parent_asin}
 Total Variants: ${children.length} child SKUs
 
-ALL VARIANTS IN THIS FAMILY:
-${variantSummary}
+IMPORTANT: This is a MULTI-VARIANT listing. Your recommendations (title, bullets, description) must be GENERIC enough to apply to ALL variants in this family. Do NOT mention specific sizes, colors, or variant-specific attributes unless they ALL share that attribute.
 
-IMPORTANT: This is a MULTI-VARIANT listing. Your recommendations (title, bullets, description) must be GENERIC enough to apply to ALL variants in this family. Do NOT mention specific sizes, colors, or variant-specific attributes unless they ALL share that attribute. If variants differ by size (e.g., 32GB, 64GB, 128GB), write copy that covers the whole range or is size-agnostic.
+--- PER-VARIANT CONTENT (compare these to find conflicts) ---
+${variantDetails}
+--- END VARIANT CONTENT ---
 
-REPRESENTATIVE TITLE (${rep.title?.length || 0} chars):
-${rep.title || '[MISSING]'}
-
-ALL VARIANT TITLES (to understand the product family):
-${allTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}
-
-CURRENT BULLET POINTS (${bullets.length}/5):
-${bullets.length > 0 ? bullets.map((b, i) => `${i + 1}. ${b}`).join('\n') : '[NO BULLETS]'}
-
-CURRENT PRODUCT DESCRIPTION:
-${rep.description ? rep.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 800) : '[MISSING — no description set]'}
-
-CURRENT BACKEND KEYWORDS (${kwLen}/250 chars used, ${kwRemaining} chars remaining):
+CURRENT BACKEND KEYWORDS FOR VARIANT 1 (${kwLen}/250 chars used, ${kwRemaining} chars remaining):
 ${rep.backend_keywords || '[EMPTY]'}
 
 IMAGE COUNT: ${rep.image_count || 0}/7
@@ -136,28 +133,40 @@ A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
 
 CRITICAL RULES:
 1. This is a MULTI-VARIANT listing family. Your title, bullets, and description must work for ALL variants — do NOT mention variant-specific attributes (specific size, specific color) unless ALL variants share it.
-2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types (e.g., "SD" vs "micro SD" are different products — use the correct one from the titles).
-3. If variants differ by capacity (32GB, 64GB, 128GB), write bullets that are capacity-agnostic OR mention the full range. Never write "128GB" as if it's the only option.
+2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types (e.g., "SD" vs "micro SD" — check the actual titles to determine which).
+3. If variants differ by capacity (32GB, 64GB, 128GB), write bullets that are capacity-agnostic OR mention the full range.
 4. Do NOT invent features or specs not mentioned in the current listing. Only rephrase and optimize what's already there.
-5. Use SIMPLE, EVERYDAY ENGLISH. Never use obscure, academic, or thesaurus-style vocabulary. Write like a human copywriter, not a professor. Bad: "Amply Capacious", "Expeditious", "Multitudinous". Good: "Large Storage", "Fast", "Multiple".
-6. Bullet hooks must be 2-4 common words that a shopper instantly understands. Examples: "LARGE STORAGE CAPACITY", "FAST READ SPEEDS", "BUILT FOR TOUGH CONDITIONS".
+5. Use SIMPLE, EVERYDAY ENGLISH. Never use obscure or thesaurus-style vocabulary. Bad: "Amply Capacious". Good: "Large Storage Capacity".
+6. Bullet hooks must be 2-4 common words a shopper instantly understands.
 
 AMAZON RULES TO ENFORCE:
-- Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC, USB), no promotional phrases ("Best", "Sale", "#1"), keywords in first 80 chars
-- Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit explanation. Max 200 chars each. No pricing or promotional content. Use plain, conversational English.
-- Backend keywords: Space-separated, no commas, no terms already in title or bullets, 250 char max total. You MUST use as close to the full remaining ${kwRemaining} chars as possible. Include: long-tail device compatibility terms (e.g., "for Canon EOS", "for DJI drone"), seasonal terms ("holiday gift", "back to school"), common misspellings, Spanish equivalents if relevant, and related product terms. Do NOT leave keyword space unused.
-- Description: Use HTML tags. Min 150 words. Include primary keywords naturally. End with a call to action. Must be generic for all variants.
+- Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC), no promotional phrases, keywords in first 80 chars
+- Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit. Max 200 chars each. Plain English.
+- Backend keywords: Space-separated, no commas, no terms already in title or bullets. HARD LIMIT: output EXACTLY ${kwRemaining} chars or fewer of NEW keywords. Each keyword/phrase must be UNIQUE — NEVER repeat any word or phrase. Include a MIX of: device compatibility ("for Canon EOS R5"), use-case terms ("trail camera", "dash cam"), seasonal ("holiday gift"), and common misspellings. Output must be a single line of space-separated terms, max ${kwRemaining} characters total.
+- Description: Use HTML tags (<b>, <br>, <ul>, <li>). Min 150 words. Generic for all variants.
 
 VARIANT CONFLICT CORRECTIONS:
-If the variants have different titles, bullets, keywords, or descriptions from each other, include a "variant_corrections" field with specific instructions on what to change for each non-matching variant to unify the listing family.
+Compare the per-variant content provided above. For EACH variant that differs from Variant 1, output a specific correction object with:
+- The exact SKU
+- Which field(s) differ (title, bullets, keywords, description)
+- The EXACT text that should REPLACE the current text (not vague instructions — give copy-paste-ready text)
+- If a variant uses wrong terminology (e.g., says "TF" when it should say "SD"), specify the exact find-and-replace
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
   "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "recommended_keywords": "string (exact terms to ADD to backend keywords, using as close to ${kwRemaining} chars as possible)",
-  "recommended_description": "string (full HTML description to paste in, min 150 words, generic for all variants)",
-  "variant_corrections": ["string instruction for each variant that differs from the recommended content"]
+  "recommended_keywords": "string (UNIQUE terms to ADD, max ${kwRemaining} chars, NO repetition)",
+  "recommended_description": "string (full HTML description, min 150 words, generic for all variants)",
+  "variant_corrections": [
+    {
+      "sku": "string (the SKU that needs correction)",
+      "field": "string (title|bullets|keywords|description)",
+      "current": "string (the problematic text currently there)",
+      "replace_with": "string (the exact corrected text to paste in)",
+      "reason": "string (brief explanation of why this change is needed)"
+    }
+  ]
 }`
 
     const openai = getOpenAI()
@@ -180,7 +189,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_bullets: string[]
       recommended_keywords: string
       recommended_description: string
-      variant_corrections?: string[]
+      variant_corrections?: VariantCorrection[]
     }
 
     try {

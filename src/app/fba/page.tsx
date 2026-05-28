@@ -104,13 +104,21 @@ interface ChildContentRow {
   content_synced_at:       string
 }
 
+interface VariantCorrection {
+  sku: string
+  field: string
+  current: string
+  replace_with: string
+  reason: string
+}
+
 interface AiRecommendations {
   parent_asin:              string
   recommended_title:        string
   recommended_bullets:      string[]
   recommended_keywords:     string
   recommended_description:  string
-  variant_corrections:      string[]
+  variant_corrections:      VariantCorrection[]
   generated_at:             string
 }
 
@@ -961,9 +969,20 @@ export default function FBAIntelligencePage() {
     finally { setSeoLoading(false) }
   }, [])
 
-  // Fetch AI recommendations for a specific parent ASIN
+  // Load cached AI recommendations from DB (GET — no generation)
+  const loadCachedRecs = useCallback(async (parentAsin: string) => {
+    if (aiRecs[parentAsin]) return // already in state
+    try {
+      const resp = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${parentAsin}`)
+      const json = await resp.json()
+      if (json.recommendations) {
+        setAiRecs(prev => ({ ...prev, [parentAsin]: json.recommendations }))
+      }
+    } catch { /* silent — just means no cached rec */ }
+  }, [aiRecs])
+
+  // Generate fresh AI recommendations (POST — always regenerates)
   const fetchAiRecs = useCallback(async (parentAsin: string) => {
-    // Always run a fresh POST — the button is explicit user intent
     setAiLoadingSet(prev => new Set(prev).add(parentAsin))
     setAiError(prev => { const n = { ...prev }; delete n[parentAsin]; return n })
     try {
@@ -2692,14 +2711,30 @@ export default function FBAIntelligencePage() {
                               <div className="space-y-4">
                                 <div className="bg-white rounded-lg border border-violet-200 p-3">
                                   <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-700">⚡ Variant Conflict Corrections</span>
-                                    <button onClick={() => copyToClipboard(rec.variant_corrections.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
+                                    <span className="text-xs font-semibold text-gray-700">⚡ Variant Conflict Corrections ({rec.variant_corrections.length})</span>
                                   </div>
-                                  <div className="space-y-2">
+                                  <div className="space-y-3">
                                     {rec.variant_corrections.map((correction, ci) => (
-                                      <div key={ci} className="flex items-start gap-2 p-2 bg-purple-50 rounded">
-                                        <span className="text-[10px] text-purple-500 font-bold mt-0.5 shrink-0">{ci + 1}.</span>
-                                        <p className="text-xs text-gray-800 leading-relaxed flex-1">{correction}</p>
+                                      <div key={ci} className="border border-purple-200 rounded-lg p-2.5 bg-purple-50">
+                                        <div className="flex items-center gap-2 mb-1.5">
+                                          <span className="text-[10px] font-mono font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{correction.sku}</span>
+                                          <span className="text-[10px] font-semibold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">{correction.field}</span>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                          <div className="flex items-start gap-1">
+                                            <span className="text-[10px] text-red-500 font-bold shrink-0 mt-0.5">✗</span>
+                                            <div className="text-[11px] text-red-700 bg-red-50 px-1.5 py-1 rounded flex-1 line-through">{correction.current.slice(0, 150)}{correction.current.length > 150 ? '...' : ''}</div>
+                                          </div>
+                                          <div className="flex items-start gap-1">
+                                            <span className="text-[10px] text-green-500 font-bold shrink-0 mt-0.5">✓</span>
+                                            <div className="text-[11px] text-green-700 bg-green-50 px-1.5 py-1 rounded flex-1">{correction.replace_with.slice(0, 150)}{correction.replace_with.length > 150 ? '...' : ''}</div>
+                                          </div>
+                                          <div className="flex items-start gap-1">
+                                            <span className="text-[10px] text-gray-400 shrink-0 mt-0.5">ℹ</span>
+                                            <span className="text-[10px] text-gray-500 italic">{correction.reason}</span>
+                                          </div>
+                                          <button onClick={() => copyToClipboard(correction.replace_with)} className="text-[10px] bg-green-100 hover:bg-green-200 text-green-700 px-2 py-0.5 rounded transition-colors mt-1">Copy Corrected Text</button>
+                                        </div>
                                       </div>
                                     ))}
                                   </div>
@@ -2770,7 +2805,7 @@ export default function FBAIntelligencePage() {
                   return (
                     <button
                       key={score.parent_asin}
-                      onClick={() => { setExpandedSeoCard(score.parent_asin); setExpandedIssueKey(null); setSelectedRecCategory(null) }}
+                      onClick={() => { setExpandedSeoCard(score.parent_asin); setExpandedIssueKey(null); setSelectedRecCategory(null); loadCachedRecs(score.parent_asin) }}
                       className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
                     >
                       <div className="p-4">
