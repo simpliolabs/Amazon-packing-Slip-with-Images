@@ -300,6 +300,7 @@ export default function FBAIntelligencePage() {
   const [aiLoadingSet, setAiLoadingSet] = useState<Set<string>>(new Set())
   const [expandedAiCard, setExpandedAiCard] = useState<string | null>(null)
   const [expandedIssueKey, setExpandedIssueKey] = useState<string | null>(null)
+  const [aiError, setAiError] = useState<Record<string, string>>({})
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -961,23 +962,10 @@ export default function FBAIntelligencePage() {
 
   // Fetch AI recommendations for a specific parent ASIN
   const fetchAiRecs = useCallback(async (parentAsin: string) => {
-    // First check if we already have cached recs
-    const cached = aiRecs[parentAsin]
-    if (cached) {
-      setExpandedAiCard(parentAsin)
-      return
-    }
-    // Check if already stored in DB
+    // Always run a fresh POST — the button is explicit user intent
     setAiLoadingSet(prev => new Set(prev).add(parentAsin))
+    setAiError(prev => { const n = { ...prev }; delete n[parentAsin]; return n })
     try {
-      const getResp = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${parentAsin}`)
-      const getJson = await getResp.json()
-      if (getJson.recommendations) {
-        setAiRecs(prev => ({ ...prev, [parentAsin]: getJson.recommendations }))
-        setExpandedAiCard(parentAsin)
-        return
-      }
-      // Not cached — generate new
       const resp = await fetch('/api/fba/listing-optimizer/ai-recommendations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -986,11 +974,18 @@ export default function FBAIntelligencePage() {
       const json = await resp.json()
       if (json.recommendations) {
         setAiRecs(prev => ({ ...prev, [parentAsin]: json.recommendations }))
-        setExpandedAiCard(parentAsin)
+      } else {
+        const errMsg = json.error || 'Unknown error from AI route'
+        console.error('[AI Recs] Error:', errMsg)
+        setAiError(prev => ({ ...prev, [parentAsin]: errMsg }))
       }
-    } catch (e) { console.error('[AI Recs]', e) }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      console.error('[AI Recs] Fetch failed:', errMsg)
+      setAiError(prev => ({ ...prev, [parentAsin]: errMsg }))
+    }
     finally { setAiLoadingSet(prev => { const s = new Set(prev); s.delete(parentAsin); return s }) }
-  }, [aiRecs])
+  }, [])
 
   // Load data when switching to analytics/listings tabs
   useEffect(() => {
@@ -2406,6 +2401,7 @@ export default function FBAIntelligencePage() {
                 const allIssues = score.issues || []
                 const rec = aiRecs[score.parent_asin] || null
                 const isAiLoading = aiLoadingSet.has(score.parent_asin)
+                const aiErrMsg = aiError[score.parent_asin] || null
                 const copyToClipboard = (text: string) => navigator.clipboard.writeText(text)
                 const categories: { key: string; label: string; emoji: string }[] = [
                   { key: 'title',           label: 'Title',             emoji: '📝' },
@@ -2519,11 +2515,20 @@ export default function FBAIntelligencePage() {
                               <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown</h4>
                               <div className="space-y-2">
                                 {score.children.map((child, childIdx) => {
-                                  const firstTitle = score.children[0].title || ''
+                                  const firstChild = score.children[0]
+                                  const firstTitle = firstChild.title || ''
                                   const hasTitleDiff = childIdx > 0 && child.title && child.title !== firstTitle
-                                  const firstKw = score.children[0].backend_keywords || ''
+                                  const firstKw = firstChild.backend_keywords || ''
                                   const hasKwDiff = childIdx > 0 && child.backend_keywords && child.backend_keywords !== firstKw
-                                  const hasAnyDiff = hasTitleDiff || hasKwDiff
+                                  // Bullet cannibalization: compare concatenated bullet text
+                                  const getBullets = (c: typeof child) => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('|')
+                                  const firstBullets = getBullets(firstChild)
+                                  const hasBulletDiff = childIdx > 0 && firstBullets && getBullets(child) !== firstBullets
+                                  // Description cannibalization
+                                  const firstDesc = (firstChild.description || '').replace(/<[^>]+>/g, ' ').trim()
+                                  const childDesc = (child.description || '').replace(/<[^>]+>/g, ' ').trim()
+                                  const hasDescDiff = childIdx > 0 && firstDesc && childDesc && childDesc !== firstDesc
+                                  const hasAnyDiff = hasTitleDiff || hasKwDiff || hasBulletDiff || hasDescDiff
                                   const bulletCount = [child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length
                                   const kwLen = child.backend_keywords?.length || 0
                                   return (
@@ -2547,12 +2552,24 @@ export default function FBAIntelligencePage() {
                                         {hasTitleDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
                                       </div>
                                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600">
-                                        <span><span className="font-semibold">Bullets:</span> <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span></span>
-                                        <span><span className="font-semibold">Keywords:</span> {child.backend_keywords ? <span className={`font-medium ${kwLen < 100 ? 'text-amber-600' : kwLen < 200 ? 'text-amber-500' : 'text-green-600'}`}>{kwLen}/250</span> : <span className="text-red-500 font-medium">Empty</span>}{hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}</span>
+                                        <span>
+                                          <span className="font-semibold">Bullets:</span>{' '}
+                                          <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span>
+                                          {hasBulletDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
+                                        </span>
+                                        <span>
+                                          <span className="font-semibold">Keywords:</span>{' '}
+                                          {child.backend_keywords ? <span className={`font-medium ${kwLen < 100 ? 'text-amber-600' : kwLen < 200 ? 'text-amber-500' : 'text-green-600'}`}>{kwLen}/250</span> : <span className="text-red-500 font-medium">Empty</span>}
+                                          {hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
+                                        </span>
                                         <span><span className="font-semibold">Images:</span> <span className={(child.image_count || 0) < 7 ? 'text-amber-600 font-medium' : 'text-green-600'}>{child.image_count || 0}/7</span></span>
                                       </div>
                                       {child.description
-                                        ? <div className="mt-1 text-gray-500"><span className="font-semibold text-gray-600">Desc: </span><span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 120)}{child.description.length > 120 ? '…' : ''}</span></div>
+                                        ? <div className={`mt-1 ${hasDescDiff ? 'text-purple-800' : 'text-gray-500'}`}>
+                                            <span className="font-semibold text-gray-600">Desc: </span>
+                                            <span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 120)}{child.description.length > 120 ? '…' : ''}</span>
+                                            {hasDescDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
+                                          </div>
                                         : child.has_aplus
                                           ? <div className="mt-1 text-green-600 font-medium">Description: Uses A+ Content</div>
                                           : <div className="mt-1 text-red-500 font-medium">Description: Missing</div>
@@ -2571,7 +2588,7 @@ export default function FBAIntelligencePage() {
                             <div className="flex items-center gap-2">
                               <span className="text-sm">✨</span>
                               <h3 className="text-sm font-bold text-violet-800">AI SEO Recommendations</h3>
-                              <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full">gemini-2.5-flash</span>
+                              <span className="text-[10px] bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full">gpt-4.1-mini</span>
                             </div>
                             {rec && (
                               <div className="flex items-center gap-2">
@@ -2586,6 +2603,15 @@ export default function FBAIntelligencePage() {
                               <div className="w-8 h-8 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
                               <p className="text-sm text-violet-600 font-medium">Analyzing listing with Amazon SEO expert AI…</p>
                               <p className="text-xs text-gray-400">This takes 10-20 seconds</p>
+                            </div>
+                          ) : aiErrMsg ? (
+                            <div className="flex flex-col items-center justify-center py-16 gap-4">
+                              <div className="text-3xl">⚠️</div>
+                              <div className="text-center">
+                                <p className="text-sm font-semibold text-red-700 mb-1">AI Audit Failed</p>
+                                <p className="text-xs text-gray-500 max-w-xs">{aiErrMsg}</p>
+                                <button onClick={() => fetchAiRecs(score.parent_asin)} className="mt-3 text-xs bg-violet-100 hover:bg-violet-200 text-violet-700 px-3 py-1.5 rounded-lg transition-colors">Try Again</button>
+                              </div>
                             </div>
                           ) : !rec ? (
                             <div className="flex flex-col items-center justify-center py-16 gap-4">

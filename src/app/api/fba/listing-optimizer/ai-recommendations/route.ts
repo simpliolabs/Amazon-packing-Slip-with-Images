@@ -144,13 +144,13 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
     const openai = getOpenAI()
 
     const completion = await openai.chat.completions.create({
-      model: 'gemini-2.5-flash',
+      model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: listingContext },
       ],
       temperature: 0.3,
-      max_tokens: 2000,
+      max_tokens: 3000,
     })
 
     const rawContent = completion.choices[0]?.message?.content || ''
