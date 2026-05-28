@@ -419,13 +419,20 @@ function scoreListingContent(
 
   // ── 3. DESCRIPTION SCORING (folded into keyword score) ────────────────────
   // Description is a separate field — we deduct from keyword score if missing
+  // NOTE: Read A+ status early so we can use it in description scoring below
+  const hasAplusEarly = representativeContent.has_aplus
   const description = representativeContent.description || ''
   const descPlain = stripHtml(description)
   const descLen = descPlain.length
 
   if (!description || descLen < 50) {
-    keywordScore -= 8
-    issues.push({ field: 'description', severity: 'warning', message: 'Product description is empty or missing. Go to Seller Central → Edit Listing → Product Description. Write 200-2000 chars of keyword-rich prose (NOT bullets). Amazon indexes this separately from bullets. Include: use cases, target audience, technical specs, and long-tail keywords that don\'t fit in the title. HTML formatting (<b>, <br>, <ul>) is allowed and improves readability.', auto_fixable: false })
+    if (hasAplusEarly) {
+      // A+ replaces the text description for most branded listings — do not penalize
+      issues.push({ field: 'description', severity: 'info', message: 'This listing uses A+ Content instead of a plain-text description (common for branded/apparel products). That is fine — A+ modules replace the description slot. Ensure your A+ modules contain keyword-rich text in every image alt field and text block, as Amazon indexes all of it. If you later add a plain-text description, keep it short (under 200 chars) to avoid duplicating A+ content.', auto_fixable: false })
+    } else {
+      keywordScore -= 8
+      issues.push({ field: 'description', severity: 'warning', message: 'Product description is empty or missing. Go to Seller Central → Edit Listing → Product Description. Write 200-2000 chars of keyword-rich prose (NOT bullets). Amazon indexes this separately from bullets. Include: use cases, target audience, technical specs, and long-tail keywords that don\'t fit in the title. HTML formatting (<b>, <br>, <ul>) is allowed and improves readability.', auto_fixable: false })
+    }
   } else if (descLen < 200) {
     keywordScore -= 4
     issues.push({ field: 'description', severity: 'info', message: `Description is only ${descLen} chars — expand to 500-2000 chars. Amazon indexes the full description text. Add: a brand story paragraph, technical specifications table, compatibility list (specific device models), FAQ-style content ("Works with Canon EOS R5, R6, 5D Mark IV"), and use-case scenarios. More indexed text = more long-tail search coverage.`, auto_fixable: false })
@@ -477,8 +484,8 @@ function scoreListingContent(
 
   keywordScore = Math.max(0, keywordScore)
 
-  // ── 5. A+ CONTENT SCORING ─────────────────────────────────────────────────
-  const hasAplus      = representativeContent.has_aplus
+  // ── 5. A+ CONTENT SCORING ─────────────────────────────────────────────────────
+  const hasAplus      = hasAplusEarly  // already read above for description check
   const missingAlt    = representativeContent.aplus_images_missing_alt
   const moduleCount   = representativeContent.aplus_module_count || 0
   const hasBrandStory = representativeContent.aplus_has_brand_story
@@ -540,6 +547,23 @@ function scoreListingContent(
           field:        'child_overrides',
           severity:     'info',
           message:      `${childrenWithMoreBullets.length} child variant(s) have MORE bullet points than the parent listing (${parentBullets} bullets). The parent listing is the "master" — copy the best child's bullets up to the parent. In Seller Central, edit the parent ASIN directly and paste the best-performing child's content.`,
+          auto_fixable: false,
+        })
+      }
+
+      // Check for children with different descriptions (description cannibalization)
+      const parentDesc = (parentContent.description || '').toLowerCase().trim()
+      const childrenWithDiffDesc = childContents.filter(c => {
+        const cDesc = (c.description || '').toLowerCase().trim()
+        return cDesc && cDesc !== parentDesc
+      })
+      if (childrenWithDiffDesc.length > 0) {
+        overrideCount += childrenWithDiffDesc.length
+        const exDesc = childrenWithDiffDesc[0]
+        issues.push({
+          field:        'child_overrides',
+          severity:     'warning',
+          message:      `${childrenWithDiffDesc.length} variant(s) have a description that differs from the parent listing (e.g. SKU "${exDesc.sku}"). Child-level description overrides fragment your keyword coverage — Amazon indexes each ASIN\'s description separately. Standardize: copy the best description to the parent and remove child-level overrides. Go to Seller Central → Edit each variant → Product Description.`,
           auto_fixable: false,
         })
       }

@@ -26,7 +26,7 @@ function getAdminSupabase() {
 function getOpenAI() {
   return new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
-    // Uses the Manus-configured base URL which supports gemini-2.5-flash
+    baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   })
 }
 
@@ -45,6 +45,8 @@ interface ChildRow {
   has_aplus: boolean
   aplus_module_count: number
   aplus_has_brand_story: boolean
+  aplus_has_headline: boolean
+  aplus_images_missing_alt: number
 }
 
 export interface AiRecommendations {
@@ -71,7 +73,7 @@ export async function POST(req: NextRequest) {
     // Fetch all child content rows for this parent
     const { data: children, error } = await supabase
       .from('listing_content')
-      .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story')
+      .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
       .eq('parent_asin', parent_asin)
       .order('sku', { ascending: true })
 
@@ -107,9 +109,11 @@ ${rep.backend_keywords || '[EMPTY]'}
 
 A+ CONTENT STATUS:
 - Has A+: ${rep.has_aplus ? 'Yes' : 'No'}
-- Module count: ${rep.aplus_module_count || 0}
-- Has Brand Story: ${rep.aplus_has_brand_story ? 'Yes' : 'No'}
-- Image count: ${rep.image_count || 0}/7
+- Module count: ${rep.aplus_module_count || 0} (Amazon allows up to 7 standard modules)
+- Has Brand Story (EMC): ${rep.aplus_has_brand_story ? 'Yes' : 'No'}
+- Has Headline module: ${rep.aplus_has_headline ? 'Yes' : 'No'}
+- Images missing alt text: ${rep.aplus_images_missing_alt || 0}
+- Image count: ${rep.image_count || 0}/7 (Amazon allows up to 7 product images)
 `.trim()
 
     const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US. You have deep expertise in:

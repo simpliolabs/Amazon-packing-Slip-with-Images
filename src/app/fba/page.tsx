@@ -97,6 +97,9 @@ interface ChildContentRow {
   backend_keywords:        string | null
   image_count:             number
   has_aplus:               boolean
+  aplus_module_count:      number
+  aplus_has_brand_story:   boolean
+  aplus_has_headline:      boolean
   aplus_images_missing_alt: number
   content_synced_at:       string
 }
@@ -296,6 +299,7 @@ export default function FBAIntelligencePage() {
   const [aiRecs, setAiRecs] = useState<Record<string, AiRecommendations | null>>({})
   const [aiLoadingSet, setAiLoadingSet] = useState<Set<string>>(new Set())
   const [expandedAiCard, setExpandedAiCard] = useState<string | null>(null)
+  const [expandedIssueKey, setExpandedIssueKey] = useState<string | null>(null)
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -2451,7 +2455,7 @@ export default function FBAIntelligencePage() {
                           <span className="text-xl leading-none">{score.overall_score}</span>
                           <span className="text-[9px] font-normal text-gray-400">/ 100</span>
                         </div>
-                        <button onClick={() => setExpandedSeoCard(null)} className="shrink-0 text-gray-400 hover:text-gray-700 text-2xl leading-none ml-2">×</button>
+                        <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null) }} className="shrink-0 text-gray-400 hover:text-gray-700 text-2xl leading-none ml-2">×</button>
                       </div>
 
                       {/* Modal body — two columns */}
@@ -2486,9 +2490,23 @@ export default function FBAIntelligencePage() {
                                     }`}>{catIssues.length}</span>
                                   </div>
                                   <div className="border-t border-current/10 divide-y divide-current/10">
-                                    {catIssues.map((issue, idx) => (
-                                      <div key={idx} className="px-3 py-2.5 text-xs leading-relaxed">{issue.message}</div>
-                                    ))}
+                                    {catIssues.map((issue, idx) => {
+                                      const issueKey = `${score.parent_asin}:${cat.key}:${idx}`
+                                      const isExpanded = expandedIssueKey === issueKey
+                                      const preview = issue.message.length > 100 ? issue.message.slice(0, 100) + '…' : issue.message
+                                      return (
+                                        <div
+                                          key={idx}
+                                          className="px-3 py-2.5 text-xs leading-relaxed cursor-pointer hover:bg-black/5 transition-colors"
+                                          onClick={() => setExpandedIssueKey(isExpanded ? null : issueKey)}
+                                        >
+                                          <div className="flex items-start gap-1.5">
+                                            <span className="shrink-0 mt-0.5 text-[10px]">{isExpanded ? '▾' : '▸'}</span>
+                                            <span className={isExpanded ? '' : 'line-clamp-2'}>{isExpanded ? issue.message : preview}</span>
+                                          </div>
+                                        </div>
+                                      )
+                                    })}
                                   </div>
                                 </div>
                               )
@@ -2517,7 +2535,7 @@ export default function FBAIntelligencePage() {
                                         <div className="flex items-center gap-1">
                                           {hasAnyDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Conflict</span>}
                                           {child.has_aplus
-                                            ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full">A+ ✓</span>
+                                            ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full" title={`${child.aplus_module_count || 0} modules${child.aplus_has_brand_story ? ', Brand Story' : ''}${child.aplus_has_headline ? ', Headline' : ''}`}>A+ ✓ {child.aplus_module_count > 0 ? `(${child.aplus_module_count}m)` : ''}</span>
                                             : <span className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded-full">No A+</span>
                                           }
                                         </div>
@@ -2535,7 +2553,9 @@ export default function FBAIntelligencePage() {
                                       </div>
                                       {child.description
                                         ? <div className="mt-1 text-gray-500"><span className="font-semibold text-gray-600">Desc: </span><span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 120)}{child.description.length > 120 ? '…' : ''}</span></div>
-                                        : <div className="mt-1 text-red-500 font-medium">Description: Missing</div>
+                                        : child.has_aplus
+                                          ? <div className="mt-1 text-green-600 font-medium">Description: Uses A+ Content</div>
+                                          : <div className="mt-1 text-red-500 font-medium">Description: Missing</div>
                                       }
                                     </div>
                                   )
@@ -2568,9 +2588,12 @@ export default function FBAIntelligencePage() {
                               <p className="text-xs text-gray-400">This takes 10-20 seconds</p>
                             </div>
                           ) : !rec ? (
-                            <div className="flex flex-col items-center justify-center py-16 gap-3">
-                              <div className="w-8 h-8 border-2 border-violet-300 border-t-violet-600 rounded-full animate-spin" />
-                              <p className="text-sm text-violet-600">Loading recommendations…</p>
+                            <div className="flex flex-col items-center justify-center py-16 gap-4">
+                              <div className="text-4xl">✨</div>
+                              <div className="text-center">
+                                <p className="text-sm font-semibold text-gray-800 mb-1">No AI audit yet</p>
+                                <p className="text-xs text-gray-500">Click &ldquo;Run AI Audit&rdquo; below to get copy-paste-ready SEO improvements from an Amazon expert AI.</p>
+                              </div>
                             </div>
                           ) : (
                             <div className="space-y-4">
@@ -2641,7 +2664,7 @@ export default function FBAIntelligencePage() {
                           >
                             {aiLoadingSet.has(score.parent_asin) ? '✨ Analyzing…' : aiRecs[score.parent_asin] ? '✨ Regenerate AI Audit' : '✨ Run AI Audit'}
                           </button>
-                          <button onClick={() => setExpandedSeoCard(null)} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
+                          <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null) }} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
                         </div>
                       </div>
                     </div>
@@ -2677,7 +2700,7 @@ export default function FBAIntelligencePage() {
                   return (
                     <button
                       key={score.parent_asin}
-                      onClick={() => setExpandedSeoCard(score.parent_asin)}
+                      onClick={() => { setExpandedSeoCard(score.parent_asin); setExpandedIssueKey(null) }}
                       className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
                     >
                       <div className="p-4">

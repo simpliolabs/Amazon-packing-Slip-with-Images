@@ -39,7 +39,7 @@ export async function GET() {
 
     const { data: childContent } = await supabase
       .from('listing_content')
-      .select('sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_images_missing_alt, content_synced_at')
+      .select('sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt, content_synced_at')
       .in('parent_asin', parentAsins)
       .order('sku', { ascending: true })
 
@@ -49,7 +49,8 @@ export async function GET() {
       bullet_1: string | null; bullet_2: string | null; bullet_3: string | null
       bullet_4: string | null; bullet_5: string | null
       description: string | null; backend_keywords: string | null; image_count: number
-      has_aplus: boolean; aplus_images_missing_alt: number; content_synced_at: string
+      has_aplus: boolean; aplus_module_count: number; aplus_has_brand_story: boolean
+      aplus_has_headline: boolean; aplus_images_missing_alt: number; content_synced_at: string
     }
     const childMap: Record<string, ChildRow[]> = {}
     for (const row of (childContent || []) as ChildRow[]) {
