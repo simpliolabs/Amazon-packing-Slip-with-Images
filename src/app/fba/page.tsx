@@ -110,6 +110,7 @@ interface AiRecommendations {
   recommended_bullets:      string[]
   recommended_keywords:     string
   recommended_description:  string
+  variant_corrections:      string[]
   generated_at:             string
 }
 
@@ -2511,8 +2512,8 @@ export default function FBAIntelligencePage() {
 
                           {/* Variant Breakdown */}
                           {score.children.length > 0 && (
-                            <div className="mt-4">
-                              <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown</h4>
+                            <div className={`mt-4 rounded-lg p-2 -mx-2 cursor-pointer ${selectedRecCategory === 'child_overrides' ? 'ring-2 ring-violet-400' : ''}`} onClick={() => setSelectedRecCategory('child_overrides')}>
+                              <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown <span className="text-[10px] font-normal text-violet-500">(click for corrections)</span></h4>
                               <div className="space-y-2">
                                 {score.children.map((child, childIdx) => {
                                   const firstChild = score.children[0]
@@ -2687,13 +2688,31 @@ export default function FBAIntelligencePage() {
                                 </div>
                               </div>
                             )
-                            // For categories without a matching rec (images, aplus, child_overrides)
+                            if (catKey === 'child_overrides' && rec.variant_corrections && rec.variant_corrections.length > 0) return (
+                              <div className="space-y-4">
+                                <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs font-semibold text-gray-700">⚡ Variant Conflict Corrections</span>
+                                    <button onClick={() => copyToClipboard(rec.variant_corrections.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
+                                  </div>
+                                  <div className="space-y-2">
+                                    {rec.variant_corrections.map((correction, ci) => (
+                                      <div key={ci} className="flex items-start gap-2 p-2 bg-purple-50 rounded">
+                                        <span className="text-[10px] text-purple-500 font-bold mt-0.5 shrink-0">{ci + 1}.</span>
+                                        <p className="text-xs text-gray-800 leading-relaxed flex-1">{correction}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                            // For categories without a matching rec (images, aplus)
                             return (
                               <div className="flex flex-col items-center justify-center py-16 gap-4">
                                 <div className="text-3xl">💬</div>
                                 <div className="text-center">
                                   <p className="text-sm font-semibold text-gray-800 mb-1">No AI recommendation for this category</p>
-                                  <p className="text-xs text-gray-500">AI recommendations are available for Title, Bullets, Keywords, and Description.</p>
+                                  <p className="text-xs text-gray-500">AI recommendations are available for Title, Bullets, Keywords, Description, and Variant Conflicts.</p>
                                 </div>
                               </div>
                             )

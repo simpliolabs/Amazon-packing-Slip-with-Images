@@ -55,6 +55,7 @@ export interface AiRecommendations {
   recommended_bullets: string[]
   recommended_keywords: string
   recommended_description: string
+  variant_corrections: string[]
   generated_at: string
 }
 
@@ -138,19 +139,25 @@ CRITICAL RULES:
 2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types (e.g., "SD" vs "micro SD" are different products — use the correct one from the titles).
 3. If variants differ by capacity (32GB, 64GB, 128GB), write bullets that are capacity-agnostic OR mention the full range. Never write "128GB" as if it's the only option.
 4. Do NOT invent features or specs not mentioned in the current listing. Only rephrase and optimize what's already there.
+5. Use SIMPLE, EVERYDAY ENGLISH. Never use obscure, academic, or thesaurus-style vocabulary. Write like a human copywriter, not a professor. Bad: "Amply Capacious", "Expeditious", "Multitudinous". Good: "Large Storage", "Fast", "Multiple".
+6. Bullet hooks must be 2-4 common words that a shopper instantly understands. Examples: "LARGE STORAGE CAPACITY", "FAST READ SPEEDS", "BUILT FOR TOUGH CONDITIONS".
 
 AMAZON RULES TO ENFORCE:
 - Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC, USB), no promotional phrases ("Best", "Sale", "#1"), keywords in first 80 chars
-- Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit explanation. Max 200 chars each. No pricing or promotional content.
-- Backend keywords: Space-separated, no commas, no terms already in title or bullets, 250 char max total. Only suggest terms that fit in the remaining ${kwRemaining} chars.
+- Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit explanation. Max 200 chars each. No pricing or promotional content. Use plain, conversational English.
+- Backend keywords: Space-separated, no commas, no terms already in title or bullets, 250 char max total. You MUST use as close to the full remaining ${kwRemaining} chars as possible. Include: long-tail device compatibility terms (e.g., "for Canon EOS", "for DJI drone"), seasonal terms ("holiday gift", "back to school"), common misspellings, Spanish equivalents if relevant, and related product terms. Do NOT leave keyword space unused.
 - Description: Use HTML tags. Min 150 words. Include primary keywords naturally. End with a call to action. Must be generic for all variants.
+
+VARIANT CONFLICT CORRECTIONS:
+If the variants have different titles, bullets, keywords, or descriptions from each other, include a "variant_corrections" field with specific instructions on what to change for each non-matching variant to unify the listing family.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
   "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "recommended_keywords": "string (exact terms to ADD to backend keywords, fitting in the remaining ${kwRemaining} chars)",
-  "recommended_description": "string (full HTML description to paste in, min 150 words, generic for all variants)"
+  "recommended_keywords": "string (exact terms to ADD to backend keywords, using as close to ${kwRemaining} chars as possible)",
+  "recommended_description": "string (full HTML description to paste in, min 150 words, generic for all variants)",
+  "variant_corrections": ["string instruction for each variant that differs from the recommended content"]
 }`
 
     const openai = getOpenAI()
@@ -173,6 +180,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_bullets: string[]
       recommended_keywords: string
       recommended_description: string
+      variant_corrections?: string[]
     }
 
     try {
@@ -190,6 +198,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
       recommended_keywords: parsed.recommended_keywords || '',
       recommended_description: parsed.recommended_description || '',
+      variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
       generated_at: new Date().toISOString(),
     }
 
