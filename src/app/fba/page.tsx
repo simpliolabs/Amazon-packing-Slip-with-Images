@@ -2534,64 +2534,40 @@ export default function FBAIntelligencePage() {
                             <div className={`mt-4 rounded-lg p-2 -mx-2 cursor-pointer ${selectedRecCategory === 'child_overrides' ? 'ring-2 ring-violet-400' : ''}`} onClick={() => setSelectedRecCategory('child_overrides')}>
                               <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Variant Breakdown <span className="text-[10px] font-normal text-violet-500">(click for corrections)</span></h4>
                               <div className="space-y-2">
-                                {score.children.map((child, childIdx) => {
-                                  const firstChild = score.children[0]
-                                  const firstTitle = firstChild.title || ''
-                                  const hasTitleDiff = childIdx > 0 && child.title && child.title !== firstTitle
-                                  const firstKw = firstChild.backend_keywords || ''
-                                  const hasKwDiff = childIdx > 0 && child.backend_keywords && child.backend_keywords !== firstKw
-                                  // Bullet cannibalization: compare concatenated bullet text
-                                  const getBullets = (c: typeof child) => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('|')
-                                  const firstBullets = getBullets(firstChild)
-                                  const hasBulletDiff = childIdx > 0 && firstBullets && getBullets(child) !== firstBullets
-                                  // Description cannibalization
-                                  const firstDesc = (firstChild.description || '').replace(/<[^>]+>/g, ' ').trim()
-                                  const childDesc = (child.description || '').replace(/<[^>]+>/g, ' ').trim()
-                                  const hasDescDiff = childIdx > 0 && firstDesc && childDesc && childDesc !== firstDesc
-                                  const hasAnyDiff = hasTitleDiff || hasKwDiff || hasBulletDiff || hasDescDiff
+                                {score.children.map((child) => {
                                   const bulletCount = [child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length
                                   const kwLen = child.backend_keywords?.length || 0
                                   return (
-                                    <div key={child.sku} className={`rounded-lg p-2.5 text-xs ${
-                                      hasAnyDiff ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50 border border-gray-100'
-                                    }`}>
+                                    <div key={child.sku} className="rounded-lg p-2.5 text-xs bg-gray-50 border border-gray-100">
                                       <div className="flex items-center justify-between mb-1">
                                         <a href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${child.asin}`} target="_blank" rel="noopener noreferrer" className="font-mono font-semibold text-blue-600 hover:underline">{child.sku}</a>
                                         <div className="flex items-center gap-1 flex-wrap justify-end">
-                                          {hasTitleDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Title ≠</span>}
-                                          {hasBulletDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Bullets ≠</span>}
-                                          {hasKwDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Keywords ≠</span>}
-                                          {hasDescDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Desc ≠</span>}
                                           {child.has_aplus
                                             ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full" title={`${child.aplus_module_count || 0} modules${child.aplus_has_brand_story ? ', Brand Story' : ''}${child.aplus_has_headline ? ', Headline' : ''}`}>A+ ✓ {child.aplus_module_count > 0 ? `(${child.aplus_module_count}m)` : ''}</span>
                                             : <span className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded-full">No A+</span>
                                           }
                                         </div>
                                       </div>
-                                      <div className={`mb-1 ${hasTitleDiff ? 'text-purple-800' : 'text-gray-700'}`}>
+                                      <div className="mb-1 text-gray-700">
                                         <span className="font-semibold">Title: </span>
                                         {child.title ? <span title={child.title}>{child.title.slice(0, 80)}{child.title.length > 80 ? '…' : ''}</span>
                                           : <span className="text-red-500 font-medium">Missing</span>}
-                                        {hasTitleDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
                                       </div>
                                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-600">
                                         <span>
                                           <span className="font-semibold">Bullets:</span>{' '}
                                           <span className={bulletCount < 5 ? 'text-amber-600 font-medium' : 'text-green-600'}>{bulletCount}/5</span>
-                                          {hasBulletDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
                                         </span>
                                         <span>
                                           <span className="font-semibold">Keywords:</span>{' '}
                                           {child.backend_keywords ? <span className={`font-medium ${kwLen < 100 ? 'text-amber-600' : kwLen < 200 ? 'text-amber-500' : 'text-green-600'}`}>{kwLen}/250</span> : <span className="text-red-500 font-medium">Empty</span>}
-                                          {hasKwDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
                                         </span>
                                         <span><span className="font-semibold">Images:</span> <span className={(child.image_count || 0) < 7 ? 'text-amber-600 font-medium' : 'text-green-600'}>{child.image_count || 0}/7</span></span>
                                       </div>
                                       {child.description
-                                        ? <div className={`mt-1 ${hasDescDiff ? 'text-purple-800' : 'text-gray-500'}`}>
+                                        ? <div className="mt-1 text-gray-500">
                                             <span className="font-semibold text-gray-600">Desc: </span>
                                             <span className="italic">{child.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 120)}{child.description.length > 120 ? '…' : ''}</span>
-                                            {hasDescDiff && <span className="ml-1 text-[10px] bg-purple-100 text-purple-700 px-1 rounded">differs</span>}
                                           </div>
                                         : child.has_aplus
                                           ? <div className="mt-1 text-green-600 font-medium">Description: Uses A+ Content</div>

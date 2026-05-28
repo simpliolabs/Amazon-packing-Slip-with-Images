@@ -142,21 +142,37 @@ CRITICAL RULES:
 AMAZON RULES TO ENFORCE:
 - Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC), no promotional phrases, keywords in first 80 chars
 - Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit. Max 200 chars each. Plain English.
-- Backend keywords: Space-separated, no commas, no terms already in title or bullets. HARD LIMIT: output EXACTLY ${kwRemaining} chars or fewer of NEW keywords. Each keyword/phrase must be UNIQUE — NEVER repeat any word or phrase. Include a MIX of: device compatibility ("for Canon EOS R5"), use-case terms ("trail camera", "dash cam"), seasonal ("holiday gift"), and common misspellings. Output must be a single line of space-separated terms, max ${kwRemaining} characters total.
+- Backend keywords: Space-separated, no commas, no duplicates of title/bullet terms. Output the COMPLETE FULL 250-character keyword string — this means KEEP the existing good keywords AND add new ones to fill the remaining ${kwRemaining} chars. The output must be the ENTIRE replacement string (not just additions). Each word/phrase must appear only ONCE — NEVER repeat. Include a MIX of: device compatibility ("for Canon EOS R5"), use-case terms ("trail camera", "dash cam"), seasonal ("holiday gift"), and common misspellings. HARD LIMIT: exactly 250 characters max total.
 - Description: Use HTML tags (<b>, <br>, <ul>, <li>). Min 150 words. Generic for all variants.
 
 VARIANT CONFLICT CORRECTIONS:
-Compare the per-variant content provided above. For EACH variant that differs from Variant 1, output a specific correction object with:
+Compare the per-variant content provided above. ONLY flag HARMFUL differences — NOT expected variant differentiation.
+
+DO flag (harmful drift):
+- Wrong product type/terminology (e.g., says "TF" when product is "SD/SDHC")
+- Contradictory or incorrect specs (wrong speed, wrong class)
+- Completely off-brand or incoherent messaging
+- Keywords that are identical across all variants (missed opportunity — each variant should target unique long-tail terms for its specific size/color)
+
+DO NOT flag (expected differentiation):
+- Different size/capacity in title or bullets (e.g., "128GB" vs "64GB" vs "32GB") — this is CORRECT and helps each variant rank for its size
+- Different color names in title/bullets
+- Different flavor/scent/material variant attributes
+
+For each HARMFUL issue found, output a correction object with:
 - The exact SKU
-- Which field(s) differ (title, bullets, keywords, description)
-- The EXACT text that should REPLACE the current text (not vague instructions — give copy-paste-ready text)
-- If a variant uses wrong terminology (e.g., says "TF" when it should say "SD"), specify the exact find-and-replace
+- Which field has the problem (title|bullets|keywords|description)
+- The EXACT current problematic text
+- The EXACT corrected text to paste in (copy-paste-ready)
+- A clear, human-readable reason explaining WHY this is harmful and what the seller should do
+
+If no harmful differences exist, return an empty array [].
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
   "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "recommended_keywords": "string (UNIQUE terms to ADD, max ${kwRemaining} chars, NO repetition)",
+  "recommended_keywords": "string (the COMPLETE FULL 250-char keyword string to paste in — existing good terms + new terms combined, max 250 chars total)",
   "recommended_description": "string (full HTML description, min 150 words, generic for all variants)",
   "variant_corrections": [
     {
@@ -178,7 +194,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
         { role: 'user', content: listingContext },
       ],
       temperature: 0.3,
-      max_tokens: 3000,
+      max_tokens: 4500,
     })
 
     const rawContent = completion.choices[0]?.message?.content || ''
