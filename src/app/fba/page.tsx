@@ -110,7 +110,6 @@ interface AiRecommendations {
   recommended_bullets:      string[]
   recommended_keywords:     string
   recommended_description:  string
-  aplus_suggestions:        string
   generated_at:             string
 }
 
@@ -300,6 +299,7 @@ export default function FBAIntelligencePage() {
   const [aiLoadingSet, setAiLoadingSet] = useState<Set<string>>(new Set())
   const [expandedAiCard, setExpandedAiCard] = useState<string | null>(null)
   const [expandedIssueKey, setExpandedIssueKey] = useState<string | null>(null)
+  const [selectedRecCategory, setSelectedRecCategory] = useState<string | null>(null)
   const [aiError, setAiError] = useState<Record<string, string>>({})
 
   // Missing Inventory state
@@ -2451,7 +2451,7 @@ export default function FBAIntelligencePage() {
                           <span className="text-xl leading-none">{score.overall_score}</span>
                           <span className="text-[9px] font-normal text-gray-400">/ 100</span>
                         </div>
-                        <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null) }} className="shrink-0 text-gray-400 hover:text-gray-700 text-2xl leading-none ml-2">×</button>
+                        <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null); setSelectedRecCategory(null) }} className="shrink-0 text-gray-400 hover:text-gray-700 text-2xl leading-none ml-2">×</button>
                       </div>
 
                       {/* Modal body — two columns */}
@@ -2475,8 +2475,8 @@ export default function FBAIntelligencePage() {
                                 : hasWarning ? 'bg-amber-50 border-amber-200 text-amber-800'
                                 : 'bg-blue-50 border-blue-200 text-blue-800'
                               return (
-                                <div key={cat.key} className={`rounded-lg border overflow-hidden ${headerColor}`}>
-                                  <div className="px-3 py-2 flex items-center gap-1.5">
+                                <div key={cat.key} className={`rounded-lg border overflow-hidden ${headerColor} ${selectedRecCategory === cat.key ? 'ring-2 ring-violet-400' : ''}`}>
+                                  <div className="px-3 py-2 flex items-center gap-1.5 cursor-pointer" onClick={() => setSelectedRecCategory(selectedRecCategory === cat.key ? null : cat.key)}>
                                     <span className="text-sm">{cat.emoji}</span>
                                     <span className="text-xs font-semibold flex-1">{cat.label}</span>
                                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
@@ -2537,8 +2537,11 @@ export default function FBAIntelligencePage() {
                                     }`}>
                                       <div className="flex items-center justify-between mb-1">
                                         <a href={`https://sellercentral.amazon.com/hz/inventory/view/all?searchField=ASIN&searchValue=${child.asin}`} target="_blank" rel="noopener noreferrer" className="font-mono font-semibold text-blue-600 hover:underline">{child.sku}</a>
-                                        <div className="flex items-center gap-1">
-                                          {hasAnyDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Conflict</span>}
+                                        <div className="flex items-center gap-1 flex-wrap justify-end">
+                                          {hasTitleDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Title ≠</span>}
+                                          {hasBulletDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Bullets ≠</span>}
+                                          {hasKwDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Keywords ≠</span>}
+                                          {hasDescDiff && <span className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full">Desc ≠</span>}
                                           {child.has_aplus
                                             ? <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full" title={`${child.aplus_module_count || 0} modules${child.aplus_has_brand_story ? ', Brand Story' : ''}${child.aplus_has_headline ? ', Headline' : ''}`}>A+ ✓ {child.aplus_module_count > 0 ? `(${child.aplus_module_count}m)` : ''}</span>
                                             : <span className="bg-red-100 text-red-700 text-[10px] px-1.5 py-0.5 rounded-full">No A+</span>
@@ -2621,58 +2624,80 @@ export default function FBAIntelligencePage() {
                                 <p className="text-xs text-gray-500">Click &ldquo;Run AI Audit&rdquo; below to get copy-paste-ready SEO improvements from an Amazon expert AI.</p>
                               </div>
                             </div>
-                          ) : (
-                            <div className="space-y-4">
-                              {/* Recommended Title */}
-                              <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                <div className="flex items-center justify-between mb-2">
-                                  <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title?.length || 0} chars)</span></span>
-                                  <button onClick={() => copyToClipboard(rec.recommended_title)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
-                                </div>
-                                <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
-                              </div>
-                              {/* Recommended Bullets */}
-                              <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                <div className="flex items-center justify-between mb-2">
-                                  <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
-                                  <button onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
-                                </div>
-                                <div className="space-y-2">
-                                  {rec.recommended_bullets.map((bullet, bi) => (
-                                    <div key={bi} className="flex items-start gap-2">
-                                      <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
-                                      <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
-                                      <button onClick={() => copyToClipboard(bullet)} className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0">Copy</button>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                              {/* Recommended Keywords */}
-                              <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                <div className="flex items-center justify-between mb-2">
-                                  <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className="text-gray-400 font-normal">({rec.recommended_keywords?.length || 0} chars)</span></span>
-                                  <button onClick={() => copyToClipboard(rec.recommended_keywords)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
-                                </div>
-                                <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
-                              </div>
-                              {/* Recommended Description */}
-                              <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                <div className="flex items-center justify-between mb-2">
-                                  <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
-                                  <button onClick={() => copyToClipboard(rec.recommended_description)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy HTML</button>
-                                </div>
-                                <div className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none" dangerouslySetInnerHTML={{ __html: rec.recommended_description }} />
-                              </div>
-                              {/* A+ Suggestions */}
-                              <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                <div className="flex items-center justify-between mb-2">
-                                  <span className="text-xs font-semibold text-gray-700">✨ A+ Content Strategy</span>
-                                  <button onClick={() => copyToClipboard(rec.aplus_suggestions)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
-                                </div>
-                                <p className="text-xs text-gray-800 leading-relaxed whitespace-pre-line">{rec.aplus_suggestions}</p>
+                          ) : !selectedRecCategory ? (
+                            <div className="flex flex-col items-center justify-center py-16 gap-4">
+                              <div className="text-3xl">👈</div>
+                              <div className="text-center">
+                                <p className="text-sm font-semibold text-gray-800 mb-1">Select a category on the left</p>
+                                <p className="text-xs text-gray-500">Click on Title, Bullets, Keywords, or Description to see the AI recommendation for that field.</p>
                               </div>
                             </div>
-                          )}
+                          ) : (() => {
+                            // Map left-side category keys to recommendation fields
+                            const catKey = selectedRecCategory
+                            if (catKey === 'title') return (
+                              <div className="space-y-4">
+                                <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title?.length || 0} chars)</span></span>
+                                    <button onClick={() => copyToClipboard(rec.recommended_title)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                  </div>
+                                  <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
+                                </div>
+                              </div>
+                            )
+                            if (catKey === 'bullets') return (
+                              <div className="space-y-4">
+                                <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
+                                    <button onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
+                                  </div>
+                                  <div className="space-y-2">
+                                    {rec.recommended_bullets.map((bullet, bi) => (
+                                      <div key={bi} className="flex items-start gap-2">
+                                        <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
+                                        <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
+                                        <button onClick={() => copyToClipboard(bullet)} className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0">Copy</button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                            if (catKey === 'backend_keywords') return (
+                              <div className="space-y-4">
+                                <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className="text-gray-400 font-normal">({rec.recommended_keywords?.length || 0} chars)</span></span>
+                                    <button onClick={() => copyToClipboard(rec.recommended_keywords)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                  </div>
+                                  <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
+                                </div>
+                              </div>
+                            )
+                            if (catKey === 'description') return (
+                              <div className="space-y-4">
+                                <div className="bg-white rounded-lg border border-violet-200 p-3">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
+                                    <button onClick={() => copyToClipboard(rec.recommended_description)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy HTML</button>
+                                  </div>
+                                  <div className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none" dangerouslySetInnerHTML={{ __html: rec.recommended_description }} />
+                                </div>
+                              </div>
+                            )
+                            // For categories without a matching rec (images, aplus, child_overrides)
+                            return (
+                              <div className="flex flex-col items-center justify-center py-16 gap-4">
+                                <div className="text-3xl">💬</div>
+                                <div className="text-center">
+                                  <p className="text-sm font-semibold text-gray-800 mb-1">No AI recommendation for this category</p>
+                                  <p className="text-xs text-gray-500">AI recommendations are available for Title, Bullets, Keywords, and Description.</p>
+                                </div>
+                              </div>
+                            )
+                          })()}
                         </div>
                       </div>
 
@@ -2690,7 +2715,7 @@ export default function FBAIntelligencePage() {
                           >
                             {aiLoadingSet.has(score.parent_asin) ? '✨ Analyzing…' : aiRecs[score.parent_asin] ? '✨ Regenerate AI Audit' : '✨ Run AI Audit'}
                           </button>
-                          <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null) }} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
+                          <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null); setSelectedRecCategory(null) }} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
                         </div>
                       </div>
                     </div>
@@ -2726,7 +2751,7 @@ export default function FBAIntelligencePage() {
                   return (
                     <button
                       key={score.parent_asin}
-                      onClick={() => { setExpandedSeoCard(score.parent_asin); setExpandedIssueKey(null) }}
+                      onClick={() => { setExpandedSeoCard(score.parent_asin); setExpandedIssueKey(null); setSelectedRecCategory(null) }}
                       className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
                     >
                       <div className="p-4">

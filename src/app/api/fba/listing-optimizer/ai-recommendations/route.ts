@@ -4,7 +4,7 @@
  * Generates AI-powered, copy-paste-ready SEO recommendations for a specific
  * parent ASIN using the actual listing content stored in listing_content.
  *
- * Uses gemini-2.5-flash via the OpenAI-compatible API for fast, cheap analysis.
+ * Uses gpt-4.1-mini via the OpenAI-compatible API for fast, cheap analysis.
  * Results are stored in listing_seo_recommendations for instant re-display.
  *
  * Body: { parent_asin: string }
@@ -55,7 +55,6 @@ export interface AiRecommendations {
   recommended_bullets: string[]
   recommended_keywords: string
   recommended_description: string
-  aplus_suggestions: string
   generated_at: string
 }
 
@@ -87,16 +86,32 @@ export async function POST(req: NextRequest) {
     const kwLen = rep.backend_keywords?.trim().length || 0
     const kwRemaining = 250 - kwLen
 
+    // Build variant summary — show all SKUs and what makes them different
+    const variantSummary = children.map((c: ChildRow) => {
+      // Extract the differentiator from SKU or title (e.g., size, color)
+      const titleShort = c.title ? c.title.slice(0, 100) : '[no title]'
+      return `  - ${c.sku} (${c.asin}): ${titleShort}`
+    }).join('\n')
+
+    // Extract unique differentiators from titles (sizes, colors, etc.)
+    const allTitles = children.map((c: ChildRow) => c.title || '').filter(Boolean)
+    
     // Build the prompt with actual listing data
     const listingContext = `
 PRODUCT LISTING DATA (Amazon US):
 Parent ASIN: ${parent_asin}
-SKU (representative): ${rep.sku}
-Child ASIN: ${rep.asin}
-Variants: ${children.length} child SKUs
+Total Variants: ${children.length} child SKUs
 
-CURRENT TITLE (${rep.title?.length || 0} chars):
+ALL VARIANTS IN THIS FAMILY:
+${variantSummary}
+
+IMPORTANT: This is a MULTI-VARIANT listing. Your recommendations (title, bullets, description) must be GENERIC enough to apply to ALL variants in this family. Do NOT mention specific sizes, colors, or variant-specific attributes unless they ALL share that attribute. If variants differ by size (e.g., 32GB, 64GB, 128GB), write copy that covers the whole range or is size-agnostic.
+
+REPRESENTATIVE TITLE (${rep.title?.length || 0} chars):
 ${rep.title || '[MISSING]'}
+
+ALL VARIANT TITLES (to understand the product family):
+${allTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 
 CURRENT BULLET POINTS (${bullets.length}/5):
 ${bullets.length > 0 ? bullets.map((b, i) => `${i + 1}. ${b}`).join('\n') : '[NO BULLETS]'}
@@ -107,13 +122,8 @@ ${rep.description ? rep.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 800
 CURRENT BACKEND KEYWORDS (${kwLen}/250 chars used, ${kwRemaining} chars remaining):
 ${rep.backend_keywords || '[EMPTY]'}
 
-A+ CONTENT STATUS:
-- Has A+: ${rep.has_aplus ? 'Yes' : 'No'}
-- Module count: ${rep.aplus_module_count || 0} (Amazon allows up to 7 standard modules)
-- Has Brand Story (EMC): ${rep.aplus_has_brand_story ? 'Yes' : 'No'}
-- Has Headline module: ${rep.aplus_has_headline ? 'Yes' : 'No'}
-- Images missing alt text: ${rep.aplus_images_missing_alt || 0}
-- Image count: ${rep.image_count || 0}/7 (Amazon allows up to 7 product images)
+IMAGE COUNT: ${rep.image_count || 0}/7
+A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
 `.trim()
 
     const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US. You have deep expertise in:
@@ -122,23 +132,25 @@ A+ CONTENT STATUS:
 - Bullet point copywriting (benefit-led hooks in CAPS, 200 char limit per bullet, feature+benefit format)
 - Backend keyword strategy (250 chars, no commas, no repetition of title/bullet terms)
 - Product description HTML formatting (Amazon allows <b>, <br>, <p>, <ul>, <li>)
-- A+ Content module strategy for conversion optimization
 
-You will receive a product listing's current content and return SPECIFIC, COPY-PASTE-READY improvements. Do not give generic advice — write the actual improved copy the seller can paste directly into Seller Central.
+CRITICAL RULES:
+1. This is a MULTI-VARIANT listing family. Your title, bullets, and description must work for ALL variants — do NOT mention variant-specific attributes (specific size, specific color) unless ALL variants share it.
+2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types (e.g., "SD" vs "micro SD" are different products — use the correct one from the titles).
+3. If variants differ by capacity (32GB, 64GB, 128GB), write bullets that are capacity-agnostic OR mention the full range. Never write "128GB" as if it's the only option.
+4. Do NOT invent features or specs not mentioned in the current listing. Only rephrase and optimize what's already there.
 
 AMAZON RULES TO ENFORCE:
 - Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC, USB), no promotional phrases ("Best", "Sale", "#1"), keywords in first 80 chars
 - Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit explanation. Max 200 chars each. No pricing or promotional content.
-- Backend keywords: Space-separated, no commas, no terms already in title or bullets, 250 char max total
-- Description: Use HTML tags. Min 150 words. Include primary keywords naturally. End with a call to action.
+- Backend keywords: Space-separated, no commas, no terms already in title or bullets, 250 char max total. Only suggest terms that fit in the remaining ${kwRemaining} chars.
+- Description: Use HTML tags. Min 150 words. Include primary keywords naturally. End with a call to action. Must be generic for all variants.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
-  "recommended_title": "string (the exact new title to paste in, max 200 chars)",
+  "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "recommended_keywords": "string (exact terms to ADD to backend keywords, fitting in the remaining chars)",
-  "recommended_description": "string (full HTML description to paste in, min 150 words)",
-  "aplus_suggestions": "string (specific module recommendations with exact copy for headlines and text blocks)"
+  "recommended_keywords": "string (exact terms to ADD to backend keywords, fitting in the remaining ${kwRemaining} chars)",
+  "recommended_description": "string (full HTML description to paste in, min 150 words, generic for all variants)"
 }`
 
     const openai = getOpenAI()
@@ -161,7 +173,6 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_bullets: string[]
       recommended_keywords: string
       recommended_description: string
-      aplus_suggestions: string
     }
 
     try {
@@ -179,7 +190,6 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
       recommended_keywords: parsed.recommended_keywords || '',
       recommended_description: parsed.recommended_description || '',
-      aplus_suggestions: parsed.aplus_suggestions || '',
       generated_at: new Date().toISOString(),
     }
 
