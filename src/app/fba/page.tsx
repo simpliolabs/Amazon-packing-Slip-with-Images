@@ -2494,7 +2494,7 @@ export default function FBAIntelligencePage() {
                                         <div
                                           key={idx}
                                           className="px-3 py-2.5 text-xs leading-relaxed cursor-pointer hover:bg-black/5 transition-colors"
-                                          onClick={() => setExpandedIssueKey(isExpanded ? null : issueKey)}
+                                          onClick={() => { setExpandedIssueKey(isExpanded ? null : issueKey); setSelectedRecCategory(cat.key) }}
                                         >
                                           <div className="flex items-start gap-1.5">
                                             <span className="shrink-0 mt-0.5 text-[10px]">{isExpanded ? '▾' : '▸'}</span>
