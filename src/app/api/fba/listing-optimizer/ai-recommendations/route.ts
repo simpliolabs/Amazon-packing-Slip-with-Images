@@ -1,8 +1,12 @@
 /**
  * POST /api/fba/listing-optimizer/ai-recommendations
- *
+ * ─────────────────────────────────────────────────────────────────────────────
  * Generates AI-powered, copy-paste-ready SEO recommendations for a specific
  * parent ASIN using the actual listing content stored in listing_content.
+ *
+ * V2 ENHANCEMENT: Injects keyword intelligence context (top opportunities,
+ * critical gaps, missing keywords) so the AI knows EXACTLY which keywords
+ * to prioritize in the title, bullets, and backend keywords.
  *
  * Uses gpt-4.1-mini via the OpenAI-compatible API for fast, cheap analysis.
  * Results are stored in listing_seo_recommendations for instant re-display.
@@ -14,6 +18,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
+import { getStoredAnalysis } from '@/lib/keyword-engine'
 
 function getAdminSupabase() {
   return createClient(
@@ -65,7 +70,87 @@ export interface AiRecommendations {
   recommended_description: string
   variant_corrections: VariantCorrection[]
   generated_at: string
+  keyword_opportunities_used?: number
 }
+
+// ─── Keyword Intelligence Context Builder ─────────────────────────────────────
+
+/**
+ * Fetches stored keyword analysis for the first child ASIN of a parent
+ * and formats it as a context block for the AI prompt.
+ *
+ * This is the V2 enhancement: the AI now knows which keywords are
+ * MISSING from the listing and which ones to prioritize.
+ */
+async function buildKeywordContext(
+  supabase: ReturnType<typeof getAdminSupabase>,
+  parentAsin: string,
+  children: ChildRow[]
+): Promise<{ contextBlock: string; opportunitiesUsed: number }> {
+  // Try to get keyword analysis for the first child ASIN
+  const firstChildAsin = children[0]?.asin
+  if (!firstChildAsin) {
+    return { contextBlock: '', opportunitiesUsed: 0 }
+  }
+
+  const analysis = await getStoredAnalysis(firstChildAsin, 50)
+
+  if (!analysis || analysis.length === 0) {
+    return {
+      contextBlock: `
+KEYWORD INTELLIGENCE: No keyword data available yet for this listing.
+The AI will optimize based on listing content alone.
+To unlock keyword-driven recommendations, trigger a keyword sync first.
+`.trim(),
+      opportunitiesUsed: 0,
+    }
+  }
+
+  // Separate by action type
+  const critical = analysis.filter(k => k.actionType === 'CRITICAL').slice(0, 5)
+  const upgrade  = analysis.filter(k => k.actionType === 'UPGRADE').slice(0, 5)
+  const reinforce = analysis.filter(k => k.actionType === 'REINFORCE').slice(0, 3)
+  const defended  = analysis.filter(k => k.actionType === 'DEFENDED').slice(0, 5)
+
+  const formatKw = (k: typeof analysis[0]) =>
+    `  • "${k.keyword}" — ${k.searchVolume.toLocaleString()} searches/mo` +
+    (k.keywordSales > 0 ? `, ${k.keywordSales} total sales/mo` : '') +
+    (k.competingProducts > 0 ? `, ${k.competingProducts.toLocaleString()} competing` : '')
+
+  const contextBlock = `
+KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
+Data source: ${analysis[0].dataSource === 'sqp' ? 'Amazon Brand Analytics (real sales data)' : analysis[0].dataSource === 'jungle_scout' ? 'Jungle Scout API' : 'Inherited from sibling products'}
+
+🔴 CRITICAL GAPS — These high-opportunity keywords are MISSING from title AND bullets.
+You MUST include them in the recommended title and/or bullets:
+${critical.length > 0 ? critical.map(formatKw).join('\n') : '  (none)'}
+
+🟠 TITLE UPGRADES — These keywords are in bullets but NOT in the title.
+Move them to the title for maximum ranking impact:
+${upgrade.length > 0 ? upgrade.map(formatKw).join('\n') : '  (none)'}
+
+🟡 REINFORCE — These keywords are in the title but NOT in bullets.
+Add them to at least one bullet to reinforce relevance:
+${reinforce.length > 0 ? reinforce.map(formatKw).join('\n') : '  (none)'}
+
+✅ DEFENDED — These keywords are already well-covered (title + bullets).
+Keep them in your recommendations:
+${defended.length > 0 ? defended.map(formatKw).join('\n') : '  (none)'}
+
+HARD RULES FOR KEYWORD INTEGRATION:
+1. Every CRITICAL GAP keyword must appear in either the title or bullet 1/2
+2. Every TITLE UPGRADE keyword must appear in the title
+3. Do NOT sacrifice readability — keywords must flow naturally in the copy
+4. Backend keywords: prioritize terms NOT already in title/bullets
+`.trim()
+
+  return {
+    contextBlock,
+    opportunitiesUsed: critical.length + upgrade.length + reinforce.length + defended.length,
+  }
+}
+
+// ─── POST Handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
@@ -104,8 +189,15 @@ export async function POST(req: NextRequest) {
   Keywords (${(c.backend_keywords?.length || 0)}/250): ${c.backend_keywords || '[EMPTY]'}
   Description: ${c.description ? c.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 200) + '...' : '[MISSING]'}`
     }).join('\n\n')
-    
-    // Build the prompt with actual listing data
+
+    // V2: Build keyword intelligence context
+    const { contextBlock: keywordContext, opportunitiesUsed } = await buildKeywordContext(
+      supabase,
+      parent_asin,
+      children as ChildRow[]
+    )
+
+    // Build the full listing context
     const listingContext = `
 PRODUCT LISTING DATA (Amazon US):
 Parent ASIN: ${parent_asin}
@@ -122,6 +214,8 @@ ${rep.backend_keywords || '[EMPTY]'}
 
 IMAGE COUNT: ${rep.image_count || 0}/7
 A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
+
+${keywordContext ? `\n--- KEYWORD INTELLIGENCE (V2) ---\n${keywordContext}\n--- END KEYWORD INTELLIGENCE ---` : ''}
 `.trim()
 
     const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US. You have deep expertise in:
@@ -131,56 +225,53 @@ A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
 - Backend keyword strategy (250 chars, no commas, no repetition of title/bullet terms)
 - Product description HTML formatting (Amazon allows <b>, <br>, <p>, <ul>, <li>)
 
+V2 ENHANCEMENT: You now have access to KEYWORD INTELLIGENCE data showing exactly which
+high-opportunity keywords are missing from the listing. You MUST use this data to drive
+your recommendations. The goal is not just to optimize copy — it's to capture ranking
+and sales from keywords that are proven to generate revenue but are currently missing
+from the listing's most visible fields.
+
 CRITICAL RULES:
 1. This is a MULTI-VARIANT listing family. Your title, bullets, and description must work for ALL variants — do NOT mention variant-specific attributes (specific size, specific color) unless ALL variants share it.
-2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types (e.g., "SD" vs "micro SD" — check the actual titles to determine which).
+2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types.
 3. If variants differ by capacity (32GB, 64GB, 128GB), write bullets that are capacity-agnostic OR mention the full range.
 4. Do NOT invent features or specs not mentioned in the current listing. Only rephrase and optimize what's already there.
-5. Use SIMPLE, EVERYDAY ENGLISH. Never use obscure or thesaurus-style vocabulary. Bad: "Amply Capacious". Good: "Large Storage Capacity".
+5. Use SIMPLE, EVERYDAY ENGLISH. Never use obscure or thesaurus-style vocabulary.
 6. Bullet hooks must be 2-4 common words a shopper instantly understands.
+7. CRITICAL GAP keywords from the keyword intelligence section MUST appear in title or bullets 1-2.
+8. TITLE UPGRADE keywords MUST appear in the title.
 
 AMAZON RULES TO ENFORCE:
 - Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC), no promotional phrases, keywords in first 80 chars
 - Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit. Max 200 chars each. Plain English.
-- Backend keywords: Space-separated, no commas, no duplicates of title/bullet terms. Output the COMPLETE FULL 250-character keyword string — this means KEEP the existing good keywords AND add new ones to fill the remaining ${kwRemaining} chars. The output must be the ENTIRE replacement string (not just additions). Each word/phrase must appear only ONCE — NEVER repeat. Include a MIX of: device compatibility ("for Canon EOS R5"), use-case terms ("trail camera", "dash cam"), seasonal ("holiday gift"), and common misspellings. HARD LIMIT: exactly 250 characters max total.
+- Backend keywords: Space-separated, no commas, no duplicates of title/bullet terms. Output the COMPLETE FULL 250-character keyword string — this means KEEP the existing good keywords AND add new ones to fill the remaining ${kwRemaining} chars. The output must be the ENTIRE replacement string (not just additions). Each word/phrase must appear only ONCE — NEVER repeat. Include a MIX of: device compatibility, use-case terms, seasonal, and common misspellings. HARD LIMIT: exactly 250 characters max total.
 - Description: Use HTML tags (<b>, <br>, <ul>, <li>). Min 150 words. Generic for all variants.
 
 VARIANT CONFLICT CORRECTIONS:
 Compare the per-variant content provided above. ONLY flag HARMFUL differences — NOT expected variant differentiation.
 
 DO flag (harmful drift):
-- Wrong product type/terminology (e.g., says "TF" when product is "SD/SDHC")
-- Contradictory or incorrect specs (wrong speed, wrong class)
+- Wrong product type/terminology
+- Contradictory or incorrect specs
 - Completely off-brand or incoherent messaging
-- Keywords that are identical across all variants (missed opportunity — each variant should target unique long-tail terms for its specific size/color)
 
 DO NOT flag (expected differentiation):
-- Different size/capacity in title or bullets (e.g., "128GB" vs "64GB" vs "32GB") — this is CORRECT and helps each variant rank for its size
-- Different color names in title/bullets
-- Different flavor/scent/material variant attributes
-
-For each HARMFUL issue found, output a correction object with:
-- The exact SKU
-- Which field has the problem (title|bullets|keywords|description)
-- The EXACT current problematic text
-- The EXACT corrected text to paste in (copy-paste-ready)
-- A clear, human-readable reason explaining WHY this is harmful and what the seller should do
-
-If no harmful differences exist, return an empty array [].
+- Different size/capacity in title or bullets — this is CORRECT
+- Different color names, flavor, scent, material variant attributes
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
-  "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants)",
+  "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants, includes CRITICAL GAP and TITLE UPGRADE keywords)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "recommended_keywords": "string (the COMPLETE FULL 250-char keyword string to paste in — existing good terms + new terms combined, max 250 chars total)",
+  "recommended_keywords": "string (the COMPLETE FULL 250-char keyword string — existing good terms + new terms combined, max 250 chars total, prioritizes terms NOT already in title/bullets)",
   "recommended_description": "string (full HTML description, min 150 words, generic for all variants)",
   "variant_corrections": [
     {
-      "sku": "string (the SKU that needs correction)",
+      "sku": "string",
       "field": "string (title|bullets|keywords|description)",
-      "current": "string (the problematic text currently there)",
-      "replace_with": "string (the exact corrected text to paste in)",
-      "reason": "string (brief explanation of why this change is needed)"
+      "current": "string",
+      "replace_with": "string",
+      "reason": "string"
     }
   ]
 }`
@@ -216,6 +307,27 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       return NextResponse.json({ error: 'AI returned invalid JSON. Please try again.' }, { status: 500 })
     }
 
+    // Post-generation validation: verify CRITICAL keywords were included
+    const criticalKeywords = (await getStoredAnalysis(children[0]?.asin, 10))
+      ?.filter(k => k.actionType === 'CRITICAL')
+      .map(k => k.keyword) ?? []
+
+    const titleAndBullets = [
+      parsed.recommended_title,
+      ...(parsed.recommended_bullets ?? []),
+    ].join(' ').toLowerCase()
+
+    const missedCritical = criticalKeywords.filter(kw =>
+      !titleAndBullets.includes(kw.toLowerCase())
+    )
+
+    if (missedCritical.length > 0) {
+      console.warn(
+        `[AI Recs] V2 validation: AI missed ${missedCritical.length} CRITICAL keywords: ${missedCritical.join(', ')}`
+      )
+      // Log but don't fail — the AI may have used synonyms or paraphrased
+    }
+
     // Store in listing_seo_recommendations
     const rec: AiRecommendations = {
       parent_asin,
@@ -225,13 +337,18 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_description: parsed.recommended_description || '',
       variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
       generated_at: new Date().toISOString(),
+      keyword_opportunities_used: opportunitiesUsed,
     }
 
     await supabase
       .from('listing_seo_recommendations')
       .upsert(rec, { onConflict: 'parent_asin' })
 
-    return NextResponse.json({ recommendations: rec })
+    return NextResponse.json({
+      recommendations: rec,
+      keywordIntelligenceUsed: opportunitiesUsed > 0,
+      missedCriticalKeywords: missedCritical,
+    })
   } catch (err) {
     console.error('[AI Recs] Unexpected error:', err)
     return NextResponse.json(
@@ -240,6 +357,8 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
     )
   }
 }
+
+// ─── GET Handler ──────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)

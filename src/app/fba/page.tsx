@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import type { ProductRecommendation, ReplenishmentStatus } from '@/lib/fba/replenishment'
+import { OptimizerView } from '@/components/fba/OptimizerView'
+import { ApiUsageMeter } from '@/components/fba/ApiUsageMeter'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -120,6 +122,46 @@ interface AiRecommendations {
   recommended_description:  string
   variant_corrections:      VariantCorrection[]
   generated_at:             string
+  keyword_opportunities_used?: number
+}
+
+// ─── Keyword Intelligence Types ─────────────────────────────────────────────
+interface AnalyzedKeyword {
+  keyword: string
+  opportunityScore: number
+  actionType: 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED'
+  actionText: string
+  rationale: string
+  urgency: 'high' | 'medium' | 'low'
+  estimatedImpact: string
+  searchVolume: number
+  keywordSales: number
+  competingProducts: number
+  asinImpressionShare: number
+  asinClickShare: number
+  asinPurchaseShare: number
+  inTitle: boolean
+  inBullets: boolean
+  inDescription: boolean
+  inBackend: boolean
+  dataSource: 'sqp' | 'jungle_scout' | 'inherited'
+}
+interface KeywordIntelligenceResult {
+  asin: string
+  analyzedAt: string
+  dataSource: 'sqp' | 'jungle_scout' | 'inherited'
+  totalKeywordsAnalyzed: number
+  topOpportunities: AnalyzedKeyword[]
+  summary: { critical: number; upgrade: number; reinforce: number; defended: number; optimized: number }
+  apiUsage?: { used: number; limit: number; remaining: number; provider: string }
+  jungleScoutEnabled?: boolean
+  message?: string
+}
+interface ApiUsageStats {
+  used: number
+  limit: number
+  remaining: number
+  provider: string
 }
 
 interface ListingIssue {
@@ -302,6 +344,7 @@ export default function FBAIntelligencePage() {
   const [seoLastSynced, setSeoLastSynced] = useState<string | null>(null)
   const [seoError, setSeoError] = useState<string | null>(null)
   const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
+  const [modalTab, setModalTab] = useState<'issues' | 'keywords'>('issues')
   const [fixingField, setFixingField] = useState<string | null>(null) // 'parentAsin:field'
   const [listingSubTab, setListingSubTab] = useState<'issues' | 'optimizer'>('issues')
   const [aiRecs, setAiRecs] = useState<Record<string, AiRecommendations | null>>({})
@@ -310,6 +353,13 @@ export default function FBAIntelligencePage() {
   const [expandedIssueKey, setExpandedIssueKey] = useState<string | null>(null)
   const [selectedRecCategory, setSelectedRecCategory] = useState<string | null>(null)
   const [aiError, setAiError] = useState<Record<string, string>>({})
+
+  // Keyword Intelligence state — keyed by child ASIN
+  const [kwData, setKwData] = useState<Record<string, KeywordIntelligenceResult | null>>({})
+  const [kwLoading, setKwLoading] = useState<Record<string, boolean>>({})
+  const [kwError, setKwError] = useState<Record<string, string>>({})
+  const [apiUsage, setApiUsage] = useState<ApiUsageStats | null>(null)
+  const [kwActiveFilter, setKwActiveFilter] = useState<'ALL' | 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED'>('ALL')
 
   // Missing Inventory state
   const [missingGaps, setMissingGaps] = useState<MissingInventoryGap[]>([])
@@ -1006,6 +1056,34 @@ export default function FBAIntelligencePage() {
     }
     finally { setAiLoadingSet(prev => { const s = new Set(prev); s.delete(parentAsin); return s }) }
   }, [])
+
+  // Fetch keyword intelligence for a child ASIN (GET = cached, POST = force refresh)
+  const fetchKeywordIntelligence = useCallback(async (childAsin: string, forceRefresh = false) => {
+    if (kwLoading[childAsin]) return
+    setKwLoading(prev => ({ ...prev, [childAsin]: true }))
+    setKwError(prev => { const n = { ...prev }; delete n[childAsin]; return n })
+    try {
+      const url = forceRefresh
+        ? `/api/fba/intelligence/${childAsin}`
+        : `/api/fba/intelligence/${childAsin}?stored=true`
+      const method = forceRefresh ? 'POST' : 'GET'
+      const resp = await fetch(url, { method })
+      const json = await resp.json()
+      if (!resp.ok) throw new Error(json.error || 'Intelligence fetch failed')
+      if (forceRefresh) {
+        // POST triggers async sync — poll for results after a short delay
+        setTimeout(() => fetchKeywordIntelligence(childAsin, false), 8000)
+        return
+      }
+      setKwData(prev => ({ ...prev, [childAsin]: json }))
+      if (json.apiUsage) setApiUsage(json.apiUsage)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setKwError(prev => ({ ...prev, [childAsin]: msg }))
+    } finally {
+      setKwLoading(prev => ({ ...prev, [childAsin]: false }))
+    }
+  }, [kwLoading])
 
   // Load data when switching to analytics/listings tabs
   useEffect(() => {
@@ -2474,8 +2552,48 @@ export default function FBAIntelligencePage() {
                         <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null); setSelectedRecCategory(null) }} className="shrink-0 text-gray-400 hover:text-gray-700 text-2xl leading-none ml-2">×</button>
                       </div>
 
-                      {/* Modal body — two columns */}
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-gray-200">
+                      {/* Modal tab strip */}
+                      <div className="flex border-b border-gray-200 px-6 bg-white">
+                        <button
+                          onClick={() => setModalTab('issues')}
+                          className={`text-sm font-medium py-3 px-4 border-b-2 transition-colors ${
+                            modalTab === 'issues'
+                              ? 'border-violet-600 text-violet-700'
+                              : 'border-transparent text-gray-500 hover:text-gray-700'
+                          }`}
+                        >
+                          Issues & AI Fix
+                        </button>
+                        <button
+                          onClick={() => {
+                            setModalTab('keywords')
+                            const childAsin = score.top_child_asin ?? score.children[0]?.asin
+                            if (childAsin && !kwData[childAsin] && !kwLoading[childAsin]) {
+                              fetchKeywordIntelligence(childAsin)
+                            }
+                          }}
+                          className={`text-sm font-medium py-3 px-4 border-b-2 transition-colors flex items-center gap-1.5 ${
+                            modalTab === 'keywords'
+                              ? 'border-violet-600 text-violet-700'
+                              : 'border-transparent text-gray-500 hover:text-gray-700'
+                          }`}
+                        >
+                          Keywords
+                          {(() => {
+                            const ca = score.top_child_asin ?? score.children[0]?.asin
+                            const d = ca ? kwData[ca] : null
+                            if (!d) return null
+                            const total = d.summary.critical + d.summary.upgrade
+                            if (total === 0) return null
+                            return <span className="text-[10px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded-full">{total}</span>
+                          })()}
+                        </button>
+                      </div>
+
+                      {/* Modal body — two columns (Issues & AI Fix tab) */}
+                      <div className={`grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-gray-200 ${
+                        modalTab !== 'issues' ? 'hidden' : ''
+                      }`}>
 
                         {/* Left: Issues */}
                         <div className="p-6 space-y-3 overflow-y-auto max-h-[60vh]">
@@ -2731,6 +2849,33 @@ export default function FBAIntelligencePage() {
                         </div>
                       </div>
 
+                      {/* Keywords tab panel */}
+                      {modalTab === 'keywords' && (() => {
+                        const childAsin = score.top_child_asin ?? score.children[0]?.asin
+                        if (!childAsin) {
+                          return (
+                            <div className="p-8 text-center text-sm text-gray-500">
+                              No child ASIN found for this product — keyword analysis unavailable.
+                            </div>
+                          )
+                        }
+                        return (
+                          <div className="p-6 overflow-y-auto max-h-[60vh]">
+                            <OptimizerView
+                              childAsin={childAsin}
+                              kwData={kwData[childAsin] ?? null}
+                              kwLoading={kwLoading[childAsin] ?? false}
+                              kwError={kwError[childAsin] ?? null}
+                              onRefreshKeywords={() => fetchKeywordIntelligence(childAsin, true)}
+                              aiRecs={aiRecs[score.parent_asin] ?? null}
+                              aiLoading={aiLoadingSet.has(score.parent_asin)}
+                              onGenerateAiFix={() => fetchAiRecs(score.parent_asin)}
+                              apiUsage={apiUsage}
+                            />
+                          </div>
+                        )
+                      })()}
+
                       {/* Modal footer */}
                       <div className="border-t border-gray-200 px-6 py-4 flex items-center justify-between bg-gray-50 rounded-b-2xl">
                         <div className="flex items-center gap-3">
@@ -2738,6 +2883,13 @@ export default function FBAIntelligencePage() {
                           <a href="https://sellercentral.amazon.com/enhanced-content/content-manager" target="_blank" rel="noopener noreferrer" className="text-sm font-medium bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 rounded-lg px-4 py-2 transition-colors">Edit A+ Content →</a>
                         </div>
                         <div className="flex items-center gap-3">
+                          {apiUsage && (
+                            <ApiUsageMeter
+                              used={apiUsage.used}
+                              limit={apiUsage.limit}
+                              provider={apiUsage.provider}
+                            />
+                          )}
                           <button
                             onClick={() => fetchAiRecs(score.parent_asin)}
                             disabled={aiLoadingSet.has(score.parent_asin)}
@@ -2745,7 +2897,7 @@ export default function FBAIntelligencePage() {
                           >
                             {aiLoadingSet.has(score.parent_asin) ? '✨ Analyzing…' : aiRecs[score.parent_asin] ? '✨ Regenerate AI Audit' : '✨ Run AI Audit'}
                           </button>
-                          <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null); setSelectedRecCategory(null) }} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
+                          <button onClick={() => { setExpandedSeoCard(null); setExpandedIssueKey(null); setSelectedRecCategory(null); setModalTab('issues') }} className="text-sm font-medium text-gray-500 hover:text-gray-700">Close</button>
                         </div>
                       </div>
                     </div>
