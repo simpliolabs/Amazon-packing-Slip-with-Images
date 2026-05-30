@@ -1072,9 +1072,31 @@ export default function FBAIntelligencePage() {
       const json = await resp.json()
       if (!resp.ok) throw new Error(json.error || 'Intelligence fetch failed')
       if (forceRefresh) {
-        // POST triggers async sync — keep loading=true while polling
+        // POST triggers async sync — poll every 60s for up to 10 minutes
         keepLoading = true
-        setTimeout(() => fetchKeywordIntelligence(childAsin, false), 10000)
+        let attempts = 0
+        const maxAttempts = 10
+        const poll = async () => {
+          attempts++
+          try {
+            const pollResp = await fetch(`/api/fba/intelligence/${childAsin}?stored=true`)
+            const pollJson = await pollResp.json()
+            if (pollResp.ok && pollJson.totalKeywordsAnalyzed > 0) {
+              setKwData(prev => ({ ...prev, [childAsin]: pollJson }))
+              if (pollJson.apiUsage) setApiUsage(pollJson.apiUsage)
+              setKwLoading(prev => ({ ...prev, [childAsin]: false }))
+            } else if (attempts < maxAttempts) {
+              setTimeout(poll, 60000)
+            } else {
+              setKwError(prev => ({ ...prev, [childAsin]: 'Sync timed out after 10 minutes. The SQP report may not be available for this ASIN yet. Try again later.' }))
+              setKwLoading(prev => ({ ...prev, [childAsin]: false }))
+            }
+          } catch {
+            if (attempts < maxAttempts) setTimeout(poll, 60000)
+            else setKwLoading(prev => ({ ...prev, [childAsin]: false }))
+          }
+        }
+        setTimeout(poll, 60000) // First poll after 60 seconds
         return
       }
       setKwData(prev => ({ ...prev, [childAsin]: json }))

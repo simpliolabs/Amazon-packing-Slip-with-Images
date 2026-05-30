@@ -108,8 +108,15 @@ export async function GET(
     }
 
     // Get API usage stats for the UI meter
-    const apiUsage = await getApiUsageStats();
+    const rawUsage = await getApiUsageStats();
     const jsStatus = getJungleScoutStatus();
+    // Normalize to the shape page.tsx ApiUsageStats expects: { used, limit, remaining, provider }
+    const apiUsage = {
+      used: rawUsage.jungleScout.callsUsed,
+      limit: rawUsage.jungleScout.budget,
+      remaining: rawUsage.jungleScout.budget - rawUsage.jungleScout.callsUsed,
+      provider: 'Jungle Scout',
+    };
 
     return NextResponse.json({
       ...result,
@@ -149,7 +156,7 @@ export async function POST(
     return NextResponse.json({
       status: 'syncing',
       asin,
-      message: `Keyword intelligence sync started for ${asin}. Refresh in 2–3 minutes.`,
+      message: `Keyword intelligence sync started for ${asin}. SQP report takes 5–8 minutes to process. The panel will auto-update when ready.`,
     });
 
   } catch (error) {
