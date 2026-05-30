@@ -54,8 +54,11 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
   const endDate = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}-${new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 0).getDate()}`;
 
   // Step 1: Create SQP report
+  // Uses the standard Reports API v2021-06-30 (NOT analytics/v1 which is wrong)
+  // GET_BRAND_ANALYTICS_SEARCH_TERMS_REPORT only accepts reportPeriod in reportOptions
+  // (no asinList — that's a different report type)
   const createResp = await fetch(
-    'https://sellingpartnerapi-na.amazon.com/analytics/v1/reports',
+    'https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/reports',
     {
       method: 'POST',
       headers: {
@@ -67,7 +70,6 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
         marketplaceIds: [process.env.AMAZON_MARKETPLACE_ID ?? 'ATVPDKIKX0DER'],
         reportOptions: {
           reportPeriod: 'MONTH',
-          asinList: [asin],
         },
         dataStartTime: startDate,
         dataEndTime: endDate,
@@ -89,7 +91,7 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
     await new Promise(r => setTimeout(r, 10000)); // 10s between polls
 
     const statusResp = await fetch(
-      `https://sellingpartnerapi-na.amazon.com/analytics/v1/reports/${reportId}`,
+      `https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/reports/${reportId}`,
       { headers: { 'x-amz-access-token': access_token } }
     );
 
@@ -112,7 +114,7 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
 
   // Step 3: Get document URL
   const docResp = await fetch(
-    `https://sellingpartnerapi-na.amazon.com/analytics/v1/reports/documents/${reportDocumentId}`,
+    `https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/documents/${reportDocumentId}`,
     { headers: { 'x-amz-access-token': access_token } }
   );
 
