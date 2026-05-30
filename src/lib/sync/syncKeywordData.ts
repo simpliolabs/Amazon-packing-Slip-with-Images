@@ -54,9 +54,9 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
   const endDate = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth() + 1).padStart(2, '0')}-${new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 0).getDate()}`;
 
   // Step 1: Create SQP report
-  // Uses the standard Reports API v2021-06-30 (NOT analytics/v1 which is wrong)
-  // GET_BRAND_ANALYTICS_SEARCH_TERMS_REPORT only accepts reportPeriod in reportOptions
-  // (no asinList — that's a different report type)
+  // Uses GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT (not SEARCH_TERMS which is a
+  // different report showing top ASINs by keyword for the whole marketplace).
+  // SQP accepts: asin (Required, space-separated) + reportPeriod (Required)
   const createResp = await fetch(
     'https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/reports',
     {
@@ -66,9 +66,10 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        reportType: 'GET_BRAND_ANALYTICS_SEARCH_TERMS_REPORT',
+        reportType: 'GET_BRAND_ANALYTICS_SEARCH_QUERY_PERFORMANCE_REPORT',
         marketplaceIds: [process.env.AMAZON_MARKETPLACE_ID ?? 'ATVPDKIKX0DER'],
         reportOptions: {
+          asin: asin,
           reportPeriod: 'MONTH',
         },
         dataStartTime: startDate,
@@ -132,32 +133,33 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
 
   const rawData = await dataResp.json();
 
-  // Step 5: Extract keyword rows from the nested SQP structure
+  // Step 5: Extract keyword rows from the SQP response.
+  // Schema: dataByAsin is a flat array — one entry per (ASIN, searchQuery) combination.
+  // totalMedianClickPrice is an object {amount, currencyCode}, not a plain number.
   const rows: SQPKeywordRow[] = [];
 
   if (rawData?.dataByAsin) {
-    for (const asinData of rawData.dataByAsin) {
-      if (asinData.asin !== asin) continue;
-      for (const entry of asinData.searchTerms ?? []) {
-        rows.push({
-          searchQuery: entry.searchQueryData?.searchQuery ?? '',
-          searchQueryScore: entry.searchQueryData?.searchQueryScore ?? 50,
-          searchQueryVolume: entry.searchQueryData?.searchQueryVolume ?? 0,
-          totalQueryImpressionCount: entry.impressionData?.totalQueryImpressionCount ?? 0,
-          asinImpressionCount: entry.impressionData?.asinImpressionCount ?? 0,
-          asinImpressionShare: entry.impressionData?.asinImpressionShare ?? 0,
-          totalClickCount: entry.clickData?.totalClickCount ?? 0,
-          asinClickCount: entry.clickData?.asinClickCount ?? 0,
-          asinClickShare: entry.clickData?.asinClickShare ?? 0,
-          totalMedianClickPrice: entry.clickData?.totalMedianClickPrice ?? 0,
-          totalCartAddCount: entry.cartAddData?.totalCartAddCount ?? 0,
-          asinCartAddCount: entry.cartAddData?.asinCartAddCount ?? 0,
-          asinCartAddShare: entry.cartAddData?.asinCartAddShare ?? 0,
-          totalPurchaseCount: entry.purchaseData?.totalPurchaseCount ?? 0,
-          asinPurchaseCount: entry.purchaseData?.asinPurchaseCount ?? 0,
-          asinPurchaseShare: entry.purchaseData?.asinPurchaseShare ?? 0,
-        });
-      }
+    for (const entry of rawData.dataByAsin) {
+      if (entry.asin !== asin) continue;
+      rows.push({
+        searchQuery: entry.searchQueryData?.searchQuery ?? '',
+        searchQueryScore: entry.searchQueryData?.searchQueryScore ?? 50,
+        searchQueryVolume: entry.searchQueryData?.searchQueryVolume ?? 0,
+        totalQueryImpressionCount: entry.impressionData?.totalQueryImpressionCount ?? 0,
+        asinImpressionCount: entry.impressionData?.asinImpressionCount ?? 0,
+        asinImpressionShare: entry.impressionData?.asinImpressionShare ?? 0,
+        totalClickCount: entry.clickData?.totalClickCount ?? 0,
+        asinClickCount: entry.clickData?.asinClickCount ?? 0,
+        asinClickShare: entry.clickData?.asinClickShare ?? 0,
+        // totalMedianClickPrice is {amount, currencyCode} in the API response
+        totalMedianClickPrice: entry.clickData?.totalMedianClickPrice?.amount ?? 0,
+        totalCartAddCount: entry.cartAddData?.totalCartAddCount ?? 0,
+        asinCartAddCount: entry.cartAddData?.asinCartAddCount ?? 0,
+        asinCartAddShare: entry.cartAddData?.asinCartAddShare ?? 0,
+        totalPurchaseCount: entry.purchaseData?.totalPurchaseCount ?? 0,
+        asinPurchaseCount: entry.purchaseData?.asinPurchaseCount ?? 0,
+        asinPurchaseShare: entry.purchaseData?.asinPurchaseShare ?? 0,
+      });
     }
   }
 
