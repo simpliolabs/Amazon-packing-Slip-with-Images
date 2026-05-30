@@ -19,6 +19,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { getAccessToken } from '@/lib/amazon/auth';
 import {
   getCachedKeywords,
   setCachedKeywords,
@@ -42,23 +43,9 @@ const supabase = createClient(
  * Uses the existing sp-api-client pattern from the codebase.
  */
 async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
-  // Get LWA access token using the existing SP-API credentials
-  const tokenResp = await fetch('https://api.amazon.com/auth/o2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: process.env.AMAZON_SP_API_REFRESH_TOKEN!,
-      client_id: process.env.AMAZON_SP_API_CLIENT_ID!,
-      client_secret: process.env.AMAZON_SP_API_CLIENT_SECRET!,
-    }),
-  });
-
-  if (!tokenResp.ok) {
-    throw new Error(`LWA token fetch failed: ${tokenResp.status}`);
-  }
-
-  const { access_token } = await tokenResp.json();
+  // Use the shared getAccessToken() which reads credentials from Supabase app_settings
+  // (same pattern as syncListings.ts, syncSalesReport.ts, etc.)
+  const access_token = await getAccessToken();
 
   // Calculate date range: last full month
   const now = new Date();
