@@ -1062,6 +1062,7 @@ export default function FBAIntelligencePage() {
     if (kwLoading[childAsin]) return
     setKwLoading(prev => ({ ...prev, [childAsin]: true }))
     setKwError(prev => { const n = { ...prev }; delete n[childAsin]; return n })
+    let keepLoading = false
     try {
       const url = forceRefresh
         ? `/api/fba/intelligence/${childAsin}`
@@ -1071,8 +1072,9 @@ export default function FBAIntelligencePage() {
       const json = await resp.json()
       if (!resp.ok) throw new Error(json.error || 'Intelligence fetch failed')
       if (forceRefresh) {
-        // POST triggers async sync — poll for results after a short delay
-        setTimeout(() => fetchKeywordIntelligence(childAsin, false), 8000)
+        // POST triggers async sync — keep loading=true while polling
+        keepLoading = true
+        setTimeout(() => fetchKeywordIntelligence(childAsin, false), 10000)
         return
       }
       setKwData(prev => ({ ...prev, [childAsin]: json }))
@@ -1081,7 +1083,9 @@ export default function FBAIntelligencePage() {
       const msg = e instanceof Error ? e.message : String(e)
       setKwError(prev => ({ ...prev, [childAsin]: msg }))
     } finally {
-      setKwLoading(prev => ({ ...prev, [childAsin]: false }))
+      if (!keepLoading) {
+        setKwLoading(prev => ({ ...prev, [childAsin]: false }))
+      }
     }
   }, [kwLoading])
 
