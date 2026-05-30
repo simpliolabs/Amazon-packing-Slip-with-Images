@@ -20,6 +20,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { getAccessToken } from '@/lib/amazon/auth';
+import { gunzipSync } from 'zlib';
 import {
   getCachedKeywords,
   setCachedKeywords,
@@ -113,7 +114,7 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
     throw new Error('SQP report timed out after 5 minutes');
   }
 
-  // Step 3: Get document URL
+  // Step 3: Get document URL and compression info
   const docResp = await fetch(
     `https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/documents/${reportDocumentId}`,
     { headers: { 'x-amz-access-token': access_token } }
@@ -123,15 +124,23 @@ async function fetchSQPFromAPI(asin: string): Promise<SQPKeywordRow[]> {
     throw new Error(`Failed to get report document: ${docResp.status}`);
   }
 
-  const { url } = await docResp.json();
+  const { url, compressionAlgorithm } = await docResp.json();
 
-  // Step 4: Download and parse the report
+  // Step 4: Download and decompress the report (SP-API reports are often GZIP compressed)
   const dataResp = await fetch(url);
   if (!dataResp.ok) {
     throw new Error(`Failed to download report: ${dataResp.status}`);
   }
 
-  const rawData = await dataResp.json();
+  let rawText: string;
+  if (compressionAlgorithm === 'GZIP') {
+    const buffer = Buffer.from(await dataResp.arrayBuffer());
+    rawText = gunzipSync(buffer).toString('utf-8');
+  } else {
+    rawText = await dataResp.text();
+  }
+
+  const rawData = JSON.parse(rawText);
 
   // Step 5: Extract keyword rows from the SQP response.
   // Schema: dataByAsin is a flat array — one entry per (ASIN, searchQuery) combination.
