@@ -48,6 +48,20 @@ interface IntelligenceResult {
   message?: string
 }
 
+interface CannibalizationWarning {
+  keyword: string
+  affected_skus: string[]
+  issue: string
+  recommendation: string
+}
+
+interface ProductDetailImprovement {
+  field_name: string
+  current_value: string | null
+  recommended_value: string
+  reason: string
+}
+
 interface AiRecommendations {
   recommended_title: string
   recommended_bullets: string[]
@@ -55,6 +69,8 @@ interface AiRecommendations {
   recommended_description: string
   generated_at: string
   keyword_opportunities_used?: number
+  cannibalization_warnings?: CannibalizationWarning[]
+  product_details_improvements?: ProductDetailImprovement[]
 }
 
 interface ApiUsageStats {
@@ -213,6 +229,61 @@ export function OptimizerView({
                   <p className="text-xs text-red-600 mt-1">⚠ Exceeds 250-byte limit — trim before publishing</p>
                 )}
               </div>
+
+              {/* Description */}
+              {aiRecs.recommended_description && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Description</p>
+                  <div
+                    className="text-sm text-gray-900 bg-gray-50 rounded-lg p-3 border border-gray-200 prose prose-sm max-w-none"
+                    dangerouslySetInnerHTML={{ __html: aiRecs.recommended_description }}
+                  />
+                </div>
+              )}
+
+              {/* Cannibalization Warnings */}
+              {aiRecs.cannibalization_warnings && aiRecs.cannibalization_warnings.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-orange-600 uppercase tracking-wide mb-1">
+                    ⚠ Cannibalization Warnings ({aiRecs.cannibalization_warnings.length})
+                  </p>
+                  <div className="space-y-2">
+                    {aiRecs.cannibalization_warnings.map((w, i) => (
+                      <div key={i} className="bg-orange-50 border border-orange-200 rounded-lg p-3">
+                        <p className="text-sm font-medium text-orange-900">
+                          <span className="font-mono bg-orange-100 px-1 rounded text-xs">{w.keyword}</span>
+                        </p>
+                        <p className="text-xs text-orange-700 mt-1">{w.issue}</p>
+                        <p className="text-xs text-orange-800 mt-1 font-medium">Fix: {w.recommendation}</p>
+                        <p className="text-[10px] text-orange-500 mt-0.5">Affected: {w.affected_skus.join(', ')}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Product Details Improvements */}
+              {aiRecs.product_details_improvements && aiRecs.product_details_improvements.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide mb-1">
+                    📋 Product Details Improvements ({aiRecs.product_details_improvements.length})
+                  </p>
+                  <div className="space-y-1.5">
+                    {aiRecs.product_details_improvements.map((imp, i) => (
+                      <div key={i} className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                        <div className="flex items-start justify-between">
+                          <p className="text-sm font-medium text-blue-900">{imp.field_name}</p>
+                        </div>
+                        {imp.current_value && (
+                          <p className="text-xs text-gray-500 mt-0.5 line-through">{imp.current_value}</p>
+                        )}
+                        <p className="text-xs text-blue-800 mt-0.5 font-medium">→ {imp.recommended_value}</p>
+                        <p className="text-[10px] text-blue-600 mt-0.5">{imp.reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <p className="text-[10px] text-gray-400">
                 Generated: {new Date(aiRecs.generated_at).toLocaleString()}

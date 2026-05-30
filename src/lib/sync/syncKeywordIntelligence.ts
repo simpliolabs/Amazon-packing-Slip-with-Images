@@ -69,6 +69,13 @@ export async function syncKeywordIntelligence(
     }
   }
 
+  // On forceRefresh: clear stale cached data so the engine re-runs with fresh presence data
+  if (forceRefresh) {
+    await supabase.from('keyword_cache').delete().eq('asin', asin);
+    await supabase.from('keyword_analysis').delete().eq('asin', asin);
+    console.log(`[syncKeywordIntelligence] Cleared stale cache for ${asin} (forceRefresh)`);
+  }
+
   // Path 2 & 3: Run SQP sync (handles cache check internally)
   const sqpResult = await syncKeywordData(asin);
 

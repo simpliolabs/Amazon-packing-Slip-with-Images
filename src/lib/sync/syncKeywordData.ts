@@ -272,10 +272,51 @@ export async function syncKeywordData(asin: string): Promise<EngineResult> {
   }
 
   // Step 3: Fetch listing content for presence checking
-  const listing = await fetchListingContent(asin);
+  let listing = await fetchListingContent(asin);
+
+  // Fallback: if child ASIN has no content yet (race condition with listing sync),
+  // try to find a sibling in the same parent family that DOES have content.
+  // This prevents storing all-false presence flags that make everything CRITICAL.
+  if (!listing || !listing.title) {
+    const { data: parentRow } = await supabase
+      .from('listing_content')
+      .select('parent_asin')
+      .eq('asin', asin)
+      .single();
+
+    if (parentRow?.parent_asin) {
+      const { data: sibling } = await supabase
+        .from('listing_content')
+        .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+        .eq('parent_asin', parentRow.parent_asin)
+        .not('title', 'is', null)
+        .limit(1)
+        .single();
+
+      if (sibling?.title) {
+        listing = sibling;
+        console.log(`[syncKeywordData] Using sibling content for presence check (child ${asin} has no content yet)`);
+      }
+    }
+  }
+
+  // Guard: if we STILL have no listing content, do NOT store results with all-false presence.
+  // Return empty result so the UI shows "Run listing sync first" instead of stale data.
+  if (!listing || !listing.title) {
+    console.warn(`[syncKeywordData] No listing content found for ${asin} or siblings. Skipping engine run.`);
+    return {
+      asin,
+      allKeywords: [],
+      topOpportunities: [],
+      totalKeywordsAnalyzed: 0,
+      summary: { critical: 0, upgrade: 0, reinforce: 0, defended: 0, optimized: 0 },
+      dataSource,
+      analyzedAt: new Date().toISOString(),
+    };
+  }
 
   // Step 4: Run keyword engine
-  const result = runKeywordEngine(asin, rawKeywords, listing ?? {}, dataSource);
+  const result = runKeywordEngine(asin, rawKeywords, listing, dataSource);
 
   // Step 5: Store analysis results
   if (result.allKeywords.length > 0) {

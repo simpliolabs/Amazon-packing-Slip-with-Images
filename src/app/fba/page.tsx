@@ -114,6 +114,20 @@ interface VariantCorrection {
   reason: string
 }
 
+interface CannibalizationWarning {
+  keyword: string
+  affected_skus: string[]
+  issue: string
+  recommendation: string
+}
+
+interface ProductDetailImprovement {
+  field_name: string
+  current_value: string | null
+  recommended_value: string
+  reason: string
+}
+
 interface AiRecommendations {
   parent_asin:              string
   recommended_title:        string
@@ -121,6 +135,8 @@ interface AiRecommendations {
   recommended_keywords:     string
   recommended_description:  string
   variant_corrections:      VariantCorrection[]
+  cannibalization_warnings?: CannibalizationWarning[]
+  product_details_improvements?: ProductDetailImprovement[]
   generated_at:             string
   keyword_opportunities_used?: number
 }

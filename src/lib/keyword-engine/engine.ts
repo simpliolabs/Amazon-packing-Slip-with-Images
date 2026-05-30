@@ -234,19 +234,25 @@ export function runKeywordEngine(
     });
   }
 
-  // Sort and get top 25
-  const topOpportunities = prioritizeActions(
-    analyzed.map(a => ({
-      actionType: a.actionType,
-      opportunityScore: a.opportunityScore,
-      primaryAction: a.actionText,
-      rationale: a.rationale,
-      urgency: a.urgency,
-      estimatedImpact: a.estimatedImpact,
-    })),
-    25
-  ).map(action => analyzed.find(a => a.actionText === action.primaryAction)!)
-   .filter(Boolean);
+  // Group by category with dynamic cap:
+  // CRITICAL: 5-10 (all scoring ≥50, min 5, max 10)
+  // UPGRADE/REINFORCE/DEFENDED: top 10 each
+  const criticalAll = analyzed.filter(a => a.actionType === 'CRITICAL')
+    .sort((a, b) => b.opportunityScore - a.opportunityScore);
+  const criticalCapped = criticalAll.length <= 5
+    ? criticalAll
+    : criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10).length >= 5
+      ? criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10)
+      : criticalAll.slice(0, 5);
+
+  const upgradeTop = analyzed.filter(a => a.actionType === 'UPGRADE')
+    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+  const reinforceTop = analyzed.filter(a => a.actionType === 'REINFORCE')
+    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+  const defendedTop = analyzed.filter(a => a.actionType === 'DEFENDED')
+    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+
+  const topOpportunities = [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop];
 
   // Summary counts
   const summary = {

@@ -62,6 +62,20 @@ export interface VariantCorrection {
   reason: string
 }
 
+export interface CannibalizationWarning {
+  keyword: string
+  affected_skus: string[]
+  issue: string
+  recommendation: string
+}
+
+export interface ProductDetailImprovement {
+  field_name: string
+  current_value: string | null
+  recommended_value: string
+  reason: string
+}
+
 export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
@@ -69,6 +83,8 @@ export interface AiRecommendations {
   recommended_keywords: string
   recommended_description: string
   variant_corrections: VariantCorrection[]
+  cannibalization_warnings: CannibalizationWarning[]
+  product_details_improvements: ProductDetailImprovement[]
   generated_at: string
   keyword_opportunities_used?: number
 }
@@ -259,6 +275,20 @@ DO NOT flag (expected differentiation):
 - Different size/capacity in title or bullets — this is CORRECT
 - Different color names, flavor, scent, material variant attributes
 
+CANNIBALIZATION ANALYSIS:
+Compare the per-variant titles, bullets, and backend keywords. Identify:
+1. Keywords that appear in the WRONG variant (e.g., "128GB" in the 32GB variant's title or bullets)
+2. Variants competing against each other for the same search terms unnecessarily
+3. Keyword stuffing that dilutes relevance (same keyword repeated across multiple fields)
+Only report genuine problems — NOT expected variant differentiation.
+
+PRODUCT DETAILS PAGE IMPROVEMENTS:
+Based on the listing content and product type, suggest the TOP 10 most impactful structured attribute improvements for the Amazon Product Details page (Seller Central "Product Details" tab). Focus on:
+- Fields that customers commonly filter by (e.g., Compatible Devices, Storage Capacity, Read Speed)
+- Fields that improve search discoverability (e.g., Special Features, Use Case)
+- Fields that are currently empty or have incorrect values
+Do NOT suggest fields irrelevant to this product category.
+
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
   "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants, includes CRITICAL GAP and TITLE UPGRADE keywords)",
@@ -273,6 +303,22 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       "replace_with": "string",
       "reason": "string"
     }
+  ],
+  "cannibalization_warnings": [
+    {
+      "keyword": "string (the keyword causing the issue)",
+      "affected_skus": ["string (SKU 1)", "string (SKU 2)"],
+      "issue": "string (clear description of the cannibalization problem)",
+      "recommendation": "string (specific fix)"
+    }
+  ],
+  "product_details_improvements": [
+    {
+      "field_name": "string (exact Seller Central field name, e.g. 'Compatible Devices')",
+      "current_value": "string or null (what's currently there)",
+      "recommended_value": "string (what it should be)",
+      "reason": "string (why this matters for ranking/conversion)"
+    }
   ]
 }`
 
@@ -285,7 +331,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
         { role: 'user', content: listingContext },
       ],
       temperature: 0.3,
-      max_tokens: 4500,
+      max_tokens: 6000,
     })
 
     const rawContent = completion.choices[0]?.message?.content || ''
@@ -297,6 +343,8 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_keywords: string
       recommended_description: string
       variant_corrections?: VariantCorrection[]
+      cannibalization_warnings?: CannibalizationWarning[]
+      product_details_improvements?: ProductDetailImprovement[]
     }
 
     try {
@@ -328,7 +376,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       // Log but don't fail — the AI may have used synonyms or paraphrased
     }
 
-    // Store in listing_seo_recommendations
+    // Build the full response object
     const rec: AiRecommendations = {
       parent_asin,
       recommended_title: parsed.recommended_title || '',
@@ -336,13 +384,32 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_keywords: parsed.recommended_keywords || '',
       recommended_description: parsed.recommended_description || '',
       variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
+      cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
+      product_details_improvements: Array.isArray(parsed.product_details_improvements) ? parsed.product_details_improvements.slice(0, 10) : [],
       generated_at: new Date().toISOString(),
       keyword_opportunities_used: opportunitiesUsed,
     }
 
-    await supabase
+    // Store in listing_seo_recommendations
+    // Try with all fields first; if DB columns don't exist yet, retry without them.
+    const { cannibalization_warnings, product_details_improvements, keyword_opportunities_used, ...persistFields } = rec
+    const fullPayload: Record<string, unknown> = {
+      ...persistFields,
+      cannibalization_warnings,
+      product_details_improvements,
+    }
+
+    const { error: upsertErr } = await supabase
       .from('listing_seo_recommendations')
-      .upsert(rec, { onConflict: 'parent_asin' })
+      .upsert(fullPayload, { onConflict: 'parent_asin' })
+
+    if (upsertErr) {
+      // Likely missing columns — retry with only the original fields
+      console.warn('[AI Recs] Full upsert failed, retrying without new fields:', upsertErr.message)
+      await supabase
+        .from('listing_seo_recommendations')
+        .upsert(persistFields, { onConflict: 'parent_asin' })
+    }
 
     return NextResponse.json({
       recommendations: rec,

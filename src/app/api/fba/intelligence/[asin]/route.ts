@@ -83,15 +83,33 @@ export async function GET(
           { status: 200 }
         );
       }
+      // Group by category and apply dynamic cap:
+      // CRITICAL: 5-10 (show all scoring ≥50, min 5, max 10)
+      // UPGRADE/REINFORCE/DEFENDED: top 10 each
+      const criticalAll = stored.filter(k => k.actionType === 'CRITICAL')
+        .sort((a, b) => b.opportunityScore - a.opportunityScore);
+      const criticalCapped = criticalAll.length <= 5
+        ? criticalAll
+        : criticalAll.filter(k => k.opportunityScore >= 50).slice(0, 10).length >= 5
+          ? criticalAll.filter(k => k.opportunityScore >= 50).slice(0, 10)
+          : criticalAll.slice(0, 5);
+
+      const upgradeTop = stored.filter(k => k.actionType === 'UPGRADE')
+        .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+      const reinforceTop = stored.filter(k => k.actionType === 'REINFORCE')
+        .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+      const defendedTop = stored.filter(k => k.actionType === 'DEFENDED')
+        .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+
       result = {
         asin,
         analyzedAt: new Date().toISOString(),
         dataSource: stored[0]?.dataSource ?? 'sqp',
         totalKeywordsAnalyzed: stored.length,
-        topOpportunities: stored.slice(0, 25),
+        topOpportunities: [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop],
         allKeywords: stored,
         summary: {
-          critical: stored.filter(k => k.actionType === 'CRITICAL').length,
+          critical: criticalAll.length,
           upgrade: stored.filter(k => k.actionType === 'UPGRADE').length,
           reinforce: stored.filter(k => k.actionType === 'REINFORCE').length,
           defended: stored.filter(k => k.actionType === 'DEFENDED').length,
