@@ -258,7 +258,7 @@ CRITICAL RULES:
 8. TITLE UPGRADE keywords MUST appear in the title.
 
 AMAZON RULES TO ENFORCE:
-- Title: Max 200 chars, Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC), no promotional phrases, keywords in first 80 chars
+- Title: 150-200 chars (the sweet spot — under 150 gets penalized, over 200 gets truncated in search), Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC), no promotional phrases, keywords in first 80 chars
 - Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit. Max 200 chars each. Plain English.
 - Backend keywords: Space-separated, no commas, no duplicates of title/bullet terms. Output the COMPLETE FULL 250-character keyword string — this means KEEP the existing good keywords AND add new ones to fill the remaining ${kwRemaining} chars. The output must be the ENTIRE replacement string (not just additions). Each word/phrase must appear only ONCE — NEVER repeat. Include a MIX of: device compatibility, use-case terms, seasonal, and common misspellings. HARD LIMIT: exactly 250 characters max total.
 - Description: Use HTML tags (<b>, <br>, <ul>, <li>). Min 150 words. Generic for all variants.
@@ -291,7 +291,7 @@ Do NOT suggest fields irrelevant to this product category.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
-  "recommended_title": "string (the exact new title to paste in, max 200 chars, generic for all variants, includes CRITICAL GAP and TITLE UPGRADE keywords)",
+  "recommended_title": "string (the exact new title to paste in, 150-200 chars target range, generic for all variants, includes CRITICAL GAP and TITLE UPGRADE keywords)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
   "recommended_keywords": "string (the COMPLETE FULL 250-char keyword string — existing good terms + new terms combined, max 250 chars total, prioritizes terms NOT already in title/bullets)",
   "recommended_description": "string (full HTML description, min 150 words, generic for all variants)",

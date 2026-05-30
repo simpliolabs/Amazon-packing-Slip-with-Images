@@ -171,7 +171,7 @@ export function KeywordIntelligencePanel({ asin, data, loading, error, onRefresh
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
-            {f === 'ALL' ? `All (${data.topOpportunities.length})` : f}
+            {f === 'ALL' ? 'All' : f}
           </button>
         ))}
       </div>

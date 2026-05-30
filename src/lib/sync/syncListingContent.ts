@@ -407,8 +407,17 @@ function scoreListingContent(
       const allBulletText = bullets.join(' ').toLowerCase()
       const titleTokens = tokenize(title)
       const bulletTokens = tokenize(allBulletText)
+      // Variant attributes and brand fragments that appear in titles but are NOT
+      // semantic keywords worth repeating in bullets (sizes, colors, brand names)
+      const variantStopWords = new Set([
+        'alpha', 'large', 'small', 'medium', 'regular', 'slim', 'relaxed', 'fitted',
+        'white', 'black', 'ivory', 'blue', 'green', 'red', 'yellow', 'pink',
+        'purple', 'orange', 'brown', 'grey', 'gray', 'navy', 'cream', 'beige',
+        'comfort', 'colors', 'hanes', 'gildan', 'bella', 'canvas', 'fruit',
+        'loom', 'shirt', 'shirts', 'tshirt', 'adult', 'unisex', 'women', 'womens',
+      ])
       // Find title keywords NOT covered in bullets (missed opportunities)
-      const titleOnlyKeywords = [...titleTokens].filter(w => !bulletTokens.has(w) && w.length > 4)
+      const titleOnlyKeywords = [...titleTokens].filter(w => !bulletTokens.has(w) && w.length > 4 && !variantStopWords.has(w))
       if (titleOnlyKeywords.length > 3) {
         bulletScore -= 3
         issues.push({ field: 'bullets', severity: 'info', message: `Bullets are missing ${titleOnlyKeywords.length} keywords from your title (e.g. "${titleOnlyKeywords.slice(0,3).join('", "')}""). Weave these into your bullets — Amazon cross-references title and bullet keywords to determine relevance. Missing overlap = lower ranking for those terms.`, auto_fixable: false })
@@ -453,6 +462,13 @@ function scoreListingContent(
   } else if (kwLen < 200) {
     keywordScore -= 4
     issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords at ${kwLen}/250 chars — ${250 - kwLen} chars still available. Use them for: long-tail device compatibility terms ("for Sony A7 III", "for DJI Mini 3"), seasonal terms ("holiday gift", "back to school"), and common misspellings of your product category.`, auto_fixable: false })
+  }
+
+  // Over-limit check: Amazon silently truncates at 250 bytes
+  const kwByteLen = new TextEncoder().encode(keywords).length
+  if (kwByteLen > 250) {
+    keywordScore -= 5
+    issues.push({ field: 'backend_keywords', severity: 'warning', message: `Backend keywords are ${kwByteLen}/250 bytes — OVER the Amazon limit by ${kwByteLen - 250} bytes. Amazon silently truncates at 250 bytes, so your trailing keywords are being ignored. Trim the least-important terms from the end to fit within 250 bytes.`, auto_fixable: false })
   }
 
   // Commas waste space
