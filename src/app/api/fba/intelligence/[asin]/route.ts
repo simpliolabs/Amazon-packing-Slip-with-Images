@@ -35,11 +35,12 @@ import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { asin: string } }
+  { params }: { params: Promise<{ asin: string }> }
 ) {
   try {
     const supabase = await createAdminClient();
-    const asin = params.asin?.toUpperCase();
+    const { asin: rawAsin } = await params;
+    const asin = rawAsin?.toUpperCase();
 
     if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
       return NextResponse.json({ error: 'Invalid ASIN format' }, { status: 400 });
@@ -130,10 +131,11 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { asin: string } }
+  { params }: { params: Promise<{ asin: string }> }
 ) {
   try {
-    const asin = params.asin?.toUpperCase();
+    const { asin: rawAsin } = await params;
+    const asin = rawAsin?.toUpperCase();
 
     if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
       return NextResponse.json({ error: 'Invalid ASIN format' }, { status: 400 });
