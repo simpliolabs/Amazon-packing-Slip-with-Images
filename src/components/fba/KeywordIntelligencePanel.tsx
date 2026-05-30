@@ -249,3 +249,4 @@ export function KeywordIntelligencePanel({ asin, data, loading, error, onRefresh
     </div>
   )
 }
+// Build trigger: Sat May 30 17:37:36 EDT 2026
