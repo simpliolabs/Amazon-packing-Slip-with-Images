@@ -1,7 +1,9 @@
 /**
  * GET  /api/fba/intelligence/[asin]
  * ─────────────────────────────────────────────────────────────────────────────
- * Returns keyword intelligence for a specific child ASIN.
+ * Returns keyword intelligence for an ASIN.
+ * Accepts both parent and child ASINs — parent ASINs are resolved to
+ * their top child ASIN automatically.
  *
  * Query params:
  *   ?refresh=true   — Force a fresh SQP fetch (ignores cache)
@@ -9,13 +11,14 @@
  *
  * Response shape:
  * {
- *   asin: string,
+ *   asin: string,            // resolved child ASIN
+ *   parentAsin?: string,     // original parent ASIN (if resolved)
  *   analyzedAt: string,
  *   dataSource: 'sqp' | 'jungle_scout' | 'inherited',
  *   totalKeywordsAnalyzed: number,
  *   summary: { critical, upgrade, reinforce, defended, optimized },
- *   topOpportunities: AnalyzedKeyword[],  // top 25
- *   apiUsage: { jungleScout: { callsUsed, budget, percentUsed } },
+ *   topOpportunities: AnalyzedKeyword[],
+ *   apiUsage: { used, limit, remaining, provider },
  *   jungleScoutEnabled: boolean,
  * }
  *
@@ -31,6 +34,65 @@ import { syncKeywordIntelligence } from '@/lib/sync/syncKeywordIntelligence';
 import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 
+// ─── Parent → Child ASIN Resolution ─────────────────────────────────────────
+
+/**
+ * Resolves an ASIN to a child ASIN with listing content.
+ *
+ * Priority:
+ *   1. Direct match in listing_content (already a child ASIN)
+ *   2. Lookup in parent_asin_rollup → top_child_asin
+ *   3. Fallback: first child in listing_content where parent_asin = input
+ *
+ * Returns { childAsin, parentAsin } or null if unresolvable.
+ */
+async function resolveToChildAsin(
+  inputAsin: string,
+  supabase: Awaited<ReturnType<typeof createAdminClient>>
+): Promise<{ childAsin: string; parentAsin: string | null } | null> {
+  // 1. Direct match — input is already a child ASIN in listing_content
+  const { data: directMatch } = await supabase
+    .from('listing_content')
+    .select('asin, parent_asin')
+    .eq('asin', inputAsin)
+    .single();
+
+  const dm = directMatch as { asin: string; parent_asin: string | null } | null;
+  if (dm) {
+    return { childAsin: dm.asin, parentAsin: dm.parent_asin };
+  }
+
+  // 2. Input is a parent ASIN — check parent_asin_rollup for top_child_asin
+  const { data: rollup } = await supabase
+    .from('parent_asin_rollup')
+    .select('top_child_asin')
+    .eq('parent_asin', inputAsin)
+    .single();
+
+  const ru = rollup as { top_child_asin: string | null } | null;
+  if (ru?.top_child_asin) {
+    console.log(`[intelligence] Resolved parent ${inputAsin} → child ${ru.top_child_asin} (via rollup)`);
+    return { childAsin: ru.top_child_asin, parentAsin: inputAsin };
+  }
+
+  // 3. Fallback: find any child in listing_content with this parent_asin
+  const { data: child } = await supabase
+    .from('listing_content')
+    .select('asin')
+    .eq('parent_asin', inputAsin)
+    .not('title', 'is', null)
+    .limit(1)
+    .single();
+
+  const ch = child as { asin: string } | null;
+  if (ch) {
+    console.log(`[intelligence] Resolved parent ${inputAsin} → child ${ch.asin} (via listing_content fallback)`);
+    return { childAsin: ch.asin, parentAsin: inputAsin };
+  }
+
+  return null;
+}
+
 // ── GET ───────────────────────────────────────────────────────────────────────
 
 export async function GET(
@@ -40,9 +102,9 @@ export async function GET(
   try {
     const supabase = await createAdminClient();
     const { asin: rawAsin } = await params;
-    const asin = rawAsin?.toUpperCase();
+    const inputAsin = rawAsin?.toUpperCase();
 
-    if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
+    if (!inputAsin || !/^[A-Z0-9]{10}$/.test(inputAsin)) {
       return NextResponse.json({ error: 'Invalid ASIN format' }, { status: 400 });
     }
 
@@ -50,29 +112,28 @@ export async function GET(
     const forceRefresh = searchParams.get('refresh') === 'true';
     const storedOnly = searchParams.get('stored') === 'true';
 
-    // Verify the ASIN exists in our catalog
-    const { data: catalogEntry } = await supabase
-      .from('listing_content')
-      .select('asin, title')
-      .eq('asin', asin)
-      .single();
+    // Resolve parent → child ASIN
+    const resolved = await resolveToChildAsin(inputAsin, supabase);
 
-    if (!catalogEntry) {
+    if (!resolved) {
       return NextResponse.json(
-        { error: `ASIN ${asin} not found in catalog. Run a listing sync first.` },
+        { error: `ASIN ${inputAsin} not found in catalog. Run a listing sync first.` },
         { status: 404 }
       );
     }
+
+    const { childAsin, parentAsin } = resolved;
 
     let result;
 
     if (storedOnly) {
       // Fast path: return stored analysis without any API calls
-      const stored = await getStoredAnalysis(asin, 100);
+      const stored = await getStoredAnalysis(childAsin, 100);
       if (!stored || stored.length === 0) {
         return NextResponse.json(
           {
-            asin,
+            asin: childAsin,
+            parentAsin,
             analyzedAt: null,
             dataSource: null,
             totalKeywordsAnalyzed: 0,
@@ -102,7 +163,8 @@ export async function GET(
         .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
 
       result = {
-        asin,
+        asin: childAsin,
+        parentAsin,
         analyzedAt: new Date().toISOString(),
         dataSource: stored[0]?.dataSource ?? 'sqp',
         totalKeywordsAnalyzed: stored.length,
@@ -117,12 +179,17 @@ export async function GET(
         },
       };
     } else {
-      // Full sync path
-      result = await syncKeywordIntelligence(asin, {
+      // Full sync path — use resolved child ASIN
+      result = await syncKeywordIntelligence(childAsin, {
         forceRefresh,
         includeJungleScout: true,
         useStoredAnalysis: !forceRefresh,
       });
+
+      // Attach parent ASIN to result
+      if (parentAsin) {
+        result = { ...result, parentAsin };
+      }
     }
 
     // Get API usage stats for the UI meter
@@ -159,22 +226,36 @@ export async function POST(
   { params }: { params: Promise<{ asin: string }> }
 ) {
   try {
+    const supabase = await createAdminClient();
     const { asin: rawAsin } = await params;
-    const asin = rawAsin?.toUpperCase();
+    const inputAsin = rawAsin?.toUpperCase();
 
-    if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
+    if (!inputAsin || !/^[A-Z0-9]{10}$/.test(inputAsin)) {
       return NextResponse.json({ error: 'Invalid ASIN format' }, { status: 400 });
     }
 
-    // Fire and forget — run sync in background
-    syncKeywordIntelligence(asin, { forceRefresh: true }).catch(err => {
-      console.error(`[POST /api/fba/intelligence/${asin}] Background sync error:`, err);
+    // Resolve parent → child ASIN
+    const resolved = await resolveToChildAsin(inputAsin, supabase);
+
+    if (!resolved) {
+      return NextResponse.json(
+        { error: `ASIN ${inputAsin} not found in catalog. Run a listing sync first.` },
+        { status: 404 }
+      );
+    }
+
+    const { childAsin } = resolved;
+
+    // Fire and forget — run sync in background using resolved child ASIN
+    syncKeywordIntelligence(childAsin, { forceRefresh: true }).catch(err => {
+      console.error(`[POST /api/fba/intelligence/${inputAsin}] Background sync error (child: ${childAsin}):`, err);
     });
 
     return NextResponse.json({
       status: 'syncing',
-      asin,
-      message: `Keyword intelligence sync started for ${asin}. SQP report takes 5–8 minutes to process. The panel will auto-update when ready.`,
+      asin: childAsin,
+      inputAsin,
+      message: `Keyword intelligence sync started for ${childAsin}${inputAsin !== childAsin ? ` (resolved from parent ${inputAsin})` : ''}. SQP report takes 5–8 minutes to process. The panel will auto-update when ready.`,
     });
 
   } catch (error) {
