@@ -376,12 +376,22 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       // Log but don't fail — the AI may have used synonyms or paraphrased
     }
 
+    // Post-generation enforcement: truncate backend keywords to Amazon's 250-char hard limit
+    let safeKeywords = (parsed.recommended_keywords || '').trim()
+    if (safeKeywords.length > 250) {
+      // Truncate at the last full word boundary within 250 chars
+      const truncated = safeKeywords.slice(0, 250)
+      const lastSpace = truncated.lastIndexOf(' ')
+      safeKeywords = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+      console.warn(`[AI Recs] Backend keywords truncated from ${parsed.recommended_keywords!.length} to ${safeKeywords.length} chars (250 limit)`)
+    }
+
     // Build the full response object
     const rec: AiRecommendations = {
       parent_asin,
       recommended_title: parsed.recommended_title || '',
       recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
-      recommended_keywords: parsed.recommended_keywords || '',
+      recommended_keywords: safeKeywords,
       recommended_description: parsed.recommended_description || '',
       variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
       cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],

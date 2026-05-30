@@ -2780,111 +2780,97 @@ export default function FBAIntelligencePage() {
                                 <p className="text-xs text-gray-500">Click &ldquo;Run AI Audit&rdquo; below to get copy-paste-ready SEO improvements from an Amazon expert AI.</p>
                               </div>
                             </div>
-                          ) : !selectedRecCategory ? (
-                            <div className="flex flex-col items-center justify-center py-16 gap-4">
-                              <div className="text-3xl">👈</div>
-                              <div className="text-center">
-                                <p className="text-sm font-semibold text-gray-800 mb-1">Select a category on the left</p>
-                                <p className="text-xs text-gray-500">Click on Title, Bullets, Keywords, or Description to see the AI recommendation for that field.</p>
-                              </div>
-                            </div>
                           ) : (() => {
-                            // Map left-side category keys to recommendation fields
-                            const catKey = selectedRecCategory
-                            if (catKey === 'title') return (
-                              <div className="space-y-4">
-                                <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title?.length || 0} chars)</span></span>
-                                    <button onClick={() => copyToClipboard(rec.recommended_title)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
-                                  </div>
-                                  <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
-                                </div>
-                              </div>
-                            )
-                            if (catKey === 'bullets') return (
-                              <div className="space-y-4">
-                                <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
-                                    <button onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
-                                  </div>
-                                  <div className="space-y-2">
-                                    {rec.recommended_bullets.map((bullet, bi) => (
-                                      <div key={bi} className="flex items-start gap-2">
-                                        <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
-                                        <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
-                                        <button onClick={() => copyToClipboard(bullet)} className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0">Copy</button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-                            )
-                            if (catKey === 'backend_keywords') return (
-                              <div className="space-y-4">
-                                <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className="text-gray-400 font-normal">({rec.recommended_keywords?.length || 0} chars)</span></span>
-                                    <button onClick={() => copyToClipboard(rec.recommended_keywords)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
-                                  </div>
-                                  <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
-                                </div>
-                              </div>
-                            )
-                            if (catKey === 'description') return (
-                              <div className="space-y-4">
-                                <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
-                                    <button onClick={() => copyToClipboard(rec.recommended_description)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy HTML</button>
-                                  </div>
-                                  <div className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none" dangerouslySetInnerHTML={{ __html: rec.recommended_description }} />
-                                </div>
-                              </div>
-                            )
-                            if (catKey === 'child_overrides' && rec.variant_corrections && rec.variant_corrections.length > 0) return (
-                              <div className="space-y-4">
-                                <div className="bg-white rounded-lg border border-violet-200 p-3">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="text-xs font-semibold text-gray-700">⚡ Variant Conflict Corrections ({rec.variant_corrections.length})</span>
-                                  </div>
-                                  <div className="space-y-3">
-                                    {rec.variant_corrections.map((correction, ci) => (
-                                      <div key={ci} className="border border-purple-200 rounded-lg p-2.5 bg-purple-50">
-                                        <div className="flex items-center gap-2 mb-1.5">
-                                          <span className="text-[10px] font-mono font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{correction.sku}</span>
-                                          <span className="text-[10px] font-semibold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">{correction.field}</span>
-                                        </div>
-                                        <div className="space-y-1.5">
-                                          <div className="flex items-start gap-1">
-                                            <span className="text-[10px] text-red-500 font-bold shrink-0 mt-0.5">✗</span>
-                                            <div className="text-[11px] text-red-700 bg-red-50 px-1.5 py-1 rounded flex-1 line-through">{correction.current.slice(0, 150)}{correction.current.length > 150 ? '...' : ''}</div>
-                                          </div>
-                                          <div className="flex items-start gap-1">
-                                            <span className="text-[10px] text-green-500 font-bold shrink-0 mt-0.5">✓</span>
-                                            <div className="text-[11px] text-green-700 bg-green-50 px-1.5 py-1 rounded flex-1">{correction.replace_with.slice(0, 150)}{correction.replace_with.length > 150 ? '...' : ''}</div>
-                                          </div>
-                                          <div className="flex items-start gap-1">
-                                            <span className="text-[10px] text-gray-400 shrink-0 mt-0.5">ℹ</span>
-                                            <span className="text-[10px] text-gray-500 italic">{correction.reason}</span>
-                                          </div>
-                                          <button onClick={() => copyToClipboard(correction.replace_with)} className="text-[10px] bg-green-100 hover:bg-green-200 text-green-700 px-2 py-0.5 rounded transition-colors mt-1">Copy Corrected Text</button>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-                            )
-                            // For categories without a matching rec (images, aplus)
+                            // Show ALL recommendation sections at once (scrollable)
+                            // Highlight the selected category if one is clicked on the left
+                            const highlight = (key: string) => selectedRecCategory === key ? 'ring-2 ring-violet-400 bg-violet-50/30' : 'bg-white'
                             return (
-                              <div className="flex flex-col items-center justify-center py-16 gap-4">
-                                <div className="text-3xl">💬</div>
-                                <div className="text-center">
-                                  <p className="text-sm font-semibold text-gray-800 mb-1">No AI recommendation for this category</p>
-                                  <p className="text-xs text-gray-500">AI recommendations are available for Title, Bullets, Keywords, Description, and Variant Conflicts.</p>
-                                </div>
+                              <div className="space-y-4">
+                                {/* Title */}
+                                {rec.recommended_title && (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('title')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">📝 Recommended Title <span className="text-gray-400 font-normal">({rec.recommended_title.length} chars)</span></span>
+                                      <button onClick={() => copyToClipboard(rec.recommended_title)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                    </div>
+                                    <p className="text-xs text-gray-800 leading-relaxed">{rec.recommended_title}</p>
+                                  </div>
+                                )}
+
+                                {/* Bullets */}
+                                {rec.recommended_bullets && rec.recommended_bullets.length > 0 && (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('bullets')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">• Recommended Bullets</span>
+                                      <button onClick={() => copyToClipboard(rec.recommended_bullets.join('\n\n'))} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy All</button>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {rec.recommended_bullets.map((bullet, bi) => (
+                                        <div key={bi} className="flex items-start gap-2">
+                                          <span className="text-[10px] text-violet-500 font-bold mt-0.5 shrink-0">{bi + 1}.</span>
+                                          <p className="text-xs text-gray-800 leading-relaxed flex-1">{bullet}</p>
+                                          <button onClick={() => copyToClipboard(bullet)} className="text-[10px] text-violet-400 hover:text-violet-700 shrink-0">Copy</button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Backend Keywords */}
+                                {rec.recommended_keywords && (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('backend_keywords')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className={`font-normal ${(rec.recommended_keywords?.length || 0) > 250 ? 'text-red-500' : 'text-gray-400'}`}>({rec.recommended_keywords.length} chars)</span></span>
+                                      <button onClick={() => copyToClipboard(rec.recommended_keywords)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                    </div>
+                                    <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
+                                  </div>
+                                )}
+
+                                {/* Description */}
+                                {rec.recommended_description && (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('description')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">📄 Recommended Description</span>
+                                      <button onClick={() => copyToClipboard(rec.recommended_description)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy HTML</button>
+                                    </div>
+                                    <div className="text-xs text-gray-800 leading-relaxed prose prose-xs max-w-none" dangerouslySetInnerHTML={{ __html: rec.recommended_description }} />
+                                  </div>
+                                )}
+
+                                {/* Variant Corrections */}
+                                {rec.variant_corrections && rec.variant_corrections.length > 0 && (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('child_overrides')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">⚡ Variant Conflict Corrections ({rec.variant_corrections.length})</span>
+                                    </div>
+                                    <div className="space-y-3">
+                                      {rec.variant_corrections.map((correction, ci) => (
+                                        <div key={ci} className="border border-purple-200 rounded-lg p-2.5 bg-purple-50">
+                                          <div className="flex items-center gap-2 mb-1.5">
+                                            <span className="text-[10px] font-mono font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{correction.sku}</span>
+                                            <span className="text-[10px] font-semibold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">{correction.field}</span>
+                                          </div>
+                                          <div className="space-y-1.5">
+                                            <div className="flex items-start gap-1">
+                                              <span className="text-[10px] text-red-500 font-bold shrink-0 mt-0.5">✗</span>
+                                              <div className="text-[11px] text-red-700 bg-red-50 px-1.5 py-1 rounded flex-1 line-through">{correction.current.slice(0, 150)}{correction.current.length > 150 ? '...' : ''}</div>
+                                            </div>
+                                            <div className="flex items-start gap-1">
+                                              <span className="text-[10px] text-green-500 font-bold shrink-0 mt-0.5">✓</span>
+                                              <div className="text-[11px] text-green-700 bg-green-50 px-1.5 py-1 rounded flex-1">{correction.replace_with.slice(0, 150)}{correction.replace_with.length > 150 ? '...' : ''}</div>
+                                            </div>
+                                            <div className="flex items-start gap-1">
+                                              <span className="text-[10px] text-gray-400 shrink-0 mt-0.5">ℹ</span>
+                                              <span className="text-[10px] text-gray-500 italic">{correction.reason}</span>
+                                            </div>
+                                            <button onClick={() => copyToClipboard(correction.replace_with)} className="text-[10px] bg-green-100 hover:bg-green-200 text-green-700 px-2 py-0.5 rounded transition-colors mt-1">Copy Corrected Text</button>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             )
                           })()}
