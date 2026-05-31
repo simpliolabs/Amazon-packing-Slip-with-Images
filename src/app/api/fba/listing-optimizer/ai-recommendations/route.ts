@@ -164,6 +164,7 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
   const contextBlock = `
 KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
 Data source: ${analysis[0].dataSource === 'sqp' ? 'Amazon Brand Analytics (real sales data)' : analysis[0].dataSource === 'jungle_scout' ? 'Jungle Scout API' : 'Inherited from sibling products'}
+⚡ SORT ORDER: Keywords within each section are sorted by OPPORTUNITY SCORE (highest first). The first keyword listed = highest priority = best chance to rank + convert.
 
 🔴 CRITICAL GAPS — These high-opportunity keywords are MISSING from title AND bullets.
 You MUST include them in the recommended title and/or bullets:
@@ -182,12 +183,15 @@ Keep them in your recommendations:
 ${defended.length > 0 ? defended.map(formatKw).join('\n') : '  (none)'}
 
 HARD RULES FOR KEYWORD INTEGRATION:
-1. TITLE: Include ONLY the top 2-3 highest-volume keywords. The title MUST be 80-150 characters. NEVER exceed 150 chars.
+IMPORTANT: Keywords above are listed in ORDER OF OPPORTUNITY (best first). Opportunity score factors in search volume, competition, rankability, and conversion potential. The #1 keyword in each section is the HIGHEST PRIORITY — not necessarily the highest raw volume.
+
+1. TITLE: Include ONLY the top 2-3 keywords BY OPPORTUNITY (the first 2-3 listed under CRITICAL or UPGRADE). Front-load the #1 opportunity keyword in the first 5 words after the brand name. The title MUST be 80-150 characters. NEVER exceed 150 chars.
 2. BULLETS: Place remaining CRITICAL and UPGRADE keywords in bullets 1-3. Each bullet ≤200 chars.
 3. BACKEND KEYWORDS: All keywords that don't fit naturally in title/bullets go here.
 4. Do NOT sacrifice readability — keywords must flow naturally in the copy.
 5. Do NOT stuff all keywords into the title. Distribute intelligently: title gets 2-3, bullets get 3-5, backend gets the rest.
-6. TITLE CHARACTER LIMIT IS NON-NEGOTIABLE: Count your characters. If title exceeds 150 chars, remove lower-volume keywords and push them to bullets.
+6. TITLE CHARACTER LIMIT IS NON-NEGOTIABLE: Count your characters. If title exceeds 150 chars, remove lower-opportunity keywords and push them to bullets.
+7. If a keyword IS the product name or brand-specific term (e.g. 'Later Gator tshirt'), it MUST be the primary title keyword regardless of raw volume — brand/product-specific terms have the highest conversion rate.
 `.trim()
 
   return {
