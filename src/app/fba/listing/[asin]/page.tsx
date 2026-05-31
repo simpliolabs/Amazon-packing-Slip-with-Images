@@ -121,6 +121,7 @@ export default function ListingDetailPage() {
   const [loading, setLoading] = useState(true)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
+  const [aiProgress, setAiProgress] = useState<string>('')
   const [copied, setCopied] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['action-plan', 'placement', 'issues']))
 
@@ -180,10 +181,11 @@ export default function ListingDetailPage() {
     })()
   }, [score?.top_child_asin])
 
-  // Generate AI recommendations
+  // Generate AI recommendations (streaming)
   const generateAiRecs = useCallback(async () => {
     setAiLoading(true)
     setAiError(null)
+    setAiProgress('Starting AI audit...')
     try {
       const resp = await fetch('/api/fba/listing-optimizer/ai-recommendations', {
         method: 'POST',
@@ -191,12 +193,61 @@ export default function ListingDetailPage() {
         body: JSON.stringify({ parent_asin: asin }),
       })
       if (!resp.ok) throw new Error('AI generation failed')
-      const data = await resp.json()
-      if (data.recommendations) setAiRecs(data.recommendations)
+
+      // Handle NDJSON streaming response
+      const reader = resp.body?.getReader()
+      if (!reader) throw new Error('No response stream')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finalResult: { recommendations?: AiRecommendations } | null = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const msg = JSON.parse(line)
+            if (msg.type === 'progress') {
+              setAiProgress(msg.message || 'Processing...')
+            } else if (msg.type === 'result') {
+              finalResult = msg
+            } else if (msg.type === 'error') {
+              throw new Error(msg.error || 'AI generation failed')
+            }
+          } catch (parseErr) {
+            // Skip malformed lines
+            if (parseErr instanceof Error && parseErr.message !== 'AI generation failed' && !parseErr.message.includes('AI returned')) continue
+            throw parseErr
+          }
+        }
+      }
+
+      // Process any remaining buffer
+      if (buffer.trim()) {
+        try {
+          const msg = JSON.parse(buffer)
+          if (msg.type === 'result') finalResult = msg
+          else if (msg.type === 'error') throw new Error(msg.error)
+        } catch { /* ignore */ }
+      }
+
+      if (finalResult?.recommendations) {
+        setAiRecs(finalResult.recommendations)
+      } else {
+        throw new Error('No recommendations received')
+      }
     } catch (e: unknown) {
       setAiError(e instanceof Error ? e.message : 'Failed')
     }
     setAiLoading(false)
+    setAiProgress('')
   }, [asin])
 
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
@@ -478,7 +529,7 @@ export default function ListingDetailPage() {
             {aiLoading && (
               <div className="bg-violet-50 border border-violet-200 rounded-lg p-6 text-center">
                 <div className="animate-spin w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full mx-auto mb-2" />
-                <p className="text-sm text-violet-600">Generating keyword placement plan...</p>
+                <p className="text-sm text-violet-600">{aiProgress || 'Generating keyword placement plan...'}</p>
               </div>
             )}
             {placementGroups && (

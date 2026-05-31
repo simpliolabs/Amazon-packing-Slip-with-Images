@@ -1066,7 +1066,7 @@ export default function FBAIntelligencePage() {
     } catch { /* silent — just means no cached rec */ }
   }, [aiRecs])
 
-  // Generate fresh AI recommendations (POST — always regenerates)
+  // Generate fresh AI recommendations (POST — streaming NDJSON)
   const fetchAiRecs = useCallback(async (parentAsin: string) => {
     setAiLoadingSet(prev => new Set(prev).add(parentAsin))
     setAiError(prev => { const n = { ...prev }; delete n[parentAsin]; return n })
@@ -1076,13 +1076,45 @@ export default function FBAIntelligencePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ parent_asin: parentAsin }),
       })
-      const json = await resp.json()
-      if (json.recommendations) {
-        setAiRecs(prev => ({ ...prev, [parentAsin]: json.recommendations }))
+      if (!resp.ok) throw new Error('AI generation failed')
+
+      // Handle NDJSON streaming response
+      const reader = resp.body?.getReader()
+      if (!reader) throw new Error('No response stream')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finalResult: Record<string, unknown> | null = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const msg = JSON.parse(line)
+            if (msg.type === 'result') finalResult = msg
+            else if (msg.type === 'error') throw new Error(msg.error || 'AI generation failed')
+          } catch (parseErr) {
+            if (parseErr instanceof Error && (parseErr.message.includes('AI') || parseErr.message.includes('generation'))) throw parseErr
+          }
+        }
+      }
+      if (buffer.trim()) {
+        try {
+          const msg = JSON.parse(buffer)
+          if (msg.type === 'result') finalResult = msg
+          else if (msg.type === 'error') throw new Error(msg.error)
+        } catch { /* ignore */ }
+      }
+
+      if (finalResult && (finalResult as { recommendations?: AiRecommendations }).recommendations) {
+        setAiRecs(prev => ({ ...prev, [parentAsin]: (finalResult as { recommendations: AiRecommendations }).recommendations }))
       } else {
-        const errMsg = json.error || 'Unknown error from AI route'
-        console.error('[AI Recs] Error:', errMsg)
-        setAiError(prev => ({ ...prev, [parentAsin]: errMsg }))
+        throw new Error('No recommendations received')
       }
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e)

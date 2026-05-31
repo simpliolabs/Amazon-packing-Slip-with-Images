@@ -1,17 +1,17 @@
 /**
  * POST /api/fba/listing-optimizer/ai-recommendations
  * ─────────────────────────────────────────────────────────────────────────────
- * V3: Generates AI-powered SEO recommendations that correctly follow Amazon's
- * parent/child listing architecture:
+ * V4: Uses OpenAI streaming to prevent proxy timeouts.
+ * Returns a streaming response with progress updates, then the final JSON.
  *
- *   SHARED (parent-level): title template, bullets, description
- *   PER-CHILD: backend keywords (unique per variant)
+ * The response format is newline-delimited JSON (NDJSON):
+ *   {"type":"progress","message":"Generating recommendations..."}
+ *   {"type":"progress","message":"Processing keywords..."}
+ *   {"type":"result","recommendations":{...},"keywordIntelligenceUsed":true,"missedCriticalKeywords":[]}
  *
- * Uses gpt-4.1-mini via the OpenAI-compatible API.
- * Results are stored in listing_seo_recommendations for instant re-display.
+ * The client should read the stream and use the last "result" line.
  *
  * Body: { parent_asin: string }
- * Returns: { recommendations: AiRecommendations }
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -85,26 +85,26 @@ export interface KeywordReconciliation {
   keyword: string
   action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'
   search_volume: number
-  placed_in: string[]           // e.g. ["title", "bullet_2", "backend_keywords"]
-  exact_text: string            // The exact phrase/sentence where it was placed
-  why: string                   // Why it was placed there
+  placed_in: string[]
+  exact_text: string
+  why: string
 }
 
 export interface AplusModuleAction {
-  module_type: string       // e.g. "Standard Comparison Chart"
+  module_type: string
   action: 'ADD' | 'EDIT' | 'KEEP'
-  content_brief: string     // What to put in this module
+  content_brief: string
   position: number
 }
 
 export interface ActionPlanItem {
-  element: string           // e.g. "title", "bullet_1", "backend_keywords", "description", "aplus_modules", "brand_story", "product_details", "images"
+  element: string
   level: 'parent' | 'per_child'
   verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP'
   priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
   current_status: string
   instruction: string
-  replacement_content?: string | string[] // The actual fix: copy-paste ready text. String for title/description, string[] for per-child keywords or bullets
+  replacement_content?: string | string[]
   seller_central_path?: string
   notes?: string
   aplus_modules?: AplusModuleAction[]
@@ -114,14 +114,14 @@ export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
   recommended_bullets: string[]
-  recommended_keywords: string          // Legacy: first child's keywords (for backward compat)
-  per_child_keywords: PerChildKeywords[] // V3: unique keywords per child
+  recommended_keywords: string
+  per_child_keywords: PerChildKeywords[]
   recommended_description: string
   variant_corrections: VariantCorrection[]
   cannibalization_warnings: CannibalizationWarning[]
   product_details_improvements: ProductDetailImprovement[]
-  keyword_reconciliation: KeywordReconciliation[]  // V4: per-keyword placement map
-  action_plan: ActionPlanItem[]          // V5: comprehensive action plan
+  keyword_reconciliation: KeywordReconciliation[]
+  action_plan: ActionPlanItem[]
   generated_at: string
   keyword_opportunities_used?: number
 }
@@ -200,7 +200,7 @@ IMPORTANT: Keywords above are listed in ORDER OF OPPORTUNITY (best first). Oppor
   }
 }
 
-// ─── POST Handler ─────────────────────────────────────────────────────────────
+// ─── POST Handler (Streaming) ────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
@@ -295,7 +295,7 @@ Generate optimized content following this architecture exactly.
 TITLE RULES (STRICT):
 - HARD LIMIT: 80-150 characters. Target 100-120 chars. NEVER exceed 150 chars.
 - Amazon recommends 80 chars for mobile. Anything over 150 gets truncated on mobile and may suppress the listing.
-- Include ONLY the top 2-3 highest-volume keywords from keyword intelligence. Push remaining keywords to bullets and backend.
+- Include ONLY the top 2-3 highest-opportunity keywords from keyword intelligence. Push remaining keywords to bullets and backend.
 - Title Case (capitalize first letter of each major word)
 - NO ALL CAPS words except recognized acronyms (e.g., UHS-I, SDHC, USB, LED, FBA)
 - No promotional phrases ("Best Seller", "Free Shipping")
@@ -392,8 +392,8 @@ This is the MOST IMPORTANT part. For every CRITICAL and UPGRADE keyword from the
 This lets the seller see at a glance: keyword → exact placement → copy-paste ready text.
 
 KEYWORD DISTRIBUTION RULES FOR RECONCILIATION:
-- Title: ONLY top 2-3 keywords by search volume. Do NOT put more than 3 keywords in the title.
-- Bullets 1-3: Next 3-5 keywords by volume. Each bullet should target 1-2 keywords naturally.
+- Title: ONLY top 2-3 keywords by OPPORTUNITY SCORE. Do NOT put more than 3 keywords in the title.
+- Bullets 1-3: Next 3-5 keywords by opportunity. Each bullet should target 1-2 keywords naturally.
 - Backend keywords: All remaining keywords that don't fit naturally in title/bullets.
 - If a keyword could NOT be naturally placed in title or bullets, place it in backend_keywords.
 Include ALL keywords from the CRITICAL GAPS and TITLE UPGRADES sections — do not skip any.
@@ -470,149 +470,203 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
 
     const openai = getOpenAI()
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: listingContext },
-      ],
-      temperature: 0.3,
-      max_tokens: 16000,
-    })
+    // ─── Use streaming to prevent proxy timeout ─────────────────────────────
+    // We stream the OpenAI response and forward progress to the client via NDJSON.
+    // This keeps the HTTP connection alive even if generation takes 90-120s.
 
-    const rawContent = completion.choices[0]?.message?.content || ''
+    const encoder = new TextEncoder()
 
-    // Parse the JSON response
-    let parsed: {
-      recommended_title: string
-      recommended_bullets: string[]
-      per_child_keywords?: { sku: string; asin: string; keywords: string }[]
-      recommended_keywords?: string  // Legacy fallback
-      recommended_description: string
-      variant_corrections?: VariantCorrection[]
-      cannibalization_warnings?: CannibalizationWarning[]
-      product_details_improvements?: ProductDetailImprovement[]
-      keyword_reconciliation?: KeywordReconciliation[]
-      action_plan?: ActionPlanItem[]
-    }
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          // Send initial progress
+          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Analyzing listing content...' }) + '\n'))
 
-    try {
-      const cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim()
-      parsed = JSON.parse(cleaned)
-    } catch {
-      console.error('[AI Recs] Failed to parse LLM response:', rawContent.slice(0, 500))
-      return NextResponse.json({ error: 'AI returned invalid JSON. Please try again.' }, { status: 500 })
-    }
+          const completion = await openai.chat.completions.create({
+            model: 'gpt-4.1-mini',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: listingContext },
+            ],
+            temperature: 0.3,
+            max_tokens: 16000,
+            stream: true,
+          })
 
-    // Post-generation validation: verify CRITICAL keywords were included
-    const criticalKeywords = (await getStoredAnalysis(children[0]?.asin, 10))
-      ?.filter(k => k.actionType === 'CRITICAL')
-      .map(k => k.keyword) ?? []
+          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'AI is generating recommendations...' }) + '\n'))
 
-    const titleAndBullets = [
-      parsed.recommended_title,
-      ...(parsed.recommended_bullets ?? []),
-    ].join(' ').toLowerCase()
+          let rawContent = ''
+          let chunkCount = 0
 
-    const missedCritical = criticalKeywords.filter(kw =>
-      !titleAndBullets.includes(kw.toLowerCase())
-    )
+          for await (const chunk of completion) {
+            const delta = chunk.choices[0]?.delta?.content || ''
+            rawContent += delta
+            chunkCount++
 
-    if (missedCritical.length > 0) {
-      console.warn(
-        `[AI Recs] V3 validation: AI missed ${missedCritical.length} CRITICAL keywords: ${missedCritical.join(', ')}`
-      )
-    }
-
-    // Post-generation enforcement: truncate each child's backend keywords to 250 chars
-    const perChildKeywords: PerChildKeywords[] = (parsed.per_child_keywords || []).map(pck => {
-      let kw = (pck.keywords || '').trim()
-      if (kw.length > 250) {
-        const truncated = kw.slice(0, 250)
-        const lastSpace = truncated.lastIndexOf(' ')
-        kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
-        console.warn(`[AI Recs] Per-child keywords for ${pck.sku} truncated from ${pck.keywords.length} to ${kw.length} chars`)
-      }
-      return { sku: pck.sku, asin: pck.asin, keywords: kw }
-    })
-
-    // Legacy fallback: if AI returned old-style single string, use it
-    const legacyKeywords = perChildKeywords.length > 0
-      ? perChildKeywords[0].keywords
-      : (() => {
-          let kw = (parsed.recommended_keywords || '').trim()
-          if (kw.length > 250) {
-            const truncated = kw.slice(0, 250)
-            const lastSpace = truncated.lastIndexOf(' ')
-            kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+            // Send periodic progress updates to keep connection alive
+            if (chunkCount % 50 === 0) {
+              const pctEstimate = Math.min(90, Math.round((rawContent.length / 12000) * 100))
+              controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: `Generating... ${pctEstimate}% complete`, chars: rawContent.length }) + '\n'))
+            }
           }
-          return kw
-        })()
 
-    // Build the full response object
-    const keywordReconciliation: KeywordReconciliation[] = Array.isArray(parsed.keyword_reconciliation)
-      ? parsed.keyword_reconciliation.map(kr => ({
-          keyword: kr.keyword || '',
-          action_type: kr.action_type as KeywordReconciliation['action_type'] || 'CRITICAL',
-          search_volume: kr.search_volume || 0,
-          placed_in: Array.isArray(kr.placed_in) ? kr.placed_in : [],
-          exact_text: kr.exact_text || '',
-          why: kr.why || '',
-        }))
-      : []
+          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Parsing AI response...' }) + '\n'))
 
-    const rec: AiRecommendations = {
-      parent_asin,
-      recommended_title: parsed.recommended_title || '',
-      recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
-      recommended_keywords: legacyKeywords,
-      per_child_keywords: perChildKeywords,
-      recommended_description: parsed.recommended_description || '',
-      variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
-      cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
-      product_details_improvements: Array.isArray(parsed.product_details_improvements) ? parsed.product_details_improvements.slice(0, 10) : [],
-      keyword_reconciliation: keywordReconciliation,
-      action_plan: Array.isArray(parsed.action_plan) ? parsed.action_plan : [],
-      generated_at: new Date().toISOString(),
-      keyword_opportunities_used: opportunitiesUsed,
-    }
+          // Parse the JSON response
+          let parsed: {
+            recommended_title: string
+            recommended_bullets: string[]
+            per_child_keywords?: { sku: string; asin: string; keywords: string }[]
+            recommended_keywords?: string
+            recommended_description: string
+            variant_corrections?: VariantCorrection[]
+            cannibalization_warnings?: CannibalizationWarning[]
+            product_details_improvements?: ProductDetailImprovement[]
+            keyword_reconciliation?: KeywordReconciliation[]
+            action_plan?: ActionPlanItem[]
+          }
 
-    // Store in listing_seo_recommendations
-    // The DB may not have per_child_keywords column yet, so we serialize it into recommended_keywords as JSON
-    const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_reconciliation: kwRecon, action_plan: actionPlan, keyword_opportunities_used, ...persistFields } = rec
+          try {
+            const cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim()
+            parsed = JSON.parse(cleaned)
+          } catch {
+            console.error('[AI Recs] Failed to parse LLM response:', rawContent.slice(0, 500))
+            controller.enqueue(encoder.encode(JSON.stringify({ type: 'error', error: 'AI returned invalid JSON. Please try again.' }) + '\n'))
+            controller.close()
+            return
+          }
 
-    // Serialize per_child_keywords as JSON string into recommended_keywords for DB storage
-    const dbPayload: Record<string, unknown> = {
-      ...persistFields,
-      // Store per_child_keywords as a JSON-encoded string in recommended_keywords
-      // The UI will try JSON.parse() first; if it fails, treat as legacy string
-      recommended_keywords: JSON.stringify(perChildKeywords),
-      cannibalization_warnings,
-      product_details_improvements,
-      keyword_reconciliation: kwRecon,
-      action_plan: actionPlan,
-    }
+          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Validating keywords...' }) + '\n'))
 
-    const { error: upsertErr } = await supabase
-      .from('listing_seo_recommendations')
-      .upsert(dbPayload, { onConflict: 'parent_asin' })
+          // Post-generation validation: verify CRITICAL keywords were included
+          const criticalKeywords = (await getStoredAnalysis(children[0]?.asin, 10))
+            ?.filter(k => k.actionType === 'CRITICAL')
+            .map(k => k.keyword) ?? []
 
-    if (upsertErr) {
-      // Likely missing columns — retry with only the original fields
-      console.warn('[AI Recs] Full upsert failed, retrying without new fields:', upsertErr.message)
-      const fallbackPayload = {
-        ...persistFields,
-        recommended_keywords: JSON.stringify(perChildKeywords),
-      }
-      await supabase
-        .from('listing_seo_recommendations')
-        .upsert(fallbackPayload, { onConflict: 'parent_asin' })
-    }
+          const titleAndBullets = [
+            parsed.recommended_title,
+            ...(parsed.recommended_bullets ?? []),
+          ].join(' ').toLowerCase()
 
-    return NextResponse.json({
-      recommendations: rec,
-      keywordIntelligenceUsed: opportunitiesUsed > 0,
-      missedCriticalKeywords: missedCritical,
+          const missedCritical = criticalKeywords.filter(kw =>
+            !titleAndBullets.includes(kw.toLowerCase())
+          )
+
+          if (missedCritical.length > 0) {
+            console.warn(
+              `[AI Recs] V3 validation: AI missed ${missedCritical.length} CRITICAL keywords: ${missedCritical.join(', ')}`
+            )
+          }
+
+          // Post-generation enforcement: truncate each child's backend keywords to 250 chars
+          const perChildKeywords: PerChildKeywords[] = (parsed.per_child_keywords || []).map(pck => {
+            let kw = (pck.keywords || '').trim()
+            if (kw.length > 250) {
+              const truncated = kw.slice(0, 250)
+              const lastSpace = truncated.lastIndexOf(' ')
+              kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+              console.warn(`[AI Recs] Per-child keywords for ${pck.sku} truncated from ${pck.keywords.length} to ${kw.length} chars`)
+            }
+            return { sku: pck.sku, asin: pck.asin, keywords: kw }
+          })
+
+          // Legacy fallback
+          const legacyKeywords = perChildKeywords.length > 0
+            ? perChildKeywords[0].keywords
+            : (() => {
+                let kw = (parsed.recommended_keywords || '').trim()
+                if (kw.length > 250) {
+                  const truncated = kw.slice(0, 250)
+                  const lastSpace = truncated.lastIndexOf(' ')
+                  kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+                }
+                return kw
+              })()
+
+          // Build keyword reconciliation
+          const keywordReconciliation: KeywordReconciliation[] = Array.isArray(parsed.keyword_reconciliation)
+            ? parsed.keyword_reconciliation.map(kr => ({
+                keyword: kr.keyword || '',
+                action_type: kr.action_type as KeywordReconciliation['action_type'] || 'CRITICAL',
+                search_volume: kr.search_volume || 0,
+                placed_in: Array.isArray(kr.placed_in) ? kr.placed_in : [],
+                exact_text: kr.exact_text || '',
+                why: kr.why || '',
+              }))
+            : []
+
+          const rec: AiRecommendations = {
+            parent_asin,
+            recommended_title: parsed.recommended_title || '',
+            recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
+            recommended_keywords: legacyKeywords,
+            per_child_keywords: perChildKeywords,
+            recommended_description: parsed.recommended_description || '',
+            variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
+            cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
+            product_details_improvements: Array.isArray(parsed.product_details_improvements) ? parsed.product_details_improvements.slice(0, 10) : [],
+            keyword_reconciliation: keywordReconciliation,
+            action_plan: Array.isArray(parsed.action_plan) ? parsed.action_plan : [],
+            generated_at: new Date().toISOString(),
+            keyword_opportunities_used: opportunitiesUsed,
+          }
+
+          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Saving to database...' }) + '\n'))
+
+          // Store in listing_seo_recommendations
+          const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_reconciliation: kwRecon, action_plan: actionPlan, keyword_opportunities_used, ...persistFields } = rec
+
+          const dbPayload: Record<string, unknown> = {
+            ...persistFields,
+            recommended_keywords: JSON.stringify(perChildKeywords),
+            cannibalization_warnings,
+            product_details_improvements,
+            keyword_reconciliation: kwRecon,
+            action_plan: actionPlan,
+          }
+
+          const { error: upsertErr } = await supabase
+            .from('listing_seo_recommendations')
+            .upsert(dbPayload, { onConflict: 'parent_asin' })
+
+          if (upsertErr) {
+            console.warn('[AI Recs] Full upsert failed, retrying without new fields:', upsertErr.message)
+            const fallbackPayload = {
+              ...persistFields,
+              recommended_keywords: JSON.stringify(perChildKeywords),
+            }
+            await supabase
+              .from('listing_seo_recommendations')
+              .upsert(fallbackPayload, { onConflict: 'parent_asin' })
+          }
+
+          // Send final result
+          controller.enqueue(encoder.encode(JSON.stringify({
+            type: 'result',
+            recommendations: rec,
+            keywordIntelligenceUsed: opportunitiesUsed > 0,
+            missedCriticalKeywords: missedCritical,
+          }) + '\n'))
+
+          controller.close()
+        } catch (err) {
+          console.error('[AI Recs] Stream error:', err)
+          controller.enqueue(encoder.encode(JSON.stringify({
+            type: 'error',
+            error: err instanceof Error ? err.message : 'Unexpected error during generation',
+          }) + '\n'))
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'application/x-ndjson',
+        'Transfer-Encoding': 'chunked',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
     })
   } catch (err) {
     console.error('[AI Recs] Unexpected error:', err)
