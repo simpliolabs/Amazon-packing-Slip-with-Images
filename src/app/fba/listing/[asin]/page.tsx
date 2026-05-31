@@ -48,7 +48,8 @@ interface ActionPlanItem {
   verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP'
   priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
   current_status: string; instruction: string
-  seller_central_path?: string; content_ready: boolean
+  replacement_content?: string | string[] | null
+  seller_central_path?: string; content_ready?: boolean
   notes?: string; aplus_modules?: AplusModuleAction[]
 }
 
@@ -393,11 +394,33 @@ export default function ListingDetailPage() {
                       </p>
                     )}
 
-                    {/* Row 5: Content Ready indicator */}
-                    {item.content_ready && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
-                      <p className="text-[10px] mt-1 text-green-700 font-medium">
-                        ✓ Copy-paste content available below in AI Recommendations
-                      </p>
+                    {/* Row 5: Replacement Content (the actual fix) */}
+                    {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                      <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] font-bold text-green-800 uppercase">✂️ Copy & Paste This:</span>
+                          <button
+                            onClick={() => {
+                              const text = Array.isArray(item.replacement_content)
+                                ? item.replacement_content.join('\n')
+                                : item.replacement_content || ''
+                              navigator.clipboard.writeText(text)
+                            }}
+                            className="text-[10px] px-2 py-0.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                        {Array.isArray(item.replacement_content) ? (
+                          <div className="space-y-1">
+                            {item.replacement_content.map((line, li) => (
+                              <p key={li} className="text-xs leading-relaxed font-mono bg-green-50 p-1.5 rounded border border-green-200">{line}</p>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs leading-relaxed font-mono bg-green-50 p-2 rounded border border-green-200 whitespace-pre-wrap">{item.replacement_content}</p>
+                        )}
+                      </div>
                     )}
 
                     {/* Row 6: Notes */}

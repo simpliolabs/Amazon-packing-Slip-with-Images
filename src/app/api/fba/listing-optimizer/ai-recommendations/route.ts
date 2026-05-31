@@ -104,8 +104,8 @@ export interface ActionPlanItem {
   priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
   current_status: string
   instruction: string
+  replacement_content?: string | string[] // The actual fix: copy-paste ready text. String for title/description, string[] for per-child keywords or bullets
   seller_central_path?: string
-  content_ready: boolean
   notes?: string
   aplus_modules?: AplusModuleAction[]
 }
@@ -350,12 +350,19 @@ You MUST include ALL of these elements in the action plan — even if the verdic
 8. images (per_child level)
 
 For each element:
-- verdict: REPLACE (swap entirely with content below), EDIT (change specific parts), CREATE (doesn't exist, build from scratch), DONE (no action needed), SKIP (not applicable — explain why)
+- verdict: REPLACE (swap entirely), EDIT (change specific parts), CREATE (doesn't exist, build from scratch), DONE (no action needed), SKIP (not applicable — explain why)
 - priority: HIGH (directly impacts search ranking), MEDIUM (improves conversion rate), LOW (nice to have), NONE (already optimized)
 - current_status: Brief factual description of what's there now (e.g. "228 chars, 5 ALL CAPS words, missing top keywords")
 - instruction: Specific step-by-step instruction. NOT vague. Tell them exactly what to do.
+- replacement_content: THE ACTUAL FIX. This is MANDATORY for REPLACE and EDIT verdicts. Include the full copy-paste ready text that replaces the current content.
+  - For title: the new title string
+  - For bullet_1 through bullet_5: the new bullet text
+  - For backend_keywords: an array of strings, one per child variant (e.g. ["SKU1: keywords here", "SKU2: keywords here"])
+  - For description: the full HTML description
+  - For product_details: a string listing each field and value (e.g. "Compatible Devices: DSLR, Mirrorless | Warranty: 5 Years | Material: Plastic")
+  - For aplus_modules, brand_story, images: null (these require visual assets, not text)
+  - For DONE/SKIP verdicts: null (no content needed)
 - seller_central_path: Exact navigation in Seller Central (e.g. "Inventory → Edit Listing → Vital Info → Product Name")
-- content_ready: true if the copy-paste content is in your recommendations, false if they need to create it themselves
 - notes: Important context (e.g. "A+ Content overrides description — description edits won't display to customers")
 
 For aplus_modules specifically, include aplus_modules array with:
@@ -443,7 +450,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       "current_status": "string (brief factual description of current state)",
       "instruction": "string (specific step-by-step instruction)",
       "seller_central_path": "string (exact Seller Central navigation)",
-      "content_ready": true,
+      "replacement_content": "string or array of strings (the actual copy-paste fix) or null if verdict is DONE/SKIP or element requires visual assets",
       "notes": "string (optional important context)",
       "aplus_modules": [
         {
