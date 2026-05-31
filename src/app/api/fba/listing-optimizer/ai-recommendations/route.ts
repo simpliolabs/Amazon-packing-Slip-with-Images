@@ -161,10 +161,12 @@ Keep them in your recommendations:
 ${defended.length > 0 ? defended.map(formatKw).join('\n') : '  (none)'}
 
 HARD RULES FOR KEYWORD INTEGRATION:
-1. Every CRITICAL GAP keyword must appear in either the title or bullet 1/2
-2. Every TITLE UPGRADE keyword must appear in the title
-3. Do NOT sacrifice readability — keywords must flow naturally in the copy
-4. Backend keywords: prioritize terms NOT already in title/bullets
+1. TITLE: Include ONLY the top 2-3 highest-volume keywords. The title MUST be 80-150 characters. NEVER exceed 150 chars.
+2. BULLETS: Place remaining CRITICAL and UPGRADE keywords in bullets 1-3. Each bullet ≤200 chars.
+3. BACKEND KEYWORDS: All keywords that don't fit naturally in title/bullets go here.
+4. Do NOT sacrifice readability — keywords must flow naturally in the copy.
+5. Do NOT stuff all keywords into the title. Distribute intelligently: title gets 2-3, bullets get 3-5, backend gets the rest.
+6. TITLE CHARACTER LIMIT IS NON-NEGOTIABLE: Count your characters. If title exceeds 150 chars, remove lower-volume keywords and push them to bullets.
 `.trim()
 
   return {
@@ -260,14 +262,17 @@ PER-CHILD CONTENT (different for each child — edited individually):
 YOUR TASK:
 Generate optimized content following this architecture exactly.
 
-TITLE RULES:
-- 150-200 chars (sweet spot — under 150 gets penalized, over 200 gets truncated)
+TITLE RULES (STRICT):
+- HARD LIMIT: 80-150 characters. Target 100-120 chars. NEVER exceed 150 chars.
+- Amazon recommends 80 chars for mobile. Anything over 150 gets truncated on mobile and may suppress the listing.
+- Include ONLY the top 2-3 highest-volume keywords from keyword intelligence. Push remaining keywords to bullets and backend.
 - Title Case (capitalize first letter of each major word)
 - NO ALL CAPS words except recognized acronyms (e.g., UHS-I, SDHC, USB, LED, FBA)
 - No promotional phrases ("Best Seller", "Free Shipping")
-- Front-load the most important keywords in the first 80 chars
+- Front-load the most important keyword in the first 80 chars
 - NEVER include variant-specific attributes (specific size, color, capacity) — Amazon handles that
 - The title must make sense for EVERY child in the family
+- FORMAT: Brand - Product Type - Top Keyword - Key Attribute (e.g., "THE CEO Memory Card SDHC UHS-I 90MB/s - High-Speed Camera Cards for Photography")
 
 BULLET RULES:
 - Start each with a 2-5 word benefit hook in ALL CAPS followed by " – "
@@ -310,14 +315,19 @@ This is the MOST IMPORTANT part. For every CRITICAL and UPGRADE keyword from the
 - Which keyword it is and its action type
 - WHERE you placed it (title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords)
 - The EXACT sentence or phrase in your recommended content where the keyword appears
-- WHY you placed it there (e.g. "Highest volume keyword — must be in title for maximum visibility")
+- WHY you placed it there (e.g. "Highest volume keyword — placed in title for maximum visibility")
 This lets the seller see at a glance: keyword → exact placement → copy-paste ready text.
-If a keyword could NOT be naturally placed anywhere, still include it with placed_in as ["backend_keywords"] and explain why.
+
+KEYWORD DISTRIBUTION RULES FOR RECONCILIATION:
+- Title: ONLY top 2-3 keywords by search volume. Do NOT put more than 3 keywords in the title.
+- Bullets 1-3: Next 3-5 keywords by volume. Each bullet should target 1-2 keywords naturally.
+- Backend keywords: All remaining keywords that don't fit naturally in title/bullets.
+- If a keyword could NOT be naturally placed in title or bullets, place it in backend_keywords.
 Include ALL keywords from the CRITICAL GAPS and TITLE UPGRADES sections — do not skip any.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
-  "recommended_title": "string (generic title template, 150-200 chars, NO variant-specific attributes, Title Case, no ALL CAPS except acronyms)",
+  "recommended_title": "string (generic title template, 80-150 chars HARD LIMIT, target 100-120 chars, NO variant-specific attributes, Title Case, no ALL CAPS except acronyms, include only top 2-3 keywords)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
   "per_child_keywords": [
     {

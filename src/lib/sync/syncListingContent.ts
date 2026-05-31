@@ -486,19 +486,19 @@ function scoreListingContent(
   const title = representativeContent.title || ''
   if (!title) {
     titleScore = 0
-    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with your primary keyword, then brand, then key attributes (size, color, material, use case). Target 150-200 chars.', auto_fixable: false })
+    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with your primary keyword, then brand, then key attributes. Target 80-150 chars (Amazon recommends ≤80 for mobile).', auto_fixable: false })
   } else {
     const titleLen = title.length
 
-    if (titleLen < 80) {
+    if (titleLen < 50) {
       titleScore -= 10
-      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — well below the 150-200 char sweet spot. Append key attributes: compatible devices, material, pack size, target audience, primary use case. Example tail to add: "– Compatible with Canon, Nikon, GoPro | Class 10 | For Photographers & Videographers"`, auto_fixable: false })
-    } else if (titleLen < 150) {
+      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to contain meaningful keywords. Target 80-120 chars with your brand, product type, and top 2-3 keywords.`, auto_fixable: false })
+    } else if (titleLen > 150) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'info', message: `Title is ${titleLen} chars — you have ${200 - titleLen} chars of unused keyword real estate. Add secondary attributes at the end: compatible devices, material type, gift occasion, or pack size. Every extra keyword in the title boosts search rank.`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — exceeds the 150-char recommended limit. Amazon truncates long titles on mobile (80 chars visible) and in search results. Remove filler words and move lower-volume keywords to bullets or backend keywords.`, auto_fixable: false })
     } else if (titleLen > 200) {
-      titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — Amazon truncates at ~200 chars in search results, hiding your tail keywords from shoppers. Trim filler phrases like "Get a Durable" or "Ideal for" and keep only high-value keywords.`, auto_fixable: false })
+      titleScore -= 10
+      issues.push({ field: 'title', severity: 'critical', message: `Title is ${titleLen} chars — exceeds Amazon's 200-char hard limit. This may cause listing suppression. Immediately shorten by removing redundant phrases and moving keywords to bullets/backend.`, auto_fixable: false })
     }
 
     // ALL CAPS check
