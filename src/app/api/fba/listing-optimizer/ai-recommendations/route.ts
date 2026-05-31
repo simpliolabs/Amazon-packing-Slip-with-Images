@@ -553,11 +553,54 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
           }
 
           try {
-            const cleaned = rawContent.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim()
-            parsed = JSON.parse(cleaned)
-          } catch {
-            console.error('[AI Recs] Failed to parse LLM response:', rawContent.slice(0, 500))
-            controller.enqueue(encoder.encode(JSON.stringify({ type: 'error', error: 'AI returned invalid JSON. Please try again.' }) + '\n'))
+            // Robust JSON extraction: strip markdown fences, find the JSON object
+            let cleaned = rawContent
+              .replace(/^```json\s*/i, '')
+              .replace(/^```\s*/i, '')
+              .replace(/\s*```$/i, '')
+              .trim()
+
+            // If it doesn't start with {, find the first {
+            const firstBrace = cleaned.indexOf('{')
+            if (firstBrace > 0) {
+              cleaned = cleaned.slice(firstBrace)
+            }
+
+            // If it doesn't end with }, find the last }
+            const lastBrace = cleaned.lastIndexOf('}')
+            if (lastBrace > 0 && lastBrace < cleaned.length - 1) {
+              cleaned = cleaned.slice(0, lastBrace + 1)
+            }
+
+            // Handle truncated JSON: if the response was cut off, try to repair
+            // by closing any open arrays/objects
+            try {
+              parsed = JSON.parse(cleaned)
+            } catch (firstErr) {
+              // Try adding closing brackets
+              let repaired = cleaned
+              const openBraces = (repaired.match(/\{/g) || []).length
+              const closeBraces = (repaired.match(/\}/g) || []).length
+              const openBrackets = (repaired.match(/\[/g) || []).length
+              const closeBrackets = (repaired.match(/\]/g) || []).length
+
+              // Remove trailing comma if any
+              repaired = repaired.replace(/,\s*$/, '')
+
+              // Close open brackets/braces
+              for (let i = 0; i < openBrackets - closeBrackets; i++) repaired += ']'
+              for (let i = 0; i < openBraces - closeBraces; i++) repaired += '}'
+
+              try {
+                parsed = JSON.parse(repaired)
+                console.warn('[AI Recs] JSON was truncated but successfully repaired')
+              } catch {
+                throw firstErr // Re-throw original error
+              }
+            }
+          } catch (parseErr) {
+            console.error('[AI Recs] Failed to parse LLM response. Length:', rawContent.length, 'First 500:', rawContent.slice(0, 500), 'Last 500:', rawContent.slice(-500))
+            controller.enqueue(encoder.encode(JSON.stringify({ type: 'error', error: 'AI returned invalid JSON. Please try again. (Response length: ' + rawContent.length + ' chars)' }) + '\n'))
             controller.close()
             return
           }
@@ -565,7 +608,14 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
           controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Validating keywords...' }) + '\n'))
 
           // Post-generation validation: verify CRITICAL keywords were included
-          const criticalKeywords = (await getStoredAnalysis(children[0]?.asin, 10))
+          // Fetch top_child_asin for validation (same logic as buildKeywordContext)
+          const { data: valScoreRow } = await supabase
+            .from('listing_seo_scores')
+            .select('top_child_asin')
+            .eq('parent_asin', parent_asin)
+            .single()
+          const validationAsin = valScoreRow?.top_child_asin || children[0]?.asin
+          const criticalKeywords = (await getStoredAnalysis(validationAsin, 10))
             ?.filter(k => k.actionType === 'CRITICAL')
             .map(k => k.keyword) ?? []
 
