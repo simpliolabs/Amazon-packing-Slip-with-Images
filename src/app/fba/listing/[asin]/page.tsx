@@ -38,6 +38,20 @@ interface VariantCorrection { sku: string; field: string; current: string; repla
 interface CannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
 interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string }
 
+interface AplusModuleAction {
+  module_type: string; action: 'ADD' | 'EDIT' | 'KEEP'
+  content_brief: string; position: number
+}
+
+interface ActionPlanItem {
+  element: string; level: 'parent' | 'per_child'
+  verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP'
+  priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
+  current_status: string; instruction: string
+  seller_central_path?: string; content_ready: boolean
+  notes?: string; aplus_modules?: AplusModuleAction[]
+}
+
 interface AiRecommendations {
   parent_asin: string; recommended_title: string; recommended_bullets: string[]
   recommended_keywords: string; per_child_keywords?: PerChildKeywords[]
@@ -45,6 +59,7 @@ interface AiRecommendations {
   cannibalization_warnings?: CannibalizationWarning[]
   product_details_improvements?: ProductDetailImprovement[]
   keyword_reconciliation?: KeywordReconciliation[]
+  action_plan?: ActionPlanItem[]
   generated_at: string; keyword_opportunities_used?: number
 }
 
@@ -106,7 +121,7 @@ export default function ListingDetailPage() {
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['placement', 'issues']))
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['action-plan', 'placement', 'issues']))
 
   const copy = (text: string, label: string) => {
     copyToClipboard(text)
@@ -307,6 +322,113 @@ export default function ListingDetailPage() {
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          ACTION PLAN — Comprehensive listing review with verdicts
+          ══════════════════════════════════════════════════════════════════════ */}
+      {aiRecs?.action_plan && aiRecs.action_plan.length > 0 && (
+        <section>
+          <button onClick={() => toggle('action-plan')} className="flex items-center gap-2 mb-3 w-full text-left">
+            <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+              Action Plan
+              <span className="text-gray-500 font-normal ml-1">
+                ({aiRecs.action_plan.filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length} actions needed)
+              </span>
+            </span>
+            <span className="text-xs text-gray-400">{expandedSections.has('action-plan') ? '▾' : '▸'}</span>
+          </button>
+
+          {expandedSections.has('action-plan') && (
+            <div className="space-y-2">
+              {aiRecs.action_plan.map((item, idx) => {
+                const verdictStyles: Record<string, string> = {
+                  REPLACE: 'bg-red-50 border-red-300 text-red-800',
+                  EDIT: 'bg-amber-50 border-amber-300 text-amber-800',
+                  CREATE: 'bg-blue-50 border-blue-300 text-blue-800',
+                  DONE: 'bg-green-50 border-green-300 text-green-800',
+                  SKIP: 'bg-gray-50 border-gray-300 text-gray-500',
+                }
+                const verdictIcons: Record<string, string> = {
+                  REPLACE: '🔴', EDIT: '⚠️', CREATE: '🔵', DONE: '✅', SKIP: '⏭️',
+                }
+                const priorityBadge: Record<string, string> = {
+                  HIGH: 'bg-red-100 text-red-700',
+                  MEDIUM: 'bg-amber-100 text-amber-700',
+                  LOW: 'bg-gray-100 text-gray-600',
+                  NONE: 'bg-green-100 text-green-700',
+                }
+                const style = verdictStyles[item.verdict] || verdictStyles.SKIP
+                return (
+                  <div key={idx} className={`rounded-lg border p-4 ${style}`}>
+                    {/* Row 1: Element + Verdict + Priority + Level */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-lg">{verdictIcons[item.verdict]}</span>
+                      <span className="font-semibold text-sm uppercase">{item.element.replace(/_/g, ' ')}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${priorityBadge[item.priority] || ''}`}>
+                        {item.priority}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/60 border border-current/20">
+                        {item.level === 'parent' ? '📦 Parent Level' : '🏷️ Per Child'}
+                      </span>
+                      <span className="ml-auto text-[10px] font-mono opacity-60">{item.verdict}</span>
+                    </div>
+
+                    {/* Row 2: Current Status */}
+                    <p className="text-xs mt-1.5 opacity-80">
+                      <span className="font-medium">Current:</span> {item.current_status}
+                    </p>
+
+                    {/* Row 3: Instruction */}
+                    {item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                      <div className="mt-2 bg-white/60 rounded p-2.5 border border-current/10">
+                        <p className="text-xs font-medium mb-0.5">What to do:</p>
+                        <p className="text-xs leading-relaxed">{item.instruction}</p>
+                      </div>
+                    )}
+
+                    {/* Row 4: Seller Central Path */}
+                    {item.seller_central_path && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                      <p className="text-[10px] mt-1.5 opacity-60">
+                        📍 {item.seller_central_path}
+                      </p>
+                    )}
+
+                    {/* Row 5: Content Ready indicator */}
+                    {item.content_ready && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                      <p className="text-[10px] mt-1 text-green-700 font-medium">
+                        ✓ Copy-paste content available below in AI Recommendations
+                      </p>
+                    )}
+
+                    {/* Row 6: Notes */}
+                    {item.notes && (
+                      <p className="text-[10px] mt-1.5 italic opacity-70">💡 {item.notes}</p>
+                    )}
+
+                    {/* A+ Module Details */}
+                    {item.aplus_modules && item.aplus_modules.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-[10px] font-medium">A+ Modules to configure:</p>
+                        {item.aplus_modules.map((mod, mi) => (
+                          <div key={mi} className="text-[10px] bg-white/80 rounded p-1.5 border border-current/10 flex gap-2">
+                            <span className="font-mono text-[9px] opacity-50">#{mod.position}</span>
+                            <span className={`px-1 rounded text-[9px] ${
+                              mod.action === 'ADD' ? 'bg-blue-100 text-blue-700' :
+                              mod.action === 'EDIT' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'
+                            }`}>{mod.action}</span>
+                            <span className="font-medium">{mod.module_type}</span>
+                            <span className="opacity-70">— {mod.content_brief}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           SECTION 1 — Keyword Placement Plan (grouped by placement)

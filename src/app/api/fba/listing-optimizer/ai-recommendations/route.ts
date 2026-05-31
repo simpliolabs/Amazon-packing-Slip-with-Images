@@ -90,6 +90,26 @@ export interface KeywordReconciliation {
   why: string                   // Why it was placed there
 }
 
+export interface AplusModuleAction {
+  module_type: string       // e.g. "Standard Comparison Chart"
+  action: 'ADD' | 'EDIT' | 'KEEP'
+  content_brief: string     // What to put in this module
+  position: number
+}
+
+export interface ActionPlanItem {
+  element: string           // e.g. "title", "bullet_1", "backend_keywords", "description", "aplus_modules", "brand_story", "product_details", "images"
+  level: 'parent' | 'per_child'
+  verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP'
+  priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
+  current_status: string
+  instruction: string
+  seller_central_path?: string
+  content_ready: boolean
+  notes?: string
+  aplus_modules?: AplusModuleAction[]
+}
+
 export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
@@ -101,6 +121,7 @@ export interface AiRecommendations {
   cannibalization_warnings: CannibalizationWarning[]
   product_details_improvements: ProductDetailImprovement[]
   keyword_reconciliation: KeywordReconciliation[]  // V4: per-keyword placement map
+  action_plan: ActionPlanItem[]          // V5: comprehensive action plan
   generated_at: string
   keyword_opportunities_used?: number
 }
@@ -238,8 +259,13 @@ ${variantDetails}
 CHILDREN NEEDING BACKEND KEYWORDS (each child gets its own unique 250-char keyword string):
 ${childKeywordSlots}
 
-IMAGE COUNT: ${rep.image_count || 0}/7
-A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
+IMAGE COUNT: ${rep.image_count || 0}/7 (Amazon allows up to 7 images + 1 video)
+A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count}/7 modules used)` : 'No A+ Content'}
+A+ BRAND STORY: ${rep.aplus_has_brand_story ? 'Yes' : 'No'}
+A+ HEADLINE: ${rep.aplus_has_headline ? 'Yes' : 'No'}
+A+ IMAGES MISSING ALT TEXT: ${rep.aplus_images_missing_alt || 0}
+DESCRIPTION LENGTH: ${rep.description ? rep.description.replace(/<[^>]+>/g, '').trim().length : 0} chars
+DESCRIPTION HAS HTML: ${rep.description && /<[^>]+>/.test(rep.description) ? 'Yes' : 'No'}
 
 ${keywordContext ? `\n--- KEYWORD INTELLIGENCE (V2) ---\n${keywordContext}\n--- END KEYWORD INTELLIGENCE ---` : ''}
 `.trim()
@@ -310,6 +336,42 @@ ONLY suggest fields that would ADD NEW information not already derivable from th
 Focus on: missing compatibility info, missing certifications, missing material/weight, missing warranty, or genuinely empty filterable fields.
 Return 5-10 improvements max — quality over quantity. If fewer than 5 are genuinely missing, return fewer.
 
+ACTION PLAN (COMPREHENSIVE LISTING REVIEW):
+Generate a step-by-step action plan that reviews EVERY element of the listing and tells the seller exactly what to do.
+You MUST include ALL of these elements in the action plan — even if the verdict is DONE:
+
+1. title (parent level)
+2. bullet_1, bullet_2, bullet_3, bullet_4, bullet_5 (parent level — review EACH individually)
+3. backend_keywords (per_child level)
+4. description (parent level)
+5. aplus_modules (parent level) — specify which Amazon A+ module types to select from the dropdown
+6. brand_story (parent level)
+7. product_details (parent level)
+8. images (per_child level)
+
+For each element:
+- verdict: REPLACE (swap entirely with content below), EDIT (change specific parts), CREATE (doesn't exist, build from scratch), DONE (no action needed), SKIP (not applicable — explain why)
+- priority: HIGH (directly impacts search ranking), MEDIUM (improves conversion rate), LOW (nice to have), NONE (already optimized)
+- current_status: Brief factual description of what's there now (e.g. "228 chars, 5 ALL CAPS words, missing top keywords")
+- instruction: Specific step-by-step instruction. NOT vague. Tell them exactly what to do.
+- seller_central_path: Exact navigation in Seller Central (e.g. "Inventory → Edit Listing → Vital Info → Product Name")
+- content_ready: true if the copy-paste content is in your recommendations, false if they need to create it themselves
+- notes: Important context (e.g. "A+ Content overrides description — description edits won't display to customers")
+
+For aplus_modules specifically, include aplus_modules array with:
+- module_type: The exact Amazon A+ module name from the dropdown (e.g. "Standard Comparison Chart", "Standard Image & Text Overlay", "Standard Four Image & Text", "Standard Single Image & Highlights")
+- action: ADD (new module), EDIT (change existing), KEEP (leave as-is)
+- content_brief: What content/images to put in this module
+- position: Order number (1-7)
+
+RULES FOR VERDICTS:
+- If current bullets are strong and your recommended bullets are very similar, mark individual bullets as DONE
+- If A+ exists with 2 modules, mark as EDIT and specify which 5 modules to ADD (with types and content)
+- If description exists but A+ overrides it, mark description as SKIP with note explaining why
+- For backend keywords, always mark as per_child and note that each child needs DIFFERENT keywords
+- For images, specify what TYPE of image to add (lifestyle, infographic, size chart, comparison, packaging)
+- If brand story is missing, mark as CREATE and describe what to include
+
 KEYWORD RECONCILIATION REPORT:
 This is the MOST IMPORTANT part. For every CRITICAL and UPGRADE keyword from the KEYWORD INTELLIGENCE section above, you MUST produce a reconciliation entry showing:
 - Which keyword it is and its action type
@@ -371,6 +433,27 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       "exact_text": "string (the exact sentence or phrase from your recommendation where this keyword appears)",
       "why": "string (brief reason for this placement)"
     }
+  ],
+  "action_plan": [
+    {
+      "element": "string (title|bullet_1|bullet_2|bullet_3|bullet_4|bullet_5|backend_keywords|description|aplus_modules|brand_story|product_details|images)",
+      "level": "string (parent|per_child)",
+      "verdict": "string (REPLACE|EDIT|CREATE|DONE|SKIP)",
+      "priority": "string (HIGH|MEDIUM|LOW|NONE)",
+      "current_status": "string (brief factual description of current state)",
+      "instruction": "string (specific step-by-step instruction)",
+      "seller_central_path": "string (exact Seller Central navigation)",
+      "content_ready": true,
+      "notes": "string (optional important context)",
+      "aplus_modules": [
+        {
+          "module_type": "string (exact Amazon A+ module name)",
+          "action": "string (ADD|EDIT|KEEP)",
+          "content_brief": "string (what to put in this module)",
+          "position": 1
+        }
+      ]
+    }
   ]
 }`
 
@@ -383,7 +466,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
         { role: 'user', content: listingContext },
       ],
       temperature: 0.3,
-      max_tokens: 12000,
+      max_tokens: 16000,
     })
 
     const rawContent = completion.choices[0]?.message?.content || ''
@@ -399,6 +482,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       cannibalization_warnings?: CannibalizationWarning[]
       product_details_improvements?: ProductDetailImprovement[]
       keyword_reconciliation?: KeywordReconciliation[]
+      action_plan?: ActionPlanItem[]
     }
 
     try {
@@ -477,13 +561,14 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
       product_details_improvements: Array.isArray(parsed.product_details_improvements) ? parsed.product_details_improvements.slice(0, 10) : [],
       keyword_reconciliation: keywordReconciliation,
+      action_plan: Array.isArray(parsed.action_plan) ? parsed.action_plan : [],
       generated_at: new Date().toISOString(),
       keyword_opportunities_used: opportunitiesUsed,
     }
 
     // Store in listing_seo_recommendations
     // The DB may not have per_child_keywords column yet, so we serialize it into recommended_keywords as JSON
-    const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_reconciliation: kwRecon, keyword_opportunities_used, ...persistFields } = rec
+    const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_reconciliation: kwRecon, action_plan: actionPlan, keyword_opportunities_used, ...persistFields } = rec
 
     // Serialize per_child_keywords as JSON string into recommended_keywords for DB storage
     const dbPayload: Record<string, unknown> = {
@@ -494,6 +579,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       cannibalization_warnings,
       product_details_improvements,
       keyword_reconciliation: kwRecon,
+      action_plan: actionPlan,
     }
 
     const { error: upsertErr } = await supabase
@@ -565,11 +651,17 @@ export async function GET(req: NextRequest) {
     ? data.keyword_reconciliation
     : []
 
+  // action_plan comes from DB as JSONB — already an array
+  const action_plan: ActionPlanItem[] = Array.isArray(data.action_plan)
+    ? data.action_plan
+    : []
+
   return NextResponse.json({
     recommendations: {
       ...data,
       per_child_keywords,
       keyword_reconciliation,
+      action_plan,
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords.length > 0
         ? per_child_keywords[0].keywords
