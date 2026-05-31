@@ -285,7 +285,15 @@ DO flag: Wrong product type, contradictory specs, incorrect attributes, backend 
 DO NOT flag: Expected variant differentiation in titles (different sizes/colors appended by Amazon), different images per variant
 
 PRODUCT DETAILS PAGE IMPROVEMENTS:
-Suggest the TOP 10 most impactful structured attribute improvements for the Amazon Product Details page. Focus on fields customers filter by, fields that improve search discoverability, and fields currently empty or incorrect.
+Suggest ONLY structured attributes that are genuinely MISSING or INCORRECT on this listing.
+CROSS-CHECK RULES (DO NOT suggest these if already evident from the listing content):
+- If the brand name appears in the title → Brand is already set, do NOT suggest it
+- If the product type/category is clear from the title → Product Type is already set, do NOT suggest it
+- If capacity/size/color is in the variant attributes → those are already set, do NOT suggest them
+- If model number appears in the listing → Model Number is already set, do NOT suggest it
+ONLY suggest fields that would ADD NEW information not already derivable from the title, bullets, or variant structure.
+Focus on: missing compatibility info, missing certifications, missing material/weight, missing warranty, or genuinely empty filterable fields.
+Return 5-10 improvements max — quality over quantity. If fewer than 5 are genuinely missing, return fewer.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {

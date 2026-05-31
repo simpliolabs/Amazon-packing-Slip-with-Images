@@ -50,6 +50,22 @@ function formatCompetition(c: number): string {
   return `${(c / 1000).toFixed(1)}K competitors`;
 }
 
+/**
+ * Detect if a keyword contains variant-specific attributes (capacity, size, color)
+ * that should NOT go in the shared title/bullets but ONLY in per-child backend keywords.
+ * Examples: "128 gb sd card", "32gb memory card", "large t shirt", "red backpack"
+ */
+function isVariantSpecificKeyword(keyword: string): boolean {
+  const kw = keyword.toLowerCase();
+  // Capacity/size patterns: digits followed by unit (gb, tb, mb, oz, ml, lb, kg, ft, in)
+  const capacityPattern = /\b\d+\s*(gb|tb|mb|oz|ml|lb|kg|ft|in|mm|cm|l|g|mg)\b/;
+  // Clothing sizes
+  const sizePattern = /\b(xx?s|xx?l|xxx?l|small|medium|large|x-large|xx-large)\b/;
+  // Color patterns (common colors that indicate variant)
+  const colorPattern = /\b(black|white|red|blue|green|pink|purple|orange|yellow|grey|gray|silver|gold|navy|brown|beige)\b/;
+  return capacityPattern.test(kw) || sizePattern.test(kw) || colorPattern.test(kw);
+}
+
 export function generateAction(ctx: ActionContext): KeywordAction {
   const {
     keyword,
@@ -75,11 +91,21 @@ export function generateAction(ctx: ActionContext): KeywordAction {
         : inDescription
         ? `currently only in your description`
         : `missing from all listing fields`;
+
+      // Variant-specific keywords should go in backend keywords, not shared title/bullets
+      const isVariantKw = isVariantSpecificKeyword(keyword);
+      const action = isVariantKw
+        ? `Add "${keyword}" to the matching variant's backend keywords`
+        : `Add "${keyword}" to your title and first bullet point`;
+      const rationaleExtra = isVariantKw
+        ? ` This is a variant-specific term — add it to the backend keywords of the matching child ASIN, not the shared title/bullets.`
+        : ` Amazon can't rank you for a keyword you don't mention in your most visible fields.`;
+
       return {
         actionType,
         opportunityScore: score.opportunityScore,
-        primaryAction: `Add "${keyword}" to your title and first bullet point`,
-        rationale: `${vol} searches/month, ${comp}, ${where}. Amazon can't rank you for a keyword you don't mention in your most visible fields.`,
+        primaryAction: action,
+        rationale: `${vol} searches/month, ${comp}, ${where}.${rationaleExtra}`,
         urgency: 'high',
         estimatedImpact: keywordSales > 0
           ? `${keywordSales} total sales/month flow through this keyword — you're capturing 0% of them`
