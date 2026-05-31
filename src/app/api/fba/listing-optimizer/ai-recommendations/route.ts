@@ -133,12 +133,38 @@ async function buildKeywordContext(
   parentAsin: string,
   children: ChildRow[]
 ): Promise<{ contextBlock: string; opportunitiesUsed: number }> {
-  const firstChildAsin = children[0]?.asin
-  if (!firstChildAsin) {
+  // ASIN resolution: use top_child_asin from listing_seo_scores (has keyword data)
+  // Fallback chain: top_child_asin → parent_asin → children[0].asin
+  let lookupAsin = children[0]?.asin
+  
+  // Try to get top_child_asin from listing_seo_scores
+  const { data: scoreRow } = await supabase
+    .from('listing_seo_scores')
+    .select('top_child_asin')
+    .eq('parent_asin', parentAsin)
+    .single()
+  
+  if (scoreRow?.top_child_asin) {
+    lookupAsin = scoreRow.top_child_asin
+  }
+
+  if (!lookupAsin) {
     return { contextBlock: '', opportunitiesUsed: 0 }
   }
 
-  const analysis = await getStoredAnalysis(firstChildAsin, 50)
+  // Try the resolved ASIN first, then fallback to parent_asin, then children[0]
+  let analysis = await getStoredAnalysis(lookupAsin, 50)
+  if (!analysis || analysis.length === 0) {
+    // Try parent ASIN (some data is stored at parent level)
+    analysis = await getStoredAnalysis(parentAsin, 50)
+  }
+  if (!analysis || analysis.length === 0) {
+    // Try first child as last resort
+    const firstChild = children[0]?.asin
+    if (firstChild && firstChild !== lookupAsin) {
+      analysis = await getStoredAnalysis(firstChild, 50)
+    }
+  }
 
   if (!analysis || analysis.length === 0) {
     return {
