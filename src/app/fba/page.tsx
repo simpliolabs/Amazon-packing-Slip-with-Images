@@ -134,6 +134,15 @@ interface PerChildKeywords {
   keywords: string
 }
 
+interface KeywordReconciliation {
+  keyword: string
+  action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'
+  search_volume: number
+  placed_in: string[]
+  exact_text: string
+  why: string
+}
+
 interface AiRecommendations {
   parent_asin:              string
   recommended_title:        string
@@ -144,6 +153,7 @@ interface AiRecommendations {
   variant_corrections:      VariantCorrection[]
   cannibalization_warnings?: CannibalizationWarning[]
   product_details_improvements?: ProductDetailImprovement[]
+  keyword_reconciliation?:  KeywordReconciliation[]
   generated_at:             string
   keyword_opportunities_used?: number
 }
@@ -2793,6 +2803,47 @@ export default function FBAIntelligencePage() {
                             const highlight = (key: string) => selectedRecCategory === key ? 'ring-2 ring-violet-400 bg-violet-50/30' : 'bg-white'
                             return (
                               <div className="space-y-4">
+                                {/* Keyword Reconciliation Report — shows exactly where each keyword was placed */}
+                                {rec.keyword_reconciliation && rec.keyword_reconciliation.length > 0 && (
+                                  <div className="rounded-lg border-2 border-violet-300 bg-violet-50/50 p-3">
+                                    <div className="flex items-center justify-between mb-3">
+                                      <span className="text-xs font-bold text-violet-800 uppercase tracking-wide">Keyword Placement Plan ({rec.keyword_reconciliation.length} keywords)</span>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {rec.keyword_reconciliation.map((kr: KeywordReconciliation, krIdx: number) => (
+                                        <div key={krIdx} className={`rounded-lg p-2.5 border ${
+                                          kr.action_type === 'CRITICAL' ? 'bg-red-50 border-red-200'
+                                          : kr.action_type === 'UPGRADE' ? 'bg-amber-50 border-amber-200'
+                                          : 'bg-green-50 border-green-200'
+                                        }`}>
+                                          <div className="flex items-center justify-between mb-1">
+                                            <div className="flex items-center gap-2">
+                                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                                kr.action_type === 'CRITICAL' ? 'bg-red-200 text-red-800'
+                                                : kr.action_type === 'UPGRADE' ? 'bg-amber-200 text-amber-800'
+                                                : 'bg-green-200 text-green-800'
+                                              }`}>{kr.action_type}</span>
+                                              <span className="text-xs font-semibold text-gray-900">&ldquo;{kr.keyword}&rdquo;</span>
+                                            </div>
+                                            {kr.search_volume > 0 && (
+                                              <span className="text-[9px] text-gray-500">{kr.search_volume.toLocaleString()}/mo</span>
+                                            )}
+                                          </div>
+                                          <div className="flex flex-wrap gap-1 mb-1">
+                                            {kr.placed_in.map((loc: string, j: number) => (
+                                              <span key={j} className="text-[9px] font-medium bg-white border border-gray-300 text-gray-700 px-1.5 py-0.5 rounded">
+                                                {loc.replace(/_/g, ' ')}
+                                              </span>
+                                            ))}
+                                          </div>
+                                          <p className="text-[10px] text-gray-700 italic leading-relaxed">&ldquo;{kr.exact_text.length > 150 ? kr.exact_text.slice(0, 150) + '…' : kr.exact_text}&rdquo;</p>
+                                          <p className="text-[9px] text-gray-500 mt-0.5">{kr.why}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
                                 {/* Title */}
                                 {rec.recommended_title && (
                                   <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('title')}`}>
