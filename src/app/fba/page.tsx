@@ -128,11 +128,18 @@ interface ProductDetailImprovement {
   reason: string
 }
 
+interface PerChildKeywords {
+  sku: string
+  asin: string
+  keywords: string
+}
+
 interface AiRecommendations {
   parent_asin:              string
   recommended_title:        string
   recommended_bullets:      string[]
   recommended_keywords:     string
+  per_child_keywords?:      PerChildKeywords[]
   recommended_description:  string
   variant_corrections:      VariantCorrection[]
   cannibalization_warnings?: CannibalizationWarning[]
@@ -2816,8 +2823,28 @@ export default function FBAIntelligencePage() {
                                   </div>
                                 )}
 
-                                {/* Backend Keywords */}
-                                {rec.recommended_keywords && (
+                                {/* Per-Child Backend Keywords (V3) */}
+                                {rec.per_child_keywords && rec.per_child_keywords.length > 0 ? (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('backend_keywords')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className="text-gray-400 font-normal">(per variant — each child gets unique 250-char keywords)</span></span>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {rec.per_child_keywords.map((pck, pki) => (
+                                        <div key={pki} className="border border-gray-200 rounded-lg p-2.5 bg-gray-50">
+                                          <div className="flex items-center justify-between mb-1.5">
+                                            <div className="flex items-center gap-2">
+                                              <span className="text-[10px] font-mono font-bold text-violet-700 bg-violet-100 px-1.5 py-0.5 rounded">{pck.sku}</span>
+                                              <span className={`text-[10px] font-normal ${pck.keywords.length > 250 ? 'text-red-500' : 'text-gray-400'}`}>{pck.keywords.length}/250 chars</span>
+                                            </div>
+                                            <button onClick={() => copyToClipboard(pck.keywords)} className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-0.5 rounded transition-colors">Copy</button>
+                                          </div>
+                                          <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{pck.keywords}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : rec.recommended_keywords ? (
                                   <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('backend_keywords')}`}>
                                     <div className="flex items-center justify-between mb-2">
                                       <span className="text-xs font-semibold text-gray-700">🔑 Backend Keywords <span className={`font-normal ${(rec.recommended_keywords?.length || 0) > 250 ? 'text-red-500' : 'text-gray-400'}`}>({rec.recommended_keywords.length} chars)</span></span>
@@ -2825,7 +2852,7 @@ export default function FBAIntelligencePage() {
                                     </div>
                                     <p className="text-xs text-gray-700 font-mono leading-relaxed break-all">{rec.recommended_keywords}</p>
                                   </div>
-                                )}
+                                ) : null}
 
                                 {/* Description */}
                                 {rec.recommended_description && (
@@ -2838,11 +2865,43 @@ export default function FBAIntelligencePage() {
                                   </div>
                                 )}
 
+                                {/* Product Details Improvements (V3) */}
+                                {rec.product_details_improvements && rec.product_details_improvements.length > 0 && (
+                                  <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('product_details')}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-xs font-semibold text-gray-700">📋 Product Details Improvements ({rec.product_details_improvements.length})</span>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {rec.product_details_improvements.map((pdi, pdi_i) => (
+                                        <div key={pdi_i} className="border border-blue-200 rounded-lg p-2.5 bg-blue-50">
+                                          <div className="flex items-center gap-2 mb-1">
+                                            <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">{pdi.field_name}</span>
+                                          </div>
+                                          {pdi.current_value && (
+                                            <div className="flex items-start gap-1 mb-1">
+                                              <span className="text-[10px] text-gray-400 shrink-0">Current:</span>
+                                              <span className="text-[10px] text-gray-500">{pdi.current_value}</span>
+                                            </div>
+                                          )}
+                                          <div className="flex items-start gap-1 mb-1">
+                                            <span className="text-[10px] text-green-600 font-semibold shrink-0">Set to:</span>
+                                            <span className="text-[10px] text-green-700">{pdi.recommended_value}</span>
+                                          </div>
+                                          <div className="flex items-start gap-1">
+                                            <span className="text-[10px] text-gray-400 shrink-0">Why:</span>
+                                            <span className="text-[10px] text-gray-500 italic">{pdi.reason}</span>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
                                 {/* Variant Corrections */}
                                 {rec.variant_corrections && rec.variant_corrections.length > 0 && (
                                   <div className={`rounded-lg border border-violet-200 p-3 transition-all ${highlight('child_overrides')}`}>
                                     <div className="flex items-center justify-between mb-2">
-                                      <span className="text-xs font-semibold text-gray-700">⚡ Variant Conflict Corrections ({rec.variant_corrections.length})</span>
+                                      <span className="text-xs font-semibold text-gray-700">⚡ Variant Health Check ({rec.variant_corrections.length})</span>
                                     </div>
                                     <div className="space-y-3">
                                       {rec.variant_corrections.map((correction, ci) => (

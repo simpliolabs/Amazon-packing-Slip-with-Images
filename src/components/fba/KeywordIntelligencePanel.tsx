@@ -132,7 +132,7 @@ export function KeywordIntelligencePanel({ asin, data, loading, error, onRefresh
     ? data.topOpportunities
     : data.topOpportunities.filter(k => k.actionType === filter)
 
-  const visible = showAll ? filtered : filtered.slice(0, 10)
+  const visible = filtered.slice(0, 5)
 
   // ── Data source label ──
   const sourceLabel = {
@@ -221,14 +221,10 @@ export function KeywordIntelligencePanel({ asin, data, loading, error, onRefresh
         ))}
       </div>
 
-      {/* Show more / show less */}
-      {filtered.length > 10 && (
-        <button
-          onClick={() => setShowAll(v => !v)}
-          className="w-full text-xs text-violet-600 hover:text-violet-800 font-medium py-1"
-        >
-          {showAll ? `Show less ↑` : `Show all ${filtered.length} keywords ↓`}
-        </button>
+      {filtered.length > 5 && (
+        <p className="text-[10px] text-gray-400 text-center py-1">
+          Showing top 5 of {filtered.length} keywords
+        </p>
       )}
 
       {/* Footer: data source + last updated + refresh */}

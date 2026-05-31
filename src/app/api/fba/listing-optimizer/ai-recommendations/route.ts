@@ -1,14 +1,13 @@
 /**
  * POST /api/fba/listing-optimizer/ai-recommendations
  * ─────────────────────────────────────────────────────────────────────────────
- * Generates AI-powered, copy-paste-ready SEO recommendations for a specific
- * parent ASIN using the actual listing content stored in listing_content.
+ * V3: Generates AI-powered SEO recommendations that correctly follow Amazon's
+ * parent/child listing architecture:
  *
- * V2 ENHANCEMENT: Injects keyword intelligence context (top opportunities,
- * critical gaps, missing keywords) so the AI knows EXACTLY which keywords
- * to prioritize in the title, bullets, and backend keywords.
+ *   SHARED (parent-level): title template, bullets, description
+ *   PER-CHILD: backend keywords (unique per variant)
  *
- * Uses gpt-4.1-mini via the OpenAI-compatible API for fast, cheap analysis.
+ * Uses gpt-4.1-mini via the OpenAI-compatible API.
  * Results are stored in listing_seo_recommendations for instant re-display.
  *
  * Body: { parent_asin: string }
@@ -76,11 +75,18 @@ export interface ProductDetailImprovement {
   reason: string
 }
 
+export interface PerChildKeywords {
+  sku: string
+  asin: string
+  keywords: string
+}
+
 export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
   recommended_bullets: string[]
-  recommended_keywords: string
+  recommended_keywords: string          // Legacy: first child's keywords (for backward compat)
+  per_child_keywords: PerChildKeywords[] // V3: unique keywords per child
   recommended_description: string
   variant_corrections: VariantCorrection[]
   cannibalization_warnings: CannibalizationWarning[]
@@ -91,19 +97,11 @@ export interface AiRecommendations {
 
 // ─── Keyword Intelligence Context Builder ─────────────────────────────────────
 
-/**
- * Fetches stored keyword analysis for the first child ASIN of a parent
- * and formats it as a context block for the AI prompt.
- *
- * This is the V2 enhancement: the AI now knows which keywords are
- * MISSING from the listing and which ones to prioritize.
- */
 async function buildKeywordContext(
   supabase: ReturnType<typeof getAdminSupabase>,
   parentAsin: string,
   children: ChildRow[]
 ): Promise<{ contextBlock: string; opportunitiesUsed: number }> {
-  // Try to get keyword analysis for the first child ASIN
   const firstChildAsin = children[0]?.asin
   if (!firstChildAsin) {
     return { contextBlock: '', opportunitiesUsed: 0 }
@@ -122,7 +120,6 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
     }
   }
 
-  // Separate by action type
   const critical = analysis.filter(k => k.actionType === 'CRITICAL').slice(0, 5)
   const upgrade  = analysis.filter(k => k.actionType === 'UPGRADE').slice(0, 5)
   const reinforce = analysis.filter(k => k.actionType === 'REINFORCE').slice(0, 3)
@@ -190,21 +187,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No listing content found. Run Scan Listings first.' }, { status: 404 })
     }
 
-    // Use the first child as the representative (parent-level content)
     const rep = children[0] as ChildRow
     const bullets = [rep.bullet_1, rep.bullet_2, rep.bullet_3, rep.bullet_4, rep.bullet_5].filter(Boolean) as string[]
-    const kwLen = rep.backend_keywords?.trim().length || 0
-    const kwRemaining = 250 - kwLen
 
     // Build per-variant detail for conflict analysis
     const variantDetails = children.map((c: ChildRow, idx: number) => {
       const cBullets = [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean) as string[]
-      return `VARIANT ${idx + 1}: ${c.sku} (${c.asin})
+      return `VARIANT ${idx + 1}: ${c.sku} (ASIN: ${c.asin})
   Title: ${c.title || '[MISSING]'}
   Bullets: ${cBullets.length > 0 ? cBullets.map((b, i) => `\n    ${i + 1}. ${b}`).join('') : '[NONE]'}
-  Keywords (${(c.backend_keywords?.length || 0)}/250): ${c.backend_keywords || '[EMPTY]'}
+  Backend Keywords (${(c.backend_keywords?.length || 0)}/250 chars): ${c.backend_keywords || '[EMPTY]'}
   Description: ${c.description ? c.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 200) + '...' : '[MISSING]'}`
     }).join('\n\n')
+
+    // Build the per-child keyword slots instruction
+    const childKeywordSlots = children.map((c: ChildRow, idx: number) => {
+      const kwLen = c.backend_keywords?.trim().length || 0
+      return `  Child ${idx + 1}: SKU="${c.sku}", ASIN="${c.asin}", current=${kwLen}/250 chars`
+    }).join('\n')
 
     // V2: Build keyword intelligence context
     const { contextBlock: keywordContext, opportunitiesUsed } = await buildKeywordContext(
@@ -219,14 +219,12 @@ PRODUCT LISTING DATA (Amazon US):
 Parent ASIN: ${parent_asin}
 Total Variants: ${children.length} child SKUs
 
-IMPORTANT: This is a MULTI-VARIANT listing. Your recommendations (title, bullets, description) must be GENERIC enough to apply to ALL variants in this family. Do NOT mention specific sizes, colors, or variant-specific attributes unless they ALL share that attribute.
-
 --- PER-VARIANT CONTENT (compare these to find conflicts) ---
 ${variantDetails}
 --- END VARIANT CONTENT ---
 
-CURRENT BACKEND KEYWORDS FOR VARIANT 1 (${kwLen}/250 chars used, ${kwRemaining} chars remaining):
-${rep.backend_keywords || '[EMPTY]'}
+CHILDREN NEEDING BACKEND KEYWORDS (each child gets its own unique 250-char keyword string):
+${childKeywordSlots}
 
 IMAGE COUNT: ${rep.image_count || 0}/7
 A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
@@ -234,66 +232,72 @@ A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count} modules)` : 'No'}
 ${keywordContext ? `\n--- KEYWORD INTELLIGENCE (V2) ---\n${keywordContext}\n--- END KEYWORD INTELLIGENCE ---` : ''}
 `.trim()
 
-    const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US. You have deep expertise in:
-- Amazon's A10 search algorithm and keyword indexing rules
-- Title optimization (200 char limit, Title Case, no ALL CAPS, keyword front-loading)
-- Bullet point copywriting (benefit-led hooks in CAPS, 200 char limit per bullet, feature+benefit format)
-- Backend keyword strategy (250 chars, no commas, no repetition of title/bullet terms)
-- Product description HTML formatting (Amazon allows <b>, <br>, <p>, <ul>, <li>)
+    const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US.
 
-V2 ENHANCEMENT: You now have access to KEYWORD INTELLIGENCE data showing exactly which
-high-opportunity keywords are missing from the listing. You MUST use this data to drive
-your recommendations. The goal is not just to optimize copy — it's to capture ranking
-and sales from keywords that are proven to generate revenue but are currently missing
-from the listing's most visible fields.
+AMAZON PARENT/CHILD LISTING ARCHITECTURE — YOU MUST UNDERSTAND THIS:
+On Amazon, a variation family has a PARENT ASIN (non-buyable placeholder) and multiple CHILD ASINs (the actual buyable products). Here is how content works:
 
-CRITICAL RULES:
-1. This is a MULTI-VARIANT listing family. Your title, bullets, and description must work for ALL variants — do NOT mention variant-specific attributes (specific size, specific color) unless ALL variants share it.
-2. Read ALL variant titles carefully to understand what the product actually is. Do NOT confuse product types.
-3. If variants differ by capacity (32GB, 64GB, 128GB), write bullets that are capacity-agnostic OR mention the full range.
-4. Do NOT invent features or specs not mentioned in the current listing. Only rephrase and optimize what's already there.
-5. Use SIMPLE, EVERYDAY ENGLISH. Never use obscure or thesaurus-style vocabulary.
-6. Bullet hooks must be 2-4 common words a shopper instantly understands.
-7. CRITICAL GAP keywords from the keyword intelligence section MUST appear in title or bullets 1-2.
-8. TITLE UPGRADE keywords MUST appear in the title.
+SHARED CONTENT (same for ALL children — edited once at parent level):
+• Title — One title template for the whole family. Amazon auto-appends the variant attribute (size, color). You write the GENERIC part only. NEVER include variant-specific attributes like "128GB", "Black", "Large" in the title unless ALL variants share it.
+• Bullets — One set of 5 bullets shared across all children. Must be generic.
+• Description — One description shared across all children. Must be generic.
+• A+ Content — Shared at parent level.
 
-AMAZON RULES TO ENFORCE:
-- Title: 150-200 chars (the sweet spot — under 150 gets penalized, over 200 gets truncated in search), Title Case, no ALL CAPS words (except acronyms like UHS-I, SDHC), no promotional phrases, keywords in first 80 chars
-- Bullets: Start each with a 2-5 word benefit hook in ALL CAPS followed by " – ", then feature+benefit. Max 200 chars each. Plain English.
-- Backend keywords: Space-separated, no commas, no duplicates of title/bullet terms. Output the COMPLETE FULL 250-character keyword string — this means KEEP the existing good keywords AND add new ones to fill the remaining ${kwRemaining} chars. The output must be the ENTIRE replacement string (not just additions). Each word/phrase must appear only ONCE — NEVER repeat. Include a MIX of: device compatibility, use-case terms, seasonal, and common misspellings. HARD LIMIT: exactly 250 characters max total.
-- Description: Use HTML tags (<b>, <br>, <ul>, <li>). Min 150 words. Generic for all variants.
+PER-CHILD CONTENT (different for each child — edited individually):
+• Backend Keywords — Each child has its own 250-byte search terms field. This is the KEY optimization opportunity: distribute your keyword universe across children. The 32GB child should target "32gb sd card", the 64GB child should target "64gb sd card", etc.
+• Images — Each child has its own image set.
 
-VARIANT CONFLICT CORRECTIONS:
-Compare the per-variant content provided above. ONLY flag HARMFUL differences — NOT expected variant differentiation.
+YOUR TASK:
+Generate optimized content following this architecture exactly.
 
-DO flag (harmful drift):
-- Wrong product type/terminology
-- Contradictory or incorrect specs
-- Completely off-brand or incoherent messaging
+TITLE RULES:
+- 150-200 chars (sweet spot — under 150 gets penalized, over 200 gets truncated)
+- Title Case (capitalize first letter of each major word)
+- NO ALL CAPS words except recognized acronyms (e.g., UHS-I, SDHC, USB, LED, FBA)
+- No promotional phrases ("Best Seller", "Free Shipping")
+- Front-load the most important keywords in the first 80 chars
+- NEVER include variant-specific attributes (specific size, color, capacity) — Amazon handles that
+- The title must make sense for EVERY child in the family
 
-DO NOT flag (expected differentiation):
-- Different size/capacity in title or bullets — this is CORRECT
-- Different color names, flavor, scent, material variant attributes
+BULLET RULES:
+- Start each with a 2-5 word benefit hook in ALL CAPS followed by " – "
+- Then feature + benefit in plain English
+- Max 200 chars each
+- Must be generic — work for ALL variants
+- CRITICAL GAP keywords from keyword intelligence MUST appear in bullets 1-2
 
-CANNIBALIZATION ANALYSIS:
-Compare the per-variant titles, bullets, and backend keywords. Identify:
-1. Keywords that appear in the WRONG variant (e.g., "128GB" in the 32GB variant's title or bullets)
-2. Variants competing against each other for the same search terms unnecessarily
-3. Keyword stuffing that dilutes relevance (same keyword repeated across multiple fields)
-Only report genuine problems — NOT expected variant differentiation.
+BACKEND KEYWORDS RULES (PER CHILD):
+- Each child gets its OWN unique 250-char keyword string
+- Space-separated, no commas, no duplicates of title/bullet terms
+- NEVER repeat the same keywords across children — distribute them
+- For variant families: each child should include its variant-specific terms (e.g., "32gb" for the 32GB child, "128gb" for the 128GB child)
+- Include: device compatibility, use-case terms, seasonal terms, common misspellings
+- HARD LIMIT: exactly 250 characters max per child
+
+DESCRIPTION RULES:
+- Use HTML tags (<b>, <br>, <ul>, <li>)
+- Min 150 words
+- Generic for all variants
+
+VARIANT HEALTH CHECK:
+Compare the per-variant content. ONLY flag genuinely HARMFUL issues:
+DO flag: Wrong product type, contradictory specs, incorrect attributes, backend keywords containing wrong variant terms (e.g., "128gb" in the 32GB child's keywords)
+DO NOT flag: Expected variant differentiation in titles (different sizes/colors appended by Amazon), different images per variant
 
 PRODUCT DETAILS PAGE IMPROVEMENTS:
-Based on the listing content and product type, suggest the TOP 10 most impactful structured attribute improvements for the Amazon Product Details page (Seller Central "Product Details" tab). Focus on:
-- Fields that customers commonly filter by (e.g., Compatible Devices, Storage Capacity, Read Speed)
-- Fields that improve search discoverability (e.g., Special Features, Use Case)
-- Fields that are currently empty or have incorrect values
-Do NOT suggest fields irrelevant to this product category.
+Suggest the TOP 10 most impactful structured attribute improvements for the Amazon Product Details page. Focus on fields customers filter by, fields that improve search discoverability, and fields currently empty or incorrect.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
-  "recommended_title": "string (the exact new title to paste in, 150-200 chars target range, generic for all variants, includes CRITICAL GAP and TITLE UPGRADE keywords)",
+  "recommended_title": "string (generic title template, 150-200 chars, NO variant-specific attributes, Title Case, no ALL CAPS except acronyms)",
   "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "recommended_keywords": "string (the COMPLETE FULL 250-char keyword string — existing good terms + new terms combined, max 250 chars total, prioritizes terms NOT already in title/bullets)",
+  "per_child_keywords": [
+    {
+      "sku": "string (the child SKU)",
+      "asin": "string (the child ASIN)",
+      "keywords": "string (unique 250-char keyword string for THIS child, including variant-specific terms)"
+    }
+  ],
   "recommended_description": "string (full HTML description, min 150 words, generic for all variants)",
   "variant_corrections": [
     {
@@ -306,18 +310,18 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
   ],
   "cannibalization_warnings": [
     {
-      "keyword": "string (the keyword causing the issue)",
-      "affected_skus": ["string (SKU 1)", "string (SKU 2)"],
-      "issue": "string (clear description of the cannibalization problem)",
-      "recommendation": "string (specific fix)"
+      "keyword": "string",
+      "affected_skus": ["string"],
+      "issue": "string",
+      "recommendation": "string"
     }
   ],
   "product_details_improvements": [
     {
-      "field_name": "string (exact Seller Central field name, e.g. 'Compatible Devices')",
-      "current_value": "string or null (what's currently there)",
-      "recommended_value": "string (what it should be)",
-      "reason": "string (why this matters for ranking/conversion)"
+      "field_name": "string (exact Seller Central field name)",
+      "current_value": "string or null",
+      "recommended_value": "string",
+      "reason": "string"
     }
   ]
 }`
@@ -331,16 +335,17 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
         { role: 'user', content: listingContext },
       ],
       temperature: 0.3,
-      max_tokens: 6000,
+      max_tokens: 8000,
     })
 
     const rawContent = completion.choices[0]?.message?.content || ''
 
-    // Parse the JSON response — strip markdown code fences if present
+    // Parse the JSON response
     let parsed: {
       recommended_title: string
       recommended_bullets: string[]
-      recommended_keywords: string
+      per_child_keywords?: { sku: string; asin: string; keywords: string }[]
+      recommended_keywords?: string  // Legacy fallback
       recommended_description: string
       variant_corrections?: VariantCorrection[]
       cannibalization_warnings?: CannibalizationWarning[]
@@ -371,27 +376,42 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
 
     if (missedCritical.length > 0) {
       console.warn(
-        `[AI Recs] V2 validation: AI missed ${missedCritical.length} CRITICAL keywords: ${missedCritical.join(', ')}`
+        `[AI Recs] V3 validation: AI missed ${missedCritical.length} CRITICAL keywords: ${missedCritical.join(', ')}`
       )
-      // Log but don't fail — the AI may have used synonyms or paraphrased
     }
 
-    // Post-generation enforcement: truncate backend keywords to Amazon's 250-char hard limit
-    let safeKeywords = (parsed.recommended_keywords || '').trim()
-    if (safeKeywords.length > 250) {
-      // Truncate at the last full word boundary within 250 chars
-      const truncated = safeKeywords.slice(0, 250)
-      const lastSpace = truncated.lastIndexOf(' ')
-      safeKeywords = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
-      console.warn(`[AI Recs] Backend keywords truncated from ${parsed.recommended_keywords!.length} to ${safeKeywords.length} chars (250 limit)`)
-    }
+    // Post-generation enforcement: truncate each child's backend keywords to 250 chars
+    const perChildKeywords: PerChildKeywords[] = (parsed.per_child_keywords || []).map(pck => {
+      let kw = (pck.keywords || '').trim()
+      if (kw.length > 250) {
+        const truncated = kw.slice(0, 250)
+        const lastSpace = truncated.lastIndexOf(' ')
+        kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+        console.warn(`[AI Recs] Per-child keywords for ${pck.sku} truncated from ${pck.keywords.length} to ${kw.length} chars`)
+      }
+      return { sku: pck.sku, asin: pck.asin, keywords: kw }
+    })
+
+    // Legacy fallback: if AI returned old-style single string, use it
+    const legacyKeywords = perChildKeywords.length > 0
+      ? perChildKeywords[0].keywords
+      : (() => {
+          let kw = (parsed.recommended_keywords || '').trim()
+          if (kw.length > 250) {
+            const truncated = kw.slice(0, 250)
+            const lastSpace = truncated.lastIndexOf(' ')
+            kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+          }
+          return kw
+        })()
 
     // Build the full response object
     const rec: AiRecommendations = {
       parent_asin,
       recommended_title: parsed.recommended_title || '',
       recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
-      recommended_keywords: safeKeywords,
+      recommended_keywords: legacyKeywords,
+      per_child_keywords: perChildKeywords,
       recommended_description: parsed.recommended_description || '',
       variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
       cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
@@ -401,24 +421,33 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
     }
 
     // Store in listing_seo_recommendations
-    // Try with all fields first; if DB columns don't exist yet, retry without them.
-    const { cannibalization_warnings, product_details_improvements, keyword_opportunities_used, ...persistFields } = rec
-    const fullPayload: Record<string, unknown> = {
+    // The DB may not have per_child_keywords column yet, so we serialize it into recommended_keywords as JSON
+    const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_opportunities_used, ...persistFields } = rec
+
+    // Serialize per_child_keywords as JSON string into recommended_keywords for DB storage
+    const dbPayload: Record<string, unknown> = {
       ...persistFields,
+      // Store per_child_keywords as a JSON-encoded string in recommended_keywords
+      // The UI will try JSON.parse() first; if it fails, treat as legacy string
+      recommended_keywords: JSON.stringify(perChildKeywords),
       cannibalization_warnings,
       product_details_improvements,
     }
 
     const { error: upsertErr } = await supabase
       .from('listing_seo_recommendations')
-      .upsert(fullPayload, { onConflict: 'parent_asin' })
+      .upsert(dbPayload, { onConflict: 'parent_asin' })
 
     if (upsertErr) {
       // Likely missing columns — retry with only the original fields
       console.warn('[AI Recs] Full upsert failed, retrying without new fields:', upsertErr.message)
+      const fallbackPayload = {
+        ...persistFields,
+        recommended_keywords: JSON.stringify(perChildKeywords),
+      }
       await supabase
         .from('listing_seo_recommendations')
-        .upsert(persistFields, { onConflict: 'parent_asin' })
+        .upsert(fallbackPayload, { onConflict: 'parent_asin' })
     }
 
     return NextResponse.json({
@@ -456,5 +485,27 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ recommendations: null })
   }
 
-  return NextResponse.json({ recommendations: data })
+  // Reconstruct per_child_keywords from the stored recommended_keywords JSON string
+  let per_child_keywords: PerChildKeywords[] = []
+  if (data.recommended_keywords) {
+    try {
+      const parsed = JSON.parse(data.recommended_keywords)
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].sku) {
+        per_child_keywords = parsed
+      }
+    } catch {
+      // Legacy string format — leave per_child_keywords empty
+    }
+  }
+
+  return NextResponse.json({
+    recommendations: {
+      ...data,
+      per_child_keywords,
+      // Keep recommended_keywords as the first child's keywords for backward compat
+      recommended_keywords: per_child_keywords.length > 0
+        ? per_child_keywords[0].keywords
+        : data.recommended_keywords || '',
+    },
+  })
 }
