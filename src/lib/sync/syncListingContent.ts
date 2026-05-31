@@ -318,7 +318,65 @@ interface ScoringContext {
   hasAiRecommendations: boolean
 }
 
-/** Fetch keyword intelligence + product details data for scoring */
+/**
+ * Resolve a parent ASIN to the child ASIN that has keyword_analysis data.
+ * Uses the same 3-step fallback as the intelligence API:
+ *   1. topChildAsin from parent_asin_rollup
+ *   2. Direct match in keyword_analysis for the parent ASIN itself
+ *   3. Any child in listing_content with this parent → check keyword_analysis
+ */
+async function resolveKeywordAsin(
+  supabase: SupabaseClient,
+  parentAsin: string,
+  topChildAsin: string | null
+): Promise<string | null> {
+  // Step 1: Try topChildAsin (most common path)
+  if (topChildAsin) {
+    const { data: check } = await supabase
+      .from('keyword_analysis')
+      .select('asin')
+      .eq('asin', topChildAsin)
+      .limit(1)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (check && (check as any[]).length > 0) return topChildAsin
+  }
+
+  // Step 2: Try parentAsin directly (some products store under parent)
+  const { data: parentCheck } = await supabase
+    .from('keyword_analysis')
+    .select('asin')
+    .eq('asin', parentAsin)
+    .limit(1)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (parentCheck && (parentCheck as any[]).length > 0) return parentAsin
+
+  // Step 3: Find any child in listing_content → check keyword_analysis
+  const { data: children } = await supabase
+    .from('listing_content')
+    .select('asin')
+    .eq('parent_asin', parentAsin)
+    .not('title', 'is', null)
+    .limit(5)
+
+  if (children) {
+    for (const child of children) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const childAsin = (child as any).asin
+      const { data: kwCheck } = await supabase
+        .from('keyword_analysis')
+        .select('asin')
+        .eq('asin', childAsin)
+        .limit(1)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (kwCheck && (kwCheck as any[]).length > 0) return childAsin
+    }
+  }
+
+  return null
+}
+
+/** Fetch keyword intelligence + product details data for scoring.
+ *  Caps CRITICAL and UPGRADE to top 10 by opportunity score for realistic scoring. */
 async function fetchScoringContext(
   supabase: SupabaseClient,
   parentAsin: string,
@@ -330,38 +388,49 @@ async function fetchScoringContext(
     productDetailsGaps: 0, hasAiRecommendations: false,
   }
 
-  // 1. Keyword intelligence from keyword_analysis table
-  //    Keywords are stored per-child ASIN. Use topChildAsin if available.
-  const kwAsin = topChildAsin || parentAsin
-  try {
-    const { data: kwRows } = await supabase
-      .from('keyword_analysis')
-      .select('keyword, action_type, opportunity_score')
-      .eq('asin', kwAsin)
-      .order('opportunity_score', { ascending: false })
-      .limit(100)
+  // 1. Resolve the correct child ASIN that has keyword_analysis data
+  const kwAsin = await resolveKeywordAsin(supabase, parentAsin, topChildAsin)
+  if (!kwAsin) {
+    // No keyword data exists for this product family — skip keyword scoring
+    console.log(`[Scoring] No keyword_analysis data found for parent ${parentAsin}`)
+  } else {
+    try {
+      // Fetch top 10 CRITICAL + top 10 UPGRADE (ordered by opportunity_score)
+      // This is the actionable working set — nobody optimizes for 42 keywords.
+      const { data: kwRows } = await supabase
+        .from('keyword_analysis')
+        .select('keyword, action_type, opportunity_score')
+        .eq('asin', kwAsin)
+        .order('opportunity_score', { ascending: false })
+        .limit(100)
 
-    if (kwRows && kwRows.length > 0) {
-      for (const row of kwRows) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const r = row as any
-        ctx.totalKeywords++
-        switch (r.action_type) {
-          case 'CRITICAL':  ctx.criticalCount++;  break
-          case 'UPGRADE':   ctx.upgradeCount++;   break
-          case 'REINFORCE': ctx.reinforceCount++; break
-          case 'DEFENDED':  ctx.defendedCount++;  break
-        }
-        if (r.action_type === 'CRITICAL' && ctx.topCriticalKeywords.length < 3) {
-          ctx.topCriticalKeywords.push(r.keyword)
-        }
-        if (r.action_type === 'UPGRADE' && ctx.topUpgradeKeywords.length < 3) {
-          ctx.topUpgradeKeywords.push(r.keyword)
+      if (kwRows && kwRows.length > 0) {
+        // Count totals but cap what affects scoring to top 10 per category
+        let criticalSeen = 0
+        let upgradeSeen = 0
+        for (const row of kwRows) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const r = row as any
+          ctx.totalKeywords++
+          switch (r.action_type) {
+            case 'CRITICAL':
+              criticalSeen++
+              if (criticalSeen <= 10) ctx.criticalCount++  // Cap at 10
+              if (ctx.topCriticalKeywords.length < 5) ctx.topCriticalKeywords.push(r.keyword)
+              break
+            case 'UPGRADE':
+              upgradeSeen++
+              if (upgradeSeen <= 10) ctx.upgradeCount++  // Cap at 10
+              if (ctx.topUpgradeKeywords.length < 5) ctx.topUpgradeKeywords.push(r.keyword)
+              break
+            case 'REINFORCE': ctx.reinforceCount++; break
+            case 'DEFENDED':  ctx.defendedCount++;  break
+          }
         }
       }
+    } catch (err) {
+      console.warn(`[Scoring] keyword_analysis lookup failed for ${kwAsin}:`, err instanceof Error ? err.message : String(err))
     }
-  } catch (err) {
-    console.warn(`[Scoring] keyword_analysis lookup failed for ${kwAsin}:`, err instanceof Error ? err.message : String(err))
   }
 
   // 2. Product details improvements from listing_seo_recommendations
@@ -458,16 +527,17 @@ function scoreListingContent(
     }
   }
 
-  // ── 1b. TITLE KEYWORD INTELLIGENCE ────────────────────────────────────────
-  // If keyword intelligence data exists, check if high-value keywords are missing from the title.
-  // UPGRADE keywords = present in bullets but NOT in title (should be promoted to title).
+  // ── 1b. TITLE KEYWORD INTELLIGENCE (capped to top 10 UPGRADE keywords) ───────
+  // UPGRADE keywords = present in bullets but NOT in title (should be promoted).
+  // Capped to top 10 by opportunity score — these are the ones worth acting on.
   if (scoringCtx.totalKeywords > 0 && scoringCtx.upgradeCount > 0) {
-    if (scoringCtx.upgradeCount >= 8) {
+    const kwList = scoringCtx.topUpgradeKeywords.slice(0, 3).map(k => `"${k}"`).join(', ')
+    if (scoringCtx.upgradeCount >= 7) {
       titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Keyword Intelligence: ${scoringCtx.upgradeCount} high-value keywords appear in your bullets but NOT in your title (e.g. "${scoringCtx.topUpgradeKeywords.join('", "')}"). Amazon weights title keywords 3-5x more than bullet keywords. Promote your top 2-3 UPGRADE keywords into the title to capture these search terms.`, auto_fixable: false })
-    } else if (scoringCtx.upgradeCount >= 4) {
+      issues.push({ field: 'title', severity: 'warning', message: `Keyword Intelligence: ${scoringCtx.upgradeCount} of your top keywords appear in bullets but NOT in your title. Top opportunities to add to title: ${kwList}. Amazon weights title keywords 3-5x more than bullets — adding even 2 of these would improve your search ranking.`, auto_fixable: false })
+    } else if (scoringCtx.upgradeCount >= 3) {
       titleScore -= 3
-      issues.push({ field: 'title', severity: 'info', message: `Keyword Intelligence: ${scoringCtx.upgradeCount} keywords are in your bullets but missing from your title (e.g. "${scoringCtx.topUpgradeKeywords.join('", "')}"). Adding even 1-2 of these to your title would improve search ranking for those terms.`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'info', message: `Keyword Intelligence: ${scoringCtx.upgradeCount} keywords are in your bullets but missing from your title: ${kwList}. Adding 1-2 of these to your title would capture more search traffic.`, auto_fixable: false })
     }
   }
   titleScore = Math.max(0, titleScore)
@@ -615,19 +685,21 @@ function scoreListingContent(
     issues.push({ field: 'images', severity: 'warning', message: 'No product images detected. Upload at least 7 images in Seller Central → Edit Listing → Images. Required: 1 white-background hero (1000x1000px minimum for zoom), 3-4 lifestyle shots, 1-2 infographic images with key specs highlighted.', auto_fixable: false })
   }
 
-  // ── 4b. KEYWORD INTELLIGENCE → KEYWORD SCORE ───────────────────────────────
+  // ── 4b. KEYWORD INTELLIGENCE → KEYWORD SCORE (capped to top 10 CRITICAL) ────
   // CRITICAL keywords = high-value search terms completely missing from your listing.
-  // More CRITICAL keywords = more revenue-generating searches you're invisible for.
+  // Capped to top 10 by opportunity score — these are the actionable ones.
+  // Thresholds: 7+/10 = critical (-8), 4-6/10 = warning (-5), 1-3/10 = info (-3)
   if (scoringCtx.totalKeywords > 0 && scoringCtx.criticalCount > 0) {
-    if (scoringCtx.criticalCount >= 20) {
+    const kwList = scoringCtx.topCriticalKeywords.slice(0, 5).map(k => `"${k}"`).join(', ')
+    if (scoringCtx.criticalCount >= 7) {
       keywordScore -= 8
-      issues.push({ field: 'keyword_intelligence', severity: 'critical', message: `Keyword Intelligence: ${scoringCtx.criticalCount} CRITICAL keywords are completely missing from your listing (e.g. "${scoringCtx.topCriticalKeywords.join('", "')}"). These are high-value search terms where shoppers are buying but you\'re invisible. This is your biggest SEO gap — address the top 5 CRITICAL keywords first by adding them to your title, bullets, and backend keywords.`, auto_fixable: false })
-    } else if (scoringCtx.criticalCount >= 10) {
+      issues.push({ field: 'keyword_intelligence', severity: 'critical', message: `Keyword Intelligence: ${scoringCtx.criticalCount} of your top 10 highest-value keywords are completely missing from your listing. Add these to your title, bullets, or backend keywords: ${kwList}. These are search terms where shoppers are buying but you\'re invisible.`, auto_fixable: false })
+    } else if (scoringCtx.criticalCount >= 4) {
       keywordScore -= 5
-      issues.push({ field: 'keyword_intelligence', severity: 'warning', message: `Keyword Intelligence: ${scoringCtx.criticalCount} CRITICAL keywords missing from your listing (e.g. "${scoringCtx.topCriticalKeywords.join('", "')}"). Each missing CRITICAL keyword is a search term where competitors are capturing sales you\'re not. Review the Keywords tab and add the top terms to your title and bullets.`, auto_fixable: false })
-    } else if (scoringCtx.criticalCount >= 5) {
+      issues.push({ field: 'keyword_intelligence', severity: 'warning', message: `Keyword Intelligence: ${scoringCtx.criticalCount} of your top 10 keywords are missing from your listing. Priority keywords to add: ${kwList}. Open the Keywords tab for the full list with placement recommendations.`, auto_fixable: false })
+    } else if (scoringCtx.criticalCount >= 1) {
       keywordScore -= 3
-      issues.push({ field: 'keyword_intelligence', severity: 'info', message: `Keyword Intelligence: ${scoringCtx.criticalCount} CRITICAL keywords missing (e.g. "${scoringCtx.topCriticalKeywords.join('", "')}"). Add these to your backend keywords or weave them into your bullets for better search coverage.`, auto_fixable: false })
+      issues.push({ field: 'keyword_intelligence', severity: 'info', message: `Keyword Intelligence: ${scoringCtx.criticalCount} keyword gap(s) found. Add to your backend keywords or bullets: ${kwList}.`, auto_fixable: false })
     }
   }
 
