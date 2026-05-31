@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import type { ProductRecommendation, ReplenishmentStatus } from '@/lib/fba/replenishment'
 import { OptimizerView } from '@/components/fba/OptimizerView'
@@ -358,6 +359,7 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function FBAIntelligencePage() {
+  const router = useRouter()
   const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings' | 'missing' | 'ads'>('replenishment')
   const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
   const [salesSearch, setSalesSearch] = useState('')
@@ -2803,46 +2805,77 @@ export default function FBAIntelligencePage() {
                             const highlight = (key: string) => selectedRecCategory === key ? 'ring-2 ring-violet-400 bg-violet-50/30' : 'bg-white'
                             return (
                               <div className="space-y-4">
-                                {/* Keyword Reconciliation Report — shows exactly where each keyword was placed */}
-                                {rec.keyword_reconciliation && rec.keyword_reconciliation.length > 0 && (
-                                  <div className="rounded-lg border-2 border-violet-300 bg-violet-50/50 p-3">
-                                    <div className="flex items-center justify-between mb-3">
-                                      <span className="text-xs font-bold text-violet-800 uppercase tracking-wide">Keyword Placement Plan ({rec.keyword_reconciliation.length} keywords)</span>
-                                    </div>
-                                    <div className="space-y-2">
-                                      {rec.keyword_reconciliation.map((kr: KeywordReconciliation, krIdx: number) => (
-                                        <div key={krIdx} className={`rounded-lg p-2.5 border ${
-                                          kr.action_type === 'CRITICAL' ? 'bg-red-50 border-red-200'
-                                          : kr.action_type === 'UPGRADE' ? 'bg-amber-50 border-amber-200'
-                                          : 'bg-green-50 border-green-200'
-                                        }`}>
-                                          <div className="flex items-center justify-between mb-1">
-                                            <div className="flex items-center gap-2">
-                                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                                kr.action_type === 'CRITICAL' ? 'bg-red-200 text-red-800'
-                                                : kr.action_type === 'UPGRADE' ? 'bg-amber-200 text-amber-800'
-                                                : 'bg-green-200 text-green-800'
-                                              }`}>{kr.action_type}</span>
-                                              <span className="text-xs font-semibold text-gray-900">&ldquo;{kr.keyword}&rdquo;</span>
+                                {/* Keyword Reconciliation Report — grouped by placement to avoid repetition */}
+                                {rec.keyword_reconciliation && rec.keyword_reconciliation.length > 0 && (() => {
+                                  // Group keywords by their primary placement (first item in placed_in)
+                                  const placementGroups: Record<string, { text: string; keywords: { keyword: string; action_type: string; search_volume: number; why: string }[] }> = {}
+                                  for (const kr of rec.keyword_reconciliation!) {
+                                    // Use a canonical key from all placements combined
+                                    const key = kr.placed_in.sort().join(' + ')
+                                    if (!placementGroups[key]) {
+                                      placementGroups[key] = { text: kr.exact_text, keywords: [] }
+                                    }
+                                    placementGroups[key].keywords.push({ keyword: kr.keyword, action_type: kr.action_type, search_volume: kr.search_volume, why: kr.why })
+                                  }
+                                  // Sort groups: title first, then bullets, then backend
+                                  const sortedKeys = Object.keys(placementGroups).sort((a, b) => {
+                                    if (a.includes('title') && !b.includes('title')) return -1
+                                    if (!a.includes('title') && b.includes('title')) return 1
+                                    if (a.includes('bullet') && !b.includes('bullet')) return -1
+                                    if (!a.includes('bullet') && b.includes('bullet')) return 1
+                                    return a.localeCompare(b)
+                                  })
+                                  const totalKw = rec.keyword_reconciliation!.length
+                                  return (
+                                    <div className="rounded-lg border-2 border-violet-300 bg-violet-50/50 p-3">
+                                      <div className="flex items-center justify-between mb-3">
+                                        <span className="text-xs font-bold text-violet-800 uppercase tracking-wide">Keyword Placement Plan ({totalKw} keywords reconciled)</span>
+                                      </div>
+                                      <div className="space-y-3">
+                                        {sortedKeys.map((groupKey) => {
+                                          const group = placementGroups[groupKey]
+                                          const placements = groupKey.split(' + ')
+                                          const totalVol = group.keywords.reduce((s, k) => s + (k.search_volume || 0), 0)
+                                          const hasCritical = group.keywords.some(k => k.action_type === 'CRITICAL')
+                                          const hasUpgrade = group.keywords.some(k => k.action_type === 'UPGRADE' || k.action_type === 'TITLE UPGRADE')
+                                          const borderColor = hasCritical ? 'border-red-300 bg-red-50/50' : hasUpgrade ? 'border-amber-300 bg-amber-50/50' : 'border-green-300 bg-green-50/50'
+                                          return (
+                                            <div key={groupKey} className={`rounded-lg p-3 border-2 ${borderColor}`}>
+                                              {/* Placement header */}
+                                              <div className="flex items-center justify-between mb-2">
+                                                <div className="flex flex-wrap gap-1">
+                                                  {placements.map((loc, j) => (
+                                                    <span key={j} className="text-[10px] font-bold bg-violet-200 text-violet-900 px-2 py-0.5 rounded uppercase">
+                                                      {loc.replace(/_/g, ' ')}
+                                                    </span>
+                                                  ))}
+                                                </div>
+                                                <span className="text-[10px] text-gray-500 font-medium">{group.keywords.length} keywords · {totalVol.toLocaleString()} searches/mo</span>
+                                              </div>
+                                              {/* The actual text for this placement */}
+                                              <p className="text-[11px] text-gray-800 leading-relaxed bg-white rounded p-2 border border-gray-200 mb-2 italic">
+                                                &ldquo;{group.text.length > 250 ? group.text.slice(0, 250) + '\u2026' : group.text}&rdquo;
+                                              </p>
+                                              {/* Keywords placed here */}
+                                              <div className="flex flex-wrap gap-1.5">
+                                                {group.keywords.sort((a, b) => (b.search_volume || 0) - (a.search_volume || 0)).map((kw, kwIdx) => (
+                                                  <span key={kwIdx} className={`inline-flex items-center gap-1 text-[9px] font-medium px-2 py-1 rounded-full border ${
+                                                    kw.action_type === 'CRITICAL' ? 'bg-red-100 border-red-300 text-red-800'
+                                                    : (kw.action_type === 'UPGRADE' || kw.action_type === 'TITLE UPGRADE') ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                                    : 'bg-green-100 border-green-300 text-green-800'
+                                                  }`}>
+                                                    {kw.keyword}
+                                                    {kw.search_volume > 0 && <span className="opacity-60">({kw.search_volume.toLocaleString()})</span>}
+                                                  </span>
+                                                ))}
+                                              </div>
                                             </div>
-                                            {kr.search_volume > 0 && (
-                                              <span className="text-[9px] text-gray-500">{kr.search_volume.toLocaleString()}/mo</span>
-                                            )}
-                                          </div>
-                                          <div className="flex flex-wrap gap-1 mb-1">
-                                            {kr.placed_in.map((loc: string, j: number) => (
-                                              <span key={j} className="text-[9px] font-medium bg-white border border-gray-300 text-gray-700 px-1.5 py-0.5 rounded">
-                                                {loc.replace(/_/g, ' ')}
-                                              </span>
-                                            ))}
-                                          </div>
-                                          <p className="text-[10px] text-gray-700 italic leading-relaxed">&ldquo;{kr.exact_text.length > 150 ? kr.exact_text.slice(0, 150) + '…' : kr.exact_text}&rdquo;</p>
-                                          <p className="text-[9px] text-gray-500 mt-0.5">{kr.why}</p>
-                                        </div>
-                                      ))}
+                                          )
+                                        })}
+                                      </div>
                                     </div>
-                                  </div>
-                                )}
+                                  )
+                                })()}
 
                                 {/* Title */}
                                 {rec.recommended_title && (
@@ -3071,7 +3104,7 @@ export default function FBAIntelligencePage() {
                   return (
                     <button
                       key={score.parent_asin}
-                      onClick={() => { setExpandedSeoCard(score.parent_asin); setExpandedIssueKey(null); setSelectedRecCategory(null); loadCachedRecs(score.parent_asin) }}
+                      onClick={() => router.push(`/fba/listing/${score.parent_asin}`)}
                       className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
                     >
                       <div className="p-4">

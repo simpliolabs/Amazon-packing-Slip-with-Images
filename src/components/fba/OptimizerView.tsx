@@ -186,52 +186,71 @@ export function OptimizerView({
 
           {!aiLoading && aiRecs && (
             <div className="space-y-4">
-              {/* Keyword Reconciliation Report — the MOST IMPORTANT section */}
-              {aiRecs.keyword_reconciliation && aiRecs.keyword_reconciliation.length > 0 && (
-                <div>
-                  <p className="text-xs font-semibold text-violet-700 uppercase tracking-wide mb-2">
-                    Keyword Placement Plan ({aiRecs.keyword_reconciliation.length} keywords reconciled)
-                  </p>
-                  <div className="space-y-2">
-                    {aiRecs.keyword_reconciliation.map((kr, i) => (
-                      <div key={i} className={`rounded-lg p-3 border ${
-                        kr.action_type === 'CRITICAL'
-                          ? 'bg-red-50 border-red-200'
-                          : kr.action_type === 'UPGRADE'
-                            ? 'bg-amber-50 border-amber-200'
-                            : 'bg-green-50 border-green-200'
-                      }`}>
-                        <div className="flex items-center justify-between mb-1">
-                          <div className="flex items-center gap-2">
-                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                              kr.action_type === 'CRITICAL'
-                                ? 'bg-red-200 text-red-800'
-                                : kr.action_type === 'UPGRADE'
-                                  ? 'bg-amber-200 text-amber-800'
-                                  : 'bg-green-200 text-green-800'
-                            }`}>
-                              {kr.action_type}
-                            </span>
-                            <span className="text-sm font-semibold text-gray-900">&ldquo;{kr.keyword}&rdquo;</span>
+              {/* Keyword Reconciliation Report — grouped by placement */}
+              {aiRecs.keyword_reconciliation && aiRecs.keyword_reconciliation.length > 0 && (() => {
+                const placementGroups: Record<string, { text: string; keywords: { keyword: string; action_type: string; search_volume: number; why: string }[] }> = {}
+                for (const kr of aiRecs.keyword_reconciliation!) {
+                  const key = [...kr.placed_in].sort().join(' + ')
+                  if (!placementGroups[key]) {
+                    placementGroups[key] = { text: kr.exact_text, keywords: [] }
+                  }
+                  placementGroups[key].keywords.push({ keyword: kr.keyword, action_type: kr.action_type, search_volume: kr.search_volume, why: kr.why })
+                }
+                const sortedKeys = Object.keys(placementGroups).sort((a, b) => {
+                  if (a.includes('title') && !b.includes('title')) return -1
+                  if (!a.includes('title') && b.includes('title')) return 1
+                  if (a.includes('bullet') && !b.includes('bullet')) return -1
+                  if (!a.includes('bullet') && b.includes('bullet')) return 1
+                  return a.localeCompare(b)
+                })
+                const totalKw = aiRecs.keyword_reconciliation!.length
+                return (
+                  <div>
+                    <p className="text-xs font-semibold text-violet-700 uppercase tracking-wide mb-2">
+                      Keyword Placement Plan ({totalKw} keywords reconciled)
+                    </p>
+                    <div className="space-y-3">
+                      {sortedKeys.map((groupKey) => {
+                        const group = placementGroups[groupKey]
+                        const placements = groupKey.split(' + ')
+                        const totalVol = group.keywords.reduce((s, k) => s + (k.search_volume || 0), 0)
+                        const hasCritical = group.keywords.some(k => k.action_type === 'CRITICAL')
+                        const hasUpgrade = group.keywords.some(k => k.action_type === 'UPGRADE' || k.action_type === 'TITLE UPGRADE')
+                        const borderColor = hasCritical ? 'border-red-300 bg-red-50/50' : hasUpgrade ? 'border-amber-300 bg-amber-50/50' : 'border-green-300 bg-green-50/50'
+                        return (
+                          <div key={groupKey} className={`rounded-lg p-3 border-2 ${borderColor}`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex flex-wrap gap-1">
+                                {placements.map((loc, j) => (
+                                  <span key={j} className="text-[10px] font-bold bg-violet-200 text-violet-900 px-2 py-0.5 rounded uppercase">
+                                    {loc.replace(/_/g, ' ')}
+                                  </span>
+                                ))}
+                              </div>
+                              <span className="text-[10px] text-gray-500 font-medium">{group.keywords.length} keywords \u00b7 {totalVol.toLocaleString()} searches/mo</span>
+                            </div>
+                            <p className="text-xs text-gray-800 leading-relaxed bg-white rounded p-2 border border-gray-200 mb-2 italic">
+                              &ldquo;{group.text.length > 250 ? group.text.slice(0, 250) + '\u2026' : group.text}&rdquo;
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {group.keywords.sort((a, b) => (b.search_volume || 0) - (a.search_volume || 0)).map((kw, kwIdx) => (
+                                <span key={kwIdx} className={`inline-flex items-center gap-1 text-[9px] font-medium px-2 py-1 rounded-full border ${
+                                  kw.action_type === 'CRITICAL' ? 'bg-red-100 border-red-300 text-red-800'
+                                  : (kw.action_type === 'UPGRADE' || kw.action_type === 'TITLE UPGRADE') ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                  : 'bg-green-100 border-green-300 text-green-800'
+                                }`}>
+                                  {kw.keyword}
+                                  {kw.search_volume > 0 && <span className="opacity-60">({kw.search_volume.toLocaleString()})</span>}
+                                </span>
+                              ))}
+                            </div>
                           </div>
-                          {kr.search_volume > 0 && (
-                            <span className="text-[10px] text-gray-500">{kr.search_volume.toLocaleString()} searches/mo</span>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap gap-1 mb-1.5">
-                          {kr.placed_in.map((loc, j) => (
-                            <span key={j} className="text-[10px] font-medium bg-white border border-gray-300 text-gray-700 px-1.5 py-0.5 rounded">
-                              {loc.replace('_', ' ')}
-                            </span>
-                          ))}
-                        </div>
-                        <p className="text-xs text-gray-700 italic">&ldquo;{kr.exact_text}&rdquo;</p>
-                        <p className="text-[10px] text-gray-500 mt-1">{kr.why}</p>
-                      </div>
-                    ))}
+                        )
+                      })}
+                    </div>
                   </div>
-                </div>
-              )}
+                )
+              })()}
 
               {/* Keyword inclusion indicator */}
               {aiRecs.keyword_opportunities_used !== undefined && !aiRecs.keyword_reconciliation?.length && (
