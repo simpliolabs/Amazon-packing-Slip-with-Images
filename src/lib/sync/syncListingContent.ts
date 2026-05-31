@@ -27,7 +27,7 @@
  *   ALTER TABLE listing_content ADD COLUMN IF NOT EXISTS image_count INTEGER DEFAULT 0;
  */
 
-import { createClient } from '@supabase/supabase-js'
+import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -300,9 +300,99 @@ function tokenize(text: string): Set<string> {
   )
 }
 
+/** Data from keyword_analysis + listing_seo_recommendations, fetched before scoring */
+interface ScoringContext {
+  /** Keyword intelligence summary counts (from keyword_analysis table) */
+  criticalCount:  number
+  upgradeCount:   number
+  reinforceCount: number
+  defendedCount:  number
+  totalKeywords:  number
+  /** Top CRITICAL keywords for issue messages */
+  topCriticalKeywords: string[]
+  /** Top UPGRADE keywords (in bullets but not title) */
+  topUpgradeKeywords:  string[]
+  /** Product details improvements count (from listing_seo_recommendations) */
+  productDetailsGaps:  number
+  /** Description quality from AI recommendations (has recommendation = room to improve) */
+  hasAiRecommendations: boolean
+}
+
+/** Fetch keyword intelligence + product details data for scoring */
+async function fetchScoringContext(
+  supabase: SupabaseClient,
+  parentAsin: string,
+  topChildAsin: string | null
+): Promise<ScoringContext> {
+  const ctx: ScoringContext = {
+    criticalCount: 0, upgradeCount: 0, reinforceCount: 0, defendedCount: 0,
+    totalKeywords: 0, topCriticalKeywords: [], topUpgradeKeywords: [],
+    productDetailsGaps: 0, hasAiRecommendations: false,
+  }
+
+  // 1. Keyword intelligence from keyword_analysis table
+  //    Keywords are stored per-child ASIN. Use topChildAsin if available.
+  const kwAsin = topChildAsin || parentAsin
+  try {
+    const { data: kwRows } = await supabase
+      .from('keyword_analysis')
+      .select('keyword, action_type, opportunity_score')
+      .eq('asin', kwAsin)
+      .order('opportunity_score', { ascending: false })
+      .limit(100)
+
+    if (kwRows && kwRows.length > 0) {
+      for (const row of kwRows) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const r = row as any
+        ctx.totalKeywords++
+        switch (r.action_type) {
+          case 'CRITICAL':  ctx.criticalCount++;  break
+          case 'UPGRADE':   ctx.upgradeCount++;   break
+          case 'REINFORCE': ctx.reinforceCount++; break
+          case 'DEFENDED':  ctx.defendedCount++;  break
+        }
+        if (r.action_type === 'CRITICAL' && ctx.topCriticalKeywords.length < 3) {
+          ctx.topCriticalKeywords.push(r.keyword)
+        }
+        if (r.action_type === 'UPGRADE' && ctx.topUpgradeKeywords.length < 3) {
+          ctx.topUpgradeKeywords.push(r.keyword)
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[Scoring] keyword_analysis lookup failed for ${kwAsin}:`, err instanceof Error ? err.message : String(err))
+  }
+
+  // 2. Product details improvements from listing_seo_recommendations
+  try {
+    const { data: recRow } = await supabase
+      .from('listing_seo_recommendations')
+      .select('product_details_improvements')
+      .eq('parent_asin', parentAsin)
+      .single()
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rec = recRow as any
+    if (rec) {
+      ctx.hasAiRecommendations = true
+      const pdi = rec.product_details_improvements
+      if (Array.isArray(pdi)) {
+        ctx.productDetailsGaps = pdi.length
+      }
+    }
+  } catch (err) {
+    // Non-fatal: listing_seo_recommendations may not exist for this parent
+    console.warn(`[Scoring] recommendations lookup failed for ${parentAsin}:`, err instanceof Error ? err.message : String(err))
+  }
+
+  return ctx
+}
+
 function scoreListingContent(
   parentContent: ListingContentRow | null,
-  childContents: ListingContentRow[]
+  childContents: ListingContentRow[],
+  scoringCtx: ScoringContext
 ): SeoScore {
   const issues: SeoIssue[] = []
   let titleScore   = 25
@@ -365,6 +455,19 @@ function scoreListingContent(
         titleScore -= 3
         issues.push({ field: 'title', severity: 'info', message: 'Title leads with brand name but the product-type keyword appears later. Amazon weights the first 5 words most heavily. Consider restructuring: "[Product Type] [Key Attribute] – [Brand Name] [Additional Details]". Example: "128GB SD Card Ultra High Speed – THE CEO Memory Card UHS-I 90MB/s for Camera"', auto_fixable: false })
       }
+    }
+  }
+
+  // ── 1b. TITLE KEYWORD INTELLIGENCE ────────────────────────────────────────
+  // If keyword intelligence data exists, check if high-value keywords are missing from the title.
+  // UPGRADE keywords = present in bullets but NOT in title (should be promoted to title).
+  if (scoringCtx.totalKeywords > 0 && scoringCtx.upgradeCount > 0) {
+    if (scoringCtx.upgradeCount >= 8) {
+      titleScore -= 5
+      issues.push({ field: 'title', severity: 'warning', message: `Keyword Intelligence: ${scoringCtx.upgradeCount} high-value keywords appear in your bullets but NOT in your title (e.g. "${scoringCtx.topUpgradeKeywords.join('", "')}"). Amazon weights title keywords 3-5x more than bullet keywords. Promote your top 2-3 UPGRADE keywords into the title to capture these search terms.`, auto_fixable: false })
+    } else if (scoringCtx.upgradeCount >= 4) {
+      titleScore -= 3
+      issues.push({ field: 'title', severity: 'info', message: `Keyword Intelligence: ${scoringCtx.upgradeCount} keywords are in your bullets but missing from your title (e.g. "${scoringCtx.topUpgradeKeywords.join('", "')}"). Adding even 1-2 of these to your title would improve search ranking for those terms.`, auto_fixable: false })
     }
   }
   titleScore = Math.max(0, titleScore)
@@ -449,6 +552,20 @@ function scoreListingContent(
     issues.push({ field: 'description', severity: 'info', message: `Description is ${descLen} chars — Amazon truncates display at ~2000 chars but indexes the full text. Ensure your most important keywords and CTAs appear in the first 2000 chars. Move technical specs and compatibility lists to the end.`, auto_fixable: false })
   }
 
+  // ── 3b. DESCRIPTION KEYWORD QUALITY ───────────────────────────────────────
+  // If description exists and is substantial, check if it overlaps with title keywords.
+  // A description that doesn't reinforce title keywords is a missed SEO opportunity.
+  if (descLen >= 200 && title) {
+    const descTokens = tokenize(descPlain)
+    const titleTokensForDesc = tokenize(title)
+    const descTitleOverlap = [...titleTokensForDesc].filter(w => descTokens.has(w) && w.length > 4)
+    // If description doesn't share at least 3 keywords with title, it's not reinforcing SEO
+    if (descTitleOverlap.length < 3) {
+      bulletScore -= 3
+      issues.push({ field: 'description', severity: 'info', message: `Description shares only ${descTitleOverlap.length} keywords with your title. Amazon cross-indexes title and description — a description that reinforces title keywords boosts relevance. Weave your primary keywords naturally into the description prose.`, auto_fixable: false })
+    }
+  }
+
   // ── 4. BACKEND KEYWORD SCORING ────────────────────────────────────────────
   const keywords = representativeContent.backend_keywords || ''
   const kwLen = keywords.length
@@ -498,6 +615,22 @@ function scoreListingContent(
     issues.push({ field: 'images', severity: 'warning', message: 'No product images detected. Upload at least 7 images in Seller Central → Edit Listing → Images. Required: 1 white-background hero (1000x1000px minimum for zoom), 3-4 lifestyle shots, 1-2 infographic images with key specs highlighted.', auto_fixable: false })
   }
 
+  // ── 4b. KEYWORD INTELLIGENCE → KEYWORD SCORE ───────────────────────────────
+  // CRITICAL keywords = high-value search terms completely missing from your listing.
+  // More CRITICAL keywords = more revenue-generating searches you're invisible for.
+  if (scoringCtx.totalKeywords > 0 && scoringCtx.criticalCount > 0) {
+    if (scoringCtx.criticalCount >= 20) {
+      keywordScore -= 8
+      issues.push({ field: 'keyword_intelligence', severity: 'critical', message: `Keyword Intelligence: ${scoringCtx.criticalCount} CRITICAL keywords are completely missing from your listing (e.g. "${scoringCtx.topCriticalKeywords.join('", "')}"). These are high-value search terms where shoppers are buying but you\'re invisible. This is your biggest SEO gap — address the top 5 CRITICAL keywords first by adding them to your title, bullets, and backend keywords.`, auto_fixable: false })
+    } else if (scoringCtx.criticalCount >= 10) {
+      keywordScore -= 5
+      issues.push({ field: 'keyword_intelligence', severity: 'warning', message: `Keyword Intelligence: ${scoringCtx.criticalCount} CRITICAL keywords missing from your listing (e.g. "${scoringCtx.topCriticalKeywords.join('", "')}"). Each missing CRITICAL keyword is a search term where competitors are capturing sales you\'re not. Review the Keywords tab and add the top terms to your title and bullets.`, auto_fixable: false })
+    } else if (scoringCtx.criticalCount >= 5) {
+      keywordScore -= 3
+      issues.push({ field: 'keyword_intelligence', severity: 'info', message: `Keyword Intelligence: ${scoringCtx.criticalCount} CRITICAL keywords missing (e.g. "${scoringCtx.topCriticalKeywords.join('", "')}"). Add these to your backend keywords or weave them into your bullets for better search coverage.`, auto_fixable: false })
+    }
+  }
+
   keywordScore = Math.max(0, keywordScore)
 
   // ── 5. A+ CONTENT SCORING ─────────────────────────────────────────────────────
@@ -528,6 +661,20 @@ function scoreListingContent(
       issues.push({ field: 'aplus', severity: 'warning', message: `${missingAlt} A+ image(s) have no alt text (image keywords). In A+ Content Manager, edit each image module and fill the "Image Keywords" field with descriptive terms (e.g. "128gb sd card high speed class 10 for canon camera"). Amazon indexes these for search — missing alt text = missing keyword coverage on your highest-converting page section.`, auto_fixable: false })
     }
   }
+  // ── 5b. PRODUCT DETAILS COMPLETENESS ─────────────────────────────────────
+  // If AI recommendations identified missing product detail fields, deduct from A+ score.
+  // Product Details (compatibility, material, warranty, etc.) are indexed by Amazon and
+  // appear in filtered search results — missing fields = missing from filter-based searches.
+  if (scoringCtx.productDetailsGaps > 0) {
+    if (scoringCtx.productDetailsGaps >= 5) {
+      aplusScore -= 5
+      issues.push({ field: 'product_details', severity: 'warning', message: `${scoringCtx.productDetailsGaps} Product Detail fields are missing or incomplete (e.g. Compatible Devices, Material, Warranty). These fields power Amazon\'s filtered search and comparison tables. Go to Seller Central → Edit Listing → More Details and fill in every applicable field. Missing product details = invisible in filtered searches.`, auto_fixable: false })
+    } else if (scoringCtx.productDetailsGaps >= 3) {
+      aplusScore -= 3
+      issues.push({ field: 'product_details', severity: 'info', message: `${scoringCtx.productDetailsGaps} Product Detail fields could be improved. Check the AI Recommendations tab for specific suggestions — each completed field improves your visibility in Amazon\'s filtered search results.`, auto_fixable: false })
+    }
+  }
+
   aplusScore = Math.max(0, aplusScore)
 
   // ── 6. CHILD CANNIBALIZATION DETECTION ────────────────────────────────────
@@ -760,8 +907,10 @@ export async function syncListingContent(
       }
 
       // ── Step 6: Score this parent ─────────────────────────────────────────
+      // Fetch keyword intelligence + product details data for holistic scoring
+      const scoringCtx = await fetchScoringContext(supabase, parentAsin, parent.top_child_asin)
       const parentOwnContent = contentRows.find(r => r.asin === parentAsin) || null
-      const score = scoreListingContent(parentOwnContent, contentRows)
+      const score = scoreListingContent(parentOwnContent, contentRows, scoringCtx)
 
       // Get product title and image from the top child
       const topChildContent = contentRows[0]
