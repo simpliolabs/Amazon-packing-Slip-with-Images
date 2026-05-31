@@ -81,6 +81,15 @@ export interface PerChildKeywords {
   keywords: string
 }
 
+export interface KeywordReconciliation {
+  keyword: string
+  action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'
+  search_volume: number
+  placed_in: string[]           // e.g. ["title", "bullet_2", "backend_keywords"]
+  exact_text: string            // The exact phrase/sentence where it was placed
+  why: string                   // Why it was placed there
+}
+
 export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
@@ -91,6 +100,7 @@ export interface AiRecommendations {
   variant_corrections: VariantCorrection[]
   cannibalization_warnings: CannibalizationWarning[]
   product_details_improvements: ProductDetailImprovement[]
+  keyword_reconciliation: KeywordReconciliation[]  // V4: per-keyword placement map
   generated_at: string
   keyword_opportunities_used?: number
 }
@@ -295,6 +305,16 @@ ONLY suggest fields that would ADD NEW information not already derivable from th
 Focus on: missing compatibility info, missing certifications, missing material/weight, missing warranty, or genuinely empty filterable fields.
 Return 5-10 improvements max — quality over quantity. If fewer than 5 are genuinely missing, return fewer.
 
+KEYWORD RECONCILIATION REPORT:
+This is the MOST IMPORTANT part. For every CRITICAL and UPGRADE keyword from the KEYWORD INTELLIGENCE section above, you MUST produce a reconciliation entry showing:
+- Which keyword it is and its action type
+- WHERE you placed it (title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords)
+- The EXACT sentence or phrase in your recommended content where the keyword appears
+- WHY you placed it there (e.g. "Highest volume keyword — must be in title for maximum visibility")
+This lets the seller see at a glance: keyword → exact placement → copy-paste ready text.
+If a keyword could NOT be naturally placed anywhere, still include it with placed_in as ["backend_keywords"] and explain why.
+Include ALL keywords from the CRITICAL GAPS and TITLE UPGRADES sections — do not skip any.
+
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
   "recommended_title": "string (generic title template, 150-200 chars, NO variant-specific attributes, Title Case, no ALL CAPS except acronyms)",
@@ -331,6 +351,16 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       "recommended_value": "string",
       "reason": "string"
     }
+  ],
+  "keyword_reconciliation": [
+    {
+      "keyword": "string (the exact keyword from KEYWORD INTELLIGENCE)",
+      "action_type": "string (CRITICAL or UPGRADE or REINFORCE)",
+      "search_volume": 0,
+      "placed_in": ["string (title|bullet_1|bullet_2|bullet_3|bullet_4|bullet_5|description|backend_keywords)"],
+      "exact_text": "string (the exact sentence or phrase from your recommendation where this keyword appears)",
+      "why": "string (brief reason for this placement)"
+    }
   ]
 }`
 
@@ -343,7 +373,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
         { role: 'user', content: listingContext },
       ],
       temperature: 0.3,
-      max_tokens: 8000,
+      max_tokens: 12000,
     })
 
     const rawContent = completion.choices[0]?.message?.content || ''
@@ -358,6 +388,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       variant_corrections?: VariantCorrection[]
       cannibalization_warnings?: CannibalizationWarning[]
       product_details_improvements?: ProductDetailImprovement[]
+      keyword_reconciliation?: KeywordReconciliation[]
     }
 
     try {
@@ -414,6 +445,17 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
         })()
 
     // Build the full response object
+    const keywordReconciliation: KeywordReconciliation[] = Array.isArray(parsed.keyword_reconciliation)
+      ? parsed.keyword_reconciliation.map(kr => ({
+          keyword: kr.keyword || '',
+          action_type: kr.action_type as KeywordReconciliation['action_type'] || 'CRITICAL',
+          search_volume: kr.search_volume || 0,
+          placed_in: Array.isArray(kr.placed_in) ? kr.placed_in : [],
+          exact_text: kr.exact_text || '',
+          why: kr.why || '',
+        }))
+      : []
+
     const rec: AiRecommendations = {
       parent_asin,
       recommended_title: parsed.recommended_title || '',
@@ -424,13 +466,14 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
       cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
       product_details_improvements: Array.isArray(parsed.product_details_improvements) ? parsed.product_details_improvements.slice(0, 10) : [],
+      keyword_reconciliation: keywordReconciliation,
       generated_at: new Date().toISOString(),
       keyword_opportunities_used: opportunitiesUsed,
     }
 
     // Store in listing_seo_recommendations
     // The DB may not have per_child_keywords column yet, so we serialize it into recommended_keywords as JSON
-    const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_opportunities_used, ...persistFields } = rec
+    const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_reconciliation: kwRecon, keyword_opportunities_used, ...persistFields } = rec
 
     // Serialize per_child_keywords as JSON string into recommended_keywords for DB storage
     const dbPayload: Record<string, unknown> = {
@@ -440,6 +483,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
       recommended_keywords: JSON.stringify(perChildKeywords),
       cannibalization_warnings,
       product_details_improvements,
+      keyword_reconciliation: kwRecon,
     }
 
     const { error: upsertErr } = await supabase
@@ -506,10 +550,16 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // keyword_reconciliation comes from DB as JSONB — already an array
+  const keyword_reconciliation: KeywordReconciliation[] = Array.isArray(data.keyword_reconciliation)
+    ? data.keyword_reconciliation
+    : []
+
   return NextResponse.json({
     recommendations: {
       ...data,
       per_child_keywords,
+      keyword_reconciliation,
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords.length > 0
         ? per_child_keywords[0].keywords

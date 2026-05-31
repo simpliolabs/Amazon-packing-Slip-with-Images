@@ -62,6 +62,15 @@ interface ProductDetailImprovement {
   reason: string
 }
 
+interface KeywordReconciliation {
+  keyword: string
+  action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'
+  search_volume: number
+  placed_in: string[]
+  exact_text: string
+  why: string
+}
+
 interface AiRecommendations {
   recommended_title: string
   recommended_bullets: string[]
@@ -71,6 +80,7 @@ interface AiRecommendations {
   keyword_opportunities_used?: number
   cannibalization_warnings?: CannibalizationWarning[]
   product_details_improvements?: ProductDetailImprovement[]
+  keyword_reconciliation?: KeywordReconciliation[]
 }
 
 interface ApiUsageStats {
@@ -176,8 +186,55 @@ export function OptimizerView({
 
           {!aiLoading && aiRecs && (
             <div className="space-y-4">
+              {/* Keyword Reconciliation Report — the MOST IMPORTANT section */}
+              {aiRecs.keyword_reconciliation && aiRecs.keyword_reconciliation.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-violet-700 uppercase tracking-wide mb-2">
+                    Keyword Placement Plan ({aiRecs.keyword_reconciliation.length} keywords reconciled)
+                  </p>
+                  <div className="space-y-2">
+                    {aiRecs.keyword_reconciliation.map((kr, i) => (
+                      <div key={i} className={`rounded-lg p-3 border ${
+                        kr.action_type === 'CRITICAL'
+                          ? 'bg-red-50 border-red-200'
+                          : kr.action_type === 'UPGRADE'
+                            ? 'bg-amber-50 border-amber-200'
+                            : 'bg-green-50 border-green-200'
+                      }`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              kr.action_type === 'CRITICAL'
+                                ? 'bg-red-200 text-red-800'
+                                : kr.action_type === 'UPGRADE'
+                                  ? 'bg-amber-200 text-amber-800'
+                                  : 'bg-green-200 text-green-800'
+                            }`}>
+                              {kr.action_type}
+                            </span>
+                            <span className="text-sm font-semibold text-gray-900">&ldquo;{kr.keyword}&rdquo;</span>
+                          </div>
+                          {kr.search_volume > 0 && (
+                            <span className="text-[10px] text-gray-500">{kr.search_volume.toLocaleString()} searches/mo</span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1 mb-1.5">
+                          {kr.placed_in.map((loc, j) => (
+                            <span key={j} className="text-[10px] font-medium bg-white border border-gray-300 text-gray-700 px-1.5 py-0.5 rounded">
+                              {loc.replace('_', ' ')}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="text-xs text-gray-700 italic">&ldquo;{kr.exact_text}&rdquo;</p>
+                        <p className="text-[10px] text-gray-500 mt-1">{kr.why}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Keyword inclusion indicator */}
-              {aiRecs.keyword_opportunities_used !== undefined && (
+              {aiRecs.keyword_opportunities_used !== undefined && !aiRecs.keyword_reconciliation?.length && (
                 <div className="bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
                   <p className="text-xs text-violet-700 font-medium">
                     ✓ {aiRecs.keyword_opportunities_used} keyword opportunities incorporated
