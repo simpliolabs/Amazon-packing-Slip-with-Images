@@ -2,11 +2,11 @@
 
 import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback } from 'react'
-import Image from 'next/image'
+// Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
 
-interface SeoIssue { category: string; message: string; severity: 'error' | 'warning' | 'info' }
+interface SeoIssue { field: string; message: string; severity: 'error' | 'warning' | 'info'; auto_fixable?: boolean }
 
 interface ChildContentRow {
   sku: string; asin: string; parent_asin: string
@@ -80,11 +80,11 @@ function barColor(score: number, max: number) {
   return 'bg-red-500'
 }
 
-function issueBorder(cat: string) {
-  if (cat.includes('Title') || cat.includes('title')) return 'border-l-blue-500'
-  if (cat.includes('Bullet') || cat.includes('bullet')) return 'border-l-green-500'
-  if (cat.includes('Keyword') || cat.includes('keyword')) return 'border-l-amber-500'
-  if (cat.includes('A+') || cat.includes('aplus')) return 'border-l-purple-500'
+function issueBorder(field: string) {
+  if (field.includes('title')) return 'border-l-blue-500'
+  if (field.includes('bullet') || field.includes('description')) return 'border-l-green-500'
+  if (field.includes('keyword') || field.includes('backend')) return 'border-l-amber-500'
+  if (field.includes('aplus') || field.includes('image')) return 'border-l-purple-500'
   return 'border-l-gray-400'
 }
 
@@ -248,7 +248,7 @@ export default function ListingDetailPage() {
           {/* Image */}
           <div className="flex-shrink-0 w-20 h-20 bg-gray-100 rounded-lg overflow-hidden">
             {score.image_url ? (
-              <Image src={score.image_url} alt="" width={80} height={80} className="w-full h-full object-cover" unoptimized />
+              <img src={score.image_url} alt="" className="w-full h-full object-cover" />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">IMG</div>
             )}
@@ -413,13 +413,13 @@ export default function ListingDetailPage() {
               <p className="text-sm text-green-600 bg-green-50 border border-green-200 rounded-lg p-3">No issues found. This listing looks great!</p>
             ) : (
               score.issues.map((issue, i) => (
-                <div key={i} className={`border-l-4 ${issueBorder(issue.category)} bg-white border border-gray-200 rounded-r-lg p-3`}>
+                <div key={i} className={`border-l-4 ${issueBorder(issue.field)} bg-white border border-gray-200 rounded-r-lg p-3`}>
                   <div className="flex items-start gap-2">
                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${
                       issue.severity === 'error' ? 'bg-red-100 text-red-700'
                       : issue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
                       : 'bg-blue-100 text-blue-700'
-                    }`}>{issue.category}</span>
+                    }`}>{issue.field}</span>
                     <p className="text-sm text-gray-700 leading-relaxed">{issue.message}</p>
                   </div>
                 </div>
