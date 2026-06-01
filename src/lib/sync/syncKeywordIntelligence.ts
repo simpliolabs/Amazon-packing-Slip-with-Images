@@ -5,7 +5,8 @@
  *
  * Determines the best data source for an ASIN and runs the appropriate sync:
  *   - Has SQP data (established product with sales) → syncKeywordData (SQP)
- *   - Jungle Scout enabled → also fetch competitor keywords
+ *   - Jungle Scout enabled → fetch keywords for own ASIN first
+ *   - If own ASIN returns 0 keywords → fallback to competitor ASIN (reverse ASIN lookup)
  *   - No data available → sibling inheritance (handled inside syncKeywordData)
  *
  * This is the function called by:
@@ -39,6 +40,8 @@ export interface IntelligenceOptions {
   includeJungleScout?: boolean;
   /** Return stored analysis if available (fastest path) */
   useStoredAnalysis?: boolean;
+  /** Competitor ASIN to use for reverse lookup if own ASIN has no data */
+  competitorAsin?: string;
 }
 
 /**
@@ -48,7 +51,9 @@ export interface IntelligenceOptions {
  *   1. Stored analysis (DB) — if fresh and useStoredAnalysis=true
  *   2. Cached raw data (keyword_cache) → re-run engine
  *   3. Fresh SQP fetch → engine → store
- *   4. Jungle Scout (if enabled) → merge → engine → store
+ *   4. Jungle Scout (if enabled):
+ *      a. Try own ASIN first
+ *      b. If 0 results → fallback to competitor ASIN (reverse ASIN lookup)
  */
 export async function syncKeywordIntelligence(
   asin: string,
@@ -58,6 +63,7 @@ export async function syncKeywordIntelligence(
     forceRefresh = false,
     includeJungleScout = true,
     useStoredAnalysis = true,
+    competitorAsin,
   } = options;
 
   // Path 1: Return stored analysis if available and not forcing refresh
@@ -80,16 +86,29 @@ export async function syncKeywordIntelligence(
   const sqpResult = await syncKeywordData(asin);
 
   // Path 4: Augment with Jungle Scout if enabled and budget allows
-  // Note: forceRefresh clears keyword_cache above, so getCachedKeywords will return null
-  // and we will always re-fetch from JS on forceRefresh. This is intentional.
   const jsStatus = await getJungleScoutStatus();
   if (includeJungleScout && jsStatus.enabled) {
     try {
       const jsCached = forceRefresh ? null : await getCachedKeywords(asin, 'jungle_scout');
       if (!jsCached) {
-        // Fetch from Jungle Scout
-        const jsKeywords = await fetchKeywordsByASIN([asin]);
-        const jsRows = jsKeywords.get(asin) ?? [];
+        // Step A: Try own ASIN first
+        let jsRows = (await fetchKeywordsByASIN([asin])).get(asin) ?? [];
+        let jsSource = asin;
+
+        // Step B: If own ASIN returns 0 keywords, fallback to competitor ASIN
+        if (jsRows.length === 0) {
+          const fallbackAsin = competitorAsin || await getCompetitorAsin(asin);
+          if (fallbackAsin) {
+            console.log(`[syncKeywordIntelligence] Own ASIN ${asin} returned 0 JS keywords. Falling back to competitor: ${fallbackAsin}`);
+            jsRows = (await fetchKeywordsByASIN([fallbackAsin])).get(fallbackAsin) ?? [];
+            jsSource = fallbackAsin;
+            if (jsRows.length > 0) {
+              console.log(`[syncKeywordIntelligence] Got ${jsRows.length} keywords from competitor ${fallbackAsin}`);
+            }
+          } else {
+            console.log(`[syncKeywordIntelligence] Own ASIN ${asin} returned 0 JS keywords and no competitor ASIN configured.`);
+          }
+        }
 
         if (jsRows.length > 0) {
           // Fetch listing content for presence check (column-based schema)
@@ -99,7 +118,7 @@ export async function syncKeywordIntelligence(
             .eq('asin', asin)
             .single();
 
-          // Run engine on JS data
+          // Run engine on JS data (against OUR listing content, not the competitor's)
           const jsResult = runKeywordEngine(asin, jsRows, listing ?? {}, 'jungle_scout');
 
           // Merge JS results into SQP results (SQP takes precedence for same keywords)
@@ -118,6 +137,7 @@ export async function syncKeywordIntelligence(
             topOpportunities: mergedKeywords.slice(0, 25),
             totalKeywordsAnalyzed: mergedKeywords.length,
             summary: buildSummary(mergedKeywords),
+            dataSource: 'jungle_scout',
           };
         }
       }
@@ -128,6 +148,52 @@ export async function syncKeywordIntelligence(
   }
 
   return sqpResult;
+}
+
+// ─── Competitor ASIN Resolution ──────────────────────────────────────────────
+
+/**
+ * Get the competitor ASIN for a given product ASIN.
+ * Looks up listing_seo_scores.competitor_asin field.
+ * Returns null if not set.
+ */
+async function getCompetitorAsin(asin: string): Promise<string | null> {
+  try {
+    // Check listing_seo_scores for this child ASIN
+    const { data: scoreRow } = await supabase
+      .from('listing_seo_scores')
+      .select('competitor_asin')
+      .eq('asin', asin)
+      .single();
+
+    if ((scoreRow as { competitor_asin: string | null } | null)?.competitor_asin) {
+      return (scoreRow as { competitor_asin: string }).competitor_asin;
+    }
+
+    // Also check by parent_asin (the ASIN might be stored at parent level)
+    const { data: listing } = await supabase
+      .from('listing_content')
+      .select('parent_asin')
+      .eq('asin', asin)
+      .single();
+
+    const parentAsin = (listing as { parent_asin: string | null } | null)?.parent_asin;
+    if (parentAsin) {
+      const { data: parentScore } = await supabase
+        .from('listing_seo_scores')
+        .select('competitor_asin')
+        .eq('parent_asin', parentAsin)
+        .single();
+
+      if ((parentScore as { competitor_asin: string | null } | null)?.competitor_asin) {
+        return (parentScore as { competitor_asin: string }).competitor_asin;
+      }
+    }
+  } catch {
+    // Column might not exist yet — that's fine
+  }
+
+  return null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

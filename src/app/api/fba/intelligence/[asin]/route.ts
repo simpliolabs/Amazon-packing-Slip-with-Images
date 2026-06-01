@@ -179,11 +179,20 @@ export async function GET(
         },
       };
     } else {
+      // Get competitor ASIN for reverse lookup fallback
+      const { data: scoreData } = await supabase
+        .from('listing_seo_scores')
+        .select('competitor_asin')
+        .eq('parent_asin', parentAsin || inputAsin)
+        .single();
+      const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
+
       // Full sync path — use resolved child ASIN
       result = await syncKeywordIntelligence(childAsin, {
         forceRefresh,
         includeJungleScout: true,
         useStoredAnalysis: !forceRefresh,
+        competitorAsin,
       });
 
       // Attach parent ASIN to result
@@ -246,8 +255,16 @@ export async function POST(
 
     const { childAsin } = resolved;
 
+    // Get competitor ASIN for reverse lookup fallback
+    const { data: scoreData } = await supabase
+      .from('listing_seo_scores')
+      .select('competitor_asin')
+      .eq('parent_asin', inputAsin)
+      .single();
+    const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
+
     // Fire and forget — run sync in background using resolved child ASIN
-    syncKeywordIntelligence(childAsin, { forceRefresh: true }).catch(err => {
+    syncKeywordIntelligence(childAsin, { forceRefresh: true, competitorAsin }).catch(err => {
       console.error(`[POST /api/fba/intelligence/${inputAsin}] Background sync error (child: ${childAsin}):`, err);
     });
 

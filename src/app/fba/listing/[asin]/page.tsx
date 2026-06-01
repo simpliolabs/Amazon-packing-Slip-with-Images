@@ -124,6 +124,8 @@ export default function ListingDetailPage() {
   const [aiProgress, setAiProgress] = useState<string>('')
   const [copied, setCopied] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['action-plan', 'placement', 'issues']))
+  const [competitorAsin, setCompetitorAsin] = useState<string>('')
+  const [competitorSaving, setCompetitorSaving] = useState(false)
 
   const copy = (text: string, label: string) => {
     copyToClipboard(text)
@@ -180,6 +182,33 @@ export default function ListingDetailPage() {
       } catch { /* ignore */ }
     })()
   }, [score?.top_child_asin])
+
+  // Fetch competitor ASIN
+  useEffect(() => {
+    if (!asin) return
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/competitor-asin?parentAsin=${asin}`)
+        if (resp.ok) {
+          const data = await resp.json()
+          if (data.competitorAsin) setCompetitorAsin(data.competitorAsin)
+        }
+      } catch { /* ignore */ }
+    })()
+  }, [asin])
+
+  const saveCompetitorAsin = async () => {
+    if (!competitorAsin || !/^[A-Z0-9]{10}$/.test(competitorAsin.toUpperCase())) return
+    setCompetitorSaving(true)
+    try {
+      await fetch('/api/fba/competitor-asin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentAsin: asin, competitorAsin: competitorAsin.toUpperCase() }),
+      })
+    } catch { /* ignore */ }
+    setCompetitorSaving(false)
+  }
 
   // Generate AI recommendations (streaming)
   const generateAiRecs = useCallback(async () => {
@@ -373,6 +402,28 @@ export default function ListingDetailPage() {
           </button>
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
+
+        {/* Competitor ASIN input for reverse keyword lookup */}
+        <div className="mt-3 pt-3 border-t border-gray-100">
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500 whitespace-nowrap">Competitor ASIN:</label>
+            <input
+              type="text"
+              value={competitorAsin}
+              onChange={(e) => setCompetitorAsin(e.target.value.toUpperCase())}
+              placeholder="B0XXXXXXXXX"
+              className="text-xs border border-gray-200 rounded px-2 py-1 w-32 font-mono uppercase"
+              maxLength={10}
+            />
+            <button
+              onClick={saveCompetitorAsin}
+              disabled={competitorSaving || !competitorAsin || competitorAsin.length !== 10}
+              className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-1 rounded disabled:opacity-50">
+              {competitorSaving ? 'Saving...' : 'Save'}
+            </button>
+            <span className="text-xs text-gray-400">Used for Jungle Scout keyword lookup when your ASIN has no data</span>
+          </div>
+        </div>
       </div>
 
       {/* ══════════════════════════════════════════════════════════════════════

@@ -264,9 +264,22 @@ export async function POST(req: NextRequest) {
     }).join('\n\n')
 
     // Build the per-child keyword slots instruction
+    // Extract color from SKU or title for color-grouped strategy
+    const extractColor = (sku: string, title: string): string => {
+      // Try to extract color from SKU pattern (e.g., AQS-TMB-2XL-MOS → MOS)
+      const skuParts = sku.split('-')
+      const colorCode = skuParts[skuParts.length - 1] || ''
+      // Also try to find color in title (after size info)
+      const titleLower = title?.toLowerCase() || ''
+      const sizePatterns = /^(small|medium|large|x-large|xx-large|2xl|3xl|xl|xs|s|m|l)\s+/i
+      const afterSize = titleLower.replace(sizePatterns, '').split(' ').slice(0, 2).join(' ')
+      return afterSize || colorCode
+    }
+
     const childKeywordSlots = children.map((c: ChildRow, idx: number) => {
       const kwLen = c.backend_keywords?.trim().length || 0
-      return `  Child ${idx + 1}: SKU="${c.sku}", ASIN="${c.asin}", current=${kwLen}/250 chars`
+      const color = extractColor(c.sku, c.title || '')
+      return `  Child ${idx + 1}: SKU="${c.sku}", ASIN="${c.asin}", color="${color}", current=${kwLen}/250 chars`
     }).join('\n')
 
     // V2: Build keyword intelligence context
@@ -337,16 +350,30 @@ BULLET RULES:
 - Must be generic — work for ALL variants
 - CRITICAL GAP keywords from keyword intelligence MUST appear in bullets 1-2
 
-BACKEND KEYWORDS RULES (PER CHILD):
+BACKEND KEYWORDS RULES (COLOR-GROUPED DISTRIBUTION STRATEGY):
 - Each child gets its OWN unique 250-char keyword string
 - Space-separated, no commas, no duplicates of title/bullet terms
 - NEVER repeat words already in the title or bullets — Amazon already indexes those automatically
 - NEVER include the variant's size or color in backend keywords — Amazon indexes those from variant attributes
-- NEVER repeat the same keywords across children — distribute your full keyword universe across all children
+
+COLOR-GROUPED STRATEGY (best practice for apparel/multi-color products):
+- Group children by COLOR (not size). All sizes of the same color share IDENTICAL backend keywords.
+- Each COLOR GROUP gets a DIFFERENT keyword string targeting that color's audience.
+- Example: Moss/Sage variants → "nature lover outdoors hiking gift green aesthetic earth tone casual weekend"
+- Example: Ivory/White variants → "clean classic minimalist gift neutral tone wedding bridal party elegant"
+- Example: Blue Jean variants → "denim look casual everyday workwear gift blue aesthetic vintage wash"
+- This maximizes indexing surface: 10 colors × 250 chars = 2,500 chars of unique keyword coverage.
+- If product has NO color variants (single color), distribute keywords across sizes by THEME:
+  - Small/Medium → audience terms (mens womens unisex teen young adult)
+  - Large/XL → occasion terms (gift birthday christmas fathers day mothers day)
+  - 2XL/3XL → style terms (vintage retro 90s novelty funny graphic)
+
+KEYWORD CONTENT RULES:
 - DO include: synonyms, alternate phrasings, common misspellings, use-case terms, occasion terms, gift terms, audience terms NOT in title/bullets
-- Example for a t-shirt: if title has "later gator tshirt", backend should have "alligator shirt gift funny saying retro 90s novelty tee unisex mens womens"
+- DO include color-specific audience terms that match the color's aesthetic
 - FILL TO 250 CHARS — use every character. Short backend keywords waste ranking opportunity.
 - HARD LIMIT: exactly 250 characters max per child (count carefully)
+- Count characters BEFORE outputting — if under 240, add more relevant terms
 
 DESCRIPTION RULES:
 - Use HTML tags (<b>, <br>, <ul>, <li>)
