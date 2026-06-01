@@ -133,8 +133,28 @@ export async function syncKeywordIntelligence(
               (listing as Record<string, string> | null)?.bullet_5 ?? '',
             ].join(' ').toLowerCase();
 
-            // Extract meaningful seed tokens from our listing (3+ chars, not stopwords)
-            const STOPWORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'has', 'have', 'its', 'our', 'your', 'all', 'can', 'not', 'but', 'from', 'they', 'will', 'been', 'more', 'also', 'into', 'than', 'then', 'when', 'what', 'which', 'who', 'how', 'any', 'each', 'both', 'very', 'just', 'over', 'such', 'even', 'most', 'made', 'make', 'like', 'only', 'well', 'way', 'may', 'per']);
+            // Extract meaningful seed tokens from our listing (3+ chars, not stopwords).
+            // We also exclude generic apparel/category words (shirt, tee, tshirt, etc.)
+            // so that competitor keywords like "Stephen Colbert shirt" don't match just
+            // because our listing contains the word "shirt".
+            const STOPWORDS = new Set([
+              // Common English stopwords
+              'the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'has', 'have',
+              'its', 'our', 'your', 'all', 'can', 'not', 'but', 'from', 'they', 'will',
+              'been', 'more', 'also', 'into', 'than', 'then', 'when', 'what', 'which',
+              'who', 'how', 'any', 'each', 'both', 'very', 'just', 'over', 'such', 'even',
+              'most', 'made', 'make', 'like', 'only', 'well', 'way', 'may', 'per',
+              // Generic apparel/category words — too broad to use as product-specific seeds
+              'shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees', 'top', 'tops',
+              'clothing', 'apparel', 'wear', 'wearing', 'clothes', 'outfit', 'outfits',
+              'mens', 'womens', 'unisex', 'men', 'women', 'man', 'woman', 'adult', 'adults',
+              'size', 'sizes', 'small', 'medium', 'large', 'xlarge', '2xl', '3xl',
+              'cotton', 'fabric', 'soft', 'comfortable', 'comfort', 'breathable',
+              'casual', 'everyday', 'gift', 'gifts', 'idea', 'ideas', 'funny', 'cute',
+              'graphic', 'print', 'printed', 'design', 'style', 'styled', 'stylish',
+              'vintage', 'retro', 'classic', 'cool', 'awesome', 'nice', 'great', 'good',
+              'fit', 'fitting', 'wear', 'worn', 'new', 'best', 'top', 'quality',
+            ]);
             const seedTokens = new Set(
               listingText.split(/[\s,\-–—]+/)
                 .filter(t => t.length >= 3 && !STOPWORDS.has(t))
