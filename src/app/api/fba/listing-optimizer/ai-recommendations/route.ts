@@ -377,11 +377,13 @@ TITLE RULES (STRICT):
 - FORMAT: Brand - Product Type - Top Keyword - Key Attribute (e.g., "THE CEO Memory Card SDHC UHS-I 90MB/s - High-Speed Camera Cards for Photography")
 
 BULLET RULES:
-- Start each with a 2-5 word benefit hook in ALL CAPS followed by " – "
-- Then feature + benefit in plain English
+- Start each with a MAX 3-WORD BENEFIT HOOK in ALL CAPS followed by " – "
+- The hook MUST describe a customer BENEFIT (e.g., RETRO STYLE VIBES, EVERYDAY COMFORT, PERFECT GIFT). It must NOT be a keyword phrase.
+- Then feature + benefit description in plain English, naturally weaving in keywords from the intelligence data
+- CRITICAL GAP keywords from keyword intelligence MUST appear in the BODY TEXT of bullets 1-3 (not in the caps header)
 - Max 200 chars each
 - Must be generic — work for ALL variants
-- CRITICAL GAP keywords from keyword intelligence MUST appear in bullets 1-2
+- Example: "RETRO STYLE VIBES – This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and relaxed fit."
 
 BACKEND KEYWORDS RULES (COLOR-GROUPED DISTRIBUTION STRATEGY):
 - Each child gets its OWN unique 250-char keyword string
