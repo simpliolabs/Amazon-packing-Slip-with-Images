@@ -340,10 +340,13 @@ BULLET RULES:
 BACKEND KEYWORDS RULES (PER CHILD):
 - Each child gets its OWN unique 250-char keyword string
 - Space-separated, no commas, no duplicates of title/bullet terms
-- NEVER repeat the same keywords across children — distribute them
-- For variant families: each child should include its variant-specific terms (e.g., "32gb" for the 32GB child, "128gb" for the 128GB child)
-- Include: device compatibility, use-case terms, seasonal terms, common misspellings
-- HARD LIMIT: exactly 250 characters max per child
+- NEVER repeat words already in the title or bullets — Amazon already indexes those automatically
+- NEVER include the variant's size or color in backend keywords — Amazon indexes those from variant attributes
+- NEVER repeat the same keywords across children — distribute your full keyword universe across all children
+- DO include: synonyms, alternate phrasings, common misspellings, use-case terms, occasion terms, gift terms, audience terms NOT in title/bullets
+- Example for a t-shirt: if title has "later gator tshirt", backend should have "alligator shirt gift funny saying retro 90s novelty tee unisex mens womens"
+- FILL TO 250 CHARS — use every character. Short backend keywords waste ranking opportunity.
+- HARD LIMIT: exactly 250 characters max per child (count carefully)
 
 DESCRIPTION RULES:
 - Use HTML tags (<b>, <br>, <ul>, <li>)

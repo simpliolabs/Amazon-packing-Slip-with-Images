@@ -80,10 +80,12 @@ export async function syncKeywordIntelligence(
   const sqpResult = await syncKeywordData(asin);
 
   // Path 4: Augment with Jungle Scout if enabled and budget allows
+  // Note: forceRefresh clears keyword_cache above, so getCachedKeywords will return null
+  // and we will always re-fetch from JS on forceRefresh. This is intentional.
   const jsStatus = await getJungleScoutStatus();
-  if (includeJungleScout && jsStatus.enabled && !forceRefresh) {
+  if (includeJungleScout && jsStatus.enabled) {
     try {
-      const jsCached = await getCachedKeywords(asin, 'jungle_scout');
+      const jsCached = forceRefresh ? null : await getCachedKeywords(asin, 'jungle_scout');
       if (!jsCached) {
         // Fetch from Jungle Scout
         const jsKeywords = await fetchKeywordsByASIN([asin]);
