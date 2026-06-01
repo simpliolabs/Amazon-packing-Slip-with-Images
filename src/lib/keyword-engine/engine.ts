@@ -41,15 +41,19 @@ export interface SQPKeywordRow {
   asinPurchaseShare: number;      // 0–100
 }
 
-/** Raw keyword row from Jungle Scout API (future) */
+/** Raw keyword row from Jungle Scout API */
 export interface JungleScoutKeywordRow {
   keyword: string;
   searchVolume: number;
-  organicProductCount: number;    // competing products
+  organicProductCount: number;    // competing products (organic_product_count)
   sponsoredProductCount: number;
   exactPpcBid?: number;
   broadPpcBid?: number;
-  relevancyScore?: number;
+  relevancyScore?: number;        // 0-100, how relevant to the queried ASIN
+  easeOfRankingScore?: number;   // 0-100, higher = easier to rank (Cerebro IQ equivalent)
+  monthlyTrend?: number;         // % change in search volume month-over-month
+  organicRank?: number;          // our ASIN's organic rank for this keyword (0 = not ranking)
+  primaryAsin?: string;          // which ASIN this keyword was returned for
 }
 
 /** Union type for any keyword source */
@@ -138,15 +142,29 @@ function normalizeJungleScoutRow(row: JungleScoutKeywordRow): {
   asinPurchaseShare: number;
   relevanceRank: number;
 } {
+  // easeOfRankingScore: 0-100, higher = easier to rank (use as relevance proxy)
+  // relevancyScore: 0-100, how relevant the keyword is to the queried ASIN
+  // We invert easeOfRankingScore for relevanceRank: lower competing = higher priority
+  const easeScore = row.easeOfRankingScore ?? null;
+  const relevScore = row.relevancyScore ?? null;
+  // Prefer easeOfRankingScore as it directly reflects opportunity (fewer competitors)
+  const relevanceRank = easeScore !== null
+    ? Math.round(easeScore)           // 0-100, higher = easier = more opportunity
+    : relevScore !== null
+    ? Math.round(relevScore)          // fallback to relevancy
+    : 50;
+
   return {
     keyword: row.keyword,
     searchVolume: row.searchVolume ?? 0,
-    keywordSales: 0, // JS doesn't provide total keyword sales directly
-    competingProducts: (row.organicProductCount ?? 0) + (row.sponsoredProductCount ?? 0),
-    asinImpressionShare: 0, // Not available from JS without our own ASIN data
+    // JS doesn't provide total keyword sales; use organic rank as a proxy signal
+    // If organicRank > 0, we're already ranking — treat as moderate sales signal
+    keywordSales: row.organicRank && row.organicRank > 0 ? Math.round(row.searchVolume * 0.02) : 0,
+    competingProducts: row.organicProductCount ?? 0, // use organic only (more accurate)
+    asinImpressionShare: 0, // Not available from JS
     asinClickShare: 0,
     asinPurchaseShare: 0,
-    relevanceRank: row.relevancyScore ? Math.round((1 - row.relevancyScore) * 100) : 50,
+    relevanceRank,
   };
 }
 

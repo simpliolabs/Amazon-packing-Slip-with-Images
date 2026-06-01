@@ -6,11 +6,13 @@
  * Credentials are loaded from the database (app_settings table) first,
  * with fallback to environment variables for backwards compatibility.
  *
- * To activate:
- *   Option A: Go to Settings → Jungle Scout API and enter Key Name + API Key
- *   Option B: Set JUNGLE_SCOUT_API_KEY, JUNGLE_SCOUT_API_NAME, JUNGLE_SCOUT_ENABLED=true in env vars
+ * Auth format (per official docs):
+ *   Authorization: KEY_NAME:API_KEY  (plain, NOT Base64)
+ *   Content-Type: application/vnd.api+json
+ *   Accept: application/vnd.junglescout.v1+json
+ *   X-API-Type: junglescout
  *
- * API docs: https://developer.junglescout.com/api/keywords/
+ * API docs: https://developers.junglescout.com/api
  * Plan required: Growth Accelerator ($49/mo) + API Tier 1 ($29/mo)
  */
 
@@ -22,7 +24,7 @@ import {
 } from '../keyword-engine';
 import { createAdminClient } from '../supabase/server';
 
-const JS_BASE_URL = 'https://developer.junglescout.com/api';
+const JS_BASE_URL = 'https://developer.junglescout.com';
 
 interface JsCredentials {
   enabled: boolean;
@@ -34,12 +36,10 @@ interface JsCredentials {
 let credentialsCache: { value: JsCredentials; expiresAt: number } | null = null;
 
 async function getCredentials(): Promise<JsCredentials> {
-  // Return cached value if still fresh
   if (credentialsCache && Date.now() < credentialsCache.expiresAt) {
     return credentialsCache.value;
   }
 
-  // Try DB first
   try {
     const adminClient = await createAdminClient();
     const { data: rows } = await adminClient
@@ -65,7 +65,6 @@ async function getCredentials(): Promise<JsCredentials> {
     console.warn('[jungleScoutClient] Could not load credentials from DB, falling back to env vars:', err);
   }
 
-  // Fallback to env vars
   const apiKey = process.env.JUNGLE_SCOUT_API_KEY ?? '';
   const keyName = process.env.JUNGLE_SCOUT_API_NAME ?? '';
   const enabled = process.env.JUNGLE_SCOUT_ENABLED === 'true' && !!apiKey && !!keyName;
@@ -75,20 +74,10 @@ async function getCredentials(): Promise<JsCredentials> {
   return creds;
 }
 
-/** Invalidate the credentials cache (call after saving new credentials) */
 export function invalidateCredentialsCache(): void {
   credentialsCache = null;
 }
 
-function buildAuthHeader(keyName: string, apiKey: string): string {
-  const encoded = Buffer.from(`${keyName}:${apiKey}`).toString('base64');
-  return `Basic ${encoded}`;
-}
-
-/**
- * Fetch keywords for up to 10 ASINs in a single API call.
- * Returns up to 100 keywords per call.
- */
 export async function fetchKeywordsByASIN(
   asins: string[]
 ): Promise<Map<string, JungleScoutKeywordRow[]>> {
@@ -96,30 +85,31 @@ export async function fetchKeywordsByASIN(
 
   const creds = await getCredentials();
   if (!creds.enabled) {
-    console.warn('[jungleScoutClient] Jungle Scout API not enabled. Configure credentials in Settings → Jungle Scout API.');
+    console.warn('[jungleScoutClient] Jungle Scout API not enabled. Configure credentials in Settings.');
     return result;
   }
 
-  // Budget check
   const budget = await isWithinBudget('jungle_scout');
   if (!budget.allowed) {
-    console.warn(`[jungleScoutClient] Monthly budget exhausted (${budget.callsUsed}/${budget.callsUsed + budget.callsRemaining} calls used)`);
+    console.warn(`[jungleScoutClient] Monthly budget exhausted`);
     return result;
   }
 
-  // Batch: max 10 ASINs per call
   const batch = asins.slice(0, 10);
 
   try {
+    // Auth: plain KEY_NAME:API_KEY — no Base64, no "Basic" prefix (per official JS docs)
+    const authHeader = `${creds.keyName}:${creds.apiKey}`;
+
     const resp = await fetch(
-      `${JS_BASE_URL}/keywords/keywords_by_asin_query?marketplace=us&sort=-monthly_trend&page[size]=100`,
+      `${JS_BASE_URL}/api/keywords/keywords_by_asin_query?marketplace=us&sort=-monthly_search_volume_exact&page[size]=100`,
       {
         method: 'POST',
         headers: {
-          'Authorization': buildAuthHeader(creds.keyName, creds.apiKey),
-          'Content-Type': 'application/json',
-          'X-API-Type': 'junglescout',
+          'Authorization': authHeader,
+          'Content-Type': 'application/vnd.api+json',
           'Accept': 'application/vnd.junglescout.v1+json',
+          'X-API-Type': 'junglescout',
         },
         body: JSON.stringify({
           data: {
@@ -138,7 +128,6 @@ export async function fetchKeywordsByASIN(
     if (!resp.ok) {
       const err = await resp.text();
       console.error(`[jungleScoutClient] API error ${resp.status}: ${err}`);
-      // Invalidate cache on auth errors so next call re-reads from DB
       if (resp.status === 401 || resp.status === 403) {
         invalidateCredentialsCache();
       }
@@ -146,10 +135,14 @@ export async function fetchKeywordsByASIN(
     }
 
     const data = await resp.json();
+    const items = data?.data ?? [];
+    console.log(`[jungleScoutClient] Received ${items.length} keywords for ASINs: ${batch.join(', ')}`);
 
-    for (const item of data?.data ?? []) {
+    for (const item of items) {
       const attrs = item.attributes ?? {};
       const keyword = attrs.name ?? '';
+      if (!keyword) continue;
+
       const row: JungleScoutKeywordRow = {
         keyword,
         searchVolume: attrs.monthly_search_volume_exact ?? 0,
@@ -158,18 +151,26 @@ export async function fetchKeywordsByASIN(
         exactPpcBid: attrs.ppc_bid_exact ?? undefined,
         broadPpcBid: attrs.ppc_bid_broad ?? undefined,
         relevancyScore: attrs.relevancy_score ?? undefined,
+        easeOfRankingScore: attrs.ease_of_ranking_score ?? undefined,
+        monthlyTrend: attrs.monthly_trend ?? undefined,
+        organicRank: attrs.organic_rank ?? undefined,
+        primaryAsin: attrs.primary_asin ?? undefined,
       };
 
-      for (const asin of batch) {
-        if (!result.has(asin)) result.set(asin, []);
-        result.get(asin)!.push(row);
-      }
+      // Use primary_asin from response to associate keyword with the right ASIN
+      const targetAsin = attrs.primary_asin && batch.includes(attrs.primary_asin)
+        ? attrs.primary_asin
+        : batch[0];
+
+      if (!result.has(targetAsin)) result.set(targetAsin, []);
+      result.get(targetAsin)!.push(row);
     }
 
     for (const asin of batch) {
       const keywords = result.get(asin) ?? [];
       if (keywords.length > 0) {
         await setCachedKeywords(asin, 'jungle_scout', keywords);
+        console.log(`[jungleScoutClient] Cached ${keywords.length} keywords for ASIN ${asin}`);
       }
     }
 
@@ -181,9 +182,6 @@ export async function fetchKeywordsByASIN(
   return result;
 }
 
-/**
- * Reverse ASIN lookup: get keywords for a competitor ASIN.
- */
 export async function reverseAsinLookup(
   competitorAsin: string
 ): Promise<JungleScoutKeywordRow[]> {
@@ -191,9 +189,6 @@ export async function reverseAsinLookup(
   return result.get(competitorAsin) ?? [];
 }
 
-/**
- * Get current Jungle Scout API status for display in the UI.
- */
 export async function getJungleScoutStatus(): Promise<{
   enabled: boolean;
   message: string;
