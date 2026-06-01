@@ -135,21 +135,19 @@ export async function syncKeywordIntelligence(
           // When keywords come from a competitor ASIN (not our own), many will
           // be completely unrelated to our product (e.g. "Stephen Colbert shirt"
           // appearing on a Later Gator tshirt competitor). Filter to only keep
-          // keywords that share at least one meaningful token with our listing.
+          // keywords that share meaningful tokens with our listing.
+          //
+          // Strategy: Use ONLY the listing TITLE as seed source (not bullets)
+          // to avoid false matches from generic adjectives in bullet copy.
+          // Require 2+ matching tokens for multi-word keywords (3+ tokens)
+          // to prevent single-word coincidental matches like "perfect".
           if (jsSource !== asin) {
-            const listingText = [
-              (listing as Record<string, string> | null)?.title ?? '',
-              (listing as Record<string, string> | null)?.bullet_1 ?? '',
-              (listing as Record<string, string> | null)?.bullet_2 ?? '',
-              (listing as Record<string, string> | null)?.bullet_3 ?? '',
-              (listing as Record<string, string> | null)?.bullet_4 ?? '',
-              (listing as Record<string, string> | null)?.bullet_5 ?? '',
-            ].join(' ').toLowerCase();
+            // Use ONLY title for seed tokens — bullets contain too many generic
+            // adjectives ("perfect", "bold", "popular") that cause false matches
+            const titleText = ((listing as Record<string, string> | null)?.title ?? '').toLowerCase();
 
-            // Extract meaningful seed tokens from our listing (3+ chars, not stopwords).
-            // We also exclude generic apparel/category words (shirt, tee, tshirt, etc.)
-            // so that competitor keywords like "Stephen Colbert shirt" don't match just
-            // because our listing contains the word "shirt".
+            // Comprehensive stopwords: common English + generic apparel/category
+            // + generic adjectives that appear in listing copy but aren't product-specific
             const STOPWORDS = new Set([
               // Common English stopwords
               'the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'has', 'have',
@@ -157,28 +155,48 @@ export async function syncKeywordIntelligence(
               'been', 'more', 'also', 'into', 'than', 'then', 'when', 'what', 'which',
               'who', 'how', 'any', 'each', 'both', 'very', 'just', 'over', 'such', 'even',
               'most', 'made', 'make', 'like', 'only', 'well', 'way', 'may', 'per',
-              // Generic apparel/category words — too broad to use as product-specific seeds
+              // Generic apparel/category words
               'shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees', 'top', 'tops',
               'clothing', 'apparel', 'wear', 'wearing', 'clothes', 'outfit', 'outfits',
               'mens', 'womens', 'unisex', 'men', 'women', 'man', 'woman', 'adult', 'adults',
+              "men's", "women's",
               'size', 'sizes', 'small', 'medium', 'large', 'xlarge', '2xl', '3xl',
               'cotton', 'fabric', 'soft', 'comfortable', 'comfort', 'breathable',
               'casual', 'everyday', 'gift', 'gifts', 'idea', 'ideas', 'funny', 'cute',
               'graphic', 'print', 'printed', 'design', 'style', 'styled', 'stylish',
               'vintage', 'retro', 'classic', 'cool', 'awesome', 'nice', 'great', 'good',
               'fit', 'fitting', 'wear', 'worn', 'new', 'best', 'top', 'quality',
+              // Generic adjectives/verbs that appear in listing copy but aren't product-specific
+              'perfect', 'ideal', 'fun', 'bold', 'popular', 'unique', 'standout',
+              'features', 'offers', 'provides', 'includes', 'brings', 'highlights',
+              'pairs', 'works', 'blends', 'adds', 'captures', 'found', 'known',
+              'looking', 'ready', 'choice', 'favorite', 'anyone', 'solid',
+              'days', 'outings', 'events', 'sporting', 'relaxed',
             ]);
+
+            // Build seed tokens from title only
             const seedTokens = new Set(
-              listingText.split(/[\s,\-–—]+/)
+              titleText.split(/[\s,\-–—&|]+/)
+                .map(t => t.replace(/[^a-z0-9]/g, '')) // strip punctuation
                 .filter(t => t.length >= 3 && !STOPWORDS.has(t))
             );
+
+            console.log(`[syncKeywordIntelligence] Seed tokens from title: [${[...seedTokens].join(', ')}]`);
 
             const beforeCount = jsRows.length;
             jsRows = jsRows.filter(row => {
               const kw = (row as { keyword: string }).keyword.toLowerCase();
-              const kwTokens = kw.split(/[\s,\-–—]+/).filter(t => t.length >= 3);
-              // Keep if any keyword token matches any listing seed token
-              return kwTokens.some(t => seedTokens.has(t));
+              // Split on whitespace and common separators, strip punctuation
+              const kwTokens = kw.split(/[\s,\-–—]+/)
+                .map(t => t.replace(/[^a-z0-9']/g, ''))
+                .filter(t => t.length >= 3 && !STOPWORDS.has(t));
+              
+              const matchCount = kwTokens.filter(t => seedTokens.has(t)).length;
+              
+              // For keywords with 3+ meaningful tokens, require 2+ matches
+              // For keywords with 1-2 meaningful tokens, require 1 match
+              const minMatches = kwTokens.length >= 3 ? 2 : 1;
+              return matchCount >= minMatches;
             });
             console.log(`[syncKeywordIntelligence] Relevance filter: ${beforeCount} → ${jsRows.length} keywords (competitor fallback from ${jsSource})`);
           }
