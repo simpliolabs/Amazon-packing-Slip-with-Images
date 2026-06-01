@@ -118,6 +118,39 @@ export async function syncKeywordIntelligence(
             .eq('asin', asin)
             .single();
 
+          // ── Relevance filter for competitor-fallback keywords ──────────────
+          // When keywords come from a competitor ASIN (not our own), many will
+          // be completely unrelated to our product (e.g. "Stephen Colbert shirt"
+          // appearing on a Later Gator tshirt competitor). Filter to only keep
+          // keywords that share at least one meaningful token with our listing.
+          if (jsSource !== asin) {
+            const listingText = [
+              (listing as Record<string, string> | null)?.title ?? '',
+              (listing as Record<string, string> | null)?.bullet_1 ?? '',
+              (listing as Record<string, string> | null)?.bullet_2 ?? '',
+              (listing as Record<string, string> | null)?.bullet_3 ?? '',
+              (listing as Record<string, string> | null)?.bullet_4 ?? '',
+              (listing as Record<string, string> | null)?.bullet_5 ?? '',
+            ].join(' ').toLowerCase();
+
+            // Extract meaningful seed tokens from our listing (3+ chars, not stopwords)
+            const STOPWORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'has', 'have', 'its', 'our', 'your', 'all', 'can', 'not', 'but', 'from', 'they', 'will', 'been', 'more', 'also', 'into', 'than', 'then', 'when', 'what', 'which', 'who', 'how', 'any', 'each', 'both', 'very', 'just', 'over', 'such', 'even', 'most', 'made', 'make', 'like', 'only', 'well', 'way', 'may', 'per']);
+            const seedTokens = new Set(
+              listingText.split(/[\s,\-–—]+/)
+                .filter(t => t.length >= 3 && !STOPWORDS.has(t))
+            );
+
+            const beforeCount = jsRows.length;
+            jsRows = jsRows.filter(row => {
+              const kw = (row as { keyword: string }).keyword.toLowerCase();
+              const kwTokens = kw.split(/[\s,\-–—]+/).filter(t => t.length >= 3);
+              // Keep if any keyword token matches any listing seed token
+              return kwTokens.some(t => seedTokens.has(t));
+            });
+            console.log(`[syncKeywordIntelligence] Relevance filter: ${beforeCount} → ${jsRows.length} keywords (competitor fallback from ${jsSource})`);
+          }
+          // ─────────────────────────────────────────────────────────────────
+
           // Run engine on JS data (against OUR listing content, not the competitor's)
           const jsResult = runKeywordEngine(asin, jsRows, listing ?? {}, 'jungle_scout');
 
