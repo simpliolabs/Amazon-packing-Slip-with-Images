@@ -16,10 +16,10 @@ export async function GET(req: NextRequest) {
     .eq('asin', asin)
     .single()
   
-  // Check keyword_cache
+  // Check keyword_cache (include keyword_data to see raw keywords)
   const { data: cache } = await supabase
     .from('keyword_cache')
-    .select('asin, source, fetched_at, expires_at')
+    .select('asin, source, fetched_at, expires_at, keyword_data')
     .eq('asin', asin)
   
   // Check keyword_analysis
@@ -30,9 +30,24 @@ export async function GET(req: NextRequest) {
     .order('opportunity_score', { ascending: false })
     .limit(20)
   
+  // Summarize keyword_cache data
+  const cacheSummary = (cache || []).map(c => {
+    const keywords = (c.keyword_data as Array<{keyword: string; searchVolume?: number}>) || [];
+    return {
+      asin: c.asin,
+      source: c.source,
+      fetched_at: c.fetched_at,
+      keywordCount: keywords.length,
+      topKeywords: keywords.slice(0, 20).map(k => ({
+        keyword: k.keyword,
+        searchVolume: k.searchVolume || 0
+      }))
+    };
+  });
+
   return NextResponse.json({ 
     listing,
-    cache,
+    cacheSummary,
     analysis,
     analysisCount: analysis?.length ?? 0
   })
