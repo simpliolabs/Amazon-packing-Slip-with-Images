@@ -282,6 +282,38 @@ export async function POST(req: NextRequest) {
       return `  Child ${idx + 1}: SKU="${c.sku}", ASIN="${c.asin}", color="${color}", current=${kwLen}/250 chars`
     }).join('\n')
 
+    // V2: Auto-sync keyword intelligence if empty (self-healing)
+    // This ensures Regenerate AI Audit works even if keyword cache was cleared
+    const { data: existingKws } = await supabase
+      .from('keyword_analysis')
+      .select('id')
+      .eq('asin', (await supabase.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()).data?.top_child_asin || children[0]?.asin)
+      .limit(1)
+    
+    if (!existingKws || existingKws.length === 0) {
+      // No keyword data — trigger a sync now (synchronous, before AI generation)
+      try {
+        const { data: scoreRow2 } = await supabase
+          .from('listing_seo_scores')
+          .select('top_child_asin, competitor_asin')
+          .eq('parent_asin', parent_asin)
+          .single()
+        const syncAsin = scoreRow2?.top_child_asin || children[0]?.asin
+        const competitorAsin = scoreRow2?.competitor_asin || undefined
+        if (syncAsin) {
+          const { syncKeywordIntelligence } = await import('@/lib/sync/syncKeywordIntelligence')
+          await syncKeywordIntelligence(syncAsin, {
+            includeJungleScout: true,
+            forceRefresh: false,
+            competitorAsin,
+          })
+          console.log(`[ai-recommendations] Auto-synced keyword intelligence for ${syncAsin}`)
+        }
+      } catch (syncErr) {
+        console.warn('[ai-recommendations] Auto-sync failed, proceeding without keyword data:', syncErr)
+      }
+    }
+
     // V2: Build keyword intelligence context
     const { contextBlock: keywordContext, opportunitiesUsed } = await buildKeywordContext(
       supabase,
