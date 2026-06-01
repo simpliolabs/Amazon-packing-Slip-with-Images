@@ -27,6 +27,7 @@ import {
   ListingContent,
 } from '../keyword-engine';
 import { createClient } from '@supabase/supabase-js';
+import { getVisionSeedKeywords, scanProductImage, getProductImageUrl } from '../keyword-engine/visionScanner';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -142,12 +143,7 @@ export async function syncKeywordIntelligence(
           // Require 2+ matching tokens for multi-word keywords (3+ tokens)
           // to prevent single-word coincidental matches like "perfect".
           if (jsSource !== asin) {
-            // Use ONLY title for seed tokens — bullets contain too many generic
-            // adjectives ("perfect", "bold", "popular") that cause false matches
-            const titleText = ((listing as Record<string, string> | null)?.title ?? '').toLowerCase();
-
-            // Comprehensive stopwords: common English + generic apparel/category
-            // + generic adjectives that appear in listing copy but aren't product-specific
+            // ── Comprehensive stopwords (used by both vision and title paths) ──
             const STOPWORDS = new Set([
               // Common English stopwords
               'the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'has', 'have',
@@ -174,19 +170,49 @@ export async function syncKeywordIntelligence(
               'days', 'outings', 'events', 'sporting', 'relaxed',
             ]);
 
-            // Build seed tokens from title only
-            const seedTokens = new Set(
-              titleText.split(/[\s,\-–—&|]+/)
-                .map(t => t.replace(/[^a-z0-9]/g, '')) // strip punctuation
-                .filter(t => t.length >= 3 && !STOPWORDS.has(t))
-            );
+            // ── Vision-first seed strategy ──────────────────────────────────
+            // Priority 1: Vision LLM-derived seeds (ground truth from product image)
+            // Priority 2: Title-derived seeds (fallback if no vision data)
+            const visionSeeds = await getVisionSeedKeywords(asin);
+            let seedTokens: Set<string>;
 
-            console.log(`[syncKeywordIntelligence] Seed tokens from title: [${[...seedTokens].join(', ')}]`);
+            if (visionSeeds && visionSeeds.length > 0) {
+              // Vision seeds are already high-quality product-specific terms
+              seedTokens = new Set(
+                visionSeeds.map(s => s.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(t => t.length >= 3)
+              );
+              // Also add multi-word vision seeds as individual tokens
+              for (const seed of visionSeeds) {
+                const parts = seed.toLowerCase().split(/[\s,\-–—]+/).map(t => t.replace(/[^a-z0-9]/g, '')).filter(t => t.length >= 3);
+                parts.forEach(p => seedTokens.add(p));
+              }
+              console.log(`[syncKeywordIntelligence] Using VISION-derived seeds: [${[...seedTokens].join(', ')}]`);
+            } else {
+              // Fallback: Use title for seed tokens
+              const titleText = ((listing as Record<string, string> | null)?.title ?? '').toLowerCase();
 
+              // Trigger background vision scan for next time (non-blocking)
+              getProductImageUrl(asin).then(imgUrl => {
+                if (imgUrl) {
+                  scanProductImage(asin, imgUrl).catch(e => 
+                    console.error(`[syncKeywordIntelligence] Background vision scan failed:`, e)
+                  );
+                }
+              }).catch(() => {});
+
+              // Build seed tokens from title only
+              seedTokens = new Set(
+                titleText.split(/[\s,\-–—&|]+/)
+                  .map(t => t.replace(/[^a-z0-9]/g, ''))
+                  .filter(t => t.length >= 3 && !STOPWORDS.has(t))
+              );
+              console.log(`[syncKeywordIntelligence] Using TITLE-derived seeds (no vision data): [${[...seedTokens].join(', ')}]`);
+            }
+
+            // Apply the relevance filter
             const beforeCount = jsRows.length;
             jsRows = jsRows.filter(row => {
               const kw = (row as { keyword: string }).keyword.toLowerCase();
-              // Split on whitespace and common separators, strip punctuation
               const kwTokens = kw.split(/[\s,\-–—]+/)
                 .map(t => t.replace(/[^a-z0-9']/g, ''))
                 .filter(t => t.length >= 3 && !STOPWORDS.has(t));
