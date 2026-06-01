@@ -264,16 +264,17 @@ export async function POST(req: NextRequest) {
     }).join('\n\n')
 
     // Build the per-child keyword slots instruction
-    // Extract color from SKU or title for color-grouped strategy
-    const extractColor = (sku: string, title: string): string => {
-      // Try to extract color from SKU pattern (e.g., AQS-TMB-2XL-MOS → MOS)
+    // Extract color from SKU for color-grouped strategy
+    // SKU pattern: AQS-TMB-{SIZE}-{COLOR} or AQS-TMB-{SIZE}-{COLOR}-FBA
+    // We strip the -FBA suffix before extracting the color code.
+    const extractColor = (sku: string, _title: string): string => {
       const skuParts = sku.split('-')
-      const colorCode = skuParts[skuParts.length - 1] || ''
-      // Also try to find color in title (after size info)
-      const titleLower = title?.toLowerCase() || ''
-      const sizePatterns = /^(small|medium|large|x-large|xx-large|2xl|3xl|xl|xs|s|m|l)\s+/i
-      const afterSize = titleLower.replace(sizePatterns, '').split(' ').slice(0, 2).join(' ')
-      return afterSize || colorCode
+      // Remove trailing FBA suffix if present
+      const partsNoFba = skuParts[skuParts.length - 1] === 'FBA'
+        ? skuParts.slice(0, -1)
+        : skuParts
+      // Color code is the last remaining segment (e.g., MOS, LG, BJ, IVO)
+      return partsNoFba[partsNoFba.length - 1] || sku
     }
 
     const childKeywordSlots = children.map((c: ChildRow, idx: number) => {
@@ -388,13 +389,15 @@ BACKEND KEYWORDS RULES (COLOR-GROUPED DISTRIBUTION STRATEGY):
 - NEVER repeat words already in the title or bullets — Amazon already indexes those automatically
 - NEVER include the variant's size or color in backend keywords — Amazon indexes those from variant attributes
 
-COLOR-GROUPED STRATEGY (best practice for apparel/multi-color products):
-- Group children by COLOR (not size). All sizes of the same color share IDENTICAL backend keywords.
-- Each COLOR GROUP gets a DIFFERENT keyword string targeting that color's audience.
+COLOR-GROUPED STRATEGY (MANDATORY FOR APPAREL/MULTI-COLOR PRODUCTS):
+- Group children by COLOR (not size). All sizes of the SAME color MUST share IDENTICAL backend keywords.
+- Each COLOR GROUP gets a COMPLETELY DIFFERENT 250-char keyword string targeting that color's specific aesthetic or audience.
+- You must create a unique 250-char string for EVERY distinct color.
 - Example: Moss/Sage variants → "nature lover outdoors hiking gift green aesthetic earth tone casual weekend"
 - Example: Ivory/White variants → "clean classic minimalist gift neutral tone wedding bridal party elegant"
 - Example: Blue Jean variants → "denim look casual everyday workwear gift blue aesthetic vintage wash"
 - This maximizes indexing surface: 10 colors × 250 chars = 2,500 chars of unique keyword coverage.
+- Do NOT just copy-paste the same generic string to every child. If you do, you have failed.
 - If product has NO color variants (single color), distribute keywords across sizes by THEME:
   - Small/Medium → audience terms (mens womens unisex teen young adult)
   - Large/XL → occasion terms (gift birthday christmas fathers day mothers day)

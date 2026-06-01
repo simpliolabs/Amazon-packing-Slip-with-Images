@@ -113,13 +113,19 @@ export async function storeAnalysis(
     analyzed_at: new Date().toISOString(),
   }));
 
-  // Batch upsert in chunks of 100 to avoid payload limits
+  // Clear existing analysis for this ASIN to remove stale/filtered keywords
+  await supabase
+    .from('keyword_analysis')
+    .delete()
+    .eq('asin', asin);
+
+  // Batch insert in chunks of 100 to avoid payload limits
   const chunkSize = 100;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
     await supabase
       .from('keyword_analysis')
-      .upsert(chunk, { onConflict: 'asin,keyword' });
+      .insert(chunk);
   }
 }
 
