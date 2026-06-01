@@ -80,7 +80,7 @@ export async function syncKeywordIntelligence(
   const sqpResult = await syncKeywordData(asin);
 
   // Path 4: Augment with Jungle Scout if enabled and budget allows
-  const jsStatus = getJungleScoutStatus();
+  const jsStatus = await getJungleScoutStatus();
   if (includeJungleScout && jsStatus.enabled && !forceRefresh) {
     try {
       const jsCached = await getCachedKeywords(asin, 'jungle_scout');

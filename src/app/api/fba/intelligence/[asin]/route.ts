@@ -194,7 +194,7 @@ export async function GET(
 
     // Get API usage stats for the UI meter
     const rawUsage = await getApiUsageStats();
-    const jsStatus = getJungleScoutStatus();
+    const jsStatus = await getJungleScoutStatus();
     // Normalize to the shape page.tsx ApiUsageStats expects: { used, limit, remaining, provider }
     const apiUsage = {
       used: rawUsage.jungleScout.callsUsed,

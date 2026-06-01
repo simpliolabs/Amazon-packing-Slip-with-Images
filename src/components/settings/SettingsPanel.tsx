@@ -461,6 +461,9 @@ export default function SettingsPanel({
       {/* FBA Intelligence Settings */}
       <FBASettingsSection />
 
+      {/* Jungle Scout API Settings */}
+      <JungleScoutSettingsSection />
+
       {/* Security Compliance Status */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <div className="flex items-center gap-2 mb-3">
@@ -500,6 +503,182 @@ function ComplianceItem({ label, status }: { label: string; status: 'enforced' |
       }>
         {label}
       </span>
+    </div>
+  )
+}
+
+function JungleScoutSettingsSection() {
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [keyName, setKeyName] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [status, setStatus] = useState<{ hasApiKey: boolean; keyName: string; enabled: boolean; apiKeyMasked: string } | null>(null)
+  const [editingKey, setEditingKey] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  // Load current status on mount
+  useState(() => {
+    fetch('/api/jungle-scout/credentials')
+      .then(r => r.json())
+      .then(data => {
+        setStatus(data)
+        if (data.keyName) setKeyName(data.keyName)
+        setEditingKey(!data.hasApiKey)
+        setLoading(false)
+      })
+      .catch(() => setLoading(false))
+  })
+
+  const handleSave = async () => {
+    if (!keyName.trim()) { return }
+    if (!apiKey.trim() && !status?.hasApiKey) { return }
+    setSaving(true)
+    try {
+      const payload: Record<string, string> = { keyName: keyName.trim() }
+      if (apiKey.trim()) payload.apiKey = apiKey.trim()
+      else if (status?.hasApiKey) {
+        // Re-fetch existing key from DB — not possible without re-entry, require new key
+        setSaving(false)
+        return
+      }
+      const resp = await fetch('/api/jungle-scout/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await resp.json()
+      if (resp.ok && data.success) {
+        toast.success('Jungle Scout API credentials saved — keyword intelligence is now active')
+        setSaved(true)
+        setApiKey('')
+        setEditingKey(false)
+        // Refresh status
+        const refreshed = await fetch('/api/jungle-scout/credentials').then(r => r.json())
+        setStatus(refreshed)
+        if (refreshed.keyName) setKeyName(refreshed.keyName)
+        setTimeout(() => setSaved(false), 3000)
+      } else {
+        toast.error(data.error || 'Failed to save credentials')
+      }
+    } catch {
+      toast.error('Network error saving credentials')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDisable = async () => {
+    try {
+      await fetch('/api/jungle-scout/credentials', { method: 'DELETE' })
+      toast.success('Jungle Scout API disabled')
+      const refreshed = await fetch('/api/jungle-scout/credentials').then(r => r.json())
+      setStatus(refreshed)
+    } catch {
+      toast.error('Failed to disable')
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
+      <div className="flex items-start justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <svg className="w-4 h-4 text-orange-500" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/>
+          </svg>
+          <h2 className="text-sm font-bold text-gray-900">Jungle Scout API</h2>
+        </div>
+        {!loading && status && (
+          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
+            status.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
+          }`}>
+            {status.enabled ? <><CheckCircle size={12} /> Active</> : <><XCircle size={12} /> Not configured</>}
+          </div>
+        )}
+      </div>
+      <p className="text-xs text-gray-500 mb-4">
+        Connect your Jungle Scout API to enable automatic keyword intelligence for listing optimization.
+        Requires Growth Accelerator plan + API Tier 1 add-on.
+      </p>
+
+      <div className="border border-gray-200 rounded-lg p-4">
+        <div className="flex items-center gap-2 mb-4">
+          <Key size={14} className="text-gray-500" />
+          <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">API Credentials</h3>
+        </div>
+
+        <div className="space-y-3">
+          {/* Key Name */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Key Name <span className="text-gray-400 font-normal">(from JS Developer page)</span>
+            </label>
+            <input
+              type="text"
+              value={keyName}
+              onChange={e => setKeyName(e.target.value)}
+              placeholder="my-key-name"
+              className="w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent"
+            />
+          </div>
+
+          {/* API Key */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              API Key
+            </label>
+            {!editingKey && status?.hasApiKey ? (
+              <div className="flex items-center gap-2">
+                <div className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-500 font-mono">
+                  {status.apiKeyMasked}
+                </div>
+                <button
+                  onClick={() => setEditingKey(true)}
+                  className="px-3 py-2 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
+                >
+                  Update
+                </button>
+              </div>
+            ) : (
+              <input
+                type="password"
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder="Paste your API key here"
+                className="w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent font-mono"
+              />
+            )}
+            <p className="text-xs text-gray-400 mt-1">
+              Get your key from <a href="https://www.junglescout.com/app/settings/developer" target="_blank" rel="noopener noreferrer" className="text-orange-500 hover:underline">Jungle Scout → Settings → Developer</a>
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 mt-4">
+          <button
+            onClick={handleSave}
+            disabled={saving || !keyName.trim() || (!apiKey.trim() && !status?.hasApiKey)}
+            className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 disabled:opacity-50 transition-colors"
+          >
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+            {saved ? 'Saved!' : saving ? 'Saving…' : 'Save Credentials'}
+          </button>
+          {status?.enabled && (
+            <button
+              onClick={handleDisable}
+              className="px-4 py-2 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+            >
+              Disable
+            </button>
+          )}
+        </div>
+      </div>
+
+      {status?.enabled && (
+        <div className="mt-3 flex items-center gap-2 text-xs text-green-700 bg-green-50 rounded-lg p-3">
+          <CheckCircle size={13} className="flex-shrink-0" />
+          <span>Keyword intelligence is active. AI recommendations will automatically use Jungle Scout data when running audits.</span>
+        </div>
+      )}
     </div>
   )
 }
