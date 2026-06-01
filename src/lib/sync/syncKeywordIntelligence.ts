@@ -75,11 +75,12 @@ export async function syncKeywordIntelligence(
     }
   }
 
-  // On forceRefresh: clear stale cached data so the engine re-runs with fresh presence data
+  // On forceRefresh: clear only the ANALYSIS cache (keyword_analysis) so the engine re-runs
+  // with fresh presence data. Do NOT delete keyword_cache — that holds the raw JS API data
+  // which costs credits to re-fetch. JS data is re-fetched only if older than 24 hours.
   if (forceRefresh) {
-    await supabase.from('keyword_cache').delete().eq('asin', asin);
     await supabase.from('keyword_analysis').delete().eq('asin', asin);
-    console.log(`[syncKeywordIntelligence] Cleared stale cache for ${asin} (forceRefresh)`);
+    console.log(`[syncKeywordIntelligence] Cleared analysis cache for ${asin} (forceRefresh). Raw keyword_cache preserved.`);
   }
 
   // Path 2 & 3: Run SQP sync (handles cache check internally)
@@ -89,7 +90,19 @@ export async function syncKeywordIntelligence(
   const jsStatus = await getJungleScoutStatus();
   if (includeJungleScout && jsStatus.enabled) {
     try {
-      const jsCached = forceRefresh ? null : await getCachedKeywords(asin, 'jungle_scout');
+      // Smart cache check: use cached JS data if it exists AND is less than 24 hours old.
+      // forceRefresh only re-runs the analysis engine — it does NOT force a new JS API call.
+      // A new JS API call is only triggered on a true cache miss (never fetched) or if the
+      // cached data is older than 24 hours. This prevents burning JS credits on every audit.
+      const rawCached = await getCachedKeywords(asin, 'jungle_scout');
+      const cachedAge = rawCached ? await getKeywordCacheAge(asin, 'jungle_scout') : Infinity;
+      const JS_REFRESH_TTL_HOURS = 24;
+      const jsCached = rawCached && cachedAge < JS_REFRESH_TTL_HOURS ? rawCached : null;
+      if (rawCached && cachedAge >= JS_REFRESH_TTL_HOURS) {
+        console.log(`[syncKeywordIntelligence] JS cache for ${asin} is ${Math.round(cachedAge)}h old (>${JS_REFRESH_TTL_HOURS}h TTL). Re-fetching from JS API.`);
+      } else if (rawCached) {
+        console.log(`[syncKeywordIntelligence] JS cache HIT for ${asin} (${Math.round(cachedAge)}h old). Skipping JS API call. 0 credits used.`);
+      }
       if (!jsCached) {
         // Step A: Try own ASIN first
         let jsRows = (await fetchKeywordsByASIN([asin])).get(asin) ?? [];
@@ -201,6 +214,29 @@ export async function syncKeywordIntelligence(
   }
 
   return sqpResult;
+}
+
+// ─── Cache Age Helper ───────────────────────────────────────────────────────
+
+/**
+ * Returns the age of a keyword cache entry in hours.
+ * Returns Infinity if the entry doesn't exist.
+ */
+async function getKeywordCacheAge(
+  asin: string,
+  source: 'sqp' | 'jungle_scout'
+): Promise<number> {
+  const { data } = await supabase
+    .from('keyword_cache')
+    .select('fetched_at')
+    .eq('asin', asin)
+    .eq('source', source)
+    .single();
+
+  if (!data?.fetched_at) return Infinity;
+  const fetchedAt = new Date(data.fetched_at).getTime();
+  const ageMs = Date.now() - fetchedAt;
+  return ageMs / (1000 * 60 * 60); // convert to hours
 }
 
 // ─── Competitor ASIN Resolution ──────────────────────────────────────────────
