@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
+import { invalidateCredentialsCache } from '@/lib/sync/jungleScoutClient'
 
 /**
  * GET /api/jungle-scout/credentials
@@ -91,6 +92,9 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: `Failed to save ${record.key}: ${error.message}` }, { status: 500 })
       }
     }
+
+    // Invalidate the in-memory credentials cache so the new credentials take effect immediately
+    invalidateCredentialsCache();
 
     return NextResponse.json({ success: true, message: 'Jungle Scout API credentials saved. Keyword intelligence is now active.' })
   } catch (err) {

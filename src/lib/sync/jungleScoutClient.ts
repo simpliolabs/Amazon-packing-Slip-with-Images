@@ -32,7 +32,8 @@ interface JsCredentials {
   keyName: string;
 }
 
-// Cache credentials in memory for 5 minutes to avoid DB round-trips on every call
+// Cache credentials in memory for 30 seconds to avoid DB round-trips on every call
+// Short TTL ensures credential updates take effect quickly without requiring a restart
 let credentialsCache: { value: JsCredentials; expiresAt: number } | null = null;
 
 async function getCredentials(): Promise<JsCredentials> {
@@ -58,7 +59,7 @@ async function getCredentials(): Promise<JsCredentials> {
 
     if (apiKey && keyName && enabledInDb) {
       const creds: JsCredentials = { enabled: true, apiKey, keyName };
-      credentialsCache = { value: creds, expiresAt: Date.now() + 5 * 60 * 1000 };
+      credentialsCache = { value: creds, expiresAt: Date.now() + 30 * 1000 }; // 30 seconds
       return creds;
     }
   } catch (err) {
@@ -70,7 +71,7 @@ async function getCredentials(): Promise<JsCredentials> {
   const enabled = process.env.JUNGLE_SCOUT_ENABLED === 'true' && !!apiKey && !!keyName;
 
   const creds: JsCredentials = { enabled, apiKey, keyName };
-  credentialsCache = { value: creds, expiresAt: Date.now() + 5 * 60 * 1000 };
+  credentialsCache = { value: creds, expiresAt: Date.now() + 30 * 1000 }; // 30 seconds
   return creds;
 }
 
