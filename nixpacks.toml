@@ -3,4 +3,11 @@ NODE_OPTIONS = "--max-old-space-size=1024"
 NEXT_TELEMETRY_DISABLED = "1"
 
 [phases.build]
-cmds = ["pnpm run build"]
+cmds = [
+  "pnpm run build",
+  "cp -r .next/static .next/standalone/.next/static",
+  "cp -r public .next/standalone/public"
+]
+
+[start]
+cmd = "node .next/standalone/server.js"
