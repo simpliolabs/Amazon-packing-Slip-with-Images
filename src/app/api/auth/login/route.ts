@@ -179,10 +179,10 @@ export async function POST(request: NextRequest) {
   const finalResponse = NextResponse.json(responseData)
 
   // Copy cookies from supabaseResponse to finalResponse
+  // NOTE: Do NOT set httpOnly — @supabase/ssr browser client reads session via document.cookie
   supabaseResponse.cookies.getAll().forEach(cookie => {
     finalResponse.cookies.set(cookie.name, cookie.value, {
       path: '/',
-      httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
     })
