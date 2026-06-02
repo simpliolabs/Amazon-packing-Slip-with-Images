@@ -3,31 +3,33 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * Orchestrator for keyword intelligence sync.
  *
- * Determines the best data source for an ASIN and runs the appropriate sync:
- *   - Has SQP data (established product with sales) → syncKeywordData (SQP)
- *   - Jungle Scout enabled → fetch keywords for own ASIN first
- *   - If own ASIN returns 0 keywords → fallback to competitor ASIN (reverse ASIN lookup)
- *   - No data available → sibling inheritance (handled inside syncKeywordData)
+ * V2 Pipeline:
+ *   1. Check stored analysis (fast path)
+ *   2. Run SQP sync (if available)
+ *   3. Run researchKeywords() — the new 3-credit pipeline:
+ *      Vision Scan → 1 seed → keywords_by_keyword → share_of_voice → competitor ASIN → 3 buckets
+ *   4. Merge SQP + JS results → store analysis
  *
- * This is the function called by:
- *   1. The API route /api/fba/intelligence/[asin] (on-demand)
- *   2. The scheduled sync job (monthly refresh)
+ * Called by:
+ *   1. /api/fba/intelligence/[asin] (on-demand)
+ *   2. /api/fba/listing-optimizer/ai-recommendations (auto-sync)
+ *   3. Scheduled sync job (monthly refresh)
  *
- * Karpathy principle: Goal-driven. One function, one purpose.
+ * Karpathy principle: Surgical change. Replaced the old multi-step fallback
+ * logic with a single call to researchKeywords() which handles everything.
  */
 
 import { syncKeywordData } from './syncKeywordData';
-import { fetchKeywordsByASIN, getJungleScoutStatus } from './jungleScoutClient';
+import { getJungleScoutStatus } from './jungleScoutClient';
 import {
   getCachedKeywords,
   getStoredAnalysis,
   runKeywordEngine,
   storeAnalysis,
   EngineResult,
-  ListingContent,
 } from '../keyword-engine';
+import { researchKeywords } from '../keyword-engine/keywordResearcher';
 import { createClient } from '@supabase/supabase-js';
-import { getVisionSeedKeywords, scanProductImage, getProductImageUrl } from '../keyword-engine/visionScanner';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -41,8 +43,12 @@ export interface IntelligenceOptions {
   includeJungleScout?: boolean;
   /** Return stored analysis if available (fastest path) */
   useStoredAnalysis?: boolean;
-  /** Competitor ASIN to use for reverse lookup if own ASIN has no data */
+  /** Competitor ASIN (legacy — now auto-detected via SOV) */
   competitorAsin?: string;
+  /** Parent ASIN (needed for competitor storage) */
+  parentAsin?: string;
+  /** Listing title (fallback seed for keyword research) */
+  listingTitle?: string;
 }
 
 /**
@@ -52,9 +58,7 @@ export interface IntelligenceOptions {
  *   1. Stored analysis (DB) — if fresh and useStoredAnalysis=true
  *   2. Cached raw data (keyword_cache) → re-run engine
  *   3. Fresh SQP fetch → engine → store
- *   4. Jungle Scout (if enabled):
- *      a. Try own ASIN first
- *      b. If 0 results → fallback to competitor ASIN (reverse ASIN lookup)
+ *   4. researchKeywords() (if JS enabled) → 3-bucket pipeline → merge
  */
 export async function syncKeywordIntelligence(
   asin: string,
@@ -64,21 +68,20 @@ export async function syncKeywordIntelligence(
     forceRefresh = false,
     includeJungleScout = true,
     useStoredAnalysis = true,
-    competitorAsin,
+    parentAsin,
+    listingTitle,
   } = options;
 
   // Path 1: Return stored analysis if available and not forcing refresh
   if (useStoredAnalysis && !forceRefresh) {
     const stored = await getStoredAnalysis(asin, 100);
     if (stored && stored.length > 0) {
-      // Build a lightweight EngineResult from stored data
       return buildResultFromStored(asin, stored);
     }
   }
 
-  // On forceRefresh: clear only the ANALYSIS cache (keyword_analysis) so the engine re-runs
-  // with fresh presence data. Do NOT delete keyword_cache — that holds the raw JS API data
-  // which costs credits to re-fetch. JS data is re-fetched only if older than 24 hours.
+  // On forceRefresh: clear only the ANALYSIS cache (keyword_analysis) so the engine re-runs.
+  // Do NOT delete keyword_cache — that holds the raw JS API data which costs credits to re-fetch.
   if (forceRefresh) {
     await supabase.from('keyword_analysis').delete().eq('asin', asin);
     console.log(`[syncKeywordIntelligence] Cleared analysis cache for ${asin} (forceRefresh). Raw keyword_cache preserved.`);
@@ -87,172 +90,73 @@ export async function syncKeywordIntelligence(
   // Path 2 & 3: Run SQP sync (handles cache check internally)
   const sqpResult = await syncKeywordData(asin);
 
-  // Path 4: Augment with Jungle Scout if enabled and budget allows
+  // Path 4: Augment with Jungle Scout research pipeline
   const jsStatus = await getJungleScoutStatus();
   if (includeJungleScout && jsStatus.enabled) {
     try {
-      // Smart cache check: use cached JS data if it exists AND is less than 24 hours old.
-      // forceRefresh only re-runs the analysis engine — it does NOT force a new JS API call.
-      // A new JS API call is only triggered on a true cache miss (never fetched) or if the
-      // cached data is older than 24 hours. This prevents burning JS credits on every audit.
+      // Check if we already have fresh JS data cached (avoid burning credits)
       const rawCached = await getCachedKeywords(asin, 'jungle_scout');
       const cachedAge = rawCached ? await getKeywordCacheAge(asin, 'jungle_scout') : Infinity;
       const JS_REFRESH_TTL_HOURS = 24;
-      const jsCached = rawCached && cachedAge < JS_REFRESH_TTL_HOURS ? rawCached : null;
-      if (rawCached && cachedAge >= JS_REFRESH_TTL_HOURS) {
-        console.log(`[syncKeywordIntelligence] JS cache for ${asin} is ${Math.round(cachedAge)}h old (>${JS_REFRESH_TTL_HOURS}h TTL). Re-fetching from JS API.`);
-      } else if (rawCached) {
-        console.log(`[syncKeywordIntelligence] JS cache HIT for ${asin} (${Math.round(cachedAge)}h old). Skipping JS API call. 0 credits used.`);
+
+      if (rawCached && cachedAge < JS_REFRESH_TTL_HOURS && !forceRefresh) {
+        console.log(`[syncKeywordIntelligence] JS cache HIT for ${asin} (${Math.round(cachedAge)}h old). Skipping JS API call.`);
+        // Re-run engine on cached data to get fresh presence analysis
+        const { data: listing } = await supabase
+          .from('listing_content')
+          .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+          .eq('asin', asin)
+          .single();
+
+        const jsResult = runKeywordEngine(asin, rawCached as import('../keyword-engine').RawKeywordRow[], listing ?? {}, 'jungle_scout');
+        const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
+        await storeAnalysis(asin, mergedKeywords);
+
+        return {
+          ...sqpResult,
+          allKeywords: mergedKeywords,
+          topOpportunities: mergedKeywords.slice(0, 25),
+          totalKeywordsAnalyzed: mergedKeywords.length,
+          summary: buildSummary(mergedKeywords),
+          dataSource: 'jungle_scout',
+        };
       }
-      if (!jsCached) {
-        // Step A: Try own ASIN first
-        let jsRows = (await fetchKeywordsByASIN([asin])).get(asin) ?? [];
-        let jsSource = asin;
 
-        // Step B: If own ASIN returns 0 keywords, fallback to competitor ASIN
-        if (jsRows.length === 0) {
-          const fallbackAsin = competitorAsin || await getCompetitorAsin(asin);
-          if (fallbackAsin) {
-            console.log(`[syncKeywordIntelligence] Own ASIN ${asin} returned 0 JS keywords. Falling back to competitor: ${fallbackAsin}`);
-            jsRows = (await fetchKeywordsByASIN([fallbackAsin])).get(fallbackAsin) ?? [];
-            jsSource = fallbackAsin;
-            if (jsRows.length > 0) {
-              console.log(`[syncKeywordIntelligence] Got ${jsRows.length} keywords from competitor ${fallbackAsin}`);
-            }
-          } else {
-            console.log(`[syncKeywordIntelligence] Own ASIN ${asin} returned 0 JS keywords and no competitor ASIN configured.`);
-          }
-        }
+      // No fresh cache — run the full 3-credit research pipeline
+      const resolvedParent = parentAsin || await getParentAsin(asin);
+      const researchResult = await researchKeywords(asin, resolvedParent || asin, {
+        forceRefresh,
+        listingTitle,
+      });
 
-        if (jsRows.length > 0) {
-          // Fetch listing content for presence check (column-based schema)
-          const { data: listing } = await supabase
-            .from('listing_content')
-            .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
-            .eq('asin', asin)
-            .single();
+      if (researchResult.allKeywords.length > 0) {
+        // Fetch listing content for presence check
+        const { data: listing } = await supabase
+          .from('listing_content')
+          .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+          .eq('asin', asin)
+          .single();
 
-          // ── Relevance filter for competitor-fallback keywords ──────────────
-          // When keywords come from a competitor ASIN (not our own), many will
-          // be completely unrelated to our product (e.g. "Stephen Colbert shirt"
-          // appearing on a Later Gator tshirt competitor). Filter to only keep
-          // keywords that share meaningful tokens with our listing.
-          //
-          // Strategy: Use ONLY the listing TITLE as seed source (not bullets)
-          // to avoid false matches from generic adjectives in bullet copy.
-          // Require 2+ matching tokens for multi-word keywords (3+ tokens)
-          // to prevent single-word coincidental matches like "perfect".
-          if (jsSource !== asin) {
-            // ── Comprehensive stopwords (used by both vision and title paths) ──
-            const STOPWORDS = new Set([
-              // Common English stopwords
-              'the', 'and', 'for', 'with', 'that', 'this', 'are', 'was', 'has', 'have',
-              'its', 'our', 'your', 'all', 'can', 'not', 'but', 'from', 'they', 'will',
-              'been', 'more', 'also', 'into', 'than', 'then', 'when', 'what', 'which',
-              'who', 'how', 'any', 'each', 'both', 'very', 'just', 'over', 'such', 'even',
-              'most', 'made', 'make', 'like', 'only', 'well', 'way', 'may', 'per',
-              // Generic apparel/category words
-              'shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees', 'top', 'tops',
-              'clothing', 'apparel', 'wear', 'wearing', 'clothes', 'outfit', 'outfits',
-              'mens', 'womens', 'unisex', 'men', 'women', 'man', 'woman', 'adult', 'adults',
-              "men's", "women's",
-              'size', 'sizes', 'small', 'medium', 'large', 'xlarge', '2xl', '3xl',
-              'cotton', 'fabric', 'soft', 'comfortable', 'comfort', 'breathable',
-              'casual', 'everyday', 'gift', 'gifts', 'idea', 'ideas', 'funny', 'cute',
-              'graphic', 'print', 'printed', 'design', 'style', 'styled', 'stylish',
-              'vintage', 'retro', 'classic', 'cool', 'awesome', 'nice', 'great', 'good',
-              'fit', 'fitting', 'wear', 'worn', 'new', 'best', 'top', 'quality',
-              // Generic adjectives/verbs that appear in listing copy but aren't product-specific
-              'perfect', 'ideal', 'fun', 'bold', 'popular', 'unique', 'standout',
-              'features', 'offers', 'provides', 'includes', 'brings', 'highlights',
-              'pairs', 'works', 'blends', 'adds', 'captures', 'found', 'known',
-              'looking', 'ready', 'choice', 'favorite', 'anyone', 'solid',
-              'days', 'outings', 'events', 'sporting', 'relaxed',
-            ]);
+        // Run engine on research results (against OUR listing content)
+        const jsResult = runKeywordEngine(asin, researchResult.allKeywords, listing ?? {}, 'jungle_scout');
 
-            // ── Vision-first seed strategy ──────────────────────────────────
-            // Priority 1: Vision LLM-derived seeds (ground truth from product image)
-            // Priority 2: Title-derived seeds (fallback if no vision data)
-            const visionSeeds = await getVisionSeedKeywords(asin);
-            let seedTokens: Set<string>;
+        // Merge JS results into SQP results (SQP takes precedence for same keywords)
+        const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
+        await storeAnalysis(asin, mergedKeywords);
 
-            if (visionSeeds && visionSeeds.length > 0) {
-              // Vision seeds are already high-quality product-specific terms
-              seedTokens = new Set(
-                visionSeeds.map(s => s.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(t => t.length >= 3)
-              );
-              // Also add multi-word vision seeds as individual tokens
-              for (const seed of visionSeeds) {
-                const parts = seed.toLowerCase().split(/[\s,\-–—]+/).map(t => t.replace(/[^a-z0-9]/g, '')).filter(t => t.length >= 3);
-                parts.forEach(p => seedTokens.add(p));
-              }
-              console.log(`[syncKeywordIntelligence] Using VISION-derived seeds: [${[...seedTokens].join(', ')}]`);
-            } else {
-              // Fallback: Use title for seed tokens
-              const titleText = ((listing as Record<string, string> | null)?.title ?? '').toLowerCase();
+        console.log(`[syncKeywordIntelligence] Research pipeline complete for ${asin}: ${researchResult.allKeywords.length} keywords, ${researchResult.creditsUsed} credits, competitor: ${researchResult.competitor?.asin || 'none'}`);
 
-              // Trigger background vision scan for next time (non-blocking)
-              getProductImageUrl(asin).then(imgUrl => {
-                if (imgUrl) {
-                  scanProductImage(asin, imgUrl).catch(e => 
-                    console.error(`[syncKeywordIntelligence] Background vision scan failed:`, e)
-                  );
-                }
-              }).catch(() => {});
-
-              // Build seed tokens from title only
-              seedTokens = new Set(
-                titleText.split(/[\s,\-–—&|]+/)
-                  .map(t => t.replace(/[^a-z0-9]/g, ''))
-                  .filter(t => t.length >= 3 && !STOPWORDS.has(t))
-              );
-              console.log(`[syncKeywordIntelligence] Using TITLE-derived seeds (no vision data): [${[...seedTokens].join(', ')}]`);
-            }
-
-            // Apply the relevance filter
-            const beforeCount = jsRows.length;
-            jsRows = jsRows.filter(row => {
-              const kw = (row as { keyword: string }).keyword.toLowerCase();
-              const kwTokens = kw.split(/[\s,\-–—]+/)
-                .map(t => t.replace(/[^a-z0-9']/g, ''))
-                .filter(t => t.length >= 3 && !STOPWORDS.has(t));
-              
-              const matchCount = kwTokens.filter(t => seedTokens.has(t)).length;
-              
-              // For keywords with 3+ meaningful tokens, require 2+ matches
-              // For keywords with 1-2 meaningful tokens, require 1 match
-              const minMatches = kwTokens.length >= 3 ? 2 : 1;
-              return matchCount >= minMatches;
-            });
-            console.log(`[syncKeywordIntelligence] Relevance filter: ${beforeCount} → ${jsRows.length} keywords (competitor fallback from ${jsSource})`);
-          }
-          // ─────────────────────────────────────────────────────────────────
-
-          // Run engine on JS data (against OUR listing content, not the competitor's)
-          const jsResult = runKeywordEngine(asin, jsRows, listing ?? {}, 'jungle_scout');
-
-          // Merge JS results into SQP results (SQP takes precedence for same keywords)
-          const mergedKeywords = mergeKeywordResults(
-            sqpResult.allKeywords,
-            jsResult.allKeywords
-          );
-
-          // Store merged analysis
-          await storeAnalysis(asin, mergedKeywords);
-
-          // Return merged result
-          return {
-            ...sqpResult,
-            allKeywords: mergedKeywords,
-            topOpportunities: mergedKeywords.slice(0, 25),
-            totalKeywordsAnalyzed: mergedKeywords.length,
-            summary: buildSummary(mergedKeywords),
-            dataSource: 'jungle_scout',
-          };
-        }
+        return {
+          ...sqpResult,
+          allKeywords: mergedKeywords,
+          topOpportunities: mergedKeywords.slice(0, 25),
+          totalKeywordsAnalyzed: mergedKeywords.length,
+          summary: buildSummary(mergedKeywords),
+          dataSource: 'jungle_scout',
+        };
       }
     } catch (err) {
-      console.error(`[syncKeywordIntelligence] Jungle Scout augmentation failed for ${asin}:`, err);
+      console.error(`[syncKeywordIntelligence] Research pipeline failed for ${asin}:`, err);
       // Don't fail — return SQP result
     }
   }
@@ -262,10 +166,6 @@ export async function syncKeywordIntelligence(
 
 // ─── Cache Age Helper ───────────────────────────────────────────────────────
 
-/**
- * Returns the age of a keyword cache entry in hours.
- * Returns Infinity if the entry doesn't exist.
- */
 async function getKeywordCacheAge(
   asin: string,
   source: 'sqp' | 'jungle_scout'
@@ -280,53 +180,22 @@ async function getKeywordCacheAge(
   if (!data?.fetched_at) return Infinity;
   const fetchedAt = new Date(data.fetched_at).getTime();
   const ageMs = Date.now() - fetchedAt;
-  return ageMs / (1000 * 60 * 60); // convert to hours
+  return ageMs / (1000 * 60 * 60);
 }
 
-// ─── Competitor ASIN Resolution ──────────────────────────────────────────────
+// ─── Parent ASIN Resolution ─────────────────────────────────────────────────
 
-/**
- * Get the competitor ASIN for a given product ASIN.
- * Looks up listing_seo_scores.competitor_asin field.
- * Returns null if not set.
- */
-async function getCompetitorAsin(asin: string): Promise<string | null> {
+async function getParentAsin(asin: string): Promise<string | null> {
   try {
-    // Check listing_seo_scores for this child ASIN
-    const { data: scoreRow } = await supabase
-      .from('listing_seo_scores')
-      .select('competitor_asin')
-      .eq('asin', asin)
-      .single();
-
-    if ((scoreRow as { competitor_asin: string | null } | null)?.competitor_asin) {
-      return (scoreRow as { competitor_asin: string }).competitor_asin;
-    }
-
-    // Also check by parent_asin (the ASIN might be stored at parent level)
-    const { data: listing } = await supabase
+    const { data } = await supabase
       .from('listing_content')
       .select('parent_asin')
       .eq('asin', asin)
       .single();
-
-    const parentAsin = (listing as { parent_asin: string | null } | null)?.parent_asin;
-    if (parentAsin) {
-      const { data: parentScore } = await supabase
-        .from('listing_seo_scores')
-        .select('competitor_asin')
-        .eq('parent_asin', parentAsin)
-        .single();
-
-      if ((parentScore as { competitor_asin: string | null } | null)?.competitor_asin) {
-        return (parentScore as { competitor_asin: string }).competitor_asin;
-      }
-    }
+    return (data as { parent_asin: string | null } | null)?.parent_asin || null;
   } catch {
-    // Column might not exist yet — that's fine
+    return null;
   }
-
-  return null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

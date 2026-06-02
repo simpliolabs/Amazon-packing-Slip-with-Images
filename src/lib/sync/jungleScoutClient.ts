@@ -79,6 +79,8 @@ export function invalidateCredentialsCache(): void {
   credentialsCache = null;
 }
 
+// ─── Keywords by ASIN (Reverse ASIN Lookup) ─────────────────────────────────
+
 export async function fetchKeywordsByASIN(
   asins: string[]
 ): Promise<Map<string, JungleScoutKeywordRow[]>> {
@@ -189,6 +191,196 @@ export async function reverseAsinLookup(
   const result = await fetchKeywordsByASIN([competitorAsin]);
   return result.get(competitorAsin) ?? [];
 }
+
+// ─── Keywords by Keyword (Keyword Research) ──────────────────────────────────
+
+/**
+ * Fetch related keywords for a single seed keyword using JS keywords_by_keyword_query.
+ *
+ * This is the CORE of the new vision-first keyword research pipeline:
+ * - Input: a single search term (e.g., "later gator tshirt")
+ * - Output: up to 100 related keywords with search volume, competition, trends
+ *
+ * Cost: 1 API credit per call.
+ * Use case: Call this 3-5 times with different seed terms from the vision scanner
+ * to build a comprehensive keyword universe for the product.
+ */
+export async function fetchKeywordsByKeyword(
+  searchTerm: string,
+  options: { pageSize?: number; minSearchVolume?: number } = {}
+): Promise<JungleScoutKeywordRow[]> {
+  const { pageSize = 100, minSearchVolume = 0 } = options;
+
+  const creds = await getCredentials();
+  if (!creds.enabled) {
+    console.warn('[jungleScoutClient] Jungle Scout API not enabled.');
+    return [];
+  }
+
+  const budget = await isWithinBudget('jungle_scout');
+  if (!budget.allowed) {
+    console.warn(`[jungleScoutClient] Monthly budget exhausted`);
+    return [];
+  }
+
+  try {
+    const authHeader = `${creds.keyName}:${creds.apiKey}`;
+
+    // Filter by minimum search volume if specified
+    const filterParams = minSearchVolume > 0
+      ? `&filter[min_monthly_search_volume_exact]=${minSearchVolume}`
+      : '';
+
+    const resp = await fetch(
+      `${JS_BASE_URL}/api/keywords/keywords_by_keyword_query?marketplace=us&sort=-monthly_search_volume_exact&page[size]=${pageSize}${filterParams}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/vnd.api+json',
+          'Accept': 'application/vnd.junglescout.v1+json',
+          'X-API-Type': 'junglescout',
+        },
+        body: JSON.stringify({
+          data: {
+            type: 'keywords_by_keyword_query',
+            attributes: {
+              search_terms: searchTerm,
+            },
+          },
+        }),
+      }
+    );
+
+    await logApiCall('jungle_scout', 'keywords_by_keyword_query', [searchTerm], resp.status);
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      console.error(`[jungleScoutClient] keywords_by_keyword API error ${resp.status}: ${err}`);
+      if (resp.status === 401 || resp.status === 403) {
+        invalidateCredentialsCache();
+      }
+      return [];
+    }
+
+    const data = await resp.json();
+    const items = data?.data ?? [];
+    console.log(`[jungleScoutClient] keywords_by_keyword: "${searchTerm}" → ${items.length} related keywords`);
+
+    const results: JungleScoutKeywordRow[] = [];
+
+    for (const item of items) {
+      const attrs = item.attributes ?? {};
+      const keyword = attrs.name ?? '';
+      if (!keyword) continue;
+
+      results.push({
+        keyword,
+        searchVolume: attrs.monthly_search_volume_exact ?? 0,
+        organicProductCount: attrs.organic_product_count ?? 0,
+        sponsoredProductCount: attrs.sponsored_product_count ?? 0,
+        exactPpcBid: attrs.ppc_bid_exact ?? undefined,
+        broadPpcBid: attrs.ppc_bid_broad ?? undefined,
+        relevancyScore: attrs.relevancy_score ?? undefined,
+        easeOfRankingScore: attrs.ease_of_ranking_score ?? undefined,
+        monthlyTrend: attrs.monthly_trend ?? undefined,
+      });
+    }
+
+    return results;
+
+  } catch (err) {
+    console.error('[jungleScoutClient] keywords_by_keyword fetch error:', err);
+    await logApiCall('jungle_scout', 'keywords_by_keyword_query', [searchTerm], 500);
+    return [];
+  }
+}
+
+// ─── Share of Voice (Auto-Competitor Detection) ─────────────────────────────
+
+export interface ShareOfVoiceCompetitor {
+  asin: string;
+  brand: string;
+  clicksShare: number;
+  conversionsShare: number;
+}
+
+/**
+ * Fetch Share of Voice data for a keyword.
+ * Returns the top ASINs dominating clicks/conversions for this search term.
+ *
+ * Cost: 1 API credit per call.
+ * Use case: Auto-detect the #1 competitor without manual ASIN input.
+ */
+export async function fetchShareOfVoice(
+  keyword: string
+): Promise<ShareOfVoiceCompetitor[]> {
+  const creds = await getCredentials();
+  if (!creds.enabled) {
+    console.warn('[jungleScoutClient] Jungle Scout API not enabled.');
+    return [];
+  }
+
+  const budget = await isWithinBudget('jungle_scout');
+  if (!budget.allowed) {
+    console.warn(`[jungleScoutClient] Monthly budget exhausted`);
+    return [];
+  }
+
+  try {
+    const authHeader = `${creds.keyName}:${creds.apiKey}`;
+
+    const resp = await fetch(
+      `${JS_BASE_URL}/api/keywords/share_of_voice?marketplace=us`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/vnd.api+json',
+          'Accept': 'application/vnd.junglescout.v1+json',
+          'X-API-Type': 'junglescout',
+        },
+        body: JSON.stringify({
+          data: {
+            type: 'share_of_voice',
+            attributes: {
+              search_terms: keyword,
+            },
+          },
+        }),
+      }
+    );
+
+    await logApiCall('jungle_scout', 'share_of_voice', [keyword], resp.status);
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      console.error(`[jungleScoutClient] share_of_voice API error ${resp.status}: ${err}`);
+      if (resp.status === 401 || resp.status === 403) {
+        invalidateCredentialsCache();
+      }
+      return [];
+    }
+
+    const data = await resp.json();
+    const topAsins = data?.data?.attributes?.top_asins ?? [];
+    console.log(`[jungleScoutClient] share_of_voice: "${keyword}" → ${topAsins.length} competitors`);
+
+    return topAsins.map((item: Record<string, unknown>) => ({
+      asin: (item.asin as string) || '',
+      brand: (item.brand as string) || '',
+      clicksShare: (item.clicks_share as number) || 0,
+      conversionsShare: (item.conversions_share as number) || 0,
+    }));
+
+  } catch (err) {
+    console.error('[jungleScoutClient] share_of_voice fetch error:', err);
+    await logApiCall('jungle_scout', 'share_of_voice', [keyword], 500);
+    return [];
+  }
+}
+
+// ─── Status ──────────────────────────────────────────────────────────────────
 
 export async function getJungleScoutStatus(): Promise<{
   enabled: boolean;

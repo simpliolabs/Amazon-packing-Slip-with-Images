@@ -126,7 +126,7 @@ export interface AiRecommendations {
   keyword_opportunities_used?: number
 }
 
-// ─── Keyword Intelligence Context Builder ─────────────────────────────────────
+// ─── Keyword Intelligence Context Builder (V2) ─────────────────────────────────
 
 async function buildKeywordContext(
   supabase: ReturnType<typeof getAdminSupabase>,
@@ -134,10 +134,8 @@ async function buildKeywordContext(
   children: ChildRow[]
 ): Promise<{ contextBlock: string; opportunitiesUsed: number }> {
   // ASIN resolution: use top_child_asin from listing_seo_scores (has keyword data)
-  // Fallback chain: top_child_asin → parent_asin → children[0].asin
   let lookupAsin = children[0]?.asin
   
-  // Try to get top_child_asin from listing_seo_scores
   const { data: scoreRow } = await supabase
     .from('listing_seo_scores')
     .select('top_child_asin')
@@ -155,11 +153,9 @@ async function buildKeywordContext(
   // Try the resolved ASIN first, then fallback to parent_asin, then children[0]
   let analysis = await getStoredAnalysis(lookupAsin, 50)
   if (!analysis || analysis.length === 0) {
-    // Try parent ASIN (some data is stored at parent level)
     analysis = await getStoredAnalysis(parentAsin, 50)
   }
   if (!analysis || analysis.length === 0) {
-    // Try first child as last resort
     const firstChild = children[0]?.asin
     if (firstChild && firstChild !== lookupAsin) {
       analysis = await getStoredAnalysis(firstChild, 50)
@@ -177,48 +173,89 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
     }
   }
 
+  // V2: Categorize with opportunity score + competition level shown per keyword
   const critical = analysis.filter(k => k.actionType === 'CRITICAL').slice(0, 5)
   const upgrade  = analysis.filter(k => k.actionType === 'UPGRADE').slice(0, 5)
   const reinforce = analysis.filter(k => k.actionType === 'REINFORCE').slice(0, 3)
   const defended  = analysis.filter(k => k.actionType === 'DEFENDED').slice(0, 5)
 
+  // V2 format: show Opp score + Competition level per keyword
+  const getCompLevel = (competing: number): string => {
+    if (competing > 50000) return 'HIGH'
+    if (competing > 10000) return 'MED'
+    return 'LOW'
+  }
+
   const formatKw = (k: typeof analysis[0]) =>
-    `  • "${k.keyword}" — ${k.searchVolume.toLocaleString()} searches/mo` +
-    (k.keywordSales > 0 ? `, ${k.keywordSales} total sales/mo` : '') +
-    (k.competingProducts > 0 ? `, ${k.competingProducts.toLocaleString()} competing` : '')
+    `  "${k.keyword}" — Vol: ${k.searchVolume.toLocaleString()}/mo | Opp: ${k.opportunityScore}/100 | Comp: ${getCompLevel(k.competingProducts)}`
 
-  const contextBlock = `
-KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
+  const formatSection = (items: typeof analysis, emptyMsg: string) =>
+    items.length > 0 ? items.map(formatKw).join('\n') : `  [NO KEYWORDS IN THIS SECTION]`
+
+  const contextBlock = `KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
 Data source: ${analysis[0].dataSource === 'sqp' ? 'Amazon Brand Analytics (real sales data)' : analysis[0].dataSource === 'jungle_scout' ? 'Jungle Scout API' : 'Inherited from sibling products'}
-⚡ SORT ORDER: Keywords within each section are sorted by OPPORTUNITY SCORE (highest first). The first keyword listed = highest priority = best chance to rank + convert.
+Sort order: Keywords within each section are sorted by OPPORTUNITY SCORE (highest first).
+The first keyword listed = highest priority = best combination of rankability, search volume, competition gap, and conversion potential.
 
-🔴 CRITICAL GAPS — These high-opportunity keywords are MISSING from title AND bullets.
-You MUST include them in the recommended title and/or bullets:
-${critical.length > 0 ? critical.map(formatKw).join('\n') : '  (none)'}
+Each keyword entry follows this format:
+  "keyword phrase" — Vol: [monthly searches] | Opp: [score 0-100] | Comp: [LOW/MED/HIGH]
 
-🟠 TITLE UPGRADES — These keywords are in bullets but NOT in the title.
-Move them to the title for maximum ranking impact:
-${upgrade.length > 0 ? upgrade.map(formatKw).join('\n') : '  (none)'}
+---
 
-🟡 REINFORCE — These keywords are in the title but NOT in bullets.
-Add them to at least one bullet to reinforce relevance:
-${reinforce.length > 0 ? reinforce.map(formatKw).join('\n') : '  (none)'}
+CRITICAL GAPS — These high-opportunity keywords are MISSING from both title AND bullets.
+You MUST include them in your recommended title and/or bullets.
+If this section is empty, no critical keyword gaps exist — skip to TITLE UPGRADES.
 
-✅ DEFENDED — These keywords are already well-covered (title + bullets).
-Keep them in your recommendations:
-${defended.length > 0 ? defended.map(formatKw).join('\n') : '  (none)'}
+${formatSection(critical, 'no critical gaps')}
 
-HARD RULES FOR KEYWORD INTEGRATION:
-IMPORTANT: Keywords above are listed in ORDER OF OPPORTUNITY (best first). Opportunity score factors in search volume, competition, rankability, and conversion potential. The #1 keyword in each section is the HIGHEST PRIORITY — not necessarily the highest raw volume.
+---
 
-1. TITLE: Include ONLY the top 2-3 keywords BY OPPORTUNITY (the first 2-3 listed under CRITICAL or UPGRADE). Front-load the #1 opportunity keyword in the first 5 words after the brand name. The title MUST be 80-150 characters. NEVER exceed 150 chars.
-2. BULLETS: Place remaining CRITICAL and UPGRADE keywords in bullets 1-3. Each bullet ≤200 chars.
-3. BACKEND KEYWORDS: All keywords that don't fit naturally in title/bullets go here.
-4. Do NOT sacrifice readability — keywords must flow naturally in the copy.
-5. Do NOT stuff all keywords into the title. Distribute intelligently: title gets 2-3, bullets get 3-5, backend gets the rest.
-6. TITLE CHARACTER LIMIT IS NON-NEGOTIABLE: Count your characters. If title exceeds 150 chars, remove lower-opportunity keywords and push them to bullets.
-7. If a keyword IS the product name or brand-specific term (e.g. 'Later Gator tshirt'), it MUST be the primary title keyword regardless of raw volume — brand/product-specific terms have the highest conversion rate.
-`.trim()
+TITLE UPGRADES — These keywords appear in bullets but NOT in the title.
+Moving them to the title increases ranking weight.
+If this section is empty, no title upgrades are needed — skip to REINFORCE.
+
+${formatSection(upgrade, 'no title upgrades')}
+
+---
+
+REINFORCE — These keywords appear in the title but NOT in bullets.
+Adding them to at least one bullet reinforces relevance signals.
+If this section is empty, no reinforcement is needed — skip to DEFENDED.
+
+${formatSection(reinforce, 'no reinforcement needed')}
+
+---
+
+DEFENDED — These keywords are already well-covered (present in both title AND bullets).
+Keep them in your recommendations. Do not remove them.
+If this section is empty, no keywords are currently defended — all optimization is net-new.
+
+${formatSection(defended, 'no defended keywords')}
+
+---
+
+KEYWORD PLACEMENT RULES:
+
+OVERRIDE RULE (applies before all others):
+If a keyword IS the product name, brand-specific term, or product-line name (e.g., "Later Gator tshirt" for a Later Gator product), treat it as Opportunity Slot #1 regardless of its calculated score. It counts toward the 2-3 keyword title limit. Brand-specific terms convert at the highest rate because the searcher already wants YOUR product.
+
+RULE 1 — TITLE (2-3 keywords max):
+Pick the top 2-3 keywords by Opportunity Score from CRITICAL and UPGRADE sections (after applying the Override Rule above). Front-load the #1 keyword within the first 80 characters after the brand name. Title MUST be 80-150 characters. If it exceeds 150, remove the lowest-opportunity keyword and push it to bullets.
+
+RULE 2 — BULLETS (3-5 keywords):
+Place the next 3-5 keywords (by Opportunity Score) from CRITICAL and UPGRADE into bullets 1-3. Each bullet should target 1-2 keywords woven naturally into the sentence. Keywords go in the body text, NOT in the ALL CAPS benefit hook.
+
+RULE 3 — BACKEND KEYWORDS (everything else):
+All remaining keywords that did not fit naturally into title or bullets go here. Also include: synonyms, common misspellings, occasion terms, audience terms, and long-tail variants not already in title/bullets.
+
+RULE 4 — READABILITY IS NON-NEGOTIABLE:
+Keywords must flow naturally in the copy. If a keyword cannot be used without making the text awkward, push it to backend keywords. Stuffed-sounding copy hurts conversion rate, which hurts ranking.
+
+RULE 5 — DO NOT DUPLICATE:
+Never repeat the same keyword in both title AND backend keywords. Amazon indexes title and bullet words automatically — duplicating them in backend wastes bytes.
+
+RULE 6 — ACCOUNT FOR EVERY KEYWORD:
+Every CRITICAL and UPGRADE keyword must appear somewhere: title, a bullet, or backend keywords. The keyword reconciliation report must prove placement for each one. If a keyword was intentionally excluded, state why.`
 
   return {
     contextBlock,
@@ -306,7 +343,8 @@ export async function POST(req: NextRequest) {
           await syncKeywordIntelligence(syncAsin, {
             includeJungleScout: true,
             forceRefresh: false,
-            competitorAsin,
+            parentAsin: parent_asin,
+            listingTitle: children[0]?.title || undefined,
           })
           console.log(`[ai-recommendations] Auto-synced keyword intelligence for ${syncAsin}`)
         }
@@ -322,194 +360,319 @@ export async function POST(req: NextRequest) {
       children as ChildRow[]
     )
 
-    // Build the full listing context
-    const listingContext = `
-PRODUCT LISTING DATA (Amazon US):
-Parent ASIN: ${parent_asin}
-Total Variants: ${children.length} child SKUs
+    // V2: Build structured input JSON matching the system prompt's Section 2 schema
+    // Extract brand from title (first word/phrase before the first dash or product type)
+    const brandName = (rep.title || '').split(/\s*[-\u2013\u2014]\s*/)[0]?.trim() || 'Unknown'
 
---- PER-VARIANT CONTENT (compare these to find conflicts) ---
+    const inputJson = {
+      brand: brandName,
+      product_type: 't-shirt', // Default for current product line
+      category: 'Clothing, Shoes & Jewelry > Novelty & More > Clothing > Novelty',
+      is_new_listing: !rep.title,
+      has_aplus: rep.has_aplus || false,
+      has_brand_story: rep.aplus_has_brand_story || false,
+      current_title: rep.title || null,
+      current_bullets: bullets.length > 0 ? bullets : null,
+      current_description: rep.description || null,
+      children: children.map((c: ChildRow) => {
+        const color = extractColor(c.sku, c.title || '')
+        // Extract size from SKU (3rd segment: AQS-TMB-{SIZE}-{COLOR})
+        const skuParts = c.sku.split('-')
+        const size = skuParts.length >= 3 ? skuParts[2] : null
+        return {
+          sku: c.sku,
+          asin: c.asin,
+          color: color || null,
+          size: size || null,
+          current_backend_keywords: c.backend_keywords || '',
+        }
+      }),
+      category_title_formula: null,
+      restricted_claims: [],
+    }
+
+    // Build the full listing context (V2 format)
+    const listingContext = `${JSON.stringify(inputJson, null, 2)}
+
+--- PER-VARIANT CONTENT (for variant health check) ---
 ${variantDetails}
 --- END VARIANT CONTENT ---
 
-CHILDREN NEEDING BACKEND KEYWORDS (each child gets its own unique 250-char keyword string):
-${childKeywordSlots}
-
-IMAGE COUNT: ${rep.image_count || 0}/7 (Amazon allows up to 7 images + 1 video)
-A+ CONTENT: ${rep.has_aplus ? `Yes (${rep.aplus_module_count}/7 modules used)` : 'No A+ Content'}
-A+ BRAND STORY: ${rep.aplus_has_brand_story ? 'Yes' : 'No'}
-A+ HEADLINE: ${rep.aplus_has_headline ? 'Yes' : 'No'}
-A+ IMAGES MISSING ALT TEXT: ${rep.aplus_images_missing_alt || 0}
-DESCRIPTION LENGTH: ${rep.description ? rep.description.replace(/<[^>]+>/g, '').trim().length : 0} chars
-DESCRIPTION HAS HTML: ${rep.description && /<[^>]+>/.test(rep.description) ? 'Yes' : 'No'}
-
-${keywordContext ? `\n--- KEYWORD INTELLIGENCE (V2) ---\n${keywordContext}\n--- END KEYWORD INTELLIGENCE ---` : ''}
+${keywordContext ? `--- KEYWORD INTELLIGENCE (V2) ---\n${keywordContext}\n--- END KEYWORD INTELLIGENCE ---` : ''}
 `.trim()
 
     const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US.
 
-AMAZON PARENT/CHILD LISTING ARCHITECTURE — YOU MUST UNDERSTAND THIS:
-On Amazon, a variation family has a PARENT ASIN (non-buyable placeholder) and multiple CHILD ASINs (the actual buyable products). Here is how content works:
+========================================
+SECTION 1: AMAZON LISTING ARCHITECTURE
+========================================
 
-SHARED CONTENT (same for ALL children — edited once at parent level):
-• Title — One title template for the whole family. Amazon auto-appends the variant attribute (size, color). You write the GENERIC part only. NEVER include variant-specific attributes like "128GB", "Black", "Large" in the title unless ALL variants share it.
-• Bullets — One set of 5 bullets shared across all children. Must be generic.
-• Description — One description shared across all children. Must be generic.
-• A+ Content — Shared at parent level.
+On Amazon, a variation family has a PARENT ASIN (non-buyable placeholder) and multiple CHILD ASINs (the actual buyable products).
 
-PER-CHILD CONTENT (different for each child — edited individually):
-• Backend Keywords — Each child has its own 250-byte search terms field. This is the KEY optimization opportunity: distribute your keyword universe across children. The 32GB child should target "32gb sd card", the 64GB child should target "64gb sd card", etc.
-• Images — Each child has its own image set.
+SHARED CONTENT (edited once at parent level, same for ALL children):
+- Title: One generic title template. Amazon auto-appends the variant attribute (size, color). You write ONLY the generic part. NEVER include variant-specific attributes (specific size, color, capacity) in the title unless ALL variants share that attribute.
+- Bullets: One set of 5 bullets shared across all children. Must be generic.
+- Description: One description shared across all children. Must be generic. NOTE: If A+ Content exists, it overrides the description — see conditional rules below.
+- A+ Content: Shared at parent level.
 
-YOUR TASK:
-Generate optimized content following this architecture exactly.
+PER-CHILD CONTENT (edited individually per child):
+- Backend Keywords: Each child has its own search terms field (250 BYTES max — see encoding rules below). This is the key optimization opportunity.
+- Images: Each child has its own image set.
 
-TITLE RULES (STRICT):
-- HARD LIMIT: 80-150 characters. Target 100-120 chars. NEVER exceed 150 chars.
-- Amazon recommends 80 chars for mobile. Anything over 150 gets truncated on mobile and may suppress the listing.
-- Include ONLY the top 2-3 highest-opportunity keywords from keyword intelligence. Push remaining keywords to bullets and backend.
-- Title Case (capitalize first letter of each major word)
-- NO ALL CAPS words except recognized acronyms (e.g., UHS-I, SDHC, USB, LED, FBA)
-- No promotional phrases ("Best Seller", "Free Shipping")
-- Front-load the most important keyword in the first 80 chars
-- NEVER include variant-specific attributes (specific size, color, capacity) — Amazon handles that
-- The title must make sense for EVERY child in the family
-- FORMAT: Brand - Product Type - Top Keyword - Key Attribute (e.g., "THE CEO Memory Card SDHC UHS-I 90MB/s - High-Speed Camera Cards for Photography")
+========================================
+SECTION 2: INPUT FORMAT
+========================================
 
-BULLET RULES:
-- Start each with a MAX 3-WORD BENEFIT HOOK in ALL CAPS followed by " – "
-- The hook MUST describe a customer BENEFIT (e.g., RETRO STYLE VIBES, EVERYDAY COMFORT, PERFECT GIFT). It must NOT be a keyword phrase.
-- Then feature + benefit description in plain English, naturally weaving in keywords from the intelligence data
-- CRITICAL GAP keywords from keyword intelligence MUST appear in the BODY TEXT of bullets 1-3 (not in the caps header)
-- Max 200 chars each
-- Must be generic — work for ALL variants
-- Example: "RETRO STYLE VIBES – This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and relaxed fit."
+You will receive a JSON object with the following structure. All fields are guaranteed present unless marked optional.
 
-BACKEND KEYWORDS RULES (COLOR-GROUPED DISTRIBUTION STRATEGY):
-- Each child gets its OWN unique 250-char keyword string
-- Space-separated, no commas, no duplicates of title/bullet terms
-- NEVER repeat words already in the title or bullets — Amazon already indexes those automatically
-- NEVER include the variant's size or color in backend keywords — Amazon indexes those from variant attributes
-
-COLOR-GROUPED STRATEGY (MANDATORY FOR APPAREL/MULTI-COLOR PRODUCTS):
-- Group children by COLOR (not size). All sizes of the SAME color MUST share IDENTICAL backend keywords.
-- Each COLOR GROUP gets a COMPLETELY DIFFERENT 250-char keyword string targeting that color's specific aesthetic or audience.
-- You must create a unique 250-char string for EVERY distinct color.
-- Example: Moss/Sage variants → "nature lover outdoors hiking gift green aesthetic earth tone casual weekend"
-- Example: Ivory/White variants → "clean classic minimalist gift neutral tone wedding bridal party elegant"
-- Example: Blue Jean variants → "denim look casual everyday workwear gift blue aesthetic vintage wash"
-- This maximizes indexing surface: 10 colors × 250 chars = 2,500 chars of unique keyword coverage.
-- Do NOT just copy-paste the same generic string to every child. If you do, you have failed.
-- If product has NO color variants (single color), distribute keywords across sizes by THEME:
-  - Small/Medium → audience terms (mens womens unisex teen young adult)
-  - Large/XL → occasion terms (gift birthday christmas fathers day mothers day)
-  - 2XL/3XL → style terms (vintage retro 90s novelty funny graphic)
-
-KEYWORD CONTENT RULES:
-- DO include: synonyms, alternate phrasings, common misspellings, use-case terms, occasion terms, gift terms, audience terms NOT in title/bullets
-- DO include color-specific audience terms that match the color's aesthetic
-- FILL TO 250 CHARS — use every character. Short backend keywords waste ranking opportunity.
-- HARD LIMIT: exactly 250 characters max per child (count carefully)
-- Count characters BEFORE outputting — if under 240, add more relevant terms
-
-DESCRIPTION RULES:
-- Use HTML tags (<b>, <br>, <ul>, <li>)
-- Min 150 words
-- Generic for all variants
-
-VARIANT HEALTH CHECK:
-Compare the per-variant content. ONLY flag genuinely HARMFUL issues:
-DO flag: Wrong product type, contradictory specs, incorrect attributes, backend keywords containing wrong variant terms (e.g., "128gb" in the 32GB child's keywords)
-DO NOT flag: Expected variant differentiation in titles (different sizes/colors appended by Amazon), different images per variant
-
-PRODUCT DETAILS PAGE IMPROVEMENTS:
-Suggest ONLY structured attributes that are genuinely MISSING or INCORRECT on this listing.
-CROSS-CHECK RULES (DO NOT suggest these if already evident from the listing content):
-- If the brand name appears in the title → Brand is already set, do NOT suggest it
-- If the product type/category is clear from the title → Product Type is already set, do NOT suggest it
-- If capacity/size/color is in the variant attributes → those are already set, do NOT suggest them
-- If model number appears in the listing → Model Number is already set, do NOT suggest it
-ONLY suggest fields that would ADD NEW information not already derivable from the title, bullets, or variant structure.
-Focus on: missing compatibility info, missing certifications, missing material/weight, missing warranty, or genuinely empty filterable fields.
-Return 5-10 improvements max — quality over quantity. If fewer than 5 are genuinely missing, return fewer.
-
-ACTION PLAN (COMPREHENSIVE LISTING REVIEW):
-Generate a step-by-step action plan that reviews EVERY element of the listing and tells the seller exactly what to do.
-You MUST include ALL of these elements in the action plan — even if the verdict is DONE:
-
-1. title (parent level)
-2. bullet_1, bullet_2, bullet_3, bullet_4, bullet_5 (parent level — review EACH individually)
-3. backend_keywords (per_child level)
-4. description (parent level)
-5. aplus_modules (parent level) — specify which Amazon A+ module types to select from the dropdown
-6. brand_story (parent level)
-7. product_details (parent level)
-8. images (per_child level)
-
-For each element:
-- verdict: REPLACE (swap entirely), EDIT (change specific parts), CREATE (doesn't exist, build from scratch), DONE (no action needed), SKIP (not applicable — explain why)
-- priority: HIGH (directly impacts search ranking), MEDIUM (improves conversion rate), LOW (nice to have), NONE (already optimized)
-- current_status: Brief factual description of what's there now (e.g. "228 chars, 5 ALL CAPS words, missing top keywords")
-- instruction: Specific step-by-step instruction. NOT vague. Tell them exactly what to do.
-- replacement_content: THE ACTUAL FIX. This is MANDATORY for REPLACE and EDIT verdicts. Include the full copy-paste ready text that replaces the current content.
-  - For title: the new title string
-  - For bullet_1 through bullet_5: the new bullet text
-  - For backend_keywords: an array of strings, one per child variant (e.g. ["SKU1: keywords here", "SKU2: keywords here"])
-  - For description: the full HTML description
-  - For product_details: a string listing each field and value (e.g. "Compatible Devices: DSLR, Mirrorless | Warranty: 5 Years | Material: Plastic")
-  - For aplus_modules, brand_story, images: null (these require visual assets, not text)
-  - For DONE/SKIP verdicts: null (no content needed)
-- seller_central_path: Exact navigation in Seller Central (e.g. "Inventory → Edit Listing → Vital Info → Product Name")
-- notes: Important context (e.g. "A+ Content overrides description — description edits won't display to customers")
-
-For aplus_modules specifically, include aplus_modules array with:
-- module_type: The exact Amazon A+ module name from the dropdown (e.g. "Standard Comparison Chart", "Standard Image & Text Overlay", "Standard Four Image & Text", "Standard Single Image & Highlights")
-- action: ADD (new module), EDIT (change existing), KEEP (leave as-is)
-- content_brief: What content/images to put in this module
-- position: Order number (1-7)
-
-RULES FOR VERDICTS:
-- If current bullets are strong and your recommended bullets are very similar, mark individual bullets as DONE
-- If A+ exists with 2 modules, mark as EDIT and specify which 5 modules to ADD (with types and content)
-- If description exists but A+ overrides it, mark description as SKIP with note explaining why
-- For backend keywords, always mark as per_child and note that each child needs DIFFERENT keywords
-- For images, specify what TYPE of image to add (lifestyle, infographic, size chart, comparison, packaging)
-- If brand story is missing, mark as CREATE and describe what to include
-
-KEYWORD RECONCILIATION REPORT:
-This is the MOST IMPORTANT part. For every CRITICAL and UPGRADE keyword from the KEYWORD INTELLIGENCE section above, you MUST produce a reconciliation entry showing:
-- Which keyword it is and its action type
-- WHERE you placed it (title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords)
-- The EXACT sentence or phrase in your recommended content where the keyword appears
-- WHY you placed it there (e.g. "Highest volume keyword — placed in title for maximum visibility")
-This lets the seller see at a glance: keyword → exact placement → copy-paste ready text.
-
-KEYWORD DISTRIBUTION RULES FOR RECONCILIATION:
-- Title: ONLY top 2-3 keywords by OPPORTUNITY SCORE. Do NOT put more than 3 keywords in the title.
-- Bullets 1-3: Next 3-5 keywords by opportunity. Each bullet should target 1-2 keywords naturally.
-- Backend keywords: All remaining keywords that don't fit naturally in title/bullets.
-- If a keyword could NOT be naturally placed in title or bullets, place it in backend_keywords.
-Include ALL keywords from the CRITICAL GAPS and TITLE UPGRADES sections — do not skip any.
-
-Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
 {
-  "recommended_title": "string (generic title template, 80-150 chars HARD LIMIT, target 100-120 chars, NO variant-specific attributes, Title Case, no ALL CAPS except acronyms, include only top 2-3 keywords)",
-  "recommended_bullets": ["string", "string", "string", "string", "string"],
-  "per_child_keywords": [
+  "brand": "string",
+  "product_type": "string (e.g., 't-shirt', 'memory card', 'supplement')",
+  "category": "string (Amazon browse node / category name)",
+  "is_new_listing": false,
+  "has_aplus": false,
+  "has_brand_story": false,
+  "current_title": "string (current parent title, or null if new listing)",
+  "current_bullets": ["string x5 (current bullets, or null if new listing)"],
+  "current_description": "string | null",
+  "children": [
     {
-      "sku": "string (the child SKU)",
-      "asin": "string (the child ASIN)",
-      "keywords": "string (unique 250-char keyword string for THIS child, including variant-specific terms)"
+      "sku": "string",
+      "asin": "string",
+      "color": "string | null",
+      "size": "string | null",
+      "current_backend_keywords": "string (current backend keywords, or empty string)"
     }
   ],
-  "recommended_description": "string (full HTML description, min 150 words, generic for all variants)",
+  "category_title_formula": "string | null (if Amazon enforces a specific title format for this category, it appears here — follow it exactly)",
+  "restricted_claims": ["string (list of claim types prohibited in this category, e.g., 'health_claims', 'pesticide_efficacy', 'fda_statements')"]
+}
+
+KEYWORD INTELLIGENCE is provided separately in the format defined by the Keyword Context Block.
+
+HANDLING EDGE CASES IN INPUT:
+- If "is_new_listing" is true: skip variant health check, mark current_status as "New listing — no existing content" in the action plan, and generate all content from scratch.
+- If "children" has only 1 entry: skip the color-grouped backend strategy. Use one 250-byte keyword string.
+- If "children" has more than 20 entries: group children by color. Produce one backend keyword string per color group. All sizes within the same color group share identical backend keywords.
+- If "category_title_formula" is provided: follow that formula exactly instead of the default title format.
+- If "restricted_claims" is non-empty: NEVER include any language matching those claim types in title, bullets, description, or backend keywords.
+- If all keyword intelligence sections are [NO KEYWORDS IN THIS SECTION]: focus on content quality, readability, and backend keyword distribution using your expertise. Note in the action plan that no keyword gaps were identified.
+
+========================================
+SECTION 3: CONTENT RULES
+========================================
+
+--- TITLE RULES ---
+
+HARD LIMIT: 80-150 characters. Aim for ~110 characters.
+- Under 80 = likely missing a keyword opportunity. Check if you dropped one.
+- Over 150 = Amazon truncates on mobile and may suppress the listing. Remove the lowest-opportunity keyword and push it to bullets.
+
+FORMAT (default, unless category_title_formula overrides):
+  Brand - Product Type - Top Keyword - Key Differentiator
+  Example: "THE CEO Memory Card SDHC UHS-I 90MB/s - High-Speed Camera Cards for Photography"
+
+TITLE CASE STANDARD — Capitalize all words EXCEPT: a, an, the, and, or, for, in, on, with, of, to, at, by. Always capitalize the first and last word regardless. Exception: recognized acronyms stay ALL CAPS (e.g., USB, LED, UHS-I, SDHC).
+
+TITLE RESTRICTIONS:
+- No promotional phrases ("Best Seller", "Free Shipping", "#1", "Top Rated")
+- No special characters for decoration (stars, arrows, pipes as separators)
+- No variant-specific attributes — Amazon appends these automatically
+- Title must make sense for EVERY child in the family
+- Include ONLY the top 2-3 keywords as determined by the Keyword Placement Rules
+
+--- BULLET RULES ---
+
+FORMAT: Start each bullet with a 2-3 WORD BENEFIT HOOK in ALL CAPS, followed by " - ".
+- The hook describes a CUSTOMER BENEFIT (e.g., RETRO STYLE VIBES, EVERYDAY COMFORT, PERFECT GIFT)
+- The hook must NOT be a keyword phrase — keywords go in the body text
+- After the hook, write the feature + benefit in plain English, naturally weaving in keywords from the intelligence data
+
+LIMITS: Each bullet must be 80-200 characters.
+- Under 80 = too thin, missing keyword or benefit detail
+- Over 200 = Amazon may truncate on mobile
+
+KEYWORD TARGETING:
+- CRITICAL GAP and UPGRADE keywords (from keyword intelligence) must appear in the body text of bullets 1-3
+- Each bullet should naturally incorporate 1-2 keywords
+- Bullets 4-5 can focus on trust signals, guarantees, or use cases without keyword pressure
+
+GENERIC REQUIREMENT: All bullets must work for every variant in the family. Do not reference specific sizes, colors, or capacities.
+
+EXAMPLE:
+"RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit."
+
+--- BACKEND KEYWORDS RULES ---
+
+ENCODING LIMIT: 250 BYTES maximum per child (not 250 characters).
+- ASCII characters (a-z, 0-9, standard punctuation) = 1 byte each
+- Accented characters (e.g., n with tilde, u with umlaut) = 2-3 bytes each
+- SAFE TARGET: Stay under 240 ASCII characters to leave headroom. If using accented characters, reduce further.
+
+FORMAT: Space-separated words. No commas, no punctuation, no quotation marks. Lowercase.
+
+NEVER INCLUDE IN BACKEND:
+- Words already in the title or bullets (Amazon indexes those automatically — duplicating wastes bytes)
+- The variant's own size, color, or attribute name (Amazon indexes variant attributes automatically)
+- The brand name (Amazon indexes it from the brand field)
+- Competitor brand names (violates Amazon TOS)
+- Subjective claims ("best", "premium", "top quality")
+
+MUST INCLUDE: Synonyms, alternate phrasings, common misspellings, use-case terms, occasion terms (gift, birthday, christmas, fathers day), audience terms (mens, womens, unisex, teen, kids), and long-tail phrases not covered in title/bullets.
+
+FILL EVERY BYTE: Short backend keywords waste ranking opportunity. If under 230 bytes, add more relevant terms.
+
+--- BACKEND DISTRIBUTION STRATEGY ---
+
+FOR MULTI-COLOR PRODUCTS (apparel, accessories, home decor):
+Group children by COLOR. All sizes of the SAME color share IDENTICAL backend keywords. Each COLOR GROUP gets a COMPLETELY DIFFERENT keyword string targeting that color's specific aesthetic, audience, or use case.
+
+Example distribution:
+  Moss/Sage variants:  "nature lover outdoors hiking gift green aesthetic earth tone casual weekend"
+  Ivory/White variants: "clean classic minimalist gift neutral tone wedding bridal party elegant"
+  Blue Jean variants:   "denim look casual everyday workwear gift blue aesthetic vintage wash"
+
+This maximizes indexing surface: 10 colors x 250 bytes = 2,500 bytes of unique keyword coverage.
+
+FOR SINGLE-COLOR OR NON-COLOR PRODUCTS:
+Distribute keywords across children by THEME:
+  Small/Medium (or lower-tier variants): audience terms (mens, womens, unisex, teen, young adult)
+  Large/XL (or mid-tier variants):       occasion terms (gift, birthday, christmas, fathers day, mothers day)
+  2XL/3XL (or top-tier variants):        style terms (vintage, retro, 90s, novelty, funny, graphic)
+
+FOR SINGLE-CHILD PRODUCTS:
+Use one keyword string. Pack it with the highest-opportunity terms not already in title/bullets.
+
+--- DESCRIPTION RULES (CONDITIONAL) ---
+
+IF "has_aplus" is true:
+  SKIP description generation. A+ Content overrides the description field — any text written here will not display to customers. Mark description as SKIP in the action plan with this explanation.
+
+IF "has_aplus" is false:
+  Generate a full HTML description using these tags: <b>, <br>, <ul>, <li>, <p>
+  Minimum 150 words, maximum 2,000 characters.
+  Must be generic for all variants.
+  Structure: Opening hook (1-2 sentences) -> Key features (bulleted list) -> Use cases/audience -> Closing CTA
+
+========================================
+SECTION 4: ACTION PLAN RULES
+========================================
+
+Generate a step-by-step action plan reviewing EVERY element below. Include ALL elements even if the verdict is DONE.
+
+ELEMENTS TO REVIEW:
+  1. title (parent level)
+  2. bullet_1 through bullet_5 (parent level — review EACH individually)
+  3. backend_keywords (per_child level)
+  4. description (parent level)
+  5. aplus_modules (parent level)
+  6. brand_story (parent level)
+  7. product_details (parent level)
+  8. images (per_child level)
+
+VERDICT OPTIONS:
+  REPLACE — Swap entirely. replacement_content is MANDATORY.
+  EDIT    — Change specific parts. replacement_content is MANDATORY (provide the full updated text, not a diff).
+  CREATE  — Does not exist, build from scratch. replacement_content is MANDATORY.
+  DONE    — No action needed. replacement_content = null.
+  SKIP    — Not applicable. replacement_content = null. Explain why in notes.
+
+PRIORITY OPTIONS:
+  HIGH   — Directly impacts search ranking or indexing
+  MEDIUM — Improves conversion rate or click-through rate
+  LOW    — Nice to have, minor improvement
+  NONE   — Already optimized
+
+VERDICT GUIDELINES:
+- If current bullets are strong and your recommendation changes fewer than 5 words, mark as DONE
+- If A+ Content exists with fewer than 5 modules, mark as EDIT and specify which modules to ADD (with types and content briefs)
+- If A+ Content does not exist, mark as CREATE
+- If description exists but A+ overrides it, mark description as SKIP
+- Backend keywords are always per_child — note that each child needs different keywords
+- For images, specify what TYPE to add (lifestyle, infographic, size chart, comparison, packaging, video)
+- If brand story is missing, mark as CREATE and describe what to include
+
+FOR PRODUCT DETAILS IMPROVEMENTS:
+Suggest ONLY structured attributes that are genuinely MISSING or INCORRECT.
+CROSS-CHECK before suggesting:
+- Brand in title? -> Brand field is already set. Do not suggest.
+- Product type clear from title? -> Product Type is set. Do not suggest.
+- Size/color in variant attributes? -> Already set. Do not suggest.
+Return 3-10 improvements. If fewer than 3 are genuinely missing, return fewer. Quality over quantity.
+
+FOR A+ MODULE RECOMMENDATIONS:
+Use exact Amazon A+ module names: "Standard Comparison Chart", "Standard Image & Text Overlay", "Standard Four Image & Text", "Standard Single Image & Highlights", "Standard Single Image & Sidebar", "Standard Three Images & Text".
+
+========================================
+SECTION 5: KEYWORD RECONCILIATION
+========================================
+
+For every CRITICAL and UPGRADE keyword from the Keyword Intelligence block, produce a reconciliation entry showing:
+- The exact keyword
+- Where you placed it (title, bullet_1-5, description, or backend_keywords)
+- The exact phrase from your recommended content containing the keyword
+- Why you placed it there (one sentence)
+
+If a keyword was intentionally NOT placed in title or bullets (pushed to backend), state the reason (e.g., "Could not integrate naturally without hurting readability" or "Title already at 3-keyword limit").
+
+This section exists for seller verification. Keep entries concise.
+
+========================================
+SECTION 6: VARIANT HEALTH CHECK
+========================================
+
+Compare per-variant content. ONLY flag genuinely HARMFUL issues.
+
+FLAG THESE:
+- Wrong product type in a child's content
+- Contradictory specifications (child says "waterproof" but product isn't)
+- Backend keywords containing a DIFFERENT variant's attributes (e.g., "128gb" in the 32GB child)
+- Backend keywords containing competitor brand names
+
+DO NOT FLAG:
+- Expected variant differentiation (different titles showing different sizes/colors — Amazon does this)
+- Different images per variant (this is correct behavior)
+- Minor wording differences that don't affect accuracy
+
+If "is_new_listing" is true, skip this section entirely and return an empty array.
+
+========================================
+SECTION 7: OUTPUT FORMAT
+========================================
+
+Return ONLY a JSON object. No markdown fences, no preamble text, no explanation outside the JSON.
+
+If you cannot complete a field, use null rather than omitting the key.
+All string values must have quotes properly escaped (especially HTML in description).
+
+{
+  "recommended_title": "string (80-150 chars, generic, Title Case, top 2-3 keywords only)",
+  "recommended_title_char_count": 0,
+  "recommended_bullets": [
+    "string (bullet 1, 80-200 chars)",
+    "string (bullet 2, 80-200 chars)",
+    "string (bullet 3, 80-200 chars)",
+    "string (bullet 4, 80-200 chars)",
+    "string (bullet 5, 80-200 chars)"
+  ],
+  "per_child_keywords": [
+    {
+      "sku": "string",
+      "asin": "string",
+      "color_group": "string | null (the color this child belongs to)",
+      "keywords": "string (unique keyword string for THIS child)",
+      "byte_count": 0
+    }
+  ],
+  "recommended_description": "string (full HTML) | null (null if A+ exists)",
   "variant_corrections": [
     {
       "sku": "string",
-      "field": "string (title|bullets|keywords|description)",
+      "field": "string (title | bullets | keywords | description)",
       "current": "string",
       "replace_with": "string",
-      "reason": "string"
+      "reason": "string",
+      "severity": "string (HIGH | MEDIUM | LOW)"
     }
   ],
   "cannibalization_warnings": [
@@ -523,43 +686,135 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
   "product_details_improvements": [
     {
       "field_name": "string (exact Seller Central field name)",
-      "current_value": "string or null",
+      "current_value": "string | null",
       "recommended_value": "string",
       "reason": "string"
     }
   ],
   "keyword_reconciliation": [
     {
-      "keyword": "string (the exact keyword from KEYWORD INTELLIGENCE)",
-      "action_type": "string (CRITICAL or UPGRADE or REINFORCE)",
+      "keyword": "string",
+      "action_type": "string (CRITICAL | UPGRADE | REINFORCE)",
       "search_volume": 0,
-      "placed_in": ["string (title|bullet_1|bullet_2|bullet_3|bullet_4|bullet_5|description|backend_keywords)"],
-      "exact_text": "string (the exact sentence or phrase from your recommendation where this keyword appears)",
-      "why": "string (brief reason for this placement)"
+      "opportunity_score": 0,
+      "placed_in": ["string (title | bullet_1 | bullet_2 | bullet_3 | bullet_4 | bullet_5 | description | backend_keywords)"],
+      "exact_text": "string (the phrase from your content where this keyword appears)",
+      "why": "string (one sentence)"
     }
   ],
   "action_plan": [
     {
-      "element": "string (title|bullet_1|bullet_2|bullet_3|bullet_4|bullet_5|backend_keywords|description|aplus_modules|brand_story|product_details|images)",
-      "level": "string (parent|per_child)",
-      "verdict": "string (REPLACE|EDIT|CREATE|DONE|SKIP)",
-      "priority": "string (HIGH|MEDIUM|LOW|NONE)",
-      "current_status": "string (brief factual description of current state)",
-      "instruction": "string (specific step-by-step instruction)",
-      "seller_central_path": "string (exact Seller Central navigation)",
-      "replacement_content": "string or array of strings (the actual copy-paste fix) or null if verdict is DONE/SKIP or element requires visual assets",
-      "notes": "string (optional important context)",
+      "element": "string (title | bullet_1 | bullet_2 | bullet_3 | bullet_4 | bullet_5 | backend_keywords | description | aplus_modules | brand_story | product_details | images)",
+      "level": "string (parent | per_child)",
+      "verdict": "string (REPLACE | EDIT | CREATE | DONE | SKIP)",
+      "priority": "string (HIGH | MEDIUM | LOW | NONE)",
+      "confidence": "string (HIGH | MEDIUM | LOW)",
+      "current_status": "string (factual description of current state)",
+      "instruction": "string (specific step-by-step instruction for the seller)",
+      "replacement_content": "string | [string] | null",
+      "notes": "string | null",
       "aplus_modules": [
         {
-          "module_type": "string (exact Amazon A+ module name)",
-          "action": "string (ADD|EDIT|KEEP)",
-          "content_brief": "string (what to put in this module)",
+          "module_type": "string (exact Amazon A+ module name from dropdown)",
+          "action": "string (ADD | EDIT | KEEP)",
+          "content_brief": "string",
           "position": 1
         }
       ]
     }
   ]
-}`
+}
+
+========================================
+SECTION 8: EXAMPLE OUTPUT (TRUNCATED)
+========================================
+
+Below is a PARTIAL example showing correct formatting for a fictional "Later Gator" t-shirt product. Your output must follow this exact structure. This example is truncated — your output must include ALL fields from the schema above.
+
+{
+  "recommended_title": "Later Gator Funny Alligator T-Shirt - Vintage See You Later Graphic Tee for Men and Women",
+  "recommended_title_char_count": 89,
+  "recommended_bullets": [
+    "RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit",
+    "COMFORT ALL DAY - Made from soft breathable cotton blend fabric that keeps you cool whether you are out with friends or lounging at home",
+    "PERFECT FUNNY GIFT - Looking for a humorous alligator lover gift? This graphic tee makes a great birthday christmas or just-because present for him or her",
+    "EASY CARE FABRIC - Machine washable and dryer safe with print that stays vibrant wash after wash without cracking fading or peeling",
+    "TRUE TO SIZE FIT - Check the size chart before ordering for the best fit in this unisex crew neck short sleeve tee available in multiple colors"
+  ],
+  "per_child_keywords": [
+    {
+      "sku": "LG-MOSS-S",
+      "asin": "B0EXAMPLE1",
+      "color_group": "Moss",
+      "keywords": "nature lover outdoors hiking gift green aesthetic earth tone casual weekend camping trip adventure wear forest sage olive neutral spring summer layering",
+      "byte_count": 168
+    },
+    {
+      "sku": "LG-IVORY-S",
+      "asin": "B0EXAMPLE2",
+      "color_group": "Ivory",
+      "keywords": "clean classic minimalist gift neutral tone wedding party elegant simple aesthetic cream off white casual dressy brunch outfit date night light color warm",
+      "byte_count": 163
+    }
+  ],
+  "recommended_description": null,
+  "variant_corrections": [],
+  "cannibalization_warnings": [],
+  "product_details_improvements": [
+    {
+      "field_name": "Fabric Type",
+      "current_value": null,
+      "recommended_value": "Cotton Blend",
+      "reason": "Fabric Type is a filterable attribute in Clothing — setting it makes the product appear in filtered searches"
+    }
+  ],
+  "keyword_reconciliation": [
+    {
+      "keyword": "later gator tshirt",
+      "action_type": "CRITICAL",
+      "search_volume": 11794,
+      "opportunity_score": 92,
+      "placed_in": ["title", "bullet_1"],
+      "exact_text": "Later Gator...T-Shirt (title) | This later gator tshirt features (bullet_1)",
+      "why": "Brand-specific product term — highest conversion rate, placed in title per Override Rule and reinforced in bullet 1"
+    }
+  ],
+  "action_plan": [
+    {
+      "element": "title",
+      "level": "parent",
+      "verdict": "REPLACE",
+      "priority": "HIGH",
+      "confidence": "HIGH",
+      "current_status": "228 chars, exceeds 150-char limit, contains 5 ALL CAPS words, missing top 2 keywords by opportunity",
+      "instruction": "Replace the entire title with the recommended title below. Copy-paste exactly. Do not add variant attributes — Amazon appends those automatically.",
+      "replacement_content": "Later Gator Funny Alligator T-Shirt - Vintage See You Later Graphic Tee for Men and Women",
+      "notes": "89 chars. Front-loads brand term 'Later Gator' in first 12 chars. Contains top 2 keywords by opportunity score.",
+      "aplus_modules": null
+    }
+  ]
+}
+
+========================================
+SECTION 9: SELF-CHECK BEFORE RETURNING
+========================================
+
+Before returning your JSON, verify each of these. If any check fails, fix the output before returning.
+
+1. TITLE CHARACTER COUNT: Count the characters in recommended_title. Is it 80-150? Does recommended_title_char_count match the actual count?
+2. BULLET CHARACTER COUNTS: Is each bullet 80-200 characters?
+3. BACKEND BYTE COUNTS: Is each child's keyword string under 250 bytes? Does byte_count match? (ASCII = 1 byte/char. Accented chars = 2-3 bytes.)
+4. NO DUPLICATE WORDS: Are there words in backend keywords that already appear in the title or bullets? Remove them.
+5. KEYWORD COVERAGE: Does every CRITICAL and UPGRADE keyword from the intelligence block appear in keyword_reconciliation? Is each one placed somewhere?
+6. NO VARIANT ATTRIBUTES IN TITLE: Does the title contain any specific size, color, or capacity? Remove them.
+7. GENERIC BULLETS: Do any bullets reference a specific variant? Fix them.
+8. RESTRICTED CLAIMS: Does any content violate the restricted_claims from the input? Remove violations.
+9. VALID JSON: Are all strings properly escaped? Are there no trailing commas? Is the JSON parseable?
+10. BRAND-SPECIFIC OVERRIDE: If a keyword is the product name or brand term, is it in title slot #1?
+
+========================================
+END OF PROMPT
+========================================`
 
     const openai = getOpenAI()
 
@@ -605,18 +860,19 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
 
           controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Parsing AI response...' }) + '\n'))
 
-          // Parse the JSON response
+          // Parse the JSON response (V2 schema)
           let parsed: {
             recommended_title: string
+            recommended_title_char_count?: number
             recommended_bullets: string[]
-            per_child_keywords?: { sku: string; asin: string; keywords: string }[]
+            per_child_keywords?: { sku: string; asin: string; color_group?: string; keywords: string; byte_count?: number }[]
             recommended_keywords?: string
-            recommended_description: string
-            variant_corrections?: VariantCorrection[]
+            recommended_description: string | null
+            variant_corrections?: (VariantCorrection & { severity?: string })[]
             cannibalization_warnings?: CannibalizationWarning[]
             product_details_improvements?: ProductDetailImprovement[]
-            keyword_reconciliation?: KeywordReconciliation[]
-            action_plan?: ActionPlanItem[]
+            keyword_reconciliation?: (KeywordReconciliation & { opportunity_score?: number })[]
+            action_plan?: (ActionPlanItem & { confidence?: string })[]
           }
 
           try {
@@ -701,14 +957,30 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
             )
           }
 
-          // Post-generation enforcement: truncate each child's backend keywords to 250 chars
+          // Post-generation enforcement: truncate each child's backend keywords to 250 BYTES
+          // Amazon's limit is 250 bytes, not 250 characters. ASCII = 1 byte, accented = 2-3 bytes.
+          const getByteLength = (str: string) => new TextEncoder().encode(str).length
+          const truncateToBytes = (str: string, maxBytes: number): string => {
+            if (getByteLength(str) <= maxBytes) return str
+            // Binary search for the right character cutoff
+            let low = 0, high = str.length
+            while (low < high) {
+              const mid = Math.ceil((low + high) / 2)
+              if (getByteLength(str.slice(0, mid)) <= maxBytes) low = mid
+              else high = mid - 1
+            }
+            // Cut at last space before the byte limit
+            const truncated = str.slice(0, low)
+            const lastSpace = truncated.lastIndexOf(' ')
+            return lastSpace > low * 0.7 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
+          }
+
           const perChildKeywords: PerChildKeywords[] = (parsed.per_child_keywords || []).map(pck => {
             let kw = (pck.keywords || '').trim()
-            if (kw.length > 250) {
-              const truncated = kw.slice(0, 250)
-              const lastSpace = truncated.lastIndexOf(' ')
-              kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
-              console.warn(`[AI Recs] Per-child keywords for ${pck.sku} truncated from ${pck.keywords.length} to ${kw.length} chars`)
+            const byteLen = getByteLength(kw)
+            if (byteLen > 250) {
+              kw = truncateToBytes(kw, 250)
+              console.warn(`[AI Recs] Per-child keywords for ${pck.sku} truncated from ${byteLen} to ${getByteLength(kw)} bytes`)
             }
             return { sku: pck.sku, asin: pck.asin, keywords: kw }
           })
