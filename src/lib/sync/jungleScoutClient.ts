@@ -330,24 +330,17 @@ export async function fetchShareOfVoice(
   try {
     const authHeader = `${creds.keyName}:${creds.apiKey}`;
 
+    const encodedKeyword = encodeURIComponent(keyword);
     const resp = await fetch(
-      `${JS_BASE_URL}/api/keywords/share_of_voice?marketplace=us`,
+      `${JS_BASE_URL}/api/share_of_voice?marketplace=us&keyword=${encodedKeyword}`,
       {
-        method: 'POST',
+        method: 'GET',
         headers: {
           'Authorization': authHeader,
           'Content-Type': 'application/vnd.api+json',
           'Accept': 'application/vnd.junglescout.v1+json',
           'X-API-Type': 'junglescout',
         },
-        body: JSON.stringify({
-          data: {
-            type: 'share_of_voice',
-            attributes: {
-              search_terms: keyword,
-            },
-          },
-        }),
       }
     );
 
@@ -363,14 +356,20 @@ export async function fetchShareOfVoice(
     }
 
     const data = await resp.json();
-    const topAsins = data?.data?.attributes?.top_asins ?? [];
+    // Response: data.attributes.top_asins[] → { asin, name, brand, clicks, conversions, conversion_rate }
+    // Note: clicks/conversions are raw integers, not percentages
+    const topAsins: Record<string, unknown>[] = data?.data?.attributes?.top_asins ?? [];
     console.log(`[jungleScoutClient] share_of_voice: "${keyword}" → ${topAsins.length} competitors`);
+
+    // Calculate total clicks to derive share percentages
+    const totalClicks = topAsins.reduce((sum, item) => sum + ((item.clicks as number) || 0), 0);
+    const totalConversions = topAsins.reduce((sum, item) => sum + ((item.conversions as number) || 0), 0);
 
     return topAsins.map((item: Record<string, unknown>) => ({
       asin: (item.asin as string) || '',
-      brand: (item.brand as string) || '',
-      clicksShare: (item.clicks_share as number) || 0,
-      conversionsShare: (item.conversions_share as number) || 0,
+      brand: (item.brand as string) || (item.name as string) || '',
+      clicksShare: totalClicks > 0 ? ((item.clicks as number) || 0) / totalClicks : 0,
+      conversionsShare: totalConversions > 0 ? ((item.conversions as number) || 0) / totalConversions : 0,
     }));
 
   } catch (err) {

@@ -268,16 +268,35 @@ async function getTopVisionSeed(asin: string): Promise<string | null> {
 // ─── Title-Based Seed (Fallback) ────────────────────────────────────────────
 
 /**
- * Build a single seed search term from a listing title.
- * Takes the first segment (before dash), adds "tshirt" if no apparel word present.
+ * Build a concise 2-3 word seed search term from a listing title.
+ * Jungle Scout keywords_by_keyword works best with short, focused seeds.
+ * Strategy: take the first meaningful noun phrase (2-3 words max).
  */
 function buildSeedFromTitle(title: string): string {
-  const firstSegment = title.split(/\s*[-–—]\s*/)[0].trim();
+  // Strip brand prefix (everything before first dash or colon)
+  const firstSegment = title.split(/\s*[-–—:]\s*/)[0].trim();
+
+  // Remove size/color/variant words
   const cleaned = firstSegment
-    .replace(/\b(Small|Medium|Large|XL|2XL|3XL|XXL|Black|White|Red|Blue|Green|Navy|Gray)\b/gi, '')
+    .replace(/\b(Small|Medium|Large|XL|2XL|3XL|XXL|Black|White|Red|Blue|Green|Navy|Gray|Vintage|Retro|Soft|Classic|Premium|Original)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
     .trim();
-  const hasApparel = /shirt|tee|top|tshirt/i.test(cleaned);
-  return (hasApparel ? cleaned : `${cleaned} tshirt`).toLowerCase();
+
+  // Take only first 3 words to keep the seed tight
+  const words = cleaned.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 3);
+
+  // Ensure apparel word is present
+  const hasApparel = words.some(w => /shirt|tee|top|tshirt/.test(w));
+  if (!hasApparel) {
+    // Replace last word with 'tshirt' if over 2 words, else append
+    if (words.length >= 3) {
+      words[2] = 'tshirt';
+    } else {
+      words.push('tshirt');
+    }
+  }
+
+  return words.join(' ');
 }
 
 // ─── Competitor Storage ─────────────────────────────────────────────────────
