@@ -187,12 +187,22 @@ export async function GET(
         .single();
       const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
 
+      // Fetch listing title for seed fallback (needed when no vision identity exists)
+      const { data: listingRow } = await supabase
+        .from('listing_content')
+        .select('title')
+        .eq('asin', childAsin)
+        .single();
+      const listingTitle = (listingRow as { title?: string } | null)?.title || undefined;
+
       // Full sync path — use resolved child ASIN
       result = await syncKeywordIntelligence(childAsin, {
         forceRefresh,
         includeJungleScout: true,
         useStoredAnalysis: !forceRefresh,
         competitorAsin,
+        parentAsin: parentAsin || undefined,
+        listingTitle,
       });
 
       // Attach parent ASIN to result
@@ -263,8 +273,21 @@ export async function POST(
       .single();
     const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
 
+    // Fetch listing title for seed fallback
+    const { data: listingRow } = await supabase
+      .from('listing_content')
+      .select('title')
+      .eq('asin', childAsin)
+      .single();
+    const listingTitle = (listingRow as { title?: string } | null)?.title || undefined;
+
     // Fire and forget — run sync in background using resolved child ASIN
-    syncKeywordIntelligence(childAsin, { forceRefresh: true, competitorAsin }).catch(err => {
+    syncKeywordIntelligence(childAsin, {
+      forceRefresh: true,
+      competitorAsin,
+      parentAsin: inputAsin,
+      listingTitle,
+    }).catch(err => {
       console.error(`[POST /api/fba/intelligence/${inputAsin}] Background sync error (child: ${childAsin}):`, err);
     });
 
