@@ -48,7 +48,7 @@ interface ActionPlanItem {
   verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP'
   priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
   current_status: string; instruction: string
-  replacement_content?: string | string[] | null
+  replacement_content?: string | string[] | Record<string, unknown>[] | null
   seller_central_path?: string; content_ready?: boolean
   notes?: string; aplus_modules?: AplusModuleAction[]
 }
@@ -504,8 +504,8 @@ export default function ListingDetailPage() {
                           <button
                             onClick={() => {
                               const text = Array.isArray(item.replacement_content)
-                                ? item.replacement_content.join('\n')
-                                : item.replacement_content || ''
+                                ? item.replacement_content.map(line => typeof line === 'string' ? line : (line as Record<string, unknown>).keywords ? `${(line as Record<string, unknown>).sku}: ${(line as Record<string, unknown>).keywords}` : JSON.stringify(line)).join('\n')
+                                : (typeof item.replacement_content === 'string' ? item.replacement_content : JSON.stringify(item.replacement_content)) || ''
                               navigator.clipboard.writeText(text)
                             }}
                             className="text-[10px] px-2 py-0.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium"
@@ -516,11 +516,13 @@ export default function ListingDetailPage() {
                         {Array.isArray(item.replacement_content) ? (
                           <div className="space-y-1">
                             {item.replacement_content.map((line, li) => (
-                              <p key={li} className="text-xs leading-relaxed font-mono bg-green-50 p-1.5 rounded border border-green-200">{line}</p>
+                              <p key={li} className="text-xs leading-relaxed font-mono bg-green-50 p-1.5 rounded border border-green-200">
+                                {typeof line === 'string' ? line : (line as Record<string, unknown>).keywords ? `${(line as Record<string, unknown>).sku}: ${(line as Record<string, unknown>).keywords}` : JSON.stringify(line)}
+                              </p>
                             ))}
                           </div>
                         ) : (
-                          <p className="text-xs leading-relaxed font-mono bg-green-50 p-2 rounded border border-green-200 whitespace-pre-wrap">{item.replacement_content}</p>
+                          <p className="text-xs leading-relaxed font-mono bg-green-50 p-2 rounded border border-green-200 whitespace-pre-wrap">{typeof item.replacement_content === 'string' ? item.replacement_content : JSON.stringify(item.replacement_content)}</p>
                         )}
                       </div>
                     )}
