@@ -396,3 +396,4 @@ function emptyResult(): KeywordResearchResult {
     researchedAt: new Date().toISOString(),
   };
 }
+// build: 20260602191152 - HOSTNAME fix
