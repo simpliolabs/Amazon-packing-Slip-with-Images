@@ -64,8 +64,7 @@ const nextConfig: NextConfig = {
   // Silence turbopack warning
   turbopack: {},
 
-  // Output standalone for Hostinger VPS deployment
-  output: 'standalone',
+  // Standard build (no standalone) — Nixpacks handles Next.js natively
 }
 
 export default nextConfig
