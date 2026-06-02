@@ -669,6 +669,61 @@ export async function syncOrders(): Promise<SyncResult> {
       console.warn('[PII Backfill] Error during backfill:', piiBackfillError)
     }
 
+    // ── Stale Order Cancellation Cleanup ────────────────────────────────
+    // After syncing, any order in our DB that is still 'Unshipped' or
+    // 'PartiallyShipped' but was NOT returned by Amazon in this sync
+    // window has been cancelled (or otherwise removed) on Amazon's side.
+    //
+    // Why this happens: fetchFBMOrders() only requests Unshipped,
+    // PartiallyShipped, and Shipped orders. When Amazon cancels an order
+    // it stops appearing in those results — so without this cleanup the
+    // order stays stuck as Unshipped in our DB forever.
+    //
+    // Logic:
+    //   1. Fetch all Unshipped/PartiallyShipped orders from DB within
+    //      the same 7-day window we synced from Amazon.
+    //   2. Any DB order whose ID was NOT in the Amazon response set is
+    //      marked Cancelled with a note in raw_data.
+    try {
+      const windowStart = new Date()
+      windowStart.setDate(windowStart.getDate() - 7)
+
+      const { data: openDbOrders } = await supabase
+        .from('orders')
+        .select('id, order_status')
+        .in('order_status', ['Unshipped', 'PartiallyShipped'])
+        .gte('purchase_date', windowStart.toISOString())
+
+      if (openDbOrders && openDbOrders.length > 0) {
+        // Build a set of all order IDs Amazon returned in this sync
+        const returnedByAmazon = new Set(amazonOrders.map(o => o.AmazonOrderId))
+
+        const staleOrders = openDbOrders.filter(o => !returnedByAmazon.has(o.id))
+
+        if (staleOrders.length > 0) {
+          console.log(`[Stale Cleanup] ${staleOrders.length} order(s) not returned by Amazon — marking Cancelled: ${staleOrders.map(o => o.id).join(', ')}`)
+
+          for (const stale of staleOrders) {
+            // Only update order_status and synced_at.
+            // order_items, ship_to, raw_data are intentionally NOT updated
+            // so packing slip history is preserved for reference.
+            await supabase
+              .from('orders')
+              .update({
+                order_status: 'Cancelled',
+                synced_at: new Date().toISOString(),
+              })
+              .eq('id', stale.id)
+          }
+
+          console.log(`[Stale Cleanup] Marked ${staleOrders.length} order(s) as Cancelled`)
+        }
+      }
+    } catch (staleCleanupError) {
+      // Non-fatal: log and continue so sync log still records success
+      console.warn('[Stale Cleanup] Error during stale order cleanup:', staleCleanupError)
+    }
+
     // Update sync log as success
     if (syncLogId) {
       await supabase
