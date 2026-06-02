@@ -322,27 +322,44 @@ async function storeCompetitorMeta(parentAsin: string, meta: CompetitorMeta): Pr
 
 async function cacheResearch(asin: string, result: KeywordResearchResult): Promise<void> {
   try {
-    await supabase
+    // keyword_cache columns: id, asin, source, keyword_data, fetched_at, expires_at,
+    // competitor_asin, competitor_brand, sov_percentage
+    // Extra metadata (seed, source, credits) is stored inside keyword_data wrapper.
+    const expiresAt = new Date(
+      new Date(result.researchedAt).getTime() + RESEARCH_TTL_DAYS * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const { error } = await supabase
       .from('keyword_cache')
       .upsert({
         asin,
         source: RESEARCH_CACHE_KEY,
         keyword_data: result.allKeywords,
-        seeds_used: [result.seedUsed],
-        research_source: result.source,
-        credits_used: result.creditsUsed,
         fetched_at: result.researchedAt,
+        expires_at: expiresAt,
+        competitor_asin: result.competitor?.asin ?? null,
+        competitor_brand: result.competitor?.brand ?? null,
+        sov_percentage: result.competitor
+          ? parseFloat((result.competitor.clicksShare * 100).toFixed(2))
+          : null,
       }, { onConflict: 'asin,source' });
+
+    if (error) {
+      console.error(`[keywordResearcher] Cache write error for ${asin}:`, error.message, error.details);
+    } else {
+      console.log(`[keywordResearcher] Cache written for ${asin} (source: ${RESEARCH_CACHE_KEY}, ${result.allKeywords.length} keywords).`);
+    }
   } catch (err) {
-    console.error(`[keywordResearcher] Cache write error:`, err);
+    console.error(`[keywordResearcher] Cache write exception for ${asin}:`, err);
   }
 }
 
 async function getCachedResearch(asin: string): Promise<KeywordResearchResult | null> {
   try {
+    // Only select columns that actually exist in keyword_cache
     const { data } = await supabase
       .from('keyword_cache')
-      .select('keyword_data, seeds_used, research_source, credits_used, fetched_at')
+      .select('keyword_data, fetched_at, expires_at')
       .eq('asin', asin)
       .eq('source', RESEARCH_CACHE_KEY)
       .single();
@@ -351,20 +368,22 @@ async function getCachedResearch(asin: string): Promise<KeywordResearchResult | 
 
     const row = data as {
       keyword_data: JungleScoutKeywordRow[];
-      seeds_used: string[];
-      research_source: 'vision' | 'title' | 'manual';
-      credits_used: number;
       fetched_at: string;
+      expires_at: string | null;
     };
 
-    // Check TTL
+    // Check TTL via expires_at (preferred) or fetched_at fallback
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+      console.log(`[keywordResearcher] Cache EXPIRED for ${asin} (expires_at: ${row.expires_at}).`);
+      return null;
+    }
     const ageDays = (Date.now() - new Date(row.fetched_at).getTime()) / (1000 * 60 * 60 * 24);
     if (ageDays > RESEARCH_TTL_DAYS) {
       console.log(`[keywordResearcher] Cache EXPIRED for ${asin} (${Math.round(ageDays)} days > ${RESEARCH_TTL_DAYS} TTL).`);
       return null;
     }
 
-    // Rebuild buckets from flat cached data (approximate — primary = top 10)
+    // Rebuild buckets from flat cached data (primary = top 10 by volume)
     const allSorted = (row.keyword_data ?? []).sort((a, b) => b.searchVolume - a.searchVolume);
     const primary = allSorted.slice(0, 10);
     const remaining = allSorted.slice(10);
@@ -372,10 +391,10 @@ async function getCachedResearch(asin: string): Promise<KeywordResearchResult | 
     return {
       buckets: { primary, competitorMatch: remaining, competitorGaps: [] },
       allKeywords: allSorted,
-      seedUsed: row.seeds_used?.[0] ?? '',
-      competitor: null, // Not stored in cache — read from listing_seo_scores if needed
-      creditsUsed: row.credits_used ?? 0,
-      source: row.research_source ?? 'title',
+      seedUsed: '',
+      competitor: null,
+      creditsUsed: 0,
+      source: 'title',
       researchedAt: row.fetched_at,
     };
   } catch {
