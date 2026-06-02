@@ -105,7 +105,7 @@ function issueBorder(field: string) {
 }
 
 function copyToClipboard(text: string) {
-  navigator.clipboard.writeText(text)
+  if (typeof window !== 'undefined') navigator.clipboard.writeText(text)
 }
 
 // ─── Page Component ─────────────────────────────────────────────────────────
