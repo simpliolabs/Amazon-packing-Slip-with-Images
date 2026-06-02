@@ -248,3 +248,4 @@ function buildSummary(keywords: EngineResult['allKeywords']): EngineResult['summ
     optimized: keywords.filter(k => k.actionType === 'OPTIMIZED').length,
   };
 }
+// build: 20260602-172806
