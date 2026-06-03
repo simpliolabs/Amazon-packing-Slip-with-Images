@@ -147,7 +147,7 @@ async function buildKeywordContext(
   }
 
   if (!lookupAsin) {
-    return { contextBlock: '', opportunitiesUsed: 0 }
+    return { contextBlock: '', opportunitiesUsed: 0, brandAnchorKeyword: null }
   }
 
   // Try the resolved ASIN first, then fallback to parent_asin, then children[0]
@@ -170,6 +170,7 @@ The AI will optimize based on listing content alone.
 To unlock keyword-driven recommendations, trigger a keyword sync first.
 `.trim(),
       opportunitiesUsed: 0,
+      brandAnchorKeyword: null,
     }
   }
 
