@@ -220,7 +220,22 @@ ${brandAnchor
 
 BRAND ANCHOR KEYWORD: "${brandAnchor.keyword}" — Vol: ${brandAnchor.searchVolume.toLocaleString()}/mo
 
-HARD RULE: The recommended_title MUST contain this exact string verbatim. Do not paraphrase it, do not split it across words, do not substitute synonyms. Copy it character-for-character into the title. This is non-negotiable.`
+HARD RULE: The recommended_title MUST contain this exact string verbatim: "${brandAnchor.keyword}"
+
+Do NOT:
+- Expand "tshirt" to "T-Shirt" or "t-shirt" (Amazon indexes them differently — they are different keywords)
+- Add descriptors before or after the phrase (e.g., "Vintage 90s" between words)
+- Substitute synonyms ("shirt" ≠ "tshirt")
+- Split the phrase across a dash or hyphen
+
+DO: Copy "${brandAnchor.keyword}" character-for-character as a contiguous substring of the title.
+
+Example of CORRECT title if brand anchor is "later gator tshirt":
+  ✅ "Later Gator Tshirt - See You Later Alligator Shirt"
+Example of INCORRECT title:
+  ❌ "Later Gator Vintage 90s T-Shirt - See You Later Alligator Shirt" ("tshirt" ≠ "T-Shirt")
+
+This is non-negotiable.\``
   : `[NO BRAND ANCHOR — no defended keywords found. Proceed with CRITICAL and UPGRADE keywords only.]`
 }
 
@@ -834,7 +849,7 @@ Before returning your JSON, verify each of these. If any check fails, fix the ou
 7. GENERIC BULLETS: Do any bullets reference a specific variant? Fix them.
 8. RESTRICTED CLAIMS: Does any content violate the restricted_claims from the input? Remove violations.
 9. VALID JSON: Are all strings properly escaped? Are there no trailing commas? Is the JSON parseable?
-10. BRAND ANCHOR VERBATIM CHECK: Does the recommended_title contain the BRAND ANCHOR keyword exactly as written (character-for-character)? If not, rewrite the title to include it verbatim. This is the single most important check.
+10. BRAND ANCHOR VERBATIM CHECK: Does the recommended_title contain the BRAND ANCHOR keyword exactly as written (character-for-character, case-insensitive)? Specifically: if the brand anchor is "later gator tshirt", the title must contain the substring "later gator tshirt" — NOT "Later Gator T-Shirt" or "Later Gator Vintage 90s T-Shirt". "tshirt" (one word) and "T-Shirt" (hyphenated) are different Amazon keywords. If the check fails, rewrite the title so it contains the exact brand anchor substring. This is the single most important check.
 
 ========================================
 END OF PROMPT
