@@ -1053,15 +1053,26 @@ END OF PROMPT
               }))
             : []
 
-          // Deterministic title assembly: override LLM title with score-driven title built from DB.
-          // This prevents LLM anchoring on product name regardless of what the LLM returns.
-          const SEASONAL_TERMS = [
-            'christmas', 'xmas', 'halloween', 'thanksgiving', 'easter', 'hanukkah',
-            'valentines', "valentine's", 'mothers day', "mother's day", 'fathers day',
-            "father's day", 'new year', 'new years', 'st patrick', 'july 4th', 'fourth of july',
+          // ─────────────────────────────────────────────────────────────────────
+          // STRUCTURED 3-SLOT AMAZON SEO TITLE BUILDER
+          // Formula: [BRAND_PRODUCT] - [DESCRIPTIVE] - [AUDIENCE]
+          // Rules: 125-char apparel cap, no word >2x, no seasonal terms
+          // Sources: Amazon Jan 2025 policy, SellerSprite, Emplicit, MyAmazonGuy
+          // ─────────────────────────────────────────────────────────────────────
+
+          // Expanded seasonal blocklist (directive 2025-06-03)
+          const SEASONAL_KEYWORDS = [
+            'christmas', 'xmas', 'halloween', 'valentines', 'valentine',
+            'easter', 'thanksgiving', 'mothers day', 'mother day',
+            'fathers day', 'father day', 'back to school', 'last day of school',
+            'schools out', 'school out', 'independence day', '4th of july',
+            'fourth of july', 'st patrick', 'new year', 'new years',
+            'memorial day', 'labor day', 'spring break', 'summer break',
+            'winter break', 'black friday', 'cyber monday', 'prime day',
+            'hanukkah', 'july 4th',
           ]
           const isSeasonalKeyword = (kw: string) =>
-            SEASONAL_TERMS.some(term => kw.toLowerCase().includes(term))
+            SEASONAL_KEYWORDS.some(term => kw.toLowerCase().includes(term))
 
           const toTitleCase = (str: string) => {
             const MINOR = new Set(['a','an','the','and','or','for','in','on','with','of','to','at','by'])
@@ -1071,7 +1082,75 @@ END OF PROMPT
               .join(' ')
           }
 
-          // Fix #2: deduplication — skip keywords that share ≥60% word overlap with an already-selected keyword
+          // Slot classification — determines which of the 3 title slots a keyword belongs to
+          // BRAND_PRODUCT: contains brand name OR product-specific name → Slot 1 (conversion anchor)
+          // AUDIENCE: contains audience/gender terms or generic product type → Slot 3 (broad reach)
+          // DESCRIPTIVE: style/material/design/variant → Slot 2 (default)
+          const BRAND_TERMS = brandName.toLowerCase().split(/\s+/).filter(Boolean)
+
+          // Extract product-name tokens from the current listing title (e.g., "gator" from
+          // "Later Gator Vintage 90s T-Shirt..."). Only keep tokens that are 5+ chars and
+          // not generic apparel/common words. Use whole-word matching to avoid "gator" matching
+          // inside "alligator". These tokens identify the product-specific name for Slot 1.
+          const GENERIC_APPAREL = new Set(['shirt','shirts','tshirt','tshirts','tee','tees','top',
+            'hoodie','sweatshirt','tank','crewneck','pullover','graphic','vintage','retro','funny',
+            'novelty','classic','comfort','cotton','soft','color','colors','playful','alligator',
+            'later','after','while','school','summer','spring','holiday','season','style','design',
+            'print','cute','cool','unique','great','good','best','nice','love','loved','loved',
+            'women','unisex','kids','boys','girls','adult','youth','small','large','medium','size'])
+          const productNameTokens = (rep.title ?? '')
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .split(/\s+/)
+            .filter(w => w.length >= 5 && !GENERIC_APPAREL.has(w))
+            .slice(0, 3)
+
+          // Whole-word match: token must appear as a standalone word in the keyword
+          const containsProductToken = (kw: string, tokens: string[]): boolean => {
+            const kwWords = new Set(kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
+            return tokens.some(t => kwWords.has(t))
+          }
+
+          const AUDIENCE_TERMS = ['for men', 'for women', 'for kids', 'for boys', 'for girls', 'for teen',
+            'mens', 'womens', 'unisex', 'graphic tee', 'graphic t-shirt', 'graphic tshirt',
+            'funny tee', 'funny shirt', 'funny t-shirt', 'novelty tee', 'novelty shirt']
+          const DESCRIPTIVE_SIGNALS = ['vintage', 'retro', 'comfort', 'cotton', 'soft', 'classic',
+            'graphic', 'design', 'print', 'style', 'aesthetic', 'cute', 'cool', 'unique']
+
+          type SlotType = 'BRAND_PRODUCT' | 'DESCRIPTIVE' | 'AUDIENCE'
+          const classifySlot = (kw: string): SlotType => {
+            const lower = kw.toLowerCase()
+            // BRAND_PRODUCT: brand name token (substring OK) OR product-name token (whole-word)
+            if (BRAND_TERMS.some(bt => lower.includes(bt))) return 'BRAND_PRODUCT'
+            if (containsProductToken(kw, productNameTokens)) return 'BRAND_PRODUCT'
+            // AUDIENCE: explicit audience phrase or generic product type phrase
+            if (AUDIENCE_TERMS.some(at => lower.includes(at))) return 'AUDIENCE'
+            // DESCRIPTIVE_SIGNALS: style/material words
+            if (DESCRIPTIVE_SIGNALS.some(ds => lower.includes(ds))) return 'DESCRIPTIVE'
+            // Default: DESCRIPTIVE
+            return 'DESCRIPTIVE'
+          }
+
+          // Word-repeat guard: count non-minor word occurrences across assembled slots
+          const MINOR_WORDS = new Set(['a','an','the','and','or','for','in','on','with','of','to','at','by'])
+          const countWordRepeats = (title: string): Map<string, number> => {
+            const counts = new Map<string, number>()
+            title.toLowerCase().split(/\s+/).forEach(w => {
+              const base = w.replace(/[^a-z]/g, '')
+              if (base && !MINOR_WORDS.has(base)) {
+                // Normalize plural: shirts=shirt, tees=tee
+                const norm = base.replace(/s$/, '')
+                counts.set(norm, (counts.get(norm) ?? 0) + 1)
+              }
+            })
+            return counts
+          }
+          const hasWordViolation = (title: string): boolean => {
+            const counts = countWordRepeats(title)
+            return [...counts.values()].some(c => c > 2)
+          }
+
+          // Deduplication: skip keywords sharing ≥60% word overlap with already-selected keyword
           const isDuplicateKeyword = (a: string, b: string): boolean => {
             const wordsA = new Set(a.toLowerCase().split(/\s+/))
             const wordsB = new Set(b.toLowerCase().split(/\s+/))
@@ -1082,31 +1161,52 @@ END OF PROMPT
 
           const titleAsin = validationAsin // already resolved above
           const allKeywords = await getStoredAnalysis(titleAsin, 50)
-          const sorted = (allKeywords ?? [])
+          const eligibleKeywords = (allKeywords ?? [])
             .filter(k => ['CRITICAL', 'UPGRADE'].includes(k.actionType))
             .filter(k => !isSeasonalKeyword(k.keyword))
             .sort((a, b) => b.opportunityScore - a.opportunityScore)
 
-          const selectedKeywords: string[] = []
-          for (const k of sorted) {
-            if (selectedKeywords.length >= 3) break
-            const isDup = selectedKeywords.some(sel => isDuplicateKeyword(sel, k.keyword))
-            if (!isDup) selectedKeywords.push(k.keyword)
+          // Pick best keyword per slot, respecting deduplication across slots
+          const slotMap: Record<SlotType, string | null> = {
+            BRAND_PRODUCT: null,
+            DESCRIPTIVE: null,
+            AUDIENCE: null,
           }
-          const titleSlots = selectedKeywords.map(kw => toTitleCase(kw))
+          const usedKeywords: string[] = []
+          for (const k of eligibleKeywords) {
+            const slot = classifySlot(k.keyword)
+            if (slotMap[slot] !== null) continue // slot already filled
+            const isDup = usedKeywords.some(sel => isDuplicateKeyword(sel, k.keyword))
+            if (isDup) continue
+            slotMap[slot] = k.keyword
+            usedKeywords.push(k.keyword)
+            if (slotMap.BRAND_PRODUCT && slotMap.DESCRIPTIVE && slotMap.AUDIENCE) break
+          }
+
+          // Assemble: Slot1 - Slot2 - Slot3, omitting null slots
+          const rawSlots = [slotMap.BRAND_PRODUCT, slotMap.DESCRIPTIVE, slotMap.AUDIENCE].filter(Boolean) as string[]
 
           let finalTitle: string
-          if (titleSlots.length > 0) {
-            const joined = titleSlots.join(' - ')
-            finalTitle = joined.length > 150 ? joined.slice(0, 147) + '...' : joined
-            console.log(`[AI Recs] Deterministic title: "${finalTitle}" (from ${titleSlots.length} keywords)`)
+          if (rawSlots.length > 0) {
+            let assembled = rawSlots.map(toTitleCase).join(' - ')
+            // Enforce 125-char apparel limit (trim from end of last slot if needed)
+            if (assembled.length > 125) {
+              assembled = assembled.slice(0, 122) + '...'
+            }
+            // Word-repeat guard: if any non-minor word appears >2x, fall back to top-2 slots
+            if (hasWordViolation(assembled) && rawSlots.length > 1) {
+              assembled = rawSlots.slice(0, 2).map(toTitleCase).join(' - ')
+              if (assembled.length > 125) assembled = assembled.slice(0, 122) + '...'
+            }
+            finalTitle = assembled
+            console.log(`[AI Recs] 3-slot title: "${finalTitle}" slots=[${rawSlots.map(s => classifySlot(s)).join(',')}]`)
           } else {
-            // No scored keywords available — fall back to LLM title
+            // No eligible keywords — fall back to LLM title
             finalTitle = parsed.recommended_title || ''
-            console.warn('[AI Recs] Deterministic title: no CRITICAL/UPGRADE keywords found, using LLM title')
+            console.warn('[AI Recs] 3-slot title: no eligible keywords found, using LLM title')
           }
 
-          // Fix #1: patch action_plan title entry so the UI's "COPY & PASTE THIS" box matches
+          // Patch action_plan title entry so the UI's "COPY & PASTE THIS" box matches
           if (Array.isArray(parsed.action_plan)) {
             const titleEntry = parsed.action_plan.find((item: { element?: string }) => item.element === 'title')
             if (titleEntry) {
