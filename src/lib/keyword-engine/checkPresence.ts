@@ -35,15 +35,31 @@ export interface PresenceResult {
 /**
  * Tokenize text into lowercase words, stripping punctuation.
  * Preserves word boundaries so "card" does NOT match "cardboard".
+ *
+ * Hyphen handling: hyphens are replaced with spaces (standard tokenization),
+ * but we ALSO generate a collapsed form for each hyphenated word so that
+ * "T-Shirt" produces tokens {t, shirt, tshirt} and matches both "t shirt"
+ * and "tshirt" spellings.
  */
 function tokenize(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter(Boolean)
-  );
+  const lower = text.toLowerCase();
+  // Standard tokens: replace all non-alphanumeric (including hyphens) with spaces
+  const standard = lower
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  // Collapsed tokens: join hyphen-separated segments into a single token
+  // e.g. "t-shirt" → "tshirt", "long-sleeve" → "longsleeve"
+  const collapsed = lower
+    .split(/\s+/)
+    .filter(Boolean)
+    .flatMap(word => {
+      if (word.includes('-')) {
+        return [word.replace(/-/g, '')];
+      }
+      return [];
+    });
+  return new Set([...standard, ...collapsed]);
 }
 
 /**

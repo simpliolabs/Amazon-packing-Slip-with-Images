@@ -1071,14 +1071,29 @@ END OF PROMPT
               .join(' ')
           }
 
+          // Fix #2: deduplication — skip keywords that share ≥60% word overlap with an already-selected keyword
+          const isDuplicateKeyword = (a: string, b: string): boolean => {
+            const wordsA = new Set(a.toLowerCase().split(/\s+/))
+            const wordsB = new Set(b.toLowerCase().split(/\s+/))
+            const intersection = [...wordsA].filter(w => wordsB.has(w))
+            const overlap = intersection.length / Math.min(wordsA.size, wordsB.size)
+            return overlap >= 0.6
+          }
+
           const titleAsin = validationAsin // already resolved above
           const allKeywords = await getStoredAnalysis(titleAsin, 50)
-          const titleSlots = (allKeywords ?? [])
+          const sorted = (allKeywords ?? [])
             .filter(k => ['CRITICAL', 'UPGRADE'].includes(k.actionType))
             .filter(k => !isSeasonalKeyword(k.keyword))
             .sort((a, b) => b.opportunityScore - a.opportunityScore)
-            .slice(0, 3)
-            .map(k => toTitleCase(k.keyword))
+
+          const selectedKeywords: string[] = []
+          for (const k of sorted) {
+            if (selectedKeywords.length >= 3) break
+            const isDup = selectedKeywords.some(sel => isDuplicateKeyword(sel, k.keyword))
+            if (!isDup) selectedKeywords.push(k.keyword)
+          }
+          const titleSlots = selectedKeywords.map(kw => toTitleCase(kw))
 
           let finalTitle: string
           if (titleSlots.length > 0) {
@@ -1089,6 +1104,14 @@ END OF PROMPT
             // No scored keywords available — fall back to LLM title
             finalTitle = parsed.recommended_title || ''
             console.warn('[AI Recs] Deterministic title: no CRITICAL/UPGRADE keywords found, using LLM title')
+          }
+
+          // Fix #1: patch action_plan title entry so the UI's "COPY & PASTE THIS" box matches
+          if (Array.isArray(parsed.action_plan)) {
+            const titleEntry = parsed.action_plan.find((item: { element?: string }) => item.element === 'title')
+            if (titleEntry) {
+              titleEntry.replacement_content = finalTitle
+            }
           }
           const rec: AiRecommendations = {
             parent_asin,
