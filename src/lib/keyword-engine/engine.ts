@@ -142,25 +142,35 @@ function normalizeJungleScoutRow(row: JungleScoutKeywordRow): {
   asinPurchaseShare: number;
   relevanceRank: number;
 } {
-  // easeOfRankingScore: 0-100, higher = easier to rank (use as relevance proxy)
-  // relevancyScore: 0-100, how relevant the keyword is to the queried ASIN
-  // We invert easeOfRankingScore for relevanceRank: lower competing = higher priority
+  // easeOfRankingScore: 0-100, higher = easier to rank (Jungle Scout's Cerebro IQ equivalent)
+  // relevancyScore: purchase-intent signal — how much buying intent flows through this keyword
+  //   for the queried product type. Brand-specific terms score very high (e.g. 2338 for
+  //   "later gator tshirt") while generic terms score low (e.g. 21 for "cool t shirts for men").
+  //   This is the correct proxy for keywordSales when SQP data is unavailable.
   const easeScore = row.easeOfRankingScore ?? null;
   const relevScore = row.relevancyScore ?? null;
-  // Prefer easeOfRankingScore as it directly reflects opportunity (fewer competitors)
+
+  // relevanceRank: use easeOfRankingScore (0-100, higher = easier to rank)
   const relevanceRank = easeScore !== null
-    ? Math.round(easeScore)           // 0-100, higher = easier = more opportunity
+    ? Math.round(easeScore)
     : relevScore !== null
-    ? Math.round(relevScore)          // fallback to relevancy
+    ? Math.round(Math.min(relevScore / 30, 100)) // relevancyScore can exceed 100 — normalize
     : 50;
+
+  // keywordSales proxy: use relevancyScore scaled to a realistic sales range.
+  // relevancyScore 2000+ = high brand intent (~400 sales/mo equivalent)
+  // relevancyScore 100  = moderate intent (~20 sales/mo equivalent)
+  // relevancyScore 0-20 = generic/low intent (~0-4 sales/mo equivalent)
+  // Scale: relevancyScore / 5 gives a reasonable sales proxy (max ~500 for score 2500)
+  const keywordSalesProxy = relevScore !== null && relevScore > 0
+    ? Math.round(relevScore / 5)
+    : 0;
 
   return {
     keyword: row.keyword,
     searchVolume: row.searchVolume ?? 0,
-    // JS doesn't provide total keyword sales; use organic rank as a proxy signal
-    // If organicRank > 0, we're already ranking — treat as moderate sales signal
-    keywordSales: row.organicRank && row.organicRank > 0 ? Math.round(row.searchVolume * 0.02) : 0,
-    competingProducts: row.organicProductCount ?? 0, // use organic only (more accurate)
+    keywordSales: keywordSalesProxy,
+    competingProducts: row.organicProductCount ?? 0,
     asinImpressionShare: 0, // Not available from JS
     asinClickShare: 0,
     asinPurchaseShare: 0,
