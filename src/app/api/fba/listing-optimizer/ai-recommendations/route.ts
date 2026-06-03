@@ -280,7 +280,10 @@ OVERRIDE RULE — BRAND ANCHOR (applies before all others, non-negotiable):
 The BRAND ANCHOR keyword listed above MUST appear verbatim in the recommended_title. It occupies Title Slot #1. Do not replace it with a generic keyword even if that generic keyword has a higher Opportunity Score. Generic keywords (e.g., "cool t shirts for men") have high competition and low conversion for brand-specific products — they belong in bullets or backend keywords, NOT the title.
 
 RULE 1 — TITLE (2-3 keywords max):
-Slot #1 = Brand Anchor keyword (verbatim, mandatory). Slot #2 = top keyword from CRITICAL or UPGRADE by Opportunity Score. Slot #3 = optional second keyword from CRITICAL or UPGRADE if it fits naturally. Title MUST be 80-150 characters.
+Slot #1 = Brand Anchor keyword (verbatim, mandatory). Slot #2 = top YEAR-ROUND keyword from CRITICAL or UPGRADE by Opportunity Score. Slot #3 = optional second year-round keyword from CRITICAL or UPGRADE if it fits naturally. Title MUST be 80-150 characters.
+
+RULE 7 — NO SEASONAL OR OCCASION KEYWORDS IN TITLE:
+Keywords tied to specific events, seasons, or occasions (e.g., "last day of school", "graduation", "christmas", "halloween", "back to school", "mothers day", "fathers day", "summer") MUST NOT appear in the recommended_title. These keywords are relevant for only 30-60 days per year. Putting them in the title permanently hurts year-round conversion because buyers who see a school-themed title in October will not click. Place seasonal keywords in bullets or backend keywords only — never the title.
 
 RULE 2 — BULLETS (3-5 keywords):
 Place the top keywords from CRITICAL and UPGRADE (those not used in the title) into bullets 1-3. Each bullet should target 1-2 keywords woven naturally into the sentence. Keywords go in the body text, NOT in the ALL CAPS benefit hook.
@@ -773,8 +776,8 @@ SECTION 8: EXAMPLE OUTPUT (TRUNCATED)
 Below is a PARTIAL example showing correct formatting for a fictional "Later Gator" t-shirt product. Your output must follow this exact structure. This example is truncated — your output must include ALL fields from the schema above.
 
 {
-  "recommended_title": "Later Gator Tshirt - Vintage See You Later Alligator Graphic Tee - Funny Cool T Shirts for Men",
-  "recommended_title_char_count": 93,
+  "recommended_title": "Later Gator Tshirt - See You Later Alligator Shirt - Cool Shirt for Men and Women",
+  "recommended_title_char_count": 80,
   "recommended_bullets": [
     "RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit",
     "COMFORT ALL DAY - Made from soft breathable cotton blend fabric that keeps you cool whether you are out with friends or lounging at home",
