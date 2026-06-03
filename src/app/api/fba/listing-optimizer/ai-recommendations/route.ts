@@ -192,10 +192,17 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
   const formatSection = (items: typeof analysis, emptyMsg: string) =>
     items.length > 0 ? items.map(formatKw).join('\n') : `  [NO KEYWORDS IN THIS SECTION]`
 
-  // Brand anchor: top DEFENDED keyword by search volume (brand-specific, highest converting)
-  const brandAnchor = defended.length > 0
-    ? [...defended].sort((a, b) => b.searchVolume - a.searchVolume)[0]
-    : null
+  // Brand anchor: the highest search-volume brand-specific keyword, regardless of whether
+  // it is already DEFENDED (in title+bullets) or UPGRADE (in bullets only).
+  // If the top brand term is UPGRADE, it means it's NOT yet in the title — which is exactly
+  // when we need to force it into the title via the brand anchor rule.
+  // Selection pool: DEFENDED + UPGRADE keywords, sorted by search volume descending.
+  // We filter to keywords with relevancyScore-derived sales (keywordSales > 50) to exclude
+  // generic terms that happen to be in bullets.
+  const brandAnchorPool = [...defended, ...upgrade]
+    .filter(k => k.keywordSales > 50) // exclude generic low-intent keywords
+    .sort((a, b) => b.searchVolume - a.searchVolume)
+  const brandAnchor = brandAnchorPool.length > 0 ? brandAnchorPool[0] : null
 
   const contextBlock = `KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
 Data source: ${analysis[0].dataSource === 'sqp' ? 'Amazon Brand Analytics (real sales data)' : analysis[0].dataSource === 'jungle_scout' ? 'Jungle Scout API' : 'Inherited from sibling products'}
