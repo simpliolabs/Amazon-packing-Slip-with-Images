@@ -714,11 +714,11 @@ function scoreListingContent(
 
   if (!hasAplus) {
     aplusScore = 0
-    issues.push({ field: 'aplus', severity: 'critical', message: 'No A+ Content detected. Go to sellercentral.amazon.com/enhanced-content/content-manager and create a Standard A+ page. Minimum: 1 hero image module + 3 feature image/text modules + 1 comparison chart. Listings with A+ convert 3-10% better and rank higher in search. This is the single highest-ROI improvement you can make.', auto_fixable: false })
+    issues.push({ field: 'aplus', severity: 'critical', message: 'No A+ Content detected. Go to sellercentral.amazon.com/enhanced-content/content-manager and create a Standard A+ page. Minimum: 1 hero image module + 3 feature image/text modules + 1 comparison chart. Listings with A+ convert 3-10% better, and that higher conversion lifts organic rank indirectly. This is the single highest-ROI improvement you can make.', auto_fixable: false })
   } else {
     if (moduleCount > 0 && moduleCount < 5) {
       aplusScore -= 8
-      issues.push({ field: 'aplus', severity: 'warning', message: `A+ page has only ${moduleCount} module(s) — Amazon allows up to 7 standard modules. Add: a comparison chart (shows your variants side-by-side and blocks competitor switching), a "How to Use" image+text module, and a technical specs module. More modules = more keyword indexing surface area and longer page dwell time.`, auto_fixable: false })
+      issues.push({ field: 'aplus', severity: 'warning', message: `A+ page has only ${moduleCount} module(s) — Amazon allows up to 7 standard modules. Add: a comparison chart (shows your variants side-by-side and blocks competitor switching), a size/fit chart, and a fabric/feature module. More modules lift conversion rate and page dwell time. Note: A+ body copy is not a confirmed search-ranking field — fill the image ALT-TEXT on each module, which Amazon does use for discoverability.`, auto_fixable: false })
     }
     if (!hasBrandStory) {
       aplusScore -= 7
