@@ -445,7 +445,7 @@ SECTION 1: AMAZON LISTING ARCHITECTURE
 On Amazon, a variation family has a PARENT ASIN (non-buyable placeholder) and multiple CHILD ASINs (the actual buyable products).
 
 SHARED CONTENT (edited once at parent level, same for ALL children):
-- Title: One generic title template. Amazon auto-appends the variant attribute (size, color). You write ONLY the generic part. NEVER include variant-specific attributes (specific size, color, capacity) in the title unless ALL variants share that attribute.
+- Title: One generic title for the family. In APPAREL, every child variant displays this same title (the parent governs the detail page), so it MUST read correctly for every size and color. Do NOT put a specific size, color, or capacity in the title. (Note: Amazon does NOT auto-append the variant attribute — the seller enters it; for apparel you simply keep the title generic so it works for all variants.)
 - Bullets: One set of 5 bullets shared across all children. Must be generic.
 - Description: One description shared across all children. Must be generic. NOTE: If A+ Content exists, it overrides the description — see conditional rules below.
 - A+ Content: Shared at parent level.
@@ -504,23 +504,26 @@ HARD LIMIT: 80-150 characters. Aim for ~110 characters.
 - Under 80 = likely missing a keyword opportunity. Check if you dropped one.
 - Over 150 = Amazon truncates on mobile and may suppress the listing. Remove the lowest-opportunity keyword and push it to bullets.
 
-FORMAT (score-first, unless category_title_formula overrides):
-  Top Keyword - Second Keyword - Audience/Differentiator
+FORMAT (brand + 3-part structure, unless category_title_formula overrides):
+  [Brand] [Product-specific keyphrase] - [Descriptive variation with a product detail] - [Audience + product type]
 
-The title MUST lead with the highest-opportunity keyword by Opportunity Score — the keyword most likely to rank AND generate traffic for this specific product. This is determined by the system's score, which combines: search volume, rankability (competing products), conversion intent (keyword sales), and gap size (whether it's missing from the listing).
+The brand name MUST appear first (Amazon apparel compliance), immediately followed by the product-specific keyphrase so the highest-converting term is still front-loaded. Then:
+  1. Brand + Keyphrase: the brand, then the product-specific term a shopper types when they already know this product. This is the highest-conversion term and leads (even if a broader keyword has a higher raw Opportunity Score — the specific term converts better). Use the highest-opportunity keyword that names THIS product.
+  2. Descriptive: a second high-opportunity keyword that describes the design/style/material (include a real product detail when one exists, e.g. "Comfort Colors").
+  3. Audience: who it is for plus the generic product type (e.g. "Funny Graphic Tee for Men and Women"). Keep ONE consistent audience — never mix kids with men/women.
 
-Do NOT start the title with the brand name or the current product name unless the brand/product name IS the top keyword by score.
+Lead with the brand, then the SPECIFIC product keyphrase; do NOT put a broad generic keyword ahead of the product keyphrase just because its raw score is higher.
 
-Example for a Later Gator graphic tee:
-  "See You Later Alligator Shirt - Later Gator Tshirt - Cool Shirt for Men and Women"
-  ("see you later alligator shirt" leads because it has the highest Opportunity Score)
+Example for THE CEO's Later Gator graphic tee:
+  "THE CEO Later Gator Tshirt - See You Later Alligator Shirt - Funny Graphic Tee for Men and Women"
+  (brand leads for compliance; "later gator tshirt" — the product-specific keyphrase — is front-loaded right after it)
 
 TITLE CASE STANDARD — Capitalize all words EXCEPT: a, an, the, and, or, for, in, on, with, of, to, at, by. Always capitalize the first and last word regardless. Exception: recognized acronyms stay ALL CAPS (e.g., USB, LED, UHS-I, SDHC).
 
 TITLE RESTRICTIONS:
 - No promotional phrases ("Best Seller", "Free Shipping", "#1", "Top Rated")
 - No special characters for decoration (stars, arrows, pipes as separators)
-- No variant-specific attributes — Amazon appends these automatically
+- No variant-specific attributes (specific size, color, capacity) — the title must read correctly for EVERY variant in the family
 - Title must make sense for EVERY child in the family
 - Include ONLY the top 2-3 keywords as determined by the Keyword Placement Rules
 
@@ -586,13 +589,16 @@ Distribute keywords across children by THEME:
 FOR SINGLE-CHILD PRODUCTS:
 Use one keyword string. Pack it with the highest-opportunity terms not already in title/bullets.
 
---- DESCRIPTION RULES (CONDITIONAL) ---
+--- DESCRIPTION RULES ---
 
-IF "has_aplus" is true:
-  SKIP description generation. A+ Content overrides the description field — any text written here will not display to customers. Mark description as SKIP in the action plan with this explanation.
+ALWAYS generate a full keyword-rich description, even when A+ Content exists.
+A+ Content overrides what CUSTOMERS SEE on the page, but Amazon STILL INDEXES the
+description field for organic search ranking. An empty description throws away an
+indexed ranking field. When "has_aplus" is true, generate the description anyway and
+add this note in the action plan: "Customers see A+ instead of this text, but Amazon
+still indexes the description field for search — keep it filled with keywords."
 
-IF "has_aplus" is false:
-  Generate a full HTML description using these tags: <b>, <br>, <ul>, <li>, <p>
+Format: full HTML using these tags: <b>, <br>, <ul>, <li>, <p>
   Minimum 150 words, maximum 2,000 characters.
   Must be generic for all variants.
   Structure: Opening hook (1-2 sentences) -> Key features (bulleted list) -> Use cases/audience -> Closing CTA
@@ -630,7 +636,7 @@ VERDICT GUIDELINES:
 - If current bullets are strong and your recommendation changes fewer than 5 words, mark as DONE
 - If A+ Content exists with fewer than 5 modules, mark as EDIT and specify which modules to ADD (with types and content briefs)
 - If A+ Content does not exist, mark as CREATE
-- If description exists but A+ overrides it, mark description as SKIP
+- Description: even when A+ overrides the displayed page, the description field is STILL INDEXED for search. If it is empty or thin, mark it CREATE/REPLACE (not SKIP) and fill it with keywords. Only mark DONE if it is already strong. Never SKIP description solely because A+ exists.
 - Backend keywords are always per_child — note that each child needs different keywords
 - For images, specify what TYPE to add (lifestyle, infographic, size chart, comparison, packaging, video)
 - If brand story is missing, mark as CREATE and describe what to include
@@ -679,6 +685,14 @@ DO NOT FLAG:
 
 If "is_new_listing" is true, skip this section entirely and return an empty array.
 
+CANNIBALIZATION NOTE (for cannibalization_warnings):
+Children in the SAME variation family do NOT compete in search — Amazon collapses the
+whole family into ONE search result. Do NOT report intra-family "cannibalization." Leave
+cannibalization_warnings EMPTY unless you detect the SAME keyword string copied identically
+across many children's backend terms (wasted indexing surface) — that is the only
+intra-family keyword issue worth flagging. TRUE cannibalization (two SEPARATE parent ASINs
+fighting for one keyword) cannot be judged from this single-family data — never speculate it.
+
 ========================================
 SECTION 7: OUTPUT FORMAT
 ========================================
@@ -707,7 +721,7 @@ All string values must have quotes properly escaped (especially HTML in descript
       "byte_count": 0
     }
   ],
-  "recommended_description": "string (full HTML) | null (null if A+ exists)",
+  "recommended_description": "string (full HTML, min 150 words — ALWAYS generate, even if A+ exists, because the field is still indexed for search)",
   "variant_corrections": [
     {
       "sku": "string",
@@ -775,8 +789,8 @@ SECTION 8: EXAMPLE OUTPUT (TRUNCATED)
 Below is a PARTIAL example showing correct formatting for a fictional "Later Gator" t-shirt product. Your output must follow this exact structure. This example is truncated — your output must include ALL fields from the schema above.
 
 {
-  "recommended_title": "See You Later Alligator Shirt - Later Gator Tshirt - Cool Shirt for Men and Women",
-  "recommended_title_char_count": 80,
+  "recommended_title": "THE CEO Later Gator Tshirt - See You Later Alligator Shirt - Funny Graphic Tee for Men and Women",
+  "recommended_title_char_count": 96,
   "recommended_bullets": [
     "RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit",
     "COMFORT ALL DAY - Made from soft breathable cotton blend fabric that keeps you cool whether you are out with friends or lounging at home",
@@ -800,7 +814,7 @@ Below is a PARTIAL example showing correct formatting for a fictional "Later Gat
       "byte_count": 163
     }
   ],
-  "recommended_description": null,
+  "recommended_description": "<p><b>See you later, alligator!</b> This later gator graphic tee brings playful retro energy to your everyday wardrobe.</p><ul><li>Soft, breathable comfort-colors fabric</li><li>Relaxed unisex fit for men and women</li><li>Vibrant print that lasts wash after wash</li></ul><p>A fun gift for alligator lovers and vintage tee fans alike.</p>",
   "variant_corrections": [],
   "cannibalization_warnings": [],
   "product_details_improvements": [
@@ -829,10 +843,10 @@ Below is a PARTIAL example showing correct formatting for a fictional "Later Gat
       "verdict": "REPLACE",
       "priority": "HIGH",
       "confidence": "HIGH",
-      "current_status": "Title exceeds 150-char limit and is missing the top-scoring keyword by opportunity",
-      "instruction": "Replace the entire title with the recommended title below. Copy-paste exactly. Do not add variant attributes — Amazon appends those automatically.",
-      "replacement_content": "See You Later Alligator Shirt - Later Gator Tshirt - Cool Shirt for Men and Women",
-      "notes": "80 chars. Leads with highest opportunity-score keyword. Contains top 2 keywords by score.",
+      "current_status": "Title exceeds 150-char limit and is missing the top critical keywords",
+      "instruction": "Replace the entire title with the recommended title below. Copy-paste exactly. Keep it generic — do not add a specific size or color (the title must read correctly for every variant).",
+      "replacement_content": "THE CEO Later Gator Tshirt - See You Later Alligator Shirt - Funny Graphic Tee for Men and Women",
+      "notes": "96 chars. Brand leads (compliance), then product keyphrase, then descriptive, then audience. One consistent audience.",
       "aplus_modules": null
     }
   ]
@@ -853,7 +867,7 @@ Before returning your JSON, verify each of these. If any check fails, fix the ou
 7. GENERIC BULLETS: Do any bullets reference a specific variant? Fix them.
 8. RESTRICTED CLAIMS: Does any content violate the restricted_claims from the input? Remove violations.
 9. VALID JSON: Are all strings properly escaped? Are there no trailing commas? Is the JSON parseable?
-10. SCORE-FIRST TITLE CHECK: Does the recommended_title start with the highest Opportunity Score keyword from the CRITICAL or UPGRADE section? The first keyword in the title must be the one with the highest score — not the brand name, not the current product name, not a paraphrase. If the title starts with a lower-scoring keyword, rewrite it so the top-scoring keyword leads.
+10. TITLE STRUCTURE CHECK: Does recommended_title follow [Brand] [product-specific keyphrase] - [descriptive variation] - [audience + product type]? It must (a) START WITH THE BRAND NAME, (b) put the specific product keyphrase immediately after the brand, (c) keep ONE consistent audience — never mix "kids" with "men"/"women", (d) contain no seasonal terms, (e) repeat no word more than twice, and (f) stay 80-125 characters. If the brand is missing, or a broad generic keyword leads instead of the product keyphrase, or audiences are mixed, rewrite it.
 
 ========================================
 END OF PROMPT
@@ -1054,223 +1068,101 @@ END OF PROMPT
             : []
 
           // ─────────────────────────────────────────────────────────────────────
-          // STRUCTURED 3-SLOT AMAZON SEO TITLE BUILDER
-          // Formula: [BRAND_PRODUCT] - [DESCRIPTIVE] - [AUDIENCE]
-          // Rules: 125-char apparel cap, no word >2x, no seasonal terms
-          // Sources: Amazon Jan 2025 policy, SellerSprite, Emplicit, MyAmazonGuy
+          // TITLE VALIDATION (PR1) — the LLM authors the title; code only referees.
+          // The former deterministic 3-slot builder produced semantically broken
+          // titles (e.g. "Kids Gator ... for Men"). A rule engine cannot AUTHOR a
+          // coherent title, but it CAN validate one. So: LLM writes, we check, and
+          // on failure we ask the LLM once to fix the specific violations.
           // ─────────────────────────────────────────────────────────────────────
-
-          // Expanded seasonal blocklist (directive 2025-06-03)
-          const SEASONAL_KEYWORDS = [
-            'christmas', 'xmas', 'halloween', 'valentines', 'valentine',
-            'easter', 'thanksgiving', 'mothers day', 'mother day',
-            'fathers day', 'father day', 'back to school', 'last day of school',
-            'schools out', 'school out', 'independence day', '4th of july',
-            'fourth of july', 'st patrick', 'new year', 'new years',
-            'memorial day', 'labor day', 'spring break', 'summer break',
-            'winter break', 'black friday', 'cyber monday', 'prime day',
-            'hanukkah', 'july 4th',
+          const SEASONAL_TITLE_TERMS = [
+            'christmas', 'xmas', 'halloween', 'valentines', 'valentine', 'easter',
+            'thanksgiving', 'mothers day', 'mother day', 'fathers day', 'father day',
+            'back to school', 'last day of school', 'schools out', 'school out',
+            'independence day', '4th of july', 'fourth of july', 'july 4th',
+            'st patrick', 'new year', 'new years', 'memorial day', 'labor day',
+            'spring break', 'summer break', 'winter break', 'black friday',
+            'cyber monday', 'prime day', 'hanukkah',
           ]
-          const isSeasonalKeyword = (kw: string) =>
-            SEASONAL_KEYWORDS.some(term => kw.toLowerCase().includes(term))
+          const TITLE_MINOR_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'for', 'in', 'on', 'with', 'of', 'to', 'at', 'by'])
+          const KIDS_AUDIENCE = ['kids', 'kid', 'toddler', 'toddlers', 'baby', 'babies', 'infant', 'youth', 'boys', 'girls', 'children']
+          const ADULT_AUDIENCE = ['men', 'mens', 'women', 'womens', 'man', 'woman', 'adult', 'adults']
 
-          const toTitleCase = (str: string) => {
-            const MINOR = new Set(['a','an','the','and','or','for','in','on','with','of','to','at','by'])
-            return str
-              .split(' ')
-              .map((w, i) => (i === 0 || !MINOR.has(w.toLowerCase())) ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase())
-              .join(' ')
-          }
-
-          // Slot classification — determines which of the 3 title slots a keyword belongs to
-          // BRAND_PRODUCT: contains brand name OR product-specific name → Slot 1 (conversion anchor)
-          // AUDIENCE: contains audience/gender terms or generic product type → Slot 3 (broad reach)
-          // DESCRIPTIVE: style/material/design/variant → Slot 2 (default)
-          const BRAND_TERMS = brandName.toLowerCase().split(/\s+/).filter(Boolean)
-
-          // Extract product-name tokens from the current listing title (e.g., "gator" from
-          // "Later Gator Vintage 90s T-Shirt..."). Only keep tokens that are 5+ chars and
-          // not generic apparel/common words. Use whole-word matching to avoid "gator" matching
-          // inside "alligator". These tokens identify the product-specific name for Slot 1.
-          const GENERIC_APPAREL = new Set(['shirt','shirts','tshirt','tshirts','tee','tees','top',
-            'hoodie','sweatshirt','tank','crewneck','pullover','graphic','vintage','retro','funny',
-            'novelty','classic','comfort','cotton','soft','color','colors','playful','alligator',
-            'later','after','while','school','summer','spring','holiday','season','style','design',
-            'print','cute','cool','unique','great','good','best','nice','love','loved','loved',
-            'women','unisex','kids','boys','girls','adult','youth','small','large','medium','size'])
-          const productNameTokens = (rep.title ?? '')
-            .toLowerCase()
-            .replace(/[^a-z0-9\s]/g, ' ')
-            .split(/\s+/)
-            .filter(w => w.length >= 5 && !GENERIC_APPAREL.has(w))
-            .slice(0, 3)
-
-          // Whole-word match: token must appear as a standalone word in the keyword
-          const containsProductToken = (kw: string, tokens: string[]): boolean => {
-            const kwWords = new Set(kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
-            return tokens.some(t => kwWords.has(t))
-          }
-
-          const AUDIENCE_TERMS = ['for men', 'for women', 'for kids', 'for boys', 'for girls', 'for teen',
-            'mens', 'womens', 'unisex', 'graphic tee', 'graphic t-shirt', 'graphic tshirt',
-            'funny tee', 'funny shirt', 'funny t-shirt', 'novelty tee', 'novelty shirt']
-          const DESCRIPTIVE_SIGNALS = ['vintage', 'retro', 'comfort', 'cotton', 'soft', 'classic',
-            'graphic', 'design', 'print', 'style', 'aesthetic', 'cute', 'cool', 'unique']
-
-          type SlotType = 'BRAND_PRODUCT' | 'DESCRIPTIVE' | 'AUDIENCE'
-          const classifySlot = (kw: string): SlotType => {
-            const lower = kw.toLowerCase()
-            // BRAND_PRODUCT: brand name token (substring OK) OR product-name token (whole-word)
-            if (BRAND_TERMS.some(bt => lower.includes(bt))) return 'BRAND_PRODUCT'
-            if (containsProductToken(kw, productNameTokens)) return 'BRAND_PRODUCT'
-            // AUDIENCE: explicit audience phrase or generic product type phrase
-            if (AUDIENCE_TERMS.some(at => lower.includes(at))) return 'AUDIENCE'
-            // DESCRIPTIVE_SIGNALS: style/material words
-            if (DESCRIPTIVE_SIGNALS.some(ds => lower.includes(ds))) return 'DESCRIPTIVE'
-            // Default: DESCRIPTIVE
-            return 'DESCRIPTIVE'
-          }
-
-          // Word-repeat guard: count non-minor word occurrences across assembled slots
-          const MINOR_WORDS = new Set(['a','an','the','and','or','for','in','on','with','of','to','at','by'])
-          const countWordRepeats = (title: string): Map<string, number> => {
+          const validateTitle = (title: string): string[] => {
+            const problems: string[] = []
+            const len = title.length
+            if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim for 80-125 for apparel).`)
+            else if (len < 80) problems.push(`Title is only ${len} characters; use at least 80 to capture more keyword space.`)
+            // Amazon Jan 2025 policy: no non-trivial word may appear more than twice (plural-normalized)
             const counts = new Map<string, number>()
-            title.toLowerCase().split(/\s+/).forEach(w => {
-              const base = w.replace(/[^a-z]/g, '')
-              if (base && !MINOR_WORDS.has(base)) {
-                // Normalize plural: shirts=shirt, tees=tee
+            title.toLowerCase().split(/\s+/).forEach((w) => {
+              const base = w.replace(/[^a-z0-9]/g, '')
+              if (base && !TITLE_MINOR_WORDS.has(base)) {
                 const norm = base.replace(/s$/, '')
                 counts.set(norm, (counts.get(norm) ?? 0) + 1)
               }
             })
-            return counts
-          }
-          const hasWordViolation = (title: string): boolean => {
-            const counts = countWordRepeats(title)
-            return [...counts.values()].some(c => c > 2)
-          }
-
-          // Deduplication: skip keywords sharing ≥60% word overlap with already-selected keyword
-          const isDuplicateKeyword = (a: string, b: string): boolean => {
-            const wordsA = new Set(a.toLowerCase().split(/\s+/))
-            const wordsB = new Set(b.toLowerCase().split(/\s+/))
-            const intersection = [...wordsA].filter(w => wordsB.has(w))
-            const overlap = intersection.length / Math.min(wordsA.size, wordsB.size)
-            return overlap >= 0.6
-          }
-
-          const titleAsin = validationAsin // already resolved above
-          const allKeywords = await getStoredAnalysis(titleAsin, 50)
-          const eligibleKeywords = (allKeywords ?? [])
-            .filter(k => ['CRITICAL', 'UPGRADE'].includes(k.actionType))
-            .filter(k => !isSeasonalKeyword(k.keyword))
-
-          // Classify all eligible keywords into slot buckets
-          const brandBucket: typeof eligibleKeywords = []
-          const descriptiveBucket: typeof eligibleKeywords = []
-          const audienceBucket: typeof eligibleKeywords = []
-          for (const k of eligibleKeywords) {
-            const slot = classifySlot(k.keyword)
-            if (slot === 'BRAND_PRODUCT') brandBucket.push(k)
-            else if (slot === 'AUDIENCE') audienceBucket.push(k)
-            else descriptiveBucket.push(k)
-          }
-
-          // Helper: word overlap ratio between a keyword and a set of words
-          const overlapRatio = (kw: string, refWords: Set<string>): number => {
-            const kwWords = kw.toLowerCase().split(/\s+/)
-            const matching = kwWords.filter(w => refWords.has(w))
-            return matching.length / kwWords.length
-          }
-
-          // ── SLOT 1: Shortest BRAND_PRODUCT keyword (fewest words, tiebreak by opp score)
-          brandBucket.sort((a, b) => {
-            const aWords = a.keyword.split(/\s+/).length
-            const bWords = b.keyword.split(/\s+/).length
-            if (aWords !== bWords) return aWords - bWords
-            return b.opportunityScore - a.opportunityScore
-          })
-          const slot1Keyword = brandBucket[0]?.keyword ?? null
-
-          // ── SLOT 2: Highest-score DESCRIPTIVE, penalize >40% overlap with Slot 1
-          const slot1Words = new Set((slot1Keyword ?? '').toLowerCase().split(/\s+/))
-          descriptiveBucket.sort((a, b) => {
-            const aOverlap = overlapRatio(a.keyword, slot1Words)
-            const bOverlap = overlapRatio(b.keyword, slot1Words)
-            // Penalize high overlap with Slot 1
-            if (aOverlap > 0.4 && bOverlap <= 0.4) return 1
-            if (bOverlap > 0.4 && aOverlap <= 0.4) return -1
-            return b.opportunityScore - a.opportunityScore
-          })
-          // Also skip if ≥60% dedup with Slot 1
-          const slot2Keyword = descriptiveBucket.find(k =>
-            !slot1Keyword || !isDuplicateKeyword(slot1Keyword, k.keyword)
-          )?.keyword ?? null
-
-          // ── SLOT 3: AUDIENCE keyword, with fallback construction
-          // Step 1: from AUDIENCE bucket (CRITICAL/UPGRADE only)
-          let slot3Keyword: string | null = audienceBucket
-            .sort((a, b) => b.opportunityScore - a.opportunityScore)[0]?.keyword ?? null
-
-          // Step 2: if none, search ALL keywords (including DEFENDED) for audience terms
-          if (!slot3Keyword) {
-            const allKws = allKeywords ?? []
-            const audienceFromAll = allKws.find(k =>
-              !isSeasonalKeyword(k.keyword) &&
-              AUDIENCE_TERMS.some(at => k.keyword.toLowerCase().includes(at))
-            )
-            if (audienceFromAll) slot3Keyword = audienceFromAll.keyword
-          }
-
-          // Step 3: if still none, CONSTRUCT deterministically
-          if (!slot3Keyword) {
-            const styleWords = ['funny', 'cool', 'vintage', 'retro', 'cute', 'graphic']
-            const allKws = allKeywords ?? []
-            const foundStyle = allKws.find(kw =>
-              styleWords.some(sw => kw.keyword.toLowerCase().includes(sw))
-            )
-            const adjective = foundStyle
-              ? (styleWords.find(sw => foundStyle.keyword.toLowerCase().includes(sw)) ?? 'Graphic')
-              : 'Graphic'
-            const adj = adjective.charAt(0).toUpperCase() + adjective.slice(1)
-            // Determine product type from Slot 1 or Slot 2 keywords
-            const refKw = (slot1Keyword ?? slot2Keyword ?? '').toLowerCase()
-            let productType = 'Shirt'
-            if (refKw.includes('tshirt') || refKw.includes('t-shirt')) productType = 'Tee'
-            else if (refKw.includes('hoodie')) productType = 'Hoodie'
-            else if (refKw.includes('sweatshirt')) productType = 'Sweatshirt'
-            slot3Keyword = `${adj} ${productType} for Men and Women`
-          }
-
-          // Build final slot map
-          const slotMap: Record<SlotType, string | null> = {
-            BRAND_PRODUCT: slot1Keyword,
-            DESCRIPTIVE: slot2Keyword,
-            AUDIENCE: slot3Keyword,
-          }
-
-          // Assemble: Slot1 - Slot2 - Slot3, omitting null slots
-          const rawSlots = [slotMap.BRAND_PRODUCT, slotMap.DESCRIPTIVE, slotMap.AUDIENCE].filter(Boolean) as string[]
-
-          let finalTitle: string
-          if (rawSlots.length > 0) {
-            let assembled = rawSlots.map(toTitleCase).join(' - ')
-            // Enforce 125-char apparel limit (trim from end of last slot if needed)
-            if (assembled.length > 125) {
-              assembled = assembled.slice(0, 122) + '...'
+            const repeated = [...counts.entries()].filter(([, c]) => c > 2).map(([w]) => w)
+            if (repeated.length) problems.push(`These words appear more than twice (Amazon allows max 2 each): ${repeated.join(', ')}.`)
+            // Seasonal terms do not belong in an evergreen title
+            const lc = title.toLowerCase()
+            const season = SEASONAL_TITLE_TERMS.find((s) => lc.includes(s))
+            if (season) problems.push(`Remove the seasonal term "${season}" — evergreen product; seasonal keywords belong in backend terms, not the title.`)
+            // Audience contradiction (the "Kids Gator ... for Men" failure)
+            const words = new Set(lc.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
+            const hasKids = KIDS_AUDIENCE.some((t) => words.has(t))
+            const hasAdult = ADULT_AUDIENCE.some((t) => words.has(t))
+            if (hasKids && hasAdult) problems.push(`Title mixes kids and adult audiences (e.g. "kids" with "men"/"women") — pick ONE consistent audience.`)
+            // Brand presence (Amazon apparel compliance — brand must lead the title)
+            if (brandName && !lc.includes(brandName.toLowerCase())) {
+              problems.push(`Title must start with the brand "${brandName}".`)
             }
-            // Word-repeat guard: if any non-minor word appears >2x, fall back to top-2 slots
-            if (hasWordViolation(assembled) && rawSlots.length > 1) {
-              assembled = rawSlots.slice(0, 2).map(toTitleCase).join(' - ')
-              if (assembled.length > 125) assembled = assembled.slice(0, 122) + '...'
-            }
-            finalTitle = assembled
-            console.log(`[AI Recs] 3-slot title: "${finalTitle}" slots=[${rawSlots.map(s => classifySlot(s)).join(',')}]`)
-          } else {
-            // No eligible keywords — fall back to LLM title
-            finalTitle = parsed.recommended_title || ''
-            console.warn('[AI Recs] 3-slot title: no eligible keywords found, using LLM title')
+            return problems
           }
+
+          let finalTitle = (parsed.recommended_title || '').trim()
+          let titleProblems = finalTitle ? validateTitle(finalTitle) : ['No title was generated.']
+
+          // One corrective retry: hand the LLM its title + the exact violations and ask for a fix.
+          if (finalTitle && titleProblems.length > 0) {
+            controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Refining title...' }) + '\n'))
+            try {
+              const fix = await openai.chat.completions.create({
+                model: 'gpt-4.1-mini',
+                messages: [
+                  { role: 'system', content: 'You are an Amazon apparel SEO title editor. Output ONLY the corrected title string — no quotes, no markdown, no explanation.' },
+                  { role: 'user', content: `Rewrite this Amazon product title to fix the problems below while keeping the strongest keywords and natural, human readability.\n\nBrand: ${brandName}\nTitle: ${finalTitle}\n\nProblems:\n- ${titleProblems.join('\n- ')}\n\nStructure: ${brandName} [product-specific keyphrase] - [descriptive variation] - [audience + product type]. Start with the brand, then the specific product keyphrase. 80-125 characters. No word more than twice. No seasonal terms. ONE consistent audience. Return ONLY the corrected title.` },
+                ],
+                temperature: 0.2,
+                max_tokens: 120,
+              })
+              const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+              if (corrected) {
+                const correctedProblems = validateTitle(corrected)
+                // Accept the rewrite if it is valid or strictly better than the original
+                if (correctedProblems.length < titleProblems.length) {
+                  finalTitle = corrected
+                  titleProblems = correctedProblems
+                }
+              }
+            } catch (titleErr) {
+              console.warn('[AI Recs] Title correction retry failed:', titleErr)
+            }
+          }
+
+          // Compliance guarantee: if the brand is still missing after the retry,
+          // prepend it (Amazon apparel requires the brand lead). Only prepend if it fits.
+          if (finalTitle && brandName && !finalTitle.toLowerCase().includes(brandName.toLowerCase())) {
+            const prefixed = `${brandName} ${finalTitle}`.trim()
+            if (prefixed.length <= 150) {
+              finalTitle = prefixed
+              titleProblems = validateTitle(finalTitle)
+            }
+          }
+
+          if (titleProblems.length > 0) {
+            console.warn(`[AI Recs] Title still imperfect after retry: ${titleProblems.join(' | ')} — "${finalTitle}"`)
+          }
+          console.log(`[AI Recs] Final title (LLM-authored, validated): "${finalTitle}"`)
 
           // Patch action_plan title entry so the UI's "COPY & PASTE THIS" box matches
           if (Array.isArray(parsed.action_plan)) {

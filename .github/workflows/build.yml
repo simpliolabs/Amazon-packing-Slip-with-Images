@@ -1,0 +1,44 @@
+name: Build
+
+# The only pre-deploy gate before this: none. Coolify auto-deploys main on push.
+# This workflow runs `next build` (the same step Nixpacks runs) on every PR and push
+# to main so a broken build is caught BEFORE it reaches production.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (Next.js — same step Nixpacks runs on deploy)
+        run: pnpm run build
+        env:
+          # Build-time placeholders. Real values are injected by Coolify at runtime.
+          # Next inlines NEXT_PUBLIC_* at build; these keep the build from failing on
+          # missing vars. No secret is required to type-check and bundle.
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          SUPABASE_SERVICE_ROLE_KEY: placeholder
+          OPENAI_API_KEY: placeholder
+
+      - name: Lint (non-blocking — informational only)
+        run: pnpm run lint
+        continue-on-error: true
