@@ -403,11 +403,11 @@ export async function POST(req: NextRequest) {
       is_new_listing: !rep.title,
       has_aplus: rep.has_aplus || false,
       has_brand_story: rep.aplus_has_brand_story || false,
-      // NOTE: current_title is intentionally excluded from the LLM input to prevent
-      // the model from anchoring on the existing product name phrase when generating
-      // the new title. The title must be driven purely by keyword opportunity scores.
-      // The current title is available in diagnosis_only fields below for issue detection only.
-      current_bullets: bullets.length > 0 ? bullets : null,
+      // NOTE: current_title and current_bullets are intentionally excluded from the LLM input.
+      // The model must NOT anchor on existing product name phrases (e.g., "Later Gator Vintage 90s T-Shirt")
+      // when generating the new title and bullets. All content must be driven purely by keyword
+      // opportunity scores from the Keyword Intelligence block.
+      // Current content is available in diagnosis_only fields below for issue detection only.
       current_description: rep.description || null,
       children: children.map((c: ChildRow) => {
         const color = extractColor(c.sku, c.title || '')
