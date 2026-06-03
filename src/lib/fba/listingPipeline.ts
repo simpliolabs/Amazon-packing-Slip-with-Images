@@ -464,12 +464,56 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
   return (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
 }
 
+// ─── Stage 0b — Relevance gate (PR17) ─────────────────────────────────────────
+// Jungle Scout / competitor pulls contaminate the keyword set with terms that are
+// not about THIS product (other brands, trademarks, bands, character/personal names).
+// Left unfiltered, they leak into the backend core (code-built) and reconciliation —
+// and pushing a trademark like "florida gators" to live listings is a TOS risk.
+// One cheap classifier pass drops clearly-unrelated terms. Conservative + fail-open.
+async function filterRelevantKeywords(input: PipelineInput, analysis: AnalyzedKeyword[]): Promise<AnalyzedKeyword[]> {
+  if (analysis.length === 0) return analysis
+  const { openai, brandName, repTitle, category } = input
+  const list = analysis.map((k, i) => `${i}: ${k.keyword}`).join('\n')
+  const system = 'You are an Amazon SEO relevance filter. Return ONLY valid JSON: {"drop":[<indices to drop>]}.'
+  const user = `Product brand: ${brandName}
+Category: ${category}
+Current product title (context only): ${repTitle ?? '(unknown)'}
+
+Keywords (index: phrase):
+${list}
+
+Return the indices of keywords that are NOT about THIS product — i.e. other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product. KEEP anything plausibly about this product, including broad/generic descriptors, audiences, occasions, gift terms, and seasonal terms (those are relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated terms. Return ONLY {"drop":[...]}.`
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0,
+      max_tokens: 500,
+      response_format: { type: 'json_object' },
+    })
+    const parsed = parseJsonLoose<{ drop?: number[] }>(completion.choices[0]?.message?.content || '{}')
+    const drop = new Set((parsed.drop ?? []).filter((n) => Number.isInteger(n)))
+    const filtered = analysis.filter((_, i) => !drop.has(i))
+    // Fail-open: if the gate dropped (nearly) everything it likely misfired — keep the original pool.
+    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return analysis
+    return filtered
+  } catch (err) {
+    console.warn('[pipeline] relevance gate failed, using unfiltered pool:', err)
+    return analysis
+  }
+}
+
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
 
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
-  const { analysis, brandName, repTitle, onProgress } = input
+  const { brandName, repTitle, onProgress } = input
 
-  // Stage 0 — candidates (code)
+  // Stage 0a — relevance gate: drop keywords that are not about this product
+  // (competitor brands, trademarks, unrelated names) before anything downstream uses them.
+  onProgress('Filtering keywords for relevance...')
+  const analysis = await filterRelevantKeywords(input, input.analysis)
+
+  // Stage 0b — candidates (code)
   const candidates = selectTitleCandidates(analysis, brandName, repTitle)
 
   // Stage 1 — Title
@@ -518,14 +562,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     console.warn('[pipeline] Audit agent failed, returning content without action plan:', err)
   }
 
-  // Guarantee the read path: overwrite action_plan copy-paste content with the CANONICAL content.
+  // Guarantee the read path AND that content always renders. The o4-mini audit is
+  // non-deterministic about verdicts — it sometimes marks title/bullets DONE ("matches
+  // finalized content"), which hides the copy-paste box in the UI. So for every content
+  // element we (a) overwrite replacement_content with the CANONICAL pipeline output and
+  // (b) force verdict=REPLACE so the seller can always copy it.
   const actionPlan = Array.isArray(audit.action_plan) ? audit.action_plan : []
+  const forceReplace = (item: PipelineActionPlanItem, content: string) => {
+    item.replacement_content = content
+    item.verdict = 'REPLACE'
+    if (item.priority === 'NONE') item.priority = 'HIGH'
+  }
   for (const item of actionPlan) {
-    if (item.element === 'title') item.replacement_content = finalTitle
+    if (item.element === 'title') forceReplace(item, finalTitle)
     else if (/^bullet_([1-5])$/.test(item.element)) {
       const idx = Number(item.element.split('_')[1]) - 1
-      if (bullets[idx]) item.replacement_content = bullets[idx]
-    } else if (item.element === 'description') item.replacement_content = description
+      if (bullets[idx]) forceReplace(item, bullets[idx])
+    } else if (item.element === 'description') forceReplace(item, description)
+    else if (item.element === 'backend_keywords') item.verdict = 'REPLACE'
   }
 
   return {
