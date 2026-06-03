@@ -398,7 +398,7 @@ export async function POST(req: NextRequest) {
 
     const inputJson = {
       brand: brandName,
-      product_type: 't-shirt', // Default for current product line
+      // product_type intentionally excluded — leaks product name into LLM context
       category: 'Clothing, Shoes & Jewelry > Novelty & More > Clothing > Novelty',
       is_new_listing: !rep.title,
       has_aplus: rep.has_aplus || false,
@@ -814,12 +814,12 @@ Below is a PARTIAL example showing correct formatting for a fictional "Later Gat
   "keyword_reconciliation": [
     {
       "keyword": "later gator tshirt",
-      "action_type": "CRITICAL",
+      "action_type": "UPGRADE",
       "search_volume": 11794,
-      "opportunity_score": 92,
+      "opportunity_score": 40,
       "placed_in": ["title", "bullet_1"],
-      "exact_text": "Later Gator...T-Shirt (title) | This later gator tshirt features (bullet_1)",
-      "why": "Brand-specific product term — highest conversion rate, placed in title per Override Rule and reinforced in bullet 1"
+      "exact_text": "Later Gator Tshirt (title) | This later gator tshirt features (bullet_1)",
+      "why": "High-volume product term — placed in title and reinforced in bullet 1"
     }
   ],
   "action_plan": [
@@ -829,10 +829,10 @@ Below is a PARTIAL example showing correct formatting for a fictional "Later Gat
       "verdict": "REPLACE",
       "priority": "HIGH",
       "confidence": "HIGH",
-      "current_status": "228 chars, exceeds 150-char limit, contains 5 ALL CAPS words, missing top 2 keywords by opportunity",
+      "current_status": "Title exceeds 150-char limit and is missing the top-scoring keyword by opportunity",
       "instruction": "Replace the entire title with the recommended title below. Copy-paste exactly. Do not add variant attributes — Amazon appends those automatically.",
-      "replacement_content": "Later Gator Funny Alligator T-Shirt - Vintage See You Later Graphic Tee for Men and Women",
-      "notes": "89 chars. Front-loads brand term 'Later Gator' in first 12 chars. Contains top 2 keywords by opportunity score.",
+      "replacement_content": "See You Later Alligator Shirt - Later Gator Tshirt - Cool Shirt for Men and Women",
+      "notes": "80 chars. Leads with highest opportunity-score keyword. Contains top 2 keywords by score.",
       "aplus_modules": null
     }
   ]
@@ -1053,8 +1053,43 @@ END OF PROMPT
               }))
             : []
 
-          // Use the LLM's recommended title directly — no forced verbatim injection.
-          let finalTitle = parsed.recommended_title || ''
+          // Deterministic title assembly: override LLM title with score-driven title built from DB.
+          // This prevents LLM anchoring on product name regardless of what the LLM returns.
+          const SEASONAL_TERMS = [
+            'christmas', 'xmas', 'halloween', 'thanksgiving', 'easter', 'hanukkah',
+            'valentines', "valentine's", 'mothers day', "mother's day", 'fathers day',
+            "father's day", 'new year', 'new years', 'st patrick', 'july 4th', 'fourth of july',
+          ]
+          const isSeasonalKeyword = (kw: string) =>
+            SEASONAL_TERMS.some(term => kw.toLowerCase().includes(term))
+
+          const toTitleCase = (str: string) => {
+            const MINOR = new Set(['a','an','the','and','or','for','in','on','with','of','to','at','by'])
+            return str
+              .split(' ')
+              .map((w, i) => (i === 0 || !MINOR.has(w.toLowerCase())) ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase())
+              .join(' ')
+          }
+
+          const titleAsin = validationAsin // already resolved above
+          const allKeywords = await getStoredAnalysis(titleAsin, 50)
+          const titleSlots = (allKeywords ?? [])
+            .filter(k => ['CRITICAL', 'UPGRADE'].includes(k.actionType))
+            .filter(k => !isSeasonalKeyword(k.keyword))
+            .sort((a, b) => b.opportunityScore - a.opportunityScore)
+            .slice(0, 3)
+            .map(k => toTitleCase(k.keyword))
+
+          let finalTitle: string
+          if (titleSlots.length > 0) {
+            const joined = titleSlots.join(' - ')
+            finalTitle = joined.length > 150 ? joined.slice(0, 147) + '...' : joined
+            console.log(`[AI Recs] Deterministic title: "${finalTitle}" (from ${titleSlots.length} keywords)`)
+          } else {
+            // No scored keywords available — fall back to LLM title
+            finalTitle = parsed.recommended_title || ''
+            console.warn('[AI Recs] Deterministic title: no CRITICAL/UPGRADE keywords found, using LLM title')
+          }
           const rec: AiRecommendations = {
             parent_asin,
             recommended_title: finalTitle,
