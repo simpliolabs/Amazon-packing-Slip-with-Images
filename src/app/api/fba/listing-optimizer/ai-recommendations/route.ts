@@ -392,8 +392,9 @@ export async function POST(req: NextRequest) {
     )
 
     // V2: Build structured input JSON matching the system prompt's Section 2 schema
-    // Extract brand from title (first word/phrase before the first dash or product type)
-    const brandName = (rep.title || '').split(/\s*[-\u2013\u2014]\s*/)[0]?.trim() || 'Unknown'
+    // Brand is the seller brand, not extracted from the listing title
+    // The title should lead with the highest-opportunity keyword, not the brand name
+    const brandName = 'THE CEO'
 
     const inputJson = {
       brand: brandName,
@@ -499,9 +500,16 @@ HARD LIMIT: 80-150 characters. Aim for ~110 characters.
 - Under 80 = likely missing a keyword opportunity. Check if you dropped one.
 - Over 150 = Amazon truncates on mobile and may suppress the listing. Remove the lowest-opportunity keyword and push it to bullets.
 
-FORMAT (default, unless category_title_formula overrides):
-  Brand - Product Type - Top Keyword - Key Differentiator
-  Example: "THE CEO Memory Card SDHC UHS-I 90MB/s - High-Speed Camera Cards for Photography"
+FORMAT (score-first, unless category_title_formula overrides):
+  Top Keyword - Second Keyword - Audience/Differentiator
+
+The title MUST lead with the highest-opportunity keyword by Opportunity Score — the keyword most likely to rank AND generate traffic for this specific product. This is determined by the system's score, which combines: search volume, rankability (competing products), conversion intent (keyword sales), and gap size (whether it's missing from the listing).
+
+Do NOT start the title with the brand name or the current product name unless the brand/product name IS the top keyword by score.
+
+Example for a Later Gator graphic tee:
+  "See You Later Alligator Shirt - Later Gator Tshirt - Cool Shirt for Men and Women"
+  ("see you later alligator shirt" leads because it has the highest Opportunity Score)
 
 TITLE CASE STANDARD — Capitalize all words EXCEPT: a, an, the, and, or, for, in, on, with, of, to, at, by. Always capitalize the first and last word regardless. Exception: recognized acronyms stay ALL CAPS (e.g., USB, LED, UHS-I, SDHC).
 
@@ -763,7 +771,7 @@ SECTION 8: EXAMPLE OUTPUT (TRUNCATED)
 Below is a PARTIAL example showing correct formatting for a fictional "Later Gator" t-shirt product. Your output must follow this exact structure. This example is truncated — your output must include ALL fields from the schema above.
 
 {
-  "recommended_title": "Later Gator Tshirt - See You Later Alligator Shirt - Cool Shirt for Men and Women",
+  "recommended_title": "See You Later Alligator Shirt - Later Gator Tshirt - Cool Shirt for Men and Women",
   "recommended_title_char_count": 80,
   "recommended_bullets": [
     "RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit",
@@ -841,7 +849,7 @@ Before returning your JSON, verify each of these. If any check fails, fix the ou
 7. GENERIC BULLETS: Do any bullets reference a specific variant? Fix them.
 8. RESTRICTED CLAIMS: Does any content violate the restricted_claims from the input? Remove violations.
 9. VALID JSON: Are all strings properly escaped? Are there no trailing commas? Is the JSON parseable?
-10. BRAND ANCHOR VERBATIM CHECK: Does the recommended_title contain the BRAND ANCHOR keyword exactly as written (character-for-character, case-insensitive)? Specifically: if the brand anchor is "later gator tshirt", the title must contain the substring "later gator tshirt" — NOT "Later Gator T-Shirt" or "Later Gator Vintage 90s T-Shirt". "tshirt" (one word) and "T-Shirt" (hyphenated) are different Amazon keywords. If the check fails, rewrite the title so it contains the exact brand anchor substring. This is the single most important check.
+10. SCORE-FIRST TITLE CHECK: Does the recommended_title start with the highest Opportunity Score keyword from the CRITICAL or UPGRADE section? The first keyword in the title must be the one with the highest score — not the brand name, not the current product name, not a paraphrase. If the title starts with a lower-scoring keyword, rewrite it so the top-scoring keyword leads.
 
 ========================================
 END OF PROMPT
