@@ -1164,23 +1164,89 @@ END OF PROMPT
           const eligibleKeywords = (allKeywords ?? [])
             .filter(k => ['CRITICAL', 'UPGRADE'].includes(k.actionType))
             .filter(k => !isSeasonalKeyword(k.keyword))
-            .sort((a, b) => b.opportunityScore - a.opportunityScore)
 
-          // Pick best keyword per slot, respecting deduplication across slots
-          const slotMap: Record<SlotType, string | null> = {
-            BRAND_PRODUCT: null,
-            DESCRIPTIVE: null,
-            AUDIENCE: null,
-          }
-          const usedKeywords: string[] = []
+          // Classify all eligible keywords into slot buckets
+          const brandBucket: typeof eligibleKeywords = []
+          const descriptiveBucket: typeof eligibleKeywords = []
+          const audienceBucket: typeof eligibleKeywords = []
           for (const k of eligibleKeywords) {
             const slot = classifySlot(k.keyword)
-            if (slotMap[slot] !== null) continue // slot already filled
-            const isDup = usedKeywords.some(sel => isDuplicateKeyword(sel, k.keyword))
-            if (isDup) continue
-            slotMap[slot] = k.keyword
-            usedKeywords.push(k.keyword)
-            if (slotMap.BRAND_PRODUCT && slotMap.DESCRIPTIVE && slotMap.AUDIENCE) break
+            if (slot === 'BRAND_PRODUCT') brandBucket.push(k)
+            else if (slot === 'AUDIENCE') audienceBucket.push(k)
+            else descriptiveBucket.push(k)
+          }
+
+          // Helper: word overlap ratio between a keyword and a set of words
+          const overlapRatio = (kw: string, refWords: Set<string>): number => {
+            const kwWords = kw.toLowerCase().split(/\s+/)
+            const matching = kwWords.filter(w => refWords.has(w))
+            return matching.length / kwWords.length
+          }
+
+          // ── SLOT 1: Shortest BRAND_PRODUCT keyword (fewest words, tiebreak by opp score)
+          brandBucket.sort((a, b) => {
+            const aWords = a.keyword.split(/\s+/).length
+            const bWords = b.keyword.split(/\s+/).length
+            if (aWords !== bWords) return aWords - bWords
+            return b.opportunityScore - a.opportunityScore
+          })
+          const slot1Keyword = brandBucket[0]?.keyword ?? null
+
+          // ── SLOT 2: Highest-score DESCRIPTIVE, penalize >40% overlap with Slot 1
+          const slot1Words = new Set((slot1Keyword ?? '').toLowerCase().split(/\s+/))
+          descriptiveBucket.sort((a, b) => {
+            const aOverlap = overlapRatio(a.keyword, slot1Words)
+            const bOverlap = overlapRatio(b.keyword, slot1Words)
+            // Penalize high overlap with Slot 1
+            if (aOverlap > 0.4 && bOverlap <= 0.4) return 1
+            if (bOverlap > 0.4 && aOverlap <= 0.4) return -1
+            return b.opportunityScore - a.opportunityScore
+          })
+          // Also skip if ≥60% dedup with Slot 1
+          const slot2Keyword = descriptiveBucket.find(k =>
+            !slot1Keyword || !isDuplicateKeyword(slot1Keyword, k.keyword)
+          )?.keyword ?? null
+
+          // ── SLOT 3: AUDIENCE keyword, with fallback construction
+          // Step 1: from AUDIENCE bucket (CRITICAL/UPGRADE only)
+          let slot3Keyword: string | null = audienceBucket
+            .sort((a, b) => b.opportunityScore - a.opportunityScore)[0]?.keyword ?? null
+
+          // Step 2: if none, search ALL keywords (including DEFENDED) for audience terms
+          if (!slot3Keyword) {
+            const allKws = allKeywords ?? []
+            const audienceFromAll = allKws.find(k =>
+              !isSeasonalKeyword(k.keyword) &&
+              AUDIENCE_TERMS.some(at => k.keyword.toLowerCase().includes(at))
+            )
+            if (audienceFromAll) slot3Keyword = audienceFromAll.keyword
+          }
+
+          // Step 3: if still none, CONSTRUCT deterministically
+          if (!slot3Keyword) {
+            const styleWords = ['funny', 'cool', 'vintage', 'retro', 'cute', 'graphic']
+            const allKws = allKeywords ?? []
+            const foundStyle = allKws.find(kw =>
+              styleWords.some(sw => kw.keyword.toLowerCase().includes(sw))
+            )
+            const adjective = foundStyle
+              ? (styleWords.find(sw => foundStyle.keyword.toLowerCase().includes(sw)) ?? 'Graphic')
+              : 'Graphic'
+            const adj = adjective.charAt(0).toUpperCase() + adjective.slice(1)
+            // Determine product type from Slot 1 or Slot 2 keywords
+            const refKw = (slot1Keyword ?? slot2Keyword ?? '').toLowerCase()
+            let productType = 'Shirt'
+            if (refKw.includes('tshirt') || refKw.includes('t-shirt')) productType = 'Tee'
+            else if (refKw.includes('hoodie')) productType = 'Hoodie'
+            else if (refKw.includes('sweatshirt')) productType = 'Sweatshirt'
+            slot3Keyword = `${adj} ${productType} for Men and Women`
+          }
+
+          // Build final slot map
+          const slotMap: Record<SlotType, string | null> = {
+            BRAND_PRODUCT: slot1Keyword,
+            DESCRIPTIVE: slot2Keyword,
+            AUDIENCE: slot3Keyword,
           }
 
           // Assemble: Slot1 - Slot2 - Slot3, omitting null slots
