@@ -132,7 +132,7 @@ async function buildKeywordContext(
   supabase: ReturnType<typeof getAdminSupabase>,
   parentAsin: string,
   children: ChildRow[]
-): Promise<{ contextBlock: string; opportunitiesUsed: number }> {
+): Promise<{ contextBlock: string; opportunitiesUsed: number; brandAnchorKeyword: string | null }> {
   // ASIN resolution: use top_child_asin from listing_seo_scores (has keyword data)
   let lookupAsin = children[0]?.asin
   
@@ -299,6 +299,7 @@ Every CRITICAL and UPGRADE keyword must appear somewhere: title, a bullet, or ba
   return {
     contextBlock,
     opportunitiesUsed: critical.length + upgrade.length + reinforce.length + defended.length,
+    brandAnchorKeyword: brandAnchor?.keyword ?? null,
   }
 }
 
@@ -393,7 +394,7 @@ export async function POST(req: NextRequest) {
     }
 
     // V2: Build keyword intelligence context
-    const { contextBlock: keywordContext, opportunitiesUsed } = await buildKeywordContext(
+    const { contextBlock: keywordContext, opportunitiesUsed, brandAnchorKeyword } = await buildKeywordContext(
       supabase,
       parent_asin,
       children as ChildRow[]
@@ -1053,13 +1054,13 @@ END OF PROMPT
           // The LLM may paraphrase the brand anchor (e.g., expand "tshirt" to "T-Shirt").
           // This deterministic step guarantees the exact brand anchor string appears in the title.
           let finalTitle = parsed.recommended_title || ''
-          if (brandAnchor) {
-            const anchor = brandAnchor.keyword.toLowerCase()
+          if (brandAnchorKeyword) {
+            const anchor = brandAnchorKeyword.toLowerCase()
             if (!finalTitle.toLowerCase().includes(anchor)) {
               // The brand anchor is missing — inject it at the start of the title.
               // Capitalize the anchor for Title Case, then append any existing title content
               // after the first dash (or use the full title if no dash).
-              const anchorTitleCase = brandAnchor.keyword
+              const anchorTitleCase = brandAnchorKeyword
                 .split(' ')
                 .map(w => w.charAt(0).toUpperCase() + w.slice(1))
                 .join(' ')
