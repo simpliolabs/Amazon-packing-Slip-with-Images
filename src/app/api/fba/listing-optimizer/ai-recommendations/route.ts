@@ -403,7 +403,10 @@ export async function POST(req: NextRequest) {
       is_new_listing: !rep.title,
       has_aplus: rep.has_aplus || false,
       has_brand_story: rep.aplus_has_brand_story || false,
-      current_title: rep.title || null,
+      // NOTE: current_title is intentionally excluded from the LLM input to prevent
+      // the model from anchoring on the existing product name phrase when generating
+      // the new title. The title must be driven purely by keyword opportunity scores.
+      // The current title is available in diagnosis_only fields below for issue detection only.
       current_bullets: bullets.length > 0 ? bullets : null,
       current_description: rep.description || null,
       children: children.map((c: ChildRow) => {
@@ -464,8 +467,9 @@ You will receive a JSON object with the following structure. All fields are guar
   "is_new_listing": false,
   "has_aplus": false,
   "has_brand_story": false,
-  "current_title": "string (current parent title, or null if new listing)",
   "current_bullets": ["string x5 (current bullets, or null if new listing)"],
+  // NOTE: current_title is NOT provided. Generate the recommended_title purely from keyword
+  // opportunity scores in the Keyword Intelligence block. Do not invent a product name phrase.
   "current_description": "string | null",
   "children": [
     {
