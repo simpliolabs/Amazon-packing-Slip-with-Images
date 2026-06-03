@@ -133,12 +133,22 @@ export function calculateScore(inputs: ScoringInputs): ScoreResult {
     asinPurchaseShare
   );
 
+  // Weight rebalancing for Jungle Scout data:
+  // JS never provides impression/click/purchase share → rScore is always 0.
+  // Redistributing the 25-point rScore weight to vScore (+15) and sScore (+10)
+  // prevents JS keywords from being systematically under-scored vs SQP keywords.
+  // SQP data keeps the original weights (rScore is meaningful there).
+  const wV = dataSource === 'jungle_scout' ? 45 : 30;
+  const wS = dataSource === 'jungle_scout' ? 35 : 25;
+  const wC = 20;
+  const wR = dataSource === 'jungle_scout' ?  0 : 25;
+
   // Weighted raw score (0–100 before gap multiplier)
   const rawScore = (
-    vScore  * 30 +
-    sScore  * 25 +
-    cScore  * 20 +
-    rScore  * 25
+    vScore  * wV +
+    sScore  * wS +
+    cScore  * wC +
+    rScore  * wR
   );
 
   // Apply usage gap multiplier (1.0–3.0)
