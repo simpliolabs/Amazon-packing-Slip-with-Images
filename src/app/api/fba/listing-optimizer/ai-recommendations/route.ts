@@ -215,29 +215,12 @@ Each keyword entry follows this format:
 
 ---
 
-⚠️ BRAND ANCHOR — MANDATORY TITLE REQUIREMENT ⚠️
+TOP KEYWORDS BY OPPORTUNITY SCORE:
 ${brandAnchor
-  ? `The following keyword is the product's brand-specific search term. Shoppers searching this exact phrase already want THIS product — conversion rate is 3-5× higher than generic keywords.
+  ? `The highest-scoring keyword already associated with this product is: "${brandAnchor.keyword}" — Vol: ${brandAnchor.searchVolume.toLocaleString()}/mo
 
-BRAND ANCHOR KEYWORD: "${brandAnchor.keyword}" — Vol: ${brandAnchor.searchVolume.toLocaleString()}/mo
-
-HARD RULE: The recommended_title MUST contain this exact string verbatim: "${brandAnchor.keyword}"
-
-Do NOT:
-- Expand "tshirt" to "T-Shirt" or "t-shirt" (Amazon indexes them differently — they are different keywords)
-- Add descriptors before or after the phrase (e.g., "Vintage 90s" between words)
-- Substitute synonyms ("shirt" ≠ "tshirt")
-- Split the phrase across a dash or hyphen
-
-DO: Copy "${brandAnchor.keyword}" character-for-character as a contiguous substring of the title.
-
-Example of CORRECT title if brand anchor is "later gator tshirt":
-  ✅ "Later Gator Tshirt - See You Later Alligator Shirt"
-Example of INCORRECT title:
-  ❌ "Later Gator Vintage 90s T-Shirt - See You Later Alligator Shirt" ("tshirt" ≠ "T-Shirt")
-
-This is non-negotiable.\``
-  : `[NO BRAND ANCHOR — no defended keywords found. Proceed with CRITICAL and UPGRADE keywords only.]`
+This keyword should be considered for the title if it is year-round relevant and fits naturally. It does NOT need to appear verbatim — use your judgment based on readability and the full keyword set.`
+  : `[No high-scoring associated keywords found. Use CRITICAL and UPGRADE keywords to build the title.]`
 }
 
 ---
@@ -276,11 +259,8 @@ ${formatSection(defended, 'no defended keywords')}
 
 KEYWORD PLACEMENT RULES:
 
-OVERRIDE RULE — BRAND ANCHOR (applies before all others, non-negotiable):
-The BRAND ANCHOR keyword listed above MUST appear verbatim in the recommended_title. It occupies Title Slot #1. Do not replace it with a generic keyword even if that generic keyword has a higher Opportunity Score. Generic keywords (e.g., "cool t shirts for men") have high competition and low conversion for brand-specific products — they belong in bullets or backend keywords, NOT the title.
-
 RULE 1 — TITLE (2-3 keywords max):
-Slot #1 = Brand Anchor keyword (verbatim, mandatory). Slot #2 = top YEAR-ROUND keyword from CRITICAL or UPGRADE by Opportunity Score. Slot #3 = optional second year-round keyword from CRITICAL or UPGRADE if it fits naturally. Title MUST be 80-150 characters.
+Build the title from the top year-round keywords by Opportunity Score. Use 2-3 keywords maximum. Prefer specific, product-relevant keywords over broad generic ones (e.g., "later gator tshirt" is better than "cool t shirts for men" for a Later Gator product because it has higher conversion intent). Title MUST be 80-150 characters. Do not include variant-specific attributes (size, color).
 
 RULE 7 — SEASONAL KEYWORDS IN TITLE ONLY WHEN PRODUCT IS DESIGNED FOR THAT OCCASION:
 Keywords tied to specific events, seasons, or occasions (e.g., "last day of school", "graduation", "christmas shirt", "halloween shirt", "mothers day", "fathers day") belong in the title ONLY if the product is specifically designed for that occasion — meaning the graphic, design, or product concept is directly tied to it.
@@ -1061,26 +1041,8 @@ END OF PROMPT
               }))
             : []
 
-          // ─── Post-processing: enforce brand anchor verbatim in title ──────────
-          // The LLM may paraphrase the brand anchor (e.g., expand "tshirt" to "T-Shirt").
-          // This deterministic step guarantees the exact brand anchor string appears in the title.
+          // Use the LLM's recommended title directly — no forced verbatim injection.
           let finalTitle = parsed.recommended_title || ''
-          if (brandAnchorKeyword) {
-            const anchor = brandAnchorKeyword.toLowerCase()
-            if (!finalTitle.toLowerCase().includes(anchor)) {
-              // The brand anchor is missing — inject it at the start of the title.
-              // Capitalize the anchor for Title Case, then append any existing title content
-              // after the first dash (or use the full title if no dash).
-              const anchorTitleCase = brandAnchorKeyword
-                .split(' ')
-                .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-                .join(' ')
-              const dashIdx = finalTitle.indexOf(' - ')
-              const rest = dashIdx >= 0 ? finalTitle.slice(dashIdx) : ''
-              finalTitle = `${anchorTitleCase}${rest}`
-            }
-          }
-
           const rec: AiRecommendations = {
             parent_asin,
             recommended_title: finalTitle,
