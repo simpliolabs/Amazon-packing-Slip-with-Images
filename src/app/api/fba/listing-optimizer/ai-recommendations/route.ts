@@ -192,6 +192,11 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
   const formatSection = (items: typeof analysis, emptyMsg: string) =>
     items.length > 0 ? items.map(formatKw).join('\n') : `  [NO KEYWORDS IN THIS SECTION]`
 
+  // Brand anchor: top DEFENDED keyword by search volume (brand-specific, highest converting)
+  const brandAnchor = defended.length > 0
+    ? [...defended].sort((a, b) => b.searchVolume - a.searchVolume)[0]
+    : null
+
   const contextBlock = `KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
 Data source: ${analysis[0].dataSource === 'sqp' ? 'Amazon Brand Analytics (real sales data)' : analysis[0].dataSource === 'jungle_scout' ? 'Jungle Scout API' : 'Inherited from sibling products'}
 Sort order: Keywords within each section are sorted by OPPORTUNITY SCORE (highest first).
@@ -199,6 +204,18 @@ The first keyword listed = highest priority = best combination of rankability, s
 
 Each keyword entry follows this format:
   "keyword phrase" — Vol: [monthly searches] | Opp: [score 0-100] | Comp: [LOW/MED/HIGH]
+
+---
+
+⚠️ BRAND ANCHOR — MANDATORY TITLE REQUIREMENT ⚠️
+${brandAnchor
+  ? `The following keyword is the product's brand-specific search term. Shoppers searching this exact phrase already want THIS product — conversion rate is 3-5× higher than generic keywords.
+
+BRAND ANCHOR KEYWORD: "${brandAnchor.keyword}" — Vol: ${brandAnchor.searchVolume.toLocaleString()}/mo
+
+HARD RULE: The recommended_title MUST contain this exact string verbatim. Do not paraphrase it, do not split it across words, do not substitute synonyms. Copy it character-for-character into the title. This is non-negotiable.`
+  : `[NO BRAND ANCHOR — no defended keywords found. Proceed with CRITICAL and UPGRADE keywords only.]`
+}
 
 ---
 
@@ -236,14 +253,14 @@ ${formatSection(defended, 'no defended keywords')}
 
 KEYWORD PLACEMENT RULES:
 
-OVERRIDE RULE (applies before all others):
-If a keyword IS the product name, brand-specific term, or product-line name (e.g., "Later Gator tshirt" for a Later Gator product), treat it as Opportunity Slot #1 regardless of its calculated score. It counts toward the 2-3 keyword title limit. Brand-specific terms convert at the highest rate because the searcher already wants YOUR product.
+OVERRIDE RULE — BRAND ANCHOR (applies before all others, non-negotiable):
+The BRAND ANCHOR keyword listed above MUST appear verbatim in the recommended_title. It occupies Title Slot #1. Do not replace it with a generic keyword even if that generic keyword has a higher Opportunity Score. Generic keywords (e.g., "cool t shirts for men") have high competition and low conversion for brand-specific products — they belong in bullets or backend keywords, NOT the title.
 
 RULE 1 — TITLE (2-3 keywords max):
-Pick the top 2-3 keywords by Opportunity Score from CRITICAL and UPGRADE sections (after applying the Override Rule above). Front-load the #1 keyword within the first 80 characters after the brand name. Title MUST be 80-150 characters. If it exceeds 150, remove the lowest-opportunity keyword and push it to bullets.
+Slot #1 = Brand Anchor keyword (verbatim, mandatory). Slot #2 = top keyword from CRITICAL or UPGRADE by Opportunity Score. Slot #3 = optional second keyword from CRITICAL or UPGRADE if it fits naturally. Title MUST be 80-150 characters.
 
 RULE 2 — BULLETS (3-5 keywords):
-Place the next 3-5 keywords (by Opportunity Score) from CRITICAL and UPGRADE into bullets 1-3. Each bullet should target 1-2 keywords woven naturally into the sentence. Keywords go in the body text, NOT in the ALL CAPS benefit hook.
+Place the top keywords from CRITICAL and UPGRADE (those not used in the title) into bullets 1-3. Each bullet should target 1-2 keywords woven naturally into the sentence. Keywords go in the body text, NOT in the ALL CAPS benefit hook.
 
 RULE 3 — BACKEND KEYWORDS (everything else):
 All remaining keywords that did not fit naturally into title or bullets go here. Also include: synonyms, common misspellings, occasion terms, audience terms, and long-tail variants not already in title/bullets.
@@ -732,8 +749,8 @@ SECTION 8: EXAMPLE OUTPUT (TRUNCATED)
 Below is a PARTIAL example showing correct formatting for a fictional "Later Gator" t-shirt product. Your output must follow this exact structure. This example is truncated — your output must include ALL fields from the schema above.
 
 {
-  "recommended_title": "Later Gator Funny Alligator T-Shirt - Vintage See You Later Graphic Tee for Men and Women",
-  "recommended_title_char_count": 89,
+  "recommended_title": "Later Gator Tshirt - Vintage See You Later Alligator Graphic Tee - Funny Cool T Shirts for Men",
+  "recommended_title_char_count": 93,
   "recommended_bullets": [
     "RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit",
     "COMFORT ALL DAY - Made from soft breathable cotton blend fabric that keeps you cool whether you are out with friends or lounging at home",
@@ -810,7 +827,7 @@ Before returning your JSON, verify each of these. If any check fails, fix the ou
 7. GENERIC BULLETS: Do any bullets reference a specific variant? Fix them.
 8. RESTRICTED CLAIMS: Does any content violate the restricted_claims from the input? Remove violations.
 9. VALID JSON: Are all strings properly escaped? Are there no trailing commas? Is the JSON parseable?
-10. BRAND-SPECIFIC OVERRIDE: If a keyword is the product name or brand term, is it in title slot #1?
+10. BRAND ANCHOR VERBATIM CHECK: Does the recommended_title contain the BRAND ANCHOR keyword exactly as written (character-for-character)? If not, rewrite the title to include it verbatim. This is the single most important check.
 
 ========================================
 END OF PROMPT
