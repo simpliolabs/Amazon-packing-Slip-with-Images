@@ -274,12 +274,17 @@ Rules:
 
 async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[]): Promise<string[]> {
   const { openai } = input
-  const kwList = remaining.slice(0, 10).map((k) => `  - "${k.keyword}"`).join('\n')
+  const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
   const system = 'You are an Amazon apparel SEO copywriter. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}.'
   const user = `The title is FINAL (do not change it): "${finalTitle}"
 
-Write 5 bullet points. Weave in these keywords NOT already in the title (body text, not the hook):
+These are CANDIDATE keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally:
 ${kwList || '  (none — focus on benefits)'}
+
+CRITICAL RELEVANCE RULES (read carefully):
+- Describe ONLY what this product actually is. Do NOT invent occasions, audiences, or product types that the product is not. For example: do NOT call it a "teacher shirt", "last day of school shirt", or "summer shirt" unless the product's design is genuinely about that. A retro alligator graphic tee is NOT a teacher/school product.
+- A keyword being in the candidate list does NOT mean you must use it. SKIP any keyword that would force an inaccurate or awkward claim. It is better to use fewer keywords naturally than to misrepresent the product.
+- Never stuff a long-tail phrase (e.g. "later gator after while crocodile shirt") verbatim if it reads unnaturally — paraphrase or skip it.
 
 Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
@@ -308,54 +313,72 @@ async function runBackendAgent(
   bullets: string[],
   remaining: AnalyzedKeyword[],
 ): Promise<PipelinePerChildKeywords[]> {
-  const { openai, children } = input
+  const { openai, children, brandName } = input
 
-  // Words already in title/bullets — Amazon auto-indexes those, so exclude from backend.
+  // Words already in title/bullets/brand — Amazon auto-indexes those, so exclude from backend.
   const excludeWords = new Set(
-    `${finalTitle} ${bullets.join(' ')}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+    `${finalTitle} ${bullets.join(' ')} ${brandName}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
   )
+  // Color names are auto-indexed from the variant attribute — never repeat them in backend.
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
-  const candidateTerms = remaining.map((k) => k.keyword).slice(0, 30)
+  colors.forEach((c) => excludeWords.add(c))
 
-  const system = 'You distribute Amazon backend search terms across color groups. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase terms"}]}.'
+  // ── SHARED CORE (strategy B): the high-value words that go on EVERY child ──
+  // Built deterministically from the remaining keyword phrases so the family's best
+  // keywords are indexed on every variant regardless of which child Amazon surfaces.
+  // Seasonal IS allowed in backend (this is where high-volume seasonal terms belong).
+  const coreWords: string[] = []
+  const seen = new Set<string>(excludeWords)
+  for (const k of remaining) {
+    for (const w of k.keyword.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+      if (w.length >= 3 && !seen.has(w)) { seen.add(w); coreWords.push(w) }
+    }
+  }
+  // Reserve ~150 bytes for the shared core, leaving ~90 for the per-color tail.
+  const core = truncateToBytes(coreWords.join(' '), 150)
+
+  // ── PER-COLOR TAIL: aesthetic/audience words unique to each color ──
+  const system = 'You generate Amazon backend search-term tails per color. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase aesthetic/audience words"}]}.'
   const user = `Color groups: ${colors.join(', ')}
 
-Candidate terms to draw from (plus add synonyms, common misspellings, occasion/gift terms, and SEASONAL terms — seasonal IS allowed in backend):
-${candidateTerms.join(', ')}
+For EACH color, output ~10-14 lowercase words capturing that color's aesthetic, mood, and audience (e.g. moss -> earthy forest sage boho nature; ivory -> elegant cream wedding minimalist). These are a TAIL appended to a shared core — do NOT repeat generic product words.
 
-Do NOT use any of these words (already in title/bullets — Amazon indexes them automatically):
-${[...excludeWords].slice(0, 60).join(' ')}
+Do NOT use any of these words (already covered in title/bullets/core/color names):
+${[...excludeWords].slice(0, 50).join(' ')}
 
-Rules:
-- One entry per color group. Each color gets a DIFFERENT keyword string targeting that color's aesthetic/audience.
-- Lowercase, space-separated, NO commas, NO quotes. Max 240 characters per group.
-- Do NOT include the brand name, the color name itself, or any size word.
+Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words. ~90 characters max per color.
 Return ONLY the JSON object.`
 
-  let groupMap = new Map<string, string>()
+  const tailMap = new Map<string, string>()
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      temperature: 0.5,
+      temperature: 0.6,
       max_tokens: 1500,
       response_format: { type: 'json_object' },
     })
     const parsed = parseJsonLoose<{ groups?: { color: string; keywords: string }[] }>(completion.choices[0]?.message?.content || '{}')
     for (const g of parsed.groups ?? []) {
-      if (g?.color && typeof g.keywords === 'string') groupMap.set(g.color.toLowerCase(), g.keywords.trim())
+      if (g?.color && typeof g.keywords === 'string') tailMap.set(g.color.toLowerCase(), g.keywords.trim())
     }
   } catch {
-    groupMap = new Map()
+    /* tail is best-effort; core still ships */
   }
 
-  // Map each child to its color group's string, byte-capped to 250.
-  const fallback = candidateTerms.join(' ').toLowerCase()
+  // ── Combine core + per-color tail, dedup words, byte-cap to 250 ──
+  const buildString = (tail: string): string => {
+    const out: string[] = []
+    const used = new Set<string>()
+    for (const w of `${core} ${tail}`.toLowerCase().split(/\s+/)) {
+      if (w && !used.has(w)) { used.add(w); out.push(w) }
+    }
+    return truncateToBytes(out.join(' '), 250)
+  }
+
   return children.map((c) => {
     const color = (c.color || 'default').toLowerCase()
-    let kw = groupMap.get(color) || fallback
-    kw = truncateToBytes(kw, 250)
-    return { sku: c.sku, asin: c.asin, keywords: kw }
+    return { sku: c.sku, asin: c.asin, keywords: buildString(tailMap.get(color) || '') }
   })
 }
 
@@ -453,20 +476,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   onProgress('Writing title...')
   const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates)
 
-  // Keywords not already placed in the title (for bullets/backend)
+  // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
+  // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
+  // no awkward >5-word composites, deduped. This is the same discipline the title gets.
   const titleLc = finalTitle.toLowerCase()
-  const remainingForBullets = analysis
-    .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE'].includes(k.actionType))
-    .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))
+  const remainingForBullets: AnalyzedKeyword[] = []
+  for (const k of analysis) {
+    if (!['CRITICAL', 'UPGRADE', 'REINFORCE'].includes(k.actionType)) continue
+    if (titleLc.includes(k.keyword.toLowerCase())) continue
+    if (isSeasonal(k.keyword)) continue
+    if (k.keyword.split(/\s+/).length > 5) continue
+    if (remainingForBullets.some((d) => wordOverlapRatio(d.keyword, k.keyword) >= 0.6)) continue
+    remainingForBullets.push(k)
+  }
 
   // Stage 2 — Bullets
   onProgress('Writing bullets...')
   const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets)
 
-  // Stage 3 — Backend keywords (keywords not in title or bullets)
+  // Stage 3 — Backend keywords. Pool = everything not in title/bullets, with SEASONAL
+  // KEPT (high-volume seasonal terms like "last day of school" belong in backend, never
+  // the title/bullets). Strategy B: a shared core on every child + per-color aesthetic tail.
   onProgress('Distributing backend keywords...')
   const bulletsLc = bullets.join(' ').toLowerCase()
-  const remainingForBackend = remainingForBullets.filter((k) => !bulletsLc.includes(k.keyword.toLowerCase()))
+  const remainingForBackend = analysis
+    .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED'].includes(k.actionType))
+    .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))
+    .filter((k) => !bulletsLc.includes(k.keyword.toLowerCase()))
   const perChild = await runBackendAgent(input, finalTitle, bullets, remainingForBackend)
 
   // Description (always generated — indexed field)
