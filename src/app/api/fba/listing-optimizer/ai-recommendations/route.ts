@@ -282,8 +282,15 @@ The BRAND ANCHOR keyword listed above MUST appear verbatim in the recommended_ti
 RULE 1 — TITLE (2-3 keywords max):
 Slot #1 = Brand Anchor keyword (verbatim, mandatory). Slot #2 = top YEAR-ROUND keyword from CRITICAL or UPGRADE by Opportunity Score. Slot #3 = optional second year-round keyword from CRITICAL or UPGRADE if it fits naturally. Title MUST be 80-150 characters.
 
-RULE 7 — NO SEASONAL OR OCCASION KEYWORDS IN TITLE:
-Keywords tied to specific events, seasons, or occasions (e.g., "last day of school", "graduation", "christmas", "halloween", "back to school", "mothers day", "fathers day", "summer") MUST NOT appear in the recommended_title. These keywords are relevant for only 30-60 days per year. Putting them in the title permanently hurts year-round conversion because buyers who see a school-themed title in October will not click. Place seasonal keywords in bullets or backend keywords only — never the title.
+RULE 7 — SEASONAL KEYWORDS IN TITLE ONLY WHEN PRODUCT IS DESIGNED FOR THAT OCCASION:
+Keywords tied to specific events, seasons, or occasions (e.g., "last day of school", "graduation", "christmas shirt", "halloween shirt", "mothers day", "fathers day") belong in the title ONLY if the product is specifically designed for that occasion — meaning the graphic, design, or product concept is directly tied to it.
+
+Examples:
+  ✅ A shirt with a Christmas tree graphic → "christmas shirt" belongs in the title
+  ✅ A shirt that says "Happy Halloween" → "halloween shirt" belongs in the title
+  ❌ A Later Gator alligator graphic tee that happens to rank for "last day of school shirt" → "last day of school" does NOT belong in the title — the product is not a school shirt, and buyers searching that term in October will not convert
+
+If the product is a general-purpose graphic tee that incidentally ranks for a seasonal keyword, place that keyword in bullets or backend keywords only — not the title. Year-round conversion is more valuable than seasonal traffic spikes.
 
 RULE 2 — BULLETS (3-5 keywords):
 Place the top keywords from CRITICAL and UPGRADE (those not used in the title) into bullets 1-3. Each bullet should target 1-2 keywords woven naturally into the sentence. Keywords go in the body text, NOT in the ALL CAPS benefit hook.
