@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis } from '@/lib/keyword-engine'
+import { runListingPipeline } from '@/lib/fba/listingPipeline'
 
 function getAdminSupabase() {
   return createClient(
@@ -319,7 +320,6 @@ export async function POST(req: NextRequest) {
     }
 
     const rep = children[0] as ChildRow
-    const bullets = [rep.bullet_1, rep.bullet_2, rep.bullet_3, rep.bullet_4, rep.bullet_5].filter(Boolean) as string[]
 
     // Build per-variant detail for conflict analysis
     const variantDetails = children.map((c: ChildRow, idx: number) => {
@@ -344,12 +344,6 @@ export async function POST(req: NextRequest) {
       // Color code is the last remaining segment (e.g., MOS, LG, BJ, IVO)
       return partsNoFba[partsNoFba.length - 1] || sku
     }
-
-    const childKeywordSlots = children.map((c: ChildRow, idx: number) => {
-      const kwLen = c.backend_keywords?.trim().length || 0
-      const color = extractColor(c.sku, c.title || '')
-      return `  Child ${idx + 1}: SKU="${c.sku}", ASIN="${c.asin}", color="${color}", current=${kwLen}/250 chars`
-    }).join('\n')
 
     // V2: Auto-sync keyword intelligence if empty (self-healing)
     // This ensures Regenerate AI Audit works even if keyword cache was cleared
@@ -426,811 +420,111 @@ export async function POST(req: NextRequest) {
       restricted_claims: [],
     }
 
-    // Build the full listing context (V2 format)
-    const listingContext = `${JSON.stringify(inputJson, null, 2)}
-
---- PER-VARIANT CONTENT (for variant health check) ---
-${variantDetails}
---- END VARIANT CONTENT ---
-
-${keywordContext ? `--- KEYWORD INTELLIGENCE (V2) ---\n${keywordContext}\n--- END KEYWORD INTELLIGENCE ---` : ''}
-`.trim()
-
-    const systemPrompt = `You are a senior Amazon SEO specialist with 15+ years optimizing product listings on Amazon US.
-
-========================================
-SECTION 1: AMAZON LISTING ARCHITECTURE
-========================================
-
-On Amazon, a variation family has a PARENT ASIN (non-buyable placeholder) and multiple CHILD ASINs (the actual buyable products).
-
-SHARED CONTENT (edited once at parent level, same for ALL children):
-- Title: One generic title for the family. In APPAREL, every child variant displays this same title (the parent governs the detail page), so it MUST read correctly for every size and color. Do NOT put a specific size, color, or capacity in the title. (Note: Amazon does NOT auto-append the variant attribute — the seller enters it; for apparel you simply keep the title generic so it works for all variants.)
-- Bullets: One set of 5 bullets shared across all children. Must be generic.
-- Description: One description shared across all children. Must be generic. NOTE: If A+ Content exists, it overrides the description — see conditional rules below.
-- A+ Content: Shared at parent level.
-
-PER-CHILD CONTENT (edited individually per child):
-- Backend Keywords: Each child has its own search terms field (250 BYTES max — see encoding rules below). This is the key optimization opportunity.
-- Images: Each child has its own image set.
-
-========================================
-SECTION 2: INPUT FORMAT
-========================================
-
-You will receive a JSON object with the following structure. All fields are guaranteed present unless marked optional.
-
-{
-  "brand": "string",
-  "product_type": "string (e.g., 't-shirt', 'memory card', 'supplement')",
-  "category": "string (Amazon browse node / category name)",
-  "is_new_listing": false,
-  "has_aplus": false,
-  "has_brand_story": false,
-  "current_bullets": ["string x5 (current bullets, or null if new listing)"],
-  // NOTE: current_title is NOT provided. Generate the recommended_title purely from keyword
-  // opportunity scores in the Keyword Intelligence block. Do not invent a product name phrase.
-  "current_description": "string | null",
-  "children": [
-    {
-      "sku": "string",
-      "asin": "string",
-      "color": "string | null",
-      "size": "string | null",
-      "current_backend_keywords": "string (current backend keywords, or empty string)"
-    }
-  ],
-  "category_title_formula": "string | null (if Amazon enforces a specific title format for this category, it appears here — follow it exactly)",
-  "restricted_claims": ["string (list of claim types prohibited in this category, e.g., 'health_claims', 'pesticide_efficacy', 'fda_statements')"]
-}
-
-KEYWORD INTELLIGENCE is provided separately in the format defined by the Keyword Context Block.
-
-HANDLING EDGE CASES IN INPUT:
-- If "is_new_listing" is true: skip variant health check, mark current_status as "New listing — no existing content" in the action plan, and generate all content from scratch.
-- If "children" has only 1 entry: skip the color-grouped backend strategy. Use one 250-byte keyword string.
-- If "children" has more than 20 entries: group children by color. Produce one backend keyword string per color group. All sizes within the same color group share identical backend keywords.
-- If "category_title_formula" is provided: follow that formula exactly instead of the default title format.
-- If "restricted_claims" is non-empty: NEVER include any language matching those claim types in title, bullets, description, or backend keywords.
-- If all keyword intelligence sections are [NO KEYWORDS IN THIS SECTION]: focus on content quality, readability, and backend keyword distribution using your expertise. Note in the action plan that no keyword gaps were identified.
-
-========================================
-SECTION 3: CONTENT RULES
-========================================
-
---- TITLE RULES ---
-
-HARD LIMIT: 80-150 characters. Aim for ~110 characters.
-- Under 80 = likely missing a keyword opportunity. Check if you dropped one.
-- Over 150 = Amazon truncates on mobile and may suppress the listing. Remove the lowest-opportunity keyword and push it to bullets.
-
-FORMAT (brand + 3-part structure, unless category_title_formula overrides):
-  [Brand] [Product-specific keyphrase] - [Descriptive variation with a product detail] - [Audience + product type]
-
-The brand name MUST appear first (Amazon apparel compliance), immediately followed by the product-specific keyphrase so the highest-converting term is still front-loaded. Then:
-  1. Brand + Keyphrase: the brand, then the product-specific term a shopper types when they already know this product. This is the highest-conversion term and leads (even if a broader keyword has a higher raw Opportunity Score — the specific term converts better). Use the highest-opportunity keyword that names THIS product.
-  2. Descriptive: a second high-opportunity keyword that describes the design/style/material (include a real product detail when one exists, e.g. "Comfort Colors").
-  3. Audience: who it is for plus the generic product type (e.g. "Funny Graphic Tee for Men and Women"). Keep ONE consistent audience — never mix kids with men/women.
-
-Lead with the brand, then the SPECIFIC product keyphrase; do NOT put a broad generic keyword ahead of the product keyphrase just because its raw score is higher.
-
-Example for THE CEO's Later Gator graphic tee:
-  "THE CEO Later Gator Tshirt - See You Later Alligator Shirt - Funny Graphic Tee for Men and Women"
-  (brand leads for compliance; "later gator tshirt" — the product-specific keyphrase — is front-loaded right after it)
-
-TITLE CASE STANDARD — Capitalize all words EXCEPT: a, an, the, and, or, for, in, on, with, of, to, at, by. Always capitalize the first and last word regardless. Exception: recognized acronyms stay ALL CAPS (e.g., USB, LED, UHS-I, SDHC).
-
-TITLE RESTRICTIONS:
-- No promotional phrases ("Best Seller", "Free Shipping", "#1", "Top Rated")
-- No special characters for decoration (stars, arrows, pipes as separators)
-- No variant-specific attributes (specific size, color, capacity) — the title must read correctly for EVERY variant in the family
-- Title must make sense for EVERY child in the family
-- Include ONLY the top 2-3 keywords as determined by the Keyword Placement Rules
-
---- BULLET RULES ---
-
-FORMAT: Start each bullet with a 2-3 WORD BENEFIT HOOK in ALL CAPS, followed by " - ".
-- The hook describes a CUSTOMER BENEFIT (e.g., RETRO STYLE VIBES, EVERYDAY COMFORT, PERFECT GIFT)
-- The hook must NOT be a keyword phrase — keywords go in the body text
-- After the hook, write the feature + benefit in plain English, naturally weaving in keywords from the intelligence data
-
-LIMITS: Each bullet must be 80-200 characters.
-- Under 80 = too thin, missing keyword or benefit detail
-- Over 200 = Amazon may truncate on mobile
-
-KEYWORD TARGETING:
-- CRITICAL GAP and UPGRADE keywords (from keyword intelligence) must appear in the body text of bullets 1-3
-- Each bullet should naturally incorporate 1-2 keywords
-- Bullets 4-5 can focus on trust signals, guarantees, or use cases without keyword pressure
-
-GENERIC REQUIREMENT: All bullets must work for every variant in the family. Do not reference specific sizes, colors, or capacities.
-
-EXAMPLE:
-"RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit."
-
---- BACKEND KEYWORDS RULES ---
-
-ENCODING LIMIT: 250 BYTES maximum per child (not 250 characters).
-- ASCII characters (a-z, 0-9, standard punctuation) = 1 byte each
-- Accented characters (e.g., n with tilde, u with umlaut) = 2-3 bytes each
-- SAFE TARGET: Stay under 240 ASCII characters to leave headroom. If using accented characters, reduce further.
-
-FORMAT: Space-separated words. No commas, no punctuation, no quotation marks. Lowercase.
-
-NEVER INCLUDE IN BACKEND:
-- Words already in the title or bullets (Amazon indexes those automatically — duplicating wastes bytes)
-- The variant's own size, color, or attribute name (Amazon indexes variant attributes automatically)
-- The brand name (Amazon indexes it from the brand field)
-- Competitor brand names (violates Amazon TOS)
-- Subjective claims ("best", "premium", "top quality")
-
-MUST INCLUDE: Synonyms, alternate phrasings, common misspellings, use-case terms, occasion terms (gift, birthday, christmas, fathers day), audience terms (mens, womens, unisex, teen, kids), and long-tail phrases not covered in title/bullets.
-
-FILL EVERY BYTE: Short backend keywords waste ranking opportunity. If under 230 bytes, add more relevant terms.
-
---- BACKEND DISTRIBUTION STRATEGY ---
-
-FOR MULTI-COLOR PRODUCTS (apparel, accessories, home decor):
-Group children by COLOR. All sizes of the SAME color share IDENTICAL backend keywords. Each COLOR GROUP gets a COMPLETELY DIFFERENT keyword string targeting that color's specific aesthetic, audience, or use case.
-
-Example distribution:
-  Moss/Sage variants:  "nature lover outdoors hiking gift green aesthetic earth tone casual weekend"
-  Ivory/White variants: "clean classic minimalist gift neutral tone wedding bridal party elegant"
-  Blue Jean variants:   "denim look casual everyday workwear gift blue aesthetic vintage wash"
-
-This maximizes indexing surface: 10 colors x 250 bytes = 2,500 bytes of unique keyword coverage.
-
-FOR SINGLE-COLOR OR NON-COLOR PRODUCTS:
-Distribute keywords across children by THEME:
-  Small/Medium (or lower-tier variants): audience terms (mens, womens, unisex, teen, young adult)
-  Large/XL (or mid-tier variants):       occasion terms (gift, birthday, christmas, fathers day, mothers day)
-  2XL/3XL (or top-tier variants):        style terms (vintage, retro, 90s, novelty, funny, graphic)
-
-FOR SINGLE-CHILD PRODUCTS:
-Use one keyword string. Pack it with the highest-opportunity terms not already in title/bullets.
-
---- DESCRIPTION RULES ---
-
-ALWAYS generate a full keyword-rich description, even when A+ Content exists.
-A+ Content overrides what CUSTOMERS SEE on the page, but Amazon STILL INDEXES the
-description field for organic search ranking. An empty description throws away an
-indexed ranking field. When "has_aplus" is true, generate the description anyway and
-add this note in the action plan: "Customers see A+ instead of this text, but Amazon
-still indexes the description field for search — keep it filled with keywords."
-
-Format: full HTML using these tags: <b>, <br>, <ul>, <li>, <p>
-  Minimum 150 words, maximum 2,000 characters.
-  Must be generic for all variants.
-  Structure: Opening hook (1-2 sentences) -> Key features (bulleted list) -> Use cases/audience -> Closing CTA
-
-========================================
-SECTION 4: ACTION PLAN RULES
-========================================
-
-Generate a step-by-step action plan reviewing EVERY element below. Include ALL elements even if the verdict is DONE.
-
-ELEMENTS TO REVIEW:
-  1. title (parent level)
-  2. bullet_1 through bullet_5 (parent level — review EACH individually)
-  3. backend_keywords (per_child level)
-  4. description (parent level)
-  5. aplus_modules (parent level)
-  6. brand_story (parent level)
-  7. product_details (parent level)
-  8. images (per_child level)
-
-VERDICT OPTIONS:
-  REPLACE — Swap entirely. replacement_content is MANDATORY.
-  EDIT    — Change specific parts. replacement_content is MANDATORY (provide the full updated text, not a diff).
-  CREATE  — Does not exist, build from scratch. replacement_content is MANDATORY.
-  DONE    — No action needed. replacement_content = null.
-  SKIP    — Not applicable. replacement_content = null. Explain why in notes.
-
-PRIORITY OPTIONS:
-  HIGH   — Directly impacts search ranking or indexing
-  MEDIUM — Improves conversion rate or click-through rate
-  LOW    — Nice to have, minor improvement
-  NONE   — Already optimized
-
-VERDICT GUIDELINES:
-- If current bullets are strong and your recommendation changes fewer than 5 words, mark as DONE
-- If A+ Content exists with fewer than 5 modules, mark as EDIT and specify which modules to ADD (with types and content briefs)
-- If A+ Content does not exist, mark as CREATE
-- Description: even when A+ overrides the displayed page, the description field is STILL INDEXED for search. If it is empty or thin, mark it CREATE/REPLACE (not SKIP) and fill it with keywords. Only mark DONE if it is already strong. Never SKIP description solely because A+ exists.
-- Backend keywords are always per_child — note that each child needs different keywords
-- For images, specify what TYPE to add (lifestyle, infographic, size chart, comparison, packaging, video)
-- If brand story is missing, mark as CREATE and describe what to include
-
-FOR PRODUCT DETAILS IMPROVEMENTS:
-Suggest ONLY structured attributes that are genuinely MISSING or INCORRECT.
-CROSS-CHECK before suggesting:
-- Brand in title? -> Brand field is already set. Do not suggest.
-- Product type clear from title? -> Product Type is set. Do not suggest.
-- Size/color in variant attributes? -> Already set. Do not suggest.
-Return 3-10 improvements. If fewer than 3 are genuinely missing, return fewer. Quality over quantity.
-
-FOR A+ MODULE RECOMMENDATIONS:
-Use exact Amazon A+ module names: "Standard Comparison Chart", "Standard Image & Text Overlay", "Standard Four Image & Text", "Standard Single Image & Highlights", "Standard Single Image & Sidebar", "Standard Three Images & Text".
-
-========================================
-SECTION 5: KEYWORD RECONCILIATION
-========================================
-
-For every CRITICAL and UPGRADE keyword from the Keyword Intelligence block, produce a reconciliation entry showing:
-- The exact keyword
-- Where you placed it (title, bullet_1-5, description, or backend_keywords)
-- The exact phrase from your recommended content containing the keyword
-- Why you placed it there (one sentence)
-
-If a keyword was intentionally NOT placed in title or bullets (pushed to backend), state the reason (e.g., "Could not integrate naturally without hurting readability" or "Title already at 3-keyword limit").
-
-This section exists for seller verification. Keep entries concise.
-
-========================================
-SECTION 6: VARIANT HEALTH CHECK
-========================================
-
-Compare per-variant content. ONLY flag genuinely HARMFUL issues.
-
-FLAG THESE:
-- Wrong product type in a child's content
-- Contradictory specifications (child says "waterproof" but product isn't)
-- Backend keywords containing a DIFFERENT variant's attributes (e.g., "128gb" in the 32GB child)
-- Backend keywords containing competitor brand names
-
-DO NOT FLAG:
-- Expected variant differentiation (different titles showing different sizes/colors — Amazon does this)
-- Different images per variant (this is correct behavior)
-- Minor wording differences that don't affect accuracy
-
-If "is_new_listing" is true, skip this section entirely and return an empty array.
-
-CANNIBALIZATION NOTE (for cannibalization_warnings):
-Children in the SAME variation family do NOT compete in search — Amazon collapses the
-whole family into ONE search result. Do NOT report intra-family "cannibalization." Leave
-cannibalization_warnings EMPTY unless you detect the SAME keyword string copied identically
-across many children's backend terms (wasted indexing surface) — that is the only
-intra-family keyword issue worth flagging. TRUE cannibalization (two SEPARATE parent ASINs
-fighting for one keyword) cannot be judged from this single-family data — never speculate it.
-
-========================================
-SECTION 7: OUTPUT FORMAT
-========================================
-
-Return ONLY a JSON object. No markdown fences, no preamble text, no explanation outside the JSON.
-
-If you cannot complete a field, use null rather than omitting the key.
-All string values must have quotes properly escaped (especially HTML in description).
-
-{
-  "recommended_title": "string (80-150 chars, generic, Title Case, top 2-3 keywords only)",
-  "recommended_title_char_count": 0,
-  "recommended_bullets": [
-    "string (bullet 1, 80-200 chars)",
-    "string (bullet 2, 80-200 chars)",
-    "string (bullet 3, 80-200 chars)",
-    "string (bullet 4, 80-200 chars)",
-    "string (bullet 5, 80-200 chars)"
-  ],
-  "per_child_keywords": [
-    {
-      "sku": "string",
-      "asin": "string",
-      "color_group": "string | null (the color this child belongs to)",
-      "keywords": "string (unique keyword string for THIS child)",
-      "byte_count": 0
-    }
-  ],
-  "recommended_description": "string (full HTML, min 150 words — ALWAYS generate, even if A+ exists, because the field is still indexed for search)",
-  "variant_corrections": [
-    {
-      "sku": "string",
-      "field": "string (title | bullets | keywords | description)",
-      "current": "string",
-      "replace_with": "string",
-      "reason": "string",
-      "severity": "string (HIGH | MEDIUM | LOW)"
-    }
-  ],
-  "cannibalization_warnings": [
-    {
-      "keyword": "string",
-      "affected_skus": ["string"],
-      "issue": "string",
-      "recommendation": "string"
-    }
-  ],
-  "product_details_improvements": [
-    {
-      "field_name": "string (exact Seller Central field name)",
-      "current_value": "string | null",
-      "recommended_value": "string",
-      "reason": "string"
-    }
-  ],
-  "keyword_reconciliation": [
-    {
-      "keyword": "string",
-      "action_type": "string (CRITICAL | UPGRADE | REINFORCE)",
-      "search_volume": 0,
-      "opportunity_score": 0,
-      "placed_in": ["string (title | bullet_1 | bullet_2 | bullet_3 | bullet_4 | bullet_5 | description | backend_keywords)"],
-      "exact_text": "string (the phrase from your content where this keyword appears)",
-      "why": "string (one sentence)"
-    }
-  ],
-  "action_plan": [
-    {
-      "element": "string (title | bullet_1 | bullet_2 | bullet_3 | bullet_4 | bullet_5 | backend_keywords | description | aplus_modules | brand_story | product_details | images)",
-      "level": "string (parent | per_child)",
-      "verdict": "string (REPLACE | EDIT | CREATE | DONE | SKIP)",
-      "priority": "string (HIGH | MEDIUM | LOW | NONE)",
-      "confidence": "string (HIGH | MEDIUM | LOW)",
-      "current_status": "string (factual description of current state)",
-      "instruction": "string (specific step-by-step instruction for the seller)",
-      "replacement_content": "string | [string] | null",
-      "notes": "string | null",
-      "aplus_modules": [
-        {
-          "module_type": "string (exact Amazon A+ module name from dropdown)",
-          "action": "string (ADD | EDIT | KEEP)",
-          "content_brief": "string",
-          "position": 1
-        }
-      ]
-    }
-  ]
-}
-
-========================================
-SECTION 8: EXAMPLE OUTPUT (TRUNCATED)
-========================================
-
-Below is a PARTIAL example showing correct formatting for a fictional "Later Gator" t-shirt product. Your output must follow this exact structure. This example is truncated — your output must include ALL fields from the schema above.
-
-{
-  "recommended_title": "THE CEO Later Gator Tshirt - See You Later Alligator Shirt - Funny Graphic Tee for Men and Women",
-  "recommended_title_char_count": 96,
-  "recommended_bullets": [
-    "RETRO STYLE VIBES - This later gator tshirt features a playful see you later alligator graphic with vintage 90s energy and a relaxed everyday fit",
-    "COMFORT ALL DAY - Made from soft breathable cotton blend fabric that keeps you cool whether you are out with friends or lounging at home",
-    "PERFECT FUNNY GIFT - Looking for a humorous alligator lover gift? This graphic tee makes a great birthday christmas or just-because present for him or her",
-    "EASY CARE FABRIC - Machine washable and dryer safe with print that stays vibrant wash after wash without cracking fading or peeling",
-    "TRUE TO SIZE FIT - Check the size chart before ordering for the best fit in this unisex crew neck short sleeve tee available in multiple colors"
-  ],
-  "per_child_keywords": [
-    {
-      "sku": "LG-MOSS-S",
-      "asin": "B0EXAMPLE1",
-      "color_group": "Moss",
-      "keywords": "nature lover outdoors hiking gift green aesthetic earth tone casual weekend camping trip adventure wear forest sage olive neutral spring summer layering",
-      "byte_count": 168
-    },
-    {
-      "sku": "LG-IVORY-S",
-      "asin": "B0EXAMPLE2",
-      "color_group": "Ivory",
-      "keywords": "clean classic minimalist gift neutral tone wedding party elegant simple aesthetic cream off white casual dressy brunch outfit date night light color warm",
-      "byte_count": 163
-    }
-  ],
-  "recommended_description": "<p><b>See you later, alligator!</b> This later gator graphic tee brings playful retro energy to your everyday wardrobe.</p><ul><li>Soft, breathable comfort-colors fabric</li><li>Relaxed unisex fit for men and women</li><li>Vibrant print that lasts wash after wash</li></ul><p>A fun gift for alligator lovers and vintage tee fans alike.</p>",
-  "variant_corrections": [],
-  "cannibalization_warnings": [],
-  "product_details_improvements": [
-    {
-      "field_name": "Fabric Type",
-      "current_value": null,
-      "recommended_value": "Cotton Blend",
-      "reason": "Fabric Type is a filterable attribute in Clothing — setting it makes the product appear in filtered searches"
-    }
-  ],
-  "keyword_reconciliation": [
-    {
-      "keyword": "later gator tshirt",
-      "action_type": "UPGRADE",
-      "search_volume": 11794,
-      "opportunity_score": 40,
-      "placed_in": ["title", "bullet_1"],
-      "exact_text": "Later Gator Tshirt (title) | This later gator tshirt features (bullet_1)",
-      "why": "High-volume product term — placed in title and reinforced in bullet 1"
-    }
-  ],
-  "action_plan": [
-    {
-      "element": "title",
-      "level": "parent",
-      "verdict": "REPLACE",
-      "priority": "HIGH",
-      "confidence": "HIGH",
-      "current_status": "Title exceeds 150-char limit and is missing the top critical keywords",
-      "instruction": "Replace the entire title with the recommended title below. Copy-paste exactly. Keep it generic — do not add a specific size or color (the title must read correctly for every variant).",
-      "replacement_content": "THE CEO Later Gator Tshirt - See You Later Alligator Shirt - Funny Graphic Tee for Men and Women",
-      "notes": "96 chars. Brand leads (compliance), then product keyphrase, then descriptive, then audience. One consistent audience.",
-      "aplus_modules": null
-    }
-  ]
-}
-
-========================================
-SECTION 9: SELF-CHECK BEFORE RETURNING
-========================================
-
-Before returning your JSON, verify each of these. If any check fails, fix the output before returning.
-
-1. TITLE CHARACTER COUNT: Count the characters in recommended_title. Is it 80-150? Does recommended_title_char_count match the actual count?
-2. BULLET CHARACTER COUNTS: Is each bullet 80-200 characters?
-3. BACKEND BYTE COUNTS: Is each child's keyword string under 250 bytes? Does byte_count match? (ASCII = 1 byte/char. Accented chars = 2-3 bytes.)
-4. NO DUPLICATE WORDS: Are there words in backend keywords that already appear in the title or bullets? Remove them.
-5. KEYWORD COVERAGE: Does every CRITICAL and UPGRADE keyword from the intelligence block appear in keyword_reconciliation? Is each one placed somewhere?
-6. NO VARIANT ATTRIBUTES IN TITLE: Does the title contain any specific size, color, or capacity? Remove them.
-7. GENERIC BULLETS: Do any bullets reference a specific variant? Fix them.
-8. RESTRICTED CLAIMS: Does any content violate the restricted_claims from the input? Remove violations.
-9. VALID JSON: Are all strings properly escaped? Are there no trailing commas? Is the JSON parseable?
-10. TITLE STRUCTURE CHECK: Does recommended_title follow [Brand] [product-specific keyphrase] - [descriptive variation] - [audience + product type]? It must (a) START WITH THE BRAND NAME, (b) put the specific product keyphrase immediately after the brand, (c) keep ONE consistent audience — never mix "kids" with "men"/"women", (d) contain no seasonal terms, (e) repeat no word more than twice, and (f) stay 80-125 characters. If the brand is missing, or a broad generic keyword leads instead of the product keyphrase, or audiences are mixed, rewrite it.
-
-========================================
-END OF PROMPT
-========================================`
+    // ─── Resolve the keyword-bearing ASIN and load the analysis for the pipeline ───
+    const { data: pipelineScoreRow } = await supabase
+      .from('listing_seo_scores')
+      .select('top_child_asin')
+      .eq('parent_asin', parent_asin)
+      .single()
+    const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
+    const analysis = (await getStoredAnalysis(analysisAsin, 50)) ?? []
+
+    // Build the child list for the pipeline (color/size parsed from SKU)
+    const pipelineChildren = children.map((c: ChildRow) => {
+      const color = extractColor(c.sku, c.title || '')
+      const skuParts = c.sku.split('-')
+      const size = skuParts.length >= 3 ? skuParts[2] : null
+      return { sku: c.sku, asin: c.asin, color: color || null, size: size || null }
+    })
 
     const openai = getOpenAI()
-
-    // ─── Use streaming to prevent proxy timeout ─────────────────────────────
-    // We stream the OpenAI response and forward progress to the client via NDJSON.
-    // This keeps the HTTP connection alive even if generation takes 90-120s.
-
     const encoder = new TextEncoder()
 
+    // ─── Streaming shell: run the multi-agent pipeline, emitting NDJSON keepalives ───
+    // Coolify/Cloudflare drop idle connections at ~100s; emit() before each agent keeps
+    // the connection warm. Each agent is a focused single-task prompt (see listingPipeline).
     const stream = new ReadableStream({
       async start(controller) {
+        const emit = (obj: unknown) => controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
         try {
-          // Send initial progress
-          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Analyzing listing content...' }) + '\n'))
+          emit({ type: 'progress', message: 'Analyzing listing content...' })
+          if (analysis.length === 0) {
+            emit({ type: 'progress', message: 'No keyword data yet — generating from listing content...' })
+          }
 
-          const completion = await openai.chat.completions.create({
-            model: 'gpt-4.1-mini',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: listingContext },
-            ],
-            temperature: 0.3,
-            max_tokens: 16000,
-            stream: true,
+          const result = await runListingPipeline({
+            openai,
+            brandName,
+            category: inputJson.category,
+            analysis,
+            children: pipelineChildren,
+            repTitle: rep.title,
+            variantDetails,
+            keywordContext,
+            hasAplus: rep.has_aplus || false,
+            auditModel: 'o4-mini',
+            onProgress: (message) => emit({ type: 'progress', message }),
           })
 
-          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'AI is generating recommendations...' }) + '\n'))
+          emit({ type: 'progress', message: 'Saving to database...' })
 
-          let rawContent = ''
-          let chunkCount = 0
-
-          for await (const chunk of completion) {
-            const delta = chunk.choices[0]?.delta?.content || ''
-            rawContent += delta
-            chunkCount++
-
-            // Send periodic progress updates to keep connection alive
-            if (chunkCount % 50 === 0) {
-              const pctEstimate = Math.min(90, Math.round((rawContent.length / 12000) * 100))
-              controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: `Generating... ${pctEstimate}% complete`, chars: rawContent.length }) + '\n'))
-            }
-          }
-
-          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Parsing AI response...' }) + '\n'))
-
-          // Parse the JSON response (V2 schema)
-          let parsed: {
-            recommended_title: string
-            recommended_title_char_count?: number
-            recommended_bullets: string[]
-            per_child_keywords?: { sku: string; asin: string; color_group?: string; keywords: string; byte_count?: number }[]
-            recommended_keywords?: string
-            recommended_description: string | null
-            variant_corrections?: (VariantCorrection & { severity?: string })[]
-            cannibalization_warnings?: CannibalizationWarning[]
-            product_details_improvements?: ProductDetailImprovement[]
-            keyword_reconciliation?: (KeywordReconciliation & { opportunity_score?: number })[]
-            action_plan?: (ActionPlanItem & { confidence?: string })[]
-          }
-
-          try {
-            // Robust JSON extraction: strip markdown fences, find the JSON object
-            let cleaned = rawContent
-              .replace(/^```json\s*/i, '')
-              .replace(/^```\s*/i, '')
-              .replace(/\s*```$/i, '')
-              .trim()
-
-            // If it doesn't start with {, find the first {
-            const firstBrace = cleaned.indexOf('{')
-            if (firstBrace > 0) {
-              cleaned = cleaned.slice(firstBrace)
-            }
-
-            // If it doesn't end with }, find the last }
-            const lastBrace = cleaned.lastIndexOf('}')
-            if (lastBrace > 0 && lastBrace < cleaned.length - 1) {
-              cleaned = cleaned.slice(0, lastBrace + 1)
-            }
-
-            // Handle truncated JSON: if the response was cut off, try to repair
-            // by closing any open arrays/objects
-            try {
-              parsed = JSON.parse(cleaned)
-            } catch (firstErr) {
-              // Try adding closing brackets
-              let repaired = cleaned
-              const openBraces = (repaired.match(/\{/g) || []).length
-              const closeBraces = (repaired.match(/\}/g) || []).length
-              const openBrackets = (repaired.match(/\[/g) || []).length
-              const closeBrackets = (repaired.match(/\]/g) || []).length
-
-              // Remove trailing comma if any
-              repaired = repaired.replace(/,\s*$/, '')
-
-              // Close open brackets/braces
-              for (let i = 0; i < openBrackets - closeBrackets; i++) repaired += ']'
-              for (let i = 0; i < openBraces - closeBraces; i++) repaired += '}'
-
-              try {
-                parsed = JSON.parse(repaired)
-                console.warn('[AI Recs] JSON was truncated but successfully repaired')
-              } catch {
-                throw firstErr // Re-throw original error
-              }
-            }
-          } catch (parseErr) {
-            console.error('[AI Recs] Failed to parse LLM response. Length:', rawContent.length, 'First 500:', rawContent.slice(0, 500), 'Last 500:', rawContent.slice(-500))
-            controller.enqueue(encoder.encode(JSON.stringify({ type: 'error', error: 'AI returned invalid JSON. Please try again. (Response length: ' + rawContent.length + ' chars)' }) + '\n'))
-            controller.close()
-            return
-          }
-
-          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Validating keywords...' }) + '\n'))
-
-          // Post-generation validation: verify CRITICAL keywords were included
-          // Fetch top_child_asin for validation (same logic as buildKeywordContext)
-          const { data: valScoreRow } = await supabase
-            .from('listing_seo_scores')
-            .select('top_child_asin')
-            .eq('parent_asin', parent_asin)
-            .single()
-          const validationAsin = valScoreRow?.top_child_asin || children[0]?.asin
-          const criticalKeywords = (await getStoredAnalysis(validationAsin, 10))
-            ?.filter(k => k.actionType === 'CRITICAL')
-            .map(k => k.keyword) ?? []
-
-          const titleAndBullets = [
-            parsed.recommended_title,
-            ...(parsed.recommended_bullets ?? []),
-          ].join(' ').toLowerCase()
-
-          const missedCritical = criticalKeywords.filter(kw =>
-            !titleAndBullets.includes(kw.toLowerCase())
-          )
-
-          if (missedCritical.length > 0) {
-            console.warn(
-              `[AI Recs] V3 validation: AI missed ${missedCritical.length} CRITICAL keywords: ${missedCritical.join(', ')}`
-            )
-          }
-
-          // Post-generation enforcement: truncate each child's backend keywords to 250 BYTES
-          // Amazon's limit is 250 bytes, not 250 characters. ASCII = 1 byte, accented = 2-3 bytes.
-          const getByteLength = (str: string) => new TextEncoder().encode(str).length
-          const truncateToBytes = (str: string, maxBytes: number): string => {
-            if (getByteLength(str) <= maxBytes) return str
-            // Binary search for the right character cutoff
-            let low = 0, high = str.length
-            while (low < high) {
-              const mid = Math.ceil((low + high) / 2)
-              if (getByteLength(str.slice(0, mid)) <= maxBytes) low = mid
-              else high = mid - 1
-            }
-            // Cut at last space before the byte limit
-            const truncated = str.slice(0, low)
-            const lastSpace = truncated.lastIndexOf(' ')
-            return lastSpace > low * 0.7 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
-          }
-
-          const perChildKeywords: PerChildKeywords[] = (parsed.per_child_keywords || []).map(pck => {
-            let kw = (pck.keywords || '').trim()
-            const byteLen = getByteLength(kw)
-            if (byteLen > 250) {
-              kw = truncateToBytes(kw, 250)
-              console.warn(`[AI Recs] Per-child keywords for ${pck.sku} truncated from ${byteLen} to ${getByteLength(kw)} bytes`)
-            }
-            return { sku: pck.sku, asin: pck.asin, keywords: kw }
-          })
-
-          // Legacy fallback
-          const legacyKeywords = perChildKeywords.length > 0
-            ? perChildKeywords[0].keywords
-            : (() => {
-                let kw = (parsed.recommended_keywords || '').trim()
-                if (kw.length > 250) {
-                  const truncated = kw.slice(0, 250)
-                  const lastSpace = truncated.lastIndexOf(' ')
-                  kw = lastSpace > 200 ? truncated.slice(0, lastSpace).trim() : truncated.trim()
-                }
-                return kw
-              })()
-
-          // Build keyword reconciliation
-          const keywordReconciliation: KeywordReconciliation[] = Array.isArray(parsed.keyword_reconciliation)
-            ? parsed.keyword_reconciliation.map(kr => ({
-                keyword: kr.keyword || '',
-                action_type: kr.action_type as KeywordReconciliation['action_type'] || 'CRITICAL',
-                search_volume: kr.search_volume || 0,
-                placed_in: Array.isArray(kr.placed_in) ? kr.placed_in : [],
-                exact_text: kr.exact_text || '',
-                why: kr.why || '',
-              }))
-            : []
-
-          // ─────────────────────────────────────────────────────────────────────
-          // TITLE VALIDATION (PR1) — the LLM authors the title; code only referees.
-          // The former deterministic 3-slot builder produced semantically broken
-          // titles (e.g. "Kids Gator ... for Men"). A rule engine cannot AUTHOR a
-          // coherent title, but it CAN validate one. So: LLM writes, we check, and
-          // on failure we ask the LLM once to fix the specific violations.
-          // ─────────────────────────────────────────────────────────────────────
-          const SEASONAL_TITLE_TERMS = [
-            'christmas', 'xmas', 'halloween', 'valentines', 'valentine', 'easter',
-            'thanksgiving', 'mothers day', 'mother day', 'fathers day', 'father day',
-            'back to school', 'last day of school', 'schools out', 'school out',
-            'independence day', '4th of july', 'fourth of july', 'july 4th',
-            'st patrick', 'new year', 'new years', 'memorial day', 'labor day',
-            'spring break', 'summer break', 'winter break', 'black friday',
-            'cyber monday', 'prime day', 'hanukkah',
-          ]
-          const TITLE_MINOR_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'for', 'in', 'on', 'with', 'of', 'to', 'at', 'by'])
-          const KIDS_AUDIENCE = ['kids', 'kid', 'toddler', 'toddlers', 'baby', 'babies', 'infant', 'youth', 'boys', 'girls', 'children']
-          const ADULT_AUDIENCE = ['men', 'mens', 'women', 'womens', 'man', 'woman', 'adult', 'adults']
-
-          const validateTitle = (title: string): string[] => {
-            const problems: string[] = []
-            const len = title.length
-            if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim for 80-125 for apparel).`)
-            else if (len < 80) problems.push(`Title is only ${len} characters; use at least 80 to capture more keyword space.`)
-            // Amazon Jan 2025 policy: no non-trivial word may appear more than twice (plural-normalized)
-            const counts = new Map<string, number>()
-            title.toLowerCase().split(/\s+/).forEach((w) => {
-              const base = w.replace(/[^a-z0-9]/g, '')
-              if (base && !TITLE_MINOR_WORDS.has(base)) {
-                const norm = base.replace(/s$/, '')
-                counts.set(norm, (counts.get(norm) ?? 0) + 1)
-              }
-            })
-            const repeated = [...counts.entries()].filter(([, c]) => c > 2).map(([w]) => w)
-            if (repeated.length) problems.push(`These words appear more than twice (Amazon allows max 2 each): ${repeated.join(', ')}.`)
-            // Seasonal terms do not belong in an evergreen title
-            const lc = title.toLowerCase()
-            const season = SEASONAL_TITLE_TERMS.find((s) => lc.includes(s))
-            if (season) problems.push(`Remove the seasonal term "${season}" — evergreen product; seasonal keywords belong in backend terms, not the title.`)
-            // Audience contradiction (the "Kids Gator ... for Men" failure)
-            const words = new Set(lc.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
-            const hasKids = KIDS_AUDIENCE.some((t) => words.has(t))
-            const hasAdult = ADULT_AUDIENCE.some((t) => words.has(t))
-            if (hasKids && hasAdult) problems.push(`Title mixes kids and adult audiences (e.g. "kids" with "men"/"women") — pick ONE consistent audience.`)
-            // Brand presence (Amazon apparel compliance — brand must lead the title)
-            if (brandName && !lc.includes(brandName.toLowerCase())) {
-              problems.push(`Title must start with the brand "${brandName}".`)
-            }
-            return problems
-          }
-
-          let finalTitle = (parsed.recommended_title || '').trim()
-          let titleProblems = finalTitle ? validateTitle(finalTitle) : ['No title was generated.']
-
-          // One corrective retry: hand the LLM its title + the exact violations and ask for a fix.
-          if (finalTitle && titleProblems.length > 0) {
-            controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Refining title...' }) + '\n'))
-            try {
-              const fix = await openai.chat.completions.create({
-                model: 'gpt-4.1-mini',
-                messages: [
-                  { role: 'system', content: 'You are an Amazon apparel SEO title editor. Output ONLY the corrected title string — no quotes, no markdown, no explanation.' },
-                  { role: 'user', content: `Rewrite this Amazon product title to fix the problems below while keeping the strongest keywords and natural, human readability.\n\nBrand: ${brandName}\nTitle: ${finalTitle}\n\nProblems:\n- ${titleProblems.join('\n- ')}\n\nStructure: ${brandName} [product-specific keyphrase] - [descriptive variation] - [audience + product type]. Start with the brand, then the specific product keyphrase. 80-125 characters. No word more than twice. No seasonal terms. ONE consistent audience. Return ONLY the corrected title.` },
-                ],
-                temperature: 0.2,
-                max_tokens: 120,
-              })
-              const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-              if (corrected) {
-                const correctedProblems = validateTitle(corrected)
-                // Accept the rewrite if it is valid or strictly better than the original
-                if (correctedProblems.length < titleProblems.length) {
-                  finalTitle = corrected
-                  titleProblems = correctedProblems
-                }
-              }
-            } catch (titleErr) {
-              console.warn('[AI Recs] Title correction retry failed:', titleErr)
-            }
-          }
-
-          // Compliance guarantee: if the brand is still missing after the retry,
-          // prepend it (Amazon apparel requires the brand lead). Only prepend if it fits.
-          if (finalTitle && brandName && !finalTitle.toLowerCase().includes(brandName.toLowerCase())) {
-            const prefixed = `${brandName} ${finalTitle}`.trim()
-            if (prefixed.length <= 150) {
-              finalTitle = prefixed
-              titleProblems = validateTitle(finalTitle)
-            }
-          }
-
-          if (titleProblems.length > 0) {
-            console.warn(`[AI Recs] Title still imperfect after retry: ${titleProblems.join(' | ')} — "${finalTitle}"`)
-          }
-          console.log(`[AI Recs] Final title (LLM-authored, validated): "${finalTitle}"`)
-
-          // Patch action_plan title entry so the UI's "COPY & PASTE THIS" box matches
-          if (Array.isArray(parsed.action_plan)) {
-            const titleEntry = parsed.action_plan.find((item: { element?: string }) => item.element === 'title')
-            if (titleEntry) {
-              titleEntry.replacement_content = finalTitle
-            }
-          }
           const rec: AiRecommendations = {
             parent_asin,
-            recommended_title: finalTitle,
-            recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
-            recommended_keywords: legacyKeywords,
-            per_child_keywords: perChildKeywords,
-            recommended_description: parsed.recommended_description || '',
-            variant_corrections: Array.isArray(parsed.variant_corrections) ? parsed.variant_corrections : [],
-            cannibalization_warnings: Array.isArray(parsed.cannibalization_warnings) ? parsed.cannibalization_warnings : [],
-            product_details_improvements: Array.isArray(parsed.product_details_improvements) ? parsed.product_details_improvements.slice(0, 10) : [],
-            keyword_reconciliation: keywordReconciliation,
-            action_plan: Array.isArray(parsed.action_plan) ? parsed.action_plan : [],
+            recommended_title: result.recommended_title,
+            recommended_bullets: result.recommended_bullets,
+            recommended_keywords: result.per_child_keywords[0]?.keywords ?? '',
+            per_child_keywords: result.per_child_keywords,
+            recommended_description: result.recommended_description,
+            variant_corrections: result.variant_corrections,
+            cannibalization_warnings: result.cannibalization_warnings,
+            product_details_improvements: result.product_details_improvements,
+            keyword_reconciliation: result.keyword_reconciliation as KeywordReconciliation[],
+            action_plan: result.action_plan as ActionPlanItem[],
             generated_at: new Date().toISOString(),
             keyword_opportunities_used: opportunitiesUsed,
           }
 
-          controller.enqueue(encoder.encode(JSON.stringify({ type: 'progress', message: 'Saving to database...' }) + '\n'))
-
-          // Store in listing_seo_recommendations
-          const { per_child_keywords: pck, cannibalization_warnings, product_details_improvements, keyword_reconciliation: kwRecon, action_plan: actionPlan, keyword_opportunities_used, ...persistFields } = rec
-
+          // DB write. recommended_bullets + the *_warnings/improvements/reconciliation/action_plan
+          // columns are JSONB (arrays written directly); recommended_keywords is TEXT (JSON string).
           const dbPayload: Record<string, unknown> = {
-            ...persistFields,
-            recommended_keywords: JSON.stringify(perChildKeywords),
-            cannibalization_warnings,
-            product_details_improvements,
-            keyword_reconciliation: kwRecon,
-            action_plan: actionPlan,
+            parent_asin: rec.parent_asin,
+            recommended_title: rec.recommended_title,
+            recommended_bullets: rec.recommended_bullets,
+            recommended_keywords: JSON.stringify(rec.per_child_keywords),
+            recommended_description: rec.recommended_description,
+            generated_at: rec.generated_at,
+            variant_corrections: rec.variant_corrections,
+            cannibalization_warnings: rec.cannibalization_warnings,
+            product_details_improvements: rec.product_details_improvements,
+            keyword_reconciliation: rec.keyword_reconciliation,
+            action_plan: rec.action_plan,
           }
 
           const { error: upsertErr } = await supabase
             .from('listing_seo_recommendations')
             .upsert(dbPayload, { onConflict: 'parent_asin' })
-
           if (upsertErr) {
-            console.warn('[AI Recs] Full upsert failed, retrying without new fields:', upsertErr.message)
-            const fallbackPayload = {
-              ...persistFields,
-              recommended_keywords: JSON.stringify(perChildKeywords),
-            }
-            await supabase
-              .from('listing_seo_recommendations')
-              .upsert(fallbackPayload, { onConflict: 'parent_asin' })
+            console.warn('[AI Recs] Full upsert failed, retrying minimal payload:', upsertErr.message)
+            await supabase.from('listing_seo_recommendations').upsert({
+              parent_asin: rec.parent_asin,
+              recommended_title: rec.recommended_title,
+              recommended_bullets: rec.recommended_bullets,
+              recommended_keywords: JSON.stringify(rec.per_child_keywords),
+              recommended_description: rec.recommended_description,
+              generated_at: rec.generated_at,
+            }, { onConflict: 'parent_asin' })
           }
 
-          // Send final result
-          controller.enqueue(encoder.encode(JSON.stringify({
+          emit({
             type: 'result',
             recommendations: rec,
             keywordIntelligenceUsed: opportunitiesUsed > 0,
-            missedCriticalKeywords: missedCritical,
-          }) + '\n'))
-
+            titleDebug: result.debug,
+          })
           controller.close()
         } catch (err) {
-          console.error('[AI Recs] Stream error:', err)
-          controller.enqueue(encoder.encode(JSON.stringify({
-            type: 'error',
-            error: err instanceof Error ? err.message : 'Unexpected error during generation',
-          }) + '\n'))
+          console.error('[AI Recs] Pipeline error:', err)
+          emit({ type: 'error', error: err instanceof Error ? err.message : 'Unexpected error during generation' })
           controller.close()
         }
       },
