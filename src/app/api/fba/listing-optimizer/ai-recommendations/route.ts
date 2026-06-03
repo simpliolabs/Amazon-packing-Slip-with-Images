@@ -1049,9 +1049,29 @@ END OF PROMPT
               }))
             : []
 
+          // ─── Post-processing: enforce brand anchor verbatim in title ──────────
+          // The LLM may paraphrase the brand anchor (e.g., expand "tshirt" to "T-Shirt").
+          // This deterministic step guarantees the exact brand anchor string appears in the title.
+          let finalTitle = parsed.recommended_title || ''
+          if (brandAnchor) {
+            const anchor = brandAnchor.keyword.toLowerCase()
+            if (!finalTitle.toLowerCase().includes(anchor)) {
+              // The brand anchor is missing — inject it at the start of the title.
+              // Capitalize the anchor for Title Case, then append any existing title content
+              // after the first dash (or use the full title if no dash).
+              const anchorTitleCase = brandAnchor.keyword
+                .split(' ')
+                .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+                .join(' ')
+              const dashIdx = finalTitle.indexOf(' - ')
+              const rest = dashIdx >= 0 ? finalTitle.slice(dashIdx) : ''
+              finalTitle = `${anchorTitleCase}${rest}`
+            }
+          }
+
           const rec: AiRecommendations = {
             parent_asin,
-            recommended_title: parsed.recommended_title || '',
+            recommended_title: finalTitle,
             recommended_bullets: Array.isArray(parsed.recommended_bullets) ? parsed.recommended_bullets.slice(0, 5) : [],
             recommended_keywords: legacyKeywords,
             per_child_keywords: perChildKeywords,
