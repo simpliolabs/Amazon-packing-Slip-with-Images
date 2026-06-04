@@ -187,6 +187,7 @@ export default function ListingDetailPage() {
   const [pushError, setPushError] = useState<string | null>(null)
   const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
   const [showPushModal, setShowPushModal] = useState(false)
+  const [fetchedImage, setFetchedImage] = useState<string | null>(null)
 
   const copy = (text: string, label: string) => {
     copyToClipboard(text)
@@ -215,6 +216,18 @@ export default function ListingDetailPage() {
       setLoading(false)
     })()
   }, [asin])
+
+  // If the synced score has no product image, fetch it on-demand from the Amazon catalog.
+  useEffect(() => {
+    if (!score || score.image_url) return
+    const imgAsin = score.top_child_asin || asin
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/product-image?asin=${imgAsin}`)
+        if (resp.ok) { const d = await resp.json(); if (d.image_url) setFetchedImage(d.image_url) }
+      } catch { /* ignore — placeholder stays */ }
+    })()
+  }, [score, asin])
 
   // Fetch AI recommendations (cached)
   useEffect(() => {
@@ -423,6 +436,7 @@ export default function ListingDetailPage() {
     </div>
   )
 
+  const displayImage = score.image_url || fetchedImage
   const bars = [
     { label: 'Title', score: score.title_score, max: 25 },
     { label: 'Bullets', score: score.bullet_score, max: 25 },
@@ -447,11 +461,11 @@ export default function ListingDetailPage() {
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6">
         <div className="flex flex-col sm:flex-row gap-5">
           {/* Image */}
-          <div className="flex-shrink-0 w-20 h-20 bg-slate-100 rounded-2xl overflow-hidden ring-1 ring-slate-200">
-            {score.image_url ? (
-              <img src={score.image_url} alt="" className="w-full h-full object-cover" />
+          <div className="flex-shrink-0 w-20 h-20 bg-slate-100 rounded-2xl overflow-hidden ring-1 ring-slate-200 flex items-center justify-center">
+            {displayImage ? (
+              <img src={displayImage} alt="" className="w-full h-full object-cover" />
             ) : (
-              <div className="w-full h-full flex items-center justify-center text-xs text-slate-400">IMG</div>
+              <svg viewBox="0 0 24 24" className="w-7 h-7 text-slate-300" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
             )}
           </div>
 
@@ -490,15 +504,6 @@ export default function ListingDetailPage() {
             className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-violet-200">
             <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Generating…' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
           </button>
-          {aiRecs && (
-            <button
-              onClick={() => openPushPreview('keywords')}
-              disabled={pushLoading}
-              title="Write the per-child backend keywords directly to Amazon"
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-emerald-200">
-              <Icon.Send className="w-3.5 h-3.5" /> Push Keywords
-            </button>
-          )}
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
 
@@ -550,15 +555,16 @@ export default function ListingDetailPage() {
           ACTION PLAN — Comprehensive listing review with verdicts
           ══════════════════════════════════════════════════════════════════════ */}
       {aiRecs?.action_plan && aiRecs.action_plan.length > 0 && (() => {
+        // Calm, SaaS-style cards: white with a colored LEFT accent per verdict (no full-bleed fills).
         const verdictStyles: Record<string, string> = {
-          REPLACE: 'bg-red-50 border-red-300 text-red-800',
-          EDIT: 'bg-amber-50 border-amber-300 text-amber-800',
-          CREATE: 'bg-blue-50 border-blue-300 text-blue-800',
-          DONE: 'bg-green-50 border-green-300 text-green-800',
-          SKIP: 'bg-slate-50 border-slate-300 text-slate-500',
+          REPLACE: 'border-l-red-400',
+          EDIT: 'border-l-amber-400',
+          CREATE: 'border-l-blue-400',
+          DONE: 'border-l-green-400',
+          SKIP: 'border-l-slate-300',
         }
-        const verdictIcons: Record<string, string> = {
-          REPLACE: '🔴', EDIT: '⚠️', CREATE: '🔵', DONE: '✅', SKIP: '⏭️',
+        const verdictDot: Record<string, string> = {
+          REPLACE: 'bg-red-500', EDIT: 'bg-amber-500', CREATE: 'bg-blue-500', DONE: 'bg-green-500', SKIP: 'bg-slate-400',
         }
         const priorityBadge: Record<string, string> = {
           HIGH: 'bg-red-100 text-red-700',
@@ -629,11 +635,11 @@ export default function ListingDetailPage() {
                           <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 flex-shrink-0 hidden sm:inline">should match</span>
                           {split
-                            ? <span className="text-[11px] text-purple-700 flex items-center gap-1"><span aria-hidden>⚡</span>{f.coh.distinct} versions live</span>
+                            ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
                             : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
                           <span className="ml-auto text-[11px] flex-shrink-0">
                             {f.coh.needUpdate > 0
-                              ? <span className="text-amber-700 flex items-center gap-1"><span aria-hidden>⚠️</span>{f.coh.needUpdate} need update</span>
+                              ? <span className="text-amber-700 flex items-center gap-1">{f.coh.needUpdate} need update</span>
                               : <span className="text-green-700">up to date</span>}
                           </span>
                           <span className="text-xs text-slate-400 flex-shrink-0">{open ? '▾' : '▸'}</span>
@@ -666,7 +672,7 @@ export default function ListingDetailPage() {
                     <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">Backend</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 flex-shrink-0 hidden sm:inline">unique each</span>
                     <span className="text-[11px] text-slate-500">each variant gets its own color-specific terms</span>
-                    <span className="ml-auto text-[11px] text-amber-700 flex items-center gap-1 flex-shrink-0"><span aria-hidden>⚠️</span>{needsUpdate} need update <span className="text-slate-400 hidden sm:inline">— see table below</span></span>
+                    <span className="ml-auto text-[11px] text-amber-700 flex items-center gap-1 flex-shrink-0">{needsUpdate} need update <span className="text-slate-400 hidden sm:inline">— see table below</span></span>
                   </div>
                 </div>
               </div>
@@ -681,37 +687,37 @@ export default function ListingDetailPage() {
                   {parentItems.map((item, idx) => {
                     const style = verdictStyles[item.verdict] || verdictStyles.SKIP
                     return (
-                  <div key={idx} className={`rounded-lg border p-4 ${style}`}>
+                  <div key={idx} className={`rounded-2xl border border-slate-200 border-l-4 bg-white shadow-sm p-4 ${style}`}>
                     {/* Row 1: Element + Verdict + Priority + Level */}
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-lg">{verdictIcons[item.verdict]}</span>
-                      <span className="font-semibold text-sm uppercase">{item.element.replace(/_/g, ' ')}</span>
+                      <span className={`inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 ${verdictDot[item.verdict] || verdictDot.SKIP}`} />
+                      <span className="font-semibold text-sm uppercase text-slate-900">{item.element.replace(/_/g, ' ')}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${priorityBadge[item.priority] || ''}`}>
                         {item.priority}
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/60 border border-current/20">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-medium">
                         {item.level === 'parent' ? 'Parent Level' : 'Per Child'}
                       </span>
-                      <span className="ml-auto text-[10px] font-mono opacity-60">{item.verdict}</span>
+                      <span className="ml-auto text-[10px] font-mono text-slate-400">{item.verdict}</span>
                     </div>
 
                     {/* Row 2: Current Status */}
-                    <p className="text-xs mt-1.5 opacity-80">
-                      <span className="font-medium">Current:</span> {item.current_status}
+                    <p className="text-xs mt-1.5 text-slate-500">
+                      <span className="font-medium text-slate-600">Current:</span> {item.current_status}
                     </p>
 
                     {/* Row 3: Instruction */}
                     {item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
-                      <div className="mt-2 bg-white/60 rounded p-2.5 border border-current/10">
-                        <p className="text-xs font-medium mb-0.5">What to do:</p>
-                        <p className="text-xs leading-relaxed">{item.instruction}</p>
+                      <div className="mt-2 bg-slate-50 rounded-lg p-2.5 border border-slate-200">
+                        <p className="text-xs font-medium mb-0.5 text-slate-700">What to do:</p>
+                        <p className="text-xs leading-relaxed text-slate-600">{item.instruction}</p>
                       </div>
                     )}
 
                     {/* Row 4: Seller Central Path */}
                     {item.seller_central_path && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
-                      <p className="text-[10px] mt-1.5 opacity-60">
-                        📍 {item.seller_central_path}
+                      <p className="text-[10px] mt-1.5 text-slate-400">
+                        {item.seller_central_path}
                       </p>
                     )}
 
@@ -830,7 +836,12 @@ export default function ListingDetailPage() {
                 {perChildRows.length === 0 ? (
                   <p className="text-xs text-slate-400">No variant data yet.</p>
                 ) : (
-                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                  <details className="bg-white border border-slate-200 rounded-2xl overflow-hidden group">
+                    <summary className="cursor-pointer select-none px-4 py-2.5 text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-2">
+                      <span className="text-slate-400 transition-transform group-open:rotate-90" aria-hidden>▸</span>
+                      View per-variant backend terms — {perChildRows.length} SKUs{needsUpdate > 0 ? `, ${needsUpdate} need update` : ''}
+                    </summary>
+                    <div className="overflow-x-auto border-t border-slate-100">
                     <table className="w-full text-xs">
                       <thead className="bg-slate-50 border-b border-slate-200">
                         <tr>
@@ -848,7 +859,7 @@ export default function ListingDetailPage() {
                               {r.recommended === ''
                                 ? <span className="text-slate-400">—</span>
                                 : r.changed
-                                  ? <span className="text-amber-600 font-medium">⚠️ Update</span>
+                                  ? <span className="text-amber-600 font-medium">Update</span>
                                   : <span className="text-green-600">✓ OK</span>}
                             </td>
                             <td className="px-3 py-2 align-top">
@@ -864,7 +875,8 @@ export default function ListingDetailPage() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                    </div>
+                  </details>
                 )}
                 {needsUpdate > 0 && (
                   <button onClick={() => openPushPreview('keywords')} className="mt-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-medium">
@@ -1170,7 +1182,7 @@ export default function ListingDetailPage() {
                     <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-indigo-900 leading-relaxed">
                         <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-semibold mr-1.5 whitespace-nowrap">Parent</span>
-                        The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> variants (child ASINs).{' '}
+                        The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> SKUs — including each ASIN&apos;s matching FBA + FBM.{' '}
                         <b>{pushPreview.changed}</b> currently differ and will change.
                       </p>
                     </div>
@@ -1178,7 +1190,7 @@ export default function ListingDetailPage() {
                     <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-amber-900 leading-relaxed">
                         <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">Per-child</span>
-                        Each of {pushPreview.count} variants gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.
+                        Each of {pushPreview.count} SKUs (incl. matching FBA + FBM) gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.
                       </p>
                     </div>
                   )}
@@ -1191,7 +1203,7 @@ export default function ListingDetailPage() {
                     /* Broadcast: show the single new value once, then which children currently differ */
                     <>
                       <div className="bg-white rounded-md border-2 border-emerald-300 p-3 mb-3">
-                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.label.toLowerCase()} → all {pushPreview.count} variants</p>
+                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.label.toLowerCase()} → all {pushPreview.count} SKUs</p>
                         {pushPreview.field === 'bullets' && Array.isArray(pushPreview.proposedValue) ? (
                           <ul className="list-disc pl-5 space-y-1">
                             {pushPreview.proposedValue.map((b, i) => <li key={i} className="text-xs text-slate-800 break-words">{b}</li>)}
@@ -1206,7 +1218,7 @@ export default function ListingDetailPage() {
                       {pushPreview.changed > 0 && (
                         <details className="mb-4">
                           <summary className="text-xs text-slate-600 cursor-pointer hover:text-slate-800">
-                            {pushPreview.changed} of {pushPreview.count} variants currently differ — view which
+                            {pushPreview.changed} of {pushPreview.count} SKUs currently differ — view which
                           </summary>
                           <div className="mt-2 border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-[35vh] overflow-y-auto">
                             {pushPreview.diff.filter(d => d.changed).map((d) => (
@@ -1236,7 +1248,7 @@ export default function ListingDetailPage() {
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
                     <button onClick={confirmPush} disabled={pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
-                      Confirm &amp; Ship {pushPreview.label.toLowerCase()} to {pushPreview.changed} variant{pushPreview.changed !== 1 ? 's' : ''}
+                      Confirm &amp; Ship {pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}
                     </button>
                   </div>
                 </>
