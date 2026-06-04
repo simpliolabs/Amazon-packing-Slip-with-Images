@@ -628,7 +628,7 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
     ? `\nNaturally mention these known product attributes (real facts from the listing — e.g. garment brand, material, fit): ${attributes.join(', ')}.`
     : ''
   const system = 'You are an Amazon apparel SEO copywriter. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, or occasion the design is not explicitly about.'
-  const user = `Write a 150-220 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>.
+  const user = `Write a SUBSTANTIAL 270-330 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>. Use most of Amazon's ~2000-character budget — do NOT write a short blurb; expand on the design, materials, fit, styling, and use cases.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
 
@@ -639,7 +639,7 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
     model: 'gpt-4.1-mini',
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
     temperature: 0.5,
-    max_tokens: 700,
+    max_tokens: 1200,
   })
   return (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
 }

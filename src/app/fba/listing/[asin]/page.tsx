@@ -108,6 +108,16 @@ function copyToClipboard(text: string) {
   if (typeof window !== 'undefined') navigator.clipboard.writeText(text)
 }
 
+// Strip Amazon's appended variant dimensions (" -Light Green-XX-Large") so the header and the
+// cohesion comparison use the seller's BASE title, not a child's suffixed one.
+const SIZE_TOKEN = "(?:XS|S|M|L|XL|XXL|XXXL|[2-5]XL|X-?Small|XX?X?-?Large|Small|Medium|Large|One[ -]?Size)"
+function stripVariantSuffix(title: string | null | undefined): string {
+  return (title ?? '')
+    .replace(new RegExp(`\\s*[-–—|]\\s*[A-Za-z][\\w /&'-]*?\\s*[-–—|]\\s*${SIZE_TOKEN}\\s*$`, 'i'), '')
+    .replace(new RegExp(`\\s*[-–—|]\\s*${SIZE_TOKEN}\\s*$`, 'i'), '')
+    .trim()
+}
+
 // Dedup variant rows by ASIN (prefer the FBA SKU). The same ASIN can have both an FBA and an
 // FBM SKU; backend keywords are per-ASIN, so the page (and the push) should treat them as one.
 function dedupByAsin<T extends { sku: string; asin: string }>(rows: T[]): T[] {
@@ -404,7 +414,7 @@ export default function ListingDetailPage() {
 
           {/* Title + meta */}
           <div className="flex-1 min-w-0">
-            <h1 className="text-base font-semibold text-gray-900 leading-snug line-clamp-2">{score.product_title || asin}</h1>
+            <h1 className="text-base font-semibold text-gray-900 leading-snug line-clamp-2">{stripVariantSuffix(score.product_title) || asin}</h1>
             <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-500">
               <span className="font-mono">{asin}</span>
               <span>{score.child_count} variant{score.child_count !== 1 ? 's' : ''}</span>
@@ -538,7 +548,7 @@ export default function ListingDetailPage() {
           return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended }
         }
         const cohFields = [
-          { key: 'title', label: 'Title', coh: fieldCohesion(c => c.title, recs.recommended_title), copyVal: recs.recommended_title },
+          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title), copyVal: recs.recommended_title },
           { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n')), copyVal: (recs.recommended_bullets ?? []).join('\n') },
           { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description), copyVal: recs.recommended_description },
         ]
