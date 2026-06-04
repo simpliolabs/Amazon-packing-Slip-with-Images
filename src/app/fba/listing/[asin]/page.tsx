@@ -148,13 +148,17 @@ export default function ListingDetailPage() {
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
 
-  // ── Push backend keywords to Amazon (PR16) ──
-  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; changed: boolean }
+  // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords) ──
+  type PushField = 'title' | 'bullets' | 'description' | 'keywords'
+  const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords' }
+  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean }
   interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string }
-  const [pushPreview, setPushPreview] = useState<{ count: number; changed: number; diff: PushDiffRow[] } | null>(null)
+  interface PushPreview { field: PushField; label: string; broadcast: boolean; count: number; changed: number; proposedValue: string | string[] | null; diff: PushDiffRow[] }
+  const [pushField, setPushField] = useState<PushField>('keywords')
+  const [pushPreview, setPushPreview] = useState<PushPreview | null>(null)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
-  const [pushResults, setPushResults] = useState<{ pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
+  const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
   const [showPushModal, setShowPushModal] = useState(false)
 
   const copy = (text: string, label: string) => {
@@ -309,11 +313,12 @@ export default function ListingDetailPage() {
     setAiProgress('')
   }, [asin])
 
-  // ─── Push backend keywords to Amazon (preview → confirm) ──────────────────
-  const openPushPreview = useCallback(async () => {
+  // ─── Ship a content section to Amazon (preview → confirm) ─────────────────
+  const openPushPreview = useCallback(async (field: PushField) => {
+    setPushField(field)
     setPushError(null); setPushResults(null); setPushPreview(null); setShowPushModal(true); setPushLoading(true)
     try {
-      const resp = await fetch(`/api/fba/listing-optimizer/push-keywords?parent_asin=${asin}`)
+      const resp = await fetch(`/api/fba/listing-optimizer/push-content?parent_asin=${asin}&field=${field}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || 'Preview failed')
       setPushPreview(data)
@@ -326,10 +331,10 @@ export default function ListingDetailPage() {
   const confirmPush = useCallback(async () => {
     setPushError(null); setPushLoading(true)
     try {
-      const resp = await fetch('/api/fba/listing-optimizer/push-keywords', {
+      const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parent_asin: asin, confirm: true }),
+        body: JSON.stringify({ parent_asin: asin, field: pushField, confirm: true }),
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || 'Push failed')
@@ -339,7 +344,7 @@ export default function ListingDetailPage() {
       setPushError(e instanceof Error ? e.message : 'Push failed')
     }
     setPushLoading(false)
-  }, [asin])
+  }, [asin, pushField])
 
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
 
@@ -464,7 +469,7 @@ export default function ListingDetailPage() {
           </button>
           {aiRecs && (
             <button
-              onClick={openPushPreview}
+              onClick={() => openPushPreview('keywords')}
               disabled={pushLoading}
               title="Write the per-child backend keywords directly to Amazon"
               className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-50 transition-colors">
@@ -697,6 +702,31 @@ export default function ListingDetailPage() {
                       </div>
                     )}
 
+                    {/* Row 5b: Ship this section to Amazon — each section has its own approval */}
+                    {(() => {
+                      const shipField: PushField | null =
+                        item.element === 'title' ? 'title'
+                        : item.element === 'description' ? 'description'
+                        : item.element === 'bullet_1' ? 'bullets'
+                        : null
+                      if (!shipField || item.verdict === 'DONE' || item.verdict === 'SKIP') return null
+                      return (
+                        <div className="mt-2.5 flex items-center gap-2 flex-wrap border-t border-current/10 pt-2.5">
+                          <button
+                            onClick={() => openPushPreview(shipField)}
+                            disabled={pushLoading}
+                            title={`Write the recommended ${FIELD_LABEL[shipField].toLowerCase()} directly to Amazon for every variant`}
+                            className="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50">
+                            🚀 Ship {shipField === 'bullets' ? 'all 5 bullets' : FIELD_LABEL[shipField].toLowerCase()} to Amazon →
+                          </button>
+                          <span className="text-[10px] text-gray-600 inline-flex items-center gap-1 flex-wrap">
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">📦 Parent</span>
+                            same value written to all {variants.length} variants
+                          </span>
+                        </div>
+                      )
+                    })()}
+
                     {/* Row 6: Notes */}
                     {item.notes && (
                       <p className="text-[10px] mt-1.5 italic opacity-70">💡 {item.notes}</p>
@@ -793,7 +823,7 @@ export default function ListingDetailPage() {
                   </div>
                 )}
                 {needsUpdate > 0 && (
-                  <button onClick={openPushPreview} className="mt-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-medium">
+                  <button onClick={() => openPushPreview('keywords')} className="mt-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-medium">
                     Push {needsUpdate} update{needsUpdate === 1 ? '' : 's'} to Amazon →
                   </button>
                 )}
@@ -1068,13 +1098,13 @@ export default function ListingDetailPage() {
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
-          PUSH KEYWORDS TO AMAZON — preview → confirm modal (PR16)
+          SHIP CONTENT TO AMAZON — per-section preview → confirm modal
           ══════════════════════════════════════════════════════════════════════ */}
       {showPushModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !pushLoading && setShowPushModal(false)}>
           <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 sticky top-0 bg-white">
-              <h3 className="text-sm font-bold text-gray-900">Push Backend Keywords to Amazon</h3>
+              <h3 className="text-sm font-bold text-gray-900">🚀 Ship {FIELD_LABEL[pushField]} to Amazon</h3>
               <button onClick={() => !pushLoading && setShowPushModal(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
             </div>
 
@@ -1091,24 +1121,78 @@ export default function ListingDetailPage() {
               {/* Preview (pre-confirm) */}
               {pushPreview && !pushResults && !pushLoading && (
                 <>
-                  <p className="text-sm text-gray-700 mb-1">
-                    <b>{pushPreview.changed}</b> of {pushPreview.count} variants will change. Backend search terms only — not customer-visible.
+                  {/* Scope banner — Parent (broadcast, same to all) vs Per-child (unique each) */}
+                  {pushPreview.broadcast ? (
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3">
+                      <p className="text-xs text-indigo-900 leading-relaxed">
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-semibold mr-1.5 whitespace-nowrap">📦 Parent</span>
+                        The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> variants (child ASINs).{' '}
+                        <b>{pushPreview.changed}</b> currently differ and will change.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+                      <p className="text-xs text-amber-900 leading-relaxed">
+                        <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">🏷️ Per-child</span>
+                        Each of {pushPreview.count} variants gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.
+                      </p>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500 mb-3">
+                    Every value is checked with Amazon (VALIDATION_PREVIEW) before any live write, and the previous value is saved for rollback.
+                    {pushPreview.field === 'keywords' && ' Backend strings are capped at 250 bytes.'}
                   </p>
-                  <p className="text-xs text-gray-500 mb-3">Each value is capped at 250 bytes and validated with Amazon before writing. Previous values are saved for rollback.</p>
-                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 mb-4 max-h-[45vh] overflow-y-auto">
-                    {pushPreview.diff.filter(d => d.changed).map((d) => (
-                      <div key={d.sku} className="p-3 text-xs">
-                        <div className="font-mono text-gray-700 mb-1">{d.sku} <span className="text-gray-400">({d.bytes}/250 bytes)</span></div>
-                        <p className="text-gray-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
-                        <p className="text-emerald-700 break-words">{d.proposed}</p>
+
+                  {pushPreview.broadcast ? (
+                    /* Broadcast: show the single new value once, then which children currently differ */
+                    <>
+                      <div className="bg-white rounded-md border-2 border-emerald-300 p-3 mb-3">
+                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.label.toLowerCase()} → all {pushPreview.count} variants</p>
+                        {pushPreview.field === 'bullets' && Array.isArray(pushPreview.proposedValue) ? (
+                          <ul className="list-disc pl-5 space-y-1">
+                            {pushPreview.proposedValue.map((b, i) => <li key={i} className="text-xs text-gray-800 break-words">{b}</li>)}
+                          </ul>
+                        ) : pushPreview.field === 'description' ? (
+                          <div className="text-xs text-gray-800 max-h-56 overflow-y-auto leading-relaxed [&_li]:ml-4 [&_li]:list-disc [&_p]:mb-2 [&_b]:font-semibold"
+                               dangerouslySetInnerHTML={{ __html: String(pushPreview.proposedValue ?? '') }} />
+                        ) : (
+                          <p className="text-xs text-gray-800 break-words whitespace-pre-wrap">{String(pushPreview.proposedValue ?? '')}</p>
+                        )}
                       </div>
-                    ))}
-                  </div>
+                      {pushPreview.changed > 0 && (
+                        <details className="mb-4">
+                          <summary className="text-xs text-gray-600 cursor-pointer hover:text-gray-800">
+                            {pushPreview.changed} of {pushPreview.count} variants currently differ — view which
+                          </summary>
+                          <div className="mt-2 border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[35vh] overflow-y-auto">
+                            {pushPreview.diff.filter(d => d.changed).map((d) => (
+                              <div key={d.sku} className="p-2.5 text-xs">
+                                <div className="font-mono text-gray-700 mb-0.5">{d.sku}</div>
+                                <p className="text-gray-400 line-through break-words">{d.current || '(empty)'}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </>
+                  ) : (
+                    /* Per-child: full current → proposed diff per SKU */
+                    <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 mb-4 max-h-[45vh] overflow-y-auto">
+                      {pushPreview.diff.filter(d => d.changed).map((d) => (
+                        <div key={d.sku} className="p-3 text-xs">
+                          <div className="font-mono text-gray-700 mb-1">{d.sku} <span className="text-gray-400">({d.bytes}/250 bytes)</span></div>
+                          <p className="text-gray-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
+                          <p className="text-emerald-700 break-words">{d.proposed}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50">Cancel</button>
                     <button onClick={confirmPush} disabled={pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
-                      Confirm &amp; Push {pushPreview.changed} variant{pushPreview.changed !== 1 ? 's' : ''} to Amazon
+                      Confirm &amp; Ship {pushPreview.label.toLowerCase()} to {pushPreview.changed} variant{pushPreview.changed !== 1 ? 's' : ''}
                     </button>
                   </div>
                 </>
