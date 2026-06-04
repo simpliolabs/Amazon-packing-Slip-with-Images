@@ -58,6 +58,9 @@ export interface PipelineInput {
   /** Keyword intelligence context block (reused for the audit agent) */
   keywordContext: string
   hasAplus: boolean
+  /** Whether the account already has an A+ Brand Story (EMC) module — gates the
+   *  brand_story CREATE recommendation so we never tell a seller to create one twice. */
+  hasBrandStory: boolean
   /** Reasoning-class model for the audit step, e.g. 'o4-mini' */
   auditModel: string
   /** NDJSON keepalive emitter — called before each stage */
@@ -789,18 +792,42 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // element we (a) overwrite replacement_content with the CANONICAL pipeline output and
   // (b) force verdict=REPLACE so the seller can always copy it.
   const actionPlan = Array.isArray(audit.action_plan) ? audit.action_plan : []
-  const forceReplace = (item: PipelineActionPlanItem, content: string) => {
+  // forceReplace also overwrites current_status + instruction. The o4-mini audit is told
+  // the content is "ALREADY FINALIZED", so it writes current_status="Finalized title…" and
+  // instruction="No changes required" — which directly contradicts the forced REPLACE
+  // verdict (a 🔴 REPLACE card that says "no changes required"). Set deterministic,
+  // action-oriented copy that describes what the seller must DO.
+  const forceReplace = (item: PipelineActionPlanItem, content: string, label: string) => {
     item.replacement_content = content
     item.verdict = 'REPLACE'
     if (item.priority === 'NONE') item.priority = 'HIGH'
+    item.current_status = `Your live ${label} is not optimized for the target keywords.`
+    item.instruction = `Replace your current ${label} with the optimized version below, then save in Seller Central.`
   }
   for (const item of actionPlan) {
-    if (item.element === 'title') forceReplace(item, finalTitle)
+    if (item.element === 'title') forceReplace(item, finalTitle, 'title')
     else if (/^bullet_([1-5])$/.test(item.element)) {
-      const idx = Number(item.element.split('_')[1]) - 1
-      if (bullets[idx]) forceReplace(item, bullets[idx])
-    } else if (item.element === 'description') forceReplace(item, description)
-    else if (item.element === 'backend_keywords') item.verdict = 'REPLACE'
+      const n = Number(item.element.split('_')[1])
+      if (bullets[n - 1]) forceReplace(item, bullets[n - 1], `bullet ${n}`)
+    } else if (item.element === 'description') {
+      forceReplace(item, description, 'description')
+      item.level = 'parent'   // description is shared across the whole family, never per-child
+    } else if (item.element === 'backend_keywords') {
+      item.verdict = 'REPLACE'
+      if (item.priority === 'NONE') item.priority = 'HIGH'
+      item.level = 'per_child'
+      // Show the canonical representative string (not o4-mini's fabricated one) so the
+      // copy box matches what actually gets pushed; the per-variant list lives below.
+      if (perChild[0]?.keywords) item.replacement_content = perChild[0].keywords
+      item.current_status = 'Your live backend search terms miss high-value keywords and repeat words already in the title.'
+      item.instruction = "Replace each child SKU's backend search terms with its per-variant string below."
+    } else if (item.element === 'brand_story' && item.verdict === 'SKIP' && !input.hasBrandStory) {
+      // The seller has no Brand Story — recommend creating one (it auto-appears on every ASIN).
+      item.verdict = 'CREATE'
+      if (item.priority === 'NONE') item.priority = 'LOW'
+      item.current_status = 'No Brand Story (EMC) module detected on your account.'
+      item.instruction = 'Create a Brand Story in A+ Content Manager — it auto-appears on every ASIN and links shoppers to your full catalog.'
+    }
   }
 
   return {

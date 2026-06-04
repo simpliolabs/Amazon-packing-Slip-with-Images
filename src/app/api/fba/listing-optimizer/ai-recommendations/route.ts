@@ -462,6 +462,7 @@ export async function POST(req: NextRequest) {
             variantDetails,
             keywordContext,
             hasAplus: rep.has_aplus || false,
+            hasBrandStory: rep.aplus_has_brand_story || false,
             auditModel: 'o4-mini',
             onProgress: (message) => emit({ type: 'progress', message }),
           })
