@@ -309,15 +309,26 @@ export async function POST(req: NextRequest) {
     const supabase = getAdminSupabase()
 
     // Fetch all child content rows for this parent
-    const { data: children, error } = await supabase
+    const { data: childrenRaw, error } = await supabase
       .from('listing_content')
       .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
       .eq('parent_asin', parent_asin)
       .order('sku', { ascending: true })
 
-    if (error || !children || children.length === 0) {
+    if (error || !childrenRaw || childrenRaw.length === 0) {
       return NextResponse.json({ error: 'No listing content found. Run Scan Listings first.' }, { status: 404 })
     }
+
+    // Dedup by ASIN (prefer the FBA SKU). The same ASIN can have BOTH an FBA and an FBM SKU in
+    // listing_content (stale per-SKU rows); backend search terms are effectively per-ASIN, so
+    // generate ONE recommendation per ASIN — otherwise the push writes the same string to both
+    // SKUs of an ASIN (the duplicate-push the PO flagged).
+    const byAsin = new Map<string, ChildRow>()
+    for (const c of childrenRaw as ChildRow[]) {
+      const existing = byAsin.get(c.asin)
+      if (!existing || c.sku.endsWith('-FBA')) byAsin.set(c.asin, c)
+    }
+    const children: ChildRow[] = [...byAsin.values()].sort((a, b) => a.sku.localeCompare(b.sku))
 
     const rep = children[0] as ChildRow
 
