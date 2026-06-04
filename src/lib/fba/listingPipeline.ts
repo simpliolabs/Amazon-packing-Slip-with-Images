@@ -454,14 +454,14 @@ async function runBackendAgent(
   // not license it back into the backend.
   const titleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
 
-  // ── SHARED CORE (hybrid fill + content dedup, PR: backend-cleanup) ──
-  // PO-chosen: FILL the full 250 bytes by including the TOP keyword phrases even when some words
-  // are also in the title (strict no-repeat left the field ~half-empty; empty bytes are wasted).
-  // BUT each meaningful word appears only ONCE (no "cool … cool … cool" repeats), junk and
-  // weak-relevance role words ("teacher" not in title) are dropped, the product-type word
-  // ("shirt"/"tee") is capped at 2, and minor words survive ONLY as connectors between two kept
-  // content words — so coherent phrases stay readable ("last day of school") while orphan runs
-  // ("cool in the of …") are removed.
+  // ── SHARED CORE: the product's biggest-opportunity keywords, intelligently de-duped ──
+  // The core IS the bulk of the 250 bytes and carries the TOP opportunity-score keywords
+  // (the pool is opportunity-sorted). Each meaningful word appears once (no "cool … cool"
+  // repeats); JUNK, weak-relevance ROLE words ("teacher"), and WRONG-AUDIENCE words (kids/
+  // youth/toddler — unless the product is actually for them, i.e. the word is in the title) are
+  // dropped; the product-type word is capped at 2; minor words survive only as connectors. The
+  // product's audience tokens (men/women, from the title) are GUARANTEED present.
+  const kidsWords = new Set(KIDS_AUDIENCE)
   const corePhrases: string[] = []
   const coreWordSet = new Set<string>()
   let productTypeCount = 0
@@ -471,7 +471,8 @@ async function runBackendAgent(
     const toks: ({ w: string; minor: boolean } | null)[] = []
     for (const w of raw.split(' ')) {
       if (JUNK_WORDS.has(w)) { toks.push(null); continue }
-      if (ROLE_WORDS.has(w) && !titleWords.has(w)) { toks.push(null); continue }
+      if (ROLE_WORDS.has(w) && !titleWords.has(w)) { toks.push(null); continue }            // weak-relevance role
+      if (kidsWords.has(w) && !titleWords.has(w)) { toks.push(null); continue }             // wrong audience (kids)
       if (MINOR_WORDS.has(w)) { toks.push({ w, minor: true }); continue }
       if (PRODUCT_TYPE_WORDS.has(w)) {
         if (productTypeCount >= 2) { toks.push(null); continue }
@@ -494,25 +495,29 @@ async function runBackendAgent(
     }
     if (out.length === 0 || out.every((w) => MINOR_WORDS.has(w))) continue
     corePhrases.push(out.join(' '))
-    if (getByteLength(corePhrases.join(' ')) >= 180) break
+    if (getByteLength(corePhrases.join(' ')) >= 200) break
   }
-  // ~180 bytes of core (top phrases + long-tail), leaving ~70 for the per-color tail (~248/250).
-  const core = truncateToBytes(corePhrases.join(' '), 180)
+  // Guarantee the product's audience tokens (PO wants Men AND Women in the backend).
+  for (const a of ['men', 'women']) {
+    if (titleWords.has(a) && !coreWordSet.has(a)) { corePhrases.push(a); coreWordSet.add(a) }
+  }
+  // The core is the opportunity keywords — most of the 250 bytes (NOT color synonyms).
+  const core = truncateToBytes(corePhrases.join(' '), 240)
 
-  // ── PER-COLOR TAIL: REAL color search terms unique to each color (NOT mood words) ──
-  const system = 'You generate Amazon backend COLOR search-term tails per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase color search words"}]}.'
+  // ── PER-COLOR TAIL: just the 2-3 top shade synonyms for THIS variant's color (not 10) ──
+  const system = 'You generate a SHORT Amazon backend color tail per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"2-3 lowercase color words"}]}.'
   const user = `Color variants: ${colors.join(', ')}
 
-For EACH color, output ~8-12 lowercase words that REAL shoppers TYPE to find that shade — color synonyms and near-shades a buyer would actually search. Examples:
-  light green -> sage mint pistachio olive moss seafoam
-  ivory -> cream off white eggshell bone beige
-  pepper -> charcoal dark grey gray heather slate
-Use ONLY actual color/shade SEARCH terms a buyer types — NEVER abstract moods/feelings (no "serene", "calm", "whimsical", "elegant", "timeless", "peaceful", "delicate").
+For EACH color, output ONLY the 2-3 MOST-SEARCHED shade synonyms a buyer would type — no more than 3. Examples:
+  light green -> sage olive
+  ivory -> cream off white
+  pepper -> charcoal heather
+Use ONLY real color/shade SEARCH words — NEVER moods/feelings ("serene", "calm", "whimsical", "elegant", "timeless"). Max 3 words per color.
 
 Do NOT use any of these words (already covered in title/bullets/core/color names):
 ${[...excludeWords].slice(0, 50).join(' ')}
 
-Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words. ~70 characters max per color.
+Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words, 2-3 words ONLY.
 Return ONLY the JSON object.`
 
   const tailMap = new Map<string, string>()
@@ -520,8 +525,8 @@ Return ONLY the JSON object.`
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      temperature: 0.6,
-      max_tokens: 1500,
+      temperature: 0.5,
+      max_tokens: 800,
       response_format: { type: 'json_object' },
     })
     const parsed = parseJsonLoose<{ groups?: { color: string; keywords: string }[] }>(completion.choices[0]?.message?.content || '{}')
@@ -532,13 +537,12 @@ Return ONLY the JSON object.`
     /* tail is best-effort; core still ships */
   }
 
-  // ── Combine core (whole phrases, kept intact) + per-color tail, byte-cap to 250 ──
-  // Only NEW tail words are appended (those not already in the core); the core phrases
-  // are never re-split, so coherent phrases survive.
+  // ── Combine: opportunity-keyword core + AT MOST 3 net-new color words, byte-cap to 250 ──
   const coreWords = new Set(core.toLowerCase().split(/\s+/).filter(Boolean))
   const buildString = (tail: string): string => {
-    // Tail must be net-new too: drop anything already in the core OR in title/bullets/colors.
-    const tailWords = tail.toLowerCase().split(/\s+/).filter((w) => w && !coreWords.has(w) && !excludeWords.has(w))
+    const tailWords = tail.toLowerCase().split(/\s+/)
+      .filter((w) => w && !coreWords.has(w) && !excludeWords.has(w) && !MINOR_WORDS.has(w))
+      .slice(0, 3)   // at most 3 color words — the PO does NOT want 10 color synonyms
     return truncateToBytes(`${core} ${tailWords.join(' ')}`.trim(), 250)
   }
 
