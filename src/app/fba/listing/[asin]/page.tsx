@@ -123,7 +123,7 @@ export default function ListingDetailPage() {
   const [aiError, setAiError] = useState<string | null>(null)
   const [aiProgress, setAiProgress] = useState<string>('')
   const [copied, setCopied] = useState<string | null>(null)
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['action-plan', 'placement', 'issues']))
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['apply']))
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
 
@@ -479,39 +479,56 @@ export default function ListingDetailPage() {
       {/* ══════════════════════════════════════════════════════════════════════
           ACTION PLAN — Comprehensive listing review with verdicts
           ══════════════════════════════════════════════════════════════════════ */}
-      {aiRecs?.action_plan && aiRecs.action_plan.length > 0 && (
+      {aiRecs?.action_plan && aiRecs.action_plan.length > 0 && (() => {
+        const verdictStyles: Record<string, string> = {
+          REPLACE: 'bg-red-50 border-red-300 text-red-800',
+          EDIT: 'bg-amber-50 border-amber-300 text-amber-800',
+          CREATE: 'bg-blue-50 border-blue-300 text-blue-800',
+          DONE: 'bg-green-50 border-green-300 text-green-800',
+          SKIP: 'bg-gray-50 border-gray-300 text-gray-500',
+        }
+        const verdictIcons: Record<string, string> = {
+          REPLACE: '🔴', EDIT: '⚠️', CREATE: '🔵', DONE: '✅', SKIP: '⏭️',
+        }
+        const priorityBadge: Record<string, string> = {
+          HIGH: 'bg-red-100 text-red-700',
+          MEDIUM: 'bg-amber-100 text-amber-700',
+          LOW: 'bg-gray-100 text-gray-600',
+          NONE: 'bg-green-100 text-green-700',
+        }
+        const recs = aiRecs!
+        const parentItems = (recs.action_plan ?? []).filter(a => a.element !== 'backend_keywords')
+        const backendItem = (recs.action_plan ?? []).find(a => a.element === 'backend_keywords')
+        const recMap = new Map((recs.per_child_keywords ?? []).map(p => [p.sku, p.keywords]))
+        const perChildRows = score.children.map(c => {
+          const recommended = (recMap.get(c.sku) ?? '').trim()
+          const current = (c.backend_keywords ?? '').trim()
+          return { sku: c.sku, current, recommended, changed: recommended !== '' && recommended !== current }
+        })
+        const needsUpdate = perChildRows.filter(r => r.changed).length
+        const actionsNeeded = (recs.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length
+        return (
         <section>
-          <button onClick={() => toggle('action-plan')} className="flex items-center gap-2 mb-3 w-full text-left">
+          <button onClick={() => toggle('apply')} className="flex items-center gap-2 mb-3 w-full text-left">
             <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">
-              Action Plan
-              <span className="text-gray-500 font-normal ml-1">
-                ({aiRecs.action_plan.filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length} actions needed)
-              </span>
+              Apply These Changes
+              <span className="text-gray-500 font-normal ml-1">({actionsNeeded} actions needed)</span>
             </span>
-            <span className="text-xs text-gray-400">{expandedSections.has('action-plan') ? '▾' : '▸'}</span>
+            <span className="text-xs text-gray-400">{expandedSections.has('apply') ? '▾' : '▸'}</span>
           </button>
 
-          {expandedSections.has('action-plan') && (
-            <div className="space-y-2">
-              {aiRecs.action_plan.map((item, idx) => {
-                const verdictStyles: Record<string, string> = {
-                  REPLACE: 'bg-red-50 border-red-300 text-red-800',
-                  EDIT: 'bg-amber-50 border-amber-300 text-amber-800',
-                  CREATE: 'bg-blue-50 border-blue-300 text-blue-800',
-                  DONE: 'bg-green-50 border-green-300 text-green-800',
-                  SKIP: 'bg-gray-50 border-gray-300 text-gray-500',
-                }
-                const verdictIcons: Record<string, string> = {
-                  REPLACE: '🔴', EDIT: '⚠️', CREATE: '🔵', DONE: '✅', SKIP: '⏭️',
-                }
-                const priorityBadge: Record<string, string> = {
-                  HIGH: 'bg-red-100 text-red-700',
-                  MEDIUM: 'bg-amber-100 text-amber-700',
-                  LOW: 'bg-gray-100 text-gray-600',
-                  NONE: 'bg-green-100 text-green-700',
-                }
-                const style = verdictStyles[item.verdict] || verdictStyles.SKIP
-                return (
+          {expandedSections.has('apply') && (
+            <div className="space-y-6">
+              {/* ── TIER 1 — Edit Once (Parent Level) ── */}
+              <div>
+                <div className="flex items-baseline gap-2 mb-2">
+                  <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">✏️ Edit Once</h3>
+                  <span className="text-[11px] text-gray-400">Parent level — applies to all {score.children.length} variants</span>
+                </div>
+                <div className="space-y-2">
+                  {parentItems.map((item, idx) => {
+                    const style = verdictStyles[item.verdict] || verdictStyles.SKIP
+                    return (
                   <div key={idx} className={`rounded-lg border p-4 ${style}`}>
                     {/* Row 1: Element + Verdict + Priority + Level */}
                     <div className="flex items-center gap-2 flex-wrap">
@@ -600,12 +617,108 @@ export default function ListingDetailPage() {
                       </div>
                     )}
                   </div>
-                )
-              })}
+                    )
+                  })}
+                </div>
+
+                {/* Recommended Product Detail values (folded from AI Recommendations) */}
+                {recs.product_details_improvements && recs.product_details_improvements.length > 0 && (
+                  <div className="mt-3 bg-white border border-gray-200 rounded-xl p-4">
+                    <span className="text-xs font-semibold text-gray-700 block mb-2">Recommended Product Detail values</span>
+                    <div className="grid sm:grid-cols-2 gap-2">
+                      {recs.product_details_improvements.map((pd, i) => (
+                        <div key={i} className="bg-gray-50 rounded-lg p-2.5">
+                          <div className="flex items-center justify-between mb-0.5">
+                            <span className="text-xs font-semibold text-gray-800">{pd.field_name}</span>
+                            <button onClick={() => copy(pd.recommended_value, `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
+                          </div>
+                          <p className="text-xs text-gray-700">{pd.recommended_value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ── TIER 2 — Edit Per Variant (Per Child) ── */}
+              <div>
+                <div className="flex items-baseline gap-2 mb-2 flex-wrap">
+                  <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">🎨 Edit Per Variant</h3>
+                  <span className="text-[11px] text-gray-400">Backend search terms — unique per color/size</span>
+                  {needsUpdate > 0
+                    ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">{needsUpdate} of {perChildRows.length} need update</span>
+                    : <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium">all {perChildRows.length} match</span>}
+                </div>
+                {backendItem?.instruction && <p className="text-xs text-gray-600 mb-2">{backendItem.instruction}</p>}
+                {perChildRows.length === 0 ? (
+                  <p className="text-xs text-gray-400">No variant data yet.</p>
+                ) : (
+                  <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 border-b border-gray-200">
+                        <tr>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">SKU</th>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Status</th>
+                          <th className="text-left px-3 py-2 font-medium text-gray-500">Recommended backend search terms</th>
+                          <th className="px-3 py-2"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {perChildRows.map(r => (
+                          <tr key={r.sku} className={r.changed ? 'bg-amber-50/40' : ''}>
+                            <td className="px-3 py-2 font-mono text-gray-700 align-top whitespace-nowrap">{r.sku}</td>
+                            <td className="px-3 py-2 align-top whitespace-nowrap">
+                              {r.recommended === ''
+                                ? <span className="text-gray-400">—</span>
+                                : r.changed
+                                  ? <span className="text-amber-600 font-medium">⚠️ Update</span>
+                                  : <span className="text-green-600">✓ OK</span>}
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              {r.changed && r.current && <p className="text-[10px] text-gray-400 line-through mb-0.5 whitespace-pre-wrap break-words">{r.current}</p>}
+                              <p className="text-gray-700 font-mono leading-relaxed whitespace-pre-wrap break-words">{r.recommended || '(no recommendation)'}</p>
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              {r.recommended && (
+                                <button onClick={() => copy(r.recommended, `kw-${r.sku}`)} className="text-[10px] text-violet-600 hover:underline whitespace-nowrap">{copied === `kw-${r.sku}` ? 'Copied!' : 'Copy'}</button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {needsUpdate > 0 && (
+                  <button onClick={openPushPreview} className="mt-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-medium">
+                    Push {needsUpdate} update{needsUpdate === 1 ? '' : 's'} to Amazon →
+                  </button>
+                )}
+
+                {/* Variant-specific corrections (folded from AI Recommendations) */}
+                {recs.variant_corrections && recs.variant_corrections.length > 0 && (
+                  <div className="mt-3 bg-white border border-gray-200 rounded-xl p-4">
+                    <span className="text-xs font-semibold text-gray-700 block mb-2">Variant-specific corrections</span>
+                    <div className="space-y-2">
+                      {recs.variant_corrections.map((vc, i) => (
+                        <div key={i} className="bg-gray-50 rounded-lg p-3">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs font-mono text-gray-600">{vc.sku}</span>
+                            <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{vc.field}</span>
+                          </div>
+                          <p className="text-[10px] text-gray-400 line-through">{vc.current.length > 100 ? vc.current.slice(0, 100) + '...' : vc.current}</p>
+                          <p className="text-xs text-gray-800 mt-0.5">{vc.replace_with}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </section>
-      )}
+        )
+      })()}
 
       {/* ══════════════════════════════════════════════════════════════════════
           SECTION 1 — Keyword Placement Plan (grouped by placement)
@@ -699,9 +812,9 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       <section>
         <button onClick={() => toggle('issues')} className="flex items-center gap-2 mb-3 w-full text-left">
-          <span className="text-sm font-bold text-gray-800 uppercase tracking-wide">
-            Issues to Fix
-            <span className="text-gray-400 font-normal ml-1">({score.issues.length})</span>
+          <span className="text-sm font-bold text-gray-600 uppercase tracking-wide">
+            Diagnostics
+            <span className="text-gray-400 font-normal ml-1">({score.issues.length}) — detailed audit; the actions above are the fixes</span>
           </span>
           <span className="text-xs text-gray-400">{expandedSections.has('issues') ? '▾' : '▸'}</span>
         </button>
@@ -782,151 +895,9 @@ export default function ListingDetailPage() {
       </section>
 
       {/* ══════════════════════════════════════════════════════════════════════
-          SECTION 4 — Full AI Recommendations (copy-paste ready)
+          SECTION 4 — (removed: consolidated into "Apply These Changes")
           ══════════════════════════════════════════════════════════════════════ */}
-      {aiRecs && (
-        <section>
-          <button onClick={() => toggle('recommendations')} className="flex items-center gap-2 mb-3 w-full text-left">
-            <span className="text-sm font-bold text-gray-800 uppercase tracking-wide">
-              AI Recommendations
-              <span className="text-gray-400 font-normal ml-1">gpt-4.1-mini &middot; {new Date(aiRecs.generated_at).toLocaleDateString()}</span>
-            </span>
-            <span className="text-xs text-gray-400">{expandedSections.has('recommendations') ? '▾' : '▸'}</span>
-          </button>
-
-          {expandedSections.has('recommendations') && (
-            <div className="space-y-4">
-
-              {/* Recommended Title */}
-              <div className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-gray-700">Recommended Title <span className="text-gray-400 font-normal">({aiRecs.recommended_title.length} chars)</span></span>
-                  <button onClick={() => copy(aiRecs.recommended_title, 'title')}
-                    className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-1 rounded transition-colors">
-                    {copied === 'title' ? 'Copied!' : 'Copy'}
-                  </button>
-                </div>
-                <p className="text-sm text-gray-800 leading-relaxed">{aiRecs.recommended_title}</p>
-              </div>
-
-              {/* Recommended Bullets */}
-              <div className="bg-white border border-gray-200 rounded-xl p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-gray-700">Recommended Bullets</span>
-                  <button onClick={() => copy(aiRecs.recommended_bullets.join('\n'), 'bullets')}
-                    className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-1 rounded transition-colors">
-                    {copied === 'bullets' ? 'Copied!' : 'Copy All'}
-                  </button>
-                </div>
-                <ol className="space-y-2">
-                  {aiRecs.recommended_bullets.map((b, i) => (
-                    <li key={i} className="flex items-start gap-2">
-                      <span className="text-[10px] text-gray-400 font-mono mt-0.5">{i + 1}.</span>
-                      <p className="text-sm text-gray-800 leading-relaxed flex-1">{b}</p>
-                      <button onClick={() => copy(b, `bullet-${i}`)}
-                        className="text-[10px] text-violet-600 hover:underline flex-shrink-0">
-                        {copied === `bullet-${i}` ? 'Copied!' : 'Copy'}
-                      </button>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-
-              {/* Backend Keywords */}
-              {aiRecs.per_child_keywords && aiRecs.per_child_keywords.length > 0 ? (
-                <div className="bg-white border border-gray-200 rounded-xl p-4">
-                  <span className="text-xs font-semibold text-gray-700 block mb-2">Backend Keywords (per variant)</span>
-                  <div className="space-y-3">
-                    {aiRecs.per_child_keywords.map((ck, i) => (
-                      <div key={i} className="bg-gray-50 rounded-lg p-3">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-mono text-gray-600">{ck.sku}</span>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-gray-400">{ck.keywords.length}/250 chars</span>
-                            <button onClick={() => copy(ck.keywords, `kw-${i}`)}
-                              className="text-[10px] text-violet-600 hover:underline">
-                              {copied === `kw-${i}` ? 'Copied!' : 'Copy'}
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-xs text-gray-700 font-mono leading-relaxed">{ck.keywords}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-white border border-gray-200 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-gray-700">Backend Keywords <span className="text-gray-400 font-normal">({aiRecs.recommended_keywords.length}/250 chars)</span></span>
-                    <button onClick={() => copy(aiRecs.recommended_keywords, 'keywords')}
-                      className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-1 rounded transition-colors">
-                      {copied === 'keywords' ? 'Copied!' : 'Copy'}
-                    </button>
-                  </div>
-                  <p className="text-xs text-gray-700 font-mono leading-relaxed">{aiRecs.recommended_keywords}</p>
-                </div>
-              )}
-
-              {/* Description */}
-              {aiRecs.recommended_description && (
-                <div className="bg-white border border-gray-200 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-gray-700">Recommended Description</span>
-                    <button onClick={() => copy(aiRecs.recommended_description, 'desc')}
-                      className="text-[10px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2 py-1 rounded transition-colors">
-                      {copied === 'desc' ? 'Copied!' : 'Copy'}
-                    </button>
-                  </div>
-                  <p className="text-sm text-gray-700 leading-relaxed">{aiRecs.recommended_description}</p>
-                </div>
-              )}
-
-              {/* Product Details Improvements */}
-              {aiRecs.product_details_improvements && aiRecs.product_details_improvements.length > 0 && (
-                <div className="bg-white border border-gray-200 rounded-xl p-4">
-                  <span className="text-xs font-semibold text-gray-700 block mb-2">Product Details Improvements</span>
-                  <div className="space-y-2">
-                    {aiRecs.product_details_improvements.map((pd, i) => (
-                      <div key={i} className="bg-gray-50 rounded-lg p-3">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-semibold text-gray-800">{pd.field_name}</span>
-                          <button onClick={() => copy(pd.recommended_value, `pd-${i}`)}
-                            className="text-[10px] text-violet-600 hover:underline">
-                            {copied === `pd-${i}` ? 'Copied!' : 'Copy'}
-                          </button>
-                        </div>
-                        {pd.current_value && <p className="text-[10px] text-gray-400 line-through mb-0.5">Current: {pd.current_value}</p>}
-                        <p className="text-xs text-gray-700">{pd.recommended_value}</p>
-                        <p className="text-[10px] text-gray-500 mt-0.5">{pd.reason}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Variant Corrections */}
-              {aiRecs.variant_corrections && aiRecs.variant_corrections.length > 0 && (
-                <div className="bg-white border border-gray-200 rounded-xl p-4">
-                  <span className="text-xs font-semibold text-gray-700 block mb-2">Variant-Specific Corrections</span>
-                  <div className="space-y-2">
-                    {aiRecs.variant_corrections.map((vc, i) => (
-                      <div key={i} className="bg-gray-50 rounded-lg p-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-mono text-gray-600">{vc.sku}</span>
-                          <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{vc.field}</span>
-                        </div>
-                        <p className="text-[10px] text-gray-400 line-through">{vc.current.length > 100 ? vc.current.slice(0, 100) + '...' : vc.current}</p>
-                        <p className="text-xs text-gray-800 mt-0.5">{vc.replace_with}</p>
-                        <p className="text-[10px] text-gray-500 mt-0.5">{vc.reason}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-      )}
+      {/* AI Recommendations consolidated into "Apply These Changes" above (Batch 4). */}
 
       {/* ══════════════════════════════════════════════════════════════════════
           SECTION 5 — Keyword Intelligence (if available)
