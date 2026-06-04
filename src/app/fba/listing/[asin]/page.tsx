@@ -83,12 +83,6 @@ interface KeywordIntelligenceResult {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function scoreColor(score: number) {
-  if (score >= 80) return 'text-green-600 border-green-400'
-  if (score >= 60) return 'text-amber-600 border-amber-400'
-  return 'text-red-600 border-red-400'
-}
-
 function barColor(score: number, max: number) {
   const pct = score / max
   if (pct >= 0.8) return 'bg-green-500'
@@ -101,7 +95,7 @@ function issueBorder(field: string) {
   if (field.includes('bullet') || field.includes('description')) return 'border-l-green-500'
   if (field.includes('keyword') || field.includes('backend')) return 'border-l-amber-500'
   if (field.includes('aplus') || field.includes('image')) return 'border-l-purple-500'
-  return 'border-l-gray-400'
+  return 'border-l-slate-400'
 }
 
 function copyToClipboard(text: string) {
@@ -127,6 +121,39 @@ function dedupByAsin<T extends { sku: string; asin: string }>(rows: T[]): T[] {
     if (!existing || c.sku.endsWith('-FBA')) byAsin.set(c.asin, c)
   }
   return [...byAsin.values()].sort((a, b) => a.sku.localeCompare(b.sku))
+}
+
+// ─── Inline icons (SVG, not emoji — crisp at any size, consistent stroke) ─────
+type IconProps = { className?: string }
+const Icon = {
+  ArrowLeft: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7" /></svg>),
+  Sparkles: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM5 19l.6 1.6L7 21l-1.4.6L5 23l-.6-1.4L3 21l1.4-.4L5 19z" /></svg>),
+  Send: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>),
+  Clipboard: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>),
+  External: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" /></svg>),
+  Layers: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>),
+  Tag: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z" /><circle cx="7" cy="7" r="1.4" fill="currentColor" stroke="none" /></svg>),
+  Check: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>),
+}
+
+/** Animated SVG progress ring for the overall 0-100 listing score. */
+function ScoreRing({ score }: { score: number }) {
+  const r = 32
+  const c = 2 * Math.PI * r
+  const pct = Math.max(0, Math.min(1, score / 100))
+  const stroke = score >= 80 ? '#16a34a' : score >= 60 ? '#d97706' : '#dc2626'
+  return (
+    <div className="relative flex-shrink-0" style={{ width: 84, height: 84 }}>
+      <svg width="84" height="84" viewBox="0 0 84 84" className="-rotate-90">
+        <circle cx="42" cy="42" r={r} fill="none" stroke="#e2e8f0" strokeWidth="7" />
+        <circle cx="42" cy="42" r={r} fill="none" stroke={stroke} strokeWidth="7" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} style={{ transition: 'stroke-dashoffset 700ms ease' }} />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-2xl font-bold text-slate-900 leading-none tabular-nums">{score}</span>
+      </div>
+    </div>
+  )
 }
 
 // ─── Page Component ─────────────────────────────────────────────────────────
@@ -340,6 +367,16 @@ export default function ListingDetailPage() {
       if (!resp.ok) throw new Error(data.error || 'Push failed')
       setPushResults(data)
       setPushPreview(null)
+      // The push re-scores server-side; pull the fresh score so the KPI cards/ring
+      // update immediately without a manual page reload.
+      if ((data.pushed ?? 0) > 0) {
+        try {
+          const sresp = await fetch('/api/fba/listing-optimizer')
+          const sdata = await sresp.json()
+          const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+          if (found) setScore(found)
+        } catch { /* best-effort — the score still updates on next load */ }
+      }
     } catch (e) {
       setPushError(e instanceof Error ? e.message : 'Push failed')
     }
@@ -372,14 +409,14 @@ export default function ListingDetailPage() {
     <div className="flex items-center justify-center min-h-[60vh]">
       <div className="text-center">
         <div className="animate-spin w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full mx-auto mb-3" />
-        <p className="text-sm text-gray-500">Loading listing data...</p>
+        <p className="text-sm text-slate-500">Loading listing data...</p>
       </div>
     </div>
   )
 
   if (!score) return (
     <div className="max-w-4xl mx-auto p-8 text-center">
-      <p className="text-lg text-gray-600 mb-4">Listing not found: {asin}</p>
+      <p className="text-lg text-slate-600 mb-4">Listing not found: {asin}</p>
       <button onClick={() => router.push('/fba')} className="text-violet-600 hover:underline text-sm">
         &larr; Back to Listing Optimizer
       </button>
@@ -396,110 +433,117 @@ export default function ListingDetailPage() {
   // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <div className="min-h-screen bg-slate-50">
+    <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
 
       {/* ── Back link ── */}
-      <button onClick={() => router.push('/fba')} className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
-        <span>&larr;</span> Back to Listing Optimizer
+      <button onClick={() => router.push('/fba')} className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-800 transition-colors cursor-pointer">
+        <Icon.ArrowLeft className="w-4 h-4" /> Back to Listing Optimizer
       </button>
 
       {/* ══════════════════════════════════════════════════════════════════════
           HEADER — Product info + Score
           ══════════════════════════════════════════════════════════════════════ */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        <div className="flex gap-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6">
+        <div className="flex flex-col sm:flex-row gap-5">
           {/* Image */}
-          <div className="flex-shrink-0 w-20 h-20 bg-gray-100 rounded-lg overflow-hidden">
+          <div className="flex-shrink-0 w-20 h-20 bg-slate-100 rounded-2xl overflow-hidden ring-1 ring-slate-200">
             {score.image_url ? (
               <img src={score.image_url} alt="" className="w-full h-full object-cover" />
             ) : (
-              <div className="w-full h-full flex items-center justify-center text-xs text-gray-400">IMG</div>
+              <div className="w-full h-full flex items-center justify-center text-xs text-slate-400">IMG</div>
             )}
           </div>
 
-          {/* Title + meta */}
+          {/* Title + meta chips */}
           <div className="flex-1 min-w-0">
-            <h1 className="text-base font-semibold text-gray-900 leading-snug line-clamp-2">{stripVariantSuffix(score.product_title) || asin}</h1>
-            <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-500">
-              <span className="font-mono">{asin}</span>
-              <span>{score.child_count} variant{score.child_count !== 1 ? 's' : ''}</span>
-              <span>{score.total_units_30d.toLocaleString()} units/30d</span>
-            </div>
-            {/* Score bars */}
-            <div className="grid grid-cols-4 gap-3 mt-3">
-              {bars.map(b => (
-                <div key={b.label}>
-                  <div className="flex justify-between text-[10px] text-gray-500 mb-0.5">
-                    <span>{b.label}</span><span>{b.score}/{b.max}</span>
-                  </div>
-                  <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${barColor(b.score, b.max)}`} style={{ width: `${(b.score / b.max) * 100}%` }} />
-                  </div>
-                </div>
-              ))}
+            <h1 className="text-lg font-semibold text-slate-900 leading-snug line-clamp-2">{stripVariantSuffix(score.product_title) || asin}</h1>
+            <div className="flex flex-wrap items-center gap-1.5 mt-2">
+              <span className="font-mono text-[11px] text-slate-600 bg-slate-100 rounded-md px-2 py-0.5">{asin}</span>
+              <span className="text-[11px] font-medium text-slate-600 bg-slate-100 rounded-md px-2 py-0.5">{score.child_count} variant{score.child_count !== 1 ? 's' : ''}</span>
+              <span className="text-[11px] font-medium text-slate-600 bg-slate-100 rounded-md px-2 py-0.5">{score.total_units_30d.toLocaleString()} units / 30d</span>
             </div>
           </div>
 
-          {/* Score circle */}
-          <div className="flex-shrink-0 flex flex-col items-center">
-            <div className={`w-16 h-16 rounded-full border-4 flex items-center justify-center ${scoreColor(score.overall_score)}`}>
-              <span className="text-xl font-bold">{score.overall_score}</span>
-            </div>
-            <span className="text-[9px] text-gray-400 mt-0.5">/ 100</span>
+          {/* Overall score ring */}
+          <div className="flex-shrink-0 flex flex-row sm:flex-col items-center justify-center gap-2 sm:gap-1">
+            <ScoreRing score={score.overall_score} />
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Listing score</span>
           </div>
         </div>
 
-        {/* Action links */}
-        <div className="flex gap-3 mt-4 pt-3 border-t border-gray-100">
+        {/* Primary actions */}
+        <div className="flex flex-wrap items-center gap-2 mt-5 pt-4 border-t border-slate-100">
           <a href={`https://sellercentral.amazon.com/abis/listing/edit?asin=${asin}&ref_=xx_addlisting_dnav_xx`}
             target="_blank" rel="noopener noreferrer"
-            className="text-xs text-violet-600 hover:text-violet-800 border border-violet-200 rounded-lg px-3 py-1.5">
-            Edit Listing in Seller Central &rarr;
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors cursor-pointer">
+            <Icon.External className="w-3.5 h-3.5" /> Edit in Seller Central
           </a>
           <a href={`https://sellercentral.amazon.com/enhanced-content/edit?asin=${asin}`}
             target="_blank" rel="noopener noreferrer"
-            className="text-xs text-violet-600 hover:text-violet-800 border border-violet-200 rounded-lg px-3 py-1.5">
-            Edit A+ Content &rarr;
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors cursor-pointer">
+            <Icon.External className="w-3.5 h-3.5" /> Edit A+ Content
           </a>
           <button
             onClick={generateAiRecs}
             disabled={aiLoading}
-            className="ml-auto text-xs bg-violet-600 hover:bg-violet-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-50 transition-colors">
-            {aiLoading ? 'Generating...' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
+            className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-violet-200">
+            <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Generating…' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
           </button>
           {aiRecs && (
             <button
               onClick={() => openPushPreview('keywords')}
               disabled={pushLoading}
               title="Write the per-child backend keywords directly to Amazon"
-              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-50 transition-colors">
-              Push Keywords to Amazon &rarr;
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-emerald-200">
+              <Icon.Send className="w-3.5 h-3.5" /> Push Keywords
             </button>
           )}
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
 
         {/* Competitor ASIN input for reverse keyword lookup */}
-        <div className="mt-3 pt-3 border-t border-gray-100">
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-gray-500 whitespace-nowrap">Competitor ASIN:</label>
-            <input
-              type="text"
-              value={competitorAsin}
-              onChange={(e) => setCompetitorAsin(e.target.value.toUpperCase())}
-              placeholder="B0XXXXXXXXX"
-              className="text-xs border border-gray-200 rounded px-2 py-1 w-32 font-mono uppercase"
-              maxLength={10}
-            />
-            <button
-              onClick={saveCompetitorAsin}
-              disabled={competitorSaving || !competitorAsin || competitorAsin.length !== 10}
-              className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-1 rounded disabled:opacity-50">
-              {competitorSaving ? 'Saving...' : 'Save'}
-            </button>
-            <span className="text-xs text-gray-400">Used for Jungle Scout keyword lookup when your ASIN has no data</span>
-          </div>
+        <div className="mt-4 pt-4 border-t border-slate-100 flex flex-wrap items-center gap-2">
+          <label className="text-xs font-medium text-slate-500 whitespace-nowrap">Competitor ASIN</label>
+          <input
+            type="text"
+            value={competitorAsin}
+            onChange={(e) => setCompetitorAsin(e.target.value.toUpperCase())}
+            placeholder="B0XXXXXXXXX"
+            className="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 w-36 font-mono uppercase focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition-shadow"
+            maxLength={10}
+          />
+          <button
+            onClick={saveCompetitorAsin}
+            disabled={competitorSaving || !competitorAsin || competitorAsin.length !== 10}
+            className="text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors cursor-pointer">
+            {competitorSaving ? 'Saving…' : 'Save'}
+          </button>
+          <span className="text-[11px] text-slate-400">Used for Jungle Scout lookup when your ASIN has no data</span>
         </div>
+      </div>
+
+      {/* ══ KPI ROW — the four sub-scores as their own cards ══ */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {bars.map(b => {
+          const pct = Math.round((b.score / b.max) * 100)
+          const tone = b.score / b.max >= 0.8 ? 'text-green-600' : b.score / b.max >= 0.6 ? 'text-amber-600' : 'text-red-600'
+          return (
+            <div key={b.label} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 transition-shadow hover:shadow-md">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{b.label}</span>
+                <span className={`text-[11px] font-bold ${tone}`}>{pct}%</span>
+              </div>
+              <div className="mt-2 flex items-baseline gap-1">
+                <span className="text-2xl font-bold text-slate-900 tabular-nums">{b.score}</span>
+                <span className="text-xs text-slate-400">/ {b.max}</span>
+              </div>
+              <div className="mt-2.5 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full ${barColor(b.score, b.max)}`} style={{ width: `${pct}%`, transition: 'width 600ms ease' }} />
+              </div>
+            </div>
+          )
+        })}
       </div>
 
       {/* ══════════════════════════════════════════════════════════════════════
@@ -511,7 +555,7 @@ export default function ListingDetailPage() {
           EDIT: 'bg-amber-50 border-amber-300 text-amber-800',
           CREATE: 'bg-blue-50 border-blue-300 text-blue-800',
           DONE: 'bg-green-50 border-green-300 text-green-800',
-          SKIP: 'bg-gray-50 border-gray-300 text-gray-500',
+          SKIP: 'bg-slate-50 border-slate-300 text-slate-500',
         }
         const verdictIcons: Record<string, string> = {
           REPLACE: '🔴', EDIT: '⚠️', CREATE: '🔵', DONE: '✅', SKIP: '⏭️',
@@ -519,7 +563,7 @@ export default function ListingDetailPage() {
         const priorityBadge: Record<string, string> = {
           HIGH: 'bg-red-100 text-red-700',
           MEDIUM: 'bg-amber-100 text-amber-700',
-          LOW: 'bg-gray-100 text-gray-600',
+          LOW: 'bg-slate-100 text-slate-600',
           NONE: 'bg-green-100 text-green-700',
         }
         const recs = aiRecs!
@@ -560,30 +604,30 @@ export default function ListingDetailPage() {
         return (
         <section>
           <button onClick={() => toggle('apply')} className="flex items-center gap-2 mb-3 w-full text-left">
-            <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+            <span className="text-sm font-bold text-slate-900 uppercase tracking-wide">
               Apply These Changes
-              <span className="text-gray-500 font-normal ml-1">({actionsNeeded} actions needed)</span>
+              <span className="text-slate-500 font-normal ml-1">({actionsNeeded} actions needed)</span>
             </span>
-            <span className="text-xs text-gray-400">{expandedSections.has('apply') ? '▾' : '▸'}</span>
+            <span className="text-xs text-slate-400">{expandedSections.has('apply') ? '▾' : '▸'}</span>
           </button>
 
           {expandedSections.has('apply') && (
             <div className="space-y-6">
               {/* ── VARIANT COHESION — how the variants compare per field ── */}
-              <div className="border border-gray-200 rounded-xl overflow-hidden">
-                <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-baseline gap-2">
-                  <span className="text-xs font-bold text-gray-700 uppercase tracking-wide">Variant Cohesion</span>
-                  <span className="text-[11px] text-gray-400">how your {variants.length} variants compare today</span>
+              <div className="border border-slate-200 rounded-2xl overflow-hidden">
+                <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex items-baseline gap-2">
+                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wide">Variant Cohesion</span>
+                  <span className="text-[11px] text-slate-400">how your {variants.length} variants compare today</span>
                 </div>
-                <div className="divide-y divide-gray-100">
+                <div className="divide-y divide-slate-100">
                   {cohFields.map(f => {
                     const split = f.coh.distinct > 1
                     const open = expandedSections.has(`coh-${f.key}`)
                     return (
                       <div key={f.key}>
-                        <button onClick={() => toggle(`coh-${f.key}`)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-50 transition-colors">
-                          <span className="text-xs font-semibold text-gray-800 w-20 flex-shrink-0">{f.label}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 flex-shrink-0 hidden sm:inline">should match</span>
+                        <button onClick={() => toggle(`coh-${f.key}`)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-slate-50 transition-colors">
+                          <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 flex-shrink-0 hidden sm:inline">should match</span>
                           {split
                             ? <span className="text-[11px] text-purple-700 flex items-center gap-1"><span aria-hidden>⚡</span>{f.coh.distinct} versions live</span>
                             : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
@@ -592,25 +636,25 @@ export default function ListingDetailPage() {
                               ? <span className="text-amber-700 flex items-center gap-1"><span aria-hidden>⚠️</span>{f.coh.needUpdate} need update</span>
                               : <span className="text-green-700">up to date</span>}
                           </span>
-                          <span className="text-xs text-gray-400 flex-shrink-0">{open ? '▾' : '▸'}</span>
+                          <span className="text-xs text-slate-400 flex-shrink-0">{open ? '▾' : '▸'}</span>
                         </button>
                         {open && (
-                          <div className="px-4 pb-3 pt-1 bg-gray-50/60 space-y-2">
+                          <div className="px-4 pb-3 pt-1 bg-slate-50/60 space-y-2">
                             <div className="flex items-start justify-between gap-2 bg-green-50 border border-green-200 rounded p-2">
                               <div className="min-w-0">
                                 <p className="text-[10px] font-bold text-green-800 uppercase">Update all {f.coh.total} variants to:</p>
-                                <p className="text-xs text-gray-800 whitespace-pre-wrap break-words mt-0.5">{f.copyVal || '(none)'}</p>
+                                <p className="text-xs text-slate-800 whitespace-pre-wrap break-words mt-0.5">{f.copyVal || '(none)'}</p>
                               </div>
                               <button onClick={() => copy(f.copyVal || '', `coh-${f.key}`)} className="text-[10px] bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded flex-shrink-0">{copied === `coh-${f.key}` ? 'Copied!' : 'Copy'}</button>
                             </div>
-                            <p className="text-[10px] font-medium text-gray-500 uppercase">Current values across your variants{split ? ' — these diverge:' : ':'}</p>
+                            <p className="text-[10px] font-medium text-slate-500 uppercase">Current values across your variants{split ? ' — these diverge:' : ':'}</p>
                             {f.coh.versions.map((v, vi) => (
-                              <details key={vi} className="bg-white border border-gray-200 rounded">
+                              <details key={vi} className="bg-white border border-slate-200 rounded">
                                 <summary className="cursor-pointer px-2 py-1 text-[11px] flex items-center gap-2">
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 flex-shrink-0">{v.skus.length} variant{v.skus.length === 1 ? '' : 's'}</span>
-                                  <span className="truncate text-gray-500">{v.value ? (v.value.length > 90 ? v.value.slice(0, 90) + '…' : v.value) : '(empty)'}</span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 flex-shrink-0">{v.skus.length} variant{v.skus.length === 1 ? '' : 's'}</span>
+                                  <span className="truncate text-slate-500">{v.value ? (v.value.length > 90 ? v.value.slice(0, 90) + '…' : v.value) : '(empty)'}</span>
                                 </summary>
-                                <p className="px-2 pb-2 text-[10px] text-gray-400 font-mono break-words">{v.skus.join(', ')}</p>
+                                <p className="px-2 pb-2 text-[10px] text-slate-400 font-mono break-words">{v.skus.join(', ')}</p>
                               </details>
                             ))}
                           </div>
@@ -619,10 +663,10 @@ export default function ListingDetailPage() {
                     )
                   })}
                   <div className="flex items-center gap-2 px-4 py-2">
-                    <span className="text-xs font-semibold text-gray-800 w-20 flex-shrink-0">Backend</span>
+                    <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">Backend</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 flex-shrink-0 hidden sm:inline">unique each</span>
-                    <span className="text-[11px] text-gray-500">each variant gets its own color-specific terms</span>
-                    <span className="ml-auto text-[11px] text-amber-700 flex items-center gap-1 flex-shrink-0"><span aria-hidden>⚠️</span>{needsUpdate} need update <span className="text-gray-400 hidden sm:inline">— see table below</span></span>
+                    <span className="text-[11px] text-slate-500">each variant gets its own color-specific terms</span>
+                    <span className="ml-auto text-[11px] text-amber-700 flex items-center gap-1 flex-shrink-0"><span aria-hidden>⚠️</span>{needsUpdate} need update <span className="text-slate-400 hidden sm:inline">— see table below</span></span>
                   </div>
                 </div>
               </div>
@@ -630,8 +674,8 @@ export default function ListingDetailPage() {
               {/* ── TIER 1 — Edit Once (Parent Level) ── */}
               <div>
                 <div className="flex items-baseline gap-2 mb-2">
-                  <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">✏️ Edit Once</h3>
-                  <span className="text-[11px] text-gray-400">Parent level — applies to all {variants.length} variants</span>
+                  <h3 className="flex items-center gap-1.5 text-xs font-bold text-slate-700 uppercase tracking-wide"><Icon.Layers className="w-3.5 h-3.5 text-violet-500" /> Edit Once</h3>
+                  <span className="text-[11px] text-slate-400">Parent level — applies to all {variants.length} variants</span>
                 </div>
                 <div className="space-y-2">
                   {parentItems.map((item, idx) => {
@@ -646,7 +690,7 @@ export default function ListingDetailPage() {
                         {item.priority}
                       </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/60 border border-current/20">
-                        {item.level === 'parent' ? '📦 Parent Level' : '🏷️ Per Child'}
+                        {item.level === 'parent' ? 'Parent Level' : 'Per Child'}
                       </span>
                       <span className="ml-auto text-[10px] font-mono opacity-60">{item.verdict}</span>
                     </div>
@@ -675,7 +719,7 @@ export default function ListingDetailPage() {
                     {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
                       <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
                         <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-[10px] font-bold text-green-800 uppercase">✂️ Copy & Paste This:</span>
+                          <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Copy & Paste This:</span>
                           <button
                             onClick={() => {
                               const text = Array.isArray(item.replacement_content)
@@ -716,11 +760,11 @@ export default function ListingDetailPage() {
                             onClick={() => openPushPreview(shipField)}
                             disabled={pushLoading}
                             title={`Write the recommended ${FIELD_LABEL[shipField].toLowerCase()} directly to Amazon for every variant`}
-                            className="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50">
-                            🚀 Ship {shipField === 'bullets' ? 'all 5 bullets' : FIELD_LABEL[shipField].toLowerCase()} to Amazon →
+                            className="inline-flex items-center gap-1.5 text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50 transition-colors cursor-pointer">
+                            <Icon.Send className="w-3.5 h-3.5" /> Ship {shipField === 'bullets' ? 'all 5 bullets' : FIELD_LABEL[shipField].toLowerCase()} to Amazon
                           </button>
-                          <span className="text-[10px] text-gray-600 inline-flex items-center gap-1 flex-wrap">
-                            <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">📦 Parent</span>
+                          <span className="text-[10px] text-slate-600 inline-flex items-center gap-1 flex-wrap">
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">Parent</span>
                             same value written to all {variants.length} variants
                           </span>
                         </div>
@@ -729,7 +773,7 @@ export default function ListingDetailPage() {
 
                     {/* Row 6: Notes */}
                     {item.notes && (
-                      <p className="text-[10px] mt-1.5 italic opacity-70">💡 {item.notes}</p>
+                      <p className="text-[10px] mt-1.5 italic opacity-70">{item.notes}</p>
                     )}
 
                     {/* A+ Module Details */}
@@ -756,16 +800,16 @@ export default function ListingDetailPage() {
 
                 {/* Recommended Product Detail values (folded from AI Recommendations) */}
                 {recs.product_details_improvements && recs.product_details_improvements.length > 0 && (
-                  <div className="mt-3 bg-white border border-gray-200 rounded-xl p-4">
-                    <span className="text-xs font-semibold text-gray-700 block mb-2">Recommended Product Detail values</span>
+                  <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-4">
+                    <span className="text-xs font-semibold text-slate-700 block mb-2">Recommended Product Detail values</span>
                     <div className="grid sm:grid-cols-2 gap-2">
                       {recs.product_details_improvements.map((pd, i) => (
-                        <div key={i} className="bg-gray-50 rounded-lg p-2.5">
+                        <div key={i} className="bg-slate-50 rounded-lg p-2.5">
                           <div className="flex items-center justify-between mb-0.5">
-                            <span className="text-xs font-semibold text-gray-800">{pd.field_name}</span>
+                            <span className="text-xs font-semibold text-slate-800">{pd.field_name}</span>
                             <button onClick={() => copy(pd.recommended_value, `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
                           </div>
-                          <p className="text-xs text-gray-700">{pd.recommended_value}</p>
+                          <p className="text-xs text-slate-700">{pd.recommended_value}</p>
                         </div>
                       ))}
                     </div>
@@ -776,40 +820,40 @@ export default function ListingDetailPage() {
               {/* ── TIER 2 — Edit Per Variant (Per Child) ── */}
               <div>
                 <div className="flex items-baseline gap-2 mb-2 flex-wrap">
-                  <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">🎨 Edit Per Variant</h3>
-                  <span className="text-[11px] text-gray-400">Backend search terms — unique per color/size</span>
+                  <h3 className="flex items-center gap-1.5 text-xs font-bold text-slate-700 uppercase tracking-wide"><Icon.Tag className="w-3.5 h-3.5 text-violet-500" /> Edit Per Variant</h3>
+                  <span className="text-[11px] text-slate-400">Backend search terms — unique per color/size</span>
                   {needsUpdate > 0
                     ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">{needsUpdate} of {perChildRows.length} need update</span>
                     : <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium">all {perChildRows.length} match</span>}
                 </div>
-                {backendItem?.instruction && <p className="text-xs text-gray-600 mb-2">{backendItem.instruction}</p>}
+                {backendItem?.instruction && <p className="text-xs text-slate-600 mb-2">{backendItem.instruction}</p>}
                 {perChildRows.length === 0 ? (
-                  <p className="text-xs text-gray-400">No variant data yet.</p>
+                  <p className="text-xs text-slate-400">No variant data yet.</p>
                 ) : (
-                  <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
                     <table className="w-full text-xs">
-                      <thead className="bg-gray-50 border-b border-gray-200">
+                      <thead className="bg-slate-50 border-b border-slate-200">
                         <tr>
-                          <th className="text-left px-3 py-2 font-medium text-gray-500">SKU</th>
-                          <th className="text-left px-3 py-2 font-medium text-gray-500">Status</th>
-                          <th className="text-left px-3 py-2 font-medium text-gray-500">Recommended backend search terms</th>
+                          <th className="text-left px-3 py-2 font-medium text-slate-500">SKU</th>
+                          <th className="text-left px-3 py-2 font-medium text-slate-500">Status</th>
+                          <th className="text-left px-3 py-2 font-medium text-slate-500">Recommended backend search terms</th>
                           <th className="px-3 py-2"></th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-gray-100">
+                      <tbody className="divide-y divide-slate-100">
                         {perChildRows.map(r => (
                           <tr key={r.sku} className={r.changed ? 'bg-amber-50/40' : ''}>
-                            <td className="px-3 py-2 font-mono text-gray-700 align-top whitespace-nowrap">{r.sku}</td>
+                            <td className="px-3 py-2 font-mono text-slate-700 align-top whitespace-nowrap">{r.sku}</td>
                             <td className="px-3 py-2 align-top whitespace-nowrap">
                               {r.recommended === ''
-                                ? <span className="text-gray-400">—</span>
+                                ? <span className="text-slate-400">—</span>
                                 : r.changed
                                   ? <span className="text-amber-600 font-medium">⚠️ Update</span>
                                   : <span className="text-green-600">✓ OK</span>}
                             </td>
                             <td className="px-3 py-2 align-top">
-                              {r.changed && r.current && <p className="text-[10px] text-gray-400 line-through mb-0.5 whitespace-pre-wrap break-words">{r.current}</p>}
-                              <p className="text-gray-700 font-mono leading-relaxed whitespace-pre-wrap break-words">{r.recommended || '(no recommendation)'}</p>
+                              {r.changed && r.current && <p className="text-[10px] text-slate-400 line-through mb-0.5 whitespace-pre-wrap break-words">{r.current}</p>}
+                              <p className="text-slate-700 font-mono leading-relaxed whitespace-pre-wrap break-words">{r.recommended || '(no recommendation)'}</p>
                             </td>
                             <td className="px-3 py-2 align-top">
                               {r.recommended && (
@@ -830,17 +874,17 @@ export default function ListingDetailPage() {
 
                 {/* Variant-specific corrections (folded from AI Recommendations) */}
                 {recs.variant_corrections && recs.variant_corrections.length > 0 && (
-                  <div className="mt-3 bg-white border border-gray-200 rounded-xl p-4">
-                    <span className="text-xs font-semibold text-gray-700 block mb-2">Variant-specific corrections</span>
+                  <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-4">
+                    <span className="text-xs font-semibold text-slate-700 block mb-2">Variant-specific corrections</span>
                     <div className="space-y-2">
                       {recs.variant_corrections.map((vc, i) => (
-                        <div key={i} className="bg-gray-50 rounded-lg p-3">
+                        <div key={i} className="bg-slate-50 rounded-lg p-3">
                           <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs font-mono text-gray-600">{vc.sku}</span>
+                            <span className="text-xs font-mono text-slate-600">{vc.sku}</span>
                             <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{vc.field}</span>
                           </div>
-                          <p className="text-[10px] text-gray-400 line-through">{vc.current.length > 100 ? vc.current.slice(0, 100) + '...' : vc.current}</p>
-                          <p className="text-xs text-gray-800 mt-0.5">{vc.replace_with}</p>
+                          <p className="text-[10px] text-slate-400 line-through">{vc.current.length > 100 ? vc.current.slice(0, 100) + '...' : vc.current}</p>
+                          <p className="text-xs text-slate-800 mt-0.5">{vc.replace_with}</p>
                         </div>
                       ))}
                     </div>
@@ -862,14 +906,14 @@ export default function ListingDetailPage() {
             Keyword Placement Plan
             {placementGroups && <span className="text-violet-500 font-normal ml-1">({placementGroups.total} keywords reconciled)</span>}
           </span>
-          <span className="text-xs text-gray-400">{expandedSections.has('placement') ? '▾' : '▸'}</span>
+          <span className="text-xs text-slate-400">{expandedSections.has('placement') ? '▾' : '▸'}</span>
         </button>
 
         {expandedSections.has('placement') && (
           <>
             {!aiRecs && !aiLoading && (
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-6 text-center">
-                <p className="text-sm text-gray-500 mb-3">No AI audit yet. Generate one to see the keyword placement plan.</p>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center">
+                <p className="text-sm text-slate-500 mb-3">No AI audit yet. Generate one to see the keyword placement plan.</p>
                 <button onClick={generateAiRecs} className="text-xs bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg">
                   Run AI Audit
                 </button>
@@ -893,7 +937,7 @@ export default function ListingDetailPage() {
                   const copyLabel = `placement-${groupKey}`
 
                   return (
-                    <div key={groupKey} className={`rounded-xl border-2 p-4 ${borderClass}`}>
+                    <div key={groupKey} className={`rounded-2xl border-2 p-4 ${borderClass}`}>
                       {/* Placement header */}
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex flex-wrap gap-1.5">
@@ -904,18 +948,18 @@ export default function ListingDetailPage() {
                           ))}
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="text-xs text-gray-500">{group.keywords.length} keywords &middot; {totalVol.toLocaleString()} searches/mo</span>
+                          <span className="text-xs text-slate-500">{group.keywords.length} keywords &middot; {totalVol.toLocaleString()} searches/mo</span>
                           <button
                             onClick={() => copy(group.text, copyLabel)}
-                            className="text-[10px] bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 px-2 py-1 rounded transition-colors">
+                            className="text-[10px] bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-2 py-1 rounded transition-colors">
                             {copied === copyLabel ? 'Copied!' : 'Copy'}
                           </button>
                         </div>
                       </div>
 
                       {/* The actual text */}
-                      <div className="bg-white rounded-lg border border-gray-200 p-3 mb-3">
-                        <p className="text-sm text-gray-800 leading-relaxed">{group.text}</p>
+                      <div className="bg-white rounded-lg border border-slate-200 p-3 mb-3">
+                        <p className="text-sm text-slate-800 leading-relaxed">{group.text}</p>
                       </div>
 
                       {/* Keyword pills */}
@@ -945,11 +989,11 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       <section>
         <button onClick={() => toggle('issues')} className="flex items-center gap-2 mb-3 w-full text-left">
-          <span className="text-sm font-bold text-gray-600 uppercase tracking-wide">
+          <span className="text-sm font-bold text-slate-600 uppercase tracking-wide">
             Diagnostics
-            <span className="text-gray-400 font-normal ml-1">({score.issues.length}) — detailed audit; the actions above are the fixes</span>
+            <span className="text-slate-400 font-normal ml-1">({score.issues.length}) — detailed audit; the actions above are the fixes</span>
           </span>
-          <span className="text-xs text-gray-400">{expandedSections.has('issues') ? '▾' : '▸'}</span>
+          <span className="text-xs text-slate-400">{expandedSections.has('issues') ? '▾' : '▸'}</span>
         </button>
 
         {expandedSections.has('issues') && (
@@ -958,14 +1002,14 @@ export default function ListingDetailPage() {
               <p className="text-sm text-green-600 bg-green-50 border border-green-200 rounded-lg p-3">No issues found. This listing looks great!</p>
             ) : (
               score.issues.map((issue, i) => (
-                <div key={i} className={`border-l-4 ${issueBorder(issue.field)} bg-white border border-gray-200 rounded-r-lg p-3`}>
+                <div key={i} className={`border-l-4 ${issueBorder(issue.field)} bg-white border border-slate-200 rounded-r-lg p-3`}>
                   <div className="flex items-start gap-2">
                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${
                       issue.severity === 'error' ? 'bg-red-100 text-red-700'
                       : issue.severity === 'warning' ? 'bg-amber-100 text-amber-700'
                       : 'bg-blue-100 text-blue-700'
                     }`}>{issue.field}</span>
-                    <p className="text-sm text-gray-700 leading-relaxed">{issue.message}</p>
+                    <p className="text-sm text-slate-700 leading-relaxed">{issue.message}</p>
                   </div>
                 </div>
               ))
@@ -979,31 +1023,31 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       <section>
         <button onClick={() => toggle('variants')} className="flex items-center gap-2 mb-3 w-full text-left">
-          <span className="text-sm font-bold text-gray-800 uppercase tracking-wide">
+          <span className="text-sm font-bold text-slate-800 uppercase tracking-wide">
             Variant Breakdown
-            <span className="text-gray-400 font-normal ml-1">({dedupByAsin(score.children).length})</span>
+            <span className="text-slate-400 font-normal ml-1">({dedupByAsin(score.children).length})</span>
           </span>
-          <span className="text-xs text-gray-400">{expandedSections.has('variants') ? '▾' : '▸'}</span>
+          <span className="text-xs text-slate-400">{expandedSections.has('variants') ? '▾' : '▸'}</span>
         </button>
 
         {expandedSections.has('variants') && (
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
             <table className="w-full text-xs">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-slate-50 border-b border-slate-200">
                 <tr>
-                  <th className="text-left px-3 py-2 font-medium text-gray-500">SKU</th>
-                  <th className="text-left px-3 py-2 font-medium text-gray-500">A+</th>
-                  <th className="text-left px-3 py-2 font-medium text-gray-500">Bullets</th>
-                  <th className="text-left px-3 py-2 font-medium text-gray-500">Keywords</th>
-                  <th className="text-left px-3 py-2 font-medium text-gray-500">Images</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">SKU</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">A+</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">Bullets</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">Keywords</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">Images</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-slate-100">
                 {dedupByAsin(score.children).map(child => (
-                  <tr key={child.sku} className="hover:bg-gray-50">
+                  <tr key={child.sku} className="hover:bg-slate-50">
                     <td className="px-3 py-2">
-                      <div className="font-mono text-gray-700">{child.sku}</div>
-                      <div className="text-[10px] text-gray-400 truncate max-w-[300px]">{child.title}</div>
+                      <div className="font-mono text-slate-700">{child.sku}</div>
+                      <div className="text-[10px] text-slate-400 truncate max-w-[300px]">{child.title}</div>
                     </td>
                     <td className="px-3 py-2">
                       {child.has_aplus ? (
@@ -1012,13 +1056,13 @@ export default function ListingDetailPage() {
                         <span className="text-red-500">&#10007;</span>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-gray-700">
+                    <td className="px-3 py-2 text-slate-700">
                       {[child.bullet_1, child.bullet_2, child.bullet_3, child.bullet_4, child.bullet_5].filter(Boolean).length}/5
                     </td>
-                    <td className="px-3 py-2 text-gray-700">
+                    <td className="px-3 py-2 text-slate-700">
                       {child.backend_keywords ? `${child.backend_keywords.length}/250` : '0/250'}
                     </td>
-                    <td className="px-3 py-2 text-gray-700">{child.image_count}/7</td>
+                    <td className="px-3 py-2 text-slate-700">{child.image_count}/7</td>
                   </tr>
                 ))}
               </tbody>
@@ -1038,17 +1082,17 @@ export default function ListingDetailPage() {
       {kwData && kwData.topOpportunities.length > 0 && (
         <section>
           <button onClick={() => toggle('kwintel')} className="flex items-center gap-2 mb-3 w-full text-left">
-            <span className="text-sm font-bold text-gray-800 uppercase tracking-wide">
+            <span className="text-sm font-bold text-slate-800 uppercase tracking-wide">
               Keyword Intelligence
-              <span className="text-gray-400 font-normal ml-1">({kwData.totalKeywordsAnalyzed} keywords analyzed)</span>
+              <span className="text-slate-400 font-normal ml-1">({kwData.totalKeywordsAnalyzed} keywords analyzed)</span>
             </span>
-            <span className="text-xs text-gray-400">{expandedSections.has('kwintel') ? '▾' : '▸'}</span>
+            <span className="text-xs text-slate-400">{expandedSections.has('kwintel') ? '▾' : '▸'}</span>
           </button>
 
           {expandedSections.has('kwintel') && (
-            <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
               {/* Summary badges */}
-              <div className="flex gap-3 p-3 border-b border-gray-100 bg-gray-50">
+              <div className="flex gap-3 p-3 border-b border-slate-100 bg-slate-50">
                 {kwData.summary.critical > 0 && <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{kwData.summary.critical} Critical</span>}
                 {kwData.summary.upgrade > 0 && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{kwData.summary.upgrade} Upgrade</span>}
                 {kwData.summary.reinforce > 0 && <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">{kwData.summary.reinforce} Reinforce</span>}
@@ -1056,19 +1100,19 @@ export default function ListingDetailPage() {
               </div>
               {/* Top 20 keywords table */}
               <table className="w-full text-xs">
-                <thead className="bg-gray-50 border-b border-gray-200">
+                <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
-                    <th className="text-left px-3 py-2 font-medium text-gray-500">Keyword</th>
-                    <th className="text-right px-3 py-2 font-medium text-gray-500">Vol</th>
-                    <th className="text-left px-3 py-2 font-medium text-gray-500">Action</th>
-                    <th className="text-left px-3 py-2 font-medium text-gray-500">Present In</th>
+                    <th className="text-left px-3 py-2 font-medium text-slate-500">Keyword</th>
+                    <th className="text-right px-3 py-2 font-medium text-slate-500">Vol</th>
+                    <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
+                    <th className="text-left px-3 py-2 font-medium text-slate-500">Present In</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y divide-slate-100">
                   {kwData.topOpportunities.slice(0, 20).map((kw, i) => (
-                    <tr key={i} className="hover:bg-gray-50">
-                      <td className="px-3 py-2 text-gray-800">{kw.keyword}</td>
-                      <td className="px-3 py-2 text-right text-gray-600">{kw.searchVolume.toLocaleString()}</td>
+                    <tr key={i} className="hover:bg-slate-50">
+                      <td className="px-3 py-2 text-slate-800">{kw.keyword}</td>
+                      <td className="px-3 py-2 text-right text-slate-600">{kw.searchVolume.toLocaleString()}</td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                           kw.actionType === 'CRITICAL' ? 'bg-red-100 text-red-700'
@@ -1082,7 +1126,7 @@ export default function ListingDetailPage() {
                           {kw.inTitle && <span className="text-[9px] bg-blue-50 text-blue-600 px-1 rounded">T</span>}
                           {kw.inBullets && <span className="text-[9px] bg-green-50 text-green-600 px-1 rounded">B</span>}
                           {kw.inDescription && <span className="text-[9px] bg-purple-50 text-purple-600 px-1 rounded">D</span>}
-                          {kw.inBackend && <span className="text-[9px] bg-gray-100 text-gray-600 px-1 rounded">K</span>}
+                          {kw.inBackend && <span className="text-[9px] bg-slate-100 text-slate-600 px-1 rounded">K</span>}
                           {!kw.inTitle && !kw.inBullets && !kw.inDescription && !kw.inBackend && (
                             <span className="text-[9px] text-red-500">nowhere</span>
                           )}
@@ -1102,10 +1146,10 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       {showPushModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !pushLoading && setShowPushModal(false)}>
-          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 sticky top-0 bg-white">
-              <h3 className="text-sm font-bold text-gray-900">🚀 Ship {FIELD_LABEL[pushField]} to Amazon</h3>
-              <button onClick={() => !pushLoading && setShowPushModal(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
+          <div className="bg-white rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
+              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Icon.Send className="w-4 h-4 text-emerald-600" /> Ship {FIELD_LABEL[pushField]} to Amazon</h3>
+              <button onClick={() => !pushLoading && setShowPushModal(false)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
             </div>
 
             <div className="p-5">
@@ -1114,7 +1158,7 @@ export default function ListingDetailPage() {
               {pushLoading && !pushResults && (
                 <div className="text-center py-8">
                   <div className="animate-spin w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full mx-auto mb-2" />
-                  <p className="text-sm text-gray-500">{pushResults ? 'Pushing…' : pushPreview ? 'Pushing to Amazon…' : 'Loading preview…'}</p>
+                  <p className="text-sm text-slate-500">{pushResults ? 'Pushing…' : pushPreview ? 'Pushing to Amazon…' : 'Loading preview…'}</p>
                 </div>
               )}
 
@@ -1125,7 +1169,7 @@ export default function ListingDetailPage() {
                   {pushPreview.broadcast ? (
                     <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-indigo-900 leading-relaxed">
-                        <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-semibold mr-1.5 whitespace-nowrap">📦 Parent</span>
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-semibold mr-1.5 whitespace-nowrap">Parent</span>
                         The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> variants (child ASINs).{' '}
                         <b>{pushPreview.changed}</b> currently differ and will change.
                       </p>
@@ -1133,12 +1177,12 @@ export default function ListingDetailPage() {
                   ) : (
                     <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-amber-900 leading-relaxed">
-                        <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">🏷️ Per-child</span>
+                        <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">Per-child</span>
                         Each of {pushPreview.count} variants gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.
                       </p>
                     </div>
                   )}
-                  <p className="text-xs text-gray-500 mb-3">
+                  <p className="text-xs text-slate-500 mb-3">
                     Every value is checked with Amazon (VALIDATION_PREVIEW) before any live write, and the previous value is saved for rollback.
                     {pushPreview.field === 'keywords' && ' Backend strings are capped at 250 bytes.'}
                   </p>
@@ -1150,25 +1194,25 @@ export default function ListingDetailPage() {
                         <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.label.toLowerCase()} → all {pushPreview.count} variants</p>
                         {pushPreview.field === 'bullets' && Array.isArray(pushPreview.proposedValue) ? (
                           <ul className="list-disc pl-5 space-y-1">
-                            {pushPreview.proposedValue.map((b, i) => <li key={i} className="text-xs text-gray-800 break-words">{b}</li>)}
+                            {pushPreview.proposedValue.map((b, i) => <li key={i} className="text-xs text-slate-800 break-words">{b}</li>)}
                           </ul>
                         ) : pushPreview.field === 'description' ? (
-                          <div className="text-xs text-gray-800 max-h-56 overflow-y-auto leading-relaxed [&_li]:ml-4 [&_li]:list-disc [&_p]:mb-2 [&_b]:font-semibold"
+                          <div className="text-xs text-slate-800 max-h-56 overflow-y-auto leading-relaxed [&_li]:ml-4 [&_li]:list-disc [&_p]:mb-2 [&_b]:font-semibold"
                                dangerouslySetInnerHTML={{ __html: String(pushPreview.proposedValue ?? '') }} />
                         ) : (
-                          <p className="text-xs text-gray-800 break-words whitespace-pre-wrap">{String(pushPreview.proposedValue ?? '')}</p>
+                          <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{String(pushPreview.proposedValue ?? '')}</p>
                         )}
                       </div>
                       {pushPreview.changed > 0 && (
                         <details className="mb-4">
-                          <summary className="text-xs text-gray-600 cursor-pointer hover:text-gray-800">
+                          <summary className="text-xs text-slate-600 cursor-pointer hover:text-slate-800">
                             {pushPreview.changed} of {pushPreview.count} variants currently differ — view which
                           </summary>
-                          <div className="mt-2 border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-[35vh] overflow-y-auto">
+                          <div className="mt-2 border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-[35vh] overflow-y-auto">
                             {pushPreview.diff.filter(d => d.changed).map((d) => (
                               <div key={d.sku} className="p-2.5 text-xs">
-                                <div className="font-mono text-gray-700 mb-0.5">{d.sku}</div>
-                                <p className="text-gray-400 line-through break-words">{d.current || '(empty)'}</p>
+                                <div className="font-mono text-slate-700 mb-0.5">{d.sku}</div>
+                                <p className="text-slate-400 line-through break-words">{d.current || '(empty)'}</p>
                               </div>
                             ))}
                           </div>
@@ -1177,11 +1221,11 @@ export default function ListingDetailPage() {
                     </>
                   ) : (
                     /* Per-child: full current → proposed diff per SKU */
-                    <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 mb-4 max-h-[45vh] overflow-y-auto">
+                    <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[45vh] overflow-y-auto">
                       {pushPreview.diff.filter(d => d.changed).map((d) => (
                         <div key={d.sku} className="p-3 text-xs">
-                          <div className="font-mono text-gray-700 mb-1">{d.sku} <span className="text-gray-400">({d.bytes}/250 bytes)</span></div>
-                          <p className="text-gray-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
+                          <div className="font-mono text-slate-700 mb-1">{d.sku} <span className="text-slate-400">({d.bytes}/250 bytes)</span></div>
+                          <p className="text-slate-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
                           <p className="text-emerald-700 break-words">{d.proposed}</p>
                         </div>
                       ))}
@@ -1189,7 +1233,7 @@ export default function ListingDetailPage() {
                   )}
 
                   <div className="flex justify-end gap-2">
-                    <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50">Cancel</button>
+                    <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
                     <button onClick={confirmPush} disabled={pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
                       Confirm &amp; Ship {pushPreview.label.toLowerCase()} to {pushPreview.changed} variant{pushPreview.changed !== 1 ? 's' : ''}
@@ -1201,18 +1245,18 @@ export default function ListingDetailPage() {
               {/* Results (post-push) */}
               {pushResults && (
                 <>
-                  <p className="text-sm text-gray-800 mb-3">{pushResults.message}</p>
-                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 mb-4 max-h-[50vh] overflow-y-auto">
+                  <p className="text-sm text-slate-800 mb-3">{pushResults.message}</p>
+                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[50vh] overflow-y-auto">
                     {pushResults.results.map((r) => (
                       <div key={r.sku} className="p-2.5 text-xs flex items-center gap-2">
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${r.status === 'accepted' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{r.status}</span>
-                        <span className="font-mono text-gray-700">{r.sku}</span>
+                        <span className="font-mono text-slate-700">{r.sku}</span>
                         {r.error && <span className="text-red-600 truncate">{r.error}</span>}
                       </div>
                     ))}
                   </div>
                   <div className="flex justify-end">
-                    <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-900 text-white">Done</button>
+                    <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white">Done</button>
                   </div>
                 </>
               )}
@@ -1220,6 +1264,7 @@ export default function ListingDetailPage() {
           </div>
         </div>
       )}
+    </div>
     </div>
   )
 }
