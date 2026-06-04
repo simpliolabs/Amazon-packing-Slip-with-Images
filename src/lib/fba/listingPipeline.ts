@@ -495,14 +495,47 @@ async function runBackendAgent(
     }
     if (out.length === 0 || out.every((w) => MINOR_WORDS.has(w))) continue
     corePhrases.push(out.join(' '))
-    if (getByteLength(corePhrases.join(' ')) >= 200) break
+    if (getByteLength(corePhrases.join(' ')) >= 215) break
   }
   // Guarantee the product's audience tokens (PO wants Men AND Women in the backend).
   for (const a of ['men', 'women']) {
     if (titleWords.has(a) && !coreWordSet.has(a)) { corePhrases.push(a); coreWordSet.add(a) }
   }
-  // The core is the opportunity keywords — most of the 250 bytes (NOT color synonyms).
-  const core = truncateToBytes(corePhrases.join(' '), 240)
+  // FILL: a small product's opportunity pool can run dry well under 250 bytes, leaving the
+  // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with LLM long-tail
+  // BUYER search words (gifts / occasions / recipients / themes) — run through the SAME junk /
+  // role / kids / dedup filters as the core, so it fills with real terms, not rejected junk.
+  if (getByteLength(corePhrases.join(' ')) < 205) {
+    try {
+      const fillSys = 'You generate ADDITIONAL Amazon backend search keywords (long-tail buyer phrases) to fill the search-term field. Return ONLY JSON: {"keywords":"lowercase space-separated search words"}.'
+      const fillUsr = `Product: ${finalTitle}
+List ~25 ADDITIONAL real search terms a shopper would TYPE to find this product — gift occasions, recipients, styles, themes, related concepts (e.g. "fathers day gift", "summer vacation tee", "novelty graphic", "animal lover gift", "back to school").
+ONLY real buyer search words. NO brand, NO color names, NO sizes, NO moods/adjectives ("elegant", "timeless", "premium", "cozy"). lowercase, space-separated, no commas/quotes.
+Avoid reusing: ${[...coreWordSet, ...titleWords].slice(0, 60).join(' ')}
+Return ONLY the JSON.`
+      const fc = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [{ role: 'system', content: fillSys }, { role: 'user', content: fillUsr }],
+        temperature: 0.6,
+        max_tokens: 300,
+        response_format: { type: 'json_object' },
+      })
+      const fillParsed = parseJsonLoose<{ keywords?: string }>(fc.choices[0]?.message?.content || '{}')
+      const fillOut: string[] = []
+      for (const w of (fillParsed.keywords || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+        if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w)) continue
+        if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue          // weak-relevance role
+        if (kidsWords.has(w) && !titleWords.has(w)) continue           // wrong audience
+        if (coreWordSet.has(w) || excludeWords.has(w)) continue        // already covered / auto-indexed
+        if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
+        coreWordSet.add(w); fillOut.push(w)
+        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= 224) break
+      }
+      if (fillOut.length) corePhrases.push(fillOut.join(' '))
+    } catch { /* fill is best-effort; the opportunity core still ships */ }
+  }
+  // The core is the opportunity keywords + long-tail fill — most of the 250 bytes (NOT colors).
+  const core = truncateToBytes(corePhrases.join(' '), 228)
 
   // ── PER-COLOR TAIL: just the 2-3 top shade synonyms for THIS variant's color (not 10) ──
   const system = 'You generate a SHORT Amazon backend color tail per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"2-3 lowercase color words"}]}.'
