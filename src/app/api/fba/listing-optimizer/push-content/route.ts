@@ -1,28 +1,40 @@
 /**
- * /api/fba/listing-optimizer/push-keywords
+ * /api/fba/listing-optimizer/push-content
  * ─────────────────────────────────────────────────────────────────────────────
- * Bulk-pushes the per-child backend keyword strings (generic_keyword) to Amazon
- * for every child SKU of a parent ASIN. Solves the 100+-variant pain point where
- * pasting each child's search terms by hand is infeasible.
+ * Generalized, per-field push of optimized listing content to Amazon via
+ * patchListingsItem. Supersedes the keyword-only push-keywords route.
  *
- * GET  ?parent_asin=...  → PREVIEW: per-SKU diff (current cached value vs proposed),
- *                          no Amazon writes. Drives the confirmation UI.
- * POST { parent_asin }   → PUSH: for each child, VALIDATION_PREVIEW then live PATCH,
- *                          throttled, with a keyword_push_log row per SKU (rollback).
+ *   field=title       → /attributes/item_name           (BROADCAST to every child SKU)
+ *   field=bullets     → /attributes/bullet_point         (BROADCAST — 5-value array)
+ *   field=description → /attributes/product_description   (BROADCAST)
+ *   field=keywords    → /attributes/generic_keyword       (PER-CHILD — unique per SKU)
+ *
+ * Each content section ships INDEPENDENTLY with its own approval. "Broadcast"
+ * fields are parent-level content that must be identical across all children, so
+ * the single recommended value is written to every (ASIN-deduped) child. Keywords
+ * are per-child (each color/size its own string).
+ *
+ * GET  ?parent_asin=&field=  → PREVIEW: per-SKU diff (current vs proposed), no writes.
+ * POST { parent_asin, field, confirm:true } → PUSH: VALIDATION_PREVIEW then live PATCH
+ *      per SKU, throttled, with a keyword_push_log row per SKU (field-tagged; rollback).
  *
  * Safety:
- *   - Backend keywords ONLY (generic_keyword) — not customer-visible, lowest risk.
- *   - 250-BYTE cap enforced before every write.
- *   - VALIDATION_PREVIEW first; only PATCH live if Amazon returns VALID.
- *   - 200ms throttle between SKUs (Amazon limit is 5 rps; ~100 SKUs ≈ 20s < 100s budget).
- *   - previous_value stored per SKU in keyword_push_log for rollback.
- *   - Uses the raw-fetch + getAccessToken() + getSellerId() pattern (NOT the SDK),
- *     reading the seller id from app_settings (the working app), per the SP-API consult.
+ *   - VALIDATION_PREVIEW before every live write; live PATCH only if Amazon says VALID.
+ *   - Per-field defensive caps (keywords 250 bytes; title/desc/bullets char caps).
+ *   - 200ms throttle between SKUs (Amazon limit 5 rps).
+ *   - previous_value stored per SKU for rollback; field column distinguishes pushes.
+ *   - listing_content cache-synced on success, then the page is re-scored.
+ *   - Log + cache writes are best-effort: they never abort a push that already wrote.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
+import {
+  FIELD_CONFIG, isPushField, type PushField,
+  resolveProposed, currentValue, asCompare, buildPatchValue,
+  dedupByAsin, cacheUpdateFor, getByteLength,
+} from '@/lib/fba/pushFields'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -42,24 +54,18 @@ async function getSellerId(): Promise<string> {
   throw new Error('amazon_seller_id not configured. Add it in Settings.')
 }
 
-function getByteLength(str: string): number {
-  return new TextEncoder().encode(str).length
-}
-function capBytes(str: string, maxBytes = 250): string {
-  if (getByteLength(str) <= maxBytes) return str
-  let lo = 0, hi = str.length
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2)
-    if (getByteLength(str.slice(0, mid)) <= maxBytes) lo = mid
-    else hi = mid - 1
-  }
-  const cut = str.slice(0, lo)
-  const lastSpace = cut.lastIndexOf(' ')
-  return (lastSpace > lo * 0.7 ? cut.slice(0, lastSpace) : cut).trim()
-}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-interface ChildContent { sku: string; backend_keywords: string | null }
+interface ContentRow {
+  sku: string; asin: string
+  title: string | null
+  bullet_1: string | null; bullet_2: string | null; bullet_3: string | null; bullet_4: string | null; bullet_5: string | null
+  description: string | null
+  backend_keywords: string | null
+}
+
+const CONTENT_COLUMNS =
+  'sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords'
 
 /** Parse per_child_keywords (stored as a JSON string in recommended_keywords). */
 function parsePerChild(raw: string | null): Map<string, string> {
@@ -74,59 +80,99 @@ function parsePerChild(raw: string | null): Map<string, string> {
   return map
 }
 
-/** Load the proposed (per-child) + current (cached) backend keywords for a parent. */
-async function loadDiff(parentAsin: string) {
+interface DiffRow {
+  sku: string
+  current: string
+  proposed: string
+  raw: string | string[] | null
+  bytes: number
+  chars: number
+  changed: boolean
+}
+
+/** Load the proposed (recommended) + current (cached) value per child SKU for one field. */
+async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]> {
   const supabase = await createAdminClient()
-  const { data: rec } = await supabase
+
+  const { data: recRow } = await supabase
     .from('listing_seo_recommendations')
-    .select('recommended_keywords')
+    .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords')
     .eq('parent_asin', parentAsin)
     .single()
-  const proposed = parsePerChild((rec as { recommended_keywords: string | null } | null)?.recommended_keywords ?? null)
+  const rec = (recRow ?? {}) as {
+    recommended_title?: string | null
+    recommended_bullets?: string[] | null
+    recommended_description?: string | null
+    recommended_keywords?: string | null
+  }
+  const perChild = field === 'keywords' ? parsePerChild(rec.recommended_keywords ?? null) : new Map<string, string>()
 
-  const { data: children } = await supabase
+  const { data: rowsRaw } = await supabase
     .from('listing_content')
-    .select('sku, backend_keywords')
+    .select(CONTENT_COLUMNS)
     .eq('parent_asin', parentAsin)
     .order('sku', { ascending: true })
 
-  const rows = (children ?? []) as ChildContent[]
-  const diff = rows
-    .filter((c) => proposed.has(c.sku))
-    .map((c) => {
-      const next = capBytes((proposed.get(c.sku) || '').trim())
-      const current = (c.backend_keywords || '').trim()
-      return { sku: c.sku, current, proposed: next, bytes: getByteLength(next), changed: current !== next }
+  // FBA+FBM SKUs share one child ASIN → push once per ASIN (prefer the -FBA SKU).
+  const content = dedupByAsin((rowsRaw ?? []) as ContentRow[])
+
+  return content
+    .map((row): DiffRow => {
+      const proposed = resolveProposed(field, rec, perChild, row.sku)
+      const proposedStr = asCompare(proposed)
+      const current = currentValue(field, row as unknown as Record<string, unknown>)
+      return {
+        sku: row.sku,
+        current,
+        proposed: proposedStr,
+        raw: proposed,
+        bytes: getByteLength(proposedStr),
+        chars: proposedStr.length,
+        changed: proposedStr.length > 0 && current !== proposedStr,
+      }
     })
-  return diff
+    .filter((d) => d.raw != null) // keywords: drops SKUs with no per-child recommendation
 }
 
 // ─── GET — preview (no writes) ─────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   try {
-    const parentAsin = new URL(req.url).searchParams.get('parent_asin')
+    const url = new URL(req.url)
+    const parentAsin = url.searchParams.get('parent_asin')
+    const rawField = url.searchParams.get('field') ?? 'keywords'
     if (!parentAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
-    const diff = await loadDiff(parentAsin)
+    if (!isPushField(rawField)) return NextResponse.json({ error: `unknown field "${rawField}"` }, { status: 400 })
+    const field = rawField
+
+    const diff = await loadDiff(parentAsin, field)
     if (diff.length === 0) {
-      return NextResponse.json({ error: 'No per-child keyword recommendations found. Run an AI audit first.' }, { status: 404 })
+      return NextResponse.json({ error: 'No recommendations found for this field. Run an AI audit first.' }, { status: 404 })
     }
-    return NextResponse.json({ parent_asin: parentAsin, count: diff.length, changed: diff.filter((d) => d.changed).length, diff })
+    const cfg = FIELD_CONFIG[field]
+    return NextResponse.json({
+      parent_asin: parentAsin,
+      field,
+      label: cfg.label,
+      broadcast: cfg.broadcast,
+      count: diff.length,
+      changed: diff.filter((d) => d.changed).length,
+      // For broadcast fields every child gets the same value — surface it once for the UI.
+      proposedValue: cfg.broadcast ? (diff[0]?.raw ?? null) : null,
+      diff,
+    })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Preview failed' }, { status: 500 })
   }
 }
 
-// ─── PATCH one SKU's generic_keyword (validation-preview, then live) ────────────
+// ─── PATCH one SKU's attribute (validation-preview, then live) ──────────────────
 async function patchSku(
-  sellerId: string, token: string, productType: string, sku: string, value: string, mode: 'VALIDATION_PREVIEW' | 'LIVE',
+  sellerId: string, token: string, productType: string, sku: string,
+  attribute: string, value: string | string[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
 ): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
   const body = {
     productType,
-    patches: [{
-      op: 'replace',
-      path: '/attributes/generic_keyword',
-      value: [{ value, marketplace_id: MARKETPLACE_ID, language_tag: 'en_US' }],
-    }],
+    patches: [{ op: 'replace', path: `/attributes/${attribute}`, value: buildPatchValue(value, MARKETPLACE_ID) }],
   }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
   const url =
@@ -169,56 +215,66 @@ async function getProductType(sellerId: string, token: string, sku: string): Pro
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}))
-    const { parent_asin, confirm } = body as { parent_asin?: string; confirm?: boolean }
+    const { parent_asin, confirm, field: rawField } = body as { parent_asin?: string; confirm?: boolean; field?: string }
     if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+    const field: PushField = isPushField(rawField) ? rawField : 'keywords'
     if (confirm !== true) {
       return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
     }
 
-    const diff = (await loadDiff(parent_asin)).filter((d) => d.changed && d.proposed.length > 0)
+    const diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
     if (diff.length === 0) {
-      return NextResponse.json({ parent_asin, pushed: 0, message: 'Nothing to push — all child keywords already match.' })
+      return NextResponse.json({ parent_asin, field, pushed: 0, message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.` })
     }
 
-    const token    = await getAccessToken()
-    const sellerId = await getSellerId()
+    const token       = await getAccessToken()
+    const sellerId    = await getSellerId()
     const productType = await getProductType(sellerId, token, diff[0].sku)
-    const supabase = await createAdminClient()
-    // keyword_push_log (migration 015) is not in the generated Supabase types yet;
+    const attribute   = FIELD_CONFIG[field].attribute
+    const supabase    = await createAdminClient()
+    // keyword_push_log (migrations 015/016) is not in the generated Supabase types;
     // use a loose alias for its writes (same pattern as optimize-listing/route.ts).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = supabase as any
     // The audit-log insert and cache update must NEVER abort a push that already wrote
-    // to Amazon (e.g. if migration 015 isn't applied yet). Both are best-effort.
+    // to Amazon (e.g. if migration 015/016 isn't applied yet). Both are best-effort.
+    // Supabase .insert() returns an { error } (it doesn't throw) on an unknown column,
+    // so if migration 016 (the `field` column) hasn't been applied we retry without it
+    // — the rollback trail still survives, just untagged.
     const logPush = async (row: Record<string, unknown>) => {
-      try { await db.from('keyword_push_log').insert(row) }
-      catch (e) { console.warn('[push] keyword_push_log insert failed (migration 015 applied?):', e) }
+      try {
+        const { error } = await db.from('keyword_push_log').insert(row)
+        if (!error) return
+        const rest = { ...row }; delete rest.field // migration 016 not applied yet → log untagged
+        await db.from('keyword_push_log').insert(rest)
+      } catch (e) { console.warn('[push-content] keyword_push_log insert failed (migrations 015/016 applied?):', e) }
     }
 
     const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
 
     for (const item of diff) {
-      const value = capBytes(item.proposed)
+      const value = item.raw as string | string[]
+      const newValueStr = asCompare(value)
       // 1) validation preview
-      const preview = await patchSku(sellerId, token, productType, item.sku, value, 'VALIDATION_PREVIEW')
+      const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
       if (!preview.ok) {
         results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
-        await logPush({ parent_asin, sku: item.sku, previous_value: item.current, new_value: value, submission_id: null, status: 'failed', error_message: preview.error })
+        await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
         await sleep(PATCH_DELAY_MS)
         continue
       }
       // 2) live write
-      const live = await patchSku(sellerId, token, productType, item.sku, value, 'LIVE')
+      const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
       const status = live.ok ? 'accepted' : 'failed'
       results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
-      await logPush({ parent_asin, sku: item.sku, previous_value: item.current, new_value: value, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
-      // keep the local cache in sync on success (best-effort)
+      await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
+      // keep the local cache in sync on success (best-effort) so the re-score below is accurate
       if (live.ok) {
         try {
           await db.from('listing_content')
-            .update({ backend_keywords: value, content_synced_at: new Date().toISOString() })
+            .update({ ...cacheUpdateFor(field, value), content_synced_at: new Date().toISOString() })
             .eq('sku', item.sku)
-        } catch (e) { console.warn('[push] listing_content cache update failed:', e) }
+        } catch (e) { console.warn('[push-content] listing_content cache update failed:', e) }
       }
       await sleep(PATCH_DELAY_MS)
     }
@@ -226,8 +282,8 @@ export async function POST(req: NextRequest) {
     const accepted = results.filter((r) => r.status === 'accepted').length
     const failed   = results.filter((r) => r.status === 'failed').length
 
-    // Re-score so the page's Keywords/overall score reflects the just-pushed values (the scorer
-    // otherwise only runs on Sync/Regenerate, so the score went stale after a push). Best-effort —
+    // Re-score so the page's score reflects the just-pushed values (the scorer otherwise
+    // only runs on Sync/Regenerate, so the score went stale after a push). Best-effort —
     // never fail a push that already wrote to Amazon. listing_content was cache-updated above.
     if (accepted > 0) {
       try {
@@ -248,15 +304,17 @@ export async function POST(req: NextRequest) {
             child_override_count: score.child_override_count,
           }).eq('parent_asin', parent_asin)
         }
-      } catch (e) { console.warn('[push] re-score failed (non-fatal):', e) }
+      } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
     }
 
+    const label = FIELD_CONFIG[field].label.toLowerCase()
     return NextResponse.json({
       parent_asin,
+      field,
       pushed: accepted,
       failed,
       total: results.length,
-      message: `Pushed backend keywords for ${accepted}/${results.length} variants${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+      message: `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
       results,
     })
   } catch (err) {
