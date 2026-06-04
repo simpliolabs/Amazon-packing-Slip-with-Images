@@ -507,6 +507,27 @@ export default function ListingDetailPage() {
         })
         const needsUpdate = perChildRows.filter(r => r.changed).length
         const actionsNeeded = (recs.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length
+        // ── Per-field variant cohesion (client-side; "should-match" fields only) ──
+        // Groups each child's CURRENT value to show whether the 46 variants are consistent or
+        // split, how many need updating, and which SKUs hold which version.
+        const normV = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim()
+        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string) => {
+          const groups = new Map<string, string[]>()
+          for (const c of score.children) {
+            const v = normV(getCurrent(c))
+            if (!groups.has(v)) groups.set(v, [])
+            groups.get(v)!.push(c.sku)
+          }
+          const versions = [...groups.entries()].map(([value, skus]) => ({ value, skus })).sort((a, b) => b.skus.length - a.skus.length)
+          const rec = normV(recommended)
+          const needUpdate = score.children.filter(c => normV(getCurrent(c)) !== rec).length
+          return { versions, distinct: versions.length, needUpdate, total: score.children.length, recommended }
+        }
+        const cohFields = [
+          { key: 'title', label: 'Title', coh: fieldCohesion(c => c.title, recs.recommended_title), copyVal: recs.recommended_title },
+          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n')), copyVal: (recs.recommended_bullets ?? []).join('\n') },
+          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description), copyVal: recs.recommended_description },
+        ]
         return (
         <section>
           <button onClick={() => toggle('apply')} className="flex items-center gap-2 mb-3 w-full text-left">
@@ -519,6 +540,64 @@ export default function ListingDetailPage() {
 
           {expandedSections.has('apply') && (
             <div className="space-y-6">
+              {/* ── VARIANT COHESION — how the variants compare per field ── */}
+              <div className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-baseline gap-2">
+                  <span className="text-xs font-bold text-gray-700 uppercase tracking-wide">Variant Cohesion</span>
+                  <span className="text-[11px] text-gray-400">how your {score.children.length} variants compare today</span>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {cohFields.map(f => {
+                    const split = f.coh.distinct > 1
+                    const open = expandedSections.has(`coh-${f.key}`)
+                    return (
+                      <div key={f.key}>
+                        <button onClick={() => toggle(`coh-${f.key}`)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-50 transition-colors">
+                          <span className="text-xs font-semibold text-gray-800 w-20 flex-shrink-0">{f.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 flex-shrink-0 hidden sm:inline">should match</span>
+                          {split
+                            ? <span className="text-[11px] text-purple-700 flex items-center gap-1"><span aria-hidden>⚡</span>{f.coh.distinct} versions live</span>
+                            : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
+                          <span className="ml-auto text-[11px] flex-shrink-0">
+                            {f.coh.needUpdate > 0
+                              ? <span className="text-amber-700 flex items-center gap-1"><span aria-hidden>⚠️</span>{f.coh.needUpdate} need update</span>
+                              : <span className="text-green-700">up to date</span>}
+                          </span>
+                          <span className="text-xs text-gray-400 flex-shrink-0">{open ? '▾' : '▸'}</span>
+                        </button>
+                        {open && (
+                          <div className="px-4 pb-3 pt-1 bg-gray-50/60 space-y-2">
+                            <div className="flex items-start justify-between gap-2 bg-green-50 border border-green-200 rounded p-2">
+                              <div className="min-w-0">
+                                <p className="text-[10px] font-bold text-green-800 uppercase">Update all {f.coh.total} variants to:</p>
+                                <p className="text-xs text-gray-800 whitespace-pre-wrap break-words mt-0.5">{f.copyVal || '(none)'}</p>
+                              </div>
+                              <button onClick={() => copy(f.copyVal || '', `coh-${f.key}`)} className="text-[10px] bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded flex-shrink-0">{copied === `coh-${f.key}` ? 'Copied!' : 'Copy'}</button>
+                            </div>
+                            <p className="text-[10px] font-medium text-gray-500 uppercase">Current values across your variants{split ? ' — these diverge:' : ':'}</p>
+                            {f.coh.versions.map((v, vi) => (
+                              <details key={vi} className="bg-white border border-gray-200 rounded">
+                                <summary className="cursor-pointer px-2 py-1 text-[11px] flex items-center gap-2">
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 flex-shrink-0">{v.skus.length} variant{v.skus.length === 1 ? '' : 's'}</span>
+                                  <span className="truncate text-gray-500">{v.value ? (v.value.length > 90 ? v.value.slice(0, 90) + '…' : v.value) : '(empty)'}</span>
+                                </summary>
+                                <p className="px-2 pb-2 text-[10px] text-gray-400 font-mono break-words">{v.skus.join(', ')}</p>
+                              </details>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                  <div className="flex items-center gap-2 px-4 py-2">
+                    <span className="text-xs font-semibold text-gray-800 w-20 flex-shrink-0">Backend</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 flex-shrink-0 hidden sm:inline">unique each</span>
+                    <span className="text-[11px] text-gray-500">each variant gets its own color-specific terms</span>
+                    <span className="ml-auto text-[11px] text-amber-700 flex items-center gap-1 flex-shrink-0"><span aria-hidden>⚠️</span>{needsUpdate} need update <span className="text-gray-400 hidden sm:inline">— see table below</span></span>
+                  </div>
+                </div>
+              </div>
+
               {/* ── TIER 1 — Edit Once (Parent Level) ── */}
               <div>
                 <div className="flex items-baseline gap-2 mb-2">
