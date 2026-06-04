@@ -188,6 +188,7 @@ export default function ListingDetailPage() {
   const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
   const [showPushModal, setShowPushModal] = useState(false)
   const [fetchedImage, setFetchedImage] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<string>('apply')
 
   const copy = (text: string, label: string) => {
     copyToClipboard(text)
@@ -437,6 +438,14 @@ export default function ListingDetailPage() {
   )
 
   const displayImage = score.image_url || fetchedImage
+  // Tab definitions for the dashboard-style section nav (one section visible at a time).
+  const TABS = [
+    { id: 'apply', label: 'Apply Changes', count: (aiRecs?.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length },
+    { id: 'placement', label: 'Keyword Plan', count: aiRecs?.keyword_reconciliation?.length ?? 0 },
+    { id: 'issues', label: 'Diagnostics', count: score.issues.length },
+    { id: 'variants', label: 'Variants', count: dedupByAsin(score.children).length },
+    ...(kwData && kwData.topOpportunities.length > 0 ? [{ id: 'kwintel', label: 'Intelligence', count: kwData.totalKeywordsAnalyzed }] : []),
+  ]
   const bars = [
     { label: 'Title', score: score.title_score, max: 25 },
     { label: 'Bullets', score: score.bullet_score, max: 25 },
@@ -447,7 +456,7 @@ export default function ListingDetailPage() {
   // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-gradient-to-b from-violet-100 via-slate-50 to-slate-50">
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
 
       {/* ── Back link ── */}
@@ -551,6 +560,33 @@ export default function ListingDetailPage() {
         })}
       </div>
 
+      {/* ══ TAB NAV — defined dashboard sections, one at a time (no infinite scroll) ══ */}
+      {aiRecs && (
+        <div className="flex items-center gap-1 overflow-x-auto bg-white rounded-2xl border border-slate-200 shadow-sm p-1.5">
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)}
+              className={`relative inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors cursor-pointer ${activeTab === t.id ? 'bg-violet-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'}`}>
+              {t.label}
+              {t.count > 0 && <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${activeTab === t.id ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>{t.count}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Tab content — only the active section renders, so inactive ones add no gap */}
+      <div>
+      {/* No audit yet — single prompt (tab bar is hidden until an audit exists) */}
+      {!aiRecs && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center">
+          <p className="text-sm text-slate-500 mb-4">{aiLoading ? (aiProgress || 'Running AI audit…') : 'Run an AI audit to see the recommended changes for this listing.'}</p>
+          {!aiLoading && (
+            <button onClick={generateAiRecs} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 transition-colors cursor-pointer">
+              <Icon.Sparkles className="w-3.5 h-3.5" /> Run AI Audit
+            </button>
+          )}
+        </div>
+      )}
+
       {/* ══════════════════════════════════════════════════════════════════════
           ACTION PLAN — Comprehensive listing review with verdicts
           ══════════════════════════════════════════════════════════════════════ */}
@@ -585,7 +621,6 @@ export default function ListingDetailPage() {
           return { sku: c.sku, current, recommended, changed: recommended !== '' && recommended !== current }
         })
         const needsUpdate = perChildRows.filter(r => r.changed).length
-        const actionsNeeded = (recs.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length
         // ── Per-field variant cohesion (client-side; "should-match" fields only) ──
         // Groups each child's CURRENT value to show whether the variants are consistent or split,
         // how many need updating, and which SKUs hold which version.
@@ -609,15 +644,7 @@ export default function ListingDetailPage() {
         ]
         return (
         <section>
-          <button onClick={() => toggle('apply')} className="flex items-center gap-2 mb-3 w-full text-left">
-            <span className="text-sm font-bold text-slate-900 uppercase tracking-wide">
-              Apply These Changes
-              <span className="text-slate-500 font-normal ml-1">({actionsNeeded} actions needed)</span>
-            </span>
-            <span className="text-xs text-slate-400">{expandedSections.has('apply') ? '▾' : '▸'}</span>
-          </button>
-
-          {expandedSections.has('apply') && (
+          {activeTab === 'apply' && (
             <div className="space-y-6">
               {/* ── VARIANT COHESION — how the variants compare per field ── */}
               <div className="border border-slate-200 rounded-2xl overflow-hidden">
@@ -913,15 +940,7 @@ export default function ListingDetailPage() {
           SECTION 1 — Keyword Placement Plan (grouped by placement)
           ══════════════════════════════════════════════════════════════════════ */}
       <section>
-        <button onClick={() => toggle('placement')} className="flex items-center gap-2 mb-3 w-full text-left">
-          <span className="text-sm font-bold text-violet-800 uppercase tracking-wide">
-            Keyword Placement Plan
-            {placementGroups && <span className="text-violet-500 font-normal ml-1">({placementGroups.total} keywords reconciled)</span>}
-          </span>
-          <span className="text-xs text-slate-400">{expandedSections.has('placement') ? '▾' : '▸'}</span>
-        </button>
-
-        {expandedSections.has('placement') && (
+        {activeTab === 'placement' && (
           <>
             {!aiRecs && !aiLoading && (
               <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center">
@@ -1000,15 +1019,7 @@ export default function ListingDetailPage() {
           SECTION 2 — Issues to Fix
           ══════════════════════════════════════════════════════════════════════ */}
       <section>
-        <button onClick={() => toggle('issues')} className="flex items-center gap-2 mb-3 w-full text-left">
-          <span className="text-sm font-bold text-slate-600 uppercase tracking-wide">
-            Diagnostics
-            <span className="text-slate-400 font-normal ml-1">({score.issues.length}) — detailed audit; the actions above are the fixes</span>
-          </span>
-          <span className="text-xs text-slate-400">{expandedSections.has('issues') ? '▾' : '▸'}</span>
-        </button>
-
-        {expandedSections.has('issues') && (
+        {activeTab === 'issues' && (
           <div className="space-y-2">
             {score.issues.length === 0 ? (
               <p className="text-sm text-green-600 bg-green-50 border border-green-200 rounded-lg p-3">No issues found. This listing looks great!</p>
@@ -1034,15 +1045,7 @@ export default function ListingDetailPage() {
           SECTION 3 — Variant Breakdown
           ══════════════════════════════════════════════════════════════════════ */}
       <section>
-        <button onClick={() => toggle('variants')} className="flex items-center gap-2 mb-3 w-full text-left">
-          <span className="text-sm font-bold text-slate-800 uppercase tracking-wide">
-            Variant Breakdown
-            <span className="text-slate-400 font-normal ml-1">({dedupByAsin(score.children).length})</span>
-          </span>
-          <span className="text-xs text-slate-400">{expandedSections.has('variants') ? '▾' : '▸'}</span>
-        </button>
-
-        {expandedSections.has('variants') && (
+        {activeTab === 'variants' && (
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
             <table className="w-full text-xs">
               <thead className="bg-slate-50 border-b border-slate-200">
@@ -1093,15 +1096,7 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       {kwData && kwData.topOpportunities.length > 0 && (
         <section>
-          <button onClick={() => toggle('kwintel')} className="flex items-center gap-2 mb-3 w-full text-left">
-            <span className="text-sm font-bold text-slate-800 uppercase tracking-wide">
-              Keyword Intelligence
-              <span className="text-slate-400 font-normal ml-1">({kwData.totalKeywordsAnalyzed} keywords analyzed)</span>
-            </span>
-            <span className="text-xs text-slate-400">{expandedSections.has('kwintel') ? '▾' : '▸'}</span>
-          </button>
-
-          {expandedSections.has('kwintel') && (
+          {activeTab === 'kwintel' && (
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
               {/* Summary badges */}
               <div className="flex gap-3 p-3 border-b border-slate-100 bg-slate-50">
@@ -1152,6 +1147,8 @@ export default function ListingDetailPage() {
           )}
         </section>
       )}
+
+      </div>
 
       {/* ══════════════════════════════════════════════════════════════════════
           SHIP CONTENT TO AMAZON — per-section preview → confirm modal
