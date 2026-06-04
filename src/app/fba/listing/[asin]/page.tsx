@@ -127,6 +127,15 @@ export default function ListingDetailPage() {
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
 
+  // ── Push backend keywords to Amazon (PR16) ──
+  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; changed: boolean }
+  interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string }
+  const [pushPreview, setPushPreview] = useState<{ count: number; changed: number; diff: PushDiffRow[] } | null>(null)
+  const [pushLoading, setPushLoading] = useState(false)
+  const [pushError, setPushError] = useState<string | null>(null)
+  const [pushResults, setPushResults] = useState<{ pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
+  const [showPushModal, setShowPushModal] = useState(false)
+
   const copy = (text: string, label: string) => {
     copyToClipboard(text)
     setCopied(label)
@@ -279,6 +288,38 @@ export default function ListingDetailPage() {
     setAiProgress('')
   }, [asin])
 
+  // ─── Push backend keywords to Amazon (preview → confirm) ──────────────────
+  const openPushPreview = useCallback(async () => {
+    setPushError(null); setPushResults(null); setPushPreview(null); setShowPushModal(true); setPushLoading(true)
+    try {
+      const resp = await fetch(`/api/fba/listing-optimizer/push-keywords?parent_asin=${asin}`)
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.error || 'Preview failed')
+      setPushPreview(data)
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : 'Preview failed')
+    }
+    setPushLoading(false)
+  }, [asin])
+
+  const confirmPush = useCallback(async () => {
+    setPushError(null); setPushLoading(true)
+    try {
+      const resp = await fetch('/api/fba/listing-optimizer/push-keywords', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: asin, confirm: true }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.error || 'Push failed')
+      setPushResults(data)
+      setPushPreview(null)
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : 'Push failed')
+    }
+    setPushLoading(false)
+  }, [asin])
+
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
 
   const placementGroups = (() => {
@@ -400,6 +441,15 @@ export default function ListingDetailPage() {
             className="ml-auto text-xs bg-violet-600 hover:bg-violet-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-50 transition-colors">
             {aiLoading ? 'Generating...' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
           </button>
+          {aiRecs && (
+            <button
+              onClick={openPushPreview}
+              disabled={pushLoading}
+              title="Write the per-child backend keywords directly to Amazon"
+              className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg disabled:opacity-50 transition-colors">
+              Push Keywords to Amazon &rarr;
+            </button>
+          )}
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
 
@@ -941,6 +991,76 @@ export default function ListingDetailPage() {
             </div>
           )}
         </section>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          PUSH KEYWORDS TO AMAZON — preview → confirm modal (PR16)
+          ══════════════════════════════════════════════════════════════════════ */}
+      {showPushModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !pushLoading && setShowPushModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 sticky top-0 bg-white">
+              <h3 className="text-sm font-bold text-gray-900">Push Backend Keywords to Amazon</h3>
+              <button onClick={() => !pushLoading && setShowPushModal(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
+            </div>
+
+            <div className="p-5">
+              {pushError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 mb-3">{pushError}</p>}
+
+              {pushLoading && !pushResults && (
+                <div className="text-center py-8">
+                  <div className="animate-spin w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full mx-auto mb-2" />
+                  <p className="text-sm text-gray-500">{pushResults ? 'Pushing…' : pushPreview ? 'Pushing to Amazon…' : 'Loading preview…'}</p>
+                </div>
+              )}
+
+              {/* Preview (pre-confirm) */}
+              {pushPreview && !pushResults && !pushLoading && (
+                <>
+                  <p className="text-sm text-gray-700 mb-1">
+                    <b>{pushPreview.changed}</b> of {pushPreview.count} variants will change. Backend search terms only — not customer-visible.
+                  </p>
+                  <p className="text-xs text-gray-500 mb-3">Each value is capped at 250 bytes and validated with Amazon before writing. Previous values are saved for rollback.</p>
+                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 mb-4 max-h-[45vh] overflow-y-auto">
+                    {pushPreview.diff.filter(d => d.changed).map((d) => (
+                      <div key={d.sku} className="p-3 text-xs">
+                        <div className="font-mono text-gray-700 mb-1">{d.sku} <span className="text-gray-400">({d.bytes}/250 bytes)</span></div>
+                        <p className="text-gray-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
+                        <p className="text-emerald-700 break-words">{d.proposed}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50">Cancel</button>
+                    <button onClick={confirmPush} disabled={pushPreview.changed === 0}
+                      className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
+                      Confirm &amp; Push {pushPreview.changed} variant{pushPreview.changed !== 1 ? 's' : ''} to Amazon
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* Results (post-push) */}
+              {pushResults && (
+                <>
+                  <p className="text-sm text-gray-800 mb-3">{pushResults.message}</p>
+                  <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 mb-4 max-h-[50vh] overflow-y-auto">
+                    {pushResults.results.map((r) => (
+                      <div key={r.sku} className="p-2.5 text-xs flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${r.status === 'accepted' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{r.status}</span>
+                        <span className="font-mono text-gray-700">{r.sku}</span>
+                        {r.error && <span className="text-red-600 truncate">{r.error}</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex justify-end">
+                    <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-900 text-white">Done</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
