@@ -96,6 +96,22 @@ const GENERIC_APPAREL = new Set([
   'tank', 'crewneck', 'pullover', 'graphic', 'vintage', 'retro', 'funny', 'novelty',
   'classic', 'comfort', 'cotton', 'soft', 'color', 'colors', 'cute', 'cool', 'gift',
 ])
+// Meaningless filler + Amazon-prohibited subjective/temporal claims. These are never
+// real search terms; they leak from low-quality keyword pulls (e.g. "interest",
+// "full transparency") and from claim words Amazon forbids in search terms. Used as a
+// DETERMINISTIC backstop to the non-deterministic LLM relevance gate, and to keep the
+// code-built backend core clean.
+const JUNK_WORDS = new Set([
+  'interest', 'interested', 'transparency', 'full', 'thing', 'things', 'stuff',
+  'item', 'items', 'product', 'products', 'misc', 'general', 'various', 'etc',
+  'best', 'bestseller', 'bestselling', 'cheap', 'cheapest', 'discount', 'sale',
+  'free', 'new', 'hot', 'popular', 'amazing', 'awesome', 'guaranteed', 'official',
+])
+/** True if every meaningful (non-minor) word in the phrase is junk filler. */
+function isAllJunk(phrase: string): boolean {
+  const words = phrase.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
+  return words.length > 0 && words.every((w) => JUNK_WORDS.has(w))
+}
 
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
 
@@ -383,7 +399,8 @@ async function runBackendAgent(
   for (const k of remaining) {
     const kw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
     if (!kw) continue
-    const newWords = kw.split(' ').filter((w) => w && !MINOR_WORDS.has(w) && !excludeWords.has(w) && !coreWordSet.has(w))
+    if (isAllJunk(kw)) continue                          // skip filler keywords entirely
+    const newWords = kw.split(' ').filter((w) => w && !MINOR_WORDS.has(w) && !JUNK_WORDS.has(w) && !excludeWords.has(w) && !coreWordSet.has(w))
     if (newWords.length === 0) continue                  // every meaningful word already covered
     newWords.forEach((w) => coreWordSet.add(w))
     corePhrases.push(newWords.join(' '))
@@ -552,6 +569,10 @@ Return the indices of keywords to DROP:
 1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product.
 2. VAGUE, non-descriptive filler that does not describe a product attribute, style, design, audience, occasion, or use case (e.g. "interest", "full transparency", "high quality", "best seller").
 KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY {"drop":[...]}.`
+  // Deterministic backstop: always drop all-junk keywords ("interest", "full
+  // transparency", "best seller") regardless of the LLM gate, which is non-deterministic
+  // and let them through in live testing. Applied to every return path.
+  const dropJunk = (kws: AnalyzedKeyword[]) => kws.filter((k) => !isAllJunk(k.keyword))
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -564,11 +585,11 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
     const drop = new Set((parsed.drop ?? []).filter((n) => Number.isInteger(n)))
     const filtered = analysis.filter((_, i) => !drop.has(i))
     // Fail-open: if the gate dropped (nearly) everything it likely misfired — keep the original pool.
-    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return analysis
-    return filtered
+    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return dropJunk(analysis)
+    return dropJunk(filtered)
   } catch (err) {
     console.warn('[pipeline] relevance gate failed, using unfiltered pool:', err)
-    return analysis
+    return dropJunk(analysis)
   }
 }
 
