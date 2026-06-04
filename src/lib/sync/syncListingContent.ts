@@ -377,7 +377,7 @@ async function resolveKeywordAsin(
 
 /** Fetch keyword intelligence + product details data for scoring.
  *  Caps CRITICAL and UPGRADE to top 10 by opportunity score for realistic scoring. */
-async function fetchScoringContext(
+export async function fetchScoringContext(
   supabase: SupabaseClient,
   parentAsin: string,
   topChildAsin: string | null
@@ -458,7 +458,40 @@ async function fetchScoringContext(
   return ctx
 }
 
-function scoreListingContent(
+/** Longest common prefix of a list of strings (character-wise). */
+function longestCommonPrefix(strings: string[]): string {
+  if (strings.length === 0) return ''
+  let prefix = strings[0]
+  for (let i = 1; i < strings.length && prefix; i++) {
+    while (prefix && !strings[i].startsWith(prefix)) prefix = prefix.slice(0, -1)
+  }
+  return prefix
+}
+
+/**
+ * Recover the seller-entered base title for a variation family.
+ * Amazon appends per-variant dimensions to each child title (e.g. " -Light Green-XX-Large"),
+ * which inflates the length and mislabels the check as "pulling the child title". Every child
+ * shares the same seller title, so the longest common prefix across child titles recovers the
+ * base — no variant metadata required. Falls back to the raw title if the recovered prefix is
+ * an implausibly short fragment (e.g. genuinely divergent child titles).
+ */
+function sellerBaseTitle(rawTitle: string, childContents: ListingContentRow[]): string {
+  const childTitles = childContents
+    .map(c => c.title)
+    .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+  if (childTitles.length < 2) return rawTitle
+  const base = longestCommonPrefix(childTitles).replace(/[\s\-–—|,]+$/, '').trim()
+  const minPlausible = Math.min(40, Math.floor((rawTitle.length || 1) * 0.5))
+  return base.length >= minPlausible ? base : rawTitle
+}
+
+/** Apparel detection from the title, to keep example terms category-appropriate. */
+function titleLooksApparel(title: string): boolean {
+  return /\b(shirt|t-?shirt|tee|tees|hoodie|sweatshirt|sweater|tank|crewneck|pullover|apparel|hat|cap|beanie|socks?|leggings|joggers|shorts|dress|jacket)\b/i.test(title)
+}
+
+export function scoreListingContent(
   parentContent: ListingContentRow | null,
   childContents: ListingContentRow[],
   scoringCtx: ScoringContext
@@ -483,7 +516,10 @@ function scoreListingContent(
   }
 
   // ── 1. TITLE SCORING ──────────────────────────────────────────────────────
-  const title = representativeContent.title || ''
+  // Score the seller-entered base title, not a single child's Amazon-suffixed title
+  // (" -Light Green-XX-Large"), which inflated the count and read as "the child title".
+  const title = sellerBaseTitle(representativeContent.title || '', childContents)
+  const apparel = titleLooksApparel(title)
   if (!title) {
     titleScore = 0
     issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with your primary keyword, then brand, then key attributes. Target 80-150 chars (Amazon recommends ≤80 for mobile).', auto_fixable: false })
@@ -493,12 +529,12 @@ function scoreListingContent(
     if (titleLen < 50) {
       titleScore -= 10
       issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to contain meaningful keywords. Target 80-120 chars with your brand, product type, and top 2-3 keywords.`, auto_fixable: false })
-    } else if (titleLen > 150) {
-      titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — exceeds the 150-char recommended limit. Amazon truncates long titles on mobile (80 chars visible) and in search results. Remove filler words and move lower-volume keywords to bullets or backend keywords.`, auto_fixable: false })
     } else if (titleLen > 200) {
       titleScore -= 10
       issues.push({ field: 'title', severity: 'critical', message: `Title is ${titleLen} chars — exceeds Amazon's 200-char hard limit. This may cause listing suppression. Immediately shorten by removing redundant phrases and moving keywords to bullets/backend.`, auto_fixable: false })
+    } else if (titleLen > 150) {
+      titleScore -= 5
+      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — exceeds the 150-char recommended limit. Amazon truncates long titles on mobile (80 chars visible) and in search results. Remove filler words and move lower-volume keywords to bullets or backend keywords.`, auto_fixable: false })
     }
 
     // ALL CAPS check
@@ -648,7 +684,10 @@ function scoreListingContent(
     issues.push({ field: 'backend_keywords', severity: 'warning', message: `Backend keywords only ${kwLen}/250 chars — ${250 - kwLen} chars of free indexing wasted. Add terms NOT in your title: common misspellings, related use cases, compatible device models, and gift search terms like "gifts for photographers". No commas, no repetition of title words.`, auto_fixable: false })
   } else if (kwLen < 200) {
     keywordScore -= 4
-    issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords at ${kwLen}/250 chars — ${250 - kwLen} chars still available. Use them for: long-tail device compatibility terms ("for Sony A7 III", "for DJI Mini 3"), seasonal terms ("holiday gift", "back to school"), and common misspellings of your product category.`, auto_fixable: false })
+    const backendExamples = apparel
+      ? 'occasion & audience terms ("gift for mom", "bachelorette party"), seasonal terms ("last day of school", "summer"), color/style synonyms, and common misspellings'
+      : 'long-tail variants, synonyms, seasonal terms ("holiday gift", "back to school"), and common misspellings of your product category'
+    issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords at ${kwLen}/250 chars — ${250 - kwLen} chars still available. Use them for: ${backendExamples} — terms not already in your title or bullets.`, auto_fixable: false })
   }
 
   // Over-limit check: Amazon silently truncates at 250 bytes
@@ -740,7 +779,8 @@ function scoreListingContent(
   if (scoringCtx.productDetailsGaps > 0) {
     if (scoringCtx.productDetailsGaps >= 5) {
       aplusScore -= 5
-      issues.push({ field: 'product_details', severity: 'warning', message: `${scoringCtx.productDetailsGaps} Product Detail fields are missing or incomplete (e.g. Compatible Devices, Material, Warranty). These fields power Amazon\'s filtered search and comparison tables. Go to Seller Central → Edit Listing → More Details and fill in every applicable field. Missing product details = invisible in filtered searches.`, auto_fixable: false })
+      const detailExamples = apparel ? 'Material, Fabric Type, Fit Type, Department' : 'Material, Color, Size, Department'
+      issues.push({ field: 'product_details', severity: 'warning', message: `${scoringCtx.productDetailsGaps} Product Detail fields are missing or incomplete (e.g. ${detailExamples}). These fields power Amazon\'s filtered search and comparison tables. Go to Seller Central → Edit Listing → More Details and fill in every applicable field. Missing product details = invisible in filtered searches.`, auto_fixable: false })
     } else if (scoringCtx.productDetailsGaps >= 3) {
       aplusScore -= 3
       issues.push({ field: 'product_details', severity: 'info', message: `${scoringCtx.productDetailsGaps} Product Detail fields could be improved. Check the AI Recommendations tab for specific suggestions — each completed field improves your visibility in Amazon\'s filtered search results.`, auto_fixable: false })

@@ -516,6 +516,31 @@ export async function POST(req: NextRequest) {
             }, { onConflict: 'parent_asin' })
           }
 
+          // Refresh the ISSUES-TO-FIX panel so it reflects the current listing. The scorer
+          // otherwise only runs on Sync, so deployed copy fixes and content changes looked
+          // stale here. Best-effort — must NEVER break a generation that already persisted.
+          emit({ type: 'progress', message: 'Refreshing issues panel...' })
+          try {
+            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+            // The route's child rows carry the fields the scorer reads (title/bullets/
+            // description/backend/image_count/aplus_*); cast to the scorer's row shape.
+            const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
+            const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
+            const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
+            const score = scoreListingContent(parentOwn, scoreRows, ctx)
+            await supabase.from('listing_seo_scores').update({
+              title_score: score.title_score,
+              bullet_score: score.bullet_score,
+              keyword_score: score.keyword_score,
+              aplus_score: score.aplus_score,
+              overall_score: score.overall_score,
+              issues: score.issues,
+              child_override_count: score.child_override_count,
+            }).eq('parent_asin', parent_asin)
+          } catch (scoreErr) {
+            console.warn('[AI Recs] Issue re-score failed (non-fatal):', scoreErr instanceof Error ? scoreErr.message : scoreErr)
+          }
+
           emit({
             type: 'result',
             recommendations: rec,
