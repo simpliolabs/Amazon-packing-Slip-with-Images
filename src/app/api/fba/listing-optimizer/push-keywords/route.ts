@@ -225,6 +225,32 @@ export async function POST(req: NextRequest) {
 
     const accepted = results.filter((r) => r.status === 'accepted').length
     const failed   = results.filter((r) => r.status === 'failed').length
+
+    // Re-score so the page's Keywords/overall score reflects the just-pushed values (the scorer
+    // otherwise only runs on Sync/Regenerate, so the score went stale after a push). Best-effort —
+    // never fail a push that already wrote to Amazon. listing_content was cache-updated above.
+    if (accepted > 0) {
+      try {
+        const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+        const { data: kids } = await db.from('listing_content')
+          .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+          .eq('parent_asin', parent_asin)
+        const rows = (kids ?? []) as Record<string, unknown>[]
+        if (rows.length > 0) {
+          const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
+          const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
+          const parentOwn = rows.find((r) => r.asin === parent_asin) || null
+          const score = scoreListingContent(parentOwn as never, rows as never, ctx)
+          await db.from('listing_seo_scores').update({
+            title_score: score.title_score, bullet_score: score.bullet_score,
+            keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+            overall_score: score.overall_score, issues: score.issues,
+            child_override_count: score.child_override_count,
+          }).eq('parent_asin', parent_asin)
+        }
+      } catch (e) { console.warn('[push] re-score failed (non-fatal):', e) }
+    }
+
     return NextResponse.json({
       parent_asin,
       pushed: accepted,

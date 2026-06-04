@@ -626,6 +626,19 @@ export function scoreListingContent(
       issues.push({ field: 'bullets', severity: 'info', message: `${noBenefitLead.length} bullets don't start with a capitalized benefit hook. Amazon shoppers scan bullets fast — lead each one with a 2-4 word benefit in CAPS followed by a dash: "FAST TRANSFER SPEEDS –", "UNIVERSAL COMPATIBILITY –", "LIFETIME WARRANTY –". This improves click-through and conversion.`, auto_fixable: false })
     }
 
+    // Opportunity-keyword coverage — the real reason a well-formed bullet still gets flagged for
+    // REPLACE: it misses the product's top opportunity keywords (what the AI rewrite weaves in).
+    // Without this, mechanically-perfect bullets score 25/25 while the action plan says "replace".
+    const bulletOppKw = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
+    if (bulletOppKw.length > 0) {
+      const bulletLc = bullets.join(' ').toLowerCase()
+      const missingOpp = bulletOppKw.filter(k => !bulletLc.includes(k.toLowerCase()))
+      if (missingOpp.length >= 2) {
+        bulletScore -= Math.min(12, missingOpp.length * 2)
+        issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets are well-formed but miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. That's why the AI Recommendations flag bullets for REPLACE: the rewrite weaves these in.`, auto_fixable: false })
+      }
+    }
+
     // Check for keyword density — bullets should cover different topics
     if (bulletCount >= 3) {
       const allBulletText = bullets.join(' ').toLowerCase()
