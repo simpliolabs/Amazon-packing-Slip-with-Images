@@ -323,19 +323,25 @@ async function runBackendAgent(
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
   colors.forEach((c) => excludeWords.add(c))
 
-  // ── SHARED CORE (strategy B): the high-value words that go on EVERY child ──
-  // Built deterministically from the remaining keyword phrases so the family's best
-  // keywords are indexed on every variant regardless of which child Amazon surfaces.
-  // Seasonal IS allowed in backend (this is where high-volume seasonal terms belong).
-  const coreWords: string[] = []
-  const seen = new Set<string>(excludeWords)
+  // ── SHARED CORE (hybrid, PR: backend-coherent-phrases) ──
+  // Whole, COHERENT keyword phrases on every child — NOT shattered into fragments like
+  // "last school". Includes the top product keyphrases (utilize the best Jungle Scout
+  // terms, even ones in the title) PLUS long-tail / synonyms / occasion / seasonal.
+  // Near-duplicate and fully-covered phrases are skipped to avoid pure repetition.
+  const corePhrases: string[] = []
+  const coreWordSet = new Set<string>()
   for (const k of remaining) {
-    for (const w of k.keyword.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
-      if (w.length >= 3 && !seen.has(w)) { seen.add(w); coreWords.push(w) }
-    }
+    const kw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!kw) continue
+    const words = kw.split(' ').filter(Boolean)
+    if (words.every((w) => coreWordSet.has(w))) continue                              // fully covered already
+    if (corePhrases.some((p) => wordOverlapRatio(p, kw) >= 0.7)) continue             // near-duplicate phrase
+    corePhrases.push(kw)
+    words.forEach((w) => coreWordSet.add(w))
+    if (getByteLength(corePhrases.join(' ')) >= 170) break
   }
-  // Reserve ~150 bytes for the shared core, leaving ~90 for the per-color tail.
-  const core = truncateToBytes(coreWords.join(' '), 150)
+  // ~175 bytes for the shared core, leaving ~75 for the per-color tail (target ~240).
+  const core = truncateToBytes(corePhrases.join(' '), 175)
 
   // ── PER-COLOR TAIL: aesthetic/audience words unique to each color ──
   const system = 'You generate Amazon backend search-term tails per color. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase aesthetic/audience words"}]}.'
@@ -366,14 +372,13 @@ Return ONLY the JSON object.`
     /* tail is best-effort; core still ships */
   }
 
-  // ── Combine core + per-color tail, dedup words, byte-cap to 250 ──
+  // ── Combine core (whole phrases, kept intact) + per-color tail, byte-cap to 250 ──
+  // Only NEW tail words are appended (those not already in the core); the core phrases
+  // are never re-split, so coherent phrases survive.
+  const coreWords = new Set(core.toLowerCase().split(/\s+/).filter(Boolean))
   const buildString = (tail: string): string => {
-    const out: string[] = []
-    const used = new Set<string>()
-    for (const w of `${core} ${tail}`.toLowerCase().split(/\s+/)) {
-      if (w && !used.has(w)) { used.add(w); out.push(w) }
-    }
-    return truncateToBytes(out.join(' '), 250)
+    const tailWords = tail.toLowerCase().split(/\s+/).filter((w) => w && !coreWords.has(w))
+    return truncateToBytes(`${core} ${tailWords.join(' ')}`.trim(), 250)
   }
 
   return children.map((c) => {
@@ -482,7 +487,10 @@ Current product title (context only): ${repTitle ?? '(unknown)'}
 Keywords (index: phrase):
 ${list}
 
-Return the indices of keywords that are NOT about THIS product — i.e. other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product. KEEP anything plausibly about this product, including broad/generic descriptors, audiences, occasions, gift terms, and seasonal terms (those are relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated terms. Return ONLY {"drop":[...]}.`
+Return the indices of keywords to DROP:
+1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product.
+2. VAGUE, non-descriptive filler that does not describe a product attribute, style, design, audience, occasion, or use case (e.g. "interest", "full transparency", "high quality", "best seller").
+KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY {"drop":[...]}.`
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -538,16 +546,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   onProgress('Writing bullets...')
   const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets)
 
-  // Stage 3 — Backend keywords. Pool = everything not in title/bullets, with SEASONAL
-  // KEPT (high-volume seasonal terms like "last day of school" belong in backend, never
-  // the title/bullets). Strategy B: a shared core on every child + per-color aesthetic tail.
+  // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
+  // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
+  // synonyms / occasion / seasonal. Whole coherent phrases, filled toward ~240 bytes.
+  // Sorted by opportunity so the highest-value phrases land first.
   onProgress('Distributing backend keywords...')
-  const bulletsLc = bullets.join(' ').toLowerCase()
-  const remainingForBackend = analysis
+  const backendPool = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED'].includes(k.actionType))
-    .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))
-    .filter((k) => !bulletsLc.includes(k.keyword.toLowerCase()))
-  const perChild = await runBackendAgent(input, finalTitle, bullets, remainingForBackend)
+    .sort((a, b) => b.opportunityScore - a.opportunityScore)
+  const perChild = await runBackendAgent(input, finalTitle, bullets, backendPool)
 
   // Description (always generated — indexed field)
   onProgress('Writing description...')
