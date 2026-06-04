@@ -238,9 +238,16 @@ export async function POST(req: NextRequest) {
     const db = supabase as any
     // The audit-log insert and cache update must NEVER abort a push that already wrote
     // to Amazon (e.g. if migration 015/016 isn't applied yet). Both are best-effort.
+    // Supabase .insert() returns an { error } (it doesn't throw) on an unknown column,
+    // so if migration 016 (the `field` column) hasn't been applied we retry without it
+    // — the rollback trail still survives, just untagged.
     const logPush = async (row: Record<string, unknown>) => {
-      try { await db.from('keyword_push_log').insert(row) }
-      catch (e) { console.warn('[push-content] keyword_push_log insert failed (migrations 015/016 applied?):', e) }
+      try {
+        const { error } = await db.from('keyword_push_log').insert(row)
+        if (!error) return
+        const rest = { ...row }; delete rest.field // migration 016 not applied yet → log untagged
+        await db.from('keyword_push_log').insert(rest)
+      } catch (e) { console.warn('[push-content] keyword_push_log insert failed (migrations 015/016 applied?):', e) }
     }
 
     const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
