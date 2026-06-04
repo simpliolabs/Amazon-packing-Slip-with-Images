@@ -468,22 +468,37 @@ function longestCommonPrefix(strings: string[]): string {
   return prefix
 }
 
+// Amazon appends per-variant dimensions to the title (e.g. " -Light Green-XX-Large"). Strip a
+// trailing "-<color>-<size>" (or a bare "-<size>") so the scored length reflects the seller-
+// editable base, not Amazon's auto-appended variant theme. This handles the common case where
+// every child stores an IDENTICAL suffixed title, which the common-prefix step cannot.
+const SIZE_TOKEN = "(?:XS|S|M|L|XL|XXL|XXXL|[2-5]XL|X-?Small|XX?X?-?Large|Small|Medium|Large|One[ -]?Size)"
+function stripVariantSuffix(title: string): string {
+  return title
+    .replace(new RegExp(`\\s*[-–—|]\\s*[A-Za-z][\\w /&'-]*?\\s*[-–—|]\\s*${SIZE_TOKEN}\\s*$`, 'i'), '')
+    .replace(new RegExp(`\\s*[-–—|]\\s*${SIZE_TOKEN}\\s*$`, 'i'), '')
+    .trim()
+}
+
 /**
  * Recover the seller-entered base title for a variation family.
- * Amazon appends per-variant dimensions to each child title (e.g. " -Light Green-XX-Large"),
- * which inflates the length and mislabels the check as "pulling the child title". Every child
- * shares the same seller title, so the longest common prefix across child titles recovers the
- * base — no variant metadata required. Falls back to the raw title if the recovered prefix is
- * an implausibly short fragment (e.g. genuinely divergent child titles).
+ * Amazon appends per-variant dimensions to each child title (e.g. " -Light Green-XX-Large").
+ * Two complementary steps recover the base: the longest common prefix across child titles
+ * (handles titles that DIVERGE by variant), then a trailing variant-dimension strip (handles the
+ * common case where every child stores the SAME suffixed title). Falls back to the raw title if a
+ * step would leave an implausibly short fragment.
  */
 function sellerBaseTitle(rawTitle: string, childContents: ListingContentRow[]): string {
   const childTitles = childContents
     .map(c => c.title)
     .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
-  if (childTitles.length < 2) return rawTitle
-  const base = longestCommonPrefix(childTitles).replace(/[\s\-–—|,]+$/, '').trim()
-  const minPlausible = Math.min(40, Math.floor((rawTitle.length || 1) * 0.5))
-  return base.length >= minPlausible ? base : rawTitle
+  let base = rawTitle
+  if (childTitles.length >= 2) {
+    const prefix = longestCommonPrefix(childTitles).replace(/[\s\-–—|,]+$/, '').trim()
+    if (prefix.length >= Math.min(40, Math.floor((rawTitle.length || 1) * 0.5))) base = prefix
+  }
+  const stripped = stripVariantSuffix(base)
+  return stripped.length >= Math.min(40, Math.floor((base.length || 1) * 0.5)) ? stripped : base
 }
 
 /** Apparel detection from the title, to keep example terms category-appropriate. */

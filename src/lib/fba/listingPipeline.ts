@@ -355,15 +355,17 @@ async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaini
   const attrLine = attributes.length
     ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention the garment brand and material in ONE bullet (e.g. "comfort colors", "ring-spun cotton"). Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
     : ''
-  const system = 'You are an Amazon apparel SEO copywriter. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}.'
+  const system = 'You are an Amazon apparel SEO copywriter. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}. Accuracy to the actual product is non-negotiable — never invent an audience, profession, or occasion the design is not explicitly about.'
   const user = `The title is FINAL (do not change it): "${finalTitle}"
+
+🚫 ACCURACY IS THE #1 RULE — violating it is a failure:
+- This is a GRAPHIC TEE; its design is ONLY what the title above says. Do NOT claim it is FOR a profession, role, or audience the design is not explicitly about. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title. (A "see you later alligator / later gator" graphic is NOT a teacher product, a school-uniform product, or a summer product.)
+- A keyword being in the candidate list does NOT make it usable — SKIP any keyword that forces an inaccurate or awkward claim. Fewer-but-accurate beats more-but-wrong.
+- Before returning, RE-READ each bullet: if any implies the product is for a specific job/role/occasion NOT named in the title, REWRITE it to be about the actual graphic/style instead.
 ${topLine}
-These are ADDITIONAL candidate keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally:
+These are ADDITIONAL candidate keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally and accurately:
 ${kwList || '  (none — focus on benefits)'}
 ${attrLine}
-CRITICAL RELEVANCE RULES (read carefully):
-- Describe ONLY what this product actually is. Do NOT invent occasions, audiences, or product types that the product is not. For example: do NOT call it a "teacher shirt", "last day of school shirt", or "summer shirt" unless the product's design is genuinely about that. A retro alligator graphic tee is NOT a teacher/school product.
-- A keyword being in the candidate list does NOT mean you must use it. SKIP any keyword that would force an inaccurate or awkward claim. It is better to use fewer keywords naturally than to misrepresent the product.
 - Never stuff a long-tail phrase (e.g. "later gator after while crocodile shirt") verbatim if it reads unnaturally — paraphrase or skip it.
 
 Rules per bullet:
@@ -549,10 +551,13 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
   const attrLine = attributes.length
     ? `\nNaturally mention these known product attributes (real facts from the listing — e.g. garment brand, material, fit): ${attributes.join(', ')}.`
     : ''
-  const system = 'You are an Amazon apparel SEO copywriter. Return ONLY the HTML description (no markdown, no JSON).'
+  const system = 'You are an Amazon apparel SEO copywriter. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, or occasion the design is not explicitly about.'
   const user = `Write a 150-220 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
+
+🚫 ACCURACY: describe ONLY what the title says this product is. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual graphic/style instead.
+
 Structure: hook -> <ul> of key features -> use cases/audience -> short closing line. Return ONLY the HTML.`
   const completion = await openai.chat.completions.create({
     model: 'gpt-4.1-mini',
