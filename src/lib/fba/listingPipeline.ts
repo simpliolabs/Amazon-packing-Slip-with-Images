@@ -96,6 +96,22 @@ const GENERIC_APPAREL = new Set([
   'tank', 'crewneck', 'pullover', 'graphic', 'vintage', 'retro', 'funny', 'novelty',
   'classic', 'comfort', 'cotton', 'soft', 'color', 'colors', 'cute', 'cool', 'gift',
 ])
+// Meaningless filler + Amazon-prohibited subjective/temporal claims. These are never
+// real search terms; they leak from low-quality keyword pulls (e.g. "interest",
+// "full transparency") and from claim words Amazon forbids in search terms. Used as a
+// DETERMINISTIC backstop to the non-deterministic LLM relevance gate, and to keep the
+// code-built backend core clean.
+const JUNK_WORDS = new Set([
+  'interest', 'interested', 'transparency', 'full', 'thing', 'things', 'stuff',
+  'item', 'items', 'product', 'products', 'misc', 'general', 'various', 'etc',
+  'best', 'bestseller', 'bestselling', 'cheap', 'cheapest', 'discount', 'sale',
+  'free', 'new', 'hot', 'popular', 'amazing', 'awesome', 'guaranteed', 'official',
+])
+/** True if every meaningful (non-minor) word in the phrase is junk filler. */
+function isAllJunk(phrase: string): boolean {
+  const words = phrase.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
+  return words.length > 0 && words.every((w) => JUNK_WORDS.has(w))
+}
 
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
 
@@ -141,7 +157,7 @@ function parseJsonLoose<T>(raw: string): T {
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
-export function validateTitle(title: string, brandName: string, mustInclude?: string): string[] {
+export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string): string[] {
   const problems: string[] = []
   const len = title.length
   if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim 80-125 for apparel).`)
@@ -177,6 +193,15 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
     const phraseWords = phrase.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
     const present = lc.includes(phrase) || (phraseWords.length > 0 && phraseWords.every((w) => words.has(w)))
     if (!present) problems.push(`Title MUST contain the highest-volume keyword "${mustInclude}" (or all of its key words) — front-load it.`)
+  }
+
+  // The blank/garment brand attribute (e.g. "comfort colors") is a strategic ranking term
+  // the seller wants in the title alongside the money keyword — enforce its presence.
+  if (attributePin) {
+    const attrWords = attributePin.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
+    if (attrWords.length > 0 && !attrWords.every((w) => words.has(w))) {
+      problems.push(`Title MUST also contain the blank-brand attribute "${attributePin}" — it's a strategic ranking term.`)
+    }
   }
 
   if (brandName && !lc.includes(brandName.toLowerCase())) problems.push(`Title must start with the brand "${brandName}".`)
@@ -230,6 +255,7 @@ async function runTitleAgent(
   attributes: string[],
   mustInclude: string | undefined,
   preferredAudience: string,
+  attributePin: string | undefined,
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category } = input
   const candidateList = candidates
@@ -239,7 +265,10 @@ async function runTitleAgent(
     ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit AFTER the mandatory keyword above (e.g. a blank-brand search term like "comfort colors graphic tee"):\n  ${attributes.join(', ')}\n`
     : ''
   const mustLine = mustInclude
-    ? `\n🔴 MANDATORY — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
+    ? `\n🔴 MANDATORY #1 — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
+    : ''
+  const attrPinLine = attributePin
+    ? `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
     : ''
   const audienceLine = preferredAudience
     ? `\nAUDIENCE: end with "for ${preferredAudience}" (this product is for ${preferredAudience} — do NOT narrow it to a single gender if it says Men and Women).\n`
@@ -248,12 +277,12 @@ async function runTitleAgent(
   const system = 'You are an Amazon apparel SEO title writer. Output ONLY the final title string — no quotes, no markdown, no explanation.'
   const user = `Brand: ${brandName}
 Category: ${category}
-${mustLine}
-Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 2-3 to support the mandatory keyword):
+${mustLine}${attrPinLine}
+Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 1-2 to support the mandatory keywords):
 ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
-Order: ${brandName}, then the MANDATORY keyword, then ONE supporting keyphrase, then the audience. It should read like a human-written phrase.
+Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'ONE supporting keyphrase'}, then the audience. It should read like a human-written phrase.
 
 Rules:
 - FRONT-LOAD the mandatory keyword in the first ~80 characters (that's all mobile shows).
@@ -270,7 +299,7 @@ Rules:
     max_tokens: 120,
   })
   let title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-  let problems = title ? validateTitle(title, brandName, mustInclude) : ['No title generated.']
+  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin) : ['No title generated.']
   let retried = false
 
   // Up to 2 corrective passes — the mandatory-keyword + max-2 rules are non-negotiable.
@@ -280,14 +309,14 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: 'You are an Amazon apparel SEO title editor. Output ONLY the corrected title string.' },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'} then one supporting keyphrase${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. 80-125 chars. Product-type word ("shirt"/"tee") used AT MOST twice total. No seasonal terms. No product specs (material/fit). ONE audience. Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}"` : ''} then an optional supporting keyphrase${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. 80-125 chars. Product-type word ("shirt"/"tee") used AT MOST twice total. No seasonal terms. No product specs (material/fit). ONE audience. Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
     })
     const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     if (corrected) {
-      const cp = validateTitle(corrected, brandName, mustInclude)
+      const cp = validateTitle(corrected, brandName, mustInclude, attributePin)
       if (cp.length <= problems.length) { title = corrected; problems = cp }
     }
   }
@@ -295,7 +324,7 @@ Rules:
   // Compliance guarantee: brand must lead.
   if (title && brandName && !title.toLowerCase().includes(brandName.toLowerCase())) {
     const prefixed = `${brandName} ${title}`.trim()
-    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude) }
+    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude, attributePin) }
   }
 
   // Audience guarantee: never silently narrow a unisex product to one gender.
@@ -305,7 +334,7 @@ Rules:
       const swapped = title
         .replace(/\bfor Men\b/i, 'for Men and Women')
         .replace(/\bMen'?s\b/i, "Men's and Women's")
-      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude) }
+      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin) }
     }
   }
   return { title, problems, retried }
@@ -383,7 +412,8 @@ async function runBackendAgent(
   for (const k of remaining) {
     const kw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
     if (!kw) continue
-    const newWords = kw.split(' ').filter((w) => w && !MINOR_WORDS.has(w) && !excludeWords.has(w) && !coreWordSet.has(w))
+    if (isAllJunk(kw)) continue                          // skip filler keywords entirely
+    const newWords = kw.split(' ').filter((w) => w && !MINOR_WORDS.has(w) && !JUNK_WORDS.has(w) && !excludeWords.has(w) && !coreWordSet.has(w))
     if (newWords.length === 0) continue                  // every meaningful word already covered
     newWords.forEach((w) => coreWordSet.add(w))
     corePhrases.push(newWords.join(' '))
@@ -552,6 +582,10 @@ Return the indices of keywords to DROP:
 1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product.
 2. VAGUE, non-descriptive filler that does not describe a product attribute, style, design, audience, occasion, or use case (e.g. "interest", "full transparency", "high quality", "best seller").
 KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY {"drop":[...]}.`
+  // Deterministic backstop: always drop all-junk keywords ("interest", "full
+  // transparency", "best seller") regardless of the LLM gate, which is non-deterministic
+  // and let them through in live testing. Applied to every return path.
+  const dropJunk = (kws: AnalyzedKeyword[]) => kws.filter((k) => !isAllJunk(k.keyword))
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -564,11 +598,11 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
     const drop = new Set((parsed.drop ?? []).filter((n) => Number.isInteger(n)))
     const filtered = analysis.filter((_, i) => !drop.has(i))
     // Fail-open: if the gate dropped (nearly) everything it likely misfired — keep the original pool.
-    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return analysis
-    return filtered
+    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return dropJunk(analysis)
+    return dropJunk(filtered)
   } catch (err) {
     console.warn('[pipeline] relevance gate failed, using unfiltered pool:', err)
-    return analysis
+    return dropJunk(analysis)
   }
 }
 
@@ -684,12 +718,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     : mentionsMen ? 'Men'
     : ''
 
+  // SECOND pin: the blank/garment brand (e.g. "comfort colors") — a strategic attribute the
+  // seller ranks for. Now that the #1 money keyword is guaranteed, this can be re-elevated
+  // into the title without crowding it out. Derived from the top searchKeyphrase with the
+  // product-type word stripped ("comfort colors shirt" -> "comfort colors").
+  let attributePin = (attrs.searchKeyphrases[0] || '')
+    .replace(/\b(graphic\s+tee|t[-\s]?shirts?|tees?|shirts?|graphic|tops?)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  // Drop it if empty or already fully covered by the #1 pin (avoids a redundant constraint).
+  if (attributePin && mustInclude) {
+    const miWords = new Set(mustInclude.toLowerCase().split(/\s+/))
+    if (attributePin.toLowerCase().split(/\s+/).every((w) => miWords.has(w))) attributePin = ''
+  }
+  const attributePinFinal = attributePin || undefined
+
   // Stage 0b — candidates (code)
   const candidates = selectTitleCandidates(analysis, brandName, repTitle)
 
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal)
 
   // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
   // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
