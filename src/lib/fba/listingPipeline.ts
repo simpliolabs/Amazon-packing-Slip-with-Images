@@ -126,6 +126,15 @@ const ROLE_WORDS = new Set([
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
 
+// Is this an APPAREL product? The title/bullet/description framing (graphic tee, shirt, garment
+// brand, men/women audience, fabric/fit specs) only makes sense for clothing. For non-apparel
+// (memory cards, mugs, mounts…) the old hardcoded framing produced nonsense — e.g. "Graphic Tee
+// for Men" on an SD card — so every agent branches on this.
+function looksApparel(category?: string | null, repTitle?: string | null): boolean {
+  const hay = ` ${category ?? ''} ${repTitle ?? ''} `.toLowerCase()
+  return /\b(?:t[-\s]?shirts?|tees?|shirts?|hoodie|sweat\s?shirt|sweater|apparel|clothing|tank\s?top|dress|leggings|pajama|garment|jersey|crew\s?neck|long\s?sleeve|onesie|bodysuit|romper|blouse|cardigan|socks?|jacket|beanie|crop\s?top)\b/.test(hay)
+}
+
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
 
 function wordOverlapRatio(a: string, b: string): number {
@@ -270,12 +279,13 @@ async function runTitleAgent(
   preferredAudience: string,
   attributePin: string | undefined,
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
-  const { openai, brandName, category } = input
+  const { openai, brandName, category, repTitle } = input
+  const apparel = looksApparel(category, repTitle)
   const candidateList = candidates
     .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
     .join('\n')
   const attrLine = attributes.length
-    ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit AFTER the mandatory keyword above (e.g. a blank-brand search term like "comfort colors graphic tee"):\n  ${attributes.join(', ')}\n`
+    ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit AFTER the mandatory keyword above${apparel ? ' (e.g. a blank-brand term like "comfort colors graphic tee")' : ''}:\n  ${attributes.join(', ')}\n`
     : ''
   const mustLine = mustInclude
     ? `\n🔴 MANDATORY #1 — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
@@ -287,7 +297,7 @@ async function runTitleAgent(
     ? `\nAUDIENCE: end with "for ${preferredAudience}" (this product is for ${preferredAudience} — do NOT narrow it to a single gender if it says Men and Women).\n`
     : ''
 
-  const system = 'You are an Amazon apparel SEO title writer. Output ONLY the final title string — no quotes, no markdown, no explanation.'
+  const system = `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`
   const user = `Brand: ${brandName}
 Category: ${category}
 ${mustLine}${attrPinLine}
@@ -301,8 +311,8 @@ Rules:
 - FRONT-LOAD the mandatory keyword in the first ~80 characters (that's all mobile shows).
 - Do NOT use " - " dashes or " | " pipes to separate sections — flow as natural language (a single comma is OK only if it genuinely reads better). Amazon indexes the title as a bag of words, so separators add nothing and only cost characters.
 - 80-125 characters. Title Case. ONE consistent audience (never mix kids with men/women).
-- Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").
-- Include the searchable keyphrases above when they fit. Do NOT put product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.
+- ${apparel ? 'Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").' : 'Name the product type concisely (once or twice total). Do NOT reframe the product as apparel / a t-shirt / "graphic tee" / clothing unless it genuinely is one.'}
+- Include the searchable keyphrases above when they fit. Do NOT put dry product SPECS (${apparel ? 'material, fabric, fit, weight, dye' : 'dimensions, capacity unit, material codes'}) in the title — those are not search terms.
 - Must read like a human wrote it. Return ONLY the title.`
 
   const completion = await openai.chat.completions.create({
@@ -321,8 +331,8 @@ Rules:
     const fix = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [
-        { role: 'system', content: 'You are an Amazon apparel SEO title editor. Output ONLY the corrected title string.' },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}"` : ''} then an optional supporting keyphrase${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. 80-125 chars. Product-type word ("shirt"/"tee") used AT MOST twice total. No seasonal terms. No product specs (material/fit). ONE audience. Return ONLY the corrected title.` },
+        { role: 'system', content: `You are an Amazon SEO title editor${apparel ? ' for apparel' : ''}. Output ONLY the corrected title string.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}"` : ''} then an optional supporting keyphrase${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. 80-125 chars. ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. '}No seasonal terms. No dry specs.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -356,22 +366,23 @@ Rules:
 // ─── Stage 2 — Bullets Agent ───────────────────────────────────────────────────
 
 async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[], attributes: string[]): Promise<string[]> {
-  const { openai } = input
+  const { openai, category, repTitle } = input
+  const apparel = looksApparel(category, repTitle)
   const topKeyphrases = remaining.slice(0, 3).map((k) => k.keyword)
   const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
   const topLine = topKeyphrases.length
     ? `\n🔴 TOP SEARCH KEYPHRASES — weave ONE of these into EACH of bullets 1, 2, and 3 (verbatim or lightly reworded), ONLY where it reads naturally and accurately. These are the highest-volume terms not already in the title; bullets must reinforce them for ranking cohesion:\n${topKeyphrases.map((k) => `  - "${k}"`).join('\n')}\n`
     : ''
   const attrLine = attributes.length
-    ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention the garment brand and material in ONE bullet (e.g. "comfort colors", "ring-spun cotton"). Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
+    ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention ${apparel ? 'the garment brand and material' : 'the key specs'} in ONE bullet${apparel ? ' (e.g. "comfort colors", "ring-spun cotton")' : ''}. Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
     : ''
-  const system = 'You are an Amazon apparel SEO copywriter. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}. Accuracy to the actual product is non-negotiable — never invent an audience, profession, or occasion the design is not explicitly about.'
+  const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}. Accuracy to the actual product is non-negotiable — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
   const user = `The title is FINAL (do not change it): "${finalTitle}"
 
 🚫 ACCURACY IS THE #1 RULE — violating it is a failure:
-- This is a GRAPHIC TEE; its design is ONLY what the title above says. Do NOT claim it is FOR a profession, role, or audience the design is not explicitly about. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title. (A "see you later alligator / later gator" graphic is NOT a teacher product, a school-uniform product, or a summer product.)
+- ${apparel ? 'This is a GRAPHIC TEE; its design is ONLY what the title above says.' : 'This product is EXACTLY what the title above describes — do NOT reframe it as apparel, a t-shirt, "graphic tee", clothing, or "fashion" unless the title literally says so.'} Do NOT claim it is FOR a profession, role, or audience not explicitly named in the title. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title.
 - A keyword being in the candidate list does NOT make it usable — SKIP any keyword that forces an inaccurate or awkward claim. Fewer-but-accurate beats more-but-wrong.
-- Before returning, RE-READ each bullet: if any implies the product is for a specific job/role/occasion NOT named in the title, REWRITE it to be about the actual graphic/style instead.
+- Before returning, RE-READ each bullet: if any implies the product is for a specific job/role/occasion NOT named in the title — or reframes it as a product type it is not — REWRITE it to describe the actual product instead.
 ${topLine}
 These are ADDITIONAL candidate keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally and accurately:
 ${kwList || '  (none — focus on benefits)'}
@@ -382,7 +393,7 @@ Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
 - 80-200 characters each. Generic for ALL variants (no specific size/color).
-- Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on material/comfort/care/gifting.
+- Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.
 Return ONLY the JSON object.`
 
   const completion = await openai.chat.completions.create({
@@ -413,7 +424,7 @@ Return ONLY the JSON object.`
         model: 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: `Your previous bullets WRONGLY implied this product is for: ${leaked.join(', ')}. It is NOT — it is a "${finalTitle}" graphic tee. Rewrite ALL 5 bullets describing ONLY the actual graphic/style/material; NEVER use the words ${leaked.join(', ')} or any profession/role word. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+          { role: 'user', content: `Your previous bullets WRONGLY implied this product is for: ${leaked.join(', ')}. It is NOT — it is "${finalTitle}". Rewrite ALL 5 bullets describing ONLY the actual product; NEVER use the words ${leaked.join(', ')} or any profession/role word. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         ],
         temperature: 0.3,
         max_tokens: 1200,
@@ -603,10 +614,11 @@ async function runAuditAgent(
   description: string,
   specs: string[],
 ): Promise<AuditResult> {
-  const { openai, auditModel, variantDetails, keywordContext, hasAplus } = input
+  const { openai, auditModel, variantDetails, keywordContext, hasAplus, category, repTitle } = input
+  const apparel = looksApparel(category, repTitle)
   const backendSummary = perChild.slice(0, 3).map((p) => `  ${p.sku}: ${p.keywords}`).join('\n')
   const specsLine = specs.length
-    ? `\n=== KNOWN PRODUCT SPECS (use these to fill structured Product-Detail fields with REAL values — e.g. Fabric Type, Material, Fit Type, Department) ===\n${specs.join(', ')}\n`
+    ? `\n=== KNOWN PRODUCT SPECS (use these to fill structured Product-Detail fields with REAL values — e.g. ${apparel ? 'Fabric Type, Material, Fit Type, Department' : 'Material, Capacity, Compatibility, Item Dimensions'}) ===\n${specs.join(', ')}\n`
     : ''
 
   const system = `You are a senior Amazon SEO auditor. Return ONLY valid JSON.
@@ -640,7 +652,7 @@ Rules:
 - Review EVERY element in the action plan (title, bullet_1..5, backend_keywords, description, aplus_modules, brand_story, product_details, images). For title/bullets/backend/description, the replacement_content is the FINALIZED content above — restate it, do not invent new copy.
 - DESCRIPTION: even if A+ exists, the field is still indexed for search — mark CREATE/EDIT (not SKIP) and note that customers see A+ but Amazon indexes this field.
 - CANNIBALIZATION: children in ONE variation family do NOT compete in search. Leave cannibalization_warnings empty unless the SAME backend string is duplicated identically across many children. Never report cross-listing cannibalization (not assessable here).
-- PRODUCT DETAILS: suggest only genuinely missing structured attributes (e.g. Fabric Type, Material, Department). 3-10 max.
+- PRODUCT DETAILS: suggest only genuinely missing structured attributes appropriate to THIS product type (${apparel ? 'e.g. Fabric Type, Material, Fit Type, Department' : 'e.g. Material, Capacity, Compatibility, Dimensions, Special Features — NOT apparel fields like Fabric Weight or Fit Type'}). 3-10 max.
 - A+ modules: more modules lift conversion and dwell time; A+ body text is not a confirmed ranking field, so recommend filling image ALT-TEXT for discoverability.
 Return ONLY the JSON object.`
 
@@ -656,16 +668,17 @@ Return ONLY the JSON object.`
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
 async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[]): Promise<string> {
-  const { openai } = input
+  const { openai, category, repTitle } = input
+  const apparel = looksApparel(category, repTitle)
   const attrLine = attributes.length
-    ? `\nNaturally mention these known product attributes (real facts from the listing — e.g. garment brand, material, fit): ${attributes.join(', ')}.`
+    ? `\nNaturally mention these known product attributes (real facts from the listing${apparel ? ' — e.g. garment brand, material, fit' : ''}): ${attributes.join(', ')}.`
     : ''
-  const system = 'You are an Amazon apparel SEO copywriter. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, or occasion the design is not explicitly about.'
-  const user = `Write a SUBSTANTIAL 270-330 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>. Use most of Amazon's ~2000-character budget — do NOT write a short blurb; expand on the design, materials, fit, styling, and use cases.
+  const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
+  const user = `Write a SUBSTANTIAL 270-330 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>. Use most of Amazon's ~2000-character budget — do NOT write a short blurb; expand on ${apparel ? 'the design, materials, fit, styling, and use cases' : "the product's features, specs, quality, and use cases"}.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
 
-🚫 ACCURACY: describe ONLY what the title says this product is. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual graphic/style instead.
+🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.
 
 Structure: hook -> <ul> of key features -> use cases/audience -> short closing line. Return ONLY the HTML.`
   const completion = await openai.chat.completions.create({
@@ -738,15 +751,16 @@ interface ProductAttributes {
 }
 
 async function extractProductAttributes(input: PipelineInput): Promise<ProductAttributes> {
-  const { openai, repTitle, variantDetails } = input
+  const { openai, repTitle, variantDetails, category } = input
+  const apparel = looksApparel(category, repTitle)
   const text = `${repTitle ?? ''}\n${variantDetails}`.slice(0, 4000).trim()
   if (!text) return { searchKeyphrases: [], specs: [] }
-  const system = 'You extract product attributes from an existing Amazon apparel listing, split into searchable keyphrases vs specs. Return ONLY valid JSON: {"searchKeyphrases":["..."],"specs":["..."]}.'
+  const system = `You extract product attributes from an existing Amazon${apparel ? ' apparel' : ''} listing, split into searchable keyphrases vs specs. Return ONLY valid JSON: {"searchKeyphrases":["..."],"specs":["..."]}.`
   const user = `From the listing text, extract TWO groups:
 
-1. searchKeyphrases — terms a shopper would actually TYPE into Amazon search. In particular, if a recognizable garment BLANK BRAND is present (e.g. comfort colors, bella canvas, gildan, next level, american apparel), output it COMBINED with the product type as a real query — e.g. "comfort colors graphic tee", "comfort colors shirt". 2-4 words each. These are TITLE-eligible.
+1. searchKeyphrases — terms a shopper would actually TYPE into Amazon search.${apparel ? ' In particular, if a recognizable garment BLANK BRAND is present (e.g. comfort colors, bella canvas, gildan, next level, american apparel), output it COMBINED with the product type as a real query — e.g. "comfort colors graphic tee", "comfort colors shirt".' : ' Combine the product type with its key descriptors as real buyer queries (e.g. "64gb sd card", "high speed memory card").'} 2-4 words each. These are TITLE-eligible.
 
-2. specs — concrete product SPECIFICATIONS that nobody searches: material/fabric, weight, fit/cut, dye method (e.g. "ring spun cotton", "6.1 oz", "garment dyed", "relaxed fit", "unisex"). These go in bullets/description/structured fields, NOT the title.
+2. specs — concrete product SPECIFICATIONS that nobody searches: ${apparel ? 'material/fabric, weight, fit/cut, dye method (e.g. "ring spun cotton", "6.1 oz", "garment dyed", "relaxed fit", "unisex")' : 'material, dimensions, capacity, compatibility, technical ratings (e.g. "class 10", "uhs-i", "waterproof")'}. These go in bullets/description/structured fields, NOT the title.
 
 Only include attributes actually stated or strongly implied — do NOT invent. Lowercase. Max 4 per group.
 
@@ -826,11 +840,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Determine the product's true audience from the existing listing + specs, so the title
   // never silently narrows a unisex product to one gender (the "for Men" regression).
+  // Apparel only — a memory card, mug, or mount has no gendered audience; forcing "for Men"
+  // on an SD card is exactly the non-apparel mess this guards against.
+  const apparelProduct = looksApparel(input.category, repTitle)
   const audienceText = `${repTitle ?? ''} ${attrs.specs.join(' ')} ${gated.map((k) => k.keyword).join(' ')}`.toLowerCase()
   const mentionsWomen = /\bwom[ae]n\b|womens|ladies|female/.test(audienceText)
   const mentionsMen = /\bm[ae]n\b|mens|male/.test(audienceText)
-  const preferredAudience =
-    /\bunisex\b/.test(audienceText) || (mentionsWomen && mentionsMen) ? 'Men and Women'
+  const preferredAudience = !apparelProduct ? ''
+    : /\bunisex\b/.test(audienceText) || (mentionsWomen && mentionsMen) ? 'Men and Women'
     : mentionsWomen ? 'Women'
     : mentionsMen ? 'Men'
     : ''
@@ -839,10 +856,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // seller ranks for. Now that the #1 money keyword is guaranteed, this can be re-elevated
   // into the title without crowding it out. Derived from the top searchKeyphrase with the
   // product-type word stripped ("comfort colors shirt" -> "comfort colors").
-  let attributePin = (attrs.searchKeyphrases[0] || '')
-    .replace(/\b(graphic\s+tee|t[-\s]?shirts?|tees?|shirts?|graphic|tops?)\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  let attributePin = ''
+  if (apparelProduct) {
+    attributePin = (attrs.searchKeyphrases[0] || '')
+      .replace(/\b(graphic\s+tee|t[-\s]?shirts?|tees?|shirts?|graphic|tops?)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
   // Drop it if empty or already fully covered by the #1 pin (avoids a redundant constraint).
   if (attributePin && mustInclude) {
     const miWords = new Set(mustInclude.toLowerCase().split(/\s+/))
