@@ -454,33 +454,46 @@ async function runBackendAgent(
   // not license it back into the backend.
   const titleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
 
-  // ── SHARED CORE (hybrid fill, PR: backend-hybrid-fill) ──
-  // PO-chosen: FILL the full 250 bytes by including the TOP keyword PHRASES even when some are
-  // also in the title — strict no-repeat left the field ~half-empty, and empty bytes are 100%
-  // wasted indexing space. Phrases stay WHOLE for readability (no "last day school" fragments).
-  // Per word we still drop junk and weak-relevance role words (e.g. "teacher" not in the title),
-  // and cap the product-type word ("shirt"/"tee") at 2 total so the hybrid doesn't bring back
-  // "shirt ×7". Near-duplicate and fully-covered phrases are skipped.
+  // ── SHARED CORE (hybrid fill + content dedup, PR: backend-cleanup) ──
+  // PO-chosen: FILL the full 250 bytes by including the TOP keyword phrases even when some words
+  // are also in the title (strict no-repeat left the field ~half-empty; empty bytes are wasted).
+  // BUT each meaningful word appears only ONCE (no "cool … cool … cool" repeats), junk and
+  // weak-relevance role words ("teacher" not in title) are dropped, the product-type word
+  // ("shirt"/"tee") is capped at 2, and minor words survive ONLY as connectors between two kept
+  // content words — so coherent phrases stay readable ("last day of school") while orphan runs
+  // ("cool in the of …") are removed.
   const corePhrases: string[] = []
   const coreWordSet = new Set<string>()
   let productTypeCount = 0
   for (const k of remaining) {
     const raw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
     if (!raw || isAllJunk(raw)) continue
-    const kept: string[] = []
+    const toks: ({ w: string; minor: boolean } | null)[] = []
     for (const w of raw.split(' ')) {
-      if (JUNK_WORDS.has(w)) continue
-      if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue            // weak-relevance role not in title
-      if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
-      kept.push(w)
+      if (JUNK_WORDS.has(w)) { toks.push(null); continue }
+      if (ROLE_WORDS.has(w) && !titleWords.has(w)) { toks.push(null); continue }
+      if (MINOR_WORDS.has(w)) { toks.push({ w, minor: true }); continue }
+      if (PRODUCT_TYPE_WORDS.has(w)) {
+        if (productTypeCount >= 2) { toks.push(null); continue }
+        productTypeCount++; toks.push({ w, minor: false }); continue
+      }
+      if (coreWordSet.has(w)) { toks.push(null); continue }            // content word already placed — drop repeat
+      coreWordSet.add(w); toks.push({ w, minor: false })
     }
-    const phrase = kept.join(' ').trim()
-    if (!phrase) continue
-    const meaningful = kept.filter((w) => !MINOR_WORDS.has(w))
-    if (meaningful.length > 0 && meaningful.every((w) => coreWordSet.has(w))) continue   // fully covered already
-    if (corePhrases.some((p) => wordOverlapRatio(p, phrase) >= 0.7)) continue             // near-duplicate phrase
-    corePhrases.push(phrase)
-    meaningful.forEach((w) => coreWordSet.add(w))
+    // Keep a minor word only when it connects two surviving content words (no orphan/leading/trailing).
+    const out: string[] = []
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]
+      if (!t) continue
+      if (t.minor) {
+        const prevContent = out.length > 0 && !MINOR_WORDS.has(out[out.length - 1])
+        let nextContent = false
+        for (let j = i + 1; j < toks.length; j++) { const n = toks[j]; if (n) { nextContent = !n.minor; break } }
+        if (prevContent && nextContent) out.push(t.w)
+      } else out.push(t.w)
+    }
+    if (out.length === 0 || out.every((w) => MINOR_WORDS.has(w))) continue
+    corePhrases.push(out.join(' '))
     if (getByteLength(corePhrases.join(' ')) >= 180) break
   }
   // ~180 bytes of core (top phrases + long-tail), leaving ~70 for the per-color tail (~248/250).

@@ -108,6 +108,17 @@ function copyToClipboard(text: string) {
   if (typeof window !== 'undefined') navigator.clipboard.writeText(text)
 }
 
+// Dedup variant rows by ASIN (prefer the FBA SKU). The same ASIN can have both an FBA and an
+// FBM SKU; backend keywords are per-ASIN, so the page (and the push) should treat them as one.
+function dedupByAsin<T extends { sku: string; asin: string }>(rows: T[]): T[] {
+  const byAsin = new Map<string, T>()
+  for (const c of rows) {
+    const existing = byAsin.get(c.asin)
+    if (!existing || c.sku.endsWith('-FBA')) byAsin.set(c.asin, c)
+  }
+  return [...byAsin.values()].sort((a, b) => a.sku.localeCompare(b.sku))
+}
+
 // ─── Page Component ─────────────────────────────────────────────────────────
 
 export default function ListingDetailPage() {
@@ -497,10 +508,13 @@ export default function ListingDetailPage() {
           NONE: 'bg-green-100 text-green-700',
         }
         const recs = aiRecs!
+        // One row per ASIN (FBA+FBM SKUs of the same ASIN collapse to one) so the page matches
+        // the per-ASIN recommendations/push.
+        const variants = dedupByAsin(score.children)
         const parentItems = (recs.action_plan ?? []).filter(a => a.element !== 'backend_keywords')
         const backendItem = (recs.action_plan ?? []).find(a => a.element === 'backend_keywords')
         const recMap = new Map((recs.per_child_keywords ?? []).map(p => [p.sku, p.keywords]))
-        const perChildRows = score.children.map(c => {
+        const perChildRows = variants.map(c => {
           const recommended = (recMap.get(c.sku) ?? '').trim()
           const current = (c.backend_keywords ?? '').trim()
           return { sku: c.sku, current, recommended, changed: recommended !== '' && recommended !== current }
@@ -508,20 +522,20 @@ export default function ListingDetailPage() {
         const needsUpdate = perChildRows.filter(r => r.changed).length
         const actionsNeeded = (recs.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length
         // ── Per-field variant cohesion (client-side; "should-match" fields only) ──
-        // Groups each child's CURRENT value to show whether the 46 variants are consistent or
-        // split, how many need updating, and which SKUs hold which version.
+        // Groups each child's CURRENT value to show whether the variants are consistent or split,
+        // how many need updating, and which SKUs hold which version.
         const normV = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim()
         const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string) => {
           const groups = new Map<string, string[]>()
-          for (const c of score.children) {
+          for (const c of variants) {
             const v = normV(getCurrent(c))
             if (!groups.has(v)) groups.set(v, [])
             groups.get(v)!.push(c.sku)
           }
           const versions = [...groups.entries()].map(([value, skus]) => ({ value, skus })).sort((a, b) => b.skus.length - a.skus.length)
           const rec = normV(recommended)
-          const needUpdate = score.children.filter(c => normV(getCurrent(c)) !== rec).length
-          return { versions, distinct: versions.length, needUpdate, total: score.children.length, recommended }
+          const needUpdate = variants.filter(c => normV(getCurrent(c)) !== rec).length
+          return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended }
         }
         const cohFields = [
           { key: 'title', label: 'Title', coh: fieldCohesion(c => c.title, recs.recommended_title), copyVal: recs.recommended_title },
@@ -544,7 +558,7 @@ export default function ListingDetailPage() {
               <div className="border border-gray-200 rounded-xl overflow-hidden">
                 <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-baseline gap-2">
                   <span className="text-xs font-bold text-gray-700 uppercase tracking-wide">Variant Cohesion</span>
-                  <span className="text-[11px] text-gray-400">how your {score.children.length} variants compare today</span>
+                  <span className="text-[11px] text-gray-400">how your {variants.length} variants compare today</span>
                 </div>
                 <div className="divide-y divide-gray-100">
                   {cohFields.map(f => {
@@ -602,7 +616,7 @@ export default function ListingDetailPage() {
               <div>
                 <div className="flex items-baseline gap-2 mb-2">
                   <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">✏️ Edit Once</h3>
-                  <span className="text-[11px] text-gray-400">Parent level — applies to all {score.children.length} variants</span>
+                  <span className="text-[11px] text-gray-400">Parent level — applies to all {variants.length} variants</span>
                 </div>
                 <div className="space-y-2">
                   {parentItems.map((item, idx) => {
@@ -927,7 +941,7 @@ export default function ListingDetailPage() {
         <button onClick={() => toggle('variants')} className="flex items-center gap-2 mb-3 w-full text-left">
           <span className="text-sm font-bold text-gray-800 uppercase tracking-wide">
             Variant Breakdown
-            <span className="text-gray-400 font-normal ml-1">({score.children.length})</span>
+            <span className="text-gray-400 font-normal ml-1">({dedupByAsin(score.children).length})</span>
           </span>
           <span className="text-xs text-gray-400">{expandedSections.has('variants') ? '▾' : '▸'}</span>
         </button>
@@ -945,7 +959,7 @@ export default function ListingDetailPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {score.children.map(child => (
+                {dedupByAsin(score.children).map(child => (
                   <tr key={child.sku} className="hover:bg-gray-50">
                     <td className="px-3 py-2">
                       <div className="font-mono text-gray-700">{child.sku}</div>
