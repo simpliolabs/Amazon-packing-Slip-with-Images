@@ -212,14 +212,11 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
 
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
-async function runTitleAgent(input: PipelineInput, candidates: TitleCandidate[], attributes: string[]): Promise<{ title: string; problems: string[]; retried: boolean }> {
+async function runTitleAgent(input: PipelineInput, candidates: TitleCandidate[]): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category } = input
   const candidateList = candidates
     .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
     .join('\n')
-  const attrLine = attributes.length
-    ? `\nKnown product attributes (real selling points from the existing listing — use the strongest one as the descriptive segment when it fits, e.g. a garment brand like "comfort colors"):\n  ${attributes.join(', ')}\n`
-    : ''
 
   const system = 'You are an Amazon apparel SEO title writer. Output ONLY the final title string — no quotes, no markdown, no explanation.'
   const user = `Brand: ${brandName}
@@ -227,7 +224,7 @@ Category: ${category}
 
 Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 2-3):
 ${candidateList}
-${attrLine}
+
 Write ONE product title using this structure:
   ${brandName} [product-specific keyphrase] - [descriptive variation] - [audience + product type]
 
@@ -275,18 +272,15 @@ Rules:
 
 // ─── Stage 2 — Bullets Agent ───────────────────────────────────────────────────
 
-async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[], attributes: string[]): Promise<string[]> {
+async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[]): Promise<string[]> {
   const { openai } = input
   const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
-  const attrLine = attributes.length
-    ? `\nKNOWN PRODUCT ATTRIBUTES — these are real product facts from the existing listing; mention the relevant ones naturally (especially the garment brand and material, e.g. "comfort colors", "ring-spun cotton"):\n  ${attributes.join(', ')}\n`
-    : ''
   const system = 'You are an Amazon apparel SEO copywriter. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}.'
   const user = `The title is FINAL (do not change it): "${finalTitle}"
 
 These are CANDIDATE keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally:
 ${kwList || '  (none — focus on benefits)'}
-${attrLine}
+
 CRITICAL RELEVANCE RULES (read carefully):
 - Describe ONLY what this product actually is. Do NOT invent occasions, audiences, or product types that the product is not. For example: do NOT call it a "teacher shirt", "last day of school shirt", or "summer shirt" unless the product's design is genuinely about that. A retro alligator graphic tee is NOT a teacher/school product.
 - A keyword being in the candidate list does NOT mean you must use it. SKIP any keyword that would force an inaccurate or awkward claim. It is better to use fewer keywords naturally than to misrepresent the product.
@@ -459,15 +453,12 @@ Return ONLY the JSON object.`
 
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
-async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[]): Promise<string> {
+async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[]): Promise<string> {
   const { openai } = input
-  const attrLine = attributes.length
-    ? `\nNaturally mention these known product attributes (real facts from the listing — e.g. garment brand, material, fit): ${attributes.join(', ')}.`
-    : ''
   const system = 'You are an Amazon apparel SEO copywriter. Return ONLY the HTML description (no markdown, no JSON).'
   const user = `Write a 150-220 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>.
 Title: ${finalTitle}
-Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
+Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}
 Structure: hook -> <ul> of key features -> use cases/audience -> short closing line. Return ONLY the HTML.`
   const completion = await openai.chat.completions.create({
     model: 'gpt-4.1-mini',
@@ -520,60 +511,6 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
   }
 }
 
-// ─── Stage 0c — Known-attribute extraction (PR: known-attribute-injection) ─────
-// Jungle Scout seeds the keyword pool from the IMAGE/title, so seller-known product
-// FACTS that aren't search-derived — the garment/blank brand ("Comfort Colors"),
-// material, fit — fall out entirely. They live in the CURRENT listing (title/bullets/
-// backend) but no code path surfaces them. This reads them back from the existing
-// listing text and returns them so they can be reinforced across every surface.
-async function extractProductAttributes(input: PipelineInput): Promise<string[]> {
-  const { openai, repTitle, variantDetails } = input
-  const text = `${repTitle ?? ''}\n${variantDetails}`.slice(0, 4000).trim()
-  if (!text) return []
-  const system = 'You extract concrete factual product attributes from an existing Amazon apparel listing. Return ONLY valid JSON: {"attributes":["..."]}.'
-  const user = `From the listing text below, extract the concrete PRODUCT ATTRIBUTES that are real selling points AND search terms — especially:
-- the garment/blank BRAND (e.g. "comfort colors", "bella canvas", "gildan", "next level")
-- MATERIAL / fabric (e.g. "ring-spun cotton", "100% cotton", "garment dyed")
-- FIT / cut (e.g. "unisex fit", "relaxed fit", "oversized")
-Only return attributes actually stated or strongly implied in the text — do NOT invent. Each a short lowercase phrase (1-3 words). Max 6.
-
-Listing text:
-${text}
-
-Return ONLY {"attributes":[...]}.`
-  try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      temperature: 0,
-      max_tokens: 200,
-      response_format: { type: 'json_object' },
-    })
-    const parsed = parseJsonLoose<{ attributes?: string[] }>(completion.choices[0]?.message?.content || '{}')
-    return Array.isArray(parsed.attributes)
-      ? parsed.attributes.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim().toLowerCase()).slice(0, 6)
-      : []
-  } catch (err) {
-    console.warn('[pipeline] product attribute extraction failed:', err)
-    return []
-  }
-}
-
-/** Turn an attribute phrase into a synthetic high-opportunity keyword so it flows through
- * the title-candidate / bullets / backend pools via the existing selection logic. */
-function attributeAsKeyword(attr: string): AnalyzedKeyword {
-  return {
-    keyword: attr,
-    opportunityScore: 55,
-    actionType: 'CRITICAL',
-    actionText: '', rationale: '', urgency: 'high', estimatedImpact: '',
-    searchVolume: 0, keywordSales: 0, competingProducts: 0,
-    asinImpressionShare: 0, asinClickShare: 0, asinPurchaseShare: 0,
-    inTitle: false, inBullets: false, inDescription: false, inBackend: false,
-    dataSource: 'jungle_scout',
-  } as AnalyzedKeyword
-}
-
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
 
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
@@ -582,22 +519,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Stage 0a — relevance gate: drop keywords that are not about this product
   // (competitor brands, trademarks, unrelated names) before anything downstream uses them.
   onProgress('Filtering keywords for relevance...')
-  const gated = await filterRelevantKeywords(input, input.analysis)
-
-  // Stage 0c — surface seller-known product attributes (garment brand "Comfort Colors",
-  // material, fit) from the existing listing. JS never captures these, so without this
-  // they're invisible to the optimizer. Inject as high-opportunity keywords so they flow
-  // into the title-candidate / bullets / backend pools, and reinforce them in the prompts.
-  onProgress('Extracting product attributes...')
-  const productAttributes = await extractProductAttributes(input)
-  const analysis = [...productAttributes.map(attributeAsKeyword), ...gated]
+  const analysis = await filterRelevantKeywords(input, input.analysis)
 
   // Stage 0b — candidates (code)
   const candidates = selectTitleCandidates(analysis, brandName, repTitle)
 
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, productAttributes)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates)
 
   // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
   // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
@@ -615,7 +544,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Stage 2 — Bullets
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, productAttributes)
+  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets)
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
@@ -629,7 +558,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Description (always generated — indexed field)
   onProgress('Writing description...')
-  const description = await runDescriptionAgent(input, finalTitle, bullets, productAttributes)
+  const description = await runDescriptionAgent(input, finalTitle, bullets)
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
