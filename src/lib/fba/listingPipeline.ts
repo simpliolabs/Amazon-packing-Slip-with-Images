@@ -393,8 +393,43 @@ Return ONLY the JSON object.`
     response_format: { type: 'json_object' },
   })
   const parsed = parseJsonLoose<{ bullets?: string[] }>(completion.choices[0]?.message?.content || '{}')
-  const bullets = Array.isArray(parsed.bullets) ? parsed.bullets.filter((b) => typeof b === 'string').slice(0, 5) : []
-  return bullets.map((b) => b.trim()).filter(Boolean)
+  let bullets = Array.isArray(parsed.bullets) ? parsed.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+
+  // Deterministic role-leak guard. The prompt forbids profession claims, but gpt-4.1-mini
+  // occasionally slips ("PLAYFUL TEACHER VIBE"). Detect role words not in the title, retry
+  // once with a pointed correction, then strip any residual role tokens as a hard backstop.
+  const titleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
+  const leakedRoles = (bs: string[]): string[] => {
+    const found = new Set<string>()
+    for (const b of bs) for (const w of b.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+      if (ROLE_WORDS.has(w) && !titleWords.has(w)) found.add(w)
+    }
+    return [...found]
+  }
+  let leaked = leakedRoles(bullets)
+  if (leaked.length > 0) {
+    try {
+      const fix = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: `Your previous bullets WRONGLY implied this product is for: ${leaked.join(', ')}. It is NOT — it is a "${finalTitle}" graphic tee. Rewrite ALL 5 bullets describing ONLY the actual graphic/style/material; NEVER use the words ${leaked.join(', ')} or any profession/role word. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+        ],
+        temperature: 0.3,
+        max_tokens: 1200,
+        response_format: { type: 'json_object' },
+      })
+      const reparsed = parseJsonLoose<{ bullets?: string[] }>(fix.choices[0]?.message?.content || '{}')
+      const rb = Array.isArray(reparsed.bullets) ? reparsed.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+      if (rb.length > 0 && leakedRoles(rb).length < leaked.length) { bullets = rb; leaked = leakedRoles(rb) }
+    } catch { /* keep best-so-far */ }
+  }
+  if (leaked.length > 0) {
+    // Hard backstop: remove residual role tokens (rare) — drops the bad word, keeps the sentence.
+    const roleRe = new RegExp(`\\b(?:${leaked.join('|')})\\b`, 'gi')
+    bullets = bullets.map((b) => b.replace(roleRe, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!])/g, '$1').trim())
+  }
+  return bullets
 }
 
 // ─── Stage 3 — Backend keywords (code grouping + LLM aesthetic assignment) ──────
@@ -414,6 +449,10 @@ async function runBackendAgent(
   // Color names are auto-indexed from the variant attribute — never repeat them in backend.
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
   colors.forEach((c) => excludeWords.add(c))
+  // Title-only word set. The role-word exception ("keep 'teacher' only if this IS a teacher
+  // product") must check the TITLE, not bullets — a bullet that wrongly slips "teacher" must
+  // not license it back into the backend.
+  const titleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
 
   // ── SHARED CORE (hybrid fill, PR: backend-hybrid-fill) ──
   // PO-chosen: FILL the full 250 bytes by including the TOP keyword PHRASES even when some are
@@ -431,7 +470,7 @@ async function runBackendAgent(
     const kept: string[] = []
     for (const w of raw.split(' ')) {
       if (JUNK_WORDS.has(w)) continue
-      if (ROLE_WORDS.has(w) && !excludeWords.has(w)) continue          // weak-relevance role not in title
+      if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue            // weak-relevance role not in title
       if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
       kept.push(w)
     }
