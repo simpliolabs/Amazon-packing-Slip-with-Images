@@ -141,7 +141,7 @@ function parseJsonLoose<T>(raw: string): T {
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
-export function validateTitle(title: string, brandName: string): string[] {
+export function validateTitle(title: string, brandName: string, mustInclude?: string): string[] {
   const problems: string[] = []
   const len = title.length
   if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim 80-125 for apparel).`)
@@ -151,12 +151,16 @@ export function validateTitle(title: string, brandName: string): string[] {
   title.toLowerCase().split(/\s+/).forEach((w) => {
     const base = w.replace(/[^a-z0-9]/g, '')
     if (base && !MINOR_WORDS.has(base)) {
-      const norm = base.replace(/s$/, '')
+      let norm = base.replace(/s$/, '')
+      // Unify the product-type word so "T-Shirt" + "Shirt" + "Shirts" counts as THREE
+      // "shirt"s (Amazon's max-2 rule). Without this, "tshirt" and "shirt" were treated
+      // as different tokens and the 3× "shirt" repetition slipped through.
+      if (norm === 'tshirt') norm = 'shirt'
       counts.set(norm, (counts.get(norm) ?? 0) + 1)
     }
   })
   const repeated = [...counts.entries()].filter(([, c]) => c > 2).map(([w]) => w)
-  if (repeated.length) problems.push(`These words appear more than twice (Amazon allows max 2 each): ${repeated.join(', ')}.`)
+  if (repeated.length) problems.push(`These words appear more than twice (Amazon allows max 2 each): ${repeated.join(', ')}. Do NOT append "shirt"/"tee" to every keyphrase — name the product type once or twice total.`)
 
   const lc = title.toLowerCase()
   const season = SEASONAL_TERMS.find((s) => lc.includes(s))
@@ -166,6 +170,14 @@ export function validateTitle(title: string, brandName: string): string[] {
   const hasKids = KIDS_AUDIENCE.some((t) => words.has(t))
   const hasAdult = ADULT_AUDIENCE.some((t) => words.has(t))
   if (hasKids && hasAdult) problems.push('Title mixes kids and adult audiences (e.g. "kids" with "men"/"women") — pick ONE consistent audience.')
+
+  // The single highest-search-volume keyword must survive into the title (the money term).
+  if (mustInclude) {
+    const phrase = mustInclude.toLowerCase()
+    const phraseWords = phrase.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
+    const present = lc.includes(phrase) || (phraseWords.length > 0 && phraseWords.every((w) => words.has(w)))
+    if (!present) problems.push(`Title MUST contain the highest-volume keyword "${mustInclude}" (or all of its key words) — front-load it.`)
+  }
 
   if (brandName && !lc.includes(brandName.toLowerCase())) problems.push(`Title must start with the brand "${brandName}".`)
   return problems
@@ -212,29 +224,42 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
 
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
-async function runTitleAgent(input: PipelineInput, candidates: TitleCandidate[], attributes: string[]): Promise<{ title: string; problems: string[]; retried: boolean }> {
+async function runTitleAgent(
+  input: PipelineInput,
+  candidates: TitleCandidate[],
+  attributes: string[],
+  mustInclude: string | undefined,
+  preferredAudience: string,
+): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category } = input
   const candidateList = candidates
     .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
     .join('\n')
   const attrLine = attributes.length
-    ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit (e.g. a blank-brand search term like "comfort colors graphic tee"):\n  ${attributes.join(', ')}\n`
+    ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit AFTER the mandatory keyword above (e.g. a blank-brand search term like "comfort colors graphic tee"):\n  ${attributes.join(', ')}\n`
+    : ''
+  const mustLine = mustInclude
+    ? `\n🔴 MANDATORY — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
+    : ''
+  const audienceLine = preferredAudience
+    ? `\nAUDIENCE: end with "for ${preferredAudience}" (this product is for ${preferredAudience} — do NOT narrow it to a single gender if it says Men and Women).\n`
     : ''
 
   const system = 'You are an Amazon apparel SEO title writer. Output ONLY the final title string — no quotes, no markdown, no explanation.'
   const user = `Brand: ${brandName}
 Category: ${category}
-
-Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 2-3):
+${mustLine}
+Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 2-3 to support the mandatory keyword):
 ${candidateList}
-${attrLine}
+${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
-Order: ${brandName}, then the highest-value product keyphrase, then a second keyphrase, then the audience (e.g. "for Men and Women"). It should read like a human-written phrase.
+Order: ${brandName}, then the MANDATORY keyword, then ONE supporting keyphrase, then the audience. It should read like a human-written phrase.
 
 Rules:
-- FRONT-LOAD the most important keyword in the first ~80 characters (that's all mobile shows).
+- FRONT-LOAD the mandatory keyword in the first ~80 characters (that's all mobile shows).
 - Do NOT use " - " dashes or " | " pipes to separate sections — flow as natural language (a single comma is OK only if it genuinely reads better). Amazon indexes the title as a bag of words, so separators add nothing and only cost characters.
-- 80-125 characters. Title Case. No word more than twice. ONE consistent audience (never mix kids with men/women).
+- 80-125 characters. Title Case. ONE consistent audience (never mix kids with men/women).
+- Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").
 - Include the searchable keyphrases above when they fit. Do NOT put product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.
 - Must read like a human wrote it. Return ONLY the title.`
 
@@ -245,31 +270,43 @@ Rules:
     max_tokens: 120,
   })
   let title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-  let problems = title ? validateTitle(title, brandName) : ['No title generated.']
+  let problems = title ? validateTitle(title, brandName, mustInclude) : ['No title generated.']
   let retried = false
 
-  if (title && problems.length > 0) {
+  // Up to 2 corrective passes — the mandatory-keyword + max-2 rules are non-negotiable.
+  for (let attempt = 0; attempt < 2 && title && problems.length > 0; attempt++) {
     retried = true
     const fix = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: 'You are an Amazon apparel SEO title editor. Output ONLY the corrected title string.' },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then the product keyphrase(s) then the audience. Front-load the top keyword. 80-125 chars. No word >2x. No seasonal terms. No product specs (material/fit). ONE audience. Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'} then one supporting keyphrase${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. 80-125 chars. Product-type word ("shirt"/"tee") used AT MOST twice total. No seasonal terms. No product specs (material/fit). ONE audience. Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
     })
     const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     if (corrected) {
-      const cp = validateTitle(corrected, brandName)
-      if (cp.length < problems.length) { title = corrected; problems = cp }
+      const cp = validateTitle(corrected, brandName, mustInclude)
+      if (cp.length <= problems.length) { title = corrected; problems = cp }
     }
   }
 
   // Compliance guarantee: brand must lead.
   if (title && brandName && !title.toLowerCase().includes(brandName.toLowerCase())) {
     const prefixed = `${brandName} ${title}`.trim()
-    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName) }
+    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude) }
+  }
+
+  // Audience guarantee: never silently narrow a unisex product to one gender.
+  if (preferredAudience === 'Men and Women' && title) {
+    const lc = title.toLowerCase()
+    if (/\bm[ae]n\b/.test(lc) && !/\bwom[ae]n\b/.test(lc)) {
+      const swapped = title
+        .replace(/\bfor Men\b/i, 'for Men and Women')
+        .replace(/\bMen'?s\b/i, "Men's and Women's")
+      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude) }
+    }
   }
   return { title, problems, retried }
 }
@@ -278,14 +315,18 @@ Rules:
 
 async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[], attributes: string[]): Promise<string[]> {
   const { openai } = input
+  const topKeyphrases = remaining.slice(0, 3).map((k) => k.keyword)
   const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
+  const topLine = topKeyphrases.length
+    ? `\n🔴 TOP SEARCH KEYPHRASES — weave ONE of these into EACH of bullets 1, 2, and 3 (verbatim or lightly reworded), ONLY where it reads naturally and accurately. These are the highest-volume terms not already in the title; bullets must reinforce them for ranking cohesion:\n${topKeyphrases.map((k) => `  - "${k}"`).join('\n')}\n`
+    : ''
   const attrLine = attributes.length
-    ? `\nKNOWN PRODUCT ATTRIBUTES — these are real product facts from the existing listing; mention the relevant ones naturally (especially the garment brand and material, e.g. "comfort colors", "ring-spun cotton"):\n  ${attributes.join(', ')}\n`
+    ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention the garment brand and material in ONE bullet (e.g. "comfort colors", "ring-spun cotton"). Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
     : ''
   const system = 'You are an Amazon apparel SEO copywriter. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}.'
   const user = `The title is FINAL (do not change it): "${finalTitle}"
-
-These are CANDIDATE keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally:
+${topLine}
+These are ADDITIONAL candidate keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally:
 ${kwList || '  (none — focus on benefits)'}
 ${attrLine}
 CRITICAL RELEVANCE RULES (read carefully):
@@ -297,7 +338,7 @@ Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
 - 80-200 characters each. Generic for ALL variants (no specific size/color).
-- Bullets 4-5 may focus on comfort/care/gifting without keyword pressure.
+- Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on material/comfort/care/gifting.
 Return ONLY the JSON object.`
 
   const completion = await openai.chat.completions.create({
@@ -330,36 +371,41 @@ async function runBackendAgent(
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
   colors.forEach((c) => excludeWords.add(c))
 
-  // ── SHARED CORE (hybrid, PR: backend-coherent-phrases) ──
-  // Whole, COHERENT keyword phrases on every child — NOT shattered into fragments like
-  // "last school". Includes the top product keyphrases (utilize the best Jungle Scout
-  // terms, even ones in the title) PLUS long-tail / synonyms / occasion / seasonal.
-  // Near-duplicate and fully-covered phrases are skipped to avoid pure repetition.
+  // ── SHARED CORE (best-practice dedup, PR: backend-dedupe-best-practice) ──
+  // Amazon indexes title + bullets + backend as ONE bag of words, so a token already in
+  // the title/bullets earns NOTHING if repeated here. Best practice = spend all 250 bytes
+  // on NET-NEW tokens (synonyms, misspellings, long-tail, occasion/seasonal not in the
+  // title). We walk opportunity-sorted phrases and append only the words NOT already seen
+  // (in title/bullets/colors/brand via excludeWords, minor words, or earlier in the core).
+  // Each token appears once — no "shirt ×7" waste, maximum unique coverage of the 250 bytes.
   const corePhrases: string[] = []
   const coreWordSet = new Set<string>()
   for (const k of remaining) {
     const kw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
     if (!kw) continue
-    const words = kw.split(' ').filter(Boolean)
-    if (words.every((w) => coreWordSet.has(w))) continue                              // fully covered already
-    if (corePhrases.some((p) => wordOverlapRatio(p, kw) >= 0.7)) continue             // near-duplicate phrase
-    corePhrases.push(kw)
-    words.forEach((w) => coreWordSet.add(w))
-    if (getByteLength(corePhrases.join(' ')) >= 170) break
+    const newWords = kw.split(' ').filter((w) => w && !MINOR_WORDS.has(w) && !excludeWords.has(w) && !coreWordSet.has(w))
+    if (newWords.length === 0) continue                  // every meaningful word already covered
+    newWords.forEach((w) => coreWordSet.add(w))
+    corePhrases.push(newWords.join(' '))
+    if (getByteLength(corePhrases.join(' ')) >= 185) break
   }
-  // ~175 bytes for the shared core, leaving ~75 for the per-color tail (target ~240).
-  const core = truncateToBytes(corePhrases.join(' '), 175)
+  // ~185 bytes of net-new core, leaving ~65 for the per-color tail (target ~245/250).
+  const core = truncateToBytes(corePhrases.join(' '), 185)
 
-  // ── PER-COLOR TAIL: aesthetic/audience words unique to each color ──
-  const system = 'You generate Amazon backend search-term tails per color. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase aesthetic/audience words"}]}.'
-  const user = `Color groups: ${colors.join(', ')}
+  // ── PER-COLOR TAIL: REAL color search terms unique to each color (NOT mood words) ──
+  const system = 'You generate Amazon backend COLOR search-term tails per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase color search words"}]}.'
+  const user = `Color variants: ${colors.join(', ')}
 
-For EACH color, output ~10-14 lowercase words capturing that color's aesthetic, mood, and audience (e.g. moss -> earthy forest sage boho nature; ivory -> elegant cream wedding minimalist). These are a TAIL appended to a shared core — do NOT repeat generic product words.
+For EACH color, output ~8-12 lowercase words that REAL shoppers TYPE to find that shade — color synonyms and near-shades a buyer would actually search. Examples:
+  light green -> sage mint pistachio olive moss seafoam
+  ivory -> cream off white eggshell bone beige
+  pepper -> charcoal dark grey gray heather slate
+Use ONLY actual color/shade SEARCH terms a buyer types — NEVER abstract moods/feelings (no "serene", "calm", "whimsical", "elegant", "timeless", "peaceful", "delicate").
 
 Do NOT use any of these words (already covered in title/bullets/core/color names):
 ${[...excludeWords].slice(0, 50).join(' ')}
 
-Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words. ~90 characters max per color.
+Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words. ~70 characters max per color.
 Return ONLY the JSON object.`
 
   const tailMap = new Map<string, string>()
@@ -384,7 +430,8 @@ Return ONLY the JSON object.`
   // are never re-split, so coherent phrases survive.
   const coreWords = new Set(core.toLowerCase().split(/\s+/).filter(Boolean))
   const buildString = (tail: string): string => {
-    const tailWords = tail.toLowerCase().split(/\s+/).filter((w) => w && !coreWords.has(w))
+    // Tail must be net-new too: drop anything already in the core OR in title/bullets/colors.
+    const tailWords = tail.toLowerCase().split(/\s+/).filter((w) => w && !coreWords.has(w) && !excludeWords.has(w))
     return truncateToBytes(`${core} ${tailWords.join(' ')}`.trim(), 250)
   }
 
@@ -579,7 +626,12 @@ Return ONLY {"searchKeyphrases":[...],"specs":[...]}.`
 function attributeAsKeyword(attr: string): AnalyzedKeyword {
   return {
     keyword: attr,
-    opportunityScore: 55,
+    // Secondary, NOT top-tier: a known attribute ("comfort colors shirt") should be
+    // included in the title when it fits, but must never out-rank and crowd out the
+    // highest SEARCH-VOLUME real keyword (that regression dropped "see you later
+    // alligator shirt", 22.7k/mo, from the title). 35 keeps it above filler, below the
+    // genuine money keywords. The orchestrator separately PINS the top-volume keyword.
+    opportunityScore: 35,
     actionType: 'CRITICAL',
     actionText: '', rationale: '', urgency: 'high', estimatedImpact: '',
     searchVolume: 0, keywordSales: 0, competingProducts: 0,
@@ -611,12 +663,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const analysis = [...attrs.searchKeyphrases.map(attributeAsKeyword), ...gated]
   const bulletAttrs = [...attrs.searchKeyphrases, ...attrs.specs]
 
+  // PIN the single highest SEARCH-VOLUME real keyword (not a synthetic attribute, not
+  // seasonal — seasonal belongs in backend) so the title agent can never drop the money
+  // term. This is what stopped "see you later alligator shirt" (22.7k/mo) from surviving.
+  const mustIncludeKw = gated
+    .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
+    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => k.keyword.split(/\s+/).length <= 6)
+    .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0) || (b.opportunityScore || 0) - (a.opportunityScore || 0))[0]
+  const mustInclude = mustIncludeKw?.keyword
+
+  // Determine the product's true audience from the existing listing + specs, so the title
+  // never silently narrows a unisex product to one gender (the "for Men" regression).
+  const audienceText = `${repTitle ?? ''} ${attrs.specs.join(' ')} ${gated.map((k) => k.keyword).join(' ')}`.toLowerCase()
+  const mentionsWomen = /\bwom[ae]n\b|womens|ladies|female/.test(audienceText)
+  const mentionsMen = /\bm[ae]n\b|mens|male/.test(audienceText)
+  const preferredAudience =
+    /\bunisex\b/.test(audienceText) || (mentionsWomen && mentionsMen) ? 'Men and Women'
+    : mentionsWomen ? 'Women'
+    : mentionsMen ? 'Men'
+    : ''
+
   // Stage 0b — candidates (code)
   const candidates = selectTitleCandidates(analysis, brandName, repTitle)
 
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience)
 
   // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
   // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
@@ -631,6 +704,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (remainingForBullets.some((d) => wordOverlapRatio(d.keyword, k.keyword) >= 0.6)) continue
     remainingForBullets.push(k)
   }
+  // Highest-opportunity first so bullets 1-3 reinforce the true top keyphrases.
+  remainingForBullets.sort((a, b) => b.opportunityScore - a.opportunityScore)
 
   // Stage 2 — Bullets
   onProgress('Writing bullets...')
