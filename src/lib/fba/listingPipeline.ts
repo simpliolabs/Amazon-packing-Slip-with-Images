@@ -115,6 +115,16 @@ function isAllJunk(phrase: string): boolean {
   const words = phrase.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
   return words.length > 0 && words.every((w) => JUNK_WORDS.has(w))
 }
+// Profession/role words a graphic tee usually ISN'T about. Dropped from the backend core
+// UNLESS the word is in the title (a genuine "Best Teacher" shirt keeps "teacher"). Stops
+// weak-relevance leaks like "...gator teacher..." on a "see you later alligator" design.
+const ROLE_WORDS = new Set([
+  'teacher', 'teachers', 'nurse', 'nurses', 'doctor', 'doctors', 'educator', 'educators',
+  'coach', 'coaches', 'professor', 'professors', 'principal', 'student', 'students',
+])
+// Product-type words capped at 2 total in the backend core (Amazon's bag-of-words already
+// has them from the title; >2 is the "shirt ×7" waste the PO flagged).
+const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
 
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
 
@@ -405,27 +415,37 @@ async function runBackendAgent(
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
   colors.forEach((c) => excludeWords.add(c))
 
-  // ── SHARED CORE (best-practice dedup, PR: backend-dedupe-best-practice) ──
-  // Amazon indexes title + bullets + backend as ONE bag of words, so a token already in
-  // the title/bullets earns NOTHING if repeated here. Best practice = spend all 250 bytes
-  // on NET-NEW tokens (synonyms, misspellings, long-tail, occasion/seasonal not in the
-  // title). We walk opportunity-sorted phrases and append only the words NOT already seen
-  // (in title/bullets/colors/brand via excludeWords, minor words, or earlier in the core).
-  // Each token appears once — no "shirt ×7" waste, maximum unique coverage of the 250 bytes.
+  // ── SHARED CORE (hybrid fill, PR: backend-hybrid-fill) ──
+  // PO-chosen: FILL the full 250 bytes by including the TOP keyword PHRASES even when some are
+  // also in the title — strict no-repeat left the field ~half-empty, and empty bytes are 100%
+  // wasted indexing space. Phrases stay WHOLE for readability (no "last day school" fragments).
+  // Per word we still drop junk and weak-relevance role words (e.g. "teacher" not in the title),
+  // and cap the product-type word ("shirt"/"tee") at 2 total so the hybrid doesn't bring back
+  // "shirt ×7". Near-duplicate and fully-covered phrases are skipped.
   const corePhrases: string[] = []
   const coreWordSet = new Set<string>()
+  let productTypeCount = 0
   for (const k of remaining) {
-    const kw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
-    if (!kw) continue
-    if (isAllJunk(kw)) continue                          // skip filler keywords entirely
-    const newWords = kw.split(' ').filter((w) => w && !MINOR_WORDS.has(w) && !JUNK_WORDS.has(w) && !excludeWords.has(w) && !coreWordSet.has(w))
-    if (newWords.length === 0) continue                  // every meaningful word already covered
-    newWords.forEach((w) => coreWordSet.add(w))
-    corePhrases.push(newWords.join(' '))
-    if (getByteLength(corePhrases.join(' ')) >= 185) break
+    const raw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!raw || isAllJunk(raw)) continue
+    const kept: string[] = []
+    for (const w of raw.split(' ')) {
+      if (JUNK_WORDS.has(w)) continue
+      if (ROLE_WORDS.has(w) && !excludeWords.has(w)) continue          // weak-relevance role not in title
+      if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
+      kept.push(w)
+    }
+    const phrase = kept.join(' ').trim()
+    if (!phrase) continue
+    const meaningful = kept.filter((w) => !MINOR_WORDS.has(w))
+    if (meaningful.length > 0 && meaningful.every((w) => coreWordSet.has(w))) continue   // fully covered already
+    if (corePhrases.some((p) => wordOverlapRatio(p, phrase) >= 0.7)) continue             // near-duplicate phrase
+    corePhrases.push(phrase)
+    meaningful.forEach((w) => coreWordSet.add(w))
+    if (getByteLength(corePhrases.join(' ')) >= 180) break
   }
-  // ~185 bytes of net-new core, leaving ~65 for the per-color tail (target ~245/250).
-  const core = truncateToBytes(corePhrases.join(' '), 185)
+  // ~180 bytes of core (top phrases + long-tail), leaving ~70 for the per-color tail (~248/250).
+  const core = truncateToBytes(corePhrases.join(' '), 180)
 
   // ── PER-COLOR TAIL: REAL color search terms unique to each color (NOT mood words) ──
   const system = 'You generate Amazon backend COLOR search-term tails per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"space separated lowercase color search words"}]}.'
