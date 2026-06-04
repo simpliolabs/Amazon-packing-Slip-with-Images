@@ -33,7 +33,7 @@ import { getAccessToken } from '@/lib/amazon/auth'
 import {
   FIELD_CONFIG, isPushField, type PushField,
   resolveProposed, currentValue, asCompare, buildPatchValue,
-  dedupByAsin, cacheUpdateFor, getByteLength,
+  cacheUpdateFor, getByteLength, capBytes,
 } from '@/lib/fba/pushFields'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -90,7 +90,14 @@ interface DiffRow {
   changed: boolean
 }
 
-/** Load the proposed (recommended) + current (cached) value per child SKU for one field. */
+/**
+ * Load the proposed (recommended) + current (cached) value for EVERY SKU of the parent.
+ *
+ * We deliberately do NOT dedup by ASIN: an ASIN can have both an FBA and an FBM SKU, and
+ * the seller needs BOTH listings updated — pushing a title to only one leaves the matching
+ * SKU stale (the bug this fixes). Keywords are per-color, so we resolve them by ASIN and
+ * apply the same string to both SKUs of a pair (per_child_keywords holds one SKU per ASIN).
+ */
 async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]> {
   const supabase = await createAdminClient()
 
@@ -105,20 +112,31 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
     recommended_description?: string | null
     recommended_keywords?: string | null
   }
-  const perChild = field === 'keywords' ? parsePerChild(rec.recommended_keywords ?? null) : new Map<string, string>()
 
   const { data: rowsRaw } = await supabase
     .from('listing_content')
     .select(CONTENT_COLUMNS)
     .eq('parent_asin', parentAsin)
     .order('sku', { ascending: true })
+  const rows = (rowsRaw ?? []) as ContentRow[] // every SKU — FBA and FBM both get pushed
 
-  // FBA+FBM SKUs share one child ASIN → push once per ASIN (prefer the -FBA SKU).
-  const content = dedupByAsin((rowsRaw ?? []) as ContentRow[])
+  // Keywords are per-color (per-ASIN). Map ASIN → string so BOTH the FBA and FBM SKU of a
+  // pair receive the same per-child keywords.
+  const asinToKeywords = new Map<string, string>()
+  if (field === 'keywords') {
+    const perChild = parsePerChild(rec.recommended_keywords ?? null) // sku → keywords (one SKU per ASIN)
+    const skuToAsin = new Map(rows.map((r) => [r.sku, r.asin]))
+    for (const [sku, kw] of perChild) {
+      const asin = skuToAsin.get(sku)
+      if (asin) asinToKeywords.set(asin, kw)
+    }
+  }
 
-  return content
+  return rows
     .map((row): DiffRow => {
-      const proposed = resolveProposed(field, rec, perChild, row.sku)
+      const proposed = field === 'keywords'
+        ? (asinToKeywords.has(row.asin) ? capBytes((asinToKeywords.get(row.asin) || '').trim(), 250) : null)
+        : resolveProposed(field, rec, new Map(), row.sku)
       const proposedStr = asCompare(proposed)
       const current = currentValue(field, row as unknown as Record<string, unknown>)
       return {
@@ -131,7 +149,7 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
         changed: proposedStr.length > 0 && current !== proposedStr,
       }
     })
-    .filter((d) => d.raw != null) // keywords: drops SKUs with no per-child recommendation
+    .filter((d) => d.raw != null) // keywords: drops SKUs whose ASIN has no per-child recommendation
 }
 
 // ─── GET — preview (no writes) ─────────────────────────────────────────────────

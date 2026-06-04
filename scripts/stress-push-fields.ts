@@ -28,9 +28,17 @@ const MP = 'ATVPDKIKX0DER'
 interface Row { sku: string; asin: string; title?: string; bullet_1?: string; bullet_2?: string; bullet_3?: string; bullet_4?: string; bullet_5?: string; description?: string; backend_keywords?: string }
 function simulate(field: PushField, rec: any, perChild: Map<string, string>, rows: Row[]) {
   const cfg = FIELD_CONFIG[field]
-  const deduped = dedupByAsin(rows)
-  const diff = deduped.map((row) => {
-    const proposed = resolveProposed(field, rec, perChild, row.sku)
+  // Mirror the route: push to EVERY SKU (no ASIN dedup). Keywords resolve by ASIN so both
+  // the FBA and FBM SKU of a pair get the same per-color string.
+  const asinToKw = new Map<string, string>()
+  if (field === 'keywords') {
+    const skuToAsin = new Map(rows.map((r) => [r.sku, r.asin]))
+    for (const [sku, kw] of perChild) { const a = skuToAsin.get(sku); if (a) asinToKw.set(a, kw) }
+  }
+  const diff = rows.map((row) => {
+    const proposed = field === 'keywords'
+      ? (asinToKw.has(row.asin) ? asinToKw.get(row.asin)! : null)
+      : resolveProposed(field, rec, new Map(), row.sku)
     const proposedStr = asCompare(proposed)
     const current = currentValue(field, row as any)
     return { sku: row.sku, current, proposed: proposedStr, raw: proposed, changed: proposedStr.length > 0 && current !== proposedStr }
@@ -166,6 +174,19 @@ const bulletRows: Row[] = [
 const bSim = simulate('bullets', rec, pcMap, bulletRows)
 eq(bSim.count, 2, 'bullets: 2 in scope')
 eq(bSim.changed, 1, 'bullets: 1 differs, 1 already matches')
+
+// FBA+FBM pair: ONE ASIN with both SKUs — the push must hit BOTH (the bug fix), not dedup to one.
+const pairRows: Row[] = [
+  { sku: 'AQS-L-LG-FBA', asin: 'PAIR', title: 'old title' },
+  { sku: 'AQS-L-LG', asin: 'PAIR', title: 'old title' }, // FBM twin, same ASIN
+]
+const pairTitle = simulate('title', rec, pcMap, pairRows)
+eq(pairTitle.count, 2, 'broadcast pushes to BOTH the FBA and FBM SKU of one ASIN (no dedup)')
+eq(pairTitle.changed, 2, 'both SKUs of the pair differ and will change')
+const pairKwMap = new Map<string, string>([['AQS-L-LG-FBA', 'see you later alligator light green lime']])
+const pairKw = simulate('keywords', rec, pairKwMap, pairRows)
+eq(pairKw.count, 2, 'keywords reach BOTH SKUs of the pair (resolved by ASIN, not just the mapped SKU)')
+ok(pairKw.diff.every((d) => d.proposed === 'see you later alligator light green lime'), 'both SKUs of the pair get the same per-color keywords')
 
 // ── 8. cacheUpdateFor: what we write back to listing_content ──────────────────
 console.log('8. cacheUpdateFor')
