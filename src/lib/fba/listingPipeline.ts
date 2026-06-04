@@ -218,7 +218,7 @@ async function runTitleAgent(input: PipelineInput, candidates: TitleCandidate[],
     .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
     .join('\n')
   const attrLine = attributes.length
-    ? `\nKnown product attributes (real selling points from the existing listing — use the strongest one as the descriptive segment when it fits, e.g. a garment brand like "comfort colors"):\n  ${attributes.join(', ')}\n`
+    ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit (e.g. a blank-brand search term like "comfort colors graphic tee"):\n  ${attributes.join(', ')}\n`
     : ''
 
   const system = 'You are an Amazon apparel SEO title writer. Output ONLY the final title string — no quotes, no markdown, no explanation.'
@@ -228,13 +228,14 @@ Category: ${category}
 Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 2-3):
 ${candidateList}
 ${attrLine}
-Write ONE product title using this structure:
-  ${brandName} [product-specific keyphrase] - [descriptive variation] - [audience + product type]
+Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
+Order: ${brandName}, then the highest-value product keyphrase, then a second keyphrase, then the audience (e.g. "for Men and Women"). It should read like a human-written phrase.
 
 Rules:
-- Start with the brand "${brandName}", then the highest-value "keyphrase"-role candidate.
-- Then a "descriptive"-role candidate, then an "audience"-role candidate (or construct "... for Men and Women").
+- FRONT-LOAD the most important keyword in the first ~80 characters (that's all mobile shows).
+- Do NOT use " - " dashes or " | " pipes to separate sections — flow as natural language (a single comma is OK only if it genuinely reads better). Amazon indexes the title as a bag of words, so separators add nothing and only cost characters.
 - 80-125 characters. Title Case. No word more than twice. ONE consistent audience (never mix kids with men/women).
+- Include the searchable keyphrases above when they fit. Do NOT put product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.
 - Must read like a human wrote it. Return ONLY the title.`
 
   const completion = await openai.chat.completions.create({
@@ -253,7 +254,7 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: 'You are an Amazon apparel SEO title editor. Output ONLY the corrected title string.' },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nStructure: ${brandName} [product keyphrase] - [descriptive] - [audience]. 80-125 chars. No word >2x. No seasonal terms. ONE audience. Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then the product keyphrase(s) then the audience. Front-load the top keyword. 80-125 chars. No word >2x. No seasonal terms. No product specs (material/fit). ONE audience. Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -409,9 +410,13 @@ async function runAuditAgent(
   bullets: string[],
   perChild: PipelinePerChildKeywords[],
   description: string,
+  specs: string[],
 ): Promise<AuditResult> {
   const { openai, auditModel, variantDetails, keywordContext, hasAplus } = input
   const backendSummary = perChild.slice(0, 3).map((p) => `  ${p.sku}: ${p.keywords}`).join('\n')
+  const specsLine = specs.length
+    ? `\n=== KNOWN PRODUCT SPECS (use these to fill structured Product-Detail fields with REAL values — e.g. Fabric Type, Material, Fit Type, Department) ===\n${specs.join(', ')}\n`
+    : ''
 
   const system = `You are a senior Amazon SEO auditor. Return ONLY valid JSON.
 The recommended title, bullets, backend keywords, and description below are ALREADY FINALIZED — do NOT rewrite them. Build the action plan and reconciliation AROUND them.`
@@ -424,7 +429,7 @@ BACKEND (sample of per-child):
 ${backendSummary}
 DESCRIPTION: ${description ? 'provided (HTML)' : '(none)'}
 A+ exists: ${hasAplus}
-
+${specsLine}
 === CURRENT LISTING (for variant health + product details) ===
 ${variantDetails}
 
@@ -526,36 +531,46 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
 // material, fit — fall out entirely. They live in the CURRENT listing (title/bullets/
 // backend) but no code path surfaces them. This reads them back from the existing
 // listing text and returns them so they can be reinforced across every surface.
-async function extractProductAttributes(input: PipelineInput): Promise<string[]> {
+interface ProductAttributes {
+  /** Real search terms a shopper would type — e.g. "comfort colors graphic tee". Title-eligible. */
+  searchKeyphrases: string[]
+  /** Specs that are NOT search terms — e.g. "garment dyed", "ring spun cotton", "relaxed fit".
+   *  Go in bullets / description / structured Product-Detail fields, NEVER the title. */
+  specs: string[]
+}
+
+async function extractProductAttributes(input: PipelineInput): Promise<ProductAttributes> {
   const { openai, repTitle, variantDetails } = input
   const text = `${repTitle ?? ''}\n${variantDetails}`.slice(0, 4000).trim()
-  if (!text) return []
-  const system = 'You extract concrete factual product attributes from an existing Amazon apparel listing. Return ONLY valid JSON: {"attributes":["..."]}.'
-  const user = `From the listing text below, extract the concrete PRODUCT ATTRIBUTES that are real selling points AND search terms — especially:
-- the garment/blank BRAND (e.g. "comfort colors", "bella canvas", "gildan", "next level")
-- MATERIAL / fabric (e.g. "ring-spun cotton", "100% cotton", "garment dyed")
-- FIT / cut (e.g. "unisex fit", "relaxed fit", "oversized")
-Only return attributes actually stated or strongly implied in the text — do NOT invent. Each a short lowercase phrase (1-3 words). Max 6.
+  if (!text) return { searchKeyphrases: [], specs: [] }
+  const system = 'You extract product attributes from an existing Amazon apparel listing, split into searchable keyphrases vs specs. Return ONLY valid JSON: {"searchKeyphrases":["..."],"specs":["..."]}.'
+  const user = `From the listing text, extract TWO groups:
+
+1. searchKeyphrases — terms a shopper would actually TYPE into Amazon search. In particular, if a recognizable garment BLANK BRAND is present (e.g. comfort colors, bella canvas, gildan, next level, american apparel), output it COMBINED with the product type as a real query — e.g. "comfort colors graphic tee", "comfort colors shirt". 2-4 words each. These are TITLE-eligible.
+
+2. specs — concrete product SPECIFICATIONS that nobody searches: material/fabric, weight, fit/cut, dye method (e.g. "ring spun cotton", "6.1 oz", "garment dyed", "relaxed fit", "unisex"). These go in bullets/description/structured fields, NOT the title.
+
+Only include attributes actually stated or strongly implied — do NOT invent. Lowercase. Max 4 per group.
 
 Listing text:
 ${text}
 
-Return ONLY {"attributes":[...]}.`
+Return ONLY {"searchKeyphrases":[...],"specs":[...]}.`
+  const clean = (arr?: string[]) =>
+    Array.isArray(arr) ? arr.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim().toLowerCase()).slice(0, 4) : []
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
       temperature: 0,
-      max_tokens: 200,
+      max_tokens: 250,
       response_format: { type: 'json_object' },
     })
-    const parsed = parseJsonLoose<{ attributes?: string[] }>(completion.choices[0]?.message?.content || '{}')
-    return Array.isArray(parsed.attributes)
-      ? parsed.attributes.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim().toLowerCase()).slice(0, 6)
-      : []
+    const parsed = parseJsonLoose<{ searchKeyphrases?: string[]; specs?: string[] }>(completion.choices[0]?.message?.content || '{}')
+    return { searchKeyphrases: clean(parsed.searchKeyphrases), specs: clean(parsed.specs) }
   } catch (err) {
     console.warn('[pipeline] product attribute extraction failed:', err)
-    return []
+    return { searchKeyphrases: [], specs: [] }
   }
 }
 
@@ -589,15 +604,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // they're invisible to the optimizer. Inject as high-opportunity keywords so they flow
   // into the title-candidate / bullets / backend pools, and reinforce them in the prompts.
   onProgress('Extracting product attributes...')
-  const productAttributes = await extractProductAttributes(input)
-  const analysis = [...productAttributes.map(attributeAsKeyword), ...gated]
+  const attrs = await extractProductAttributes(input)
+  // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
+  // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
+  // must NOT enter the title — they go to bullets/description/structured fields only.
+  const analysis = [...attrs.searchKeyphrases.map(attributeAsKeyword), ...gated]
+  const bulletAttrs = [...attrs.searchKeyphrases, ...attrs.specs]
 
   // Stage 0b — candidates (code)
   const candidates = selectTitleCandidates(analysis, brandName, repTitle)
 
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, productAttributes)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases)
 
   // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
   // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
@@ -615,7 +634,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Stage 2 — Bullets
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, productAttributes)
+  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs)
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
@@ -629,13 +648,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Description (always generated — indexed field)
   onProgress('Writing description...')
-  const description = await runDescriptionAgent(input, finalTitle, bullets, productAttributes)
+  const description = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs)
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
   let audit: AuditResult = {}
   try {
-    audit = await runAuditAgent(input, finalTitle, bullets, perChild, description)
+    audit = await runAuditAgent(input, finalTitle, bullets, perChild, description, attrs.specs)
   } catch (err) {
     console.warn('[pipeline] Audit agent failed, returning content without action plan:', err)
   }
