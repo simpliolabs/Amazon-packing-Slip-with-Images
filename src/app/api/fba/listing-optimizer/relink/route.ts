@@ -135,6 +135,34 @@ export async function POST(req: NextRequest) {
     if (!preview.ok) return NextResponse.json({ child_sku: childSku, parent_sku: parentSku, applied: false, issues: preview.issues, error: 'Validation failed — not written.' }, { status: 422 })
 
     const live = await patchChild(sellerId, token, childSku, productType, patches, 'LIVE')
+
+    // Persist the submission for status tracking + duplicate-submission guard.
+    // Best-effort; never fails the response that already wrote to Amazon. The migration
+    // (018_relink_log.sql) creates the table — if it hasn't been applied, this insert is a no-op.
+    if (live.ok) {
+      try {
+        // Resolve the child's current ASIN (Listings Items search by SKU keeps it generic).
+        let childAsin = ''
+        try {
+          const url =
+            `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(childSku)}` +
+            `?marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
+          const r = await fetch(url, { headers: { 'x-amz-access-token': token } })
+          if (r.ok) {
+            const j = (await r.json()) as { summaries?: { asin?: string }[] }
+            childAsin = j.summaries?.[0]?.asin ?? ''
+          }
+        } catch { /* leave blank */ }
+        const supabase = await createAdminClient()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (supabase as any).from('relink_log').insert({
+          child_sku: childSku, child_asin: childAsin,
+          target_parent_sku: parentSku,
+          submission_id: live.submissionId, status: 'pending',
+        })
+      } catch (e) { console.warn('[relink] log insert failed (migration 018 applied?):', e) }
+    }
+
     return NextResponse.json({
       child_sku: childSku, parent_sku: parentSku, variation_theme: theme,
       submitted: live.ok, status: live.status, submissionId: live.submissionId, issues: live.issues,

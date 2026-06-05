@@ -262,6 +262,8 @@ export default function ListingDetailPage() {
   }, [asin])
   useEffect(() => { runRelatedOrphans() }, [runRelatedOrphans])
 
+  // (Re-link submission status state + helper live AFTER openRelink is declared — see below.)
+
   // ─── Capacity attribute check — detect children whose live capacity disagrees with SKU ──
   type CapRow = {
     sku: string; asin: string; productType: string | null
@@ -333,6 +335,51 @@ export default function ListingDetailPage() {
     setRelinkParentSku(parentSku || '')
     setRelinkPreview(null); setRelinkResult(null); setRelinkError(null)
   }, [])
+
+  // ─── Re-link submission status — track pending Amazon submissions so we don't keep offering
+  //  the Re-link button on a SKU the seller already pushed. The /relink-status endpoint also
+  //  lazily auto-resolves pending rows to applied when Amazon's catalog reports the new parent.
+  type RelinkStatusRow = { child_sku: string; target_parent_sku: string; status: 'pending' | 'applied' | 'failed'; submitted_at: string; applied_at: string | null; submission_id: string | null }
+  const [relinkStatus, setRelinkStatus] = useState<Record<string, RelinkStatusRow>>({})
+  const runRelinkStatus = useCallback(async () => {
+    const skus = new Set<string>()
+    for (const c of orphans?.children ?? []) skus.add(c.sku)
+    for (const c of relatedOrphans?.candidates ?? []) skus.add(c.sku)
+    if (skus.size === 0) return
+    try {
+      const r = await fetch(`/api/fba/listing-optimizer/relink-status?child_skus=${[...skus].join(',')}`)
+      if (!r.ok) return
+      const d = await r.json() as { statuses?: RelinkStatusRow[] }
+      const map: Record<string, RelinkStatusRow> = {}
+      for (const s of d.statuses ?? []) map[s.child_sku] = s
+      setRelinkStatus(map)
+    } catch { /* best-effort */ }
+  }, [orphans, relatedOrphans])
+  useEffect(() => { runRelinkStatus() }, [runRelinkStatus])
+  const renderRelinkAction = useCallback((c: { sku: string; asin: string }, parentSku: string | undefined, style: 'amber' | 'sky' | 'violet') => {
+    const status = relinkStatus[c.sku]
+    if (status?.status === 'pending') {
+      const mins = Math.max(1, Math.floor((Date.now() - new Date(status.submitted_at).getTime()) / 60000))
+      return (
+        <span className="ml-auto inline-flex items-center gap-2 text-[11px]">
+          <span className="px-2 py-0.5 rounded bg-slate-700 text-white font-semibold">Submitted {mins}m ago</span>
+          <button onClick={runRelinkStatus} className="text-[11px] underline text-slate-600 hover:text-slate-900 cursor-pointer" title="Re-check Amazon for the applied state">Re-check</button>
+        </span>
+      )
+    }
+    if (status?.status === 'applied') {
+      return <span className="ml-auto text-[11px] font-semibold text-green-700">✓ Applied on Amazon</span>
+    }
+    const cls = style === 'amber' ? 'bg-amber-700 hover:bg-amber-800 text-white'
+      : style === 'sky' ? 'bg-white border border-sky-300 hover:bg-sky-100 text-sky-700'
+      : 'bg-violet-700 hover:bg-violet-800 text-white'
+    return (
+      <button onClick={() => openRelink(c.sku, c.asin, parentSku)} disabled={style === 'violet' && !parentSku}
+        className={`ml-auto inline-flex items-center gap-1 text-[11px] font-semibold ${cls} px-2.5 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-50`}>
+        {style === 'sky' ? 'Move to this parent' : style === 'violet' ? 'Re-link to this parent' : 'Re-link'}
+      </button>
+    )
+  }, [relinkStatus, runRelinkStatus, openRelink])
   const previewRelink = useCallback(async () => {
     if (!relinkTarget || !relinkParentSku) return
     setRelinkLoading(true); setRelinkError(null); setRelinkPreview(null); setRelinkResult(null)
@@ -683,9 +730,7 @@ export default function ListingDetailPage() {
                   <span className="font-mono">{c.asin}</span>
                   <span className="text-amber-700">({c.sku})</span>
                   <span className="text-amber-900">— no parent link on Amazon</span>
-                  <button onClick={() => openRelink(c.sku, c.asin)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-700 hover:bg-amber-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer">
-                    Re-link
-                  </button>
+                  {renderRelinkAction(c, undefined, 'amber')}
                 </li>
               ))}
             </ul>
@@ -745,9 +790,7 @@ export default function ListingDetailPage() {
                         <span className="font-mono">{c.asin}</span>
                         <span className="text-sky-700">({c.sku})</span>
                         <span className="text-sky-900">— linked to <span className="font-mono">{c.liveParent}</span></span>
-                        <button onClick={() => openRelink(c.sku, c.asin)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium bg-white border border-sky-300 hover:bg-sky-100 text-sky-700 px-2.5 py-1 rounded-md transition-colors cursor-pointer" title="Only if you intended to move this child to THIS parent">
-                          Move to this parent
-                        </button>
+                        {renderRelinkAction(c, undefined, 'sky')}
                       </li>
                     ))}
                   </ul>
@@ -773,13 +816,7 @@ export default function ListingDetailPage() {
                   <span className="font-mono">{c.asin}</span>
                   <span className="text-violet-700">({c.sku})</span>
                   <span className="text-violet-900">— no parent link on Amazon</span>
-                  <button
-                    onClick={() => openRelink(c.sku, c.asin, relatedOrphans.parent_sku ?? undefined)}
-                    disabled={!relatedOrphans.parent_sku}
-                    title={relatedOrphans.parent_sku ? `Re-link as a child of ${relatedOrphans.parent_sku}` : 'Parent SKU unknown — open Re-link and enter it manually'}
-                    className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-violet-700 hover:bg-violet-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-50">
-                    Re-link to this parent
-                  </button>
+                  {renderRelinkAction(c, relatedOrphans.parent_sku ?? undefined, 'violet')}
                 </li>
               ))}
             </ul>
@@ -1669,7 +1706,7 @@ export default function ListingDetailPage() {
                   </button>
                 )}
                 {relinkResult && (
-                  <button onClick={() => { setRelinkTarget(null); runOrphanCheck() }}
+                  <button onClick={() => { setRelinkTarget(null); runOrphanCheck(); runRelinkStatus() }}
                     className="ml-auto text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white cursor-pointer">
                     Done (re-check orphans)
                   </button>
