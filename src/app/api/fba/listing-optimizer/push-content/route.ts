@@ -785,11 +785,22 @@ export async function POST(req: NextRequest) {
               const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
               const parentOwn = rows.find((r) => r.asin === parent_asin) || null
               const score = scoreListingContent(parentOwn as never, rows as never, ctx)
+              // Refresh the cached display title alongside the scores. syncListingContent
+              // populates listing_seo_scores.product_title from the top child's title at
+              // sync time; without this same update on push, the page header + dashboard
+              // card show the seller's OLD title for hours/days after a successful push.
+              // Pick the top-child's row by asin (matching syncListingContent's logic);
+              // fall back to the first row when top_child_asin isn't set yet.
+              const topChildRow = (sc?.top_child_asin
+                ? rows.find((r) => r.asin === sc.top_child_asin)
+                : rows[0]) ?? rows[0]
+              const newProductTitle = typeof topChildRow?.title === 'string' ? topChildRow.title : null
               await db.from('listing_seo_scores').update({
                 title_score: score.title_score, bullet_score: score.bullet_score,
                 keyword_score: score.keyword_score, aplus_score: score.aplus_score,
                 overall_score: score.overall_score, issues: score.issues,
                 child_override_count: score.child_override_count,
+                product_title: newProductTitle,
               }).eq('parent_asin', parent_asin)
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
