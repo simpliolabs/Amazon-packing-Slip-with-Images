@@ -217,24 +217,64 @@ const TRADEMARK_TOKENS = new Set([
 ])
 
 /**
+ * Crude singular-ization for proximity matching ("gators" → "gator", "cowboys" → "cowboy").
+ * Doesn't try to be a real stemmer — normalizes the trademark word forms most likely to
+ * evade an exact-phrase check.
+ */
+function singularize(w: string): string {
+  if (w.endsWith('ies') && w.length > 4) return w.slice(0, -3) + 'y'
+  if (w.endsWith('es') && w.length > 3) return w.slice(0, -2)
+  if (w.endsWith('s') && w.length > 3) return w.slice(0, -1)
+  return w
+}
+
+/**
  * Find trademark phrases (sports teams, universities, media franchises) in `text`.
- * Returns the matched phrases. These should NEVER appear in a listing's customer-facing
- * copy — they need to be DROPPED from the source keyword pool (no framing fix applies).
+ * Returns matched phrases — these should NEVER appear in customer-facing copy.
  *
- * Generic words alone ("alligator", "lions", "gators") are NOT in the trademark sets,
- * so they pass through untouched.
+ * Two detection paths (PR #79 widened from exact-phrase only):
+ *   1. EXACT phrase match — verbatim "florida gators", "dallas cowboys".
+ *   2. TOKEN-PROXIMITY match — for each multi-word phrase, tokenize, normalize stems
+ *      (gators → gator), then if ALL phrase tokens appear inside any 4-token window
+ *      of `text` (in either order), flag the phrase.
+ *
+ * Catches the live-verified evasions PR #77 missed on B0G884ZJ27:
+ *   - "vintage 90s Florida gator shirt"  → flagged via 'florida' + 'gator' in window
+ *   - "Vintage 90s Gator Florida Tee"    → reversed order → flagged
+ *   - "love for Florida gators"          → plural caught by exact match
+ *
+ * Generic words alone ("alligator", "lions", "gator") are NOT flagged — only the
+ * COMBINATION of trademark tokens within the proximity window triggers.
  */
 export function findTrademarkPhrases(text: string): string[] {
   const lc = ` ${text.toLowerCase()} `
   const found = new Set<string>()
+
+  // 1. Exact phrase match.
   for (const phrase of TRADEMARK_PHRASES) {
     if (lc.includes(` ${phrase} `) || lc.includes(` ${phrase}.`) || lc.includes(` ${phrase},`) || lc.includes(`${phrase}'`)) {
       found.add(phrase)
     } else if (lc.includes(phrase)) {
-      found.add(phrase)   // catch-all (start/end of text, adjacent punctuation)
+      found.add(phrase)
     }
   }
-  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
+
+  // 2. Token-proximity match — handles singular/plural and reversed word order.
+  const textTokens = lc.split(/[^a-z0-9]+/).filter(Boolean)
+  const textStems = textTokens.map(singularize)
+  for (const phrase of TRADEMARK_PHRASES) {
+    if (found.has(phrase)) continue
+    const phraseStems = phrase.split(/\s+/).filter(Boolean).map(singularize)
+    if (phraseStems.length < 2) continue
+    const windowSize = Math.max(4, phraseStems.length + 2)
+    for (let i = 0; i <= textStems.length - phraseStems.length; i++) {
+      const window = new Set(textStems.slice(i, i + windowSize))
+      if (phraseStems.every((s) => window.has(s))) { found.add(phrase); break }
+    }
+  }
+
+  // 3. Single-word trademark tokens (Marvel/Disney/Harvard/etc.).
+  for (const w of textTokens) {
     if (TRADEMARK_TOKENS.has(w)) found.add(w)
   }
   return [...found]
@@ -937,10 +977,59 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         const fb = Array.isArray(fp.bullets) ? fp.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
         if (fb.length === 0) break
         const fbProblems = validateBullets(fb, brandName, opportunityKws, capacityFamilyTokens)
-        // Accept the rewrite only when it actually reduces the problem count — never regress.
-        if (fbProblems.length < bProblems.length) { bullets = fb; bProblems = fbProblems }
-        else break
+        // Accept criteria (PR #79 strictened after live audit found the loose count-only
+        // check kept original bullets when rewrite traded one issue type for another):
+        //   - take the rewrite when total count drops, OR
+        //   - take the rewrite when CRITICAL-class problems (suppression / trademark /
+        //     capacity-family) strictly decrease — even at the cost of more lower-tier
+        //     issues (length, hook). Critical violations are the seller-visible legal
+        //     risk; lower-tier are polish.
+        const criticalCount = (ps: string[]) => ps.filter((p) =>
+          /LISTING-SUPPRESSION|TRADEMARK INFRINGEMENT|CAPACITY-FAMILY VIOLATION/.test(p)
+        ).length
+        const prevCrit = criticalCount(bProblems)
+        const newCrit = criticalCount(fbProblems)
+        if (newCrit < prevCrit || (newCrit === prevCrit && fbProblems.length < bProblems.length)) {
+          bullets = fb; bProblems = fbProblems
+        } else break
       } catch { break /* keep best-so-far */ }
+    }
+
+    // 🛟 Programmatic capacity backstop (PR #79). The agent retry sometimes keeps a "this
+    // 128 GB SD card" string in a broadcast bullet (live-verified on B0GCF11RKL bullet 3
+    // even after the validator flagged it). If capacity tokens are still present after
+    // the retry, strip them deterministically — better awkward phrasing than a 32GB
+    // shopper reading "this 128 GB SD card" on their PDP.
+    if (capacityFamilyTokens.length >= 2) {
+      const capRe = /\b\d{1,4}\s?(?:GB|TB|MB)\b/gi
+      bullets = bullets.map((b) =>
+        b
+          // Strip "this <N>GB <noun>" → "this <noun>" (common pattern).
+          .replace(/\bthis\s+\d{1,4}\s?(?:GB|TB|MB)\s+/gi, 'this ')
+          // Any other "<N>GB sd card alternative" → "sd card alternative".
+          .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\s+(sd\s+card|memory\s+card|micro\s*sd)/gi, '$1')
+          // Catch-all: any remaining capacity token → "ample capacity".
+          .replace(capRe, 'ample capacity')
+          // Tidy double spaces left behind.
+          .replace(/\s{2,}/g, ' ')
+          .trim()
+      )
+    }
+
+    // 🛟 Role-leak final pass (PR #79). The pre-validation role-leak strip runs once
+    // before the brand-safety/coverage retry loop; the retry can REINTRODUCE role
+    // words (live-verified: bullet 2 of B0G884ZJ27 said "later gator teacher shirt"
+    // after the brand retry). Strip any residual role words against the final title.
+    {
+      const finalTitleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
+      const residual = new Set<string>()
+      for (const b of bullets) for (const w of b.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+        if (ROLE_WORDS.has(w) && !finalTitleWords.has(w)) residual.add(w)
+      }
+      if (residual.size > 0) {
+        const roleRe = new RegExp(`\\b(?:${[...residual].join('|')})\\b`, 'gi')
+        bullets = bullets.map((b) => b.replace(roleRe, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!])/g, '$1').trim())
+      }
     }
   }
 
