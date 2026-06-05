@@ -1467,25 +1467,55 @@ export async function judgeBrandSafetyLLM(
   openai: OpenAI,
 ): Promise<{ detected: BrandSafetyFinding[] }> {
   if (!text || !text.trim()) return { detected: [] }
-  const system = 'You are an Amazon trademark-safety judge. Identify third-party brand names, registered trademarks, and proper-noun references that the seller is NOT licensed to use. Return ONLY {"detected":[{"phrase":"<exact substring>","reason":"<short why>"}]}.'
+  // PR #81: upgraded gpt-4.1-mini → gpt-5 after live B0G884ZJ27 verification of #80
+  // showed gpt-4.1-mini returned empty findings on prompts that LITERALLY listed
+  // Homelander / Ripcurl / Iration / Ella Fella as examples to flag. The smaller model
+  // lacked classification reliability for this proper-noun-recognition task. gpt-5 is
+  // ~same cost ($0.001/call) on short input/output and demonstrably better at recall.
+  const system = `You are a STRICT Amazon trademark-safety judge. Find every third-party brand, registered trademark, sports team, university, media franchise, character name, band/musician, or other proper-noun reference that this seller cannot legally use without a license.
+
+Rules:
+1. Flag ANY proper-noun phrase that COULD be a registered mark — band names, movies, TV characters, sports teams, clothing/electronics brands, university nicknames, video-game IPs.
+2. If you do not recognize a capitalized phrase AND cannot confirm it is generic English, you MUST flag it.
+3. NEVER flag generic English words (alligator, lion, gator, eagle, cool, vintage, classic, retro).
+4. NEVER flag the seller's own brand "${brandName}".
+5. NEVER flag pure descriptors (XL, Black, JPEG).
+6. When uncertain, FLAG. False positives are recoverable; missed trademarks cause listing suppression.
+
+Return ONLY {"detected":[{"phrase":"<exact substring>","reason":"<one line>"}]}. Empty array only if certain there is no trademarked reference.`
   const user = `Seller brand: ${brandName}
+
 Text to review:
 """
-${text.slice(0, 1500)}
+${text.slice(0, 1800)}
 """
-Identify any third-party brand, trademark, registered phrase, sports team, college, media franchise, character name, band, or other proper-noun reference. Examples to flag: Canon, Sony, GoPro, Marvel, Disney, Ripcurl, Rip Curl, Homelander, Spaceballs, Iration, Ella Fella, Florida Gators, Harry Potter, iPhone, etc. Generic English words (alligator, lions, eagles, cool) are NOT flagged. The seller's own brand "${brandName}" is exempt. When uncertain, prefer to flag — false-positives are recoverable, missed trademarks are listing suppression / takedowns. Return ONLY the JSON. Empty array if nothing to flag.`
+
+Identify EVERY third-party brand/trademark/proper-noun reference. Be paranoid.
+
+Items that MUST be flagged when present:
+- Canon, Sony, GoPro, SanDisk, Lexar (electronics)
+- Marvel, Disney, Pixar, Star Wars, Harry Potter (media)
+- Homelander, Iron Man, Spider-Man (characters)
+- Ripcurl, Rip Curl, Quiksilver, Hurley (apparel brands)
+- Iration, Sublime, Metallica (musicians)
+- Ella Fella, Janie & Jack, Mini Boden (kids brands)
+- Florida Gators, Dallas Cowboys (sports teams)
+- iPhone, PlayStation, Xbox (product names)
+
+If you see a CAPITALIZED phrase that is NOT obvious generic English AND NOT "${brandName}", flag it.
+
+Return ONLY the JSON object.`
   try {
     const r = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
+      model: 'gpt-5',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      temperature: 0,
-      max_tokens: 400,
+      max_completion_tokens: 600,
       response_format: { type: 'json_object' },
     })
     const parsed = parseJsonLoose<{ detected?: BrandSafetyFinding[] }>(r.choices[0]?.message?.content || '{}')
     const detected = Array.isArray(parsed.detected) ? parsed.detected
       .filter((f) => f && typeof f.phrase === 'string' && f.phrase.trim().length > 0)
-      .slice(0, 10) : []
+      .slice(0, 15) : []
     return { detected }
   } catch {
     return { detected: [] }
