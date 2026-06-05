@@ -588,22 +588,24 @@ export default function ListingDetailPage() {
         </div>
       </div>
 
-      {/* ══ ORPHAN WARNING — children whose live variation link to this parent is broken ══ */}
-      {orphans && orphans.orphanCount > 0 && (
+      {/* ══ ORPHAN / REPARENTED — split by severity ══
+          Orphan: truly disconnected (no parent on Amazon) → Re-link button (writes via SP-API).
+          Re-parented: child IS linked, just to a DIFFERENT parent than we have stored. Offering
+          a Re-link here would MOVE the child away from its real family, which is wrong. Show
+          as "your data is stale" with a low-key "Move to this parent" only if you really meant it. */}
+      {orphans && orphans.children.some((c) => c.status === 'orphan') && (() => { const trueOrphans = orphans.children.filter((c) => c.status === 'orphan'); return (
         <div className="bg-amber-50 border border-amber-300 rounded-2xl shadow-sm p-4 flex items-start gap-3">
           <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-amber-900">{orphans.orphanCount} variant{orphans.orphanCount === 1 ? '' : 's'} disconnected from this parent</p>
-            <p className="text-xs text-amber-800 mt-0.5">These child ASINs are stored under this parent, but Amazon no longer links them to the variation family — they lose the family&apos;s pooled reviews &amp; ranking. Re-link them in Seller Central&apos;s variation wizard.</p>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-amber-900">{trueOrphans.length} variant{trueOrphans.length === 1 ? '' : 's'} disconnected from this parent</p>
+            <p className="text-xs text-amber-800 mt-0.5">Stored under this parent, but Amazon has no parent link for them — pooled reviews &amp; ranking are lost. Click <b>Re-link</b> to write the variation relationship back to Amazon.</p>
             <ul className="mt-2 space-y-1">
-              {orphans.children.filter((c) => c.status === 'orphan' || c.status === 'reparented').map((c) => (
+              {trueOrphans.map((c) => (
                 <li key={c.asin} className="text-xs text-amber-900 flex items-center gap-2 flex-wrap">
                   <span className="font-mono">{c.asin}</span>
                   <span className="text-amber-700">({c.sku})</span>
-                  <span className="text-amber-900">— {c.status === 'orphan' ? 'no parent link on Amazon' : `now linked to ${c.liveParent}`}</span>
-                  <button
-                    onClick={() => openRelink(c.sku, c.asin)}
-                    className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-700 hover:bg-amber-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer">
+                  <span className="text-amber-900">— no parent link on Amazon</span>
+                  <button onClick={() => openRelink(c.sku, c.asin)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-700 hover:bg-amber-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer">
                     Re-link
                   </button>
                 </li>
@@ -611,7 +613,30 @@ export default function ListingDetailPage() {
             </ul>
           </div>
         </div>
-      )}
+      )})()}
+
+      {/* Re-parented children — informational, NOT a Re-link prompt (they're correctly linked elsewhere). */}
+      {orphans && orphans.children.some((c) => c.status === 'reparented') && (() => { const reparented = orphans.children.filter((c) => c.status === 'reparented'); return (
+        <div className="bg-sky-50 border border-sky-200 rounded-2xl shadow-sm p-4 flex items-start gap-3">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-sky-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-sky-900">{reparented.length} variant{reparented.length === 1 ? '' : 's'} live under a different parent on Amazon</p>
+            <p className="text-xs text-sky-800 mt-0.5">Our portal still groups these under this ASIN, but Amazon links them to a different parent — likely the correct family. Re-run <b>Sync Now</b> to update our records. Only <b>Move to this parent</b> if you intend to move the child here.</p>
+            <ul className="mt-2 space-y-1">
+              {reparented.map((c) => (
+                <li key={c.asin} className="text-xs text-sky-900 flex items-center gap-2 flex-wrap">
+                  <span className="font-mono">{c.asin}</span>
+                  <span className="text-sky-700">({c.sku})</span>
+                  <span className="text-sky-900">— linked to <span className="font-mono">{c.liveParent}</span></span>
+                  <button onClick={() => openRelink(c.sku, c.asin)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium bg-white border border-sky-300 hover:bg-sky-100 text-sky-700 px-2.5 py-1 rounded-md transition-colors cursor-pointer" title="Only if you intended to move this child to THIS parent">
+                    Move to this parent
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )})()}
 
       {/* ══ KPI ROW — the four sub-scores as their own cards ══ */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
