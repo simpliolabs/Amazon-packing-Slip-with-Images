@@ -354,6 +354,113 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   return problems
 }
 
+/**
+ * Validate the generated bullets against scorer-equivalent rules + Amazon brand-safety.
+ * Mirrors the validateTitle contract: returns problems for the bullets-agent retry loop to
+ * resolve. Each check matches a real penalty in scoreListingContent() so passing here means
+ * passing the scorer too — the "follow the recommendation → perfect score" promise extends
+ * to bullets the same way PR #73 extended it to title.
+ *
+ * Checks (all match scoreListingContent.ts:654+):
+ *   - length < 100 chars per bullet (scorer -5 per short bullet, capped at -15)
+ *   - bare third-party brand in any bullet (Amazon Jan 2025 listing-suppression risk —
+ *     parallel to validateTitle's check; PR #74 closed it for title, this closes it for bullets)
+ *   - 3+ top opportunity keywords (CRITICAL ∪ UPGRADE) missing across the whole bullet set
+ *     (scorer -2 per missing, capped at -12; threshold matches scorer's "2+" trigger)
+ */
+export function validateBullets(
+  bullets: string[],
+  brandName: string,
+  opportunityKws: string[] = [],
+): string[] {
+  const problems: string[] = []
+  if (bullets.length === 0) {
+    problems.push('No bullets generated.')
+    return problems
+  }
+
+  // Length: bullets <100 chars get docked by the scorer.
+  const shortBullets = bullets
+    .map((b, i) => ({ i, b, len: b.length }))
+    .filter((x) => x.len < 100)
+  if (shortBullets.length > 0) {
+    const names = shortBullets.map((x) => `bullet ${x.i + 1} (${x.len} chars)`).join(', ')
+    problems.push(`${shortBullets.length} bullet${shortBullets.length === 1 ? '' : 's'} under 100 chars: ${names}. Expand each to 100-200 chars with a "so that" benefit, a compatible-device example, and a long-tail keyword.`)
+  }
+
+  // 🚫 BRAND-NAME SAFETY — same rule that PR #74 enforced for title. Each bullet checked
+  // independently because a bare brand reference in ANY bullet is a listing-suppression risk.
+  const ownBrands = ownBrandTokenSet(brandName)
+  const bareByBullet: { i: number; bare: string[] }[] = []
+  for (let i = 0; i < bullets.length; i++) {
+    const found = findThirdPartyBrands(bullets[i], ownBrands)
+    const bare = found.filter((b) => !isBrandProperlyFramed(bullets[i], b))
+    if (bare.length > 0) bareByBullet.push({ i, bare })
+  }
+  if (bareByBullet.length > 0) {
+    const detail = bareByBullet
+      .map(({ i, bare }) => `bullet ${i + 1}: ${bare.map((b) => `"${b}"`).join(', ')}`)
+      .join('; ')
+    problems.push(`🚫 LISTING-SUPPRESSION RISK: bare third-party brand name(s) in ${detail}. Amazon's Jan 2025 policy requires 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]' framing — never bare. Rewrite those bullets to wrap each brand mention in compatibility language.`)
+  }
+
+  // Opportunity-keyword coverage. The scorer aggregates CRITICAL ∪ UPGRADE and penalizes
+  // when 2+ are missing across the bullets joined together. We use 3+ as the retry trigger
+  // (1-2 missing is below the scorer's first penalty tier and not worth a retry round).
+  if (opportunityKws.length >= 3) {
+    const joined = bullets.join(' ').toLowerCase()
+    const joinedWords = new Set(joined.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
+    const missing = opportunityKws.filter((kw) => {
+      const phrase = kw.toLowerCase()
+      if (joined.includes(phrase)) return false
+      const words = phrase.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
+      return !(words.length > 0 && words.every((w) => joinedWords.has(w)))
+    })
+    if (missing.length >= 3) {
+      const sample = missing.slice(0, 5).map((k) => `"${k}"`).join(', ')
+      problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE). Weave at least ${Math.max(0, missing.length - 2)} of these naturally into the bullet body text: ${sample}.`)
+    }
+  }
+
+  return problems
+}
+
+/**
+ * Validate the generated description. Mirrors validateBullets: returns problems for the
+ * description-agent retry loop. Checks match scoreListingContent.ts:724+ penalties.
+ *
+ * Checks:
+ *   - plain text < 200 chars (scorer -4) — description below the meaningful-indexing floor
+ *   - bare third-party brand (Amazon Jan 2025 listing-suppression risk — parallel to title)
+ *
+ * Note: the scorer's "<3 shared title keywords" penalty isn't enforced here because the
+ * agent already gets the title as input and is told to reinforce its themes. If that gap
+ * shows up in practice we can add a check that takes title tokens as a param.
+ */
+export function validateDescription(
+  description: string,
+  brandName: string,
+): string[] {
+  const problems: string[] = []
+  // Strip HTML the same way the scorer does (loose tag strip — agent returns <p>/<ul>/<li>).
+  const plain = description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+  if (plain.length === 0) {
+    problems.push('No description generated.')
+    return problems
+  }
+  if (plain.length < 200) {
+    problems.push(`Description is only ${plain.length} chars — expand to 800-2000 chars with use cases, target audience, technical specs, and long-tail keywords. Amazon indexes the full text.`)
+  }
+
+  const ownBrands = ownBrandTokenSet(brandName)
+  const bare = findThirdPartyBrands(plain, ownBrands).filter((b) => !isBrandProperlyFramed(plain, b))
+  if (bare.length > 0) {
+    problems.push(`🚫 LISTING-SUPPRESSION RISK: description contains bare third-party brand name(s) ${bare.map((b) => `"${b}"`).join(', ')} without 'for' or 'compatible with' framing. Rewrite every brand mention as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.`)
+  }
+
+  return problems
+}
+
 // ─── Stage 0 — candidate preparation (code only) ───────────────────────────────
 
 interface TitleCandidate { keyword: string; opportunityScore: number; role: 'keyphrase' | 'descriptive' | 'audience' }
@@ -507,8 +614,17 @@ Rules:
 
 // ─── Stage 2 — Bullets Agent ───────────────────────────────────────────────────
 
-async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[], attributes: string[]): Promise<string[]> {
-  const { openai, category, repTitle, children } = input
+async function runBulletsAgent(
+  input: PipelineInput,
+  finalTitle: string,
+  remaining: AnalyzedKeyword[],
+  attributes: string[],
+  /** Top opportunity keywords (CRITICAL ∪ UPGRADE) the bullets MUST cover. Passed to the
+   *  validation retry below — if 3+ are missing across all bullets, the corrective prompt
+   *  fires with the missing list. Same contract as runTitleAgent's upgradeKws. */
+  opportunityKws: string[] = [],
+): Promise<string[]> {
+  const { openai, brandName, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
   // Capacity family detection: do any 2 children carry different capacity tokens in their SKUs?
   // If yes, the SHARED bullets must NOT hardcode a specific GB value — each variant's title
@@ -591,6 +707,45 @@ Return ONLY the JSON object.`
     const roleRe = new RegExp(`\\b(?:${leaked.join('|')})\\b`, 'gi')
     bullets = bullets.map((b) => b.replace(roleRe, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!])/g, '$1').trim())
   }
+
+  // ── Brand-safety + length + opportunity coverage retry (validateBullets) ─────
+  // Same shape as runTitleAgent's corrective loop in PR #73/#74: up to 2 attempts. The
+  // role-leak guard above runs first because its check is cheap and deterministic; this
+  // pass costs one more LLM call only when validateBullets actually finds problems.
+  if (bullets.length > 0 && brandName) {
+    let bProblems = validateBullets(bullets, brandName, opportunityKws)
+    for (let attempt = 0; attempt < 2 && bProblems.length > 0; attempt++) {
+      try {
+        const fix = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `Rewrite ALL 5 bullets to fix these problems. The product is "${finalTitle}" — describe ONLY that.
+
+Problems:
+- ${bProblems.join('\n- ')}
+
+Rules to honor on rewrite:
+- Each bullet 100-200 chars, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ".
+- Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${brandName}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.
+- Weave in any missing opportunity keywords listed above where they fit naturally.
+Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+          ],
+          temperature: 0.3,
+          max_tokens: 1200,
+          response_format: { type: 'json_object' },
+        })
+        const fp = parseJsonLoose<{ bullets?: string[] }>(fix.choices[0]?.message?.content || '{}')
+        const fb = Array.isArray(fp.bullets) ? fp.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+        if (fb.length === 0) break
+        const fbProblems = validateBullets(fb, brandName, opportunityKws)
+        // Accept the rewrite only when it actually reduces the problem count — never regress.
+        if (fbProblems.length < bProblems.length) { bullets = fb; bProblems = fbProblems }
+        else break
+      } catch { break /* keep best-so-far */ }
+    }
+  }
+
   return bullets
 }
 
@@ -891,7 +1046,44 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
     temperature: 0.5,
     max_tokens: 1200,
   })
-  return (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+  let description = (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+
+  // ── Brand-safety + length retry (validateDescription) ─────────────────────────
+  // Same shape as runTitleAgent / runBulletsAgent: up to 2 corrective passes. Closes the
+  // last surface in PR #75 — title (#74), bullets (above), and now description all share
+  // the parent/child coverage standard for validate+retry.
+  const { brandName: descBrand } = input
+  if (description && descBrand) {
+    let dProblems = validateDescription(description, descBrand)
+    for (let attempt = 0; attempt < 2 && dProblems.length > 0; attempt++) {
+      try {
+        const fix = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `Rewrite the description to fix these problems. The product is "${finalTitle}" — describe ONLY that.
+
+Problems:
+- ${dProblems.join('\n- ')}
+
+Rules to honor on rewrite:
+- 270-330 words HTML using <p>, <b>, <ul>, <li>.
+- Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.
+- Return ONLY the HTML.` },
+          ],
+          temperature: 0.4,
+          max_tokens: 1200,
+        })
+        const corrected = (fix.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+        if (!corrected) break
+        const cdProblems = validateDescription(corrected, descBrand)
+        if (cdProblems.length < dProblems.length) { description = corrected; dProblems = cdProblems }
+        else break
+      } catch { break /* keep best-so-far */ }
+    }
+  }
+
+  return description
 }
 
 // ─── Stage 0b — Relevance gate (PR17) ─────────────────────────────────────────
@@ -1145,8 +1337,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   remainingForBullets.sort((a, b) => b.opportunityScore - a.opportunityScore)
 
   // Stage 2 — Bullets
+  // Opportunity pool for the bullets retry validator: top CRITICAL ∪ UPGRADE keywords (same
+  // discipline title gets in Stage 0c, but for bullets we keep BOTH tiers since the bullets
+  // scorer penalizes when 2+ CRITICAL-or-UPGRADE keywords are missing across all 5 bullets).
+  // Sorted by opportunity, deduped against title (those don't count as bullet gaps).
+  const topOpportunityKwsForBullets = cleanGated
+    .filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE')
+    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => k.keyword.split(/\s+/).length <= 5)
+    .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))   // already in title → not a bullet gap
+    .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    .slice(0, 10)
+    .map((k) => k.keyword)
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs)
+  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets)
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
