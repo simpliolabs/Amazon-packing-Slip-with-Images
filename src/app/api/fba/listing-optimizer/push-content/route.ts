@@ -605,173 +605,224 @@ async function patchSkuDetail(
 }
 
 // ─── POST — push (writes to Amazon, with confirm) ──────────────────────────────
+// Streams NDJSON so the upload survives proxy idle-timeouts (Coolify nginx ~60s,
+// Cloudflare ~100s) and container restarts mid-deploy. Replaces the previous
+// synchronous JSON response that surfaced as 'Bad Gateway' to the client when
+// the proxy gave up before the push finished (PR #69 caught the parser error;
+// this fixes the root cause).
+//
+// Event types (one JSON object per newline-delimited line):
+//   {type:'started',    field, detail_field?, attribute_key?, total, broadcast}
+//   {type:'progress',   sku, status:'validating'|'accepted'|'failed', error?, submissionId?, current?, proposed?}
+//   {type:'rescore',    message:'…'}       — between SKU loop and final result
+//   {type:'result',     pushed, failed, total, message, results, field, detail_field?, attribute_key?}
+//   {type:'error',      error, results?}    — terminal; partial results included when known
+//
+// The client reads the stream line-by-line; the 'result' event is the only one
+// that should advance the post-push UI. 'progress' updates a per-SKU spinner.
 export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json().catch(() => ({}))
-    const { parent_asin, confirm, field: rawField, detail_field: detailField } = body as
-      { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string }
-    if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
-    if (confirm !== true) {
-      return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
-    }
-
-    // ── DETAILS branch ─────────────────────────────────────────────────────────
-    if (rawField === 'details') {
-      const { ctx, error } = await loadDetailContext(parent_asin, detailField || '')
-      if (!ctx) return NextResponse.json({ error }, { status: 400 })
-      const diff = (await loadDetailDiff(parent_asin, ctx)).filter((d) => d.changed && d.raw != null)
-      if (diff.length === 0) {
-        return NextResponse.json({ parent_asin, field: 'details', detail_field: ctx.detailField, pushed: 0, message: `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".` })
-      }
-      const token = await getAccessToken()
-      const sellerId = await getSellerId()
-      const productType = await getProductType(sellerId, token, diff[0].sku)
-      const supabase = await createAdminClient()
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const db = supabase as any
-      // Audit-log helper (best-effort — tagged with field='details' + the friendly attribute name
-      // so a future log query can distinguish title/bullets/keywords/details by attribute).
-      const logPush = async (row: Record<string, unknown>) => {
-        try {
-          const { error: insertErr } = await db.from('keyword_push_log').insert(row)
-          if (!insertErr) return
-          const rest = { ...row }; delete rest.field
-          await db.from('keyword_push_log').insert(rest)
-        } catch (e) { console.warn('[push-content/details] keyword_push_log insert failed:', e) }
-      }
-
-      const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
-      for (const item of diff) {
-        const newValueStr = ctx.recommendedValue
-        // 1) validation preview
-        const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW')
-        if (!preview.ok) {
-          results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
-          await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
-          await sleep(PATCH_DELAY_MS)
-          continue
-        }
-        // 2) live write
-        const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE')
-        const status = live.ok ? 'accepted' : 'failed'
-        results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
-        await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
-        await sleep(PATCH_DELAY_MS)
-      }
-
-      const accepted = results.filter((r) => r.status === 'accepted').length
-      const failed = results.filter((r) => r.status === 'failed').length
-      return NextResponse.json({
-        parent_asin,
-        field: 'details' as const,
-        detail_field: ctx.detailField,
-        attribute_key: ctx.attribute.spApiKey,
-        pushed: accepted,
-        failed,
-        total: results.length,
-        message: `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
-        results,
-      })
-    }
-
-    const field: PushField = isPushField(rawField) ? rawField : 'keywords'
-
-    const diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
-    if (diff.length === 0) {
-      return NextResponse.json({ parent_asin, field, pushed: 0, message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.` })
-    }
-
-    const token       = await getAccessToken()
-    const sellerId    = await getSellerId()
-    const productType = await getProductType(sellerId, token, diff[0].sku)
-    const attribute   = FIELD_CONFIG[field].attribute
-    const supabase    = await createAdminClient()
-    // keyword_push_log (migrations 015/016) is not in the generated Supabase types;
-    // use a loose alias for its writes (same pattern as optimize-listing/route.ts).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = supabase as any
-    // The audit-log insert and cache update must NEVER abort a push that already wrote
-    // to Amazon (e.g. if migration 015/016 isn't applied yet). Both are best-effort.
-    // Supabase .insert() returns an { error } (it doesn't throw) on an unknown column,
-    // so if migration 016 (the `field` column) hasn't been applied we retry without it
-    // — the rollback trail still survives, just untagged.
-    const logPush = async (row: Record<string, unknown>) => {
-      try {
-        const { error } = await db.from('keyword_push_log').insert(row)
-        if (!error) return
-        const rest = { ...row }; delete rest.field // migration 016 not applied yet → log untagged
-        await db.from('keyword_push_log').insert(rest)
-      } catch (e) { console.warn('[push-content] keyword_push_log insert failed (migrations 015/016 applied?):', e) }
-    }
-
-    const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
-
-    for (const item of diff) {
-      const value = item.raw as string | string[]
-      const newValueStr = asCompare(value)
-      // 1) validation preview
-      const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
-      if (!preview.ok) {
-        results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
-        await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
-        await sleep(PATCH_DELAY_MS)
-        continue
-      }
-      // 2) live write
-      const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
-      const status = live.ok ? 'accepted' : 'failed'
-      results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
-      await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
-      // keep the local cache in sync on success (best-effort) so the re-score below is accurate
-      if (live.ok) {
-        try {
-          await db.from('listing_content')
-            .update({ ...cacheUpdateFor(field, value), content_synced_at: new Date().toISOString() })
-            .eq('sku', item.sku)
-        } catch (e) { console.warn('[push-content] listing_content cache update failed:', e) }
-      }
-      await sleep(PATCH_DELAY_MS)
-    }
-
-    const accepted = results.filter((r) => r.status === 'accepted').length
-    const failed   = results.filter((r) => r.status === 'failed').length
-
-    // Re-score so the page's score reflects the just-pushed values (the scorer otherwise
-    // only runs on Sync/Regenerate, so the score went stale after a push). Best-effort —
-    // never fail a push that already wrote to Amazon. listing_content was cache-updated above.
-    if (accepted > 0) {
-      try {
-        const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
-        const { data: kids } = await db.from('listing_content')
-          .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
-          .eq('parent_asin', parent_asin)
-        const rows = (kids ?? []) as Record<string, unknown>[]
-        if (rows.length > 0) {
-          const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
-          const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
-          const parentOwn = rows.find((r) => r.asin === parent_asin) || null
-          const score = scoreListingContent(parentOwn as never, rows as never, ctx)
-          await db.from('listing_seo_scores').update({
-            title_score: score.title_score, bullet_score: score.bullet_score,
-            keyword_score: score.keyword_score, aplus_score: score.aplus_score,
-            overall_score: score.overall_score, issues: score.issues,
-            child_override_count: score.child_override_count,
-          }).eq('parent_asin', parent_asin)
-        }
-      } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
-    }
-
-    const label = FIELD_CONFIG[field].label.toLowerCase()
-    return NextResponse.json({
-      parent_asin,
-      field,
-      pushed: accepted,
-      failed,
-      total: results.length,
-      message: `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
-      results,
-    })
-  } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'Push failed' }, { status: 500 })
+  // Validate the body BEFORE opening the stream — a 400 here is a real client error,
+  // not a mid-push failure. Keeps the streaming envelope reserved for things that
+  // can actually fail asynchronously.
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string }
+  try { body = (await req.json().catch(() => ({}))) as typeof body }
+  catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
+  const { parent_asin, confirm, field: rawField, detail_field: detailField } = body
+  if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+  if (confirm !== true) {
+    return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
   }
+
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const emit = (obj: unknown) => controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+      try {
+        // ── DETAILS branch ─────────────────────────────────────────────────────
+        if (rawField === 'details') {
+          const { ctx, error } = await loadDetailContext(parent_asin, detailField || '')
+          if (!ctx) { emit({ type: 'error', error }); controller.close(); return }
+          const diff = (await loadDetailDiff(parent_asin, ctx)).filter((d) => d.changed && d.raw != null)
+          if (diff.length === 0) {
+            emit({
+              type: 'result',
+              parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
+              pushed: 0, failed: 0, total: 0,
+              message: `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
+              results: [],
+            })
+            controller.close(); return
+          }
+          emit({
+            type: 'started',
+            field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
+            total: diff.length, broadcast: true,
+          })
+          const token = await getAccessToken()
+          const sellerId = await getSellerId()
+          const productType = await getProductType(sellerId, token, diff[0].sku)
+          const supabase = await createAdminClient()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const db = supabase as any
+          const logPush = async (row: Record<string, unknown>) => {
+            try {
+              const { error: insertErr } = await db.from('keyword_push_log').insert(row)
+              if (!insertErr) return
+              const rest = { ...row }; delete rest.field
+              await db.from('keyword_push_log').insert(rest)
+            } catch (e) { console.warn('[push-content/details] keyword_push_log insert failed:', e) }
+          }
+
+          const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+          for (const item of diff) {
+            const newValueStr = ctx.recommendedValue
+            emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
+            const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW')
+            if (!preview.ok) {
+              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
+              emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
+              await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
+              await sleep(PATCH_DELAY_MS)
+              continue
+            }
+            const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE')
+            const status = live.ok ? 'accepted' : 'failed'
+            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+            emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+            await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
+            await sleep(PATCH_DELAY_MS)
+          }
+
+          const accepted = results.filter((r) => r.status === 'accepted').length
+          const failed = results.filter((r) => r.status === 'failed').length
+          emit({
+            type: 'result',
+            parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
+            pushed: accepted, failed, total: results.length,
+            message: `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+            results,
+          })
+          controller.close(); return
+        }
+
+        // ── REGULAR FIELDS branch (title / bullets / description / keywords) ──
+        const field: PushField = isPushField(rawField) ? rawField : 'keywords'
+        const diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
+        if (diff.length === 0) {
+          emit({
+            type: 'result',
+            parent_asin, field, pushed: 0, failed: 0, total: 0,
+            message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
+            results: [],
+          })
+          controller.close(); return
+        }
+
+        emit({
+          type: 'started',
+          field, total: diff.length,
+          broadcast: FIELD_CONFIG[field].broadcast,
+        })
+
+        const token       = await getAccessToken()
+        const sellerId    = await getSellerId()
+        const productType = await getProductType(sellerId, token, diff[0].sku)
+        const attribute   = FIELD_CONFIG[field].attribute
+        const supabase    = await createAdminClient()
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const db = supabase as any
+        const logPush = async (row: Record<string, unknown>) => {
+          try {
+            const { error } = await db.from('keyword_push_log').insert(row)
+            if (!error) return
+            const rest = { ...row }; delete rest.field
+            await db.from('keyword_push_log').insert(rest)
+          } catch (e) { console.warn('[push-content] keyword_push_log insert failed (migrations 015/016 applied?):', e) }
+        }
+
+        const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+        for (const item of diff) {
+          const value = item.raw as string | string[]
+          const newValueStr = asCompare(value)
+          emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
+          const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
+          if (!preview.ok) {
+            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
+            emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
+            await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
+            await sleep(PATCH_DELAY_MS)
+            continue
+          }
+          const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
+          const status = live.ok ? 'accepted' : 'failed'
+          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+          emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+          await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
+          if (live.ok) {
+            try {
+              await db.from('listing_content')
+                .update({ ...cacheUpdateFor(field, value), content_synced_at: new Date().toISOString() })
+                .eq('sku', item.sku)
+            } catch (e) { console.warn('[push-content] listing_content cache update failed:', e) }
+          }
+          await sleep(PATCH_DELAY_MS)
+        }
+
+        const accepted = results.filter((r) => r.status === 'accepted').length
+        const failed   = results.filter((r) => r.status === 'failed').length
+
+        // Re-score so the page's score reflects the just-pushed values. Best-effort.
+        if (accepted > 0) {
+          emit({ type: 'rescore', message: 'Re-scoring listing…' })
+          try {
+            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+            const { data: kids } = await db.from('listing_content')
+              .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+              .eq('parent_asin', parent_asin)
+            const rows = (kids ?? []) as Record<string, unknown>[]
+            if (rows.length > 0) {
+              const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
+              const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
+              const parentOwn = rows.find((r) => r.asin === parent_asin) || null
+              const score = scoreListingContent(parentOwn as never, rows as never, ctx)
+              await db.from('listing_seo_scores').update({
+                title_score: score.title_score, bullet_score: score.bullet_score,
+                keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+                overall_score: score.overall_score, issues: score.issues,
+                child_override_count: score.child_override_count,
+              }).eq('parent_asin', parent_asin)
+            }
+          } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
+        }
+
+        const label = FIELD_CONFIG[field].label.toLowerCase()
+        emit({
+          type: 'result',
+          parent_asin, field,
+          pushed: accepted, failed, total: results.length,
+          message: `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+          results,
+        })
+        controller.close()
+      } catch (err) {
+        // Emit a structured error so the client can render it instead of choking.
+        // No partial-results aggregation here: any SKU that already streamed a 'progress'
+        // event has already informed the client what happened to it.
+        emit({ type: 'error', error: err instanceof Error ? err.message : 'Push failed' })
+        controller.close()
+      }
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/x-ndjson',
+      'Transfer-Encoding': 'chunked',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      // Disable nginx buffering on the proxy side so each emit() actually reaches the client
+      // immediately. Coolify's default config buffers up to 8KB before flushing.
+      'X-Accel-Buffering': 'no',
+    },
+  })
 }
