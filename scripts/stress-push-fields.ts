@@ -112,6 +112,23 @@ ok(!capForField('keywords', longKw).endsWith(' '), 'keyword cap trims trailing s
 eq(resolveProposed('title', { recommended_title: '' }, pcMap, 's'), null, 'empty title → null')
 eq(resolveProposed('bullets', { recommended_bullets: [] }, pcMap, 's'), null, 'empty bullets → null')
 
+// per_child_titles — capacity families like SD cards (#44 part 2)
+console.log('3b. per_child_titles override (capacity families)')
+const recPct = {
+  recommended_title: 'THE CEO SD Card 128GB Class 10 Memory for Cameras',
+  per_child_titles: [
+    { sku: 'DAFEI-482-128GB-FBA', asin: 'A1', title: 'THE CEO SD Card 128GB Class 10 Memory for Cameras' },
+    { sku: 'DAFEI-482-64G.-FBA',  asin: 'A2', title: 'THE CEO SD Card 64GB Class 10 Memory for Cameras' },
+    { sku: 'DAFEI-482-32G-FBA',   asin: 'A3', title: 'THE CEO SD Card 32GB Class 10 Memory for Cameras' },
+  ],
+}
+eq(resolveProposed('title', recPct, pcMap, 'DAFEI-482-32G-FBA'), 'THE CEO SD Card 32GB Class 10 Memory for Cameras', '32G SKU gets its own 32GB title (not broadcast 128GB)')
+eq(resolveProposed('title', recPct, pcMap, 'DAFEI-482-64G.-FBA'), 'THE CEO SD Card 64GB Class 10 Memory for Cameras', '64G SKU gets its own 64GB title')
+eq(resolveProposed('title', recPct, pcMap, 'DAFEI-482-128GB-FBA'), 'THE CEO SD Card 128GB Class 10 Memory for Cameras', '128GB SKU gets 128GB title')
+eq(resolveProposed('title', recPct, pcMap, 'SOME-OTHER-SKU'), 'THE CEO SD Card 128GB Class 10 Memory for Cameras', 'unmapped SKU falls back to broadcast recommended_title')
+// apparel safety: no per_child_titles means broadcast (current behavior)
+eq(resolveProposed('title', { recommended_title: 'Apparel Title' }, pcMap, 'AQS-L-LG-FBA'), 'Apparel Title', 'apparel (no per_child_titles) stays broadcast')
+
 // ── 4. currentValue reads each field from a content row ───────────────────────
 console.log('4. currentValue')
 const row1 = { sku: 'A', asin: 'B0X', title: '  Old Title  ', bullet_1: 'b1', bullet_2: '', bullet_3: 'b3', description: '<p>old</p>', backend_keywords: 'old kw' }

@@ -12,6 +12,11 @@
  * "Broadcast" = parent-level content that must be IDENTICAL across all children,
  * so the single recommended value is written to every (ASIN-deduped) child.
  * "Per-child" = each color/size gets its own string (backend search terms).
+ *
+ * Title is broadcast by default, but for CAPACITY variation families (SD cards 64/128/256GB)
+ * the pipeline emits `per_child_titles` so each child carries its own capacity. The push route
+ * uses the per-child title when present for a SKU; otherwise it falls back to the broadcast
+ * recommended_title. Apparel never gets per_child_titles, so it remains broadcast.
  */
 
 export type PushField = 'title' | 'bullets' | 'description' | 'keywords'
@@ -107,12 +112,16 @@ export interface RecRow {
   recommended_title?: string | null
   recommended_bullets?: string[] | null
   recommended_description?: string | null
+  /** Per-child titles for capacity variation families. When present, the push uses each
+   *  child's specific title instead of the broadcast recommended_title. */
+  per_child_titles?: { sku: string; asin: string; title: string }[] | null
 }
 
 /**
  * The proposed value for one SKU, capped and cleaned.
  * Broadcast fields ignore `sku` (same value for everyone). Keywords look it up
- * in `perChild`. Returns null when there's nothing to push for this SKU/field.
+ * in `perChild`. Title checks per_child_titles first (capacity families), then falls back
+ * to the broadcast recommended_title. Returns null when there's nothing to push.
  */
 export function resolveProposed(
   field: PushField,
@@ -126,7 +135,12 @@ export function resolveProposed(
       return v == null ? null : capBytes(v.trim(), 250)
     }
     case 'title': {
-      const t = capForField('title', rec.recommended_title ?? '')
+      // Prefer the SKU-specific title when the pipeline emitted per-child titles (capacity
+      // families like SD cards 64/128/256GB). Apparel never gets per_child_titles, so this
+      // path is only taken when the pipeline explicitly opted into per-child generation.
+      const pct = Array.isArray(rec.per_child_titles) ? rec.per_child_titles.find((p) => p.sku === sku) : null
+      const candidate = pct?.title ?? rec.recommended_title ?? ''
+      const t = capForField('title', candidate)
       return t.length > 0 ? t : null
     }
     case 'description': {

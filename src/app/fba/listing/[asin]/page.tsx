@@ -53,9 +53,14 @@ interface ActionPlanItem {
   notes?: string; aplus_modules?: AplusModuleAction[]
 }
 
+interface PerChildTitle { sku: string; asin: string; title: string }
+
 interface AiRecommendations {
   parent_asin: string; recommended_title: string; recommended_bullets: string[]
   recommended_keywords: string; per_child_keywords?: PerChildKeywords[]
+  /** Per-child titles for capacity variation families (SD cards 64/128/256GB). When present,
+   *  each child carries its own capacity instead of a single broadcast title. */
+  per_child_titles?: PerChildTitle[]
   recommended_description: string; variant_corrections: VariantCorrection[]
   cannibalization_warnings?: CannibalizationWarning[]
   product_details_improvements?: ProductDetailImprovement[]
@@ -849,8 +854,34 @@ export default function ListingDetailPage() {
                       </p>
                     )}
 
-                    {/* Row 5: Replacement Content (the actual fix) */}
-                    {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                    {/* Row 5a: PER-CHILD title table (capacity families like SD cards) — overrides
+                        the single Copy & Paste box for title only. Apparel & single-capacity
+                        products keep the broadcast card below (per_child_titles is empty). */}
+                    {item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                      <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Per-Variant Titles ({recs.per_child_titles.length}):</span>
+                          <span className="text-[10px] text-slate-500">Each child carries its own capacity (Amazon SEO best-practice for capacity variations).</span>
+                        </div>
+                        <div className="space-y-1">
+                          {recs.per_child_titles.map((t) => (
+                            <div key={t.sku} className="flex items-center gap-2 bg-green-50 p-1.5 rounded border border-green-200">
+                              <span className="text-[10px] font-mono text-slate-500 flex-shrink-0">{t.sku}</span>
+                              <span className="text-xs leading-relaxed text-slate-800 flex-1 min-w-0 break-words">{t.title}</span>
+                              <button
+                                onClick={() => { navigator.clipboard.writeText(t.title); setCopied(`pct-${t.sku}`); setTimeout(() => setCopied(null), 2000) }}
+                                className="text-[10px] px-2 py-0.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium flex-shrink-0">
+                                {copied === `pct-${t.sku}` ? 'Copied!' : 'Copy'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Row 5b: Replacement Content (the actual fix) — broadcast card. Hidden when
+                        the per-child title table above is showing. */}
+                    {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && !(item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1) && (
                       <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Copy & Paste This:</span>
@@ -880,7 +911,7 @@ export default function ListingDetailPage() {
                       </div>
                     )}
 
-                    {/* Row 5b: Ship this section to Amazon — each section has its own approval */}
+                    {/* Row 5c: Ship this section to Amazon — each section has its own approval */}
                     {(() => {
                       const shipField: PushField | null =
                         item.element === 'title' ? 'title'
@@ -888,18 +919,29 @@ export default function ListingDetailPage() {
                         : item.element === 'bullet_1' ? 'bullets'
                         : null
                       if (!shipField || item.verdict === 'DONE' || item.verdict === 'SKIP') return null
+                      // Title is per-child for capacity families; everything else is broadcast.
+                      const perChildTitle = shipField === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1
                       return (
                         <div className="mt-2.5 flex items-center gap-2 flex-wrap border-t border-current/10 pt-2.5">
                           <button
                             onClick={() => openPushPreview(shipField)}
                             disabled={pushLoading}
-                            title={`Write the recommended ${FIELD_LABEL[shipField].toLowerCase()} directly to Amazon for every variant`}
+                            title={perChildTitle ? 'Each variant gets its own capacity-specific title' : `Write the recommended ${FIELD_LABEL[shipField].toLowerCase()} directly to Amazon for every variant`}
                             className="inline-flex items-center gap-1.5 text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50 transition-colors cursor-pointer">
                             <Icon.Send className="w-3.5 h-3.5" /> Ship {shipField === 'bullets' ? 'all 5 bullets' : FIELD_LABEL[shipField].toLowerCase()} to Amazon
                           </button>
                           <span className="text-[10px] text-slate-600 inline-flex items-center gap-1 flex-wrap">
-                            <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">Parent</span>
-                            same value written to all {variants.length} variants
+                            {perChildTitle ? (
+                              <>
+                                <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium">Per child</span>
+                                each variant gets its own capacity-specific title
+                              </>
+                            ) : (
+                              <>
+                                <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">Parent</span>
+                                same value written to all {variants.length} variants
+                              </>
+                            )}
                           </span>
                         </div>
                       )
