@@ -17,18 +17,32 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 
-/** Longest common SKU prefix across a set, broken at separators (-, _, .). Mirror the logic
- *  used by /related-orphans so the two routes agree on what counts as "related". */
-function commonSkuPrefix(skus: string[]): string {
-  if (skus.length === 0) return ''
-  let prefix = skus[0]
+/** Generate SKU-prefix CANDIDATES from longest to shortest, broken at each separator. The
+ *  caller queries the DB with each in turn — the LONGEST that finds matches is the right one.
+ *  Heuristic prefix-trimming alone is too fragile (you can't tell "482" the product code from
+ *  "32G" the variation axis just by looking). Letting the data answer is more correct. */
+function prefixCandidates(skus: string[]): string[] {
+  if (skus.length === 0) return []
+  // Start by computing the longest common prefix across the inputs (intersect at chars).
+  let common = skus[0]
   for (const s of skus.slice(1)) {
-    let i = 0; while (i < prefix.length && i < s.length && prefix[i] === s[i]) i++
-    prefix = prefix.slice(0, i)
+    let i = 0; while (i < common.length && i < s.length && common[i] === s[i]) i++
+    common = common.slice(0, i)
   }
-  const lastSep = Math.max(prefix.lastIndexOf('-'), prefix.lastIndexOf('_'), prefix.lastIndexOf('.'))
-  if (lastSep > 0) prefix = prefix.slice(0, lastSep)
-  return prefix.length >= 4 ? prefix : ''
+  // Trim trailing partial segment so we don't anchor on "DAFEI-48".
+  const sep = (s: string) => Math.max(s.lastIndexOf('-'), s.lastIndexOf('_'), s.lastIndexOf('.'))
+  let p = common
+  const lastSep = sep(p)
+  if (lastSep > 0) p = p.slice(0, lastSep)
+  // Walk back through every separator boundary, emitting each prefix while it's >=4 chars.
+  const out: string[] = []
+  while (p.length >= 4) {
+    out.push(p)
+    const s = sep(p)
+    if (s <= 0) break
+    p = p.slice(0, s)
+  }
+  return out
 }
 
 export async function GET(req: NextRequest) {
@@ -46,28 +60,38 @@ export async function GET(req: NextRequest) {
       .eq('parent_asin', parentAsin)
     const ownRows = (own ?? []) as { sku: string; asin: string }[]
     const ownSkus = ownRows.filter((r) => r.asin !== parentAsin).map((r) => r.sku)
-    const prefix = commonSkuPrefix(ownSkus)
-    if (!prefix) return NextResponse.json({ parent_asin: parentAsin, prefix: '', twinParent: null })
+    const candidates = prefixCandidates(ownSkus)
+    if (candidates.length === 0) return NextResponse.json({ parent_asin: parentAsin, prefix: '', twinParent: null })
 
-    // 2) Find OTHER child SKUs sharing that prefix, grouped by parent_asin. The parent with the
-    //    most matching children is the most likely "real" family for these SKUs.
-    const { data: related } = await supabase
-      .from('listing_content')
-      .select('sku, asin, parent_asin')
-      .like('sku', `${prefix}%`)
-      .neq('parent_asin', parentAsin)
-    const counts = new Map<string, number>()
-    for (const r of (related ?? []) as { parent_asin: string | null }[]) {
-      if (!r.parent_asin) continue
-      counts.set(r.parent_asin, (counts.get(r.parent_asin) ?? 0) + 1)
+    // 2) Try each candidate prefix from LONGEST to shortest. The first one that finds OTHER
+    //    SKUs under a DIFFERENT parent is the right level of specificity. The longest match
+    //    avoids false twins (e.g. matching on a 4-char brand prefix that owns dozens of unrelated
+    //    products); the shortest fallback handles cases where only a coarse prefix matches.
+    let usedPrefix = ''
+    let twinParent: string | null = null
+    let twinChildCount = 0
+    for (const prefix of candidates) {
+      const { data: related } = await supabase
+        .from('listing_content')
+        .select('sku, asin, parent_asin')
+        .like('sku', `${prefix}%`)
+        .neq('parent_asin', parentAsin)
+      const counts = new Map<string, number>()
+      for (const r of (related ?? []) as { parent_asin: string | null }[]) {
+        if (!r.parent_asin) continue
+        counts.set(r.parent_asin, (counts.get(r.parent_asin) ?? 0) + 1)
+      }
+      const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+      if (top && top[1] > 0) {
+        usedPrefix = prefix; twinParent = top[0]; twinChildCount = top[1]
+        break
+      }
     }
-    const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
-    const twinParent = top?.[0] ?? null
-    const twinChildCount = top?.[1] ?? 0
 
     return NextResponse.json({
       parent_asin: parentAsin,
-      prefix,
+      prefix: usedPrefix,
+      candidatesTried: candidates,
       ownChildCount: ownRows.length,
       twinParent,
       twinChildCount,
