@@ -840,6 +840,31 @@ Rules:
       if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) }
     }
   }
+
+  // 🛟 LLM brand-safety judge — final catch-net (PR #80). Same shape as the bullets
+  // judge; catches third-party brands/TMs the curated list can't enumerate. One
+  // corrective rewrite if flagged. Fail-open on LLM error.
+  try {
+    const judged = await judgeBrandSafetyLLM(title, brandName, openai)
+    if (judged.detected.length > 0) {
+      const phrasesList = judged.detected.map((d) => `"${d.phrase}"`).join(', ')
+      const fix = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: `Rewrite the title to REMOVE these third-party brand/trademark references entirely: ${phrasesList}. Keep the brand "${brandName}" and the mandatory keyword${mustInclude ? ` "${mustInclude}"` : ''}. Use generic descriptors in place of any flagged term. 80-150 chars. Return ONLY the title string, no quotes or markdown.` },
+        ],
+        temperature: 0.2,
+        max_tokens: 120,
+      })
+      const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+      if (corrected && corrected.length <= 200) {
+        title = corrected
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws)
+      }
+    }
+  } catch { /* fail-open */ }
+
   return { title, problems, retried }
 }
 
@@ -1031,6 +1056,32 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         bullets = bullets.map((b) => b.replace(roleRe, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!])/g, '$1').trim())
       }
     }
+
+    // 🛟 LLM brand-safety judge — final catch-net (PR #80, hybrid with curated list).
+    // After all deterministic checks pass, an LLM judges the bullets for third-party
+    // brand/trademark refs the curated TRADEMARK_PHRASES list can't enumerate
+    // (Ripcurl, Homelander, Spaceballs, Iration etc. — all live-verified leaks on
+    // B0G884ZJ27). One corrective rewrite if flagged; fail-open on LLM error.
+    try {
+      const joined = bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')
+      const judged = await judgeBrandSafetyLLM(joined, brandName, openai)
+      if (judged.detected.length > 0) {
+        const phrasesList = judged.detected.map((d) => `"${d.phrase}"`).join(', ')
+        const fix = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `Rewrite ALL 5 bullets to REMOVE these third-party brand/trademark references entirely: ${phrasesList}. The product is "${finalTitle}" — describe ONLY that with generic descriptors. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet 100-200 chars. Replace any brand reference with a generic descriptor (e.g. "Ripcurl design" → "bold graphic design", "Homelander shirt" → "superhero-style shirt"). Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+          ],
+          temperature: 0.3,
+          max_tokens: 1200,
+          response_format: { type: 'json_object' },
+        })
+        const fp = parseJsonLoose<{ bullets?: string[] }>(fix.choices[0]?.message?.content || '{}')
+        const fb = Array.isArray(fp.bullets) ? fp.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+        if (fb.length === 5) bullets = fb
+      }
+    } catch { /* fail-open — keep best-so-far */ }
   }
 
   return bullets
@@ -1368,9 +1419,77 @@ Rules to honor on rewrite:
         else break
       } catch { break /* keep best-so-far */ }
     }
+
+    // 🛟 LLM brand-safety judge — final catch-net (PR #80). Strip HTML for the judge
+    // (don't ask it to reason about markup); rewrite if flagged.
+    try {
+      const plainForJudge = description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+      const judged = await judgeBrandSafetyLLM(plainForJudge, descBrand, openai)
+      if (judged.detected.length > 0) {
+        const phrasesList = judged.detected.map((d) => `"${d.phrase}"`).join(', ')
+        const fix = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: `Rewrite the HTML description to REMOVE these third-party brand/trademark references entirely: ${phrasesList}. The product is "${finalTitle}" — describe ONLY that with generic descriptors. 270-330 words HTML using <p>, <b>, <ul>, <li>. Return ONLY the HTML.` },
+          ],
+          temperature: 0.4,
+          max_tokens: 1200,
+        })
+        const corrected = (fix.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+        if (corrected) description = corrected
+      }
+    } catch { /* fail-open */ }
   }
 
   return description
+}
+
+/**
+ * LLM brand-safety judge (PR #80, hybrid with curated list).
+ *
+ * The curated TRADEMARK_PHRASES + token-proximity check (PR #77/#79) catches the
+ * enumerated marks. But the keyword pool has thousands of brand/trademark queries
+ * we'll never exhaustively list — live-verified B0G884ZJ27 regen leaked Ripcurl /
+ * Homelander / Spaceballs / Ella Fella / Iration (band) into title + bullets, all
+ * outside our set. This judge is the catch-net: one cheap LLM pass per agent output
+ * that flags any third-party brand / trademark / proper-noun reference, with the
+ * seller's own brand exempt.
+ *
+ * Returns `{ detected: [{phrase, reason}] }`. Conservative — better false-positive
+ * than miss a TM. Fail-open: on error returns empty so the agent ships its current
+ * output (don't block a regen on a transient LLM failure).
+ */
+export interface BrandSafetyFinding { phrase: string; reason: string }
+export async function judgeBrandSafetyLLM(
+  text: string,
+  brandName: string,
+  openai: OpenAI,
+): Promise<{ detected: BrandSafetyFinding[] }> {
+  if (!text || !text.trim()) return { detected: [] }
+  const system = 'You are an Amazon trademark-safety judge. Identify third-party brand names, registered trademarks, and proper-noun references that the seller is NOT licensed to use. Return ONLY {"detected":[{"phrase":"<exact substring>","reason":"<short why>"}]}.'
+  const user = `Seller brand: ${brandName}
+Text to review:
+"""
+${text.slice(0, 1500)}
+"""
+Identify any third-party brand, trademark, registered phrase, sports team, college, media franchise, character name, band, or other proper-noun reference. Examples to flag: Canon, Sony, GoPro, Marvel, Disney, Ripcurl, Rip Curl, Homelander, Spaceballs, Iration, Ella Fella, Florida Gators, Harry Potter, iPhone, etc. Generic English words (alligator, lions, eagles, cool) are NOT flagged. The seller's own brand "${brandName}" is exempt. When uncertain, prefer to flag — false-positives are recoverable, missed trademarks are listing suppression / takedowns. Return ONLY the JSON. Empty array if nothing to flag.`
+  try {
+    const r = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0,
+      max_tokens: 400,
+      response_format: { type: 'json_object' },
+    })
+    const parsed = parseJsonLoose<{ detected?: BrandSafetyFinding[] }>(r.choices[0]?.message?.content || '{}')
+    const detected = Array.isArray(parsed.detected) ? parsed.detected
+      .filter((f) => f && typeof f.phrase === 'string' && f.phrase.trim().length > 0)
+      .slice(0, 10) : []
+    return { detected }
+  } catch {
+    return { detected: [] }
+  }
 }
 
 // ─── Stage 0b — Relevance gate (PR17) ─────────────────────────────────────────
