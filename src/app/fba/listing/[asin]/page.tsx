@@ -723,7 +723,7 @@ export default function ListingDetailPage() {
           <div className="min-w-0 flex-1">
             <p className="text-sm font-semibold text-violet-900">{relatedOrphans.candidates.length} orphan{relatedOrphans.candidates.length === 1 ? '' : 's'} could be linked to this family</p>
             <p className="text-xs text-violet-800 mt-0.5">
-              These SKUs share the <span className="font-mono">{relatedOrphans.prefix}</span> prefix and have <b>no parent on Amazon</b>. Re-link them here{relatedOrphans.parent_sku ? <> (target parent SKU: <span className="font-mono">{relatedOrphans.parent_sku}</span>)</> : ''} to restore pooled reviews &amp; ranking.
+              These SKUs share the <span className="font-mono">{relatedOrphans.prefix}</span> prefix and have <b>no parent on Amazon</b>. Re-link them here {relatedOrphans.parent_sku ? <>(target parent SKU: <span className="font-mono">{relatedOrphans.parent_sku}</span>) </> : null}to restore pooled reviews &amp; ranking.
             </p>
             <ul className="mt-2 space-y-1">
               {relatedOrphans.candidates.map((c) => (
