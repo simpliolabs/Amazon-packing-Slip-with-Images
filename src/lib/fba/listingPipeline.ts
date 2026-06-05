@@ -132,8 +132,16 @@ const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee
 // for Men" on an SD card — so every agent branches on this.
 function looksApparel(category?: string | null, repTitle?: string | null): boolean {
   const hay = ` ${category ?? ''} ${repTitle ?? ''} `.toLowerCase()
+  // Strong non-apparel nouns WIN: a memory-card / mug listing templated from a shirt still has
+  // leftover "shirt" in its data, but it is NOT clothing. The product noun decides.
+  if (/\b(?:memory\s?cards?|sd\s?cards?|micro\s?sd|usb|flash\s?drives?|mugs?|cups?|tumblers?|bottles?|mounts?|holders?|stands?|chargers?|cables?|adapters?|cases?|stickers?|decals?|posters?|prints?|canvas|mousepads?|keychains?|magnets?|earbuds?|headphones?|speakers?|watch(?:es)?|necklaces?|bracelets?|earrings?|candles?|blankets?|pillows?|towels?|backpacks?|wallets?|notebooks?|journals?|toys?|puzzles?|ornaments?|mats?|signs?)\b/.test(hay)) return false
   return /\b(?:t[-\s]?shirts?|tees?|shirts?|hoodie|sweat\s?shirt|sweater|apparel|clothing|tank\s?top|dress|leggings|pajama|garment|jersey|crew\s?neck|long\s?sleeve|onesie|bodysuit|romper|blouse|cardigan|socks?|jacket|beanie|crop\s?top)\b/.test(hay)
 }
+
+// Apparel words that contaminate a NON-apparel listing (one templated from a shirt). Dropped
+// from the keyword pool + specs so a memory card / mug never inherits "graphic tee",
+// "ring-spun cotton", "for men", etc. Only applied when the product is non-apparel.
+const APPAREL_CONTAMINANTS = /\b(?:t[-\s]?shirts?|tees?|shirts?|graphic\s*tees?|hoodie|sweat\s?shirts?|sweater|apparel|clothing|garments?|fabric|cotton|ring[-\s]?spun|jersey|knit(?:ted)?|relaxed\s*fit|regular\s*fit|comfort\s*colors|bella\s*canvas|gildan|next\s*level|unisex|m[ae]ns?|wom[ae]ns?|fashion|outfit|wardrobe|sleeves?|crew\s?neck|tank\s?tops?|garment[-\s]?dyed|\bdye\b|wear|wearable)\b/i
 
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
 
@@ -451,7 +459,8 @@ async function runBackendAgent(
   bullets: string[],
   remaining: AnalyzedKeyword[],
 ): Promise<PipelinePerChildKeywords[]> {
-  const { openai, children, brandName } = input
+  const { openai, children, brandName, category, repTitle } = input
+  const apparel = looksApparel(category, repTitle)
 
   // Words already in title/bullets/brand — Amazon auto-indexes those, so exclude from backend.
   const excludeWords = new Set(
@@ -565,7 +574,7 @@ Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words,
 Return ONLY the JSON object.`
 
   const tailMap = new Map<string, string>()
-  try {
+  if (apparel) try {  // color shade synonyms are an apparel concept — skip for non-apparel
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
@@ -822,16 +831,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // into the title-candidate / bullets / backend pools, and reinforce them in the prompts.
   onProgress('Extracting product attributes...')
   const attrs = await extractProductAttributes(input)
+  const apparelProduct = looksApparel(input.category, repTitle)
+  // Non-apparel listings are sometimes templated from a shirt, so their data carries apparel
+  // contamination ("graphic tee", "ring-spun cotton", "for men"). Strip it for non-apparel so a
+  // memory card / mug never inherits clothing language in the keyword pool, specs, or title.
+  if (!apparelProduct) {
+    const clean = (s: string) => !APPAREL_CONTAMINANTS.test(s)
+    attrs.searchKeyphrases = attrs.searchKeyphrases.filter(clean)
+    attrs.specs = attrs.specs.filter(clean)
+  }
+  const cleanGated = apparelProduct ? gated : gated.filter((k) => !APPAREL_CONTAMINANTS.test(k.keyword))
   // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
   // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
   // must NOT enter the title — they go to bullets/description/structured fields only.
-  const analysis = [...attrs.searchKeyphrases.map(attributeAsKeyword), ...gated]
+  const analysis = [...attrs.searchKeyphrases.map(attributeAsKeyword), ...cleanGated]
   const bulletAttrs = [...attrs.searchKeyphrases, ...attrs.specs]
 
   // PIN the single highest SEARCH-VOLUME real keyword (not a synthetic attribute, not
   // seasonal — seasonal belongs in backend) so the title agent can never drop the money
   // term. This is what stopped "see you later alligator shirt" (22.7k/mo) from surviving.
-  const mustIncludeKw = gated
+  const mustIncludeKw = cleanGated
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !isSeasonal(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)
@@ -841,9 +860,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Determine the product's true audience from the existing listing + specs, so the title
   // never silently narrows a unisex product to one gender (the "for Men" regression).
   // Apparel only — a memory card, mug, or mount has no gendered audience; forcing "for Men"
-  // on an SD card is exactly the non-apparel mess this guards against.
-  const apparelProduct = looksApparel(input.category, repTitle)
-  const audienceText = `${repTitle ?? ''} ${attrs.specs.join(' ')} ${gated.map((k) => k.keyword).join(' ')}`.toLowerCase()
+  // on an SD card is exactly the non-apparel mess this guards against (apparelProduct computed above).
+  const audienceText = `${repTitle ?? ''} ${attrs.specs.join(' ')} ${cleanGated.map((k) => k.keyword).join(' ')}`.toLowerCase()
   const mentionsWomen = /\bwom[ae]n\b|womens|ladies|female/.test(audienceText)
   const mentionsMen = /\bm[ae]n\b|mens|male/.test(audienceText)
   const preferredAudience = !apparelProduct ? ''
