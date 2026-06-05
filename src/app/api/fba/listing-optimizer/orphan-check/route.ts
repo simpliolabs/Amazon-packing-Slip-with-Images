@@ -43,21 +43,20 @@ export async function GET(req: NextRequest) {
       .eq('parent_asin', parentAsin)
     const all = (rows ?? []) as { sku: string; asin: string; parent_asin: string | null }[]
 
-    // Check the actual CHILDREN only — never the parent's own row (a parent returns childAsins,
-    // not parentAsins, so it would false-positive as an orphan). Dedup by ASIN.
-    const byAsin = new Map<string, { sku: string; asin: string; parent_asin: string | null }>()
-    for (const c of all) {
-      if (c.asin === parentAsin) continue
-      if (!byAsin.has(c.asin)) byAsin.set(c.asin, c)
-    }
-    const children = [...byAsin.values()]
+    // Children only — never the parent's own row (a parent returns childAsins, not parentAsins,
+    // so it would false-positive as orphan). DO NOT dedup by ASIN here: FBA + FBM SKUs share the
+    // same child ASIN but are SEPARATE listings on Amazon, each with its OWN parentage attribute.
+    // If both are detached, each needs its own Re-link, so each must appear in the warning.
+    const children = all.filter((c) => c.asin !== parentAsin)
     if (children.length === 0) return NextResponse.json({ parent_asin: parentAsin, children: [], orphanCount: 0 })
 
     const token = await getAccessToken()
-    const asins = children.map((c) => c.asin)
+    // Batch the API call by UNIQUE ASIN (no point fetching the same catalog item twice for two
+    // SKUs of the same ASIN) but map the result back to every SKU.
+    const uniqueAsins = [...new Set(children.map((c) => c.asin))]
     const itemMap = new Map<string, CatalogItem>()
-    for (let i = 0; i < asins.length; i += 20) {
-      const batch = asins.slice(i, i + 20)
+    for (let i = 0; i < uniqueAsins.length; i += 20) {
+      const batch = uniqueAsins.slice(i, i + 20)
       const url =
         `${ENDPOINT}/catalog/2022-04-01/items?identifiers=${batch.join(',')}` +
         `&identifiersType=ASIN&marketplaceIds=${MARKETPLACE_ID}&includedData=relationships`
