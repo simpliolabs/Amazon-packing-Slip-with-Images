@@ -614,6 +614,37 @@ export default function ListingDetailPage() {
           const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
           if (found) setScore(found)
         } catch { /* best-effort — the score still updates on next load */ }
+
+        // Mark the matching action_plan items as DONE locally so the card collapses to
+        // the "✓ Pushed" state immediately. The audit JSON in the DB is frozen until
+        // the user re-generates; without this the page still shows "Current: ..." and
+        // the Ship button for a section that was just successfully pushed — which
+        // makes it look like the push didn't land. A clear "✓ Pushed Nm ago" badge
+        // replaces both. Lasts until the next page reload (DB still has the old verdict)
+        // OR until a Regenerate refreshes the audit.
+        const matchesPushedField = (elem: string): boolean => {
+          if (pushField === 'title') return elem === 'title'
+          if (pushField === 'description') return elem === 'description'
+          if (pushField === 'keywords') return elem === 'backend_keywords'
+          if (pushField === 'details') return elem === 'product_details'
+          if (pushField === 'bullets') return /^bullet/.test(elem)
+          return false
+        }
+        const pushedAt = new Date().toISOString()
+        const pushedLabel = pushField === 'details' && pushDetailField ? pushDetailField : FIELD_LABEL[pushField]
+        setAiRecs((prev) => {
+          if (!prev) return prev
+          const action_plan = (prev.action_plan ?? []).map((it) => {
+            if (!matchesPushedField(it.element)) return it
+            return {
+              ...it,
+              verdict: 'DONE' as const,
+              current_status: `✓ Pushed ${pushedLabel} to Amazon (${(data.pushed ?? 0)}/${data.total ?? 0} variants)`,
+              notes: `${it.notes ? it.notes + ' · ' : ''}Pushed at ${pushedAt}. Submissions are ACCEPTED — Amazon applies in 15min–6hr. Use Verify on Amazon to confirm.`,
+            }
+          })
+          return { ...prev, action_plan }
+        })
       }
     } catch (e) {
       setPushError(e instanceof Error ? e.message : 'Push failed')
@@ -1256,12 +1287,16 @@ export default function ListingDetailPage() {
                       </div>
                     )}
 
-                    {/* Row 5c: Ship this section to Amazon — each section has its own approval */}
+                    {/* Row 5c: Ship this section to Amazon — each section has its own approval.
+                        Audit emits element names: 'title' / 'description' / 'bullet_1..5'
+                        (one consolidated bullets card, not five). Old code matched the literal
+                        'bullet_1' only, which never appears — so the Ship button never showed up
+                        on the bullets card. Match anything starting with 'bullet'. */}
                     {(() => {
                       const shipField: PushField | null =
                         item.element === 'title' ? 'title'
                         : item.element === 'description' ? 'description'
-                        : item.element === 'bullet_1' ? 'bullets'
+                        : /^bullet/.test(item.element) ? 'bullets'
                         : null
                       if (!shipField || item.verdict === 'DONE' || item.verdict === 'SKIP') return null
                       // Title is per-child for capacity families; everything else is broadcast.
