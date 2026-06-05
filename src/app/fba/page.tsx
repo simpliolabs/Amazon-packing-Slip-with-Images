@@ -401,10 +401,34 @@ export default function FBAIntelligencePage() {
           const counts = new Map<string, number>()
           for (const c of reparented) if (c.liveParent) counts.set(c.liveParent, (counts.get(c.liveParent) ?? 0) + 1)
           const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
-          const dominantParent = top?.[0] ?? null
+          let dominantParent = top?.[0] ?? null
           const dominantCount = top?.[1] ?? 0
-          // Stale = the real family clearly lives under another parent (>= half of children).
-          const isStale = !!dominantParent && dominantCount >= Math.max(1, Math.ceil(children.length / 2))
+          // Primary stale signal: a single OTHER parent owns >= half of the currently-reparented
+          // children. This fires when the dashboard sees the family mid-move and our DB still
+          // points at the old parent for some kids.
+          let isStale = !!dominantParent && dominantCount >= Math.max(1, Math.ceil(children.length / 2))
+          // Secondary signal: after #53's self-heal already migrated children to the new parent
+          // in OUR DB, the donor parent has very few children left (or just orphans). The
+          // reparented-children signal goes silent, but the donor row STILL shows on the
+          // dashboard pointing at a now-empty page. Detect via stored-vs-claimed mismatch and
+          // resolve a "twin parent" via SKU-prefix matching.
+          const claimedChildCount = s.child_count ?? 0
+          const livingCount = children.length - orphanCount
+          const looksDead = (claimedChildCount > 0 && children.length === 0)
+            || (claimedChildCount >= 2 && livingCount === 0)
+            || (claimedChildCount >= 3 && children.length / claimedChildCount < 0.4)
+          if (!isStale && looksDead) {
+            try {
+              const tr = await fetch(`/api/fba/listing-optimizer/twin-parent?parent_asin=${s.parent_asin}`)
+              if (tr.ok) {
+                const td = await tr.json()
+                if (td.twinParent) {
+                  dominantParent = td.twinParent
+                  isStale = true
+                }
+              }
+            } catch { /* best-effort */ }
+          }
           if (!cancelled) setStaleStatus((prev) => ({ ...prev, [s.parent_asin]: { isStale, dominantParent, orphanCount, reparentedCount: reparented.length, totalChildren: children.length } }))
         } catch { /* best-effort */ }
       }))
