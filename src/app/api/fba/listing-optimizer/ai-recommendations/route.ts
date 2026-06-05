@@ -28,9 +28,17 @@ function getAdminSupabase() {
   )
 }
 
-function getOpenAI() {
+/**
+ * Build an OpenAI client for this request. PR #82: prefers the DB-stored key from
+ * Settings UI; falls back to OPENAI_API_KEY env var so historical deploys keep
+ * working. The DB key is resolved via the cached helper to avoid one DB read per
+ * agent call.
+ */
+async function getOpenAI() {
+  const { resolveOpenAIKey } = await import('@/lib/openai/credentials')
+  const apiKey = await resolveOpenAIKey()
   return new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey,
     baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   })
 }
@@ -493,7 +501,7 @@ export async function POST(req: NextRequest) {
       return { sku: c.sku, asin: c.asin, color: color || null, size: size || null, title: c.title || null }
     })
 
-    const openai = getOpenAI()
+    const openai = await getOpenAI()
     const encoder = new TextEncoder()
 
     // ─── Streaming shell: run the multi-agent pipeline, emitting NDJSON keepalives ───
