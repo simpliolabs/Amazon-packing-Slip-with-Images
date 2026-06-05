@@ -184,7 +184,7 @@ export default function ListingDetailPage() {
   // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords) ──
   type PushField = 'title' | 'bullets' | 'description' | 'keywords'
   const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords' }
-  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean }
+  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string }
   interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string }
   interface PushPreview { field: PushField; label: string; broadcast: boolean; count: number; changed: number; proposedValue: string | string[] | null; diff: PushDiffRow[] }
   const [pushField, setPushField] = useState<PushField>('keywords')
@@ -1763,9 +1763,14 @@ export default function ListingDetailPage() {
                       )}
                     </>
                   ) : (
-                    /* Per-child: full current → proposed diff per SKU */
+                    /* Per-child: full current → proposed diff per SKU. Sort parent row to the top,
+                       then by SKU for stable ordering, so the modal mirrors the section card above. */
                     <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[45vh] overflow-y-auto">
-                      {pushPreview.diff.filter(d => d.changed).map((d) => {
+                      {pushPreview.diff
+                        .filter(d => d.changed)
+                        .slice()
+                        .sort((a, b) => (a.isParent ? -1 : b.isParent ? 1 : a.sku.localeCompare(b.sku)))
+                        .map((d) => {
                         // Field-aware size readout: keywords are byte-capped (250B), titles char-capped
                         // (~200), description char-capped (~2000). Show the meaningful unit per field.
                         const sizeLabel = pushPreview.field === 'keywords' ? `${d.bytes}/250 bytes`
@@ -1773,10 +1778,14 @@ export default function ListingDetailPage() {
                           : pushPreview.field === 'description' ? `${d.chars} chars`
                           : `${d.chars} chars`
                         return (
-                          <div key={d.sku} className="p-3 text-xs">
-                            <div className="font-mono text-slate-700 mb-1">{d.sku} <span className="text-slate-400">({sizeLabel})</span></div>
-                            <p className="text-slate-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
-                            <p className="text-emerald-700 break-words">{d.proposed}</p>
+                          <div key={d.sku} className={`p-3 text-xs ${d.isParent ? 'bg-violet-50' : ''}`}>
+                            <div className="font-mono text-slate-700 mb-1 flex items-center gap-2">
+                              {d.isParent && <span className="text-[10px] font-bold text-violet-700 uppercase tracking-wide bg-violet-100 px-1.5 py-0.5 rounded">PARENT</span>}
+                              <span>{d.sku}</span>
+                              <span className="text-slate-400">({sizeLabel})</span>
+                            </div>
+                            <p className="text-slate-400 line-through mb-0.5 break-words">{d.current || '(empty — Amazon will validate the new value)'}</p>
+                            <p className={`break-words ${d.isParent ? 'text-violet-800' : 'text-emerald-700'}`}>{d.proposed}</p>
                           </div>
                         )
                       })}
