@@ -233,15 +233,53 @@ export default function ListingDetailPage() {
 
   // Orphan check — flag children whose live Amazon variation link to this parent is broken
   // (was part of the family, got disconnected). Best-effort; never blocks the page.
-  useEffect(() => {
+  const runOrphanCheck = useCallback(async () => {
     if (!asin) return
-    ;(async () => {
-      try {
-        const r = await fetch(`/api/fba/listing-optimizer/orphan-check?parent_asin=${asin}`)
-        if (r.ok) { const d = await r.json(); if (d && typeof d.orphanCount === 'number') setOrphans(d) }
-      } catch { /* best-effort */ }
-    })()
+    try {
+      const r = await fetch(`/api/fba/listing-optimizer/orphan-check?parent_asin=${asin}`)
+      if (r.ok) { const d = await r.json(); if (d && typeof d.orphanCount === 'number') setOrphans(d) }
+    } catch { /* best-effort */ }
   }, [asin])
+  useEffect(() => { runOrphanCheck() }, [runOrphanCheck])
+
+  // ─── Re-link an orphan/re-parented child into a target parent SKU ────────────────
+  type RelinkIssue = { code?: string; message?: string; severity?: string }
+  const [relinkTarget, setRelinkTarget] = useState<{ childSku: string; childAsin: string } | null>(null)
+  const [relinkParentSku, setRelinkParentSku] = useState<string>('')
+  const [relinkPreview, setRelinkPreview] = useState<{ ok: boolean; productType: string; variation_theme: string | null; issues: RelinkIssue[] } | null>(null)
+  const [relinkLoading, setRelinkLoading] = useState(false)
+  const [relinkError, setRelinkError] = useState<string | null>(null)
+  const [relinkResult, setRelinkResult] = useState<{ submitted: boolean; status: string | null; submissionId: string | null; issues: RelinkIssue[]; message: string } | null>(null)
+  const openRelink = useCallback((childSku: string, childAsin: string) => {
+    setRelinkTarget({ childSku, childAsin })
+    setRelinkParentSku('Memory-Card-P')   // your known target (parent SKU for B0GCF11RKL); editable
+    setRelinkPreview(null); setRelinkResult(null); setRelinkError(null)
+  }, [])
+  const previewRelink = useCallback(async () => {
+    if (!relinkTarget || !relinkParentSku) return
+    setRelinkLoading(true); setRelinkError(null); setRelinkPreview(null); setRelinkResult(null)
+    try {
+      const r = await fetch(`/api/fba/listing-optimizer/relink?child_sku=${encodeURIComponent(relinkTarget.childSku)}&parent_sku=${encodeURIComponent(relinkParentSku)}`)
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Preview failed')
+      setRelinkPreview(d)
+    } catch (e) { setRelinkError(e instanceof Error ? e.message : 'Preview failed') }
+    setRelinkLoading(false)
+  }, [relinkTarget, relinkParentSku])
+  const confirmRelink = useCallback(async () => {
+    if (!relinkTarget || !relinkParentSku) return
+    setRelinkLoading(true); setRelinkError(null)
+    try {
+      const r = await fetch('/api/fba/listing-optimizer/relink', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ child_sku: relinkTarget.childSku, parent_sku: relinkParentSku, confirm: true }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Re-link failed')
+      setRelinkResult(d); setRelinkPreview(null)
+    } catch (e) { setRelinkError(e instanceof Error ? e.message : 'Re-link failed') }
+    setRelinkLoading(false)
+  }, [relinkTarget, relinkParentSku])
 
   // Fetch AI recommendations (cached)
   useEffect(() => {
@@ -557,10 +595,17 @@ export default function ListingDetailPage() {
           <div className="min-w-0">
             <p className="text-sm font-semibold text-amber-900">{orphans.orphanCount} variant{orphans.orphanCount === 1 ? '' : 's'} disconnected from this parent</p>
             <p className="text-xs text-amber-800 mt-0.5">These child ASINs are stored under this parent, but Amazon no longer links them to the variation family — they lose the family&apos;s pooled reviews &amp; ranking. Re-link them in Seller Central&apos;s variation wizard.</p>
-            <ul className="mt-2 space-y-0.5">
+            <ul className="mt-2 space-y-1">
               {orphans.children.filter((c) => c.status === 'orphan' || c.status === 'reparented').map((c) => (
-                <li key={c.asin} className="text-xs text-amber-900">
-                  <span className="font-mono">{c.asin}</span> <span className="text-amber-700">({c.sku})</span> — {c.status === 'orphan' ? 'no parent link on Amazon' : `now linked to ${c.liveParent}`}
+                <li key={c.asin} className="text-xs text-amber-900 flex items-center gap-2 flex-wrap">
+                  <span className="font-mono">{c.asin}</span>
+                  <span className="text-amber-700">({c.sku})</span>
+                  <span className="text-amber-900">— {c.status === 'orphan' ? 'no parent link on Amazon' : `now linked to ${c.liveParent}`}</span>
+                  <button
+                    onClick={() => openRelink(c.sku, c.asin)}
+                    className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-700 hover:bg-amber-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer">
+                    Re-link
+                  </button>
                 </li>
               ))}
             </ul>
@@ -1192,6 +1237,95 @@ export default function ListingDetailPage() {
       )}
 
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          RE-LINK ORPHAN — preview (VALIDATION_PREVIEW) → confirm → live PATCH
+          ══════════════════════════════════════════════════════════════════════ */}
+      {relinkTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !relinkLoading && setRelinkTarget(null)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
+              <h3 className="text-sm font-bold text-slate-900">Re-link <span className="font-mono">{relinkTarget.childSku}</span> to a parent</h3>
+              <button onClick={() => !relinkLoading && setRelinkTarget(null)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+            </div>
+            <div className="p-5">
+              <p className="text-xs text-slate-600 mb-3">This writes the variation relationship directly to Amazon. We <b>validation-preview first</b> — only an Amazon-validated change reaches Live. After Live, Amazon returns ACCEPTED before actually applying the change, so confirm via the orphan check again in a few minutes.</p>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Target parent SKU</label>
+              <input
+                type="text" value={relinkParentSku} onChange={(e) => { setRelinkParentSku(e.target.value); setRelinkPreview(null); setRelinkResult(null) }}
+                className="w-full text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400"
+                placeholder="e.g. Memory-Card-P"
+              />
+              <p className="text-[11px] text-slate-400 mt-1">The parent SKU (not ASIN). Must already exist as a non-buyable variation parent of the same productType.</p>
+
+              {relinkError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 mt-3">{relinkError}</p>}
+
+              {/* Preview */}
+              {relinkPreview && !relinkResult && (
+                <div className={`mt-4 rounded-lg p-3 ${relinkPreview.ok ? 'bg-emerald-50 border border-emerald-200' : 'bg-red-50 border border-red-200'}`}>
+                  <p className={`text-xs font-semibold ${relinkPreview.ok ? 'text-emerald-800' : 'text-red-800'}`}>
+                    {relinkPreview.ok ? 'Amazon validated — ready to write.' : 'Amazon rejected the planned change.'}
+                  </p>
+                  <p className="text-[11px] text-slate-600 mt-1">productType: <span className="font-mono">{relinkPreview.productType}</span> · variation_theme: <span className="font-mono">{relinkPreview.variation_theme ?? '(none from parent)'}</span></p>
+                  {relinkPreview.issues.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {relinkPreview.issues.map((i, idx) => (
+                        <li key={idx} className="text-[11px]">
+                          <span className={`px-1.5 py-0.5 rounded font-bold mr-1 ${i.severity === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{i.severity}</span>
+                          <span className="text-slate-700">{i.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* Result */}
+              {relinkResult && (
+                <div className={`mt-4 rounded-lg p-3 ${relinkResult.submitted ? 'bg-emerald-50 border border-emerald-200' : 'bg-red-50 border border-red-200'}`}>
+                  <p className={`text-xs font-semibold ${relinkResult.submitted ? 'text-emerald-800' : 'text-red-800'}`}>
+                    {relinkResult.submitted ? 'Submitted to Amazon.' : 'Amazon rejected the re-link.'}
+                  </p>
+                  <p className="text-[11px] text-slate-700 mt-1">{relinkResult.message}</p>
+                  {relinkResult.submissionId && <p className="text-[11px] text-slate-500 mt-1">submissionId: <span className="font-mono">{relinkResult.submissionId}</span></p>}
+                  {relinkResult.issues.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {relinkResult.issues.map((i, idx) => (
+                        <li key={idx} className="text-[11px]">
+                          <span className={`px-1.5 py-0.5 rounded font-bold mr-1 ${i.severity === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{i.severity}</span>
+                          <span className="text-slate-700">{i.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-5 flex items-center gap-2">
+                <button onClick={() => setRelinkTarget(null)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 cursor-pointer">Cancel</button>
+                {!relinkResult && (
+                  <button onClick={previewRelink} disabled={relinkLoading || !relinkParentSku}
+                    className="text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white disabled:opacity-50 cursor-pointer">
+                    {relinkLoading && !relinkPreview ? 'Validating…' : 'Validate with Amazon'}
+                  </button>
+                )}
+                {relinkPreview?.ok && !relinkResult && (
+                  <button onClick={confirmRelink} disabled={relinkLoading}
+                    className="ml-auto text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold disabled:opacity-50 cursor-pointer">
+                    {relinkLoading ? 'Writing…' : 'Confirm & Re-link'}
+                  </button>
+                )}
+                {relinkResult && (
+                  <button onClick={() => { setRelinkTarget(null); runOrphanCheck() }}
+                    className="ml-auto text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white cursor-pointer">
+                    Done (re-check orphans)
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           SHIP CONTENT TO AMAZON — per-section preview → confirm modal
