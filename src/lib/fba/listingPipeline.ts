@@ -43,7 +43,7 @@ export interface PipelineActionPlanItem {
   aplus_modules?: PipelineAplusModuleAction[]
 }
 
-export interface PipelineChild { sku: string; asin: string; color: string | null; size: string | null }
+export interface PipelineChild { sku: string; asin: string; color: string | null; size: string | null; title?: string | null }
 
 export interface PipelineInput {
   openai: OpenAI
@@ -71,6 +71,9 @@ export interface PipelineResult {
   recommended_title: string
   recommended_bullets: string[]
   per_child_keywords: PipelinePerChildKeywords[]
+  /** Per-child titles for capacity/size-spec variation families (e.g. SD cards by GB). Undefined
+   *  for apparel and single-capacity products, which use the one shared recommended_title. */
+  per_child_titles?: { sku: string; asin: string; title: string }[]
   recommended_description: string
   variant_corrections: PipelineVariantCorrection[]
   cannibalization_warnings: PipelineCannibalizationWarning[]
@@ -142,6 +145,14 @@ function looksApparel(category?: string | null, repTitle?: string | null): boole
 // from the keyword pool + specs so a memory card / mug never inherits "graphic tee",
 // "ring-spun cotton", "for men", etc. Only applied when the product is non-apparel.
 const APPAREL_CONTAMINANTS = /\b(?:t[-\s]?shirts?|tees?|shirts?|graphic\s*tees?|hoodie|sweat\s?shirts?|sweater|apparel|clothing|garments?|fabric|cotton|ring[-\s]?spun|jersey|knit(?:ted)?|relaxed\s*fit|regular\s*fit|comfort\s*colors|bella\s*canvas|gildan|next\s*level|unisex|m[ae]ns?|wom[ae]ns?|fashion|outfit|wardrobe|sleeves?|crew\s?neck|tank\s?tops?|garment[-\s]?dyed|\bdye\b|wear|wearable)\b/i
+
+// A storage-capacity token ("128GB", "1 TB"). When children span >=2 distinct capacities the
+// title is per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
+const CAPACITY_RE = /\b(\d{1,4})\s?(tb|gb|mb)\b/i
+function capacityOf(s: string | null | undefined): string | null {
+  const m = (s ?? '').match(CAPACITY_RE)
+  return m ? `${m[1]}${m[2].toUpperCase()}` : null
+}
 
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
 
@@ -895,6 +906,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   onProgress('Writing title...')
   const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal)
 
+  // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
+  // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
+  // carry its OWN capacity in the title; broadcasting one capacity to the others risks search
+  // suppression. Apparel is excluded by apparelProduct AND never matches the capacity pattern,
+  // so its title stays the single shared/broadcast value untouched.
+  let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
+  if (!apparelProduct) {
+    const childCap = new Map<string, string>()
+    for (const c of input.children) { const cap = capacityOf(c.title); if (cap) childCap.set(c.sku, cap) }
+    if (new Set(childCap.values()).size >= 2) {
+      const baseCap = capacityOf(finalTitle)
+      perChildTitles = input.children.map((c) => {
+        const cap = childCap.get(c.sku)
+        if (!cap) return { sku: c.sku, asin: c.asin, title: finalTitle }
+        let t = finalTitle
+        if (baseCap && cap !== baseCap) t = finalTitle.replace(new RegExp(`\\b${baseCap}\\b`, 'gi'), cap)
+        else if (!baseCap) t = finalTitle.replace(/^(\S+\s+\S+\s+\S+)/, `$1 ${cap}`)
+        return { sku: c.sku, asin: c.asin, title: truncateToBytes(t, 200) }
+      })
+    }
+  }
+
   // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
   // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
   // no awkward >5-word composites, deduped. This is the same discipline the title gets.
@@ -1004,6 +1037,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     recommended_title: finalTitle,
     recommended_bullets: bullets,
     per_child_keywords: perChild,
+    per_child_titles: perChildTitles,
     recommended_description: description,
     variant_corrections: Array.isArray(audit.variant_corrections) ? audit.variant_corrections : [],
     cannibalization_warnings: Array.isArray(audit.cannibalization_warnings) ? audit.cannibalization_warnings : [],
