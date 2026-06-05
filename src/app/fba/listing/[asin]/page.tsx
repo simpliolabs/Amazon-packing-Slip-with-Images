@@ -620,28 +620,70 @@ export default function ListingDetailPage() {
         </div>
       )})()}
 
-      {/* Re-parented children — informational, NOT a Re-link prompt (they're correctly linked elsewhere). */}
-      {orphans && orphans.children.some((c) => c.status === 'reparented') && (() => { const reparented = orphans.children.filter((c) => c.status === 'reparented'); return (
-        <div className="bg-sky-50 border border-sky-200 rounded-2xl shadow-sm p-4 flex items-start gap-3">
-          <svg viewBox="0 0 24 24" className="w-5 h-5 text-sky-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-semibold text-sky-900">{reparented.length} variant{reparented.length === 1 ? '' : 's'} live under a different parent on Amazon</p>
-            <p className="text-xs text-sky-800 mt-0.5">Our portal still groups these under this ASIN, but Amazon links them to a different parent — likely the correct family. Re-run <b>Sync Now</b> to update our records. Only <b>Move to this parent</b> if you intend to move the child here.</p>
-            <ul className="mt-2 space-y-1">
-              {reparented.map((c) => (
-                <li key={c.asin} className="text-xs text-sky-900 flex items-center gap-2 flex-wrap">
-                  <span className="font-mono">{c.asin}</span>
-                  <span className="text-sky-700">({c.sku})</span>
-                  <span className="text-sky-900">— linked to <span className="font-mono">{c.liveParent}</span></span>
-                  <button onClick={() => openRelink(c.sku, c.asin)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium bg-white border border-sky-300 hover:bg-sky-100 text-sky-700 px-2.5 py-1 rounded-md transition-colors cursor-pointer" title="Only if you intended to move this child to THIS parent">
-                    Move to this parent
-                  </button>
-                </li>
-              ))}
-            </ul>
+      {/* Re-parented — if MOST/ALL children live under the same OTHER parent on Amazon, we have
+          the WRONG parent open. Show a clear "you opened the wrong page" prompt that links to the
+          right one instead of a vague "Move to this parent" suggestion that's almost always wrong. */}
+      {orphans && (() => {
+        const reparented = orphans.children.filter((c) => c.status === 'reparented')
+        if (reparented.length === 0) return null
+        // If a single live parent dominates (≥1 child and ≥half of all detected reparented rows),
+        // assume our portal opened the wrong family — point the seller there.
+        const counts = new Map<string, number>()
+        for (const c of reparented) if (c.liveParent) counts.set(c.liveParent, (counts.get(c.liveParent) ?? 0) + 1)
+        const dominantEntry = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+        const dominantParent = dominantEntry?.[0]
+        const dominantCount = dominantEntry?.[1] ?? 0
+        const looksLikeWrongParent = !!dominantParent && dominantCount >= Math.max(1, Math.ceil(reparented.length / 2))
+        return (
+          <div className="bg-sky-50 border border-sky-200 rounded-2xl shadow-sm p-4 flex items-start gap-3">
+            <svg viewBox="0 0 24 24" className="w-5 h-5 text-sky-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+            <div className="min-w-0 flex-1">
+              {looksLikeWrongParent ? (
+                <>
+                  <p className="text-sm font-semibold text-sky-900">You may have the wrong parent open</p>
+                  <p className="text-xs text-sky-800 mt-0.5">
+                    On Amazon, these variants live under <span className="font-mono font-semibold">{dominantParent}</span> — that&apos;s likely the real current family.
+                    This page (<span className="font-mono">{asin}</span>) is probably a stale grouping in our records.
+                  </p>
+                  <div className="mt-2 flex items-center gap-2 flex-wrap">
+                    <button onClick={() => router.push(`/fba/listing/${dominantParent}`)} className="inline-flex items-center gap-1.5 text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white px-3 py-1.5 rounded-lg transition-colors cursor-pointer">
+                      Open {dominantParent}
+                    </button>
+                    <span className="text-[11px] text-sky-700">Then re-run <b>Sync Now</b> to refresh our records.</span>
+                  </div>
+                  <details className="mt-2">
+                    <summary className="text-[11px] text-sky-700 cursor-pointer hover:underline">show details</summary>
+                    <ul className="mt-1 space-y-0.5">
+                      {reparented.map((c) => (
+                        <li key={c.sku} className="text-[11px] text-sky-900">
+                          <span className="font-mono">{c.asin}</span> <span className="text-sky-700">({c.sku})</span> → <span className="font-mono">{c.liveParent}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold text-sky-900">{reparented.length} variant{reparented.length === 1 ? '' : 's'} live under a different parent on Amazon</p>
+                  <p className="text-xs text-sky-800 mt-0.5">Re-run <b>Sync Now</b> to refresh our records. Only <b>Move to this parent</b> if you intend to move the child here.</p>
+                  <ul className="mt-2 space-y-1">
+                    {reparented.map((c) => (
+                      <li key={c.sku} className="text-xs text-sky-900 flex items-center gap-2 flex-wrap">
+                        <span className="font-mono">{c.asin}</span>
+                        <span className="text-sky-700">({c.sku})</span>
+                        <span className="text-sky-900">— linked to <span className="font-mono">{c.liveParent}</span></span>
+                        <button onClick={() => openRelink(c.sku, c.asin)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium bg-white border border-sky-300 hover:bg-sky-100 text-sky-700 px-2.5 py-1 rounded-md transition-colors cursor-pointer" title="Only if you intended to move this child to THIS parent">
+                          Move to this parent
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      )})()}
+        )
+      })()}
 
       {/* ══ KPI ROW — the four sub-scores as their own cards ══ */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
