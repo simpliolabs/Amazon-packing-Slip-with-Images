@@ -464,6 +464,9 @@ export default function SettingsPanel({
       {/* Jungle Scout API Settings */}
       <JungleScoutSettingsSection />
 
+      {/* OpenAI API Settings (PR #82) */}
+      <OpenAISettingsSection />
+
       {/* Security Compliance Status */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <div className="flex items-center gap-2 mb-3">
@@ -677,6 +680,168 @@ function JungleScoutSettingsSection() {
         <div className="mt-3 flex items-center gap-2 text-xs text-green-700 bg-green-50 rounded-lg p-3">
           <CheckCircle size={13} className="flex-shrink-0" />
           <span>Keyword intelligence is active. AI recommendations will automatically use Jungle Scout data when running audits.</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * OpenAI API credentials section (PR #82). Mirrors JungleScoutSettingsSection.
+ * The pipeline resolves the key DB-first, env-fallback — so an admin can update
+ * the key from this UI without redeploying, and historical env-var deploys
+ * continue working untouched.
+ */
+function OpenAISettingsSection() {
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [status, setStatus] = useState<{ hasApiKey: boolean; enabled: boolean; apiKeyMasked: string; envFallbackPresent: boolean } | null>(null)
+  const [editingKey, setEditingKey] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  useState(() => {
+    fetch('/api/openai/credentials')
+      .then(r => r.json())
+      .then(data => {
+        setStatus(data)
+        setEditingKey(!data.hasApiKey)
+        setLoading(false)
+      })
+      .catch(() => setLoading(false))
+  })
+
+  const handleSave = async () => {
+    if (!apiKey.trim()) return
+    setSaving(true)
+    try {
+      const resp = await fetch('/api/openai/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: apiKey.trim() }),
+      })
+      const data = await resp.json()
+      if (resp.ok && data.success) {
+        toast.success('OpenAI API key saved — AI features will use this key on the next request')
+        setSaved(true)
+        setApiKey('')
+        setEditingKey(false)
+        const refreshed = await fetch('/api/openai/credentials').then(r => r.json())
+        setStatus(refreshed)
+        setTimeout(() => setSaved(false), 3000)
+      } else {
+        toast.error(data.error || 'Failed to save API key')
+      }
+    } catch {
+      toast.error('Network error saving API key')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDisable = async () => {
+    try {
+      await fetch('/api/openai/credentials', { method: 'DELETE' })
+      toast.success('OpenAI API key disabled')
+      const refreshed = await fetch('/api/openai/credentials').then(r => r.json())
+      setStatus(refreshed)
+    } catch {
+      toast.error('Failed to disable')
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5 mb-4">
+      <div className="flex items-start justify-between mb-1">
+        <div className="flex items-center gap-2">
+          {/* Simple sparkle / AI mark — kept inline to match the existing icon pattern. */}
+          <svg className="w-4 h-4 text-emerald-600" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2l2.4 5.6L20 10l-5.6 2.4L12 18l-2.4-5.6L4 10l5.6-2.4L12 2z" />
+          </svg>
+          <h2 className="text-sm font-bold text-gray-900">OpenAI API</h2>
+        </div>
+        {!loading && status && (
+          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
+            status.enabled || status.envFallbackPresent ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
+          }`}>
+            {status.enabled
+              ? <><CheckCircle size={12} /> Active</>
+              : status.envFallbackPresent
+                ? <><CheckCircle size={12} /> Active (env)</>
+                : <><XCircle size={12} /> Not configured</>}
+          </div>
+        )}
+      </div>
+      <p className="text-xs text-gray-500 mb-4">
+        Powers the AI listing optimizer — title / bullets / description agents and the brand-safety judge.
+        {status?.envFallbackPresent && !status.hasApiKey && (
+          <span className="text-emerald-700"> An <code>OPENAI_API_KEY</code> environment variable is already configured; you can leave this empty or override it here.</span>
+        )}
+      </p>
+
+      <div className="border border-gray-200 rounded-lg p-4">
+        <div className="flex items-center gap-2 mb-4">
+          <Key size={14} className="text-gray-500" />
+          <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">API Credentials</h3>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              API Key <span className="text-gray-400 font-normal">(starts with sk-)</span>
+            </label>
+            {!editingKey && status?.hasApiKey ? (
+              <div className="flex items-center gap-2">
+                <div className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-500 font-mono">
+                  {status.apiKeyMasked}
+                </div>
+                <button
+                  onClick={() => setEditingKey(true)}
+                  className="px-3 py-2 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
+                >
+                  Update
+                </button>
+              </div>
+            ) : (
+              <input
+                type="password"
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder="sk-..."
+                className="w-full px-3 py-2 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent font-mono"
+              />
+            )}
+            <p className="text-xs text-gray-400 mt-1">
+              Get your key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline">platform.openai.com → API keys</a>.
+              Saved keys are never displayed again — only the last 4 chars are shown.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 mt-4">
+          <button
+            onClick={handleSave}
+            disabled={saving || !apiKey.trim()}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+          >
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+            {saved ? 'Saved!' : saving ? 'Saving…' : 'Save Credentials'}
+          </button>
+          {status?.enabled && (
+            <button
+              onClick={handleDisable}
+              className="px-4 py-2 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+            >
+              Disable
+            </button>
+          )}
+        </div>
+      </div>
+
+      {status?.enabled && (
+        <div className="mt-3 flex items-center gap-2 text-xs text-green-700 bg-green-50 rounded-lg p-3">
+          <CheckCircle size={13} className="flex-shrink-0" />
+          <span>OpenAI API key active. Brand-safety judge, title/bullet/description agents will use this key for all regens going forward.</span>
         </div>
       )}
     </div>
