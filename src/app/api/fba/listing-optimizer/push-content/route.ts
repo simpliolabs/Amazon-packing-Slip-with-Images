@@ -35,6 +35,11 @@ import {
   resolveProposed, currentValue, asCompare, buildPatchValue,
   cacheUpdateFor, getByteLength, capBytes,
 } from '@/lib/fba/pushFields'
+import {
+  resolveDetailAttribute, isPushableDetail, unpushableReason,
+  buildDetailPatchValue, currentDetailValue, normalizeFieldName,
+  type DetailAttribute,
+} from '@/lib/fba/productDetailAttrs'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -298,6 +303,139 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
   return baseDiff
 }
 
+// ─── PRODUCT DETAILS — parallel path for field=details ─────────────────────────
+// Details push is one ATTRIBUTE per click (Material, Brand, Fit Type, …). The
+// friendly name comes from the audit's product_details_improvements; we resolve
+// it to an SP-API key via productDetailAttrs and build the patch with the same
+// twin-SKU expansion logic title uses.
+
+interface DetailContext {
+  /** Friendly name as emitted by the audit, e.g. "Material" or "Fit Type". */
+  detailField: string
+  /** Resolved SP-API attribute key, e.g. "material" or "fit_type". */
+  attribute: DetailAttribute
+  /** The single value to push across every (FBA+FBM, child) SKU under the parent. */
+  recommendedValue: string
+}
+
+/** Load + validate the audit's recommendation for one detail attribute. Returns null on
+ *  unknown / non-pushable detail names so the caller can return a clean 4xx. */
+async function loadDetailContext(parentAsin: string, detailField: string): Promise<{ ctx: DetailContext | null; error: string | null }> {
+  if (!detailField) return { ctx: null, error: 'detail_field is required for field=details (e.g. ?detail_field=Material).' }
+  if (!isPushableDetail(detailField)) {
+    return { ctx: null, error: unpushableReason(detailField) || `"${detailField}" can't be pushed from the portal.` }
+  }
+  const attribute = resolveDetailAttribute(detailField)
+  if (!attribute) return { ctx: null, error: `"${detailField}" is not a recognized product-detail attribute yet.` }
+
+  const supabase = await createAdminClient()
+  const { data: recRow } = await supabase
+    .from('listing_seo_recommendations')
+    .select('product_details_improvements')
+    .eq('parent_asin', parentAsin)
+    .single()
+  // product_details_improvements is JSONB; not in generated types yet.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: string }[]
+  const wanted = normalizeFieldName(detailField)
+  const match = details.find((d) => normalizeFieldName(d.field_name || '') === wanted)
+  if (!match || !match.recommended_value || !match.recommended_value.trim()) {
+    return { ctx: null, error: `No AI recommendation found for "${detailField}". Run an AI audit first.` }
+  }
+  return { ctx: { detailField, attribute, recommendedValue: match.recommended_value.trim() }, error: null }
+}
+
+/** Fetch a SKU's CURRENT attribute value live from Listings Items. Best-effort: '' on failure. */
+async function fetchCurrentDetail(
+  sellerId: string, token: string, sku: string, spApiKey: string,
+): Promise<string> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+      `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return ''
+    const json = (await resp.json()) as { attributes?: Record<string, unknown> }
+    return currentDetailValue(json.attributes ?? null, spApiKey)
+  } catch { return '' }
+}
+
+/**
+ * Build the per-SKU diff for a detail attribute. Mirrors loadDiff's shape so the existing
+ * push modal can render it unchanged. Differences:
+ *   - the proposed value comes from product_details_improvements (one string, broadcast)
+ *   - the current value is read live per-SKU from Listings Items attributes (no DB cache)
+ *   - twin SKUs (FBA/FBM) are discovered and added with the same proposed value
+ *   - the parent SKU is ALSO included for broadcast details so the variation hub agrees
+ */
+async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Promise<DiffRow[]> {
+  const supabase = await createAdminClient()
+  const { data: rowsRaw } = await supabase
+    .from('listing_content')
+    .select('sku, asin')
+    .eq('parent_asin', parentAsin)
+    .order('sku', { ascending: true })
+  const rows = (rowsRaw ?? []) as { sku: string; asin: string }[]
+  if (rows.length === 0) return []
+
+  const token = await getAccessToken()
+  const sellerId = await getSellerId()
+
+  // Expand to FBM twins per ASIN (same logic title push uses) so a broadcast detail also
+  // covers the FBM half of each FBA/FBM pair the seller hasn't synced into our DB.
+  const knownSkus = new Set(rows.map((r) => r.sku))
+  const expanded: { sku: string; asin: string }[] = [...rows]
+  const asinsToProbe = [...new Set(rows.map((r) => r.asin).filter(Boolean))]
+  for (const asin of asinsToProbe) {
+    const discovered = await discoverSkusForAsin(sellerId, token, asin)
+    for (const d of discovered) {
+      if (knownSkus.has(d.sku)) continue
+      // TWIN-NAME GUARD: same rule as title push — only inherit when the discovered SKU's
+      // stripped name matches one of our DB rows under this ASIN. Avoids accidentally
+      // pushing to unrelated SKUs that share the ASIN through a stale mapping.
+      const discoveredBase = stripFulfillmentSuffix(d.sku)
+      const sourceMatch = rows.find(
+        (b) => b.asin === asin && stripFulfillmentSuffix(b.sku) === discoveredBase,
+      )
+      if (!sourceMatch) continue
+      expanded.push(d)
+      knownSkus.add(d.sku)
+    }
+  }
+
+  // Optionally include the variation parent SKU (broadcast details should agree on the hub too).
+  try {
+    const parentSku = await findParentSku(sellerId, token, parentAsin)
+    if (parentSku && !knownSkus.has(parentSku)) {
+      expanded.push({ sku: parentSku, asin: parentAsin })
+      knownSkus.add(parentSku)
+    }
+  } catch { /* parent enrichment is best-effort */ }
+
+  // Build the diff: one row per SKU, current fetched live, proposed = recommendedValue.
+  const proposedStr = ctx.recommendedValue
+  const isParentSet = new Set<string>()
+  // Mark the parent row so the modal can label it (same flag the title diff uses).
+  const parentRow = expanded.find((r) => r.asin === parentAsin && !rows.some((rr) => rr.sku === r.sku))
+  if (parentRow) isParentSet.add(parentRow.sku)
+
+  const diff: DiffRow[] = []
+  for (const r of expanded) {
+    const current = await fetchCurrentDetail(sellerId, token, r.sku, ctx.attribute.spApiKey)
+    diff.push({
+      sku: r.sku, asin: r.asin,
+      current,
+      proposed: proposedStr,
+      raw: proposedStr,
+      bytes: getByteLength(proposedStr),
+      chars: proposedStr.length,
+      changed: proposedStr.length > 0 && current !== proposedStr,
+      isParent: isParentSet.has(r.sku) || undefined,
+    })
+  }
+  return diff
+}
+
 // ─── GET — preview (no writes) ─────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   try {
@@ -305,6 +443,33 @@ export async function GET(req: NextRequest) {
     const parentAsin = url.searchParams.get('parent_asin')
     const rawField = url.searchParams.get('field') ?? 'keywords'
     if (!parentAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+
+    // ── DETAILS branch ─────────────────────────────────────────────────────────
+    if (rawField === 'details') {
+      const detailField = url.searchParams.get('detail_field') ?? ''
+      const { ctx, error } = await loadDetailContext(parentAsin, detailField)
+      if (!ctx) return NextResponse.json({ error }, { status: 400 })
+      const diff = await loadDetailDiff(parentAsin, ctx)
+      if (diff.length === 0) {
+        return NextResponse.json({ error: 'No SKUs found for this parent. Run a Sync first.' }, { status: 404 })
+      }
+      return NextResponse.json({
+        parent_asin: parentAsin,
+        field: 'details' as const,
+        // Surface the SP-API key so the seller knows which attribute is being patched.
+        detail_field: ctx.detailField,
+        attribute_key: ctx.attribute.spApiKey,
+        label: `Detail · ${ctx.detailField}`,
+        // Details are always broadcast in v1 (per-variant attrs are blocked upstream).
+        broadcast: true,
+        configBroadcast: true,
+        count: diff.length,
+        changed: diff.filter((d) => d.changed).length,
+        proposedValue: ctx.recommendedValue,
+        diff,
+      })
+    }
+
     if (!isPushField(rawField)) return NextResponse.json({ error: `unknown field "${rawField}"` }, { status: 400 })
     const field = rawField
 
@@ -387,16 +552,108 @@ async function getProductType(sellerId: string, token: string, sku: string): Pro
   return 'PRODUCT' // generic fallback; Amazon resolves the actual type from the listing
 }
 
+// ─── PATCH one SKU's DETAIL attribute (validation-preview, then live) ──────────
+async function patchSkuDetail(
+  sellerId: string, token: string, productType: string, sku: string,
+  attribute: DetailAttribute, value: string, mode: 'VALIDATION_PREVIEW' | 'LIVE',
+): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+  const body = {
+    productType,
+    patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
+      value: buildDetailPatchValue(attribute, value, MARKETPLACE_ID) }],
+  }
+  const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
+  const url =
+    `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+    `?marketplaceIds=${MARKETPLACE_ID}&includedData=issues${modeParam}`
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    const txt = await resp.text()
+    return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
+  }
+  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
+  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
+  if (json.status === 'INVALID' || errorIssues.length > 0) {
+    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
+  }
+  return { ok: true, submissionId: json.submissionId ?? null }
+}
+
 // ─── POST — push (writes to Amazon, with confirm) ──────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}))
-    const { parent_asin, confirm, field: rawField } = body as { parent_asin?: string; confirm?: boolean; field?: string }
+    const { parent_asin, confirm, field: rawField, detail_field: detailField } = body as
+      { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string }
     if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
-    const field: PushField = isPushField(rawField) ? rawField : 'keywords'
     if (confirm !== true) {
       return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
     }
+
+    // ── DETAILS branch ─────────────────────────────────────────────────────────
+    if (rawField === 'details') {
+      const { ctx, error } = await loadDetailContext(parent_asin, detailField || '')
+      if (!ctx) return NextResponse.json({ error }, { status: 400 })
+      const diff = (await loadDetailDiff(parent_asin, ctx)).filter((d) => d.changed && d.raw != null)
+      if (diff.length === 0) {
+        return NextResponse.json({ parent_asin, field: 'details', detail_field: ctx.detailField, pushed: 0, message: `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".` })
+      }
+      const token = await getAccessToken()
+      const sellerId = await getSellerId()
+      const productType = await getProductType(sellerId, token, diff[0].sku)
+      const supabase = await createAdminClient()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const db = supabase as any
+      // Audit-log helper (best-effort — tagged with field='details' + the friendly attribute name
+      // so a future log query can distinguish title/bullets/keywords/details by attribute).
+      const logPush = async (row: Record<string, unknown>) => {
+        try {
+          const { error: insertErr } = await db.from('keyword_push_log').insert(row)
+          if (!insertErr) return
+          const rest = { ...row }; delete rest.field
+          await db.from('keyword_push_log').insert(rest)
+        } catch (e) { console.warn('[push-content/details] keyword_push_log insert failed:', e) }
+      }
+
+      const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+      for (const item of diff) {
+        const newValueStr = ctx.recommendedValue
+        // 1) validation preview
+        const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW')
+        if (!preview.ok) {
+          results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
+          await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
+          await sleep(PATCH_DELAY_MS)
+          continue
+        }
+        // 2) live write
+        const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE')
+        const status = live.ok ? 'accepted' : 'failed'
+        results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+        await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
+        await sleep(PATCH_DELAY_MS)
+      }
+
+      const accepted = results.filter((r) => r.status === 'accepted').length
+      const failed = results.filter((r) => r.status === 'failed').length
+      return NextResponse.json({
+        parent_asin,
+        field: 'details' as const,
+        detail_field: ctx.detailField,
+        attribute_key: ctx.attribute.spApiKey,
+        pushed: accepted,
+        failed,
+        total: results.length,
+        message: `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+        results,
+      })
+    }
+
+    const field: PushField = isPushField(rawField) ? rawField : 'keywords'
 
     const diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
     if (diff.length === 0) {

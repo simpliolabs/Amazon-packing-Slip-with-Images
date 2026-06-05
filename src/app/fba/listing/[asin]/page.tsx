@@ -2,6 +2,7 @@
 
 import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback } from 'react'
+import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -181,13 +182,23 @@ export default function ListingDetailPage() {
   const [competitorSaving, setCompetitorSaving] = useState(false)
   const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
 
-  // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords) ──
-  type PushField = 'title' | 'bullets' | 'description' | 'keywords'
-  const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords' }
+  // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords / details) ──
+  // 'details' is a single-attribute push (one detail per click): Material, Brand, Fit Type, etc.
+  // The seller picks WHICH detail in the UI; the route resolves the friendly name to an SP-API
+  // attribute key (see lib/fba/productDetailAttrs.ts).
+  type PushField = 'title' | 'bullets' | 'description' | 'keywords' | 'details'
+  const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords', details: 'Product Detail' }
   interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string }
   interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string }
-  interface PushPreview { field: PushField; label: string; broadcast: boolean; count: number; changed: number; proposedValue: string | string[] | null; diff: PushDiffRow[] }
+  interface PushPreview {
+    field: PushField; label: string; broadcast: boolean; count: number; changed: number;
+    proposedValue: string | string[] | null; diff: PushDiffRow[]
+    /** Only set when field='details': the friendly attribute name (e.g. "Material") and SP-API key. */
+    detail_field?: string; attribute_key?: string
+  }
   const [pushField, setPushField] = useState<PushField>('keywords')
+  /** Only set when pushField='details': which detail attribute is being pushed (Material, etc.). */
+  const [pushDetailField, setPushDetailField] = useState<string | null>(null)
   const [pushPreview, setPushPreview] = useState<PushPreview | null>(null)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
@@ -531,11 +542,16 @@ export default function ListingDetailPage() {
   }, [asin])
 
   // ─── Ship a content section to Amazon (preview → confirm) ─────────────────
-  const openPushPreview = useCallback(async (field: PushField) => {
+  // detailField is only used for field='details' (one detail per click).
+  const openPushPreview = useCallback(async (field: PushField, detailField?: string) => {
     setPushField(field)
+    setPushDetailField(field === 'details' ? (detailField ?? null) : null)
     setPushError(null); setPushResults(null); setPushPreview(null); setShowPushModal(true); setPushLoading(true)
     try {
-      const resp = await fetch(`/api/fba/listing-optimizer/push-content?parent_asin=${asin}&field=${field}`)
+      const qs = field === 'details' && detailField
+        ? `&detail_field=${encodeURIComponent(detailField)}`
+        : ''
+      const resp = await fetch(`/api/fba/listing-optimizer/push-content?parent_asin=${asin}&field=${field}${qs}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || 'Preview failed')
       setPushPreview(data)
@@ -548,10 +564,12 @@ export default function ListingDetailPage() {
   const confirmPush = useCallback(async () => {
     setPushError(null); setPushLoading(true)
     try {
+      const body: Record<string, unknown> = { parent_asin: asin, field: pushField, confirm: true }
+      if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parent_asin: asin, field: pushField, confirm: true }),
+        body: JSON.stringify(body),
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || 'Push failed')
@@ -571,7 +589,7 @@ export default function ListingDetailPage() {
       setPushError(e instanceof Error ? e.message : 'Push failed')
     }
     setPushLoading(false)
-  }, [asin, pushField])
+  }, [asin, pushField, pushDetailField])
 
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
 
@@ -1210,19 +1228,56 @@ export default function ListingDetailPage() {
                 </div>
 
                 {/* Recommended Product Detail values (folded from AI Recommendations) */}
+                {/* Each detail ships INDEPENDENTLY (Material, Brand, Fit Type, …). The map in
+                    lib/fba/productDetailAttrs.ts decides which friendly names are pushable —
+                    parent-shared attributes get a Push button, per-variant ones (Color/Size/
+                    Capacity) and unmapped names keep Copy + a tooltip explaining why. */}
                 {recs.product_details_improvements && recs.product_details_improvements.length > 0 && (
                   <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-4">
-                    <span className="text-xs font-semibold text-slate-700 block mb-2">Recommended Product Detail values</span>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-slate-700">Recommended Product Detail values</span>
+                      <span className="text-[10px] text-slate-400">
+                        {recs.product_details_improvements.filter((pd) => isPushableDetail(pd.field_name)).length} pushable · {recs.product_details_improvements.length} total
+                      </span>
+                    </div>
                     <div className="grid sm:grid-cols-2 gap-2">
-                      {recs.product_details_improvements.map((pd, i) => (
-                        <div key={i} className="bg-slate-50 rounded-lg p-2.5">
-                          <div className="flex items-center justify-between mb-0.5">
-                            <span className="text-xs font-semibold text-slate-800">{pd.field_name}</span>
-                            <button onClick={() => copy(pd.recommended_value, `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
+                      {recs.product_details_improvements.map((pd, i) => {
+                        const pushable = isPushableDetail(pd.field_name)
+                        const blockedReason = pushable ? null : unpushableReason(pd.field_name)
+                        return (
+                          <div key={i} className={`rounded-lg p-2.5 ${pushable ? 'bg-emerald-50/40 border border-emerald-100' : 'bg-slate-50'}`}>
+                            <div className="flex items-center justify-between mb-0.5 gap-2">
+                              <span className="text-xs font-semibold text-slate-800">{pd.field_name}</span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button onClick={() => copy(pd.recommended_value, `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
+                                {pushable ? (
+                                  <button
+                                    onClick={() => openPushPreview('details', pd.field_name)}
+                                    className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap"
+                                    title={`Push ${pd.field_name} to Amazon for every child SKU`}
+                                  >
+                                    Push →
+                                  </button>
+                                ) : (
+                                  <span
+                                    className="text-[10px] text-slate-400 cursor-help"
+                                    title={blockedReason ?? 'Set this in Seller Central.'}
+                                  >
+                                    Manual
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <p className="text-xs text-slate-700">{pd.recommended_value}</p>
+                            {pd.current_value && pd.current_value !== pd.recommended_value && (
+                              <p className="text-[10px] text-slate-400 line-through mt-1 break-words">{pd.current_value}</p>
+                            )}
+                            {!pushable && blockedReason && (
+                              <p className="text-[10px] text-slate-500 italic mt-1">{blockedReason}</p>
+                            )}
                           </div>
-                          <p className="text-xs text-slate-700">{pd.recommended_value}</p>
-                        </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   </div>
                 )}
@@ -1724,7 +1779,15 @@ export default function ListingDetailPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !pushLoading && setShowPushModal(false)}>
           <div className="bg-white rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
-              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Icon.Send className="w-4 h-4 text-emerald-600" /> Ship {FIELD_LABEL[pushField]} to Amazon</h3>
+              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                <Icon.Send className="w-4 h-4 text-emerald-600" />
+                {pushField === 'details' && pushDetailField
+                  ? <>Ship Detail · <span className="font-semibold">{pushDetailField}</span> to Amazon</>
+                  : <>Ship {FIELD_LABEL[pushField]} to Amazon</>}
+                {pushField === 'details' && pushPreview?.attribute_key && (
+                  <span className="text-[10px] text-slate-500 font-mono ml-1">/attributes/{pushPreview.attribute_key}</span>
+                )}
+              </h3>
               <button onClick={() => !pushLoading && setShowPushModal(false)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
             </div>
 
@@ -1746,8 +1809,13 @@ export default function ListingDetailPage() {
                     <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-indigo-900 leading-relaxed">
                         <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-semibold mr-1.5 whitespace-nowrap">Parent</span>
-                        The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> SKUs — including each ASIN&apos;s matching FBA + FBM.{' '}
-                        <b>{pushPreview.changed}</b> currently differ and will change.
+                        {pushPreview.field === 'details' ? (
+                          <>The same <b>{pushPreview.detail_field}</b> value is written to <b>all {pushPreview.count}</b> SKUs (each ASIN&apos;s FBA + FBM + the variation parent).{' '}
+                          <b>{pushPreview.changed}</b> currently differ and will change.</>
+                        ) : (
+                          <>The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> SKUs — including each ASIN&apos;s matching FBA + FBM.{' '}
+                          <b>{pushPreview.changed}</b> currently differ and will change.</>
+                        )}
                       </p>
                     </div>
                   ) : (
@@ -1771,7 +1839,11 @@ export default function ListingDetailPage() {
                     /* Broadcast: show the single new value once, then which children currently differ */
                     <>
                       <div className="bg-white rounded-md border-2 border-emerald-300 p-3 mb-3">
-                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.label.toLowerCase()} → all {pushPreview.count} SKUs</p>
+                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">
+                          {pushPreview.field === 'details' && pushPreview.detail_field
+                            ? <>New {pushPreview.detail_field} → all {pushPreview.count} SKUs</>
+                            : <>New {pushPreview.label.toLowerCase()} → all {pushPreview.count} SKUs</>}
+                        </p>
                         {pushPreview.field === 'bullets' && Array.isArray(pushPreview.proposedValue) ? (
                           <ul className="list-disc pl-5 space-y-1">
                             {pushPreview.proposedValue.map((b, i) => <li key={i} className="text-xs text-slate-800 break-words">{b}</li>)}
@@ -1833,7 +1905,9 @@ export default function ListingDetailPage() {
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
                     <button onClick={confirmPush} disabled={pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
-                      Confirm &amp; Ship {pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}
+                      Confirm &amp; Ship {pushPreview.field === 'details' && pushPreview.detail_field
+                        ? pushPreview.detail_field
+                        : pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}
                     </button>
                   </div>
                 </>
