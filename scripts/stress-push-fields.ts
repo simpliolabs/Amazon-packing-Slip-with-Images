@@ -129,6 +129,31 @@ eq(resolveProposed('title', recPct, pcMap, 'SOME-OTHER-SKU'), 'THE CEO SD Card 1
 // apparel safety: no per_child_titles means broadcast (current behavior)
 eq(resolveProposed('title', { recommended_title: 'Apparel Title' }, pcMap, 'AQS-L-LG-FBA'), 'Apparel Title', 'apparel (no per_child_titles) stays broadcast')
 
+// EFFECTIVE BROADCAST detection (push-content GET logic). The route says "broadcast" only when
+// every SKU's proposed value is identical. With per_child_titles in scope, title becomes per-child.
+console.log('3c. effective-broadcast detection')
+// Build a diff array like the route does. Helper to mimic loadDiff for title.
+const buildTitleDiff = (rec: any, rows: Row[]) => rows.map((r) => {
+  const proposed = resolveProposed('title', rec, new Map(), r.sku) as string | null
+  return { sku: r.sku, proposed: proposed || '', changed: !!proposed }
+})
+const effective = (proposed: string[]) => proposed.length === 0 || proposed.every((s) => s === proposed[0])
+// Capacity family with per_child_titles → 32GB, 64GB, 128GB all differ → effective broadcast = false
+const capRows: Row[] = [
+  { sku: 'DAFEI-482-32G-FBA', asin: 'A1' },
+  { sku: 'DAFEI-482-64G.-FBA', asin: 'A2' },
+  { sku: 'DAFEI-482-128GB-FBA', asin: 'A3' },
+]
+const capDiff = buildTitleDiff(recPct, capRows)
+ok(!effective(capDiff.map((d) => d.proposed)), 'capacity family: titles differ → effective broadcast = false (modal must show per-SKU)')
+// Apparel family with single broadcast title → all SKUs get same title → effective broadcast = true
+const apRows: Row[] = [
+  { sku: 'AQS-L-LG-FBA', asin: 'X1' },
+  { sku: 'AQS-L-MOS-FBA', asin: 'X2' },
+]
+const apDiff = buildTitleDiff({ recommended_title: 'Apparel Title' }, apRows)
+ok(effective(apDiff.map((d) => d.proposed)), 'apparel (no per_child_titles): same title to all → effective broadcast = true')
+
 // ── 4. currentValue reads each field from a content row ───────────────────────
 console.log('4. currentValue')
 const row1 = { sku: 'A', asin: 'B0X', title: '  Old Title  ', bullet_1: 'b1', bullet_2: '', bullet_3: 'b3', description: '<p>old</p>', backend_keywords: 'old kw' }
