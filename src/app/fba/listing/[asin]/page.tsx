@@ -211,6 +211,13 @@ export default function ListingDetailPage() {
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyResults, setVerifyResults] = useState<VerifyPayload | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
+  // ── Live push progress — populated from NDJSON stream events. Each entry tracks one SKU's
+  // state as the route patches it in the loop. Replaces the old all-or-nothing 'Pushing…'
+  // spinner with a per-SKU readout, AND eliminates the proxy-502 failure mode entirely
+  // (each progress emit() keeps the connection warm).
+  interface PushProgressRow { sku: string; status: 'validating' | 'accepted' | 'failed'; error?: string; submissionId?: string | null }
+  const [pushProgress, setPushProgress] = useState<PushProgressRow[]>([])
+  const [pushPhase, setPushPhase] = useState<'idle' | 'starting' | 'pushing' | 'rescoring' | 'done'>('idle')
   // ── Family-SKUs view — full set of FBA + FBM twins + variation parent SKU. The DB cache
   // (listing_content) historically deduped some FBA/FBM pairs, so cards that render from
   // it alone hid the FBM twins (the seller saw "3 children" but the push hit 6).
@@ -597,7 +604,7 @@ export default function ListingDetailPage() {
   const openPushPreview = useCallback(async (field: PushField, detailField?: string) => {
     setPushField(field)
     setPushDetailField(field === 'details' ? (detailField ?? null) : null)
-    setPushError(null); setPushResults(null); setPushPreview(null); setVerifyResults(null); setVerifyError(null); setShowPushModal(true); setPushLoading(true)
+    setPushError(null); setPushResults(null); setPushPreview(null); setVerifyResults(null); setVerifyError(null); setPushProgress([]); setPushPhase('idle'); setShowPushModal(true); setPushLoading(true)
     try {
       const qs = field === 'details' && detailField
         ? `&detail_field=${encodeURIComponent(detailField)}`
@@ -612,8 +619,18 @@ export default function ListingDetailPage() {
     setPushLoading(false)
   }, [asin])
 
+  /**
+   * Stream-consume the NDJSON push response. Each emit() from the server arrives as a
+   * newline-delimited JSON line; we accumulate the read buffer until a newline, parse,
+   * dispatch, then continue. The per-SKU 'progress' events keep the proxy connection
+   * warm so the push survives container restarts and nginx idle-timeouts (the original
+   * 502 Bad Gateway failure mode).
+   */
   const confirmPush = useCallback(async () => {
-    setPushError(null); setPushLoading(true)
+    setPushError(null); setPushLoading(true); setPushPhase('starting')
+    setPushProgress([])
+    let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } | null = null
+    let streamError: string | null = null
     try {
       const body: Record<string, unknown> = { parent_asin: asin, field: pushField, confirm: true }
       if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
@@ -622,20 +639,74 @@ export default function ListingDetailPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string; pushed?: number; total?: number; failed?: number; message?: string; results?: PushResultRow[]; field?: PushField }
-      if (!resp.ok) throw new Error(data.error || 'Push failed')
-      setPushResults({
-        field: data.field,
-        pushed: data.pushed ?? 0,
-        failed: data.failed ?? 0,
-        total: data.total ?? 0,
-        message: data.message ?? 'Push completed.',
-        results: data.results ?? [],
-      })
+
+      // Non-OK BEFORE the stream opens means a body-validation error (we still send JSON
+      // for those — see route.ts). Read it the defensive way to also catch 502 HTML in
+      // the rare case the proxy throws before the stream gets going.
+      if (!resp.ok) {
+        const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }
+        throw new Error(data.error || `Push failed (HTTP ${resp.status})`)
+      }
+      if (!resp.body) throw new Error('Server returned no body — connection dropped before stream.')
+
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const handleLine = (line: string) => {
+        if (!line.trim()) return
+        let msg: { type?: string; sku?: string; status?: string; error?: string; submissionId?: string | null; pushed?: number; failed?: number; total?: number; message?: string; results?: PushResultRow[]; field?: PushField }
+        try { msg = JSON.parse(line) } catch { return }
+        if (msg.type === 'started') {
+          setPushPhase('pushing')
+        } else if (msg.type === 'progress' && msg.sku && msg.status) {
+          // Upsert per-SKU progress row. Validating overwritten by accepted/failed as the
+          // SKU moves through the loop.
+          setPushProgress((prev) => {
+            const idx = prev.findIndex((p) => p.sku === msg.sku)
+            const row: PushProgressRow = { sku: msg.sku!, status: msg.status as PushProgressRow['status'], error: msg.error, submissionId: msg.submissionId }
+            if (idx === -1) return [...prev, row]
+            const next = prev.slice(); next[idx] = row; return next
+          })
+        } else if (msg.type === 'rescore') {
+          setPushPhase('rescoring')
+        } else if (msg.type === 'result') {
+          finalResult = {
+            field: msg.field,
+            pushed: msg.pushed ?? 0,
+            failed: msg.failed ?? 0,
+            total: msg.total ?? 0,
+            message: msg.message ?? 'Push completed.',
+            results: msg.results ?? [],
+          }
+        } else if (msg.type === 'error') {
+          streamError = msg.error || 'Push failed mid-stream.'
+        }
+      }
+      // Read pump: decode, split on newlines, dispatch each complete line, keep the
+      // partial tail in the buffer for the next read.
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) handleLine(line)
+      }
+      // Flush whatever's left (server should always terminate with a newline, but defend).
+      if (buffer.trim()) handleLine(buffer)
+
+      if (streamError) throw new Error(streamError)
+      if (!finalResult) throw new Error('Stream ended without a result event.')
+      // TS loses narrowing across the closure-mutated `finalResult` — re-assert the shape.
+      const data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } = finalResult
+
+      setPushResults(data)
       setPushPreview(null)
-      // The push re-scores server-side; pull the fresh score so the KPI cards/ring
-      // update immediately without a manual page reload.
-      if ((data.pushed ?? 0) > 0) {
+      setPushPhase('done')
+
+      // Refresh score (push re-scored server-side).
+      if (data.pushed > 0) {
         try {
           const sresp = await fetch('/api/fba/listing-optimizer')
           const sdata = await sresp.json()
@@ -643,13 +714,8 @@ export default function ListingDetailPage() {
           if (found) setScore(found)
         } catch { /* best-effort — the score still updates on next load */ }
 
-        // Mark the matching action_plan items as DONE locally so the card collapses to
-        // the "✓ Pushed" state immediately. The audit JSON in the DB is frozen until
-        // the user re-generates; without this the page still shows "Current: ..." and
-        // the Ship button for a section that was just successfully pushed — which
-        // makes it look like the push didn't land. A clear "✓ Pushed Nm ago" badge
-        // replaces both. Lasts until the next page reload (DB still has the old verdict)
-        // OR until a Regenerate refreshes the audit.
+        // Mark matching action_plan items DONE locally so the card collapses to the
+        // ✓ Pushed state immediately (audit JSON is frozen until Regenerate).
         const matchesPushedField = (elem: string): boolean => {
           if (pushField === 'title') return elem === 'title'
           if (pushField === 'description') return elem === 'description'
@@ -667,7 +733,7 @@ export default function ListingDetailPage() {
             return {
               ...it,
               verdict: 'DONE' as const,
-              current_status: `✓ Pushed ${pushedLabel} to Amazon (${(data.pushed ?? 0)}/${data.total ?? 0} variants)`,
+              current_status: `✓ Pushed ${pushedLabel} to Amazon (${data.pushed}/${data.total} variants)`,
               notes: `${it.notes ? it.notes + ' · ' : ''}Pushed at ${pushedAt}. Submissions are ACCEPTED — Amazon applies in 15min–6hr. Use Verify on Amazon to confirm.`,
             }
           })
@@ -675,7 +741,10 @@ export default function ListingDetailPage() {
         })
       }
     } catch (e) {
+      // If we have any progress rows, the seller knows what landed (the stream told them
+      // per-SKU). We do NOT clear them on error — they're the rollback evidence.
       setPushError(e instanceof Error ? e.message : 'Push failed')
+      setPushPhase('idle')
     }
     setPushLoading(false)
   }, [asin, pushField, pushDetailField])
@@ -1950,9 +2019,41 @@ export default function ListingDetailPage() {
               {pushError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 mb-3">{pushError}</p>}
 
               {pushLoading && !pushResults && (
-                <div className="text-center py-8">
-                  <div className="animate-spin w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full mx-auto mb-2" />
-                  <p className="text-sm text-slate-500">{pushResults ? 'Pushing…' : pushPreview ? 'Pushing to Amazon…' : 'Loading preview…'}</p>
+                <div className="py-4">
+                  <div className="text-center mb-3">
+                    <div className="animate-spin w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full mx-auto mb-2" />
+                    <p className="text-sm text-slate-500">
+                      {pushPhase === 'rescoring' ? 'Re-scoring listing…'
+                        : pushPhase === 'pushing' ? 'Streaming pushes to Amazon — one SKU at a time…'
+                        : pushPhase === 'starting' ? 'Connecting to Amazon…'
+                        : pushPreview ? 'Pushing to Amazon…'
+                        : 'Loading preview…'}
+                    </p>
+                  </div>
+                  {/* Live per-SKU stream — visible during the push, kept after on success
+                       so the seller can scroll back to see what each SKU did. The stream
+                       eliminates the proxy-502 failure mode by keeping the connection
+                       warm with one event per SKU (250ms each). */}
+                  {pushProgress.length > 0 && (
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 max-w-md mx-auto">
+                      <p className="text-[10px] font-semibold text-slate-600 uppercase mb-1.5">Per-SKU progress · {pushProgress.filter(p => p.status === 'accepted').length} accepted · {pushProgress.filter(p => p.status === 'failed').length} failed · {pushProgress.filter(p => p.status === 'validating').length} pending</p>
+                      <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-[35vh] overflow-y-auto bg-white">
+                        {pushProgress.map((p) => (
+                          <div key={p.sku} className="px-2 py-1.5 text-[11px] flex items-center gap-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              p.status === 'accepted' ? 'bg-green-100 text-green-700'
+                              : p.status === 'failed' ? 'bg-red-100 text-red-700'
+                              : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {p.status === 'accepted' ? '✓ accepted' : p.status === 'failed' ? '✗ failed' : '⏳ validating'}
+                            </span>
+                            <span className="font-mono text-slate-700 flex-1 min-w-0 truncate">{p.sku}</span>
+                            {p.error && <span className="text-[10px] text-red-600 truncate">{p.error.slice(0, 60)}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
