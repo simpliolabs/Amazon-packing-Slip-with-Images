@@ -247,6 +247,62 @@ export default function ListingDetailPage() {
   }, [asin])
   useEffect(() => { runOrphanCheck() }, [runOrphanCheck])
 
+  // ─── Capacity attribute check — detect children whose live capacity disagrees with SKU ──
+  type CapRow = {
+    sku: string; asin: string; productType: string | null
+    attributeName: string | null
+    live: { value: number; unit: string } | null
+    expected: { value: number; unit: string } | null
+    liveLabel: string; expectedLabel: string
+    mismatch: boolean
+    reason: 'no_attribute' | 'no_sku_capacity' | 'match' | 'mismatch' | 'fetch_failed'
+  }
+  const [capacityCheck, setCapacityCheck] = useState<{ mismatchCount: number; children: CapRow[] } | null>(null)
+  const runCapacityCheck = useCallback(async () => {
+    if (!asin) return
+    try {
+      const r = await fetch(`/api/fba/listing-optimizer/capacity-check?parent_asin=${asin}`)
+      if (r.ok) { const d = await r.json(); if (d && typeof d.mismatchCount === 'number') setCapacityCheck(d) }
+    } catch { /* best-effort */ }
+  }, [asin])
+  useEffect(() => { runCapacityCheck() }, [runCapacityCheck])
+
+  // ─── Fix a single child's capacity attribute (preview → confirm → live) ──────────
+  type CapIssue = { code?: string; message?: string; severity?: string }
+  const [fixCapTarget, setFixCapTarget] = useState<{ row: CapRow } | null>(null)
+  const [fixCapLoading, setFixCapLoading] = useState(false)
+  const [fixCapError, setFixCapError] = useState<string | null>(null)
+  const [fixCapPreview, setFixCapPreview] = useState<{ ok: boolean; attributeName: string; current: { value: number | string | undefined; unit: string | undefined }; proposed: { value: number; unit: string }; issues: CapIssue[] } | null>(null)
+  const [fixCapResult, setFixCapResult] = useState<{ submitted: boolean; status: string | null; submissionId: string | null; issues: CapIssue[]; message: string } | null>(null)
+  const openFixCap = useCallback((row: CapRow) => {
+    setFixCapTarget({ row }); setFixCapPreview(null); setFixCapResult(null); setFixCapError(null)
+  }, [])
+  const previewFixCap = useCallback(async () => {
+    const row = fixCapTarget?.row; if (!row?.expected) return
+    setFixCapLoading(true); setFixCapError(null); setFixCapPreview(null); setFixCapResult(null)
+    try {
+      const r = await fetch(`/api/fba/listing-optimizer/fix-capacity?child_sku=${encodeURIComponent(row.sku)}&value=${row.expected.value}&unit=${encodeURIComponent(row.expected.unit)}`)
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Preview failed')
+      setFixCapPreview(d)
+    } catch (e) { setFixCapError(e instanceof Error ? e.message : 'Preview failed') }
+    setFixCapLoading(false)
+  }, [fixCapTarget])
+  const confirmFixCap = useCallback(async () => {
+    const row = fixCapTarget?.row; if (!row?.expected) return
+    setFixCapLoading(true); setFixCapError(null)
+    try {
+      const r = await fetch('/api/fba/listing-optimizer/fix-capacity', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ child_sku: row.sku, value: row.expected.value, unit: row.expected.unit, confirm: true }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Fix failed')
+      setFixCapResult(d); setFixCapPreview(null)
+    } catch (e) { setFixCapError(e instanceof Error ? e.message : 'Fix failed') }
+    setFixCapLoading(false)
+  }, [fixCapTarget])
+
   // ─── Re-link an orphan/re-parented child into a target parent SKU ────────────────
   type RelinkIssue = { code?: string; message?: string; severity?: string }
   const [relinkTarget, setRelinkTarget] = useState<{ childSku: string; childAsin: string } | null>(null)
@@ -642,6 +698,29 @@ export default function ListingDetailPage() {
           </div>
         </div>
       )})()}
+
+      {/* ══ WRONG CAPACITY ATTRIBUTE — a child's live capacity disagrees with its SKU ══ */}
+      {capacityCheck && capacityCheck.mismatchCount > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl shadow-sm p-4 flex items-start gap-3">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-amber-900">{capacityCheck.mismatchCount} variant{capacityCheck.mismatchCount === 1 ? '' : 's'} with wrong capacity attribute on Amazon</p>
+            <p className="text-xs text-amber-800 mt-0.5">A child SKU encodes one capacity but Amazon stores another (e.g. a 32GB SKU listed as 128GB). Click <b>Fix</b> to write the correct value via SP-API — Amazon validates first, then accepts. <span className="font-medium">Heads-up:</span> changing a variation axis can re-validate the family.</p>
+            <ul className="mt-2 space-y-1">
+              {capacityCheck.children.filter((c) => c.mismatch).map((c) => (
+                <li key={c.sku} className="text-xs text-amber-900 flex items-center gap-2 flex-wrap">
+                  <span className="font-mono">{c.asin}</span>
+                  <span className="text-amber-700">({c.sku})</span>
+                  <span className="text-amber-900">— live <span className="font-mono font-semibold">{c.liveLabel}</span> → should be <span className="font-mono font-semibold">{c.expectedLabel}</span></span>
+                  <button onClick={() => openFixCap(c)} className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-700 hover:bg-amber-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer">
+                    Fix
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       {/* ══ KPI ROW — the four sub-scores as their own cards ══ */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1304,6 +1383,94 @@ export default function ListingDetailPage() {
       )}
 
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          FIX CAPACITY ATTRIBUTE — preview → confirm → live PATCH (same chain as re-link)
+          ══════════════════════════════════════════════════════════════════════ */}
+      {fixCapTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !fixCapLoading && setFixCapTarget(null)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
+              <h3 className="text-sm font-bold text-slate-900">Fix capacity for <span className="font-mono">{fixCapTarget.row.sku}</span></h3>
+              <button onClick={() => !fixCapLoading && setFixCapTarget(null)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+            </div>
+            <div className="p-5">
+              <p className="text-xs text-slate-600 mb-3">
+                This patches the <span className="font-mono">{fixCapTarget.row.attributeName ?? 'capacity'}</span> attribute via SP-API. We <b>validation-preview first</b> — only an Amazon-validated change reaches Live. Amazon returns ACCEPTED before the change is actually visible, so re-run the capacity check after a few minutes. <b>Heads-up:</b> changing a variation axis value can cause Amazon to re-validate the variation family.
+              </p>
+              <div className="text-xs bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+                <div className="flex justify-between"><span className="text-slate-500">SKU</span><span className="font-mono">{fixCapTarget.row.sku}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">ASIN</span><span className="font-mono">{fixCapTarget.row.asin}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Attribute</span><span className="font-mono">{fixCapTarget.row.attributeName ?? '—'}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Live (wrong)</span><span className="font-mono text-red-600">{fixCapTarget.row.liveLabel}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Will become</span><span className="font-mono text-emerald-700 font-semibold">{fixCapTarget.row.expectedLabel}</span></div>
+              </div>
+
+              {fixCapError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 mt-3">{fixCapError}</p>}
+
+              {fixCapPreview && !fixCapResult && (
+                <div className={`mt-4 rounded-lg p-3 ${fixCapPreview.ok ? 'bg-emerald-50 border border-emerald-200' : 'bg-red-50 border border-red-200'}`}>
+                  <p className={`text-xs font-semibold ${fixCapPreview.ok ? 'text-emerald-800' : 'text-red-800'}`}>
+                    {fixCapPreview.ok ? 'Amazon validated — ready to write.' : 'Amazon rejected the planned change.'}
+                  </p>
+                  {fixCapPreview.issues.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {fixCapPreview.issues.map((i, idx) => (
+                        <li key={idx} className="text-[11px]">
+                          <span className={`px-1.5 py-0.5 rounded font-bold mr-1 ${i.severity === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{i.severity}</span>
+                          <span className="text-slate-700">{i.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {fixCapResult && (
+                <div className={`mt-4 rounded-lg p-3 ${fixCapResult.submitted ? 'bg-emerald-50 border border-emerald-200' : 'bg-red-50 border border-red-200'}`}>
+                  <p className={`text-xs font-semibold ${fixCapResult.submitted ? 'text-emerald-800' : 'text-red-800'}`}>
+                    {fixCapResult.submitted ? 'Submitted to Amazon.' : 'Amazon rejected the capacity fix.'}
+                  </p>
+                  <p className="text-[11px] text-slate-700 mt-1">{fixCapResult.message}</p>
+                  {fixCapResult.submissionId && <p className="text-[11px] text-slate-500 mt-1">submissionId: <span className="font-mono">{fixCapResult.submissionId}</span></p>}
+                  {fixCapResult.issues.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {fixCapResult.issues.map((i, idx) => (
+                        <li key={idx} className="text-[11px]">
+                          <span className={`px-1.5 py-0.5 rounded font-bold mr-1 ${i.severity === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{i.severity}</span>
+                          <span className="text-slate-700">{i.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-5 flex items-center gap-2">
+                <button onClick={() => setFixCapTarget(null)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 cursor-pointer">Cancel</button>
+                {!fixCapResult && (
+                  <button onClick={previewFixCap} disabled={fixCapLoading}
+                    className="text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white disabled:opacity-50 cursor-pointer">
+                    {fixCapLoading && !fixCapPreview ? 'Validating…' : 'Validate with Amazon'}
+                  </button>
+                )}
+                {fixCapPreview?.ok && !fixCapResult && (
+                  <button onClick={confirmFixCap} disabled={fixCapLoading}
+                    className="ml-auto text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold disabled:opacity-50 cursor-pointer">
+                    {fixCapLoading ? 'Writing…' : 'Confirm & Fix'}
+                  </button>
+                )}
+                {fixCapResult && (
+                  <button onClick={() => { setFixCapTarget(null); runCapacityCheck() }}
+                    className="ml-auto text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white cursor-pointer">
+                    Done (re-check)
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           RE-LINK ORPHAN — preview (VALIDATION_PREVIEW) → confirm → live PATCH
