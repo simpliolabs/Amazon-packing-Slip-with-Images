@@ -247,6 +247,21 @@ export default function ListingDetailPage() {
   }, [asin])
   useEffect(() => { runOrphanCheck() }, [runOrphanCheck])
 
+  // ─── Related orphans — orphan SKUs (no live parent) that share a SKU prefix with this
+  // parent's children. Surfaces "this orphan probably belongs HERE — re-link it" prompts on the
+  // CORRECT parent's page, not on the stale one where the orphan currently sits. Includes this
+  // parent's seller SKU so the Re-link modal pre-fills the target. Best-effort.
+  type RelatedOrphans = { parent_sku: string | null; prefix: string; candidates: { sku: string; asin: string; storedParent: string | null }[] }
+  const [relatedOrphans, setRelatedOrphans] = useState<RelatedOrphans | null>(null)
+  const runRelatedOrphans = useCallback(async () => {
+    if (!asin) return
+    try {
+      const r = await fetch(`/api/fba/listing-optimizer/related-orphans?parent_asin=${asin}`)
+      if (r.ok) { const d = await r.json(); if (d && Array.isArray(d.candidates)) setRelatedOrphans(d) }
+    } catch { /* best-effort */ }
+  }, [asin])
+  useEffect(() => { runRelatedOrphans() }, [runRelatedOrphans])
+
   // ─── Capacity attribute check — detect children whose live capacity disagrees with SKU ──
   type CapRow = {
     sku: string; asin: string; productType: string | null
@@ -311,9 +326,11 @@ export default function ListingDetailPage() {
   const [relinkLoading, setRelinkLoading] = useState(false)
   const [relinkError, setRelinkError] = useState<string | null>(null)
   const [relinkResult, setRelinkResult] = useState<{ submitted: boolean; status: string | null; submissionId: string | null; issues: RelinkIssue[]; message: string } | null>(null)
-  const openRelink = useCallback((childSku: string, childAsin: string) => {
+  const openRelink = useCallback((childSku: string, childAsin: string, parentSku?: string) => {
     setRelinkTarget({ childSku, childAsin })
-    setRelinkParentSku('Memory-Card-P')   // your known target (parent SKU for B0GCF11RKL); editable
+    // Pre-fill with the caller's parent SKU when known (Related Orphans on a parent page),
+    // otherwise leave blank so the user must enter it (no more hard-coded "Memory-Card-P").
+    setRelinkParentSku(parentSku || '')
     setRelinkPreview(null); setRelinkResult(null); setRelinkError(null)
   }, [])
   const previewRelink = useCallback(async () => {
@@ -698,6 +715,35 @@ export default function ListingDetailPage() {
           </div>
         </div>
       )})()}
+
+      {/* ══ RELATED ORPHANS — orphan SKUs that share this family's SKU prefix and could be linked HERE ══ */}
+      {relatedOrphans && relatedOrphans.candidates.length > 0 && (
+        <div className="bg-violet-50 border border-violet-200 rounded-2xl shadow-sm p-4 flex items-start gap-3">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-violet-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path d="M12 7v6l3 2" /></svg>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-violet-900">{relatedOrphans.candidates.length} orphan{relatedOrphans.candidates.length === 1 ? '' : 's'} could be linked to this family</p>
+            <p className="text-xs text-violet-800 mt-0.5">
+              These SKUs share the <span className="font-mono">{relatedOrphans.prefix}</span> prefix and have <b>no parent on Amazon</b>. Re-link them here{relatedOrphans.parent_sku ? <> (target parent SKU: <span className="font-mono">{relatedOrphans.parent_sku}</span>)</> : ''} to restore pooled reviews &amp; ranking.
+            </p>
+            <ul className="mt-2 space-y-1">
+              {relatedOrphans.candidates.map((c) => (
+                <li key={c.sku} className="text-xs text-violet-900 flex items-center gap-2 flex-wrap">
+                  <span className="font-mono">{c.asin}</span>
+                  <span className="text-violet-700">({c.sku})</span>
+                  <span className="text-violet-900">— no parent link on Amazon</span>
+                  <button
+                    onClick={() => openRelink(c.sku, c.asin, relatedOrphans.parent_sku ?? undefined)}
+                    disabled={!relatedOrphans.parent_sku}
+                    title={relatedOrphans.parent_sku ? `Re-link as a child of ${relatedOrphans.parent_sku}` : 'Parent SKU unknown — open Re-link and enter it manually'}
+                    className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold bg-violet-700 hover:bg-violet-800 text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-50">
+                    Re-link to this parent
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       {/* ══ WRONG CAPACITY ATTRIBUTE — a child's live capacity disagrees with its SKU ══ */}
       {capacityCheck && capacityCheck.mismatchCount > 0 && (
