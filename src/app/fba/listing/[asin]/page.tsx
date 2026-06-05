@@ -211,6 +211,13 @@ export default function ListingDetailPage() {
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyResults, setVerifyResults] = useState<VerifyPayload | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
+  // ── Family-SKUs view — full set of FBA + FBM twins + variation parent SKU. The DB cache
+  // (listing_content) historically deduped some FBA/FBM pairs, so cards that render from
+  // it alone hid the FBM twins (the seller saw "3 children" but the push hit 6).
+  // /family-skus discovers them live so the displayed list matches the push reality.
+  interface FamilySkuRow { sku: string; asin: string; fulfillment: 'FBA' | 'FBM' | 'unknown'; base_name: string }
+  interface FamilySkus { parent: { sku: string; asin: string } | null; children: FamilySkuRow[]; count: number }
+  const [familySkus, setFamilySkus] = useState<FamilySkus | null>(null)
   const [showPushModal, setShowPushModal] = useState(false)
   const [fetchedImage, setFetchedImage] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<string>('apply')
@@ -436,6 +443,21 @@ export default function ListingDetailPage() {
           if (data.recommendations) setAiRecs(data.recommendations)
         }
       } catch { /* ignore */ }
+    })()
+  }, [asin])
+
+  // Fetch family SKUs (FBA + FBM twins + variation parent) — used by the TITLES card to show
+  // every SKU the push will hit, not just what's in the DB cache. Read-only, best-effort.
+  useEffect(() => {
+    if (!asin) return
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/listing-optimizer/family-skus?parent_asin=${asin}`)
+        if (resp.ok) {
+          const data = await resp.json()
+          if (data?.children) setFamilySkus(data)
+        }
+      } catch { /* ignore — UI falls back to per_child_titles only */ }
     })()
   }, [asin])
 
@@ -1105,7 +1127,10 @@ export default function ListingDetailPage() {
 
                     {/* Row 5a: PER-CHILD title table (capacity families like SD cards) — overrides
                         the single Copy & Paste box for title only. Apparel & single-capacity
-                        products keep the broadcast card below (per_child_titles is empty). */}
+                        products keep the broadcast card below (per_child_titles is empty).
+                        Display is enriched with FBM TWINS from /family-skus so the seller sees
+                        every SKU the push will hit (the audit pipeline only sees FBA in
+                        listing_content, but the push discovers FBM twins live). */}
                     {item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (() => {
                       // Parent (variation hub) title = capacity-agnostic. Strip any GB/TB/MB
                       // capacity token from the broadcast recommended_title so the parent SKU
@@ -1114,12 +1139,47 @@ export default function ListingDetailPage() {
                       const stripCap = (t: string) => (t || '')
                         .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, '')
                         .replace(/\s{2,}/g, ' ').trim()
+                      const stripSfx = (sku: string) => sku.replace(/[-_](?:FBA|FBM|AFN|MFN|FN)$/i, '')
                       const parentTitle = stripCap(recs.recommended_title || '') || (recs.per_child_titles[0]?.title ? stripCap(recs.per_child_titles[0].title) : '')
+
+                      // Compose the display list: every per_child_titles entry, plus every FBM
+                      // twin discovered live (inherits its FBA sibling's title — same as push).
+                      // Each row carries an `inherited` flag so the UI can show a subtle hint.
+                      type DisplayTitleRow = { sku: string; title: string; fulfillment: 'FBA' | 'FBM' | 'unknown'; inherited: boolean }
+                      const titlesBySku = new Map<string, string>()
+                      for (const t of recs.per_child_titles ?? []) titlesBySku.set(t.sku, t.title)
+                      const titlesByBase = new Map<string, string>()
+                      for (const t of recs.per_child_titles ?? []) titlesByBase.set(stripSfx(t.sku), t.title)
+
+                      const display: DisplayTitleRow[] = (recs.per_child_titles ?? []).map((t) => ({
+                        sku: t.sku, title: t.title,
+                        fulfillment: /[-_]FBA$/i.test(t.sku) ? 'FBA' : (/[-_]FBM$/i.test(t.sku) ? 'FBM' : 'unknown'),
+                        inherited: false,
+                      }))
+                      if (familySkus?.children?.length) {
+                        for (const f of familySkus.children) {
+                          if (titlesBySku.has(f.sku)) continue
+                          // Only show a discovered SKU when we have a sibling title to inherit.
+                          const inheritedTitle = titlesByBase.get(f.base_name)
+                          if (!inheritedTitle) continue
+                          display.push({ sku: f.sku, title: inheritedTitle, fulfillment: f.fulfillment, inherited: true })
+                        }
+                      }
+                      // Group by base_name (capacity), FBA before FBM, parent SKU rendered separately.
+                      display.sort((a, b) => {
+                        const baseA = stripSfx(a.sku), baseB = stripSfx(b.sku)
+                        if (baseA !== baseB) return baseA.localeCompare(baseB)
+                        const order = { FBA: 0, FBM: 1, unknown: 2 } as const
+                        return order[a.fulfillment] - order[b.fulfillment]
+                      })
+
                       return (
                         <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Titles ({recs.per_child_titles.length + 1}: parent + {recs.per_child_titles.length} variants):</span>
-                            <span className="text-[10px] text-slate-500">Each child carries its own capacity (Amazon SEO best-practice for capacity variations).</span>
+                          <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
+                            <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase">
+                              <Icon.Clipboard className="w-3 h-3" /> Titles ({display.length + 1}: parent + {display.length} variants{display.some(d => d.inherited) ? ` incl. FBM twins` : ''}):
+                            </span>
+                            <span className="text-[10px] text-slate-500">Each child carries its own capacity (Amazon SEO best-practice). FBM twins inherit their FBA sibling&apos;s title.</span>
                           </div>
 
                           {/* PARENT ROW — the variation hub title, capacity-agnostic */}
@@ -1136,13 +1196,17 @@ export default function ListingDetailPage() {
                           )}
 
                           <div className="space-y-1">
-                            {recs.per_child_titles.map((t) => (
-                              <div key={t.sku} className="flex items-center gap-2 bg-green-50 p-1.5 rounded border border-green-200">
+                            {display.map((t) => (
+                              <div key={t.sku} className={`flex items-center gap-2 p-1.5 rounded border ${t.inherited ? 'bg-sky-50 border-sky-200' : 'bg-green-50 border-green-200'}`}>
                                 <span className="text-[10px] font-mono text-slate-500 flex-shrink-0">{t.sku}</span>
+                                <span className={`text-[9px] font-semibold px-1 rounded flex-shrink-0 ${t.fulfillment === 'FBA' ? 'bg-emerald-200 text-emerald-800' : t.fulfillment === 'FBM' ? 'bg-sky-200 text-sky-800' : 'bg-slate-200 text-slate-700'}`}>
+                                  {t.fulfillment === 'unknown' ? '?' : t.fulfillment}
+                                </span>
                                 <span className="text-xs leading-relaxed text-slate-800 flex-1 min-w-0 break-words">{t.title}</span>
+                                {t.inherited && <span className="text-[9px] text-sky-600 italic flex-shrink-0">inherits FBA twin</span>}
                                 <button
                                   onClick={() => { navigator.clipboard.writeText(t.title); setCopied(`pct-${t.sku}`); setTimeout(() => setCopied(null), 2000) }}
-                                  className="text-[10px] px-2 py-0.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium flex-shrink-0">
+                                  className={`text-[10px] px-2 py-0.5 text-white rounded font-medium flex-shrink-0 ${t.inherited ? 'bg-sky-600 hover:bg-sky-700' : 'bg-green-600 hover:bg-green-700'}`}>
                                   {copied === `pct-${t.sku}` ? 'Copied!' : 'Copy'}
                                 </button>
                               </div>
@@ -1153,6 +1217,7 @@ export default function ListingDetailPage() {
                             <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
                               <span className="font-semibold text-slate-700">Parent</span> is the variation hub title (no specific capacity — it&apos;s the shared family title sellers see in Seller Central before drilling into a variant).
                               <span className="font-semibold text-slate-700"> Variants</span> are the actual buyable child SKUs, each carrying its own capacity.
+                              {display.some(d => d.inherited) && <> <span className="font-semibold text-slate-700">FBM twins</span> share the title of their FBA sibling (same product, different fulfillment).</>}
                             </p>
                           )}
                         </div>
