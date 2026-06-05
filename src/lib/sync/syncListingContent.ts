@@ -316,6 +316,26 @@ interface ScoringContext {
   productDetailsGaps:  number
   /** Description quality from AI recommendations (has recommendation = room to improve) */
   hasAiRecommendations: boolean
+  /** Brand name — exempted from the ALL CAPS check (e.g. "THE CEO" is the seller's
+   *  brand identity, not a style-guide violation). Resolved from settings/catalog. */
+  brandName?: string
+}
+
+/**
+ * True when a caps token is a legitimate technical acronym or brand fragment that
+ * Amazon's style guide does NOT consider a violation. The old check counted UHS-I,
+ * DSLR, HDMI etc. against the seller, contradicting its own error message ("UHS-I
+ * and SDHC are allowed in caps"). Rule of thumb:
+ *   ≤6 chars  → almost certainly an acronym (DSLR/UHS-I/USB-C/HDMI/OLED)
+ *   contains a non-letter (digit or punctuation) → mixed token like "4K", "USB-C"
+ * Promotional spam ("CHEAPEST", "LOWEST", "BIGGEST", "DEAL") is always 7+ letters
+ * and pure letters — so this heuristic catches all real abuse without false positives
+ * on industry terminology.
+ */
+function isLegitCapsToken(token: string): boolean {
+  if (token.length <= 6) return true            // DSLR, UHS-I, USB, HDMI, OLED, NFC, LED, GPS
+  if (/[^A-Za-z]/.test(token)) return true      // 4K, USB-C, 2.5GbE, MP3-320
+  return false                                  // CHEAPEST, BIGGEST, AMAZING, BARGAIN
 }
 
 /**
@@ -455,6 +475,28 @@ export async function fetchScoringContext(
     console.warn(`[Scoring] recommendations lookup failed for ${parentAsin}:`, err instanceof Error ? err.message : String(err))
   }
 
+  // 3. Brand name — used by the scorer to EXEMPT the brand from the ALL CAPS check
+  // (e.g. "THE CEO" is the seller's brand identity, not a violation). Read from
+  // app_settings, falling back to catalog_products.brand if available. Best-effort —
+  // missing brand just means brand tokens aren't exempted (the tech-acronym whitelist
+  // still kicks in for UHS-I/DSLR/etc.).
+  try {
+    const { data: brandRow } = await supabase
+      .from('app_settings').select('value').eq('key', 'brand_name').single()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const br = brandRow as any
+    if (br?.value && typeof br.value === 'string') ctx.brandName = br.value
+  } catch { /* non-fatal */ }
+  if (!ctx.brandName) {
+    try {
+      const { data: catRow } = await supabase
+        .from('catalog_products').select('brand').eq('parent_asin', parentAsin).single()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const c = catRow as any
+      if (c?.brand && typeof c.brand === 'string') ctx.brandName = c.brand
+    } catch { /* non-fatal */ }
+  }
+
   return ctx
 }
 
@@ -552,8 +594,24 @@ export function scoreListingContent(
       issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — exceeds the 150-char recommended limit. Amazon truncates long titles on mobile (80 chars visible) and in search results. Remove filler words and move lower-volume keywords to bullets or backend keywords.`, auto_fixable: false })
     }
 
-    // ALL CAPS check
-    const capsWords = title.split(' ').filter(w => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w))
+    // ALL CAPS check — the message says brand names + technical acronyms are exempt;
+    // here we actually exempt them. Brand name comes from scoringCtx (resolved from
+    // settings / recommendation row). Tech acronyms: any token ≤6 chars or containing
+    // a non-letter — covers UHS-I, DSLR, USB, HDMI, OLED, 4K, USB-C, etc. What's left
+    // is promotional spam ("CHEAPEST", "AMAZING", "LOWEST") which we DO want to flag.
+    const brandTokens = new Set(
+      (scoringCtx.brandName ?? '').split(/\s+/).filter(Boolean).map((t) => t.toUpperCase())
+    )
+    const capsWords = title.split(' ').filter((w) => {
+      if (w.length <= 2) return false
+      if (w !== w.toUpperCase()) return false
+      if (!/[A-Z]/.test(w)) return false
+      // Strip trailing punctuation for the comparison ("CEO," still matches brand "CEO").
+      const stripped = w.replace(/[^\w-]+$/, '')
+      if (brandTokens.has(stripped.toUpperCase())) return false  // brand name parts: exempt
+      if (isLegitCapsToken(stripped)) return false                // UHS-I / DSLR / HDMI / 4K: exempt
+      return true                                                 // promotional spam: counts
+    })
     if (capsWords.length > 2) {
       titleScore -= 5
       const exampleFix = capsWords.slice(0, 3).map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(', ')
