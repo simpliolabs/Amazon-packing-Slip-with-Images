@@ -163,6 +163,83 @@ const THIRD_PARTY_BRAND_PHRASES = [
   'western digital', 'audio technica', 'sea gate', 'go pro',
 ]
 
+/**
+ * Sports teams, college athletic programs, media franchises, and other licensed
+ * trademark phrases. **Different semantics from THIRD_PARTY_BRANDS**: there's no safe
+ * `'for [Brand]'` framing for these — an unlicensed seller can't write "for Florida
+ * Gators" because the WORD MARK itself is protected (separately from the design mark
+ * / logo). They must be DROPPED entirely from the keyword pool BEFORE any agent sees
+ * them. The LLM relevance gate (filterRelevantKeywords) is supposed to catch these
+ * but is non-deterministic; this is the deterministic backstop.
+ *
+ * Live-verified gap (B0G884ZJ27): regen emitted "Florida Gators" bare in title +
+ * bullets + description. UF actively enforces this mark.
+ *
+ * Curated list focuses on actively-enforced marks where licensing is required for
+ * apparel/accessory resale. Generic words ("alligator", "gators", "lions", "bears")
+ * are NOT here — only the multi-word PHRASES that constitute the registered marks.
+ */
+const TRADEMARK_PHRASES = new Set([
+  // NCAA football/basketball (top enforced)
+  'florida gators', 'tennessee volunteers', 'tennessee vols', 'texas longhorns',
+  'alabama crimson tide', 'lsu tigers', 'georgia bulldogs', 'auburn tigers',
+  'oklahoma sooners', 'ohio state buckeyes', 'michigan wolverines',
+  'penn state nittany lions', 'notre dame fighting irish', 'usc trojans', 'ucla bruins',
+  'oregon ducks', 'washington huskies', 'miami hurricanes', 'florida state seminoles',
+  'clemson tigers', 'virginia tech hokies', 'north carolina tar heels',
+  'duke blue devils', 'kentucky wildcats', 'arkansas razorbacks',
+  'kansas jayhawks', 'syracuse orange', 'villanova wildcats', 'arizona wildcats',
+  'gonzaga bulldogs', 'michigan state spartans',
+  // NFL
+  'dallas cowboys', 'new york giants', 'new england patriots', 'kansas city chiefs',
+  'green bay packers', 'pittsburgh steelers', 'philadelphia eagles', 'chicago bears',
+  'san francisco 49ers', 'seattle seahawks', 'tampa bay buccaneers', 'miami dolphins',
+  'new orleans saints', 'denver broncos', 'baltimore ravens', 'los angeles rams',
+  // NBA
+  'los angeles lakers', 'boston celtics', 'chicago bulls', 'golden state warriors',
+  'miami heat', 'new york knicks', 'brooklyn nets', 'philadelphia 76ers',
+  // MLB
+  'new york yankees', 'boston red sox', 'los angeles dodgers', 'chicago cubs',
+  'san francisco giants', 'st louis cardinals', 'houston astros', 'atlanta braves',
+  // Major media franchises (word marks)
+  'star wars', 'harry potter', 'lord of the rings', 'game of thrones',
+  'the simpsons', 'family guy', 'south park', 'breaking bad',
+])
+
+/** Single-word trademark tokens (registered marks where the single word is unambiguous). */
+const TRADEMARK_TOKENS = new Set([
+  // Media / entertainment
+  'marvel', 'disney', 'pixar', 'dreamworks', 'lucasfilm',
+  // Universities (apparel context — Brown, Yale, Harvard etc. license their names)
+  'harvard', 'stanford', 'yale', 'princeton',
+  // Major leagues
+  'nfl', 'nba', 'mlb', 'nhl', 'ncaa',
+])
+
+/**
+ * Find trademark phrases (sports teams, universities, media franchises) in `text`.
+ * Returns the matched phrases. These should NEVER appear in a listing's customer-facing
+ * copy — they need to be DROPPED from the source keyword pool (no framing fix applies).
+ *
+ * Generic words alone ("alligator", "lions", "gators") are NOT in the trademark sets,
+ * so they pass through untouched.
+ */
+export function findTrademarkPhrases(text: string): string[] {
+  const lc = ` ${text.toLowerCase()} `
+  const found = new Set<string>()
+  for (const phrase of TRADEMARK_PHRASES) {
+    if (lc.includes(` ${phrase} `) || lc.includes(` ${phrase}.`) || lc.includes(` ${phrase},`) || lc.includes(`${phrase}'`)) {
+      found.add(phrase)
+    } else if (lc.includes(phrase)) {
+      found.add(phrase)   // catch-all (start/end of text, adjacent punctuation)
+    }
+  }
+  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
+    if (TRADEMARK_TOKENS.has(w)) found.add(w)
+  }
+  return [...found]
+}
+
 /** Find every third-party brand token in `text`, excluding the seller's own brand. */
 export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>): string[] {
   const lc = text.toLowerCase()
@@ -178,17 +255,50 @@ export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>):
 }
 
 /**
- * True if `brandToken` appears in `text` properly preceded by 'for', 'compatible with',
- * 'works with', or 'fits' within the prior 2-3 tokens. Anything else is a bare reference
- * that violates Amazon's policy.
+ * True if EVERY occurrence of `brandToken` in `text` is properly preceded by a framing
+ * word ('for' / 'compatible with' / 'works with' / 'fits') within the prior 2-3 content
+ * tokens (commas / 'and' / 'or' don't count as content — they're list connectors).
+ *
+ * Per-occurrence check (PR #77). The previous one-shot check would mark a bullet like
+ *   "GoPro is great. Compatible with GoPro Hero."
+ * as framed because SOMEWHERE a framing word touches the brand — but the FIRST occurrence
+ * is still bare and that's the policy-violating one.
+ *
+ * Handles list-with-shared-framing correctly:
+ *   "for Canon, Nikon, and Sony cameras"      → all three framed via the leading "for"
+ *   "compatible with GoPro Hero and Insta360" → both framed via "compatible with"
  */
 export function isBrandProperlyFramed(text: string, brandToken: string): boolean {
   const lc = text.toLowerCase()
-  // Escape the token and allow 0-2 intervening tokens between the framing word and the brand.
-  // e.g. 'for GoPro' ✓, 'for action camera GoPro' ✓, 'GoPro SD Card' ✗
-  const tok = brandToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
-  const re = new RegExp(`\\b(?:for|compatible\\s+with|works?\\s+with|fits?\\s+(?:for\\s+)?)\\s+(?:[a-z0-9-]+\\s+){0,2}${tok}\\b`, 'i')
-  return re.test(lc)
+  const tokRe = brandToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
+  const occurrences = [...lc.matchAll(new RegExp(`\\b${tokRe}\\b`, 'gi'))]
+  if (occurrences.length === 0) return true   // nothing to check
+  const FRAMING_RE = /^(?:for|compatible\s+with|works?\s+with|fits?(?:\s+for)?)\s*$/
+  const CONNECTOR_RE = /^(?:and|or|,|\/|&)$/
+  for (const m of occurrences) {
+    // Walk backwards through up to 5 preceding tokens (skipping commas/and/or as list
+    // connectors). If we find a framing token within that window → this occurrence is
+    // framed. Otherwise → bare.
+    const before = lc.slice(Math.max(0, (m.index ?? 0) - 80), m.index ?? 0)
+    const beforeTokens = before.split(/[\s]+/).filter(Boolean)
+    let framed = false
+    let contentTokensSeen = 0
+    for (let i = beforeTokens.length - 1; i >= 0 && contentTokensSeen < 4; i--) {
+      const t = beforeTokens[i]
+      // Try multi-word framing patterns first ("compatible with", "works with").
+      if (i > 0) {
+        const pair = `${beforeTokens[i - 1]} ${t}`
+        if (FRAMING_RE.test(pair)) { framed = true; break }
+      }
+      if (FRAMING_RE.test(t)) { framed = true; break }
+      if (CONNECTOR_RE.test(t)) continue            // list connector — keep walking, don't count
+      // Allow up to 3 brand-related content tokens between the framing word and this
+      // brand (covers "for action camera GoPro" + "for Canon EOS GoPro").
+      contentTokensSeen++
+    }
+    if (!framed) return false
+  }
+  return true
 }
 
 /** Get the seller's own brand tokens for exemption from brand checks. */
@@ -329,6 +439,15 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
     problems.push(`🚫 LISTING-SUPPRESSION RISK: title contains bare third-party brand name${bareRefs.length === 1 ? '' : 's'} ${bareRefs.map((b) => `"${b}"`).join(', ')} without 'for' or 'compatible with' framing. Amazon's Jan 2025 policy (Q4 2025 enforcement) suppresses listings with bare brand references. Rewrite using "for ${bareRefs[0]}" or "compatible with ${bareRefs[0]}" — never the brand name standing alone.`)
   }
 
+  // 🚫 TRADEMARK PHRASES (sports teams / universities / media franchises). Different
+  // semantics from THIRD_PARTY_BRANDS — no compatibility framing can rescue them. The
+  // keyword pool already drops these (PR #77 filterRelevantKeywords backstop) but
+  // this is the validator's last-mile check.
+  const trademarksInTitle = findTrademarkPhrases(title)
+  if (trademarksInTitle.length > 0) {
+    problems.push(`🚫 TRADEMARK INFRINGEMENT RISK: title contains registered trademark phrase${trademarksInTitle.length === 1 ? '' : 's'} ${trademarksInTitle.map((t) => `"${t}"`).join(', ')}. Sports teams, universities, and media franchises (Florida Gators, Dallas Cowboys, Marvel, Star Wars, etc.) cannot be used in product titles unless you hold an official license. Remove these words entirely and rewrite the title with generic descriptors (e.g. "alligator graphic" not "Florida Gators", "superhero tee" not "Marvel").`)
+  }
+
   // UPGRADE keyword coverage — the scorer docks 5 points when 7+ UPGRADE keywords appear
   // in bullets but NOT in the title (3 points when 3-6 miss). Fail fast in validation so the
   // existing retry loop pulls more of them into the title before we commit.
@@ -404,6 +523,19 @@ export function validateBullets(
     problems.push(`🚫 LISTING-SUPPRESSION RISK: bare third-party brand name(s) in ${detail}. Amazon's Jan 2025 policy requires 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]' framing — never bare. Rewrite those bullets to wrap each brand mention in compatibility language.`)
   }
 
+  // 🚫 TRADEMARK PHRASES per bullet (sports teams / universities / media franchises).
+  const tmByBullet: { i: number; tm: string[] }[] = []
+  for (let i = 0; i < bullets.length; i++) {
+    const tms = findTrademarkPhrases(bullets[i])
+    if (tms.length > 0) tmByBullet.push({ i, tm: tms })
+  }
+  if (tmByBullet.length > 0) {
+    const detail = tmByBullet
+      .map(({ i, tm }) => `bullet ${i + 1}: ${tm.map((t) => `"${t}"`).join(', ')}`)
+      .join('; ')
+    problems.push(`🚫 TRADEMARK INFRINGEMENT RISK: ${detail}. Sports teams, universities, and media franchises cannot be used in customer-facing copy unless you hold an official license. Remove these phrases entirely and rewrite with generic descriptors.`)
+  }
+
   // Opportunity-keyword coverage. The scorer aggregates CRITICAL ∪ UPGRADE and penalizes
   // when 2+ are missing across the bullets joined together. We use 3+ as the retry trigger
   // (1-2 missing is below the scorer's first penalty tier and not worth a retry round).
@@ -456,6 +588,12 @@ export function validateDescription(
   const bare = findThirdPartyBrands(plain, ownBrands).filter((b) => !isBrandProperlyFramed(plain, b))
   if (bare.length > 0) {
     problems.push(`🚫 LISTING-SUPPRESSION RISK: description contains bare third-party brand name(s) ${bare.map((b) => `"${b}"`).join(', ')} without 'for' or 'compatible with' framing. Rewrite every brand mention as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.`)
+  }
+
+  // 🚫 TRADEMARK PHRASES in description.
+  const tmInDesc = findTrademarkPhrases(plain)
+  if (tmInDesc.length > 0) {
+    problems.push(`🚫 TRADEMARK INFRINGEMENT RISK: description contains registered trademark phrase${tmInDesc.length === 1 ? '' : 's'} ${tmInDesc.map((t) => `"${t}"`).join(', ')}. Sports teams, universities, and media franchises cannot be used in customer-facing copy unless you hold an official license. Rewrite using generic descriptors.`)
   }
 
   return problems
@@ -1108,10 +1246,18 @@ Return the indices of keywords to DROP:
 1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product.
 2. VAGUE, non-descriptive filler that does not describe a product attribute, style, design, audience, occasion, or use case (e.g. "interest", "full transparency", "high quality", "best seller").
 KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY {"drop":[...]}.`
-  // Deterministic backstop: always drop all-junk keywords ("interest", "full
-  // transparency", "best seller") regardless of the LLM gate, which is non-deterministic
-  // and let them through in live testing. Applied to every return path.
-  const dropJunk = (kws: AnalyzedKeyword[]) => kws.filter((k) => !isAllJunk(k.keyword))
+  // Deterministic backstops: ALWAYS drop these regardless of the LLM gate, which is
+  // non-deterministic and let them through in live testing.
+  //   1. all-junk keywords ("interest", "full transparency", "best seller")
+  //   2. trademark phrases (sports teams, universities, media franchises) — PR #77
+  //      after live B0G884ZJ27 audit leaked "Florida Gators" into a recommended title.
+  //      Generic team-mascot words ("alligator", "gators", "lions") still pass through
+  //      — only the multi-word REGISTERED phrases are dropped.
+  const dropJunkAndTrademarks = (kws: AnalyzedKeyword[]) => kws.filter((k) => {
+    if (isAllJunk(k.keyword)) return false
+    if (findTrademarkPhrases(k.keyword).length > 0) return false
+    return true
+  })
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -1124,11 +1270,11 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
     const drop = new Set((parsed.drop ?? []).filter((n) => Number.isInteger(n)))
     const filtered = analysis.filter((_, i) => !drop.has(i))
     // Fail-open: if the gate dropped (nearly) everything it likely misfired — keep the original pool.
-    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return dropJunk(analysis)
-    return dropJunk(filtered)
+    if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return dropJunkAndTrademarks(analysis)
+    return dropJunkAndTrademarks(filtered)
   } catch (err) {
     console.warn('[pipeline] relevance gate failed, using unfiltered pool:', err)
-    return dropJunk(analysis)
+    return dropJunkAndTrademarks(analysis)
   }
 }
 
