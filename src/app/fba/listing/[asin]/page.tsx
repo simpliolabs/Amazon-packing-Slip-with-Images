@@ -203,6 +203,14 @@ export default function ListingDetailPage() {
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
   const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
+  // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
+  // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
+  // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
+  interface VerifyResultRow { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; matches: boolean; lastUpdatedDate: string | null }
+  interface VerifyPayload { total: number; matched: number; stale: number; results: VerifyResultRow[]; attribute_key?: string }
+  const [verifyLoading, setVerifyLoading] = useState(false)
+  const [verifyResults, setVerifyResults] = useState<VerifyPayload | null>(null)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
   const [showPushModal, setShowPushModal] = useState(false)
   const [fetchedImage, setFetchedImage] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<string>('apply')
@@ -546,7 +554,7 @@ export default function ListingDetailPage() {
   const openPushPreview = useCallback(async (field: PushField, detailField?: string) => {
     setPushField(field)
     setPushDetailField(field === 'details' ? (detailField ?? null) : null)
-    setPushError(null); setPushResults(null); setPushPreview(null); setShowPushModal(true); setPushLoading(true)
+    setPushError(null); setPushResults(null); setPushPreview(null); setVerifyResults(null); setVerifyError(null); setShowPushModal(true); setPushLoading(true)
     try {
       const qs = field === 'details' && detailField
         ? `&detail_field=${encodeURIComponent(detailField)}`
@@ -589,6 +597,25 @@ export default function ListingDetailPage() {
       setPushError(e instanceof Error ? e.message : 'Push failed')
     }
     setPushLoading(false)
+  }, [asin, pushField, pushDetailField])
+
+  /** Verify what Amazon ACTUALLY has live right now for the just-pushed field.
+   *  Useful when a push was Accepted but the seller doesn't see it on Seller Central
+   *  or the PDP — answers "is Amazon still processing, or did the push silently fail?". */
+  const runVerify = useCallback(async () => {
+    setVerifyError(null); setVerifyResults(null); setVerifyLoading(true)
+    try {
+      const qs = pushField === 'details' && pushDetailField
+        ? `&detail_field=${encodeURIComponent(pushDetailField)}`
+        : ''
+      const resp = await fetch(`/api/fba/listing-optimizer/verify-push?parent_asin=${asin}&field=${pushField}${qs}`)
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.error || 'Verify failed')
+      setVerifyResults(data)
+    } catch (e) {
+      setVerifyError(e instanceof Error ? e.message : 'Verify failed')
+    }
+    setVerifyLoading(false)
   }, [asin, pushField, pushDetailField])
 
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
@@ -1901,6 +1928,43 @@ export default function ListingDetailPage() {
                     </div>
                   )}
 
+                  {/* ── Verify on Amazon (also on preview, so a seller who pushed earlier
+                       can check "did Amazon apply it?" without re-pushing). Shows when
+                       changed === 0 (cache matches rec → push was Accepted earlier) too. */}
+                  <div className="mb-3 -mt-1">
+                    <button
+                      onClick={runVerify}
+                      disabled={verifyLoading}
+                      className="text-xs text-indigo-700 hover:text-indigo-900 underline disabled:opacity-50"
+                    >
+                      {verifyLoading ? 'Checking Amazon live…' : verifyResults ? 'Re-check Amazon live' : 'Verify on Amazon → is it actually applied?'}
+                    </button>
+                    {verifyError && <p className="text-xs text-red-600 mt-1">{verifyError}</p>}
+                    {verifyResults && (
+                      <div className="mt-2 bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                        <p className="text-xs text-slate-700 mb-1.5">
+                          <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-green-500" /> <b>{verifyResults.matched}</b> applied</span>
+                          <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> stale</span>
+                          <span className="text-slate-500">· {verifyResults.total} SKUs checked</span>
+                        </p>
+                        <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-[25vh] overflow-y-auto bg-white">
+                          {verifyResults.results.map((v) => (
+                            <div key={v.sku} className={`px-2 py-1.5 text-[11px] flex items-center gap-2 ${v.isParent ? 'bg-violet-50' : ''}`}>
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                {v.matches ? '✓ applied' : 'stale'}
+                              </span>
+                              <span className="font-mono text-slate-700">{v.sku}</span>
+                              {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
+                              {v.lastUpdatedDate && (
+                                <span className="text-[10px] text-slate-400 ml-auto whitespace-nowrap">{new Date(v.lastUpdatedDate).toLocaleString()}</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
                     <button onClick={confirmPush} disabled={pushPreview.changed === 0}
@@ -1917,7 +1981,7 @@ export default function ListingDetailPage() {
               {pushResults && (
                 <>
                   <p className="text-sm text-slate-800 mb-3">{pushResults.message}</p>
-                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[50vh] overflow-y-auto">
+                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[40vh] overflow-y-auto">
                     {pushResults.results.map((r) => (
                       <div key={r.sku} className="p-2.5 text-xs flex items-center gap-2">
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${r.status === 'accepted' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{r.status}</span>
@@ -1926,6 +1990,76 @@ export default function ListingDetailPage() {
                       </div>
                     ))}
                   </div>
+
+                  {/* ── Verify on Amazon (live getListingsItem per SKU) ─────────────────
+                       Amazon returns ACCEPTED, not "applied". This calls /verify-push to
+                       read the LIVE attribute and tell the seller whether each SKU is
+                       APPLIED, STALE (Amazon still processing or rejected), or matches. */}
+                  <div className="mb-3 bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="text-xs text-slate-700">
+                        <span className="font-semibold">Did Amazon apply it?</span>{' '}
+                        <span className="text-slate-500">Submissions are ACCEPTED, then processed asynchronously (15min–6hr for variation families). Check what&apos;s actually live:</span>
+                      </div>
+                      <button
+                        onClick={runVerify}
+                        disabled={verifyLoading}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 whitespace-nowrap"
+                      >
+                        {verifyLoading ? 'Checking Amazon…' : verifyResults ? 'Re-check live' : 'Verify on Amazon →'}
+                      </button>
+                    </div>
+                    {verifyError && <p className="text-xs text-red-600 mt-2">{verifyError}</p>}
+                    {verifyResults && (
+                      <div className="mt-3">
+                        <p className="text-xs text-slate-700 mb-2">
+                          <span className="inline-flex items-center gap-1 mr-3">
+                            <span className="w-2 h-2 rounded-full bg-green-500" /> <b>{verifyResults.matched}</b> applied
+                          </span>
+                          <span className="inline-flex items-center gap-1 mr-3">
+                            <span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> still stale (Amazon processing or rejected)
+                          </span>
+                          <span className="text-slate-500">· {verifyResults.total} SKUs checked{verifyResults.attribute_key ? ` · /attributes/${verifyResults.attribute_key}` : ''}</span>
+                        </p>
+                        <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-[35vh] overflow-y-auto bg-white">
+                          {verifyResults.results.map((v) => (
+                            <div key={v.sku} className={`p-2.5 text-xs ${v.isParent ? 'bg-violet-50' : ''}`}>
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                  {v.matches ? '✓ applied' : 'stale'}
+                                </span>
+                                <span className="font-mono text-slate-700">{v.sku}</span>
+                                {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
+                                {v.lastUpdatedDate && (
+                                  <span className="text-[10px] text-slate-400 ml-auto">
+                                    Amazon updated {new Date(v.lastUpdatedDate).toLocaleString()}
+                                  </span>
+                                )}
+                              </div>
+                              {!v.matches && (
+                                <div className="grid sm:grid-cols-2 gap-2 mt-1">
+                                  <div>
+                                    <p className="text-[10px] font-semibold text-amber-700 uppercase mb-0.5">Live on Amazon</p>
+                                    <p className="text-[10px] text-slate-600 whitespace-pre-wrap break-words">{v.currentLive || <em className="text-slate-400">(empty)</em>}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] font-semibold text-emerald-700 uppercase mb-0.5">Expected (pushed)</p>
+                                    <p className="text-[10px] text-slate-700 whitespace-pre-wrap break-words">{v.expected || <em className="text-slate-400">(empty)</em>}</p>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {verifyResults.stale > 0 && (
+                          <p className="text-[10px] text-slate-500 mt-2 italic">
+                            Stale = Amazon hasn&apos;t applied the new value yet. If it&apos;s been &gt; 6 hours, the submission may have been silently rejected — re-push from the section above.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex justify-end">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white">Done</button>
                   </div>

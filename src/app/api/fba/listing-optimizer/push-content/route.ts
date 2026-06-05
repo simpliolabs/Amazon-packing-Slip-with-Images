@@ -274,24 +274,45 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
     }
   } catch { /* enrichment is best-effort — don't block the preview */ }
 
-  // ── PARENT SKU row for title pushes when a capacity family is in scope ──
-  // The variation parent (e.g. Memory-Card-P) is non-buyable but DOES carry its own item_name.
-  // For capacity families we ship a CAPACITY-AGNOSTIC title there so the variation hub doesn't
-  // show a specific GB. Only fired for field=title and only when per_child_titles is present.
-  if (field === 'title' && Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1) {
+  // ── PARENT SKU row for BROADCAST field pushes ────────────────────────────────
+  // The variation parent (e.g. Memory-Card-P) is non-buyable but DOES carry its own
+  // item_name / bullet_point / product_description. Amazon's PDP and search results
+  // surface the PARENT's content for the variation hub, so a child-only push leaves
+  // the customer-visible parent stale — which is why pushing bullets to all children
+  // looked like "nothing changed on Amazon" an hour later (we never wrote the
+  // parent's bullets).
+  //
+  // Fires for any BROADCAST field (title / bullets / description), not just
+  // title-with-capacity-families. Title uses a CAPACITY-AGNOSTIC version
+  // (stripCapacity) when per_child_titles is in scope; otherwise ships the broadcast
+  // title verbatim. Bullets and description always ship the broadcast value
+  // (they're not capacity-specific).
+  const isBroadcastField = field === 'title' || field === 'bullets' || field === 'description'
+  if (isBroadcastField) {
     try {
       if (!token) { token = await getAccessToken(); sellerId = await getSellerId() }
       const parentSku = sellerId ? await findParentSku(sellerId, token, parentAsin) : null
       if (parentSku && !baseDiff.some((d) => d.sku === parentSku)) {
-        const parentTitle = stripCapacity(rec.recommended_title ?? '')
-        if (parentTitle.length > 0) {
+        // Resolve the parent's proposed value per-field.
+        let parentValue: string | string[] | null = null
+        if (field === 'title') {
+          parentValue = Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1
+            ? (stripCapacity(rec.recommended_title ?? '') || null)
+            : (rec.recommended_title ?? null)
+        } else if (field === 'bullets') {
+          parentValue = resolveProposed('bullets', rec, new Map(), parentSku)
+        } else if (field === 'description') {
+          parentValue = resolveProposed('description', rec, new Map(), parentSku)
+        }
+        const parentStr = asCompare(parentValue)
+        if (parentValue && parentStr.length > 0) {
           baseDiff.push({
             sku: parentSku, asin: parentAsin,
-            current: '', // we don't sync the parent's title cache; let VALIDATION_PREVIEW catch surprises
-            proposed: parentTitle,
-            raw: parentTitle,
-            bytes: getByteLength(parentTitle),
-            chars: parentTitle.length,
+            current: '', // we don't cache the parent's content; VALIDATION_PREVIEW is the safety net
+            proposed: parentStr,
+            raw: parentValue,
+            bytes: getByteLength(parentStr),
+            chars: parentStr.length,
             changed: true,
             isParent: true,
           })
