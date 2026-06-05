@@ -125,6 +125,76 @@ const ROLE_WORDS = new Set([
   'teacher', 'teachers', 'nurse', 'nurses', 'doctor', 'doctors', 'educator', 'educators',
   'coach', 'coaches', 'professor', 'professors', 'principal', 'student', 'students',
 ])
+
+/**
+ * Third-party brand names that REQUIRE 'for [Brand]' or 'compatible with [Brand]' framing
+ * in titles and bullets. Amazon's Jan 2025 enforcement (tightened Q4 2025): bare third-party
+ * brand references in titles trigger listing suppression and can lead to ASIN takedown.
+ * Sources: DAM Law Firm 2026 Q4 enforcement report; Amazon Seller Central Product Title
+ * Guidelines effective Jan 21, 2025.
+ *
+ * The seller's own brand (input.brandName) is exempted at runtime — this list is
+ * COMPETITORS / accessories ecosystems the seller's product is compatible WITH, not made by.
+ *
+ * Apparel "blank" brands (Comfort Colors, Bella Canvas, Gildan…) are deliberately NOT here.
+ * Amazon has long tolerated them as material/style descriptors and the existing pipeline
+ * handles them via `attributePin`. This list focuses on actively-enforcing trademark holders.
+ */
+const THIRD_PARTY_BRANDS = new Set([
+  // Cameras & imaging
+  'canon', 'nikon', 'sony', 'fujifilm', 'fuji', 'olympus', 'panasonic', 'pentax', 'leica',
+  'kodak', 'gopro', 'insta360', 'dji', 'ricoh', 'sigma', 'tamron',
+  // Memory / storage manufacturers
+  'sandisk', 'samsung', 'lexar', 'kingston', 'pny', 'toshiba', 'transcend', 'adata', 'patriot',
+  'crucial', 'seagate', 'maxell', 'micron',
+  // Phones & computing
+  'apple', 'iphone', 'ipad', 'macbook', 'imac', 'galaxy', 'pixel', 'microsoft', 'surface',
+  'huawei', 'xiaomi', 'oneplus', 'motorola',
+  // Drones
+  'parrot', 'autel', 'skydio', 'yuneec',
+  // Gaming
+  'nintendo', 'playstation', 'xbox', 'switch',
+  // Audio
+  'bose', 'beats', 'jbl', 'sennheiser',
+])
+
+/** Multi-word brand phrases (checked verbatim, not per-word). */
+const THIRD_PARTY_BRAND_PHRASES = [
+  'western digital', 'audio technica', 'sea gate', 'go pro',
+]
+
+/** Find every third-party brand token in `text`, excluding the seller's own brand. */
+export function findThirdPartyBrands(text: string, ownBrandTokens: Set<string>): string[] {
+  const lc = text.toLowerCase()
+  const found = new Set<string>()
+  for (const w of lc.split(/[^a-z0-9]+/).filter(Boolean)) {
+    if (ownBrandTokens.has(w)) continue
+    if (THIRD_PARTY_BRANDS.has(w)) found.add(w)
+  }
+  for (const phrase of THIRD_PARTY_BRAND_PHRASES) {
+    if (lc.includes(phrase)) found.add(phrase)
+  }
+  return [...found]
+}
+
+/**
+ * True if `brandToken` appears in `text` properly preceded by 'for', 'compatible with',
+ * 'works with', or 'fits' within the prior 2-3 tokens. Anything else is a bare reference
+ * that violates Amazon's policy.
+ */
+export function isBrandProperlyFramed(text: string, brandToken: string): boolean {
+  const lc = text.toLowerCase()
+  // Escape the token and allow 0-2 intervening tokens between the framing word and the brand.
+  // e.g. 'for GoPro' ✓, 'for action camera GoPro' ✓, 'GoPro SD Card' ✗
+  const tok = brandToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
+  const re = new RegExp(`\\b(?:for|compatible\\s+with|works?\\s+with|fits?\\s+(?:for\\s+)?)\\s+(?:[a-z0-9-]+\\s+){0,2}${tok}\\b`, 'i')
+  return re.test(lc)
+}
+
+/** Get the seller's own brand tokens for exemption from brand checks. */
+function ownBrandTokenSet(brandName: string): Set<string> {
+  return new Set(brandName.toLowerCase().split(/\s+/).filter(Boolean))
+}
 // Product-type words capped at 2 total in the backend core (Amazon's bag-of-words already
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
@@ -247,6 +317,17 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   }
 
   if (brandName && !lc.includes(brandName.toLowerCase())) problems.push(`Title must start with the brand "${brandName}".`)
+
+  // 🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy, Q4 2025 enforcement).
+  // Bare third-party brand names in titles trigger listing suppression. Only allowed with
+  // 'for [Brand]' or 'compatible with [Brand]' framing. The seller's own brand is exempted
+  // via ownBrandTokenSet. Critical — fail validation hard so the retry fires the fix.
+  const ownBrands = ownBrandTokenSet(brandName)
+  const brandsInTitle = findThirdPartyBrands(title, ownBrands)
+  const bareRefs = brandsInTitle.filter((b) => !isBrandProperlyFramed(title, b))
+  if (bareRefs.length > 0) {
+    problems.push(`🚫 LISTING-SUPPRESSION RISK: title contains bare third-party brand name${bareRefs.length === 1 ? '' : 's'} ${bareRefs.map((b) => `"${b}"`).join(', ')} without 'for' or 'compatible with' framing. Amazon's Jan 2025 policy (Q4 2025 enforcement) suppresses listings with bare brand references. Rewrite using "for ${bareRefs[0]}" or "compatible with ${bareRefs[0]}" — never the brand name standing alone.`)
+  }
 
   // UPGRADE keyword coverage — the scorer docks 5 points when 7+ UPGRADE keywords appear
   // in bullets but NOT in the title (3 points when 3-6 miss). Fail fast in validation so the
@@ -371,7 +452,8 @@ Rules:
 - ${apparel ? 'Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").' : 'Name the product type concisely (once or twice total). Do NOT reframe the product as apparel / a t-shirt / "graphic tee" / clothing unless it genuinely is one.'}
 - ${apparel
   ? 'Include the searchable keyphrases above when they fit. Do NOT put dry product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.'
-  : 'Include the searchable keyphrases above. **Technical/feature identifiers that shoppers actually search for ARE search terms** — include them when in the candidate pool above (e.g. UHS-I, Class 10, Bluetooth 5.0, USB-C, IP68, model identifiers like "Kodak PixPro", speed ratings like "90MB/s", capacity like "256GB"). Only EXCLUDE dry physical specs shoppers do not search (raw inch dimensions, gram weights, internal model codes).'}
+  : 'Include the searchable keyphrases above. **Technical/feature identifiers that shoppers actually search for ARE search terms** — include them when in the candidate pool above (e.g. UHS-I, Class 10, Bluetooth 5.0, USB-C, IP68, speed ratings like "90MB/s", capacity like "256GB"). Only EXCLUDE dry physical specs shoppers do not search (raw inch dimensions, gram weights, internal model codes).'}
+- 🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy — bare brand references SUPPRESS listings): If any keyword above is a third-party brand name (e.g. Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, Galaxy, DJI, Bose, etc. — anything that isn't your own brand "${brandName}"), use it ONLY in 'for [Brand]' or 'compatible with [Brand]' phrasing. Examples: ✓ 'for GoPro Hero', ✓ 'compatible with Canon EOS', ✗ 'GoPro SD Card' (bare reference — listing gets suppressed). Same rule for model names (iPhone 14, DSLR camera brands, etc.).
 - ${apparel ? '' : 'PREFER concrete keyphrases over filler descriptors. NEVER add empty marketing words like "Durable", "Reliable", "Solution", "Premium", "High-Quality", "Versatile", "Versatile Options" — every word should be either a search term, a real product attribute shoppers type, or an essential connector. If you have budget left, add another keyphrase from the candidate pool, not filler.'}
 - Must read like a human wrote it. Return ONLY the title.`
 
@@ -455,6 +537,7 @@ These are ADDITIONAL candidate keywords you MAY weave into the bullet body text 
 ${kwList || '  (none — focus on benefits)'}
 ${attrLine}
 - Never stuff a long-tail phrase (e.g. "later gator after while crocodile shirt") verbatim if it reads unnaturally — paraphrase or skip it.
+- 🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy, Q4 2025 enforcement): If any candidate keyword above is a third-party brand name (Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, DJI, Bose, etc. — anything that isn't your own brand), use it ONLY in 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]' phrasing. Examples: ✓ 'Compatible with GoPro Hero 11', ✗ 'Sandisk Standard Speed'. Bare third-party brand references in bullets risk listing suppression and trademark complaints. Same rule for model names (iPhone 14, EOS R5, etc.).
 
 Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
@@ -542,6 +625,12 @@ async function runBackendAgent(
   // dropped; the product-type word is capped at 2; minor words survive only as connectors. The
   // product's audience tokens (men/women, from the title) are GUARANTEED present.
   const kidsWords = new Set(KIDS_AUDIENCE)
+  // Backend keywords are space-separated tokens — you CAN'T express "for [Brand]" framing
+  // in that format. Bare third-party brand tokens in backend draw the same Amazon
+  // trademark-complaint risk as in titles. Drop them entirely. The seller's compatibility
+  // signal still lands via the title and bullets ("for GoPro Hero 11") which Amazon DOES
+  // index. (Jan 2025 policy + Q4 2025 enforcement.)
+  const ownBrandsForBackend = ownBrandTokenSet(brandName)
   const corePhrases: string[] = []
   const coreWordSet = new Set<string>()
   let productTypeCount = 0
@@ -553,6 +642,7 @@ async function runBackendAgent(
       if (JUNK_WORDS.has(w)) { toks.push(null); continue }
       if (ROLE_WORDS.has(w) && !titleWords.has(w)) { toks.push(null); continue }            // weak-relevance role
       if (kidsWords.has(w) && !titleWords.has(w)) { toks.push(null); continue }             // wrong audience (kids)
+      if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) { toks.push(null); continue }  // 3P brand: trademark risk in backend
       if (MINOR_WORDS.has(w)) { toks.push({ w, minor: true }); continue }
       if (PRODUCT_TYPE_WORDS.has(w)) {
         if (productTypeCount >= 2) { toks.push(null); continue }
@@ -606,6 +696,7 @@ Return ONLY the JSON.`
         if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w)) continue
         if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue          // weak-relevance role
         if (kidsWords.has(w) && !titleWords.has(w)) continue           // wrong audience
+        if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) continue  // 3P brand: trademark risk
         if (coreWordSet.has(w) || excludeWords.has(w)) continue        // already covered / auto-indexed
         if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
         coreWordSet.add(w); fillOut.push(w)
@@ -787,7 +878,9 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
 
-🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.${descCapacityFamily ? `
+🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.
+
+🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy): any third-party brand name (Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, DJI, Bose, etc. — anything not your own brand) appears ONLY in 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]' phrasing. Examples: ✓ 'compatible with Canon EOS R5 and Sony Alpha cameras', ✗ 'Sandisk-quality storage' (bare brand reference — risks listing suppression and trademark complaints).${descCapacityFamily ? `
 
 🚫 CAPACITY: this family has MULTIPLE capacities (${descFamilyCapList}). The description is SHARED across all variants — NEVER hardcode a specific GB number in any paragraph or bullet (no "128GB and 64GB capacities", no "this 128GB SD card", no "Available in 128GB and 64GB"). Use capacity-agnostic phrasing: "available in multiple capacities", "high-capacity storage", "ample space for your needs". The capacity-specific text already lives in each variant's TITLE.` : ''}
 
