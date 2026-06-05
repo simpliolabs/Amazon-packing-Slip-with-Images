@@ -439,18 +439,36 @@ export default function ListingDetailPage() {
     setRelinkLoading(false)
   }, [relinkTarget, relinkParentSku])
 
-  // Fetch AI recommendations (cached)
+  // Fetch AI recommendations (cached). If this parent has children but NO recommendations,
+  // probe the twin-parent endpoint — the seller likely navigated to a stale parent and the
+  // real recommendations live under a different ASIN (live-verified on B0F8WYNVPJ — push
+  // failed with 'No recommendations found' even though the page showed children. They were
+  // under B0GCF11RKL). When found, show the redirect banner below the header.
+  const [twinParentRedirect, setTwinParentRedirect] = useState<string | null>(null)
   useEffect(() => {
     if (!asin) return
+    let cancelled = false
     ;(async () => {
       try {
         const resp = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}`)
-        if (resp.ok) {
-          const data = await resp.json()
-          if (data.recommendations) setAiRecs(data.recommendations)
+        if (!resp.ok) return
+        const data = await resp.json()
+        if (cancelled) return
+        if (data.recommendations) {
+          setAiRecs(data.recommendations)
+          return
         }
+        // No recommendations stored for this parent — ask twin-parent if there's a sibling
+        // ASIN with the same SKU family that actually has them.
+        try {
+          const tr = await fetch(`/api/fba/listing-optimizer/twin-parent?parent_asin=${asin}`)
+          if (!tr.ok || cancelled) return
+          const td = await tr.json()
+          if (td.twinParent) setTwinParentRedirect(td.twinParent as string)
+        } catch { /* best-effort */ }
       } catch { /* ignore */ }
     })()
+    return () => { cancelled = true }
   }, [asin])
 
   // Fetch family SKUs (FBA + FBM twins + variation parent) — used by the TITLES card to show
@@ -834,6 +852,32 @@ export default function ListingDetailPage() {
       <button onClick={() => router.push('/fba')} className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-800 transition-colors cursor-pointer">
         <Icon.ArrowLeft className="w-4 h-4" /> Back to Listing Optimizer
       </button>
+
+      {/* ── Twin-parent redirect banner (PR #83) ──
+          When the seller lands on a parent that has children but NO recommendations stored,
+          and a twin-parent with matching SKU prefix DOES have them, surface a one-click
+          jump. Live-verified on B0F8WYNVPJ: 3 vars visible, push said 'No recommendations
+          found', the real ones lived under B0GCF11RKL. Mirrors the dashboard's stale-parent
+          badge UX, just on the listing page where the seller is actually stuck. */}
+      {twinParentRedirect && (
+        <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3 flex items-center gap-3">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-700 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-bold text-amber-900 uppercase tracking-wide">Stale Parent</div>
+            <div className="text-xs text-amber-900 leading-snug">
+              This ASIN has no AI recommendations stored — the children's actual recommendations
+              live under <span className="font-mono font-semibold">{twinParentRedirect}</span>.
+              Push will fail from here.
+            </div>
+          </div>
+          <button
+            onClick={() => router.push(`/fba/listing/${twinParentRedirect}`)}
+            className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold whitespace-nowrap"
+          >
+            Open {twinParentRedirect} →
+          </button>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           HEADER — Product info + Score
