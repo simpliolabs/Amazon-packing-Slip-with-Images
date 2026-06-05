@@ -571,6 +571,27 @@ export default function ListingDetailPage() {
     setAiProgress('')
   }, [asin])
 
+  /** Read a JSON response defensively. Coolify/nginx returns plain-text '502 Bad Gateway'
+   *  HTML when the upstream Next process times out, restarts, or OOMs mid-request — calling
+   *  `await resp.json()` on that throws the classic 'Unexpected token "B" is not valid JSON'.
+   *  This wraps the read so we surface a clean, actionable message instead. */
+  const readJsonOrThrowGateway = async (resp: Response, when: 'preview' | 'push'): Promise<unknown> => {
+    const ct = resp.headers.get('content-type') || ''
+    const text = await resp.text()
+    if (!ct.includes('application/json') || /^\s*<|^\s*5\d{2}\s+|Bad Gateway|Gateway Time-?out/i.test(text)) {
+      // It's HTML / plain text — a gateway / proxy error from Coolify, NOT a JSON response.
+      const code = resp.status || 502
+      const hint = when === 'push'
+        ? `Server returned ${code} mid-push. The submission likely still reached Amazon — use Verify on Amazon to confirm before retrying (a retry could submit a duplicate patch).`
+        : `Server returned ${code}. The app may be restarting (Coolify deploy?) — retry in ~30 seconds.`
+      throw new Error(hint)
+    }
+    try { return JSON.parse(text) }
+    catch {
+      throw new Error(`Server returned malformed JSON (${resp.status}). ${when === 'push' ? 'Check Verify on Amazon before retrying.' : 'Retry shortly.'}`)
+    }
+  }
+
   // ─── Ship a content section to Amazon (preview → confirm) ─────────────────
   // detailField is only used for field='details' (one detail per click).
   const openPushPreview = useCallback(async (field: PushField, detailField?: string) => {
@@ -582,9 +603,9 @@ export default function ListingDetailPage() {
         ? `&detail_field=${encodeURIComponent(detailField)}`
         : ''
       const resp = await fetch(`/api/fba/listing-optimizer/push-content?parent_asin=${asin}&field=${field}${qs}`)
-      const data = await resp.json()
+      const data = await readJsonOrThrowGateway(resp, 'preview') as { error?: string }
       if (!resp.ok) throw new Error(data.error || 'Preview failed')
-      setPushPreview(data)
+      setPushPreview(data as PushPreview)
     } catch (e) {
       setPushError(e instanceof Error ? e.message : 'Preview failed')
     }
@@ -601,9 +622,16 @@ export default function ListingDetailPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await resp.json()
+      const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string; pushed?: number; total?: number; failed?: number; message?: string; results?: PushResultRow[]; field?: PushField }
       if (!resp.ok) throw new Error(data.error || 'Push failed')
-      setPushResults(data)
+      setPushResults({
+        field: data.field,
+        pushed: data.pushed ?? 0,
+        failed: data.failed ?? 0,
+        total: data.total ?? 0,
+        message: data.message ?? 'Push completed.',
+        results: data.results ?? [],
+      })
       setPushPreview(null)
       // The push re-scores server-side; pull the fresh score so the KPI cards/ring
       // update immediately without a manual page reload.
