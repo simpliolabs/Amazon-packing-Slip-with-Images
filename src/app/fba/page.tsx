@@ -380,6 +380,37 @@ export default function FBAIntelligencePage() {
   const [seoError, setSeoError] = useState<string | null>(null)
   const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
   const [modalTab, setModalTab] = useState<'issues' | 'keywords'>('issues')
+  /** Per-parent stale-status. Stale = at least one child re-parented elsewhere or orphaned, AND
+   *  a single OTHER parent dominates (>=half) — meaning the real family lives there now. */
+  const [staleStatus, setStaleStatus] = useState<Record<string, { isStale: boolean; dominantParent: string | null; orphanCount: number; reparentedCount: number; totalChildren: number }>>({})
+  // Lazily check each parent's orphan status after scores load. SP-API is rate-limited so we
+  // fire them in parallel but cap to avoid hammering; cards render the badge progressively.
+  useEffect(() => {
+    if (seoScores.length === 0) return
+    let cancelled = false
+    ;(async () => {
+      await Promise.all(seoScores.map(async (s) => {
+        if (staleStatus[s.parent_asin]) return // already checked
+        try {
+          const r = await fetch(`/api/fba/listing-optimizer/orphan-check?parent_asin=${s.parent_asin}`)
+          if (!r.ok) return
+          const d = await r.json()
+          const children = (d.children ?? []) as { status: string; liveParent: string | null }[]
+          const orphanCount = children.filter((c) => c.status === 'orphan').length
+          const reparented = children.filter((c) => c.status === 'reparented')
+          const counts = new Map<string, number>()
+          for (const c of reparented) if (c.liveParent) counts.set(c.liveParent, (counts.get(c.liveParent) ?? 0) + 1)
+          const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+          const dominantParent = top?.[0] ?? null
+          const dominantCount = top?.[1] ?? 0
+          // Stale = the real family clearly lives under another parent (>= half of children).
+          const isStale = !!dominantParent && dominantCount >= Math.max(1, Math.ceil(children.length / 2))
+          if (!cancelled) setStaleStatus((prev) => ({ ...prev, [s.parent_asin]: { isStale, dominantParent, orphanCount, reparentedCount: reparented.length, totalChildren: children.length } }))
+        } catch { /* best-effort */ }
+      }))
+    })()
+    return () => { cancelled = true }
+  }, [seoScores, staleStatus])
   const [fixingField, setFixingField] = useState<string | null>(null) // 'parentAsin:field'
   const [listingSubTab, setListingSubTab] = useState<'issues' | 'optimizer'>('issues')
   const [aiRecs, setAiRecs] = useState<Record<string, AiRecommendations | null>>({})
@@ -3111,12 +3142,15 @@ export default function FBAIntelligencePage() {
               {/* ── Compact Cards Grid ──────────────────────────────────────────── */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {seoScores.map(score => {
+                  const stale = staleStatus[score.parent_asin]
+                  const isStale = stale?.isStale ?? false
                   const scoreColor =
                     score.overall_score >= 80 ? 'text-green-600'
                     : score.overall_score >= 60 ? 'text-amber-600'
                     : 'text-red-600'
-                  const scoreBg =
-                    score.overall_score >= 80 ? 'bg-green-50 border-green-200 hover:border-green-400'
+                  const scoreBg = isStale
+                    ? 'bg-slate-50 border-slate-300 hover:border-slate-400 opacity-75'
+                    : score.overall_score >= 80 ? 'bg-green-50 border-green-200 hover:border-green-400'
                     : score.overall_score >= 60 ? 'bg-amber-50 border-amber-200 hover:border-amber-400'
                     : 'bg-red-50 border-red-200 hover:border-red-400'
                   const allIssues = score.issues || []
@@ -3140,6 +3174,19 @@ export default function FBAIntelligencePage() {
                       className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
                     >
                       <div className="p-4">
+                        {/* Stale-parent badge: this parent's children have moved to another family on Amazon. */}
+                        {isStale && stale?.dominantParent && (
+                          <div
+                            onClick={(e) => { e.stopPropagation(); router.push(`/fba/listing/${stale.dominantParent}`) }}
+                            className="mb-3 -mx-4 -mt-4 px-4 py-2 bg-amber-100 border-b border-amber-200 flex items-center gap-2 cursor-pointer hover:bg-amber-200 transition-colors"
+                            title="Open the parent the children actually live under on Amazon"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-700 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+                            <span className="text-[11px] font-semibold text-amber-900 uppercase tracking-wide">Stale Parent</span>
+                            <span className="text-[11px] text-amber-900 truncate">Children moved to <span className="font-mono font-semibold">{stale.dominantParent}</span></span>
+                            <span className="ml-auto text-[11px] text-amber-700 font-medium whitespace-nowrap">Open →</span>
+                          </div>
+                        )}
                         {/* Header row: image + title + score */}
                         <div className="flex items-start gap-3 mb-3">
                           {score.image_url
