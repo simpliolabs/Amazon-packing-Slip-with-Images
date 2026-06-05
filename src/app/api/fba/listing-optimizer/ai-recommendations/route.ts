@@ -525,6 +525,64 @@ export async function POST(req: NextRequest) {
 
           emit({ type: 'progress', message: 'Saving to database...' })
 
+          // ── POST-PROCESS: mark items DONE when live already matches the recommendation ──
+          // The pipeline FORCES verdict=REPLACE on every content element (listingPipeline.ts:1043)
+          // so the copy box always renders. That's intentional, but it conflicts with reality:
+          // after the seller pushes a section, the next regen still flags it as actionable even
+          // though the live content now matches what we'd recommend writing. Seller sees
+          // 'Apply Changes (8)' for content they already shipped.
+          //
+          // Fix: compare each child's live content to the pipeline's recommendation. When every
+          // child agrees, flip verdict to DONE so the card collapses to the ✓ Pushed state. The
+          // copy box stays available (we keep replacement_content) for sellers who want to
+          // re-copy.
+          const norm = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
+          const everyChildMatches = (getLive: (c: ChildRow) => string, recommended: string): boolean => {
+            const recNorm = norm(recommended)
+            if (!recNorm || children.length === 0) return false
+            return children.every((c) => norm(getLive(c)) === recNorm)
+          }
+          for (const item of result.action_plan as ActionPlanItem[]) {
+            if (item.verdict !== 'REPLACE') continue
+            let live = false
+            if (item.element === 'title') {
+              // Capacity families have per-child titles — compare each child to its own
+              // recommended title rather than the broadcast one.
+              if (Array.isArray(result.per_child_titles) && result.per_child_titles.length > 1) {
+                const pctMap = new Map(result.per_child_titles.map((p) => [p.sku, norm(p.title)]))
+                live = children.every((c) => {
+                  const want = pctMap.get(c.sku)
+                  return want ? norm(c.title) === want : true
+                })
+              } else {
+                live = everyChildMatches((c) => c.title ?? '', result.recommended_title)
+              }
+            } else if (/^bullet_(\d+)$/.test(item.element)) {
+              const n = Number(item.element.split('_')[1])
+              const recBullet = result.recommended_bullets[n - 1] ?? ''
+              live = everyChildMatches((c) => (c as unknown as Record<string, string | null>)[`bullet_${n}`] ?? '', recBullet)
+            } else if (item.element === 'description') {
+              live = everyChildMatches((c) => c.description ?? '', result.recommended_description)
+            } else if (item.element === 'backend_keywords') {
+              // Per-child: each SKU compares to its own per_child_keywords entry.
+              const kwMap = new Map(result.per_child_keywords.map((p) => [p.sku, norm(p.keywords)]))
+              live = children.length > 0 && children.every((c) => {
+                const want = kwMap.get(c.sku)
+                return want ? norm(c.backend_keywords) === want : true
+              })
+            }
+            if (live) {
+              item.verdict = 'DONE'
+              const label = item.element === 'backend_keywords' ? 'backend search terms'
+                : item.element === 'description' ? 'description'
+                : /^bullet_(\d+)$/.test(item.element) ? `bullet ${item.element.split('_')[1]}`
+                : item.element
+              item.current_status = `✓ Live ${label} matches the recommended version across all ${children.length} variant${children.length === 1 ? '' : 's'}.`
+              item.instruction = 'No action required — your last push wrote this exact content. The copy box stays below if you need it.'
+              if (item.priority !== 'HIGH') item.priority = 'NONE'
+            }
+          }
+
           const rec: AiRecommendations = {
             parent_asin,
             recommended_title: result.recommended_title,
