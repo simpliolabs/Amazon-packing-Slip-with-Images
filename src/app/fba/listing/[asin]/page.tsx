@@ -174,6 +174,7 @@ export default function ListingDetailPage() {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['apply']))
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
+  const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
 
   // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords) ──
   type PushField = 'title' | 'bullets' | 'description' | 'keywords'
@@ -229,6 +230,18 @@ export default function ListingDetailPage() {
       } catch { /* ignore — placeholder stays */ }
     })()
   }, [score, asin])
+
+  // Orphan check — flag children whose live Amazon variation link to this parent is broken
+  // (was part of the family, got disconnected). Best-effort; never blocks the page.
+  useEffect(() => {
+    if (!asin) return
+    ;(async () => {
+      try {
+        const r = await fetch(`/api/fba/listing-optimizer/orphan-check?parent_asin=${asin}`)
+        if (r.ok) { const d = await r.json(); if (d && typeof d.orphanCount === 'number') setOrphans(d) }
+      } catch { /* best-effort */ }
+    })()
+  }, [asin])
 
   // Fetch AI recommendations (cached)
   useEffect(() => {
@@ -536,6 +549,24 @@ export default function ListingDetailPage() {
           <span className="text-[11px] text-slate-400">Used for Jungle Scout lookup when your ASIN has no data</span>
         </div>
       </div>
+
+      {/* ══ ORPHAN WARNING — children whose live variation link to this parent is broken ══ */}
+      {orphans && orphans.orphanCount > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl shadow-sm p-4 flex items-start gap-3">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-amber-900">{orphans.orphanCount} variant{orphans.orphanCount === 1 ? '' : 's'} disconnected from this parent</p>
+            <p className="text-xs text-amber-800 mt-0.5">These child ASINs are stored under this parent, but Amazon no longer links them to the variation family — they lose the family&apos;s pooled reviews &amp; ranking. Re-link them in Seller Central&apos;s variation wizard.</p>
+            <ul className="mt-2 space-y-0.5">
+              {orphans.children.filter((c) => c.status === 'orphan' || c.status === 'reparented').map((c) => (
+                <li key={c.asin} className="text-xs text-amber-900">
+                  <span className="font-mono">{c.asin}</span> <span className="text-amber-700">({c.sku})</span> — {c.status === 'orphan' ? 'no parent link on Amazon' : `now linked to ${c.liveParent}`}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       {/* ══ KPI ROW — the four sub-scores as their own cards ══ */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
