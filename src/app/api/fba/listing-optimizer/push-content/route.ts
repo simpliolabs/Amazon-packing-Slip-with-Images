@@ -88,6 +88,53 @@ interface DiffRow {
   bytes: number
   chars: number
   changed: boolean
+  /** Marks this row as the variation PARENT SKU (the non-buyable hub). Only set for title pushes
+   *  when a capacity family is in scope; the title written here is capacity-agnostic. */
+  isParent?: boolean
+  /** ASIN this row's seller SKU resolves to (helpful when we add FBM twins discovered live). */
+  asin?: string
+}
+
+/** Strip any GB/TB/MB capacity token from a title so it's safe for the variation-parent SKU.
+ *  Mirrors the client-side computation in #60's PARENT row. */
+function stripCapacity(t: string): string {
+  return (t || '').replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, '').replace(/\s{2,}/g, ' ').trim()
+}
+
+/**
+ * For a given ASIN, ask Amazon for every SKU this seller has under it (FBA, FBM, etc.). Used to
+ * augment listing_content rows whose FBM twin was never synced into our DB. Best-effort: if the
+ * call fails we just return what was passed in.
+ */
+async function discoverSkusForAsin(
+  sellerId: string, token: string, asin: string,
+): Promise<{ sku: string; asin: string }[]> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
+      `?identifiers=${encodeURIComponent(asin)}&identifiersType=ASIN` +
+      `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return []
+    const json = (await resp.json()) as { items?: { sku?: string }[] }
+    return (json.items ?? [])
+      .map((it) => (it.sku ? { sku: it.sku, asin } : null))
+      .filter((x): x is { sku: string; asin: string } => x !== null)
+  } catch { return [] }
+}
+
+/** Look up the variation-parent SKU for a parent ASIN via Listings Items search. */
+async function findParentSku(sellerId: string, token: string, parentAsin: string): Promise<string | null> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
+      `?identifiers=${encodeURIComponent(parentAsin)}&identifiersType=ASIN` +
+      `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return null
+    const json = (await resp.json()) as { items?: { sku?: string }[] }
+    return json.items?.[0]?.sku ?? null
+  } catch { return null }
 }
 
 /**
@@ -135,7 +182,7 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
     }
   }
 
-  return rows
+  const baseDiff = rows
     .map((row): DiffRow => {
       const proposed = field === 'keywords'
         ? (asinToKeywords.has(row.asin) ? capBytes((asinToKeywords.get(row.asin) || '').trim(), 250) : null)
@@ -143,7 +190,7 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
       const proposedStr = asCompare(proposed)
       const current = currentValue(field, row as unknown as Record<string, unknown>)
       return {
-        sku: row.sku,
+        sku: row.sku, asin: row.asin,
         current,
         proposed: proposedStr,
         raw: proposed,
@@ -153,6 +200,84 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
       }
     })
     .filter((d) => d.raw != null) // keywords: drops SKUs whose ASIN has no per-child recommendation
+  if (baseDiff.length === 0) return baseDiff
+
+  // ── ENRICH with FBM twin SKUs discovered live from Amazon ──
+  // listing_content historically deduped some FBA/FBM pairs; the user expects the push to hit
+  // BOTH. Ask SP-API Listings Items per ASIN to find every SKU this seller has under that ASIN,
+  // and add any SKU we don't already have to the diff with the SAME proposed value.
+  let token: string | null = null
+  let sellerId: string | null = null
+  try {
+    const knownSkus = new Set(baseDiff.map((d) => d.sku))
+    const asinsToProbe = [...new Set(baseDiff.map((d) => d.asin).filter((a): a is string => !!a))]
+    if (asinsToProbe.length > 0) {
+      token = await getAccessToken()
+      sellerId = await getSellerId()
+      const skuToCurrent = new Map(rows.map((r) => [r.sku, r]))
+      for (const asin of asinsToProbe) {
+        const discovered = await discoverSkusForAsin(sellerId, token, asin)
+        for (const d of discovered) {
+          if (knownSkus.has(d.sku)) continue // already in the diff
+          // Find an existing row for this ASIN to base the "current" value on. The newly-found
+          // SKU may have a slightly different live title, but since we don't sync its content
+          // we present the same current value (Amazon's VALIDATION_PREVIEW will reveal any
+          // surprise before we write). Fallback to empty current.
+          const sourceRow = baseDiff.find((b) => b.asin === asin) ?? null
+          // Re-resolve proposed using the new SKU so per_child_titles matching by SKU still
+          // works when the FBM SKU has its own per-child entry. Fall back to the ASIN's first
+          // row's proposed value otherwise.
+          const proposed = field === 'keywords'
+            ? (asinToKeywords.has(asin) ? capBytes((asinToKeywords.get(asin) || '').trim(), 250) : null)
+            : (resolveProposed(field, rec, new Map(), d.sku) ?? sourceRow?.raw ?? null)
+          const proposedStr = asCompare(proposed)
+          if (!proposed || proposedStr.length === 0) continue
+          const currentValueForRow = sourceRow?.current ?? ''
+          baseDiff.push({
+            sku: d.sku, asin,
+            current: currentValueForRow,
+            proposed: proposedStr,
+            raw: proposed,
+            bytes: getByteLength(proposedStr),
+            chars: proposedStr.length,
+            // A discovered SKU we haven't synced is assumed to need updating unless it happens
+            // to equal the proposed string. Conservatively mark changed=true so the user can
+            // see it in the preview.
+            changed: proposedStr.length > 0 && currentValueForRow !== proposedStr,
+          })
+          knownSkus.add(d.sku)
+        }
+      }
+    }
+  } catch { /* enrichment is best-effort — don't block the preview */ }
+
+  // ── PARENT SKU row for title pushes when a capacity family is in scope ──
+  // The variation parent (e.g. Memory-Card-P) is non-buyable but DOES carry its own item_name.
+  // For capacity families we ship a CAPACITY-AGNOSTIC title there so the variation hub doesn't
+  // show a specific GB. Only fired for field=title and only when per_child_titles is present.
+  if (field === 'title' && Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1) {
+    try {
+      if (!token) { token = await getAccessToken(); sellerId = await getSellerId() }
+      const parentSku = sellerId ? await findParentSku(sellerId, token, parentAsin) : null
+      if (parentSku && !baseDiff.some((d) => d.sku === parentSku)) {
+        const parentTitle = stripCapacity(rec.recommended_title ?? '')
+        if (parentTitle.length > 0) {
+          baseDiff.push({
+            sku: parentSku, asin: parentAsin,
+            current: '', // we don't sync the parent's title cache; let VALIDATION_PREVIEW catch surprises
+            proposed: parentTitle,
+            raw: parentTitle,
+            bytes: getByteLength(parentTitle),
+            chars: parentTitle.length,
+            changed: true,
+            isParent: true,
+          })
+        }
+      }
+    } catch { /* parent enrichment is best-effort */ }
+  }
+
+  return baseDiff
 }
 
 // ─── GET — preview (no writes) ─────────────────────────────────────────────────
