@@ -148,10 +148,11 @@ const APPAREL_CONTAMINANTS = /\b(?:t[-\s]?shirts?|tees?|shirts?|graphic\s*tees?|
 
 // A storage-capacity token ("128GB", "1 TB"). When children span >=2 distinct capacities the
 // title is per-child (each carries its own capacity) — NOT a concept that ever matches apparel.
-const CAPACITY_RE = /\b(\d{1,4})\s?(tb|gb|mb)\b/i
+const CAPACITY_RE = /\b(\d{1,4})\s?(t|g)b?\b/i // GB/TB only — "MB" is usually a transfer speed, not capacity
 function capacityOf(s: string | null | undefined): string | null {
   const m = (s ?? '').match(CAPACITY_RE)
-  return m ? `${m[1]}${m[2].toUpperCase()}` : null
+  // "32G"/"64G." -> 32GB/64GB, "128GB" -> 128GB, "1T"/"1TB" -> 1TB
+  return m ? `${m[1]}${m[2].toUpperCase()}B` : null
 }
 
 const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
@@ -914,7 +915,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
   if (!apparelProduct) {
     const childCap = new Map<string, string>()
-    for (const c of input.children) { const cap = capacityOf(c.title); if (cap) childCap.set(c.sku, cap) }
+    // Capacity from the SKU first (reliable — e.g. "...-32G-FBA"); the child's CURRENT title is
+    // an unreliable fallback (it can be a templated/wrong title — part of why we're optimizing).
+    for (const c of input.children) { const cap = capacityOf(c.sku) || capacityOf(c.title); if (cap) childCap.set(c.sku, cap) }
     if (new Set(childCap.values()).size >= 2) {
       const baseCap = capacityOf(finalTitle)
       perChildTitles = input.children.map((c) => {
