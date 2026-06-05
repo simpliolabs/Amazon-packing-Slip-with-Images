@@ -936,6 +936,18 @@ export default function ListingDetailPage() {
         )
       })()}
 
+      {/* Apply-tab fallback — recommendations loaded but the audit returned an empty action plan
+          (otherwise the tab renders blank — the "not loading" report). */}
+      {activeTab === 'apply' && aiRecs && !(aiRecs.action_plan && aiRecs.action_plan.length > 0) && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center">
+          <p className="text-sm text-slate-500 mb-1">The recommendations loaded, but the action plan came back empty.</p>
+          <p className="text-xs text-slate-400 mb-4">Regenerate to rebuild the per-section changes.</p>
+          <button onClick={generateAiRecs} disabled={aiLoading} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 transition-colors cursor-pointer disabled:opacity-50">
+            <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Regenerating…' : 'Regenerate'}
+          </button>
+        </div>
+      )}
+
       {/* ══════════════════════════════════════════════════════════════════════
           SECTION 1 — Keyword Placement Plan (grouped by placement)
           ══════════════════════════════════════════════════════════════════════ */}
