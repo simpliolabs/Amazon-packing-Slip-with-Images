@@ -309,12 +309,54 @@ export async function POST(req: NextRequest) {
 
     const supabase = getAdminSupabase()
 
-    // Fetch all child content rows for this parent
-    const { data: childrenRaw, error } = await supabase
+    // Fetch all child content rows for this parent.
+    const contentCols = 'sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt'
+    let { data: childrenRaw, error } = await supabase
       .from('listing_content')
-      .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+      .select(contentCols)
       .eq('parent_asin', parent_asin)
       .order('sku', { ascending: true })
+
+    // SELF-HEAL: if we have 0 rows under this parent_asin but Amazon's catalog says this ASIN
+    // IS a variation parent with childAsins, the children are stored under a STALE parent_asin
+    // in our DB (their actual Amazon parent changed). Pull the live childAsins, re-assign our
+    // listing_content rows, then retry. Keeps a stale sync from blocking a perfectly valid regen.
+    if (!error && (!childrenRaw || childrenRaw.length === 0)) {
+      try {
+        const { getAccessToken: getTok } = await import('@/lib/amazon/auth')
+        const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
+        const MP = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
+        const tok = await getTok()
+        const url = `${ENDPOINT}/catalog/2022-04-01/items/${encodeURIComponent(parent_asin)}?marketplaceIds=${MP}&includedData=relationships`
+        const resp = await fetch(url, { headers: { 'x-amz-access-token': tok } })
+        if (resp.ok) {
+          const cat = await resp.json() as { relationships?: { relationships?: { type?: string; childAsins?: string[] }[] }[] }
+          const childAsins: string[] = []
+          for (const byMp of cat.relationships ?? []) for (const r of byMp.relationships ?? []) {
+            if (r.type === 'VARIATION' && Array.isArray(r.childAsins)) childAsins.push(...r.childAsins)
+          }
+          if (childAsins.length > 0) {
+            const { data: matched } = await supabase
+              .from('listing_content')
+              .select('sku, asin, parent_asin')
+              .in('asin', childAsins)
+            const movable = (matched ?? []).filter((r) => (r as { parent_asin: string | null }).parent_asin !== parent_asin)
+            if (movable.length > 0) {
+              const movableSkus = movable.map((r) => (r as { sku: string }).sku)
+              await supabase.from('listing_content').update({ parent_asin }).in('sku', movableSkus)
+              console.log(`[ai-recommendations] self-heal: re-attached ${movableSkus.length} child SKU(s) to parent ${parent_asin}`)
+              // Re-query with the corrected parent_asin
+              const retry = await supabase
+                .from('listing_content')
+                .select(contentCols)
+                .eq('parent_asin', parent_asin)
+                .order('sku', { ascending: true })
+              childrenRaw = retry.data; error = retry.error
+            }
+          }
+        }
+      } catch (e) { console.warn('[ai-recommendations] self-heal failed (continuing with 404):', e) }
+    }
 
     if (error || !childrenRaw || childrenRaw.length === 0) {
       return NextResponse.json({ error: 'No listing content found. Run Scan Listings first.' }, { status: 404 })
