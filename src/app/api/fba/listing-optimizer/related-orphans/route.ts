@@ -78,23 +78,25 @@ export async function GET(req: NextRequest) {
     const storedSkus = new Set(storedRows.map((r) => r.sku))
     const prefix = commonSkuPrefix(storedRows.filter((r) => r.asin !== parentAsin).map((r) => r.sku))
 
-    // Also resolve this parent's seller SKU via SP-API (needed for pre-fill in the Re-link modal).
+    // Also resolve this parent's seller SKU (needed for pre-fill in the Re-link modal).
+    // The Catalog Items API summaries don't expose seller-specific SKUs; the Listings Items
+    // search endpoint does. /listings/2021-08-01/items/{sellerId}?identifiers=<ASIN>&identifiersType=ASIN
+    // returns this seller's SKUs that map to the given ASIN — including the variation parent SKU.
     const token = await getAccessToken()
     const sellerId = await getSellerId()
     let parentSku: string | null = null
     try {
-      const parentResp = await fetch(
-        `${ENDPOINT}/catalog/2022-04-01/items/${encodeURIComponent(parentAsin)}` +
-        `?marketplaceIds=${MARKETPLACE_ID}&includedData=summaries,relationships`,
+      const lookup = await fetch(
+        `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
+        `?identifiers=${encodeURIComponent(parentAsin)}&identifiersType=ASIN` +
+        `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`,
         { headers: { 'x-amz-access-token': token } },
       )
-      if (parentResp.ok) {
-        const pj = (await parentResp.json()) as CatalogItem
-        parentSku = pj.summaries?.[0]?.sku ?? null
+      if (lookup.ok) {
+        const lj = (await lookup.json()) as { items?: { sku?: string }[] }
+        parentSku = lj.items?.[0]?.sku ?? null
       }
     } catch { /* best-effort — UI can still let the user type the SKU */ }
-    // Fallback: getListingsItem for one of the stored child SKUs returns the seller SKU it was queried with,
-    // but the parent's seller SKU isn't always derivable that way. Skip if SP-API didn't give us one.
 
     if (!prefix) return NextResponse.json({ parent_asin: parentAsin, parent_sku: parentSku, prefix: '', candidates: [] })
 
