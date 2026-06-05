@@ -491,6 +491,12 @@ export function validateBullets(
   bullets: string[],
   brandName: string,
   opportunityKws: string[] = [],
+  /** Distinct capacity tokens across the family (e.g. ['32GB','64GB','128GB']). Non-empty
+   *  means broadcast bullets must NOT hardcode any specific capacity — they ship to every
+   *  child. Live-verified bug at B0GCF11RKL: bullets 2 and 3 hardcoded "128 GB" though the
+   *  family has 32/64/128 SKUs. The agent prompt already forbids this — validation
+   *  enforces it through the retry loop. */
+  capacityFamily: string[] = [],
 ): string[] {
   const problems: string[] = []
   if (bullets.length === 0) {
@@ -505,6 +511,53 @@ export function validateBullets(
   if (shortBullets.length > 0) {
     const names = shortBullets.map((x) => `bullet ${x.i + 1} (${x.len} chars)`).join(', ')
     problems.push(`${shortBullets.length} bullet${shortBullets.length === 1 ? '' : 's'} under 100 chars: ${names}. Expand each to 100-200 chars with a "so that" benefit, a compatible-device example, and a long-tail keyword.`)
+  }
+
+  // CAPS-hook check (live-verified bug at B0G884ZJ27: bullets opened with sentence prose
+  // "Made from soft, breathable..." instead of "PREMIUM FABRIC - Made from..."). Pattern:
+  // 2-4 ALL-CAPS tokens (length ≥2 each, hyphens/digits allowed) followed by " - "/" – "/" — ".
+  const capsHookRe = /^(?:[A-Z][A-Z0-9-]+(?:\s+[A-Z][A-Z0-9-]+){0,3})\s*[-–—]\s+/
+  const noHook: { i: number }[] = []
+  for (let i = 0; i < bullets.length; i++) {
+    if (!capsHookRe.test(bullets[i].trim())) noHook.push({ i })
+  }
+  if (noHook.length > 0) {
+    const names = noHook.map((x) => `bullet ${x.i + 1}`).join(', ')
+    problems.push(`${noHook.length} bullet${noHook.length === 1 ? '' : 's'} missing the CAPS benefit hook (${names}). Each bullet must start with a 2-3 word ALL-CAPS benefit followed by " - " then the explanation. Example: "HIGH-SPEED PERFORMANCE - Class 10 UHS-I technology ensures fast read/write speeds...".`)
+  }
+
+  // Awkward-forced-keyword check (live-verified bug at B0GCF11RKL: "CRITICAL UPGRADE -
+  // Upgrade your storage..." — the agent literalized PR #73's MANDATORY #3 prompt term as
+  // the benefit hook). CAPS hooks should be BENEFIT phrases, not pipeline action-type
+  // labels that name the SEO mechanic itself.
+  const FORBIDDEN_HOOK_WORDS = new Set(['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED', 'KEYWORD', 'KEYWORDS', 'SEO', 'OPPORTUNITY'])
+  const awkwardHooks: { i: number; forbidden: string[] }[] = []
+  for (let i = 0; i < bullets.length; i++) {
+    const m = bullets[i].trim().match(capsHookRe)
+    if (!m) continue
+    const hookOnly = m[0].replace(/\s*[-–—]\s+$/, '').trim()
+    const forbidden = hookOnly.split(/\s+/).filter((w) => FORBIDDEN_HOOK_WORDS.has(w))
+    if (forbidden.length > 0) awkwardHooks.push({ i, forbidden })
+  }
+  if (awkwardHooks.length > 0) {
+    const detail = awkwardHooks.map((x) => `bullet ${x.i + 1} ("${x.forbidden.join('/')}" in hook)`).join(', ')
+    problems.push(`${awkwardHooks.length} bullet${awkwardHooks.length === 1 ? '' : 's'} have a CAPS hook that literalizes a pipeline action-type label (${detail}). Hooks must name a real BENEFIT shoppers care about ("HIGH-SPEED PERFORMANCE", "DURABLE DESIGN", "WIDE COMPATIBILITY") — never "CRITICAL", "UPGRADE", "KEYWORD" or other SEO mechanic words. Rewrite the hook with a benefit phrase that fits the bullet body.`)
+  }
+
+  // 🚫 CAPACITY-FAMILY check (live-verified bug at B0GCF11RKL: bullets 2 and 3 hardcoded
+  // "128 GB" though the family spans 32GB/64GB/128GB — broadcast bullets ship to every
+  // child, so 32GB shoppers would see "this 128 GB SD card").
+  if (capacityFamily.length >= 2) {
+    const capacityRe = /\b\d{1,4}\s?(?:GB|TB|MB)\b/gi
+    const hardcoded: { i: number; matches: string[] }[] = []
+    for (let i = 0; i < bullets.length; i++) {
+      const ms = bullets[i].match(capacityRe)
+      if (ms && ms.length > 0) hardcoded.push({ i, matches: [...new Set(ms.map((m) => m.replace(/\s+/g, ' ').toUpperCase()))] })
+    }
+    if (hardcoded.length > 0) {
+      const detail = hardcoded.map((x) => `bullet ${x.i + 1} ("${x.matches.join(', ')}")`).join('; ')
+      problems.push(`🚫 CAPACITY-FAMILY VIOLATION: ${hardcoded.length} bullet${hardcoded.length === 1 ? '' : 's'} hardcode a specific capacity (${detail}). This family has multiple capacities (${capacityFamily.join(', ')}) and bullets are SHARED across all variants — saying "128GB" in a bullet ships to your 32GB and 64GB SKUs and misleads shoppers. Use capacity-agnostic phrasing: "ample capacity", "high-capacity storage", "available in multiple sizes". Each variant's specific capacity already lives in its TITLE.`)
+    }
   }
 
   // 🚫 BRAND-NAME SAFETY — same rule that PR #74 enforced for title. Each bullet checked
@@ -761,6 +814,10 @@ async function runBulletsAgent(
    *  validation retry below — if 3+ are missing across all bullets, the corrective prompt
    *  fires with the missing list. Same contract as runTitleAgent's upgradeKws. */
   opportunityKws: string[] = [],
+  /** Capacity tokens across the family (e.g. ['32GB','64GB','128GB']). When ≥2 distinct
+   *  capacities, the validator rejects any hardcoded capacity in a broadcast bullet
+   *  (PR #76 fix for B0GCF11RKL "this 128 GB SD card" bug). */
+  capacityFamilyTokens: string[] = [],
 ): Promise<string[]> {
   const { openai, brandName, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
@@ -851,9 +908,12 @@ Return ONLY the JSON object.`
   // role-leak guard above runs first because its check is cheap and deterministic; this
   // pass costs one more LLM call only when validateBullets actually finds problems.
   if (bullets.length > 0 && brandName) {
-    let bProblems = validateBullets(bullets, brandName, opportunityKws)
+    let bProblems = validateBullets(bullets, brandName, opportunityKws, capacityFamilyTokens)
     for (let attempt = 0; attempt < 2 && bProblems.length > 0; attempt++) {
       try {
+        const capacityClause = capacityFamilyTokens.length >= 2
+          ? `\n- 🚫 CAPACITY: this family has multiple capacities (${capacityFamilyTokens.join(', ')}). The bullets are SHARED across all variants — NEVER hardcode a specific GB number ("128GB", "this 128 GB SD card"). Use capacity-agnostic phrasing only.`
+          : ''
         const fix = await openai.chat.completions.create({
           model: 'gpt-4.1-mini',
           messages: [
@@ -864,8 +924,8 @@ Problems:
 - ${bProblems.join('\n- ')}
 
 Rules to honor on rewrite:
-- Each bullet 100-200 chars, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ".
-- Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${brandName}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.
+- Each bullet 100-200 chars, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ". The hook is a real BENEFIT ("HIGH-SPEED PERFORMANCE", "DURABLE DESIGN") — never a pipeline label like "CRITICAL UPGRADE" or "KEYWORD".
+- Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${brandName}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capacityClause}
 - Weave in any missing opportunity keywords listed above where they fit naturally.
 Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
           ],
@@ -876,7 +936,7 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         const fp = parseJsonLoose<{ bullets?: string[] }>(fix.choices[0]?.message?.content || '{}')
         const fb = Array.isArray(fp.bullets) ? fp.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
         if (fb.length === 0) break
-        const fbProblems = validateBullets(fb, brandName, opportunityKws)
+        const fbProblems = validateBullets(fb, brandName, opportunityKws, capacityFamilyTokens)
         // Accept the rewrite only when it actually reduces the problem count — never regress.
         if (fbProblems.length < bProblems.length) { bullets = fb; bProblems = fbProblems }
         else break
@@ -1495,8 +1555,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
+  // Capacity-family detection — passed to the bullets validator (PR #76) so the retry
+  // loop rejects bullets that hardcode a specific GB/TB/MB when the family spans ≥2 capacities.
+  // Mirrors the agent prompt's own capacity rule but enforces it through validation, not just instruction.
+  const bulletCapTokens = new Set<string>()
+  for (const c of input.children) {
+    const cap = capacityOf(c.sku) || capacityOf(c.title)
+    if (cap) bulletCapTokens.add(cap.toUpperCase())
+  }
+  const capacityFamilyTokens = bulletCapTokens.size >= 2 ? [...bulletCapTokens] : []
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets)
+  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens)
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
