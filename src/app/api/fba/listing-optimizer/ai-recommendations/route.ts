@@ -502,6 +502,7 @@ export async function POST(req: NextRequest) {
 
           // DB write. recommended_bullets + the *_warnings/improvements/reconciliation/action_plan
           // columns are JSONB (arrays written directly); recommended_keywords is TEXT (JSON string).
+          // per_child_titles is JSONB (migration 017) — only present for capacity variation families.
           const dbPayload: Record<string, unknown> = {
             parent_asin: rec.parent_asin,
             recommended_title: rec.recommended_title,
@@ -514,6 +515,7 @@ export async function POST(req: NextRequest) {
             product_details_improvements: rec.product_details_improvements,
             keyword_reconciliation: rec.keyword_reconciliation,
             action_plan: rec.action_plan,
+            per_child_titles: rec.per_child_titles ?? null,
           }
 
           const { error: upsertErr } = await supabase
@@ -632,10 +634,15 @@ export async function GET(req: NextRequest) {
     ? data.action_plan
     : []
 
+  // per_child_titles (migration 017) is JSONB. Tolerate missing column / null / non-arrays.
+  const per_child_titles: { sku: string; asin: string; title: string }[] =
+    Array.isArray(data.per_child_titles) ? data.per_child_titles : []
+
   return NextResponse.json({
     recommendations: {
       ...data,
       per_child_keywords,
+      per_child_titles,
       keyword_reconciliation,
       action_plan,
       // Keep recommended_keywords as the first child's keywords for backward compat

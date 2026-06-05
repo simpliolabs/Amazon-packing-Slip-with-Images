@@ -103,7 +103,7 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
 
   const { data: recRow } = await supabase
     .from('listing_seo_recommendations')
-    .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords')
+    .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords, per_child_titles')
     .eq('parent_asin', parentAsin)
     .single()
   const rec = (recRow ?? {}) as {
@@ -111,6 +111,9 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
     recommended_bullets?: string[] | null
     recommended_description?: string | null
     recommended_keywords?: string | null
+    /** Per-child titles for capacity families (migration 017). resolveProposed picks the
+     *  SKU-specific title when present, otherwise falls back to recommended_title. */
+    per_child_titles?: { sku: string; asin: string; title: string }[] | null
   }
 
   const { data: rowsRaw } = await supabase
