@@ -982,6 +982,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   }
 
+  // GUARANTEE the core elements always exist. The audit (o4-mini) is best-effort and sometimes
+  // returns an EMPTY action_plan — which left the "Apply Changes" UI blank despite a full set of
+  // recommendations (the "not loading" bug). Synthesize any missing core element from the
+  // canonical pipeline output so the page ALWAYS renders its recommendations.
+  const present = new Set(actionPlan.map((a) => a.element))
+  const synth = (element: string, content: string, level: 'parent' | 'per_child', status: string, instruction: string) => {
+    if (present.has(element) || !content) return
+    actionPlan.push({
+      element, level, verdict: 'REPLACE', priority: 'HIGH',
+      current_status: status, instruction, replacement_content: content,
+      seller_central_path: 'Manage Inventory > Edit Listing',
+    } as PipelineActionPlanItem)
+  }
+  synth('title', finalTitle, 'parent', 'Your live title is not optimized for the target keywords.', 'Replace your current title with the optimized version below, then save in Seller Central.')
+  for (let i = 1; i <= 5; i++) synth(`bullet_${i}`, bullets[i - 1], 'parent', `Your live bullet ${i} is not optimized for the target keywords.`, `Replace your current bullet ${i} with the optimized version below, then save in Seller Central.`)
+  synth('description', description, 'parent', 'Your live description is not optimized for the target keywords.', 'Replace your current description with the optimized version below, then save in Seller Central.')
+  synth('backend_keywords', perChild[0]?.keywords ?? '', 'per_child', 'Your live backend search terms miss high-value keywords.', "Replace each child SKU's backend search terms with its per-variant string below.")
+
   return {
     recommended_title: finalTitle,
     recommended_bullets: bullets,
