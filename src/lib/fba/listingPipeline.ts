@@ -199,7 +199,7 @@ function parseJsonLoose<T>(raw: string): T {
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
-export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string): string[] {
+export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string, upgradeKws?: string[]): string[] {
   const problems: string[] = []
   const len = title.length
   if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim 80-125 for apparel).`)
@@ -247,6 +247,29 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   }
 
   if (brandName && !lc.includes(brandName.toLowerCase())) problems.push(`Title must start with the brand "${brandName}".`)
+
+  // UPGRADE keyword coverage — the scorer docks 5 points when 7+ UPGRADE keywords appear
+  // in bullets but NOT in the title (3 points when 3-6 miss). Fail fast in validation so the
+  // existing retry loop pulls more of them into the title before we commit.
+  // Threshold of 3+ missing matches the scorer's mid-tier penalty so we don't over-retry
+  // on titles that are already 'good enough' (1-2 missing).
+  if (upgradeKws && upgradeKws.length >= 3) {
+    const missing = upgradeKws.filter((kw) => {
+      const phrase = kw.toLowerCase()
+      // Either the verbatim phrase or every meaningful word survives — same matching the
+      // mustInclude check uses, so the validator and scorer agree on what 'present' means.
+      if (lc.includes(phrase)) return false
+      const phraseWords = phrase.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
+      return !(phraseWords.length > 0 && phraseWords.every((w) => words.has(w)))
+    })
+    if (missing.length >= 3) {
+      // Show the first 5 missing keywords — enough for the retry prompt to act on without
+      // overwhelming the agent.
+      const sample = missing.slice(0, 5).map((k) => `"${k}"`).join(', ')
+      problems.push(`Title is missing ${missing.length} top UPGRADE keywords that appear in your bullets — Amazon weights title keywords 3-5× more than bullets. Pull at least ${Math.max(0, missing.length - 2)} of these in: ${sample}.`)
+    }
+  }
+
   return problems
 }
 
@@ -298,6 +321,10 @@ async function runTitleAgent(
   mustInclude: string | undefined,
   preferredAudience: string,
   attributePin: string | undefined,
+  /** Top UPGRADE-tagged keywords (present in bullets but not title — see scorer's
+   *  title.upgradeCount penalty). The agent is told to pull as many in as fit; the
+   *  validator below fails the title if 3+ are still missing, triggering a retry. */
+  upgradeKws: string[] = [],
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle } = input
   const apparel = looksApparel(category, repTitle)
@@ -313,6 +340,16 @@ async function runTitleAgent(
   const attrPinLine = attributePin
     ? `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
     : ''
+  // UPGRADE keywords = ranking signals the seller has demonstrated traffic on (present in
+  // bullets, missing from title). Amazon weights title 3-5× over bullets, so dragging these
+  // INTO the title is the highest-leverage move available. The scorer penalizes the title
+  // when 3+ are missing; the validator below fails on the same threshold so the retry loop
+  // is responsible for covering them, not the seller.
+  const upgradeLine = upgradeKws.length >= 3
+    ? `\n🟡 MANDATORY #3 — these UPGRADE keywords already drive your bullets' search traffic but are MISSING from your live title. Amazon weights title keywords 3-5× more than bullets — folding them into the title is your single highest-leverage SEO move. Include AT LEAST ${Math.max(3, upgradeKws.length - 2)} of these (more is better, fit as many as the budget allows):\n  ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
+    : upgradeKws.length > 0
+      ? `\nTry to include these UPGRADE keywords too (they drive bullet traffic but are missing from the title): ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
+      : ''
   const audienceLine = preferredAudience
     ? `\nAUDIENCE: end with "for ${preferredAudience}" (this product is for ${preferredAudience} — do NOT narrow it to a single gender if it says Men and Women).\n`
     : ''
@@ -320,7 +357,7 @@ async function runTitleAgent(
   const system = `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`
   const user = `Brand: ${brandName}
 Category: ${category}
-${mustLine}${attrPinLine}
+${mustLine}${attrPinLine}${upgradeLine}
 Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — use as many as fit naturally, ${apparel ? 'typically 1-2 beyond the mandatory keyword' : 'aim for 3-5 of these alongside the mandatory keyword'}):
 ${candidateList}
 ${attrLine}${audienceLine}
@@ -345,7 +382,7 @@ Rules:
     max_tokens: 120,
   })
   let title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin) : ['No title generated.']
+  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) : ['No title generated.']
   let retried = false
 
   // Up to 2 corrective passes — the mandatory-keyword + max-2 rules are non-negotiable.
@@ -362,7 +399,7 @@ Rules:
     })
     const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     if (corrected) {
-      const cp = validateTitle(corrected, brandName, mustInclude, attributePin)
+      const cp = validateTitle(corrected, brandName, mustInclude, attributePin, upgradeKws)
       if (cp.length <= problems.length) { title = corrected; problems = cp }
     }
   }
@@ -370,7 +407,7 @@ Rules:
   // Compliance guarantee: brand must lead.
   if (title && brandName && !title.toLowerCase().includes(brandName.toLowerCase())) {
     const prefixed = `${brandName} ${title}`.trim()
-    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude, attributePin) }
+    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) }
   }
 
   // Audience guarantee: never silently narrow a unisex product to one gender.
@@ -380,7 +417,7 @@ Rules:
       const swapped = title
         .replace(/\bfor Men\b/i, 'for Men and Women')
         .replace(/\bMen'?s\b/i, "Men's and Women's")
-      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin) }
+      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) }
     }
   }
   return { title, problems, retried }
@@ -956,9 +993,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Stage 0b — candidates (code)
   const candidates = selectTitleCandidates(analysis, brandName, repTitle)
 
+  // Stage 0c — top UPGRADE keywords for explicit title-coverage. UPGRADE = ranking
+  // signal already present in bullets but absent from the title. The scorer in
+  // syncListingContent.ts docks 5 points when 7+ of these are missing (3 when 3-6
+  // miss). We feed them to the title agent as MANDATORY #3 and fail validation when
+  // 3+ still aren't in the title, so the existing retry loop is on the hook for
+  // covering them — not the seller.
+  const topUpgradeKws = cleanGated
+    .filter((k) => k.actionType === 'UPGRADE')
+    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => k.keyword.split(/\s+/).length <= 6)  // skip long-tail phrases that wouldn't fit
+    .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    .slice(0, 10)                                        // matches the scorer's top-10 cap
+    .map((k) => k.keyword)
+
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal, topUpgradeKws)
 
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
