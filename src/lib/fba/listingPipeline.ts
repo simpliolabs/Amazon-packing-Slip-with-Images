@@ -305,7 +305,7 @@ async function runTitleAgent(
     .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
     .join('\n')
   const attrLine = attributes.length
-    ? `\nSearchable product keyphrases shoppers actually type — include one or two if they fit AFTER the mandatory keyword above${apparel ? ' (e.g. a blank-brand term like "comfort colors graphic tee")' : ''}:\n  ${attributes.join(', ')}\n`
+    ? `\nSearchable product keyphrases shoppers actually type — work them in AFTER the mandatory keyword${apparel ? ' (e.g. a blank-brand term like "comfort colors graphic tee")' : ' (titles under 110 chars have room for more — keep adding while you have budget)'}:\n  ${attributes.join(', ')}\n`
     : ''
   const mustLine = mustInclude
     ? `\n🔴 MANDATORY #1 — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
@@ -321,18 +321,21 @@ async function runTitleAgent(
   const user = `Brand: ${brandName}
 Category: ${category}
 ${mustLine}${attrPinLine}
-Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — pick the best 1-2 to support the mandatory keywords):
+Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — use as many as fit naturally, ${apparel ? 'typically 1-2 beyond the mandatory keyword' : 'aim for 3-5 of these alongside the mandatory keyword'}):
 ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
-Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'ONE supporting keyphrase'}, then the audience. It should read like a human-written phrase.
+Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : `${apparel ? 'ONE supporting keyphrase' : 'multiple supporting keyphrases/specs from above (fill the title)'}`}, then the audience. It should read like a human-written phrase.
 
 Rules:
 - FRONT-LOAD the mandatory keyword in the first ~80 characters (that's all mobile shows).
 - Do NOT use " - " dashes or " | " pipes to separate sections — flow as natural language (a single comma is OK only if it genuinely reads better). Amazon indexes the title as a bag of words, so separators add nothing and only cost characters.
-- 80-125 characters. Title Case. ONE consistent audience (never mix kids with men/women).
+- ${apparel ? '80-125 characters' : 'TARGET 110-125 characters (Amazon indexes every word — use the budget; titles under 100 chars are leaving ranking on the table)'}. Title Case. ONE consistent audience (never mix kids with men/women).
 - ${apparel ? 'Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").' : 'Name the product type concisely (once or twice total). Do NOT reframe the product as apparel / a t-shirt / "graphic tee" / clothing unless it genuinely is one.'}
-- Include the searchable keyphrases above when they fit. Do NOT put dry product SPECS (${apparel ? 'material, fabric, fit, weight, dye' : 'dimensions, capacity unit, material codes'}) in the title — those are not search terms.
+- ${apparel
+  ? 'Include the searchable keyphrases above when they fit. Do NOT put dry product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.'
+  : 'Include the searchable keyphrases above. **Technical/feature identifiers that shoppers actually search for ARE search terms** — include them when in the candidate pool above (e.g. UHS-I, Class 10, Bluetooth 5.0, USB-C, IP68, model identifiers like "Kodak PixPro", speed ratings like "90MB/s", capacity like "256GB"). Only EXCLUDE dry physical specs shoppers do not search (raw inch dimensions, gram weights, internal model codes).'}
+- ${apparel ? '' : 'PREFER concrete keyphrases over filler descriptors. NEVER add empty marketing words like "Durable", "Reliable", "Solution", "Premium", "High-Quality", "Versatile", "Versatile Options" — every word should be either a search term, a real product attribute shoppers type, or an essential connector. If you have budget left, add another keyphrase from the candidate pool, not filler.'}
 - Must read like a human wrote it. Return ONLY the title.`
 
   const completion = await openai.chat.completions.create({
@@ -352,7 +355,7 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: `You are an Amazon SEO title editor${apparel ? ' for apparel' : ''}. Output ONLY the corrected title string.` },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}"` : ''} then an optional supporting keyphrase${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. 80-125 chars. ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. '}No seasonal terms. No dry specs.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}"` : ''} then ${apparel ? 'an optional supporting keyphrase' : 'multiple supporting keyphrases (fill toward 110-125 chars)'}${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. ${apparel ? '80-125 chars' : 'TARGET 110-125 chars — use the budget'}. ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
