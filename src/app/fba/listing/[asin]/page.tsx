@@ -1024,27 +1024,58 @@ export default function ListingDetailPage() {
                     {/* Row 5a: PER-CHILD title table (capacity families like SD cards) — overrides
                         the single Copy & Paste box for title only. Apparel & single-capacity
                         products keep the broadcast card below (per_child_titles is empty). */}
-                    {item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
-                      <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Per-Variant Titles ({recs.per_child_titles.length}):</span>
-                          <span className="text-[10px] text-slate-500">Each child carries its own capacity (Amazon SEO best-practice for capacity variations).</span>
-                        </div>
-                        <div className="space-y-1">
-                          {recs.per_child_titles.map((t) => (
-                            <div key={t.sku} className="flex items-center gap-2 bg-green-50 p-1.5 rounded border border-green-200">
-                              <span className="text-[10px] font-mono text-slate-500 flex-shrink-0">{t.sku}</span>
-                              <span className="text-xs leading-relaxed text-slate-800 flex-1 min-w-0 break-words">{t.title}</span>
+                    {item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (() => {
+                      // Parent (variation hub) title = capacity-agnostic. Strip any GB/TB/MB
+                      // capacity token from the broadcast recommended_title so the parent SKU
+                      // (e.g. Memory-Card-P) carries a generic family title without any specific
+                      // capacity — that's what shows on the variation hub before a child is picked.
+                      const stripCap = (t: string) => (t || '')
+                        .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, '')
+                        .replace(/\s{2,}/g, ' ').trim()
+                      const parentTitle = stripCap(recs.recommended_title || '') || (recs.per_child_titles[0]?.title ? stripCap(recs.per_child_titles[0].title) : '')
+                      return (
+                        <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Titles ({recs.per_child_titles.length + 1}: parent + {recs.per_child_titles.length} variants):</span>
+                            <span className="text-[10px] text-slate-500">Each child carries its own capacity (Amazon SEO best-practice for capacity variations).</span>
+                          </div>
+
+                          {/* PARENT ROW — the variation hub title, capacity-agnostic */}
+                          {parentTitle && (
+                            <div className="flex items-center gap-2 bg-violet-50 p-1.5 rounded border border-violet-200 mb-1">
+                              <span className="text-[10px] font-bold text-violet-700 uppercase tracking-wide flex-shrink-0 w-24">PARENT</span>
+                              <span className="text-xs leading-relaxed text-slate-800 flex-1 min-w-0 break-words">{parentTitle}</span>
                               <button
-                                onClick={() => { navigator.clipboard.writeText(t.title); setCopied(`pct-${t.sku}`); setTimeout(() => setCopied(null), 2000) }}
-                                className="text-[10px] px-2 py-0.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium flex-shrink-0">
-                                {copied === `pct-${t.sku}` ? 'Copied!' : 'Copy'}
+                                onClick={() => { navigator.clipboard.writeText(parentTitle); setCopied('pct-PARENT'); setTimeout(() => setCopied(null), 2000) }}
+                                className="text-[10px] px-2 py-0.5 bg-violet-600 text-white rounded hover:bg-violet-700 font-medium flex-shrink-0">
+                                {copied === 'pct-PARENT' ? 'Copied!' : 'Copy'}
                               </button>
                             </div>
-                          ))}
+                          )}
+
+                          <div className="space-y-1">
+                            {recs.per_child_titles.map((t) => (
+                              <div key={t.sku} className="flex items-center gap-2 bg-green-50 p-1.5 rounded border border-green-200">
+                                <span className="text-[10px] font-mono text-slate-500 flex-shrink-0">{t.sku}</span>
+                                <span className="text-xs leading-relaxed text-slate-800 flex-1 min-w-0 break-words">{t.title}</span>
+                                <button
+                                  onClick={() => { navigator.clipboard.writeText(t.title); setCopied(`pct-${t.sku}`); setTimeout(() => setCopied(null), 2000) }}
+                                  className="text-[10px] px-2 py-0.5 bg-green-600 text-white rounded hover:bg-green-700 font-medium flex-shrink-0">
+                                  {copied === `pct-${t.sku}` ? 'Copied!' : 'Copy'}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+
+                          {parentTitle && (
+                            <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+                              <span className="font-semibold text-slate-700">Parent</span> is the variation hub title (no specific capacity — it&apos;s the shared family title sellers see in Seller Central before drilling into a variant).
+                              <span className="font-semibold text-slate-700"> Variants</span> are the actual buyable child SKUs, each carrying its own capacity.
+                            </p>
+                          )}
                         </div>
-                      </div>
-                    )}
+                      )
+                    })()}
 
                     {/* Row 5b: Replacement Content (the actual fix) — broadcast card. Hidden when
                         the per-child title table above is showing. */}
