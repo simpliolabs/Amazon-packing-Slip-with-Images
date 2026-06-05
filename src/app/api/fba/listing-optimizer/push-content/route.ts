@@ -101,10 +101,23 @@ function stripCapacity(t: string): string {
   return (t || '').replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, '').replace(/\s{2,}/g, ' ').trim()
 }
 
+/** Amazon-managed system SKUs we must NOT push to. They surface in Listings Items search but
+ *  aren't real seller listings: amzn.gr.* are returnless / graded inventory SKUs, amzn.* in
+ *  general is system-namespaced. Pushing a title to them is meaningless and may fail validation. */
+function isSystemSku(sku: string): boolean {
+  return /^amzn\./i.test(sku)
+}
+
+/** Strip trailing fulfillment suffix so an FBA SKU and its FBM twin compare equal:
+ *  "DAFEI-482-32G-FBA" → "DAFEI-482-32G", "DAFEI-482-32G" → "DAFEI-482-32G". */
+function stripFulfillmentSuffix(sku: string): string {
+  return sku.replace(/[-_](?:FBA|FBM|AFN|MFN|FN)$/i, '')
+}
+
 /**
  * For a given ASIN, ask Amazon for every SKU this seller has under it (FBA, FBM, etc.). Used to
  * augment listing_content rows whose FBM twin was never synced into our DB. Best-effort: if the
- * call fails we just return what was passed in.
+ * call fails we just return what was passed in. Filters out Amazon-managed system SKUs.
  */
 async function discoverSkusForAsin(
   sellerId: string, token: string, asin: string,
@@ -119,7 +132,7 @@ async function discoverSkusForAsin(
     const json = (await resp.json()) as { items?: { sku?: string }[] }
     return (json.items ?? [])
       .map((it) => (it.sku ? { sku: it.sku, asin } : null))
-      .filter((x): x is { sku: string; asin: string } => x !== null)
+      .filter((x): x is { sku: string; asin: string } => x !== null && !isSystemSku(x.sku))
   } catch { return [] }
 }
 
@@ -219,20 +232,26 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
         const discovered = await discoverSkusForAsin(sellerId, token, asin)
         for (const d of discovered) {
           if (knownSkus.has(d.sku)) continue // already in the diff
-          // Find an existing row for this ASIN to base the "current" value on. The newly-found
-          // SKU may have a slightly different live title, but since we don't sync its content
-          // we present the same current value (Amazon's VALIDATION_PREVIEW will reveal any
-          // surprise before we write). Fallback to empty current.
-          const sourceRow = baseDiff.find((b) => b.asin === asin) ?? null
-          // Re-resolve proposed using the new SKU so per_child_titles matching by SKU still
-          // works when the FBM SKU has its own per-child entry. Fall back to the ASIN's first
-          // row's proposed value otherwise.
+          // INHERITANCE rule: a newly-discovered SKU under the same ASIN is a TWIN (typically the
+          // FBM half of an FBA/FBM pair). It must inherit the SAME proposed value as its sibling
+          // — NOT fall back to the broadcast title via resolveProposed, which would assign the
+          // wrong capacity.
+          // TWIN-NAME GUARD: only inherit from a source SKU whose NAME (minus fulfillment suffix)
+          // matches the discovered SKU's name. Sellers occasionally assign multiple unrelated SKUs
+          // to one ASIN (e.g. DAFEI-482-128GB stored under the 32G ASIN through a stale mapping);
+          // those aren't real twins and we'd silently push the wrong title. Match by stripped name
+          // and skip when no match exists.
+          const discoveredBase = stripFulfillmentSuffix(d.sku)
+          const sourceRow = baseDiff.find(
+            (b) => b.asin === asin && stripFulfillmentSuffix(b.sku) === discoveredBase,
+          ) ?? null
+          if (!sourceRow) continue // not a true FBA/FBM twin — leave it alone
           const proposed = field === 'keywords'
             ? (asinToKeywords.has(asin) ? capBytes((asinToKeywords.get(asin) || '').trim(), 250) : null)
-            : (resolveProposed(field, rec, new Map(), d.sku) ?? sourceRow?.raw ?? null)
+            : sourceRow.raw // <- inherit verbatim from the source row, so FBM gets the FBA's title
           const proposedStr = asCompare(proposed)
           if (!proposed || proposedStr.length === 0) continue
-          const currentValueForRow = sourceRow?.current ?? ''
+          const currentValueForRow = sourceRow.current
           baseDiff.push({
             sku: d.sku, asin,
             current: currentValueForRow,
@@ -241,8 +260,7 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
             bytes: getByteLength(proposedStr),
             chars: proposedStr.length,
             // A discovered SKU we haven't synced is assumed to need updating unless it happens
-            // to equal the proposed string. Conservatively mark changed=true so the user can
-            // see it in the preview.
+            // to equal the proposed string.
             changed: proposedStr.length > 0 && currentValueForRow !== proposedStr,
           })
           knownSkus.add(d.sku)
