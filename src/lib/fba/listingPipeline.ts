@@ -389,8 +389,15 @@ Rules:
 // ─── Stage 2 — Bullets Agent ───────────────────────────────────────────────────
 
 async function runBulletsAgent(input: PipelineInput, finalTitle: string, remaining: AnalyzedKeyword[], attributes: string[]): Promise<string[]> {
-  const { openai, category, repTitle } = input
+  const { openai, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
+  // Capacity family detection: do any 2 children carry different capacity tokens in their SKUs?
+  // If yes, the SHARED bullets must NOT hardcode a specific GB value — each variant's title
+  // carries its own capacity; shared bullets that say "128GB" mislead the 32GB and 64GB rows.
+  const childCaps = new Set<string>()
+  for (const c of children) { const cap = capacityOf(c.sku) || capacityOf(c.title); if (cap) childCaps.add(cap) }
+  const capacityFamily = !apparel && childCaps.size >= 2
+  const familyCapList = [...childCaps].join(', ')
   const topKeyphrases = remaining.slice(0, 3).map((k) => k.keyword)
   const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
   const topLine = topKeyphrases.length
@@ -415,7 +422,8 @@ ${attrLine}
 Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
-- 80-200 characters each. Generic for ALL variants (no specific size/color).
+- 80-200 characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
+- 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}
 - Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.
 Return ONLY the JSON object.`
 
@@ -605,18 +613,52 @@ Return ONLY the JSON object.`
     /* tail is best-effort; core still ships */
   }
 
+  // ── Per-child CAPACITY awareness ──
+  // For a capacity variation family (e.g. SD cards 64/128/256GB), every child currently received
+  // the IDENTICAL core, leading with whichever capacity ranked highest in the keyword pool
+  // (usually 128GB). That means the 32G SKU's backend says "128 gb sd card..." first — Amazon
+  // ranks it for the wrong capacity. Per Amazon SEO research, each child's backend should
+  // emphasize ITS OWN capacity. Detect distinct child capacities and, when present, build a
+  // per-child core: strip OTHER capacity tokens, prepend the child's own capacity.
+  const backendChildCaps = new Map<string, string>()
+  const liveCaps = new Set<string>()
+  for (const c of children) {
+    const cap = capacityOf(c.sku) || capacityOf(c.title)
+    if (cap) { backendChildCaps.set(c.sku, cap); liveCaps.add(cap) }
+  }
+  const backendCapacityFamily = !apparel && liveCaps.size >= 2
+
+  // Build a regex that matches ANY GB/TB token (e.g. "128 gb", "128gb", "1tb"). Used to strip
+  // wrong-capacity tokens from the broadcast core before re-prepending the child's own.
+  const anyCapRe = /\b\d{1,4}\s?(?:tb|gb|mb)\b/gi
+
   // ── Combine: opportunity-keyword core + AT MOST 3 net-new color words, byte-cap to 250 ──
-  const coreWords = new Set(core.toLowerCase().split(/\s+/).filter(Boolean))
-  const buildString = (tail: string): string => {
+  const buildString = (tail: string, customCore?: string): string => {
+    const effectiveCore = customCore ?? core
+    const effectiveCoreWords = customCore ? new Set(effectiveCore.toLowerCase().split(/\s+/).filter(Boolean)) : new Set(core.toLowerCase().split(/\s+/).filter(Boolean))
     const tailWords = tail.toLowerCase().split(/\s+/)
-      .filter((w) => w && !coreWords.has(w) && !excludeWords.has(w) && !MINOR_WORDS.has(w))
+      .filter((w) => w && !effectiveCoreWords.has(w) && !excludeWords.has(w) && !MINOR_WORDS.has(w))
       .slice(0, 3)   // at most 3 color words — the PO does NOT want 10 color synonyms
-    return truncateToBytes(`${core} ${tailWords.join(' ')}`.trim(), 250)
+    return truncateToBytes(`${effectiveCore} ${tailWords.join(' ')}`.trim(), 250)
   }
 
   return children.map((c) => {
     const color = (c.color || 'default').toLowerCase()
-    return { sku: c.sku, asin: c.asin, keywords: buildString(tailMap.get(color) || '') }
+    let childCore: string | undefined
+    if (backendCapacityFamily) {
+      const childCap = backendChildCaps.get(c.sku)
+      if (childCap) {
+        const childCapLc = childCap.toLowerCase()                  // e.g. "32gb"
+        const childCapSpaced = childCapLc.replace(/(\d+)([a-z]+)/, '$1 $2')  // "32 gb"
+        // 1) Strip every capacity token in the core (we'll re-add this child's first).
+        let stripped = core.replace(anyCapRe, ' ').replace(/\s{2,}/g, ' ').trim()
+        // 2) Prepend this child's own capacity (twice — both unspaced and spaced — so it ranks
+        //    for "32gb" and "32 gb" search variants without burning much budget).
+        stripped = `${childCapSpaced} ${childCapLc} ${stripped}`.replace(/\s{2,}/g, ' ').trim()
+        childCore = truncateToBytes(stripped, 228)
+      }
+    }
+    return { sku: c.sku, asin: c.asin, keywords: buildString(tailMap.get(color) || '', childCore) }
   })
 }
 
@@ -692,8 +734,14 @@ Return ONLY the JSON object.`
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
 async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[]): Promise<string> {
-  const { openai, category, repTitle } = input
+  const { openai, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
+  // Capacity-family detection (mirrors bullets): shared description must NOT hardcode a
+  // capacity that doesn't match every variant.
+  const descChildCaps = new Set<string>()
+  for (const c of children) { const cap = capacityOf(c.sku) || capacityOf(c.title); if (cap) descChildCaps.add(cap) }
+  const descCapacityFamily = !apparel && descChildCaps.size >= 2
+  const descFamilyCapList = [...descChildCaps].join(', ')
   const attrLine = attributes.length
     ? `\nNaturally mention these known product attributes (real facts from the listing${apparel ? ' — e.g. garment brand, material, fit' : ''}): ${attributes.join(', ')}.`
     : ''
@@ -702,7 +750,9 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
 
-🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.
+🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.${descCapacityFamily ? `
+
+🚫 CAPACITY: this family has MULTIPLE capacities (${descFamilyCapList}). The description is SHARED across all variants — NEVER hardcode a specific GB number in any paragraph or bullet (no "128GB and 64GB capacities", no "this 128GB SD card", no "Available in 128GB and 64GB"). Use capacity-agnostic phrasing: "available in multiple capacities", "high-capacity storage", "ample space for your needs". The capacity-specific text already lives in each variant's TITLE.` : ''}
 
 Structure: hook -> <ul> of key features -> use cases/audience -> short closing line. Return ONLY the HTML.`
   const completion = await openai.chat.completions.create({
