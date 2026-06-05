@@ -117,6 +117,7 @@ export interface AiRecommendations {
   recommended_bullets: string[]
   recommended_keywords: string
   per_child_keywords: PerChildKeywords[]
+  per_child_titles?: { sku: string; asin: string; title: string }[]
   recommended_description: string
   variant_corrections: VariantCorrection[]
   cannibalization_warnings: CannibalizationWarning[]
@@ -445,7 +446,9 @@ export async function POST(req: NextRequest) {
       const color = extractColor(c.sku, c.title || '')
       const skuParts = c.sku.split('-')
       const size = skuParts.length >= 3 ? skuParts[2] : null
-      return { sku: c.sku, asin: c.asin, color: color || null, size: size || null }
+      // title is threaded through so the pipeline can read each child's current capacity
+      // (e.g. "...128GB...") for per-child capacity titles on storage-variation families.
+      return { sku: c.sku, asin: c.asin, color: color || null, size: size || null, title: c.title || null }
     })
 
     const openai = getOpenAI()
@@ -486,6 +489,7 @@ export async function POST(req: NextRequest) {
             recommended_bullets: result.recommended_bullets,
             recommended_keywords: result.per_child_keywords[0]?.keywords ?? '',
             per_child_keywords: result.per_child_keywords,
+            per_child_titles: result.per_child_titles,
             recommended_description: result.recommended_description,
             variant_corrections: result.variant_corrections,
             cannibalization_warnings: result.cannibalization_warnings,
