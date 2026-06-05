@@ -170,15 +170,27 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'No recommendations found for this field. Run an AI audit first.' }, { status: 404 })
     }
     const cfg = FIELD_CONFIG[field]
+    // EFFECTIVE broadcast: the FIELD_CONFIG says title/bullets/description are broadcast, but
+    // capacity variation families inject per_child_titles → the proposed values are SKU-specific.
+    // Detecting that purely from the field name is wrong (silently shows ONE title to the user
+    // while writing different ones per SKU). Compare the actual proposed strings: only call it
+    // broadcast when every SKU genuinely agrees on the same value.
+    const proposedStrings = diff.map((d) => d.proposed)
+    const allIdentical = proposedStrings.length === 0 || proposedStrings.every((s) => s === proposedStrings[0])
+    const effectiveBroadcast = cfg.broadcast && allIdentical
     return NextResponse.json({
       parent_asin: parentAsin,
       field,
       label: cfg.label,
-      broadcast: cfg.broadcast,
+      broadcast: effectiveBroadcast,
+      // Useful for the UI to know whether this field is broadcast IN PRINCIPLE (so it can
+      // explain why values differ) vs per-child by definition (like backend keywords).
+      configBroadcast: cfg.broadcast,
       count: diff.length,
       changed: diff.filter((d) => d.changed).length,
       // For broadcast fields every child gets the same value — surface it once for the UI.
-      proposedValue: cfg.broadcast ? (diff[0]?.raw ?? null) : null,
+      // For effective-per-child cases, set to null so the modal must use diff[] per-SKU.
+      proposedValue: effectiveBroadcast ? (diff[0]?.raw ?? null) : null,
       diff,
     })
   } catch (err) {

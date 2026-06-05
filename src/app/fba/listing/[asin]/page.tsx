@@ -1686,7 +1686,11 @@ export default function ListingDetailPage() {
                     <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-amber-900 leading-relaxed">
                         <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">Per-child</span>
-                        Each of {pushPreview.count} SKUs (incl. matching FBA + FBM) gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.
+                        {pushPreview.field === 'keywords'
+                          ? <>Each of <b>{pushPreview.count}</b> SKUs (incl. matching FBA + FBM) gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.</>
+                          : pushPreview.field === 'title'
+                          ? <>Each of <b>{pushPreview.count}</b> SKUs gets its <b>own</b> title — different SKUs get different titles (e.g. each capacity variant carries its own GB). Review each row below before confirming. <b>{pushPreview.changed}</b> will change.</>
+                          : <>Each of <b>{pushPreview.count}</b> SKUs gets its <b>own</b> {pushPreview.label.toLowerCase()}. Review each row below. <b>{pushPreview.changed}</b> will change.</>}
                       </p>
                     </div>
                   )}
@@ -1730,13 +1734,21 @@ export default function ListingDetailPage() {
                   ) : (
                     /* Per-child: full current → proposed diff per SKU */
                     <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[45vh] overflow-y-auto">
-                      {pushPreview.diff.filter(d => d.changed).map((d) => (
-                        <div key={d.sku} className="p-3 text-xs">
-                          <div className="font-mono text-slate-700 mb-1">{d.sku} <span className="text-slate-400">({d.bytes}/250 bytes)</span></div>
-                          <p className="text-slate-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
-                          <p className="text-emerald-700 break-words">{d.proposed}</p>
-                        </div>
-                      ))}
+                      {pushPreview.diff.filter(d => d.changed).map((d) => {
+                        // Field-aware size readout: keywords are byte-capped (250B), titles char-capped
+                        // (~200), description char-capped (~2000). Show the meaningful unit per field.
+                        const sizeLabel = pushPreview.field === 'keywords' ? `${d.bytes}/250 bytes`
+                          : pushPreview.field === 'title' ? `${d.chars}/200 chars`
+                          : pushPreview.field === 'description' ? `${d.chars} chars`
+                          : `${d.chars} chars`
+                        return (
+                          <div key={d.sku} className="p-3 text-xs">
+                            <div className="font-mono text-slate-700 mb-1">{d.sku} <span className="text-slate-400">({sizeLabel})</span></div>
+                            <p className="text-slate-400 line-through mb-0.5 break-words">{d.current || '(empty)'}</p>
+                            <p className="text-emerald-700 break-words">{d.proposed}</p>
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
 
