@@ -485,7 +485,7 @@ export async function POST(req: NextRequest) {
     // ─── Resolve the keyword-bearing ASIN and load the analysis for the pipeline ───
     const { data: pipelineScoreRow } = await supabase
       .from('listing_seo_scores')
-      .select('top_child_asin')
+      .select('top_child_asin, product_title')
       .eq('parent_asin', parent_asin)
       .single()
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
@@ -523,6 +523,9 @@ export async function POST(req: NextRequest) {
             analysis,
             children: pipelineChildren,
             repTitle: rep.title,
+            // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
+            // the alphabetically-first variant and often does NOT lead with the design name.
+            canonicalTitle: pipelineScoreRow?.product_title ?? null,
             variantDetails,
             keywordContext,
             hasAplus: rep.has_aplus || false,
