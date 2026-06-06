@@ -744,6 +744,9 @@ async function runTitleAgent(
    *  title.upgradeCount penalty). The agent is told to pull as many in as fit; the
    *  validator below fails the title if 3+ are still missing, triggering a retry. */
   upgradeKws: string[] = [],
+  /** High-IQ COMPATIBILITY device brands the product genuinely works with (Canon/Sony/
+   *  Nikon/…). Agent weaves the top ones in as 'Compatible with [Brand]'. PR #86. */
+  compatibilityBrands: string[] = [],
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle } = input
   const apparel = looksApparel(category, repTitle)
@@ -792,7 +795,8 @@ Rules:
   ? 'Include the searchable keyphrases above when they fit. Do NOT put dry product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.'
   : 'Include the searchable keyphrases above. **Technical/feature identifiers that shoppers actually search for ARE search terms** — include them when in the candidate pool above (e.g. UHS-I, Class 10, Bluetooth 5.0, USB-C, IP68, speed ratings like "90MB/s", capacity like "256GB"). Only EXCLUDE dry physical specs shoppers do not search (raw inch dimensions, gram weights, internal model codes).'}
 - 🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy — bare brand references SUPPRESS listings): If any keyword above is a third-party brand name (e.g. Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, Galaxy, DJI, Bose, etc. — anything that isn't your own brand "${brandName}"), use it ONLY in 'for [Brand]' or 'compatible with [Brand]' phrasing. Examples: ✓ 'for GoPro Hero', ✓ 'compatible with Canon EOS', ✗ 'GoPro SD Card' (bare reference — listing gets suppressed). Same rule for model names (iPhone 14, DSLR camera brands, etc.).
-- ${apparel ? '' : 'PREFER concrete keyphrases over filler descriptors. NEVER add empty marketing words like "Durable", "Reliable", "Solution", "Premium", "High-Quality", "Versatile", "Versatile Options" — every word should be either a search term, a real product attribute shoppers type, or an essential connector. If you have budget left, add another keyphrase from the candidate pool, not filler.'}
+- ${apparel ? '' : 'PREFER concrete keyphrases over filler descriptors. NEVER add empty marketing words like "Durable", "Reliable", "Solution", "Premium", "High-Quality", "Versatile", "Versatile Options" — every word should be either a search term, a real product attribute shoppers type, or an essential connector. If you have budget left, add another keyphrase from the candidate pool, not filler.'}${compatibilityBrands.length > 0 ? `
+- 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands and shoppers search for them. Weave the top 2-3 in using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example: "...Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')}". This is legal referential use and captures real buyer traffic.` : ''}
 - Must read like a human wrote it. Return ONLY the title.`
 
   const completion = await openai.chat.completions.create({
@@ -841,18 +845,26 @@ Rules:
     }
   }
 
-  // 🛟 LLM brand-safety judge — final catch-net (PR #80). Same shape as the bullets
-  // judge; catches third-party brands/TMs the curated list can't enumerate. One
-  // corrective rewrite if flagged. Fail-open on LLM error.
+  // 🛟 LLM brand-safety judge — final catch-net (PR #80, classified in #86).
+  // piggyback brands → REMOVE; compatibility brands → ensure "Compatible with [Brand]"
+  // framing (high-value, keep). Only rewrite when there's something to fix.
   try {
-    const judged = await judgeBrandSafetyLLM(title, brandName, openai)
-    if (judged.detected.length > 0) {
-      const phrasesList = judged.detected.map((d) => `"${d.phrase}"`).join(', ')
+    const judged = await judgeBrandSafetyLLM(title, brandName, openai, `${brandName} ${category} ${repTitle ?? ''}`.trim())
+    const piggyback = judged.detected.filter((d) => d.classification === 'piggyback')
+    // Compatibility brand is a problem only when BARE (not already "compatible with X").
+    const compatBare = judged.detected.filter((d) => d.classification === 'compatibility' && !isBrandProperlyFramed(title, d.phrase))
+    if (piggyback.length > 0 || compatBare.length > 0) {
+      const removeList = piggyback.map((d) => `"${d.phrase}"`).join(', ')
+      const frameList = compatBare.map((d) => `"${d.phrase}"`).join(', ')
+      const instructions = [
+        piggyback.length > 0 ? `REMOVE these entirely (no functional tie to the product): ${removeList}.` : '',
+        compatBare.length > 0 ? `KEEP these but wrap each in "Compatible with [Brand]" framing (the product genuinely works with them): ${frameList}.` : '',
+      ].filter(Boolean).join(' ')
       const fix = await openai.chat.completions.create({
         model: 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: `Rewrite the title to REMOVE these third-party brand/trademark references entirely: ${phrasesList}. Keep the brand "${brandName}" and the mandatory keyword${mustInclude ? ` "${mustInclude}"` : ''}. Use generic descriptors in place of any flagged term. 80-150 chars. Return ONLY the title string, no quotes or markdown.` },
+          { role: 'user', content: `Rewrite the title. ${instructions} Keep the brand "${brandName}" and the mandatory keyword${mustInclude ? ` "${mustInclude}"` : ''}. 80-150 chars. Return ONLY the title string, no quotes or markdown.` },
         ],
         temperature: 0.2,
         max_tokens: 120,
@@ -1064,14 +1076,21 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
     // B0G884ZJ27). One corrective rewrite if flagged; fail-open on LLM error.
     try {
       const joined = bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')
-      const judged = await judgeBrandSafetyLLM(joined, brandName, openai)
-      if (judged.detected.length > 0) {
-        const phrasesList = judged.detected.map((d) => `"${d.phrase}"`).join(', ')
+      const judged = await judgeBrandSafetyLLM(joined, brandName, openai, finalTitle)
+      const piggyback = judged.detected.filter((d) => d.classification === 'piggyback')
+      const compatBare = judged.detected.filter((d) => d.classification === 'compatibility' && !isBrandProperlyFramed(joined, d.phrase))
+      if (piggyback.length > 0 || compatBare.length > 0) {
+        const removeList = piggyback.map((d) => `"${d.phrase}"`).join(', ')
+        const frameList = compatBare.map((d) => `"${d.phrase}"`).join(', ')
+        const instructions = [
+          piggyback.length > 0 ? `REMOVE these entirely (no functional tie): ${removeList} — replace with generic descriptors (e.g. "Ripcurl design" → "bold graphic design").` : '',
+          compatBare.length > 0 ? `KEEP these but frame each as "Compatible with [Brand]" (the product genuinely works with them): ${frameList}.` : '',
+        ].filter(Boolean).join(' ')
         const fix = await openai.chat.completions.create({
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite ALL 5 bullets to REMOVE these third-party brand/trademark references entirely: ${phrasesList}. The product is "${finalTitle}" — describe ONLY that with generic descriptors. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet 100-200 chars. Replace any brand reference with a generic descriptor (e.g. "Ripcurl design" → "bold graphic design", "Homelander shirt" → "superhero-style shirt"). Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+            { role: 'user', content: `Rewrite ALL 5 bullets. ${instructions} The product is "${finalTitle}" — describe ONLY that. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet 100-200 chars. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
           ],
           temperature: 0.3,
           max_tokens: 1200,
@@ -1424,14 +1443,21 @@ Rules to honor on rewrite:
     // (don't ask it to reason about markup); rewrite if flagged.
     try {
       const plainForJudge = description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-      const judged = await judgeBrandSafetyLLM(plainForJudge, descBrand, openai)
-      if (judged.detected.length > 0) {
-        const phrasesList = judged.detected.map((d) => `"${d.phrase}"`).join(', ')
+      const judged = await judgeBrandSafetyLLM(plainForJudge, descBrand, openai, finalTitle)
+      const piggyback = judged.detected.filter((d) => d.classification === 'piggyback')
+      const compatBare = judged.detected.filter((d) => d.classification === 'compatibility' && !isBrandProperlyFramed(plainForJudge, d.phrase))
+      if (piggyback.length > 0 || compatBare.length > 0) {
+        const removeList = piggyback.map((d) => `"${d.phrase}"`).join(', ')
+        const frameList = compatBare.map((d) => `"${d.phrase}"`).join(', ')
+        const instructions = [
+          piggyback.length > 0 ? `REMOVE these entirely (no functional tie): ${removeList} — use generic descriptors instead.` : '',
+          compatBare.length > 0 ? `KEEP these but frame each as "Compatible with [Brand]" (the product genuinely works with them): ${frameList}.` : '',
+        ].filter(Boolean).join(' ')
         const fix = await openai.chat.completions.create({
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite the HTML description to REMOVE these third-party brand/trademark references entirely: ${phrasesList}. The product is "${finalTitle}" — describe ONLY that with generic descriptors. 270-330 words HTML using <p>, <b>, <ul>, <li>. Return ONLY the HTML.` },
+            { role: 'user', content: `Rewrite the HTML description. ${instructions} The product is "${finalTitle}" — describe ONLY that. 270-330 words HTML using <p>, <b>, <ul>, <li>. Return ONLY the HTML.` },
           ],
           temperature: 0.4,
           max_tokens: 1200,
@@ -1460,61 +1486,74 @@ Rules to honor on rewrite:
  * than miss a TM. Fail-open: on error returns empty so the agent ships its current
  * output (don't block a regen on a transient LLM failure).
  */
-export interface BrandSafetyFinding { phrase: string; reason: string }
+// PR #86: each finding is CLASSIFIED, not just flagged.
+//   - 'piggyback'    → third-party mark with NO functional relationship to the product
+//                      (Florida Gators on an alligator tee, Marvel, a band name). REMOVE.
+//   - 'compatibility'→ a device/platform the product GENUINELY works with (Canon/Sony/
+//                      Nikon/GoPro for an SD card). High-value — KEEP, ensure it's framed
+//                      'Compatible with [Brand]'. NEVER bare.
+export type BrandClassification = 'piggyback' | 'compatibility'
+export interface BrandSafetyFinding { phrase: string; reason: string; classification: BrandClassification }
 export async function judgeBrandSafetyLLM(
   text: string,
   brandName: string,
   openai: OpenAI,
+  /** What the product actually IS (title/category) so the judge can decide genuine
+   *  compatibility. An SD card IS compatible with Canon cameras; an alligator tee is
+   *  NOT 'compatible with' Florida Gators. PR #86. */
+  productContext = '',
 ): Promise<{ detected: BrandSafetyFinding[] }> {
   if (!text || !text.trim()) return { detected: [] }
-  // PR #81: upgraded gpt-4.1-mini → gpt-5 after live B0G884ZJ27 verification of #80
-  // showed gpt-4.1-mini returned empty findings on prompts that LITERALLY listed
-  // Homelander / Ripcurl / Iration / Ella Fella as examples to flag. The smaller model
-  // lacked classification reliability for this proper-noun-recognition task. gpt-5 is
-  // ~same cost ($0.001/call) on short input/output and demonstrably better at recall.
-  const system = `You are a STRICT Amazon trademark-safety judge. Find every third-party brand, registered trademark, sports team, university, media franchise, character name, band/musician, or other proper-noun reference that this seller cannot legally use without a license.
+  // PR #81: gpt-5 (gpt-4.1-mini lacked recall). PR #86: now also CLASSIFIES each brand.
+  const system = `You are a STRICT Amazon trademark judge. Find every third-party brand, trademark, sports team, university, media franchise, character, band, or proper-noun reference the seller can't use unlicensed — then CLASSIFY each one.
+
+Classification (critical):
+- "compatibility": the product GENUINELY works with this device/platform brand. Example: an SD card IS compatible with Canon, Sony, Nikon, GoPro, DJI, Kodak, Nintendo Switch cameras/devices. A phone case IS compatible with iPhone/Samsung. These are LEGITIMATE to reference as "Compatible with [Brand]" and are high-value — KEEP them, just ensure proper framing.
+- "piggyback": the product has NO functional relationship to the brand — it's riding the trademark. Example: an alligator graphic tee is NOT "compatible with" Florida Gators; a generic mug is NOT compatible with Marvel. Band names, movies, sports teams, unrelated apparel brands on novelty goods. These must be REMOVED.
+
+The test: would "[product] compatible with [brand]" be TRUE and meaningful? If yes → compatibility. If it's nonsense → piggyback.
 
 Rules:
-1. Flag ANY proper-noun phrase that COULD be a registered mark — band names, movies, TV characters, sports teams, clothing/electronics brands, university nicknames, video-game IPs.
-2. If you do not recognize a capitalized phrase AND cannot confirm it is generic English, you MUST flag it.
-3. NEVER flag generic English words (alligator, lion, gator, eagle, cool, vintage, classic, retro).
-4. NEVER flag the seller's own brand "${brandName}".
-5. NEVER flag pure descriptors (XL, Black, JPEG).
-6. When uncertain, FLAG. False positives are recoverable; missed trademarks cause listing suppression.
+1. Classify EVERY third-party proper-noun. If unrecognized and not generic English, include it (default "piggyback" when unsure of a functional relationship).
+2. NEVER flag generic English (alligator, lion, gator, vintage, retro, cool).
+3. NEVER flag the seller's own brand "${brandName}".
+4. NEVER flag pure descriptors (XL, Black, JPEG).
 
-Return ONLY {"detected":[{"phrase":"<exact substring>","reason":"<one line>"}]}. Empty array only if certain there is no trademarked reference.`
+Return ONLY {"detected":[{"phrase":"<exact substring>","classification":"compatibility|piggyback","reason":"<one line>"}]}.`
   const user = `Seller brand: ${brandName}
+Product: ${productContext || '(infer from text)'}
 
 Text to review:
 """
 ${text.slice(0, 1800)}
 """
 
-Identify EVERY third-party brand/trademark/proper-noun reference. Be paranoid.
+Classify EVERY third-party brand/trademark/proper-noun reference.
 
-Items that MUST be flagged when present:
-- Canon, Sony, GoPro, SanDisk, Lexar (electronics)
-- Marvel, Disney, Pixar, Star Wars, Harry Potter (media)
-- Homelander, Iron Man, Spider-Man (characters)
-- Ripcurl, Rip Curl, Quiksilver, Hurley (apparel brands)
-- Iration, Sublime, Metallica (musicians)
-- Ella Fella, Janie & Jack, Mini Boden (kids brands)
-- Florida Gators, Dallas Cowboys (sports teams)
-- iPhone, PlayStation, Xbox (product names)
+COMPATIBILITY examples (product genuinely works with them → keep, frame as "Compatible with"):
+- SD card / memory: Canon, Sony, Nikon, Fujifilm, Panasonic, GoPro, DJI, Kodak PixPro, Nintendo Switch, Raspberry Pi
+- Phone/tablet accessory: iPhone, Samsung Galaxy, iPad, Pixel
 
-If you see a CAPITALIZED phrase that is NOT obvious generic English AND NOT "${brandName}", flag it.
+PIGGYBACK examples (no functional tie → remove):
+- Apparel/novelty: Florida Gators, Dallas Cowboys, Marvel, Disney, Star Wars, Harry Potter, Homelander, Ripcurl, Iration, Ella Fella, Spaceballs
 
 Return ONLY the JSON object.`
   try {
     const r = await openai.chat.completions.create({
-      model: 'gpt-5',
+      model: process.env.BRAND_SAFETY_JUDGE_MODEL || 'gpt-5',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      max_completion_tokens: 600,
+      max_completion_tokens: 700,
       response_format: { type: 'json_object' },
     })
-    const parsed = parseJsonLoose<{ detected?: BrandSafetyFinding[] }>(r.choices[0]?.message?.content || '{}')
-    const detected = Array.isArray(parsed.detected) ? parsed.detected
+    const parsed = parseJsonLoose<{ detected?: { phrase?: string; reason?: string; classification?: string }[] }>(r.choices[0]?.message?.content || '{}')
+    const detected: BrandSafetyFinding[] = Array.isArray(parsed.detected) ? parsed.detected
       .filter((f) => f && typeof f.phrase === 'string' && f.phrase.trim().length > 0)
+      .map((f): BrandSafetyFinding => ({
+        phrase: f.phrase!.trim(),
+        reason: typeof f.reason === 'string' ? f.reason : '',
+        // Default to the SAFE side (piggyback = remove) when the model omits/garbles it.
+        classification: f.classification === 'compatibility' ? 'compatibility' : 'piggyback',
+      }))
       .slice(0, 15) : []
     return { detected }
   } catch {
@@ -1736,9 +1775,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .slice(0, 10)                                        // matches the scorer's top-10 cap
     .map((k) => k.keyword)
 
+  // COMPATIBILITY-BRAND opportunities (PR #86). Keywords whose tokens include a known
+  // device brand (Canon/Sony/Nikon/GoPro/Kodak/…) are high-IQ compatibility plays the
+  // product genuinely works with. Live B0GCF11RKL: 'sd card for canon camera' (CRITICAL,
+  // nowhere), 'sd card for sony camera', 'fz55 sd card', etc. — all sitting unused.
+  // Extract the distinct brands, opportunity-sorted, so the agents can weave them in as
+  // 'Compatible with [Brand]'. NON-apparel only — an alligator tee has no device
+  // compatibility (apparel brand mentions are piggyback, handled by the judge/removal).
+  const compatibilityBrands: string[] = []
+  if (!apparelProduct) {
+    const seen = new Set<string>()
+    const ownB = ownBrandTokenSet(brandName)
+    const ranked = cleanGated
+      .filter((k) => !isSeasonal(k.keyword))
+      .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    for (const k of ranked) {
+      for (const brand of findThirdPartyBrands(k.keyword, ownB)) {
+        // Title-case the brand for display ("canon" → "Canon", multi-word kept lower→Title).
+        const display = brand.split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+        if (!seen.has(display)) { seen.add(display); compatibilityBrands.push(display) }
+      }
+      if (compatibilityBrands.length >= 6) break
+    }
+  }
+
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal, topUpgradeKws)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands)
 
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
