@@ -419,7 +419,7 @@ function parseJsonLoose<T>(raw: string): T {
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
-export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string, upgradeKws?: string[]): string[] {
+export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string, upgradeKws?: string[], designName?: string): string[] {
   const problems: string[] = []
   const len = title.length
   if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim 80-125 for apparel).`)
@@ -455,6 +455,15 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
     const phraseWords = phrase.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
     const present = lc.includes(phrase) || (phraseWords.length > 0 && phraseWords.every((w) => words.has(w)))
     if (!present) problems.push(`Title MUST contain the highest-volume keyword "${mustInclude}" (or all of its key words) — front-load it.`)
+  }
+
+  // 🔴 DESIGN NAME (PR #91) — the seller's design identity ("Later Gator") must appear
+  // VERBATIM. Substring match (not word-set) so paraphrases like "See You Later Alligator"
+  // for a "Later Gator" design DON'T satisfy it. Drives the retry to restore it.
+  if (designName) {
+    if (!lc.includes(designName.toLowerCase())) {
+      problems.push(`🔴 DESIGN NAME MISSING: the title must contain the product's design name "${designName}" VERBATIM (it's the seller's design identity printed on the product). Do NOT paraphrase or substitute a synonym — use "${designName}" exactly.`)
+    }
   }
 
   // The blank/garment brand attribute (e.g. "comfort colors") is a strategic ranking term
@@ -747,6 +756,9 @@ async function runTitleAgent(
   /** High-IQ COMPATIBILITY device brands the product genuinely works with (Canon/Sony/
    *  Nikon/…). Agent weaves the top ones in as 'Compatible with [Brand]'. PR #86. */
   compatibilityBrands: string[] = [],
+  /** Seller's DESIGN/SLOGAN name ("Later Gator") that MUST survive verbatim — the product's
+   *  identity. Mandated + validated like the money keyword. PR #91. */
+  designName = '',
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle } = input
   const apparel = looksApparel(category, repTitle)
@@ -758,6 +770,12 @@ async function runTitleAgent(
     : ''
   const mustLine = mustInclude
     ? `\n🔴 MANDATORY #1 — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
+    : ''
+  // The seller's design/slogan name is the PRODUCT'S IDENTITY (the artwork printed on it).
+  // It must appear VERBATIM — do NOT paraphrase it (e.g. keep "Later Gator", never swap it
+  // for "See You Later Alligator" or "Crocodile Design"). PR #91.
+  const designLine = designName
+    ? `\n🔴 MANDATORY — the title MUST contain the product's DESIGN NAME exactly as written: "${designName}". This is the seller's design identity printed on the product. Use it VERBATIM — never paraphrase, expand, or substitute a synonym for it.\n`
     : ''
   const attrPinLine = attributePin
     ? `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
@@ -779,7 +797,7 @@ async function runTitleAgent(
   const system = `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`
   const user = `Brand: ${brandName}
 Category: ${category}
-${mustLine}${attrPinLine}${upgradeLine}
+${designLine}${mustLine}${attrPinLine}${upgradeLine}
 Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — use as many as fit naturally, ${apparel ? 'typically 1-2 beyond the mandatory keyword' : 'aim for 3-5 of these alongside the mandatory keyword'}):
 ${candidateList}
 ${attrLine}${audienceLine}
@@ -806,7 +824,7 @@ Rules:
     max_tokens: 120,
   })
   let title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) : ['No title generated.']
+  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) : ['No title generated.']
   let retried = false
 
   // Up to 2 corrective passes — the mandatory-keyword + max-2 rules are non-negotiable.
@@ -823,7 +841,7 @@ Rules:
     })
     const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     if (corrected) {
-      const cp = validateTitle(corrected, brandName, mustInclude, attributePin, upgradeKws)
+      const cp = validateTitle(corrected, brandName, mustInclude, attributePin, upgradeKws, designName)
       if (cp.length <= problems.length) { title = corrected; problems = cp }
     }
   }
@@ -831,7 +849,7 @@ Rules:
   // Compliance guarantee: brand must lead.
   if (title && brandName && !title.toLowerCase().includes(brandName.toLowerCase())) {
     const prefixed = `${brandName} ${title}`.trim()
-    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) }
+    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) }
   }
 
   // Audience guarantee: never silently narrow a unisex product to one gender.
@@ -841,7 +859,7 @@ Rules:
       const swapped = title
         .replace(/\bfor Men\b/i, 'for Men and Women')
         .replace(/\bMen'?s\b/i, "Men's and Women's")
-      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws) }
+      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) }
     }
   }
 
@@ -872,7 +890,7 @@ Rules:
       const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
       if (corrected && corrected.length <= 200) {
         title = corrected
-        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws)
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
       }
     }
   } catch { /* fail-open */ }
@@ -1671,6 +1689,54 @@ Return ONLY {"searchKeyphrases":[...],"specs":[...]}.`
   }
 }
 
+/**
+ * Extract the seller's DESIGN / SLOGAN NAME from the current title — the product's identity
+ * (the graphic/phrase printed on the shirt, mug, sticker, etc.). PR #91.
+ *
+ * The agent kept paraphrasing "Later Gator" (the seller's actual design name, leading their
+ * live title) into "See You Later Alligator" / "Crocodile Design" and DROPPING the real name.
+ * The design name is the seller's brand identity for that product — it MUST survive verbatim
+ * into the optimized title/bullets/description, the same way the money keyword does.
+ *
+ * Returns '' when there's no distinct design name (most non-apparel — an SD card has no
+ * "design", its identity is its specs). Apparel/novelty almost always has one.
+ */
+async function extractDesignName(input: PipelineInput): Promise<string> {
+  const { openai, repTitle, category } = input
+  const apparel = looksApparel(category, repTitle)
+  // Design names live on apparel / novelty / print products. Skip pure-spec products.
+  if (!repTitle || !apparel) return ''
+  const system = 'You identify the DESIGN / SLOGAN NAME of a print-on-demand or novelty product from its title — the short distinctive phrase printed on it or that names the artwork (e.g. "Later Gator", "Big Dill", "Out of Office"). It is the product\'s identity, NOT generic descriptors. Return ONLY {"designName":"<short phrase, or empty string>"}.'
+  const user = `Current product title: "${repTitle}"
+
+Return the DESIGN/SLOGAN NAME exactly as the seller wrote it — the distinctive phrase that names this specific design (usually leads the title, before generic words like "Vintage", "90s", "T-Shirt", "Comfort Colors", "Graphic Tee", "for Men").
+- Use the seller's EXACT wording (e.g. "Later Gator", not a paraphrase like "See You Later Alligator").
+- If the title is only generic descriptors with no distinct design name, return "".
+- Max 5 words.
+
+Return ONLY {"designName":"..."}.`
+  try {
+    const r = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0,
+      max_tokens: 40,
+      response_format: { type: 'json_object' },
+    })
+    const parsed = parseJsonLoose<{ designName?: string }>(r.choices[0]?.message?.content || '{}')
+    let name = typeof parsed.designName === 'string' ? parsed.designName.trim() : ''
+    // Guard: the extracted name MUST actually appear in the seller's title (the LLM is told
+    // to use exact wording; reject hallucinated/paraphrased names). Case-insensitive substring.
+    if (name && !repTitle.toLowerCase().includes(name.toLowerCase())) name = ''
+    // Don't return the brand itself as a "design name".
+    if (name && input.brandName && name.toLowerCase() === input.brandName.toLowerCase()) name = ''
+    return name.split(/\s+/).length <= 5 ? name : ''
+  } catch (err) {
+    console.warn('[pipeline] design-name extraction failed:', err)
+    return ''
+  }
+}
+
 /** Turn an attribute phrase into a synthetic high-opportunity keyword so it flows through
  * the title-candidate / bullets / backend pools via the existing selection logic. */
 function attributeAsKeyword(attr: string): AnalyzedKeyword {
@@ -1810,9 +1876,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   }
 
+  // Design-name anchor (PR #91): the seller's distinctive design/slogan ("Later Gator")
+  // that MUST survive into the title verbatim — the agent kept paraphrasing it away.
+  const designName = await extractDesignName(input)
+
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
 
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
