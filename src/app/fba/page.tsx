@@ -3167,6 +3167,15 @@ export default function FBAIntelligencePage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {seoScores.map(score => {
                   const stale = staleStatus[score.parent_asin]
+                  // PR #90: HIDE fully-empty ghost parents. B0F8WYNVPJ-class ASINs claim
+                  // child_count>0 in the rollup but orphan-check finds ZERO live children
+                  // (the variation family migrated away). twin-parent can't resolve them
+                  // (no SKUs → no prefix), so #88/#89 can't redirect — they just dead-end.
+                  // Removing them from the grid entirely is the only clean answer: the seller
+                  // then sees ONLY the live parent (e.g. B0GCF11RKL). Guarded: only hide once
+                  // orphan-check has CONFIRMED 0 total children AND the rollup claimed some
+                  // (the mismatch that proves it's a stale ghost, not a not-yet-synced card).
+                  if (stale && stale.totalChildren === 0 && (score.child_count ?? 0) > 0) return null
                   const isStale = stale?.isStale ?? false
                   const scoreColor =
                     score.overall_score >= 80 ? 'text-green-600'
