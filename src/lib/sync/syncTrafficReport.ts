@@ -294,6 +294,30 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
     }
 
     // ── Compute and upsert parent_asin_rollup ────────────────────────────
+    // PR #85: load the AUTHORITATIVE child→parent map first. The variation parent from
+    // the Catalog API (stored in listing_health.parent_asin by syncParentAsins) is more
+    // reliable than the Sales-&-Traffic report's own parentAsin field, which is often
+    // blank for variation children mid-resolution. Without this, the line below fell back
+    // to `entry.childAsin` and a CHILD became its own rollup parent → the dashboard
+    // rendered child ASINs as listing-optimizer cards (live-verified: B0B4STMBS7, a 32GB
+    // child, showed as a card because its parent B0GCF11RKL wasn't on the traffic row).
+    const knownChildToParent = new Map<string, string>()
+    const knownChildAsins = new Set<string>()
+    try {
+      const { data: lhRows } = await supabase
+        .from('listing_health')
+        .select('asin, parent_asin')
+        .not('parent_asin', 'is', null)
+      for (const r of (lhRows ?? []) as { asin: string; parent_asin: string }[]) {
+        if (r.asin && r.parent_asin && r.parent_asin !== r.asin) {
+          knownChildToParent.set(r.asin, r.parent_asin)
+          knownChildAsins.add(r.asin)
+        }
+      }
+    } catch (e) {
+      console.warn('[Traffic Sync] could not load child→parent map (rollup may self-parent children):', e instanceof Error ? e.message : e)
+    }
+
     const parentMap = new Map<string, {
       children: RawTrafficEntry[]
       totalUnits: number
@@ -309,7 +333,13 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
     }>()
 
     for (const entry of entries) {
-      const parent = entry.parentAsin || entry.childAsin
+      // Precedence (PR #85): authoritative Catalog map > traffic-report field > self.
+      // Only self-parent when the ASIN is NOT a known child — that's a genuine standalone
+      // product (single SKU, no variation family), which legitimately is its own parent.
+      const parent = knownChildToParent.get(entry.childAsin)
+        || (entry.parentAsin && entry.parentAsin !== entry.childAsin ? entry.parentAsin : '')
+        || (knownChildAsins.has(entry.childAsin) ? '' : entry.childAsin)
+      if (!parent) continue // known child with no resolved parent yet — don't self-parent it
       const existing = parentMap.get(parent) || {
         children: [],
         totalUnits: 0,
@@ -376,6 +406,27 @@ export async function syncTrafficReport(): Promise<TrafficSyncResult> {
       } else {
         parentRollupsCreated += chunk.length
       }
+    }
+
+    // ── CLEANUP (PR #85): delete already-corrupted self-parented child rows ──
+    // Prior syncs (before this fix) wrote child ASINs into parent_asin_rollup as their own
+    // parent. Those stale rows keep rendering as dashboard cards until overwritten. Now
+    // that we know which ASINs are children, delete any rollup row keyed on a known child.
+    // The legitimate parent already has (or just got) its own correct row above, so the
+    // dashboard self-heals on the next load — no need to wait for a clean full re-sync.
+    if (knownChildAsins.size > 0) {
+      const childList = [...knownChildAsins]
+      let deleted = 0
+      for (let i = 0; i < childList.length; i += 100) {
+        const chunk = childList.slice(i, i + 100)
+        const { error: delErr, count } = await supabase
+          .from('parent_asin_rollup')
+          .delete({ count: 'exact' })
+          .in('parent_asin', chunk)
+        if (delErr) console.warn('[Traffic Sync] rollup cleanup delete error:', delErr.message)
+        else deleted += count ?? 0
+      }
+      if (deleted > 0) console.log(`[Traffic Sync] Cleaned up ${deleted} self-parented child rows from parent_asin_rollup`)
     }
 
     // ── Enrich sku_sales_analytics with traffic data ─────────────────────
