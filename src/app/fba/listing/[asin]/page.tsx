@@ -468,6 +468,38 @@ export default function ListingDetailPage() {
     })()
   }, [asin])
 
+  // 👻 GHOST-PARENT HARD REDIRECT (PR #89). B0F8WYNVPJ-class ASINs are "half-ghosts":
+  // they still carry stale recommendations + score (so the #83 empty-recs banner never
+  // fires) but have ZERO live children on Amazon (the variation family migrated to a twin
+  // parent, e.g. B0GCF11RKL). Landing here is a dead end — the seller's repeated "clicking
+  // a card doesn't open the parent". The authoritative signal is orphan-check (live catalog
+  // relationships). If it returns 0 live children AND twin-parent resolves a DIFFERENT real
+  // ASIN, hard-redirect to the live parent. Deterministic, runs on load, independent of
+  // stale recs / rollup child_count / async dashboard staleStatus. Loop-guarded.
+  const [ghostRedirecting, setGhostRedirecting] = useState(false)
+  useEffect(() => {
+    if (!asin) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const oc = await fetch(`/api/fba/listing-optimizer/orphan-check?parent_asin=${asin}`)
+        if (!oc.ok || cancelled) return
+        const ocd = await oc.json()
+        const liveChildren = (ocd.children ?? []).filter((c: { status?: string }) => c.status !== 'orphan')
+        if (liveChildren.length > 0) return // genuine parent — never redirect
+        // 0 live children → ghost. Resolve the live twin and route there.
+        const tr = await fetch(`/api/fba/listing-optimizer/twin-parent?parent_asin=${asin}`)
+        if (!tr.ok || cancelled) return
+        const td = await tr.json()
+        if (td.twinParent && td.twinParent !== asin) {
+          setGhostRedirecting(true)
+          router.replace(`/fba/listing/${td.twinParent}`)
+        }
+      } catch { /* best-effort — page renders normally if checks fail */ }
+    })()
+    return () => { cancelled = true }
+  }, [asin, router])
+
   // Fetch keyword intelligence
   useEffect(() => {
     if (!score?.top_child_asin) return
@@ -789,6 +821,17 @@ export default function ListingDetailPage() {
   })()
 
   // ─── Loading / Not Found ──────────────────────────────────────────────────
+
+  // Ghost-parent redirect in flight (PR #89) — show a clear message instead of flashing
+  // the dead listing's stale content before router.replace swaps the page.
+  if (ghostRedirecting) return (
+    <div className="flex items-center justify-center min-h-[60vh]">
+      <div className="text-center">
+        <div className="animate-spin w-8 h-8 border-2 border-amber-500 border-t-transparent rounded-full mx-auto mb-3" />
+        <p className="text-sm text-slate-600">This ASIN&apos;s variation family moved — opening the live parent…</p>
+      </div>
+    </div>
+  )
 
   if (loading) return (
     <div className="flex items-center justify-center min-h-[60vh]">
