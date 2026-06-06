@@ -895,6 +895,9 @@ async function runBulletsAgent(
    *  capacities, the validator rejects any hardcoded capacity in a broadcast bullet
    *  (PR #76 fix for B0GCF11RKL "this 128 GB SD card" bug). */
   capacityFamilyTokens: string[] = [],
+  /** High-IQ compatibility device brands to weave in as 'Compatible with [Brand]'.
+   *  PR #87 — proactively seed (title already does; bullets/desc now match). */
+  compatibilityBrands: string[] = [],
 ): Promise<string[]> {
   const { openai, brandName, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
@@ -932,7 +935,8 @@ Rules per bullet:
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
 - 80-200 characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
 - 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}
-- Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.
+- Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.${compatibilityBrands.length > 0 ? `
+- 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands shoppers search for. Devote ONE bullet to compatibility using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example hook: "WIDE COMPATIBILITY - Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras and more...".` : ''}
 Return ONLY the JSON object.`
 
   const completion = await openai.chat.completions.create({
@@ -1373,7 +1377,7 @@ Return ONLY the JSON object.`
 
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
-async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[]): Promise<string> {
+async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = []): Promise<string> {
   const { openai, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
   // Capacity-family detection (mirrors bullets): shared description must NOT hardcode a
@@ -1392,7 +1396,9 @@ Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
 
 🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.
 
-🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy): any third-party brand name (Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, DJI, Bose, etc. — anything not your own brand) appears ONLY in 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]' phrasing. Examples: ✓ 'compatible with Canon EOS R5 and Sony Alpha cameras', ✗ 'Sandisk-quality storage' (bare brand reference — risks listing suppression and trademark complaints).${descCapacityFamily ? `
+🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy): any third-party brand name (Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, DJI, Bose, etc. — anything not your own brand) appears ONLY in 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]' phrasing. Examples: ✓ 'compatible with Canon EOS R5 and Sony Alpha cameras', ✗ 'Sandisk-quality storage' (bare brand reference — risks listing suppression and trademark complaints).${compatibilityBrands.length > 0 ? `
+
+🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands and shoppers search for them. Naturally work the top ones into the description using "Compatible with [Brand]" framing (one feature bullet or sentence — never bare): ${compatibilityBrands.join(', ')}. Example: "Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras". Legal referential use that captures real buyer traffic.` : ''}${descCapacityFamily ? `
 
 🚫 CAPACITY: this family has MULTIPLE capacities (${descFamilyCapList}). The description is SHARED across all variants — NEVER hardcode a specific GB number in any paragraph or bullet (no "128GB and 64GB capacities", no "this 128GB SD card", no "Available in 128GB and 64GB"). Use capacity-agnostic phrasing: "available in multiple capacities", "high-capacity storage", "ample space for your needs". The capacity-specific text already lives in each variant's TITLE.` : ''}
 
@@ -1871,7 +1877,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   const capacityFamilyTokens = bulletCapTokens.size >= 2 ? [...bulletCapTokens] : []
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens)
+  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands)
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
@@ -1885,7 +1891,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Description (always generated — indexed field)
   onProgress('Writing description...')
-  const description = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs)
+  const description = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
