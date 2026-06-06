@@ -1786,7 +1786,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (!apparelProduct) {
     const seen = new Set<string>()
     const ownB = ownBrandTokenSet(brandName)
-    const ranked = cleanGated
+    // Read from RAW input.analysis, NOT cleanGated — the relevance gate
+    // (filterRelevantKeywords) strips "competitor brands/trademarks" upstream, so by the
+    // time we reach cleanGated the very device brands we want to chase are gone. The raw
+    // pool still has 'sd card for canon camera', 'sd card for sony camera', etc. (Live-
+    // verified: first #86 deploy surfaced ZERO brands because it read cleanGated.)
+    const ranked = [...input.analysis]
       .filter((k) => !isSeasonal(k.keyword))
       .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     for (const k of ranked) {
