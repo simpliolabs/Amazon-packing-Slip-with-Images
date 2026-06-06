@@ -126,18 +126,23 @@ export async function syncParentAsins(asins: string[]): Promise<{ map: ParentAsi
             const asin = item.asin as string
             if (!asin) continue
 
-            // relationships is an array of { identifiers, type, childAsins, parentAsins }
-            const relationships = item.relationships as Array<Record<string, unknown>> | undefined
+            // SP-API Catalog Items 2022-04-01 relationships are DOUBLY nested and parentAsins
+            // is an array of STRINGS (not objects). The previous code read
+            // item.relationships[].parentAsins[].asin — singly nested, expecting objects —
+            // so it matched NOTHING and parentMap was never populated from the Catalog API.
+            // That's the root cause of the dashboard surfacing child/ghost ASINs as parents.
+            // Correct shape (matches the working orphan-check / relink-status parsers):
+            //   relationships: [ { marketplaceId, relationships: [ { type, parentAsins: string[],
+            //                      childAsins: string[] } ] } ]
+            const relationships = item.relationships as
+              Array<{ relationships?: Array<{ type?: string; parentAsins?: string[] }> }> | undefined
             if (!relationships) continue
 
-            for (const rel of relationships) {
-              // Look for parentAsins in the relationship
-              const parentAsins = rel.parentAsins as Array<Record<string, unknown>> | undefined
-              if (parentAsins && parentAsins.length > 0) {
-                // parentAsins[0] has { marketplaceId, asin }
-                const parentAsin = parentAsins[0].asin as string
-                if (parentAsin) {
-                  parentMap[asin] = parentAsin
+            for (const byMarketplace of relationships) {
+              for (const rel of byMarketplace.relationships ?? []) {
+                if (rel.parentAsins && rel.parentAsins.length > 0) {
+                  const parentAsin = rel.parentAsins[0] // already an ASIN string
+                  if (parentAsin) parentMap[asin] = parentAsin
                 }
               }
             }
