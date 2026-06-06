@@ -3191,10 +3191,17 @@ export default function FBAIntelligencePage() {
                   ].filter(c => issueCounts[c.key])
                   const hasCritical = allIssues.some(i => i.severity === 'critical')
 
+                  // PR #88: when this card is a STALE/ghost parent (its children have moved to
+                  // a live twin, e.g. B0F8WYNVPJ → B0GCF11RKL), clicking the card must land on
+                  // the LIVE parent — not the dead ASIN with 0 children and no recommendations.
+                  // The stale-parent badge already linked there; this makes the WHOLE card do it
+                  // so there's no dead-end. Falls back to the card's own ASIN when not stale.
+                  const clickTarget = (isStale && stale?.dominantParent) ? stale.dominantParent : score.parent_asin
                   return (
                     <button
                       key={score.parent_asin}
-                      onClick={() => router.push(`/fba/listing/${score.parent_asin}`)}
+                      onClick={() => router.push(`/fba/listing/${clickTarget}`)}
+                      title={clickTarget !== score.parent_asin ? `Opens the live parent ${clickTarget} — this ASIN's children moved there` : undefined}
                       className={`rounded-xl border ${scoreBg} overflow-hidden flex flex-col text-left w-full cursor-pointer transition-all duration-150 hover:shadow-md active:scale-[0.99]`}
                     >
                       <div className="p-4">
