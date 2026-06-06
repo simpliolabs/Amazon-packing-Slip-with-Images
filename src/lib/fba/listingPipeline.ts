@@ -665,6 +665,10 @@ export function validateBullets(
 export function validateDescription(
   description: string,
   brandName: string,
+  /** Distinct capacity tokens across the family. When ≥2, the SHARED description must not
+   *  hardcode a specific GB/TB/MB (PR #90 — live B0GCF11RKL shipped "THE CEO 128GB..." in a
+   *  32/64/128 family). Mirrors the bullet capacity check from #76. */
+  capacityFamily: string[] = [],
 ): string[] {
   const problems: string[] = []
   // Strip HTML the same way the scorer does (loose tag strip — agent returns <p>/<ul>/<li>).
@@ -675,6 +679,14 @@ export function validateDescription(
   }
   if (plain.length < 200) {
     problems.push(`Description is only ${plain.length} chars — expand to 800-2000 chars with use cases, target audience, technical specs, and long-tail keywords. Amazon indexes the full text.`)
+  }
+
+  // 🚫 CAPACITY-FAMILY check (PR #90) — same rule the bullets validator enforces.
+  if (capacityFamily.length >= 2) {
+    const caps = [...new Set((plain.match(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi) || []).map((m) => m.replace(/\s+/g, ' ').toUpperCase()))]
+    if (caps.length > 0) {
+      problems.push(`🚫 CAPACITY-FAMILY VIOLATION: the description hardcodes ${caps.join(', ')} but this family spans ${capacityFamily.join(', ')}. The description is SHARED across all variants — a specific GB misleads the other-capacity SKUs. Use capacity-agnostic phrasing ("ample capacity", "high-capacity storage", "available in multiple sizes").`)
+    }
   }
 
   const ownBrands = ownBrandTokenSet(brandName)
@@ -1416,10 +1428,15 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
   // last surface in PR #75 — title (#74), bullets (above), and now description all share
   // the parent/child coverage standard for validate+retry.
   const { brandName: descBrand } = input
+  // PR #90: family capacity tokens for the description capacity-family check (mirrors bullets).
+  const descCapTokens = descCapacityFamily ? [...descChildCaps].map((c) => c.toUpperCase()) : []
   if (description && descBrand) {
-    let dProblems = validateDescription(description, descBrand)
+    let dProblems = validateDescription(description, descBrand, descCapTokens)
     for (let attempt = 0; attempt < 2 && dProblems.length > 0; attempt++) {
       try {
+        const capClause = descCapTokens.length >= 2
+          ? `\n- 🚫 CAPACITY: family spans ${descCapTokens.join(', ')}. The description is SHARED — NEVER hardcode a specific GB/TB ("128GB"). Use capacity-agnostic phrasing only.`
+          : ''
         const fix = await openai.chat.completions.create({
           model: 'gpt-4.1-mini',
           messages: [
@@ -1431,7 +1448,7 @@ Problems:
 
 Rules to honor on rewrite:
 - 270-330 words HTML using <p>, <b>, <ul>, <li>.
-- Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.
+- Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capClause}
 - Return ONLY the HTML.` },
           ],
           temperature: 0.4,
@@ -1439,10 +1456,22 @@ Rules to honor on rewrite:
         })
         const corrected = (fix.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
         if (!corrected) break
-        const cdProblems = validateDescription(corrected, descBrand)
+        const cdProblems = validateDescription(corrected, descBrand, descCapTokens)
         if (cdProblems.length < dProblems.length) { description = corrected; dProblems = cdProblems }
         else break
       } catch { break /* keep best-so-far */ }
+    }
+
+    // 🛟 Programmatic capacity backstop (PR #90, mirrors the bullets backstop in #79). If a
+    // specific capacity still survives in a multi-capacity family's shared description after
+    // the retries, strip it deterministically — better awkward phrasing than "128GB" shown
+    // on a 32GB variant's PDP.
+    if (descCapTokens.length >= 2) {
+      description = description
+        .replace(/\bthis\s+\d{1,4}\s?(?:GB|TB|MB)\s+/gi, 'this ')
+        .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\s+(sd\s+card|memory\s+card|sdhc|sdxc|micro\s*sd)/gi, '$1')
+        .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, 'high-capacity')
+        .replace(/\s{2,}/g, ' ')
     }
 
     // 🛟 LLM brand-safety judge — final catch-net (PR #80). Strip HTML for the judge
