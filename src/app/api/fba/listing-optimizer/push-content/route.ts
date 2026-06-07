@@ -804,6 +804,35 @@ export async function POST(req: NextRequest) {
               }).eq('parent_asin', parent_asin)
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
+
+          // PERSIST verdict=DONE for the pushed section. Without this, the card snaps back to
+          // "Do Now" the moment the page refetches recommendations: the client only marked DONE
+          // in local state, while listing_seo_recommendations.action_plan still held the pipeline's
+          // forced 'REPLACE'. We just shipped the recommended value, so live now matches it → DONE.
+          try {
+            const { data: recRow } = await db.from('listing_seo_recommendations')
+              .select('action_plan').eq('parent_asin', parent_asin).single()
+            const plan = Array.isArray(recRow?.action_plan) ? recRow.action_plan as Array<Record<string, unknown>> : null
+            if (plan) {
+              const isPushed = (el: string) =>
+                field === 'title' ? el === 'title'
+                : field === 'description' ? el === 'description'
+                : field === 'keywords' ? el === 'backend_keywords'
+                : field === 'bullets' ? /^bullet_\d+$/.test(el) : false
+              const lbl = FIELD_CONFIG[field].label.toLowerCase()
+              let changed = false
+              for (const it of plan) {
+                if (isPushed(String(it.element)) && it.verdict !== 'DONE' && it.verdict !== 'SKIP') {
+                  it.verdict = 'DONE'
+                  it.current_status = `✓ Shipped to Amazon — live ${lbl} now matches the recommended version.`
+                  it.instruction = 'No action required — you pushed this. The copy box stays below if you need it.'
+                  if (it.priority !== 'HIGH') it.priority = 'NONE'
+                  changed = true
+                }
+              }
+              if (changed) await db.from('listing_seo_recommendations').update({ action_plan: plan }).eq('parent_asin', parent_asin)
+            }
+          } catch (e) { console.warn('[push-content] persist DONE verdict failed (non-fatal):', e) }
         }
 
         const label = FIELD_CONFIG[field].label.toLowerCase()
