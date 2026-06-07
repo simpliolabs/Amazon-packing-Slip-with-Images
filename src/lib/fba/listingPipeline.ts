@@ -53,6 +53,11 @@ export interface PipelineInput {
   children: PipelineChild[]
   /** Current title of the representative child — used for product-name token extraction */
   repTitle: string | null
+  /** Canonical listing title (listing_seo_scores.product_title — the title the seller & dashboard
+   *  see, sourced from the best-selling child). Preferred over repTitle for DESIGN-NAME extraction:
+   *  repTitle is children[0] = the alphabetically-first variant, often a stale/secondary title that
+   *  does NOT lead with the design name. Null when no score row exists. */
+  canonicalTitle?: string | null
   /** Per-variant content block (for the audit's variant-health check) */
   variantDetails: string
   /** Keyword intelligence context block (reused for the audit agent) */
@@ -80,7 +85,7 @@ export interface PipelineResult {
   product_details_improvements: PipelineProductDetailImprovement[]
   keyword_reconciliation: PipelineKeywordReconciliation[]
   action_plan: PipelineActionPlanItem[]
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean }
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string }
 }
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
@@ -1730,13 +1735,63 @@ Return ONLY {"searchKeyphrases":[...],"specs":[...]}.`
  * Returns '' when there's no distinct design name (most non-apparel — an SD card has no
  * "design", its identity is its specs). Apparel/novelty almost always has one.
  */
-async function extractDesignName(input: PipelineInput): Promise<string> {
-  const { openai, repTitle, category } = input
-  const apparel = looksApparel(category, repTitle)
-  // Design names live on apparel / novelty / print products. Skip pure-spec products.
-  if (!repTitle || !apparel) return ''
-  const system = 'You identify the DESIGN / SLOGAN NAME of a print-on-demand or novelty product from its title — the short distinctive phrase printed on it or that names the artwork (e.g. "Later Gator", "Big Dill", "Out of Office"). It is the product\'s identity, NOT generic descriptors. Return ONLY {"designName":"<short phrase, or empty string>"}.'
-  const user = `Current product title: "${repTitle}"
+/** The distinctive design/slogan phrase that LEADS a print-on-demand apparel title — the words
+ *  before the first generic descriptor ("Later Gator" in "Later Gator Vintage 90s T-Shirt..."). A
+ *  deterministic fallback for when the LLM design-name extraction returns nothing, so apparel always
+ *  surfaces its design name (the seller flagged the dropped name 3×, so empty is not acceptable when
+ *  a clear lead exists). */
+export function leadingDesignPhrase(title: string, brandName: string): string {
+  const STOP = /^(?:vintage|retro|classic|\d{2,4}s?|t|tshirt|tshirts|tee|tees|shirt|shirts|hoodie|hoodies|sweatshirt|sweater|tank|top|tops|comfort|color|colors|graphic|graphics|soft|premium|quality|unisex|man|mans|men|mens|woman|womans|women|womens|ladies|youth|adult|kid|kids|toddler|baby|for|gift|gifts|funny|cute|cool|novelty|design|designs|apparel|clothing|crewneck|crew|long|short|sleeve|sleeves|cotton|ringspun|the|a|an|and|with|by|ideal|perfect|great)$/i
+  let t = (title || '').trim()
+  if (brandName && t.toLowerCase().startsWith(brandName.toLowerCase())) t = t.slice(brandName.length).trim()
+  const words = t.replace(/[—–]+/g, ' ').split(/[\s\-]+/).filter(Boolean)
+  const lead: string[] = []
+  for (const w of words) {
+    const clean = w.replace(/[^A-Za-z0-9']/g, '')
+    if (!clean || STOP.test(clean)) break
+    lead.push(clean)
+    if (lead.length >= 5) break
+  }
+  return lead.join(' ').trim()
+}
+
+/**
+ * Extract the seller's DESIGN / SLOGAN NAME ("Later Gator") to anchor it verbatim into the title.
+ *
+ * Source FIX: prefer the CANONICAL title (listing_seo_scores.product_title — what the seller &
+ * dashboard actually see, sourced from the best-selling child). The earlier version read
+ * input.repTitle = children[0] = the ALPHABETICALLY-FIRST variant, whose stored listing_content
+ * title is often a stale/secondary one that does NOT lead with the design name — so the LLM
+ * extracted from the wrong title and the substring guard nulled it, silently dropping "Later Gator".
+ *
+ * Returns { name, source } where source is a debug tag (llm:canonical / heuristic:canonical /
+ * empty:rep / none) surfaced into titleDebug so a live regen proves which path ran.
+ */
+async function extractDesignName(input: PipelineInput): Promise<{ name: string; source: string }> {
+  const { openai, repTitle, category, canonicalTitle, brandName } = input
+  const usingCanonical = !!(canonicalTitle && canonicalTitle.trim())
+  const source = usingCanonical ? canonicalTitle!.trim() : (repTitle || '')
+  const titleTag = usingCanonical ? 'canonical' : 'rep'
+  const apparel = looksApparel(category, source)
+  // Design names live on apparel / novelty / print products. Skip pure-spec products (an SD card has
+  // no "design" — its identity is its specs).
+  if (!source || !apparel) return { name: '', source: 'none' }
+
+  // A candidate is valid only if it ACTUALLY appears in the source title (rejects hallucinated /
+  // paraphrased names — "See You Later Alligator" must NOT pass for a "Later Gator" design), is not
+  // the seller's own brand, and is <=5 words.
+  const accept = (cand: string | undefined | null): string => {
+    const n = (cand || '').trim()
+    if (!n) return ''
+    if (!source.toLowerCase().includes(n.toLowerCase())) return ''
+    if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
+    return n.split(/\s+/).length <= 5 ? n : ''
+  }
+
+  // Primary: LLM extraction from the canonical title.
+  try {
+    const system = 'You identify the DESIGN / SLOGAN NAME of a print-on-demand or novelty product from its title — the short distinctive phrase printed on it or that names the artwork (e.g. "Later Gator", "Big Dill", "Out of Office"). It is the product\'s identity, NOT generic descriptors. Return ONLY {"designName":"<short phrase, or empty string>"}.'
+    const user = `Current product title: "${source}"
 
 Return the DESIGN/SLOGAN NAME exactly as the seller wrote it — the distinctive phrase that names this specific design (usually leads the title, before generic words like "Vintage", "90s", "T-Shirt", "Comfort Colors", "Graphic Tee", "for Men").
 - Use the seller's EXACT wording (e.g. "Later Gator", not a paraphrase like "See You Later Alligator").
@@ -1744,7 +1799,6 @@ Return the DESIGN/SLOGAN NAME exactly as the seller wrote it — the distinctive
 - Max 5 words.
 
 Return ONLY {"designName":"..."}.`
-  try {
     const r = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
@@ -1753,17 +1807,18 @@ Return ONLY {"designName":"..."}.`
       response_format: { type: 'json_object' },
     })
     const parsed = parseJsonLoose<{ designName?: string }>(r.choices[0]?.message?.content || '{}')
-    let name = typeof parsed.designName === 'string' ? parsed.designName.trim() : ''
-    // Guard: the extracted name MUST actually appear in the seller's title (the LLM is told
-    // to use exact wording; reject hallucinated/paraphrased names). Case-insensitive substring.
-    if (name && !repTitle.toLowerCase().includes(name.toLowerCase())) name = ''
-    // Don't return the brand itself as a "design name".
-    if (name && input.brandName && name.toLowerCase() === input.brandName.toLowerCase()) name = ''
-    return name.split(/\s+/).length <= 5 ? name : ''
+    const llm = accept(parsed.designName)
+    if (llm) return { name: llm, source: `llm:${titleTag}` }
   } catch (err) {
-    console.warn('[pipeline] design-name extraction failed:', err)
-    return ''
+    console.warn('[pipeline] design-name LLM extraction failed:', err)
   }
+
+  // Deterministic fallback: the leading distinctive phrase. Guards against LLM flakiness/timeouts so
+  // apparel never silently loses its design name when a clear lead exists.
+  const heur = accept(leadingDesignPhrase(source, brandName))
+  if (heur) return { name: heur, source: `heuristic:${titleTag}` }
+
+  return { name: '', source: `empty:${titleTag}` }
 }
 
 /** Turn an attribute phrase into a synthetic high-opportunity keyword so it flows through
@@ -1907,7 +1962,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Design-name anchor (PR #91): the seller's distinctive design/slogan ("Later Gator")
   // that MUST survive into the title verbatim — the agent kept paraphrasing it away.
-  const designName = await extractDesignName(input)
+  const { name: designName, source: designSource } = await extractDesignName(input)
 
   // Stage 1 — Title
   onProgress('Writing title...')
@@ -2074,6 +2129,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     product_details_improvements: Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : [],
     keyword_reconciliation: Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [],
     action_plan: actionPlan,
-    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried },
+    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource },
   }
 }

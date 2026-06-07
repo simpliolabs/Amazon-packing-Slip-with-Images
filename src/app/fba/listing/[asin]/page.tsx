@@ -118,6 +118,18 @@ function stripVariantSuffix(title: string | null | undefined): string {
     .trim()
 }
 
+// Strip a storage-capacity token ("64GB", "1 TB") from a title — used to render the capacity-
+// AGNOSTIC parent / variation-hub title for capacity-variation families (SD cards by GB). The
+// stored product_title is the best-seller CHILD's title, so it carries that child's capacity; the
+// parent header must not. Shared by the page header and the TITLES card's PARENT row so the two
+// can never drift.
+function stripCapacityToken(title: string | null | undefined): string {
+  return (title ?? '')
+    .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 // Dedup variant rows by ASIN (prefer the FBA SKU). The same ASIN can have both an FBA and an
 // FBM SKU; backend keywords are per-ASIN, so the page (and the push) should treat them as one.
 function dedupByAsin<T extends { sku: string; asin: string }>(rows: T[]): T[] {
@@ -852,6 +864,15 @@ export default function ListingDetailPage() {
   )
 
   const displayImage = score.image_url || fetchedImage
+  // Capacity-family parents (e.g. SD cards by GB): the stored product_title is the best-seller
+  // CHILD's title, so it carries that child's capacity ("...64GB..."). The parent / variation-hub
+  // header must be capacity-AGNOSTIC — strip the GB token, mirroring the TITLES card's PARENT row.
+  // Gated on per_child_titles.length > 1 (only built for non-apparel capacity families), so apparel
+  // and single-capacity products are untouched.
+  const isCapacityFamily = Array.isArray(aiRecs?.per_child_titles) && (aiRecs?.per_child_titles?.length ?? 0) > 1
+  const headerTitle = isCapacityFamily
+    ? stripCapacityToken(stripVariantSuffix(score.product_title))
+    : stripVariantSuffix(score.product_title)
   // Tab definitions for the dashboard-style section nav (one section visible at a time).
   const TABS = [
     { id: 'apply', label: 'Apply Changes', count: (aiRecs?.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length },
@@ -894,7 +915,7 @@ export default function ListingDetailPage() {
 
           {/* Title + meta chips */}
           <div className="flex-1 min-w-0">
-            <h1 className="text-lg font-semibold text-slate-900 leading-snug line-clamp-2">{stripVariantSuffix(score.product_title) || asin}</h1>
+            <h1 className="text-lg font-semibold text-slate-900 leading-snug line-clamp-2">{headerTitle || asin}</h1>
             <div className="flex flex-wrap items-center gap-1.5 mt-2">
               <span className="font-mono text-[11px] text-slate-600 bg-slate-100 rounded-md px-2 py-0.5">{asin}</span>
               <span className="text-[11px] font-medium text-slate-600 bg-slate-100 rounded-md px-2 py-0.5">{score.child_count} variant{score.child_count !== 1 ? 's' : ''}</span>
@@ -1173,7 +1194,7 @@ export default function ListingDetailPage() {
         // Groups each child's CURRENT value to show whether the variants are consistent or split,
         // how many need updating, and which SKUs hold which version.
         const normV = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim()
-        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string) => {
+        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string, optimal: boolean) => {
           const groups = new Map<string, string[]>()
           for (const c of variants) {
             const v = normV(getCurrent(c))
@@ -1182,13 +1203,16 @@ export default function ListingDetailPage() {
           }
           const versions = [...groups.entries()].map(([value, skus]) => ({ value, skus })).sort((a, b) => b.skus.length - a.skus.length)
           const rec = normV(recommended)
-          const needUpdate = variants.filter(c => normV(getCurrent(c)) !== rec).length
-          return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended }
+          // When the section already scores MAX it's optimal — don't flag "N need update" against a
+          // fresh AI draft that's never byte-identical (same reason the action item becomes DONE not
+          // REPLACE). Keeps this row consistent with a 25/25 score instead of contradicting it.
+          const needUpdate = optimal ? 0 : variants.filter(c => normV(getCurrent(c)) !== rec).length
+          return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal }
         }
         const cohFields = [
-          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title), copyVal: recs.recommended_title },
-          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n')), copyVal: (recs.recommended_bullets ?? []).join('\n') },
-          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description), copyVal: recs.recommended_description },
+          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 25), copyVal: recs.recommended_title },
+          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 25), copyVal: (recs.recommended_bullets ?? []).join('\n') },
+          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description, score.keyword_score >= 25), copyVal: recs.recommended_description },
         ]
         return (
         <section>
@@ -1307,11 +1331,8 @@ export default function ListingDetailPage() {
                       // capacity token from the broadcast recommended_title so the parent SKU
                       // (e.g. Memory-Card-P) carries a generic family title without any specific
                       // capacity — that's what shows on the variation hub before a child is picked.
-                      const stripCap = (t: string) => (t || '')
-                        .replace(/\b\d{1,4}\s?(?:GB|TB|MB)\b/gi, '')
-                        .replace(/\s{2,}/g, ' ').trim()
                       const stripSfx = (sku: string) => sku.replace(/[-_](?:FBA|FBM|AFN|MFN|FN)$/i, '')
-                      const parentTitle = stripCap(recs.recommended_title || '') || (recs.per_child_titles[0]?.title ? stripCap(recs.per_child_titles[0].title) : '')
+                      const parentTitle = stripCapacityToken(recs.recommended_title || '') || (recs.per_child_titles[0]?.title ? stripCapacityToken(recs.per_child_titles[0].title) : '')
 
                       // Compose the display list: every per_child_titles entry, plus every FBM
                       // twin discovered live (inherits its FBA sibling's title — same as push).

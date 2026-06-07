@@ -485,7 +485,7 @@ export async function POST(req: NextRequest) {
     // ─── Resolve the keyword-bearing ASIN and load the analysis for the pipeline ───
     const { data: pipelineScoreRow } = await supabase
       .from('listing_seo_scores')
-      .select('top_child_asin')
+      .select('top_child_asin, product_title')
       .eq('parent_asin', parent_asin)
       .single()
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
@@ -523,6 +523,9 @@ export async function POST(req: NextRequest) {
             analysis,
             children: pipelineChildren,
             repTitle: rep.title,
+            // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
+            // the alphabetically-first variant and often does NOT lead with the design name.
+            canonicalTitle: pipelineScoreRow?.product_title ?? null,
             variantDetails,
             keywordContext,
             hasAplus: rep.has_aplus || false,
@@ -533,17 +536,40 @@ export async function POST(req: NextRequest) {
 
           emit({ type: 'progress', message: 'Saving to database...' })
 
-          // ── POST-PROCESS: mark items DONE when live already matches the recommendation ──
+          // ── LIVE SCORE (computed UP FRONT) — drives the issues panel AND verdict gating below ──
+          // Scored on the live listing_content rows (independent of the AI rewrite). Best-effort:
+          // scoring must NEVER break a generation that already produced recommendations. We need it
+          // before the action-plan loop so a section that already scores MAX can be marked DONE
+          // instead of a red REPLACE — that's the "Title 25/25 but still asked to ship it" bug.
+          let secScore: { title: number; bullet: number; keyword: number; aplus: number } | null = null
+          try {
+            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+            const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
+            const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
+            const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
+            const sc = scoreListingContent(parentOwn, scoreRows, ctx)
+            secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score }
+            await supabase.from('listing_seo_scores').update({
+              title_score: sc.title_score,
+              bullet_score: sc.bullet_score,
+              keyword_score: sc.keyword_score,
+              aplus_score: sc.aplus_score,
+              overall_score: sc.overall_score,
+              issues: sc.issues,
+              child_override_count: sc.child_override_count,
+            }).eq('parent_asin', parent_asin)
+          } catch (scoreErr) {
+            console.warn('[AI Recs] Live score (verdict gating + issues panel) failed (non-fatal):', scoreErr instanceof Error ? scoreErr.message : scoreErr)
+          }
+
+          // ── POST-PROCESS: mark items DONE when the section already scores MAX, or live matches ──
           // The pipeline FORCES verdict=REPLACE on every content element (listingPipeline.ts:1043)
-          // so the copy box always renders. That's intentional, but it conflicts with reality:
-          // after the seller pushes a section, the next regen still flags it as actionable even
-          // though the live content now matches what we'd recommend writing. Seller sees
-          // 'Apply Changes (8)' for content they already shipped.
-          //
-          // Fix: compare each child's live content to the pipeline's recommendation. When every
-          // child agrees, flip verdict to DONE so the card collapses to the ✓ Pushed state. The
-          // copy box stays available (we keep replacement_content) for sellers who want to
-          // re-copy.
+          // so the copy box always renders. That's intentional, but it conflicts with the score:
+          // a section the scorer just rated 25/25 must NOT show a red "REPLACE — not optimized".
+          //   (1) sectionOptimal: the live section already scores MAX → DONE (copy box stays as an
+          //       optional alternative). Robust after a push: pushed-optimal content re-scores MAX.
+          //   (2) live-match: every child's live content already equals the recommendation → DONE.
+          // Either path flips verdict to DONE so the badge/ship button/REPLACE pill all collapse.
           const norm = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
           const everyChildMatches = (getLive: (c: ChildRow) => string, recommended: string): boolean => {
             const recNorm = norm(recommended)
@@ -579,14 +605,27 @@ export async function POST(req: NextRequest) {
                 return want ? norm(c.backend_keywords) === want : true
               })
             }
-            if (live) {
+            // (1) The live section already scores MAX (25/25) → it's optimal, don't nag to ship.
+            // Title→title_score, bullets→bullet_score, backend & description→keyword_score (the
+            // keyword-bearing surfaces). A+/product-detail items aren't content-replace items.
+            let sectionOptimal = false
+            if (secScore) {
+              if (item.element === 'title') sectionOptimal = secScore.title >= 25
+              else if (/^bullet_(\d+)$/.test(item.element)) sectionOptimal = secScore.bullet >= 25
+              else if (item.element === 'backend_keywords' || item.element === 'description') sectionOptimal = secScore.keyword >= 25
+            }
+            if (live || sectionOptimal) {
               item.verdict = 'DONE'
               const label = item.element === 'backend_keywords' ? 'backend search terms'
                 : item.element === 'description' ? 'description'
                 : /^bullet_(\d+)$/.test(item.element) ? `bullet ${item.element.split('_')[1]}`
                 : item.element
-              item.current_status = `✓ Live ${label} matches the recommended version across all ${children.length} variant${children.length === 1 ? '' : 's'}.`
-              item.instruction = 'No action required — your last push wrote this exact content. The copy box stays below if you need it.'
+              item.current_status = live
+                ? `✓ Live ${label} matches the recommended version across all ${children.length} variant${children.length === 1 ? '' : 's'}.`
+                : `✓ Your live ${label} already scores top marks (25/25) — no change needed. Optimized copy is below if you want to compare.`
+              item.instruction = live
+                ? 'No action required — your last push wrote this exact content. The copy box stays below if you need it.'
+                : 'No action required — this section is already optimized. The copy box below is an optional alternative.'
               if (item.priority !== 'HIGH') item.priority = 'NONE'
             }
           }
@@ -641,31 +680,7 @@ export async function POST(req: NextRequest) {
             }, { onConflict: 'parent_asin' })
           }
 
-          // Refresh the ISSUES-TO-FIX panel so it reflects the current listing. The scorer
-          // otherwise only runs on Sync, so deployed copy fixes and content changes looked
-          // stale here. Best-effort — must NEVER break a generation that already persisted.
-          emit({ type: 'progress', message: 'Refreshing issues panel...' })
-          try {
-            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
-            // The route's child rows carry the fields the scorer reads (title/bullets/
-            // description/backend/image_count/aplus_*); cast to the scorer's row shape.
-            const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
-            const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
-            const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
-            const score = scoreListingContent(parentOwn, scoreRows, ctx)
-            await supabase.from('listing_seo_scores').update({
-              title_score: score.title_score,
-              bullet_score: score.bullet_score,
-              keyword_score: score.keyword_score,
-              aplus_score: score.aplus_score,
-              overall_score: score.overall_score,
-              issues: score.issues,
-              child_override_count: score.child_override_count,
-            }).eq('parent_asin', parent_asin)
-          } catch (scoreErr) {
-            console.warn('[AI Recs] Issue re-score failed (non-fatal):', scoreErr instanceof Error ? scoreErr.message : scoreErr)
-          }
-
+          // (Issues panel + scores were refreshed UP FRONT — see the LIVE SCORE block above.)
           emit({
             type: 'result',
             recommendations: rec,
