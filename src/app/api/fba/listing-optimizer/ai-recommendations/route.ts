@@ -325,11 +325,15 @@ export async function POST(req: NextRequest) {
       .eq('parent_asin', parent_asin)
       .order('sku', { ascending: true })
 
-    // SELF-HEAL: if we have 0 rows under this parent_asin but Amazon's catalog says this ASIN
-    // IS a variation parent with childAsins, the children are stored under a STALE parent_asin
-    // in our DB (their actual Amazon parent changed). Pull the live childAsins, re-assign our
-    // listing_content rows, then retry. Keeps a stale sync from blocking a perfectly valid regen.
-    if (!error && (!childrenRaw || childrenRaw.length === 0)) {
+    // LIVE-FAMILY RECONCILE: on EVERY regen, ask Amazon's catalog for this parent's live VARIATION
+    // childAsins and re-attach any listing_content row currently stored under a DIFFERENT parent.
+    // This pulls in children the seller newly LINKED into the family on Amazon (e.g. a 128GB SD
+    // card moved into the SD-card parent) AND heals children stored under a stale parent. A normal
+    // Sync never corrects this: syncParentAsins only FILLS null parent_asins — it never re-parents
+    // an existing (stale/self-parented) one. Previously this ran ONLY when the parent had 0 stored
+    // children; broadened so a parent that GAINS a child is reconciled too. Best-effort — the
+    // catalog call is wrapped in try/catch and never blocks a regen.
+    if (!error) {
       try {
         const { getAccessToken: getTok } = await import('@/lib/amazon/auth')
         const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
