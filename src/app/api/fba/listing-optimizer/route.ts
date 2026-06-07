@@ -18,13 +18,15 @@ export async function GET() {
   try {
     const supabase = await createAdminClient()
 
-    // Top 10 parents with issues (score < 100), ranked by 30d sales
+    // Top parents with issues (score < 100), ranked by 30d sales. Fetch HEADROOM (20, not 10)
+    // because some top rows are GHOSTS — stale score rows whose children have moved/been removed
+    // (0 live children). Those are filtered out below, then we slice to the real top 10.
     const { data: scores, error: scoresErr } = await supabase
       .from('listing_seo_scores')
       .select('*')
       .lt('overall_score', 100)
       .order('total_units_30d', { ascending: false })
-      .limit(10)
+      .limit(20)
 
     if (scoresErr) {
       return NextResponse.json({ error: scoresErr.message }, { status: 500 })
@@ -73,10 +75,22 @@ export async function GET() {
       child_override_count: number; top_child_asin: string | null; product_title: string | null
       image_url: string | null; total_units_30d: number; scored_at: string
     }
-    const result = (scores as ScoreRow[]).map(score => ({
-      ...score,
-      children: childMap[score.parent_asin] || [],
-    }))
+    const result = (scores as ScoreRow[])
+      .map(score => ({
+        ...score,
+        children: childMap[score.parent_asin] || [],
+      }))
+      // ── FOUNDATIONAL INVARIANT: a parent card requires >=1 LIVE child ──────────────
+      // A "parent" with zero live children (no listing_content row points to it) is a GHOST:
+      // an old/merged parent ASIN whose variations moved away, leaving a stale score row with
+      // historical sales (e.g. B0F8WYNVPJ: child_count=3 but 0 live children, 965 stale units →
+      // ranked #1 → rendered a card that dead-ends at /fba/listing/B0F8WYNVPJ). The live
+      // `listing_content` join is the ground truth; the `child_count` column is stale and lies.
+      // Excluding empty-children rows HERE — at the single source that feeds the card grid — is
+      // the authoritative fix. It replaces the racy client-side hide/redirect heuristics (#89/#90)
+      // that depended on a per-parent orphan-check which often hadn't resolved before the click.
+      .filter(r => r.children.length > 0)
+      .slice(0, 10)
 
     return NextResponse.json({
       scores: result,
