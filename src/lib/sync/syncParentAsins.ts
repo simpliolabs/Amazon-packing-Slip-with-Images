@@ -87,9 +87,18 @@ export async function syncParentAsins(asins: string[]): Promise<{ map: ParentAsi
 
     console.log(`[Parent Sync] Already know ${Object.keys(parentMap).length} parent mappings from DB`)
 
-    // Filter out ASINs we already have parent data for
-    const unknownAsins = asins.filter(a => !parentMap[a])
-    console.log(`[Parent Sync] Need to look up ${unknownAsins.length} ASINs via Catalog API`)
+    // Snapshot the CURRENT stored parents BEFORE the catalog lookup, so we can tell which ones
+    // actually CHANGED (the seller re-linked a child into a different family on Amazon) vs were
+    // merely blank. Used by the reconcile-write below to skip rows that are already correct.
+    const storedMap: ParentAsinMap = { ...parentMap }
+
+    // AUTO-RECONCILE: look up the live parent for ALL active ASINs — not just the unknown ones.
+    // Asking the catalog for every active child is the only way to catch a re-linked/re-parented
+    // one; the old "skip ASINs we already know" filter is exactly why a stale self-parent (e.g. a
+    // 128GB SD card the seller moved into the SD-card family) was never corrected. `unknownAsins`
+    // now holds ALL active ASINs to verify. Batched 20/req, 2 req/s — cheap next to the sales sync.
+    const unknownAsins = asins
+    console.log(`[Parent Sync] Reconciling live parents for ${unknownAsins.length} active ASINs via Catalog API`)
 
     if (unknownAsins.length === 0) {
       return {
@@ -171,23 +180,22 @@ export async function syncParentAsins(asins: string[]): Promise<{ map: ParentAsi
 
     console.log(`[Parent Sync] Looked up ${lookedUp} ASINs, found ${Object.keys(parentMap).length} parent mappings`)
 
-    // Persist new parent mappings to listing_health and asin_traffic
-    const newMappings = Object.entries(parentMap)
-    for (const [childAsin, parentAsin] of newMappings) {
-      // Update listing_health
-      await supabase
-        .from('listing_health')
-        .update({ parent_asin: parentAsin })
-        .eq('asin', childAsin)
-        .is('parent_asin', null)
-
-      // Update asin_traffic if row exists
-      await supabase
-        .from('asin_traffic')
-        .update({ parent_asin: parentAsin })
-        .eq('child_asin', childAsin)
-        .is('parent_asin', null)
+    // Persist parent mappings. AUTO-RECONCILE: write across listing_health, asin_traffic AND
+    // listing_content (the table the optimizer + orphan-check actually read), and CORRECT a stale
+    // value — not just fill NULLs — whenever the live catalog parent differs from what we stored.
+    // Only the mappings that actually CHANGED (live !== stored) are written, so this is NOT three
+    // writes per ASIN every sync. We never CLEAR a parent: a transient empty catalog response keeps
+    // the stored value (the loop above only SETS parentMap[asin] when a live parent is returned),
+    // so this only adds/corrects links, never drops a good one.
+    let corrected = 0
+    for (const [childAsin, parentAsin] of Object.entries(parentMap)) {
+      if (storedMap[childAsin] === parentAsin) continue // already correct in DB — nothing to write
+      await supabase.from('listing_health').update({ parent_asin: parentAsin }).eq('asin', childAsin)
+      await supabase.from('asin_traffic').update({ parent_asin: parentAsin }).eq('child_asin', childAsin)
+      await supabase.from('listing_content').update({ parent_asin: parentAsin }).eq('asin', childAsin)
+      corrected++
     }
+    console.log(`[Parent Sync] Reconciled ${corrected} changed/new parent mapping(s) across health/traffic/content`)
 
     // Also compute parent rollups from sku_sales_analytics for parents we now know about
     const uniqueParents = [...new Set(Object.values(parentMap))]
