@@ -1526,6 +1526,42 @@ Rules to honor on rewrite:
     } catch { /* fail-open */ }
   }
 
+  // ── #1 LENGTH FLOOR: the agent targets 270-330 words but occasionally under-delivers a thin
+  // blurb (leaving Amazon's ~2000-char budget — and ranking — on the table). One expand pass when
+  // the plain text is well short. Best-effort; the prompt forbids inventing facts/audiences.
+  const plainLen = (d: string) => d.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().length
+  if (description && plainLen(description) < 1300) {
+    try {
+      const expand = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: `Expand this product description to a SUBSTANTIAL 270-330 words using most of Amazon's ~2000-character budget. Do NOT invent facts, audiences, professions, or uses not already implied. Same product ("${finalTitle}"); keep every third-party brand in "compatible with [Brand]" framing; keep clean HTML (<p>, <b>, <ul>, <li>).
+
+Too-short description to expand:
+${description}
+
+Return ONLY the expanded HTML.` },
+        ],
+        temperature: 0.5,
+        max_tokens: 1200,
+      })
+      const longer = (expand.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+      if (longer && plainLen(longer) > plainLen(description)) description = longer
+    } catch { /* keep best-so-far */ }
+  }
+
+  // ── #1 CAP: Amazon truncates the Product Description near 2000 chars. Trim at the last closing
+  // tag boundary so the live PDP never shows a description cut mid-word / mid-tag.
+  if (description.length > 2000) {
+    let bestEnd = -1
+    for (const tag of ['</p>', '</li>', '</ul>']) {
+      const i = description.lastIndexOf(tag, 2000)
+      if (i >= 0 && i + tag.length > bestEnd) bestEnd = i + tag.length
+    }
+    description = bestEnd > 0 ? description.slice(0, bestEnd) : description.slice(0, 2000).replace(/<[^>]*$/, '').trim()
+  }
+
   return description
 }
 

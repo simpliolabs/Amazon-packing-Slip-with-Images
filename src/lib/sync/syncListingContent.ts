@@ -425,6 +425,27 @@ export async function fetchScoringContext(
         .limit(100)
 
       if (kwRows && kwRows.length > 0) {
+        // CREDIT KEYWORDS ALREADY IN THE LIVE COPY. action_type (CRITICAL/UPGRADE) is a snapshot
+        // from the last keyword sync: after the seller SHIPS a recommendation the keyword is now in
+        // the copy but still classified "missing", which used to pin the score (shipping the rec
+        // didn't move it). Build a haystack of the family's CURRENT content (title/bullets/
+        // description/backend across all children) and skip any keyword already present, so the
+        // score reflects what's live and shipping a recommendation raises it immediately. The push
+        // route updates listing_content BEFORE re-scoring, so the just-pushed value is included.
+        // Best-effort: an empty haystack scores exactly as before.
+        let haystack = ''
+        try {
+          const { data: contentRows } = await supabase
+            .from('listing_content')
+            .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+            .eq('parent_asin', parentAsin)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          haystack = ((contentRows ?? []) as any[])
+            .map((r) => [r.title, r.bullet_1, r.bullet_2, r.bullet_3, r.bullet_4, r.bullet_5, r.description, r.backend_keywords].filter(Boolean).join(' '))
+            .join(' ').toLowerCase().replace(/\s+/g, ' ')
+        } catch { /* empty haystack → score exactly as before */ }
+        const isCovered = (kw: string) => { const k = (kw || '').toLowerCase().trim(); return k.length > 0 && haystack.includes(k) }
+
         // Count totals but cap what affects scoring to top 10 per category
         let criticalSeen = 0
         let upgradeSeen = 0
@@ -434,11 +455,13 @@ export async function fetchScoringContext(
           ctx.totalKeywords++
           switch (r.action_type) {
             case 'CRITICAL':
+              if (isCovered(r.keyword)) break  // already in the live copy — not a gap
               criticalSeen++
               if (criticalSeen <= 10) ctx.criticalCount++  // Cap at 10
               if (ctx.topCriticalKeywords.length < 5) ctx.topCriticalKeywords.push(r.keyword)
               break
             case 'UPGRADE':
+              if (isCovered(r.keyword)) break  // already in the live copy — not a gap
               upgradeSeen++
               if (upgradeSeen <= 10) ctx.upgradeCount++  // Cap at 10
               if (ctx.topUpgradeKeywords.length < 5) ctx.topUpgradeKeywords.push(r.keyword)
