@@ -279,7 +279,9 @@ interface SeoScore {
   bullet_score:         number  // 0-25
   keyword_score:        number  // 0-25
   aplus_score:          number  // 0-25
-  overall_score:        number  // 0-100
+  description_score:    number  // 0-25  (own card — was folded into keyword_score)
+  features_score:       number  // 0-25  (own card — product-detail specs; was folded into aplus_score)
+  overall_score:        number  // 0-100 (normalized: sum of the 6 sub-scores / 150 * 100)
   issues:               SeoIssue[]
   child_override_count: number
 }
@@ -590,6 +592,8 @@ export function scoreListingContent(
   let bulletScore  = 25
   let keywordScore = 25
   let aplusScore   = 25
+  let descriptionScore = 25
+  let featuresScore    = 25
   let overrideCount = 0
 
   // Use parent content if available, otherwise best child (most bullets)
@@ -601,7 +605,7 @@ export function scoreListingContent(
     })[0]
 
   if (!representativeContent) {
-    return { title_score: 0, bullet_score: 0, keyword_score: 0, aplus_score: 0, overall_score: 0, issues: [{ field: 'general', severity: 'critical', message: 'No listing content found — run Scan Listings to fetch data from Amazon.', auto_fixable: false }], child_override_count: 0 }
+    return { title_score: 0, bullet_score: 0, keyword_score: 0, aplus_score: 0, description_score: 0, features_score: 0, overall_score: 0, issues: [{ field: 'general', severity: 'critical', message: 'No listing content found — run Scan Listings to fetch data from Amazon.', auto_fixable: false }], child_override_count: 0 }
   }
 
   // ── 1. TITLE SCORING ──────────────────────────────────────────────────────
@@ -753,8 +757,8 @@ export function scoreListingContent(
   }
   bulletScore = Math.max(0, bulletScore)
 
-  // ── 3. DESCRIPTION SCORING (folded into keyword score) ────────────────────
-  // Description is a separate field — we deduct from keyword score if missing
+  // ── 3. DESCRIPTION SCORING (own /25 card) ─────────────────────────────────
+  // Description is its own score now (these deductions used to fold into keyword_score).
   // NOTE: Read A+ status early so we can use it in description scoring below
   const hasAplusEarly = representativeContent.has_aplus
   const description = representativeContent.description || ''
@@ -766,11 +770,11 @@ export function scoreListingContent(
       // A+ replaces the text description for most branded listings — do not penalize
       issues.push({ field: 'description', severity: 'info', message: 'This listing uses A+ Content instead of a plain-text description (common for branded/apparel products). That is fine — A+ modules replace the description slot. Ensure your A+ modules contain keyword-rich text in every image alt field and text block, as Amazon indexes all of it. If you later add a plain-text description, keep it short (under 200 chars) to avoid duplicating A+ content.', auto_fixable: false })
     } else {
-      keywordScore -= 8
+      descriptionScore -= 8
       issues.push({ field: 'description', severity: 'warning', message: 'Product description is empty or missing. Go to Seller Central → Edit Listing → Product Description. Write 200-2000 chars of keyword-rich prose (NOT bullets). Amazon indexes this separately from bullets. Include: use cases, target audience, technical specs, and long-tail keywords that don\'t fit in the title. HTML formatting (<b>, <br>, <ul>) is allowed and improves readability.', auto_fixable: false })
     }
   } else if (descLen < 200) {
-    keywordScore -= 4
+    descriptionScore -= 4
     issues.push({ field: 'description', severity: 'info', message: `Description is only ${descLen} chars — expand to 500-2000 chars. Amazon indexes the full description text. Add: a brand story paragraph, technical specifications table, compatibility list (specific device models), FAQ-style content ("Works with Canon EOS R5, R6, 5D Mark IV"), and use-case scenarios. More indexed text = more long-tail search coverage.`, auto_fixable: false })
   } else if (descLen > 2000) {
     issues.push({ field: 'description', severity: 'info', message: `Description is ${descLen} chars — Amazon truncates display at ~2000 chars but indexes the full text. Ensure your most important keywords and CTAs appear in the first 2000 chars. Move technical specs and compatibility lists to the end.`, auto_fixable: false })
@@ -785,10 +789,12 @@ export function scoreListingContent(
     const descTitleOverlap = [...titleTokensForDesc].filter(w => descTokens.has(w) && w.length > 4)
     // If description doesn't share at least 3 keywords with title, it's not reinforcing SEO
     if (descTitleOverlap.length < 3) {
-      bulletScore -= 3
+      descriptionScore -= 3
       issues.push({ field: 'description', severity: 'info', message: `Description shares only ${descTitleOverlap.length} keywords with your title. Amazon cross-indexes title and description — a description that reinforces title keywords boosts relevance. Weave your primary keywords naturally into the description prose.`, auto_fixable: false })
     }
   }
+
+  descriptionScore = Math.max(0, descriptionScore)
 
   // ── 4. BACKEND KEYWORD SCORING ────────────────────────────────────────────
   const keywords = representativeContent.backend_keywords || ''
@@ -890,21 +896,22 @@ export function scoreListingContent(
       issues.push({ field: 'aplus', severity: 'warning', message: `${missingAlt} A+ image(s) have no alt text (image keywords). In A+ Content Manager, edit each image module and fill the "Image Keywords" field with descriptive terms (e.g. "128gb sd card high speed class 10 for canon camera"). Amazon indexes these for search — missing alt text = missing keyword coverage on your highest-converting page section.`, auto_fixable: false })
     }
   }
-  // ── 5b. PRODUCT DETAILS COMPLETENESS ─────────────────────────────────────
-  // If AI recommendations identified missing product detail fields, deduct from A+ score.
-  // Product Details (compatibility, material, warranty, etc.) are indexed by Amazon and
-  // appear in filtered search results — missing fields = missing from filter-based searches.
+  // ── 5b. FEATURES — PRODUCT DETAILS COMPLETENESS (own /25 card) ────────────
+  // The structured product-detail specs (Material, Brand-compatibility, Capacity, speed class…).
+  // These deductions used to fold into aplus_score; they are now their own Features score.
+  // Product Details are indexed by Amazon and power filtered search + comparison tables.
   if (scoringCtx.productDetailsGaps > 0) {
     if (scoringCtx.productDetailsGaps >= 5) {
-      aplusScore -= 5
+      featuresScore -= 5
       const detailExamples = apparel ? 'Material, Fabric Type, Fit Type, Department' : 'Material, Color, Size, Department'
       issues.push({ field: 'product_details', severity: 'warning', message: `${scoringCtx.productDetailsGaps} Product Detail fields are missing or incomplete (e.g. ${detailExamples}). These fields power Amazon\'s filtered search and comparison tables. Go to Seller Central → Edit Listing → More Details and fill in every applicable field. Missing product details = invisible in filtered searches.`, auto_fixable: false })
     } else if (scoringCtx.productDetailsGaps >= 3) {
-      aplusScore -= 3
+      featuresScore -= 3
       issues.push({ field: 'product_details', severity: 'info', message: `${scoringCtx.productDetailsGaps} Product Detail fields could be improved. Check the AI Recommendations tab for specific suggestions — each completed field improves your visibility in Amazon\'s filtered search results.`, auto_fixable: false })
     }
   }
 
+  featuresScore = Math.max(0, featuresScore)
   aplusScore = Math.max(0, aplusScore)
 
   // ── 6. CHILD CANNIBALIZATION DETECTION ────────────────────────────────────
@@ -997,13 +1004,18 @@ export function scoreListingContent(
     }
   }
 
-  const overall = titleScore + bulletScore + keywordScore + aplusScore
+  // 6 sub-scores × 25 = 150 max. Normalize to 0-100 so the ScoreRing + dashboard stay on the
+  // familiar 0-100 scale (this re-baselines the number once: it becomes a true % across all six
+  // sections instead of a raw sum of four).
+  const overall = Math.round((titleScore + bulletScore + keywordScore + aplusScore + descriptionScore + featuresScore) / 150 * 100)
 
   return {
     title_score:          titleScore,
     bullet_score:         bulletScore,
     keyword_score:        keywordScore,
     aplus_score:          aplusScore,
+    description_score:    descriptionScore,
+    features_score:       featuresScore,
     overall_score:        overall,
     issues,
     child_override_count: overrideCount,
@@ -1162,6 +1174,8 @@ export async function syncListingContent(
           bullet_score:         score.bullet_score,
           keyword_score:        score.keyword_score,
           aplus_score:          score.aplus_score,
+          description_score:    score.description_score,
+          features_score:       score.features_score,
           overall_score:        score.overall_score,
           issues:               score.issues,
           child_count:          uniqueChildren.length,
