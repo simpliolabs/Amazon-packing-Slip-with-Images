@@ -1261,7 +1261,14 @@ export default function ListingDetailPage() {
                                 <p className="text-[10px] font-bold text-green-800 uppercase">Update all {f.coh.total} variants to:</p>
                                 <p className="text-xs text-slate-800 whitespace-pre-wrap break-words mt-0.5">{f.copyVal || '(none)'}</p>
                               </div>
-                              <button onClick={() => copy(f.copyVal || '', `coh-${f.key}`)} className="text-[10px] bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded flex-shrink-0">{copied === `coh-${f.key}` ? 'Copied!' : 'Copy'}</button>
+                              <div className="flex items-center gap-1.5 flex-shrink-0">
+                                <button onClick={() => copy(f.copyVal || '', `coh-${f.key}`)} className="text-[10px] bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded">{copied === `coh-${f.key}` ? 'Copied!' : 'Copy'}</button>
+                                {/* Ship the broadcast value to Amazon — same push the Edit-Once card uses, surfaced here
+                                    so "N need update" always has a one-click path (the seller's "no way to update it"). */}
+                                {f.coh.needUpdate > 0 && (
+                                  <button onClick={() => openPushPreview(f.key as 'title' | 'bullets' | 'description')} className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap">Ship →</button>
+                                )}
+                              </div>
                             </div>
                             <p className="text-[10px] font-medium text-slate-500 uppercase">Current values across your variants{split ? ' — these diverge:' : ':'}</p>
                             {f.coh.versions.map((v, vi) => (
