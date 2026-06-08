@@ -21,7 +21,8 @@ interface ChildContentRow {
 
 interface SeoScoreRow {
   parent_asin: string; title_score: number; bullet_score: number
-  keyword_score: number; aplus_score: number; overall_score: number
+  keyword_score: number; aplus_score: number
+  description_score: number | null; features_score: number | null; overall_score: number
   issues: SeoIssue[]; child_count: number; child_override_count: number
   top_child_asin: string | null; product_title: string | null
   image_url: string | null; total_units_30d: number; scored_at: string
@@ -752,7 +753,9 @@ export default function ListingDetailPage() {
       // Refresh score (push re-scored server-side).
       if (data.pushed > 0) {
         try {
-          const sresp = await fetch('/api/fba/listing-optimizer')
+          // no-store: a push just mutated listing_content; the refetch MUST be fresh so the
+          // cohesion rows (which compare per-child live backend vs recommendation) flip green.
+          const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
           const sdata = await sresp.json()
           const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
           if (found) setScore(found)
@@ -885,6 +888,10 @@ export default function ListingDetailPage() {
     { label: 'Title', score: score.title_score, max: 25 },
     { label: 'Bullets', score: score.bullet_score, max: 25 },
     { label: 'Keywords', score: score.keyword_score, max: 25 },
+    // Description + Features each got their own /25 score (migration 020). Older rows are NULL
+    // until re-scored — show the cards only once populated so we never render a phantom 0%.
+    ...(score.description_score != null ? [{ label: 'Description', score: score.description_score, max: 25 }] : []),
+    ...(score.features_score != null ? [{ label: 'Features', score: score.features_score, max: 25 }] : []),
     { label: 'A+', score: score.aplus_score, max: 25 },
   ]
 
@@ -1106,8 +1113,8 @@ export default function ListingDetailPage() {
         </div>
       )}
 
-      {/* ══ KPI ROW — the four sub-scores as their own cards ══ */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* ══ KPI ROW — the six sub-scores as their own cards ══ */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
         {bars.map(b => {
           const pct = Math.round((b.score / b.max) * 100)
           const tone = b.score / b.max >= 0.8 ? 'text-green-600' : b.score / b.max >= 0.6 ? 'text-amber-600' : 'text-red-600'
@@ -1271,7 +1278,14 @@ export default function ListingDetailPage() {
                     <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">Backend</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 flex-shrink-0 hidden sm:inline">unique each</span>
                     <span className="text-[11px] text-slate-500">each variant gets its own color-specific terms</span>
-                    <span className="ml-auto text-[11px] text-amber-700 flex items-center gap-1 flex-shrink-0">{needsUpdate} need update <span className="text-slate-400 hidden sm:inline">— see table below</span></span>
+                    {needsUpdate > 0 ? (
+                      <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+                        <span className="text-[11px] text-amber-700">{needsUpdate} need update</span>
+                        <button onClick={() => openPushPreview('keywords')} className="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded-md font-medium">Ship →</button>
+                      </span>
+                    ) : (
+                      <span className="ml-auto text-[11px] text-emerald-600 font-medium flex-shrink-0">✓ up to date</span>
+                    )}
                   </div>
                 </div>
               </div>

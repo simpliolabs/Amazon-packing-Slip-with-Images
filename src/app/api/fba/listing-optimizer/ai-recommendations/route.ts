@@ -571,19 +571,21 @@ export async function POST(req: NextRequest) {
           // scoring must NEVER break a generation that already produced recommendations. We need it
           // before the action-plan loop so a section that already scores MAX can be marked DONE
           // instead of a red REPLACE — that's the "Title 25/25 but still asked to ship it" bug.
-          let secScore: { title: number; bullet: number; keyword: number; aplus: number } | null = null
+          let secScore: { title: number; bullet: number; keyword: number; aplus: number; description: number; features: number } | null = null
           try {
             const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
             const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
             const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
             const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
             const sc = scoreListingContent(parentOwn, scoreRows, ctx)
-            secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score }
+            secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score, description: sc.description_score, features: sc.features_score }
             await supabase.from('listing_seo_scores').update({
               title_score: sc.title_score,
               bullet_score: sc.bullet_score,
               keyword_score: sc.keyword_score,
               aplus_score: sc.aplus_score,
+              description_score: sc.description_score,
+              features_score: sc.features_score,
               overall_score: sc.overall_score,
               issues: sc.issues,
               child_override_count: sc.child_override_count,
@@ -638,14 +640,16 @@ export async function POST(req: NextRequest) {
             // (1) CONVERGENCE: the live section already scores STRONG (>=23/25, the seller's
             // "good enough" bar) → treat it as done and stop nagging to ship. A literal 25 isn't
             // always reachable (long-tail keywords can't all fit a 150-char title), so a strong
-            // section counts as optimized. Title→title_score, bullets→bullet_score, backend &
-            // description→keyword_score. A+/product-detail items aren't content-replace items.
+            // section counts as optimized. Each element gates on its OWN sub-score: title→title,
+            // bullets→bullet, backend→keyword, description→description, product_details→features.
             const STRONG = 23
             let secVal: number | null = null
             if (secScore) {
               if (item.element === 'title') secVal = secScore.title
               else if (/^bullet_(\d+)$/.test(item.element)) secVal = secScore.bullet
-              else if (item.element === 'backend_keywords' || item.element === 'description') secVal = secScore.keyword
+              else if (item.element === 'backend_keywords') secVal = secScore.keyword
+              else if (item.element === 'description') secVal = secScore.description
+              else if (item.element === 'product_details') secVal = secScore.features
             }
             const sectionOptimal = secVal !== null && secVal >= STRONG
             if (live || sectionOptimal) {

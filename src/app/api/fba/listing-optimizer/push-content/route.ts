@@ -798,6 +798,7 @@ export async function POST(req: NextRequest) {
               await db.from('listing_seo_scores').update({
                 title_score: score.title_score, bullet_score: score.bullet_score,
                 keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+                description_score: score.description_score, features_score: score.features_score,
                 overall_score: score.overall_score, issues: score.issues,
                 child_override_count: score.child_override_count,
                 product_title: newProductTitle,
