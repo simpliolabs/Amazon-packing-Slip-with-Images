@@ -549,15 +549,20 @@ export async function POST(req: NextRequest) {
           // change and no schema migration. Best-effort; re-evaluated on every regen.
           const noiseKw = Array.isArray(result.irrelevant_keywords) ? result.irrelevant_keywords : []
           if (noiseKw.length > 0 && analysisAsin) {
-            try {
-              await supabase
-                .from('keyword_analysis')
-                .update({ action_type: 'IRRELEVANT' })
-                .eq('asin', analysisAsin)
-                .in('keyword', noiseKw)
-              emit({ type: 'progress', message: `Filtered ${noiseKw.length} off-product keyword${noiseKw.length === 1 ? '' : 's'} from scoring...` })
-            } catch (e) {
-              console.warn('[ai-recommendations] noise-filter persist failed (non-fatal):', e)
+            // IMPORTANT: capture { error }. A CHECK-constraint rejection (or any PostgREST error) is
+            // RETURNED here, not thrown — the first cut swallowed it and reported "Filtered N" while
+            // 0 rows actually changed (action_type had a CHECK that excluded 'IRRELEVANT' until
+            // migration 019). Only announce the filter when rows truly flipped, and log real errors.
+            const { data: upd, error: updErr } = await supabase
+              .from('keyword_analysis')
+              .update({ action_type: 'IRRELEVANT' })
+              .eq('asin', analysisAsin)
+              .in('keyword', noiseKw)
+              .select('keyword')
+            if (updErr) {
+              console.warn('[ai-recommendations] noise-filter persist failed (non-fatal):', updErr.message)
+            } else if ((upd?.length ?? 0) > 0) {
+              emit({ type: 'progress', message: `Filtered ${upd!.length} off-product keyword${upd!.length === 1 ? '' : 's'} from scoring...` })
             }
           }
 
