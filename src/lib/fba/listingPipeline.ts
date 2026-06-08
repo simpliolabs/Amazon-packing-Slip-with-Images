@@ -826,6 +826,27 @@ function collapseProductPhrases(title: string): string {
   return [...kept.flat(), ...tail].join(' ').replace(/\s{2,}/g, ' ').trim()
 }
 
+/** Deterministic audience de-dup. gpt-4.1-mini stacks a redundant gendered audience on top of the
+ *  inclusive one — "...Shirts for Women for Men and Women" ("Women" twice), or the possessive
+ *  "Cool Mens Shirts for Men and Women" ("Men" twice). When the inclusive "for Men and Women" is
+ *  present, it is the ONLY audience the title needs, so we keep that one phrase and strip every
+ *  other gender mention (standalone "for Men"/"for Women", possessive "Mens"/"Men's", and any
+ *  duplicate inclusive). Amazon indexes the title as a bag of words, so dropping a redundant repeat
+ *  loses no ranking. Verified live on B0G884ZJ27 where the validator-driven retry couldn't clear it. */
+function dedupeAudiencePhrases(title: string): string {
+  const incl = title.match(/\bfor (?:men and women|women and men)\b/i)
+  if (!incl) return title
+  const PH = ' AUD '
+  // Protect the FIRST inclusive phrase, strip every other gender mention, then restore it.
+  let t = title.replace(/\bfor (?:men and women|women and men)\b/i, PH)
+  t = t
+    .replace(/\bfor (?:men and women|women and men)\b/gi, ' ')   // any DUPLICATE inclusive phrase
+    .replace(/\bfor (?:men|women)\b/gi, ' ')                      // standalone gendered audience
+    .replace(/\b(?:men|women)['’]?s\b/gi, ' ')              // possessive adjective: Mens / Men's
+    .replace(PH, incl[0])
+  return t.replace(/\s{2,}/g, ' ').trim()
+}
+
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
 async function runTitleAgent(
@@ -980,6 +1001,17 @@ Rules:
       }
     }
   } catch { /* fail-open */ }
+
+  // Deterministic backstop (all categories): kill a redundant gendered audience the LLM stacked on
+  // top of the inclusive one ("for Women for Men and Women" → "for Men and Women"). The validator
+  // flags the repeat but gpt-4.1-mini's retry couldn't clear it (verified live on B0G884ZJ27).
+  {
+    const tidied = dedupeAudiencePhrases(title)
+    if (tidied && tidied !== title) {
+      title = tidied
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    }
+  }
 
   // Deterministic backstop: the LLM keeps stacking product-type synonyms on keyword-heavy
   // non-apparel titles despite the prompt + candidate de-dup — so collapse them mechanically.
