@@ -609,15 +609,19 @@ export async function POST(req: NextRequest) {
                 return want ? norm(c.backend_keywords) === want : true
               })
             }
-            // (1) The live section already scores MAX (25/25) → it's optimal, don't nag to ship.
-            // Title→title_score, bullets→bullet_score, backend & description→keyword_score (the
-            // keyword-bearing surfaces). A+/product-detail items aren't content-replace items.
-            let sectionOptimal = false
+            // (1) CONVERGENCE: the live section already scores STRONG (>=23/25, the seller's
+            // "good enough" bar) → treat it as done and stop nagging to ship. A literal 25 isn't
+            // always reachable (long-tail keywords can't all fit a 150-char title), so a strong
+            // section counts as optimized. Title→title_score, bullets→bullet_score, backend &
+            // description→keyword_score. A+/product-detail items aren't content-replace items.
+            const STRONG = 23
+            let secVal: number | null = null
             if (secScore) {
-              if (item.element === 'title') sectionOptimal = secScore.title >= 25
-              else if (/^bullet_(\d+)$/.test(item.element)) sectionOptimal = secScore.bullet >= 25
-              else if (item.element === 'backend_keywords' || item.element === 'description') sectionOptimal = secScore.keyword >= 25
+              if (item.element === 'title') secVal = secScore.title
+              else if (/^bullet_(\d+)$/.test(item.element)) secVal = secScore.bullet
+              else if (item.element === 'backend_keywords' || item.element === 'description') secVal = secScore.keyword
             }
+            const sectionOptimal = secVal !== null && secVal >= STRONG
             if (live || sectionOptimal) {
               item.verdict = 'DONE'
               const label = item.element === 'backend_keywords' ? 'backend search terms'
@@ -626,10 +630,10 @@ export async function POST(req: NextRequest) {
                 : item.element
               item.current_status = live
                 ? `✓ Live ${label} matches the recommended version across all ${children.length} variant${children.length === 1 ? '' : 's'}.`
-                : `✓ Your live ${label} already scores top marks (25/25) — no change needed. Optimized copy is below if you want to compare.`
+                : `✓ Your live ${label} is already strong (${secVal}/25) — no change needed. Optimized copy is below if you want to compare.`
               item.instruction = live
                 ? 'No action required — your last push wrote this exact content. The copy box stays below if you need it.'
-                : 'No action required — this section is already optimized. The copy box below is an optional alternative.'
+                : 'No action required — this section is already strong. The copy box below is an optional alternative.'
               if (item.priority !== 'HIGH') item.priority = 'NONE'
             }
           }

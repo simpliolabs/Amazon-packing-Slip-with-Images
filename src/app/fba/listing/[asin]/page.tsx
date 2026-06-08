@@ -1210,9 +1210,9 @@ export default function ListingDetailPage() {
           return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal }
         }
         const cohFields = [
-          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 25), copyVal: recs.recommended_title },
-          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 25), copyVal: (recs.recommended_bullets ?? []).join('\n') },
-          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description, score.keyword_score >= 25), copyVal: recs.recommended_description },
+          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 23), copyVal: recs.recommended_title },
+          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 23), copyVal: (recs.recommended_bullets ?? []).join('\n') },
+          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description, score.keyword_score >= 23), copyVal: recs.recommended_description },
         ]
         return (
         <section>
