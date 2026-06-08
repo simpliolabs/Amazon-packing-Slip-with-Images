@@ -29,6 +29,7 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
+import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -1004,10 +1005,17 @@ export function scoreListingContent(
     }
   }
 
-  // 6 sub-scores × 25 = 150 max. Normalize to 0-100 so the ScoreRing + dashboard stay on the
-  // familiar 0-100 scale (this re-baselines the number once: it becomes a true % across all six
-  // sections instead of a raw sum of four).
-  const overall = Math.round((titleScore + bulletScore + keywordScore + aplusScore + descriptionScore + featuresScore) / 150 * 100)
+  // Importance-weighted overall. Each section's (score/25) is scaled by its weight; the weights
+  // (scoreWeights.ts) SUM TO 100, so a perfect listing scores exactly 100 — no 150 ceiling, and a
+  // weak-but-minor section costs fewer points than a weak critical one. The six weighted points
+  // here are the same values the KPI cards display, so the cards add up to this number.
+  const overall =
+    weightedPoints(titleScore, SECTION_WEIGHTS.title) +
+    weightedPoints(bulletScore, SECTION_WEIGHTS.bullets) +
+    weightedPoints(keywordScore, SECTION_WEIGHTS.keyword) +
+    weightedPoints(aplusScore, SECTION_WEIGHTS.aplus) +
+    weightedPoints(descriptionScore, SECTION_WEIGHTS.description) +
+    weightedPoints(featuresScore, SECTION_WEIGHTS.features)
 
   return {
     title_score:          titleScore,
