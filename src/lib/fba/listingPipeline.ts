@@ -85,6 +85,9 @@ export interface PipelineResult {
   product_details_improvements: PipelineProductDetailImprovement[]
   keyword_reconciliation: PipelineKeywordReconciliation[]
   action_plan: PipelineActionPlanItem[]
+  // Off-product keywords the relevance gate dropped — the API route marks these in
+  // keyword_analysis so the scorer stops penalizing for keywords that target a different product.
+  irrelevant_keywords: string[]
   debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string }
 }
 
@@ -1674,7 +1677,7 @@ Keywords (index: phrase):
 ${list}
 
 Return the indices of keywords to DROP:
-1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers), unrelated products, or personal/character names with no connection to this product.
+1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers); a keyword for a DIFFERENT physical product than this listing sells — e.g. "sim card", "card reader", or "phone case" on an SD-MEMORY-CARD listing, or "mug" on a t-shirt listing (the shopper typing it wants a different item, so ranking there only brings junk traffic that never converts); or personal/character names with no connection to this product.
 2. VAGUE, non-descriptive filler that does not describe a product attribute, style, design, audience, occasion, or use case (e.g. "interest", "full transparency", "high quality", "best seller").
 KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY {"drop":[...]}.`
   // Deterministic backstops: ALWAYS drop these regardless of the LLM gate, which is
@@ -1886,6 +1889,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (competitor brands, trademarks, unrelated names) before anything downstream uses them.
   onProgress('Filtering keywords for relevance...')
   const gated = await filterRelevantKeywords(input, input.analysis)
+  // Stage 2 (noise filter): the phrases the gate removed are off-product noise (competitor
+  // brands, trademarks, or a DIFFERENT product like "sim card" on an SD-card listing). Surface
+  // them so the API route can mark them in keyword_analysis — the SCORER must stop docking the
+  // listing for not ranking on keywords the relevance gate already rejected for the rewrite.
+  const gatedKeywordSet = new Set(gated.map((g) => g.keyword))
+  const irrelevantKeywords = input.analysis
+    .filter((k) => !gatedKeywordSet.has(k.keyword))
+    .map((k) => k.keyword)
 
   // Stage 0c — surface seller-known product attributes (garment brand "Comfort Colors",
   // material, fit) from the existing listing. JS never captures these, so without this
@@ -2165,6 +2176,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     product_details_improvements: Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : [],
     keyword_reconciliation: Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [],
     action_plan: actionPlan,
+    irrelevant_keywords: irrelevantKeywords,
     debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource },
   }
 }

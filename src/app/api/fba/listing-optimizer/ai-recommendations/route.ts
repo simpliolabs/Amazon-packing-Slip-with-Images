@@ -540,6 +540,27 @@ export async function POST(req: NextRequest) {
 
           emit({ type: 'progress', message: 'Saving to database...' })
 
+          // ── Stage 2 (noise filter): persist the relevance gate's drops ───────────────────────
+          // The gate already removed off-product keywords (competitor brands, or a DIFFERENT
+          // product like "sim card for camera" on an SD-card listing) from the rewrite. Mark those
+          // same keyword_analysis rows 'IRRELEVANT' so the live score below — and every later
+          // push/sync re-score — stops docking the listing for not ranking on a different product.
+          // The scorer only counts CRITICAL/UPGRADE, so 'IRRELEVANT' is silently skipped: no scorer
+          // change and no schema migration. Best-effort; re-evaluated on every regen.
+          const noiseKw = Array.isArray(result.irrelevant_keywords) ? result.irrelevant_keywords : []
+          if (noiseKw.length > 0 && analysisAsin) {
+            try {
+              await supabase
+                .from('keyword_analysis')
+                .update({ action_type: 'IRRELEVANT' })
+                .eq('asin', analysisAsin)
+                .in('keyword', noiseKw)
+              emit({ type: 'progress', message: `Filtered ${noiseKw.length} off-product keyword${noiseKw.length === 1 ? '' : 's'} from scoring...` })
+            } catch (e) {
+              console.warn('[ai-recommendations] noise-filter persist failed (non-fatal):', e)
+            }
+          }
+
           // ── LIVE SCORE (computed UP FRONT) — drives the issues panel AND verdict gating below ──
           // Scored on the live listing_content rows (independent of the AI rewrite). Best-effort:
           // scoring must NEVER break a generation that already produced recommendations. We need it
