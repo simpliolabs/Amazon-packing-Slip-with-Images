@@ -209,6 +209,9 @@ export default function ListingDetailPage() {
     proposedValue: string | string[] | null; diff: PushDiffRow[]
     /** Only set when field='details': the friendly attribute name (e.g. "Material") and SP-API key. */
     detail_field?: string; attribute_key?: string
+    /** Feature B — for enum attributes: Amazon's accepted vocabulary and the value we
+     *  normalized FROM (e.g. "Unisex Adult") when the audit's value wasn't accepted. */
+    acceptedValues?: string[] | null; normalizedFrom?: string | null
   }
   const [pushField, setPushField] = useState<PushField>('keywords')
   /** Only set when pushField='details': which detail attribute is being pushed (Material, etc.). */
@@ -2201,6 +2204,24 @@ export default function ListingDetailPage() {
                           <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{String(pushPreview.proposedValue ?? '')}</p>
                         )}
                       </div>
+                      {/* Feature B — show Amazon's accepted vocabulary for enum attributes so the
+                          seller can see the system knows the valid terms (and what we normalized). */}
+                      {pushPreview.field === 'details' && pushPreview.acceptedValues && pushPreview.acceptedValues.length > 0 && (
+                        <div className="bg-sky-50 border border-sky-200 rounded-md p-2.5 mb-3">
+                          {pushPreview.normalizedFrom && (
+                            <p className="text-[11px] text-sky-900 mb-1.5">
+                              Normalized <span className="font-mono line-through text-slate-500">{pushPreview.normalizedFrom}</span> → <span className="font-mono font-semibold text-emerald-700">{String(pushPreview.proposedValue ?? '')}</span> to match Amazon&apos;s accepted terms.
+                            </p>
+                          )}
+                          <p className="text-[10px] text-sky-800 leading-relaxed">
+                            <span className="font-bold uppercase mr-1">Amazon accepts</span>
+                            {pushPreview.acceptedValues.slice(0, 12).map((v, i) => (
+                              <span key={i} className={`inline-block mr-1 mb-1 px-1.5 py-0.5 rounded border ${String(pushPreview.proposedValue ?? '').toLowerCase() === v.toLowerCase() ? 'bg-emerald-100 border-emerald-300 text-emerald-800 font-semibold' : 'bg-white border-slate-200 text-slate-600'}`}>{v}</span>
+                            ))}
+                            {pushPreview.acceptedValues.length > 12 && <span className="text-slate-400">+{pushPreview.acceptedValues.length - 12} more</span>}
+                          </p>
+                        </div>
+                      )}
                       {pushPreview.changed > 0 && (
                         <details className="mb-4">
                           <summary className="text-xs text-slate-600 cursor-pointer hover:text-slate-800">
