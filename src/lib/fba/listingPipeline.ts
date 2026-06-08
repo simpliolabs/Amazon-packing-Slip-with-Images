@@ -769,6 +769,37 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
   return deduped.slice(0, 7).map((k) => ({ keyword: k.keyword, opportunityScore: k.opportunityScore, role: roleOf(k.keyword) }))
 }
 
+/** Deterministic backstop for NON-APPAREL titles: gpt-4.1-mini keeps stacking product-type synonyms
+ *  on keyword-heavy listings ("Post It Notes ... Sticky Note ... CEO Sticky Notes ... Small Notes")
+ *  despite the prompt (#123) and candidate de-dup (#124). This collapses them: keep at most 2
+ *  DISTINCT phrases that END in the dominant product noun (the rest are redundant ways to name the
+ *  same product), preserving the brand prefix and the trailing remainder. Amazon indexes the title as
+ *  a bag of words, so a mechanical trim is safe. Returns the title unchanged when no product noun
+ *  repeats more than twice. */
+function collapseProductPhrases(title: string): string {
+  const norm = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, '').replace(/s$/, '')
+  const words = title.split(/\s+/).filter(Boolean)
+  const counts: Record<string, number> = {}
+  for (const w of words) { const n = norm(w); if (n.length >= 3 && !MINOR_WORDS.has(n)) counts[n] = (counts[n] || 0) + 1 }
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]
+  if (!top || top[1] <= 2) return title
+  const noun = top[0]
+  // Split into chunks each ENDING at the dominant noun; words after the last noun are the tail.
+  const chunks: string[][] = []
+  let cur: string[] = []
+  for (const w of words) { cur.push(w); if (norm(w) === noun) { chunks.push(cur); cur = [] } }
+  const tail = cur
+  // Keep the first 2 DISTINCT chunks (by significant-word signature); drop duplicates / extras.
+  const kept: string[][] = []
+  const seen = new Set<string>()
+  for (const ch of chunks) {
+    const sig = ch.map(norm).filter((n) => n.length >= 3 && !MINOR_WORDS.has(n)).sort().join(' ')
+    if (seen.has(sig) || kept.length >= 2) continue
+    seen.add(sig); kept.push(ch)
+  }
+  return [...kept.flat(), ...tail].join(' ').replace(/\s{2,}/g, ' ').trim()
+}
+
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
 async function runTitleAgent(
@@ -923,6 +954,16 @@ Rules:
       }
     }
   } catch { /* fail-open */ }
+
+  // Deterministic backstop: the LLM keeps stacking product-type synonyms on keyword-heavy
+  // non-apparel titles despite the prompt + candidate de-dup — so collapse them mechanically.
+  if (!apparel) {
+    const cleaned = collapseProductPhrases(title)
+    if (cleaned && cleaned !== title && cleaned.length >= 40) {
+      title = cleaned
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    }
+  }
 
   return { title, problems, retried }
 }
