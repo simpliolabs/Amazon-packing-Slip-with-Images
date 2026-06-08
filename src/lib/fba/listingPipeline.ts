@@ -743,10 +743,19 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
     .filter((k) => !isSeasonal(k.keyword))
     .sort((a, b) => b.opportunityScore - a.opportunityScore)
 
-  // Dedup by >=60% word overlap, keeping the higher-scoring keyword
+  // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
+  // product. The old "keep the higher-opportunity one at >=60% overlap" rule caused synonym + niche
+  // stuffing ("Post It Notes ... Sticky Note ... CEO Sticky Notes ... Bible Study Sticky Notes"):
+  //   • single-shared-noun pairs (post it notes / sticky notes = 1/2 = 0.5) slipped under the 0.6 bar,
+  //   • and niche long-tails out-score the broad term, so the niche won the dedup.
+  // Fix: lower the bar to 0.5, and on overlap keep the BROADER (fewer-word) term — a general
+  // "sticky notes" beats "bible study sticky notes". Dropped phrases still flow to the BACKEND
+  // keyword pool, so their ranking value isn't lost; they just don't crowd or narrow the title.
   const deduped: AnalyzedKeyword[] = []
   for (const k of eligible) {
-    if (!deduped.some((d) => wordOverlapRatio(d.keyword, k.keyword) >= 0.6)) deduped.push(k)
+    const idx = deduped.findIndex((d) => wordOverlapRatio(d.keyword, k.keyword) >= 0.5)
+    if (idx === -1) deduped.push(k)
+    else if (k.keyword.split(/\s+/).length < deduped[idx].keyword.split(/\s+/).length) deduped[idx] = k
   }
 
   const roleOf = (kw: string): TitleCandidate['role'] => {
