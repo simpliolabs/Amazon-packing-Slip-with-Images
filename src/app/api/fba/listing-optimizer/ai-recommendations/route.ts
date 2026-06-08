@@ -577,6 +577,11 @@ export async function POST(req: NextRequest) {
             const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
             const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
             const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
+            // This regen's recommendations (incl. product_details_improvements) are persisted to
+            // listing_seo_recommendations AFTER this block — so fetchScoringContext just read the
+            // PREVIOUS regen's (stale) product-detail count. Override with THIS regen's fresh count
+            // so the Features score reflects the specs we just generated, not a one-regen-old value.
+            if (Array.isArray(result.product_details_improvements)) ctx.productDetailsGaps = result.product_details_improvements.length
             const sc = scoreListingContent(parentOwn, scoreRows, ctx)
             secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score, description: sc.description_score, features: sc.features_score }
             await supabase.from('listing_seo_scores').update({
