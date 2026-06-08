@@ -40,6 +40,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
+import { getAttributeEnum, coerceToEnum } from '@/lib/fba/productTypeDefinitions'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -335,8 +336,15 @@ interface DetailContext {
   detailField: string
   /** Resolved SP-API attribute key, e.g. "material" or "fit_type". */
   attribute: DetailAttribute
-  /** The single value to push across every (FBA+FBM, child) SKU under the parent. */
+  /** The single value to push across every (FBA+FBM, child) SKU under the parent.
+   *  Already coerced to an accepted enum value when the attribute is a constrained
+   *  enum (e.g. "Unisex Adult" → "Unisex"). */
   recommendedValue: string
+  /** When the attribute is a constrained enum, the accepted values (for the seller to
+   *  pick from if the audit's value couldn't be mapped). Undefined for free-text attrs. */
+  acceptedValues?: string[]
+  /** The audit's original value when enum-coercion changed it (e.g. "Unisex Adult"). */
+  normalizedFrom?: string
 }
 
 /** Load + validate the audit's recommendation for one detail attribute. Returns null on
@@ -363,7 +371,46 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
   if (!match || !match.recommended_value || !match.recommended_value.trim()) {
     return { ctx: null, error: `No AI recommendation found for "${detailField}". Run an AI audit first.` }
   }
-  return { ctx: { detailField, attribute, recommendedValue: match.recommended_value.trim() }, error: null }
+
+  // ── Enum validation (Feature B) ──────────────────────────────────────────────
+  // Some attributes are constrained enums (apparel `department` accepts only
+  // {Unisex, Unisex Baby, Unisex Kids} for this product type). The audit emits a
+  // free-text value ("Unisex Adult") that Amazon rejects. Read the LIVE product-type
+  // schema and coerce the value to an accepted one — "the system knows the acceptable
+  // terms for any feature". Best-effort: any failure leaves the value as-is (the prior
+  // behavior; VALIDATION_PREVIEW still guards the write).
+  let recommendedValue = match.recommended_value.trim()
+  let acceptedValues: string[] | undefined
+  let normalizedFrom: string | undefined
+  try {
+    const { data: skuRows } = await supabase
+      .from('listing_content')
+      .select('sku')
+      .eq('parent_asin', parentAsin)
+      .limit(1)
+    const sku = (skuRows as { sku?: string }[] | null)?.[0]?.sku
+    if (sku) {
+      const token = await getAccessToken()
+      const sellerId = await getSellerId()
+      const productType = await getProductType(sellerId, token, sku)
+      const enumDef = await getAttributeEnum(productType, attribute.spApiKey, {
+        token, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
+      })
+      if (enumDef && enumDef.values.length > 0) {
+        acceptedValues = enumDef.names.length ? enumDef.names : enumDef.values
+        const coerced = coerceToEnum(recommendedValue, enumDef)
+        if (coerced.valid && coerced.changed) {
+          normalizedFrom = recommendedValue
+          recommendedValue = coerced.value
+          console.log(`[push-content] enum-coerced ${attribute.spApiKey}: "${normalizedFrom}" -> "${recommendedValue}" (productType ${productType})`)
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[push-content] enum coercion skipped:', err)
+  }
+
+  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom }, error: null }
 }
 
 /** Fetch a SKU's CURRENT attribute value live from Listings Items. Best-effort: '' on failure. */
@@ -487,6 +534,10 @@ export async function GET(req: NextRequest) {
         count: diff.length,
         changed: diff.filter((d) => d.changed).length,
         proposedValue: ctx.recommendedValue,
+        // Enum (Feature B): the accepted vocabulary for this attribute + what we
+        // normalized the audit's value FROM, so the modal can show "Unisex Adult → Unisex".
+        acceptedValues: ctx.acceptedValues ?? null,
+        normalizedFrom: ctx.normalizedFrom ?? null,
         diff,
       })
     }
