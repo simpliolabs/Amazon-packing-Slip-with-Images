@@ -72,7 +72,7 @@ interface AiRecommendations {
 
 interface AnalyzedKeyword {
   keyword: string; opportunityScore: number
-  actionType: 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED'
+  actionType: 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED' | 'IRRELEVANT'
   actionText: string; rationale: string; urgency: string; estimatedImpact: string
   searchVolume: number; keywordSales: number; competingProducts: number
   asinImpressionShare: number; asinClickShare: number; asinPurchaseShare: number
@@ -1858,8 +1858,9 @@ export default function ListingDetailPage() {
                           kw.actionType === 'CRITICAL' ? 'bg-red-100 text-red-700'
                           : kw.actionType === 'UPGRADE' ? 'bg-amber-100 text-amber-700'
                           : kw.actionType === 'REINFORCE' ? 'bg-green-100 text-green-700'
+                          : kw.actionType === 'IRRELEVANT' ? 'bg-slate-100 text-slate-500'
                           : 'bg-blue-100 text-blue-700'
-                        }`}>{kw.actionType}</span>
+                        }`}>{kw.actionType === 'IRRELEVANT' ? 'OFF-PRODUCT' : kw.actionType}</span>
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex gap-1">
