@@ -444,7 +444,16 @@ export async function fetchScoringContext(
             .map((r) => [r.title, r.bullet_1, r.bullet_2, r.bullet_3, r.bullet_4, r.bullet_5, r.description, r.backend_keywords].filter(Boolean).join(' '))
             .join(' ').toLowerCase().replace(/\s+/g, ' ')
         } catch { /* empty haystack → score exactly as before */ }
-        const isCovered = (kw: string) => { const k = (kw || '').toLowerCase().trim(); return k.length > 0 && haystack.includes(k) }
+        // TOKEN-based coverage (not exact-phrase). Amazon ranks a listing for a query when the copy
+        // contains the query's WORDS, not the verbatim phrase. A keyword counts as covered when every
+        // significant token (minus stopwords) appears somewhere in the copy — so a title with
+        // "SD Camera Card 64GB ... Kodak and Canon" covers "sd card for camera 64gb" and is no longer
+        // flagged. The old exact-substring check is why a genuinely keyword-rich title never moved off
+        // 20: no realistic title contains long-tail phrases like "sd card for camera 64gb" verbatim.
+        const KW_STOP = new Set(['for','the','a','an','and','with','of','to','in','on','your','you','that','this','&'])
+        const kwToks = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t && !KW_STOP.has(t))
+        const haystackTokens = new Set(kwToks(haystack))
+        const isCovered = (kw: string) => { const t = kwToks(kw); return t.length > 0 && t.every((x) => haystackTokens.has(x)) }
 
         // Count totals but cap what affects scoring to top 10 per category
         let criticalSeen = 0
