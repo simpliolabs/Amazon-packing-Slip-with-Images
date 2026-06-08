@@ -24,68 +24,98 @@ interface FetchOpts {
   token: string
   marketplaceId: string
   endpoint: string
+  /** Optional — some product-type schemas are scoped to the seller. */
+  sellerId?: string
 }
 
-// Process-lifetime cache. A product-type schema is large (100KB–1MB) and effectively
-// static; one fetch per (productType, marketplace) per server instance is plenty.
-// `null` is cached too, so a missing/failed schema isn't re-fetched every push.
-const _schemaCache = new Map<string, Record<string, unknown> | null>()
+// Process-lifetime cache of SUCCESSFUL schemas ONLY. A schema is large (100KB–1MB) and
+// effectively static, so one fetch per (productType, marketplace) per server instance is
+// plenty. We deliberately do NOT cache failures: a transient SP-API hiccup during container
+// warmup must never poison every later push with a permanent null (that bug shipped first).
+const _schemaCache = new Map<string, Record<string, unknown>>()
 
-async function fetchProductTypeSchema(productType: string, opts: FetchOpts): Promise<Record<string, unknown> | null> {
+/** Diagnostics from a fetch attempt, surfaced by the ?debug=1 route branch. */
+export interface SchemaFetchDebug {
+  productType: string
+  cached: boolean
+  metaStatus: number | null
+  hasSchemaLink: boolean
+  schemaStatus: number | null
+  topPropertyCount: number | null
+  error: string | null
+}
+
+async function fetchProductTypeSchema(
+  productType: string,
+  opts: FetchOpts,
+  debug?: SchemaFetchDebug,
+): Promise<Record<string, unknown> | null> {
   const key = `${productType}|${opts.marketplaceId}`
-  if (_schemaCache.has(key)) return _schemaCache.get(key) ?? null
+  const cached = _schemaCache.get(key)
+  if (cached) {
+    if (debug) { debug.cached = true; debug.topPropertyCount = Object.keys((cached as { properties?: object }).properties ?? {}).length }
+    return cached
+  }
 
   let schema: Record<string, unknown> | null = null
   try {
     // 1) Metadata call returns a presigned link to the actual JSON Schema.
+    const sellerParam = opts.sellerId ? `&sellerId=${encodeURIComponent(opts.sellerId)}` : ''
     const metaUrl =
       `${opts.endpoint}/definitions/2020-09-01/productTypes/${encodeURIComponent(productType)}` +
-      `?marketplaceIds=${opts.marketplaceId}&requirements=LISTING&locale=en_US`
+      `?marketplaceIds=${opts.marketplaceId}&requirements=LISTING&locale=en_US${sellerParam}`
     const metaResp = await fetch(metaUrl, { headers: { 'x-amz-access-token': opts.token } })
+    if (debug) debug.metaStatus = metaResp.status
     if (metaResp.ok) {
       const meta = (await metaResp.json()) as { schema?: { link?: { resource?: string } } }
       const link = meta?.schema?.link?.resource
+      if (debug) debug.hasSchemaLink = !!link
       if (link) {
         // 2) The schema lives on a presigned S3 URL — no auth header.
         const schemaResp = await fetch(link)
+        if (debug) debug.schemaStatus = schemaResp.status
         if (schemaResp.ok) schema = (await schemaResp.json()) as Record<string, unknown>
       }
     } else {
       console.warn(`[productTypeDefinitions] getDefinitionsProductType ${productType} -> HTTP ${metaResp.status}`)
     }
   } catch (err) {
+    if (debug) debug.error = err instanceof Error ? err.message : String(err)
     console.warn(`[productTypeDefinitions] schema fetch failed for ${productType}:`, err)
   }
 
-  _schemaCache.set(key, schema)
+  // Cache ONLY on success — never poison future calls with a transient null.
+  if (schema) {
+    _schemaCache.set(key, schema)
+    if (debug) debug.topPropertyCount = Object.keys((schema as { properties?: object }).properties ?? {}).length
+  }
   return schema
 }
 
-/** Walk an attribute subschema and pull the FIRST value-enum (+ optional enumNames).
- *  Handles the common shapes: array→items→properties.value.enum, properties.value.enum,
- *  enum directly on items / the node, and anyOf/oneOf/allOf wrappers. */
+/** Find the accepted-value enum inside an attribute subschema. Amazon nests this differently
+ *  across product types (array→items→properties.value.enum, oneOf wrappers, $defs-inlined, …),
+ *  so we do a bounded DFS for ANY `enum` array — preferring one whose property key is `value`
+ *  (the SP-API value field), reading its sibling `enumNames` for display labels. */
 function extractEnum(node: unknown): AttributeEnum | null {
-  if (!node || typeof node !== 'object') return null
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const n = node as Record<string, any>
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const candidates: any[] = [n.items?.properties?.value, n.properties?.value, n.items, n]
-  for (const c of candidates) {
-    if (c && Array.isArray(c.enum) && c.enum.length) {
-      return {
-        values: c.enum.map((v: unknown) => String(v)),
-        names: Array.isArray(c.enumNames) ? c.enumNames.map((v: unknown) => String(v)) : [],
+  let best: AttributeEnum | null = null      // enum found on a `value` property — preferred
+  let fallback: AttributeEnum | null = null  // any other enum encountered
+  const visit = (n: unknown, keyName: string, depth: number): void => {
+    if (best || !n || typeof n !== 'object' || depth > 12) return
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const obj = n as Record<string, any>
+    if (Array.isArray(obj.enum) && obj.enum.length) {
+      const found: AttributeEnum = {
+        values: obj.enum.map((v: unknown) => String(v)),
+        names: Array.isArray(obj.enumNames) ? obj.enumNames.map((v: unknown) => String(v)) : [],
       }
+      if (keyName === 'value') { best = found; return }
+      if (!fallback) fallback = found
     }
+    if (Array.isArray(n)) { for (const item of n) visit(item, keyName, depth + 1) }
+    else { for (const k of Object.keys(obj)) { if (k !== 'enum' && k !== 'enumNames') visit(obj[k], k, depth + 1) } }
   }
-  for (const key of ['anyOf', 'oneOf', 'allOf']) {
-    if (Array.isArray(n[key])) {
-      for (const sub of n[key]) { const r = extractEnum(sub); if (r) return r }
-    }
-  }
-  if (n.items) { const r = extractEnum(n.items); if (r) return r }
-  return null
+  visit(node, '', 0)
+  return best || fallback
 }
 
 /** The accepted-value enum for one attribute of a product type, or null when the
@@ -100,6 +130,27 @@ export async function getAttributeEnum(
   const props = (schema as { properties?: Record<string, unknown> }).properties
   if (!props) return null
   return extractEnum(props[spApiKey])
+}
+
+/** Diagnostics for the ?debug=1 route branch — pinpoints WHERE enum resolution fails
+ *  (definitions HTTP status, presigned-schema status, attribute presence, extraction). */
+export async function inspectProductTypeAttribute(
+  productType: string,
+  spApiKey: string,
+  opts: FetchOpts,
+): Promise<{ debug: SchemaFetchDebug; attrPresent: boolean; attrKeysSample: string[]; result: AttributeEnum | null }> {
+  const debug: SchemaFetchDebug = {
+    productType, cached: false, metaStatus: null, hasSchemaLink: false,
+    schemaStatus: null, topPropertyCount: null, error: null,
+  }
+  const schema = await fetchProductTypeSchema(productType, opts, debug)
+  const props = (schema as { properties?: Record<string, unknown> } | null)?.properties ?? null
+  const attrPresent = !!props && Object.prototype.hasOwnProperty.call(props, spApiKey)
+  const attrKeysSample = props
+    ? Object.keys(props).filter((k) => /depart|gender|fit|sleeve|neck|closure|age|size|colou?r|material|style/i.test(k)).slice(0, 25)
+    : []
+  const result = props ? extractEnum(props[spApiKey]) : null
+  return { debug, attrPresent, attrKeysSample, result }
 }
 
 /** Normalize for comparison: lowercase, strip spaces/dashes/underscores. */

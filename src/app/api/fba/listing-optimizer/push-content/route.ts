@@ -40,7 +40,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { getAttributeEnum, coerceToEnum } from '@/lib/fba/productTypeDefinitions'
+import { getAttributeEnum, coerceToEnum, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -394,7 +394,7 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
       const sellerId = await getSellerId()
       const productType = await getProductType(sellerId, token, sku)
       const enumDef = await getAttributeEnum(productType, attribute.spApiKey, {
-        token, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
+        token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
       })
       if (enumDef && enumDef.values.length > 0) {
         acceptedValues = enumDef.names.length ? enumDef.names : enumDef.values
@@ -511,6 +511,33 @@ export async function GET(req: NextRequest) {
     const parentAsin = url.searchParams.get('parent_asin')
     const rawField = url.searchParams.get('field') ?? 'keywords'
     if (!parentAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+
+    // ── DEBUG branch (?debug=1&field=details&detail_field=…) — diagnose enum resolution.
+    //    Read-only: resolves the productType and introspects the LIVE product-type schema so we
+    //    can see WHERE enum lookup fails (definitions HTTP status, presigned-schema status,
+    //    attribute presence, extraction). ?product_type= overrides the resolved type.
+    if (url.searchParams.get('debug') === '1' && rawField === 'details') {
+      const detailField = url.searchParams.get('detail_field') || 'Department'
+      const attribute = resolveDetailAttribute(detailField)
+      if (!attribute) return NextResponse.json({ error: `unknown detail "${detailField}"` }, { status: 400 })
+      const supabase = await createAdminClient()
+      const { data: skuRows } = await supabase.from('listing_content').select('sku').eq('parent_asin', parentAsin).limit(1)
+      const sku = (skuRows as { sku?: string }[] | null)?.[0]?.sku ?? null
+      const ptOverride = url.searchParams.get('product_type')
+      let productType = ptOverride || 'PRODUCT'
+      let token = '', sellerId = ''
+      try {
+        token = await getAccessToken()
+        sellerId = await getSellerId()
+        if (!ptOverride && sku) productType = await getProductType(sellerId, token, sku)
+      } catch (e) {
+        return NextResponse.json({ stage: 'auth', sku, error: e instanceof Error ? e.message : String(e) })
+      }
+      const inspect = await inspectProductTypeAttribute(productType, attribute.spApiKey, {
+        token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
+      })
+      return NextResponse.json({ sku, detailField, spApiKey: attribute.spApiKey, productType, ...inspect })
+    }
 
     // ── DETAILS branch ─────────────────────────────────────────────────────────
     if (rawField === 'details') {
