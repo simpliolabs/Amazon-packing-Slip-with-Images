@@ -65,7 +65,7 @@ For suggestedSearchTerms: Include 5-10 full Amazon search queries a shopper woul
 export async function scanProductImage(
   asin: string,
   imageUrl: string,
-  options: { forceRescan?: boolean } = {}
+  options: { forceRescan?: boolean; openai?: OpenAI } = {}
 ): Promise<ProductIdentity | null> {
   const { forceRescan = false } = options;
 
@@ -86,7 +86,10 @@ export async function scanProductImage(
   console.log(`[visionScanner] Scanning product image for ${asin}: ${imageUrl}`);
 
   try {
-    const openai = new OpenAI(); // Uses OPENAI_API_KEY env var
+    // Prefer the seller's saved key (passed from the route). The env OPENAI_API_KEY is usually NOT
+    // set in prod — the key lives in app_settings — so `new OpenAI()` silently failed, which is why
+    // product_identity has been empty and the design name fell back to title-scraping.
+    const openai = options.openai ?? new OpenAI();
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',

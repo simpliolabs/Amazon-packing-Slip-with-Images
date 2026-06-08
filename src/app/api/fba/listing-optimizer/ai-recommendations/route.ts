@@ -19,6 +19,7 @@ import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
+import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 
 function getAdminSupabase() {
   return createClient(
@@ -520,6 +521,31 @@ export async function POST(req: NextRequest) {
             emit({ type: 'progress', message: 'No keyword data yet — generating from listing content...' })
           }
 
+          // ── Vision: read the DESIGN off the product image (GROUND TRUTH) ─────────────────────
+          // The artwork printed on the product names the design far more reliably than a keyword-
+          // stuffed title (a "Later Gator" tee whose title leads "See You Later Alligator"). We pass
+          // the SELLER's OpenAI client so the vision call is actually authenticated — the env key is
+          // unset in prod, so `new OpenAI()` inside the scanner used to silently fail and leave
+          // product_identity empty. Non-fatal: a miss just falls back to title-based extraction.
+          let visionDesign: { designTheme: string; visualElements: string[]; seedKeywords: string[] } | null = null
+          try {
+            emit({ type: 'progress', message: 'Reading the product design off the image...' })
+            const imageUrl = await getProductImageUrl(parent_asin)
+            const identity = imageUrl ? await scanProductImage(parent_asin, imageUrl, { openai }) : null
+            if (identity) {
+              visionDesign = {
+                designTheme: identity.designTheme || '',
+                visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
+                seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
+              }
+              console.log(`[ai-recommendations] vision design for ${parent_asin}: theme="${visionDesign.designTheme}" seeds=[${visionDesign.seedKeywords.join(', ')}]`)
+            } else {
+              console.log(`[ai-recommendations] no vision identity for ${parent_asin} (no image or scan miss) — falling back to title extraction`)
+            }
+          } catch (err) {
+            console.warn('[ai-recommendations] vision scan failed (non-fatal):', err)
+          }
+
           const result = await runListingPipeline({
             openai,
             brandName,
@@ -530,6 +556,9 @@ export async function POST(req: NextRequest) {
             // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
             // the alphabetically-first variant and often does NOT lead with the design name.
             canonicalTitle: pipelineScoreRow?.product_title ?? null,
+            // Vision-read design identity — the printed artwork is ground truth for the design name,
+            // overriding a paraphrased title (PR: vision-based design recognition / Feature A).
+            visionDesign,
             variantDetails,
             keywordContext,
             hasAplus: rep.has_aplus || false,

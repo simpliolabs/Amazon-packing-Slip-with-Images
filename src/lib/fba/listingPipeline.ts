@@ -66,6 +66,10 @@ export interface PipelineInput {
   /** Whether the account already has an A+ Brand Story (EMC) module — gates the
    *  brand_story CREATE recommendation so we never tell a seller to create one twice. */
   hasBrandStory: boolean
+  /** Vision-scanned design identity read off the product IMAGE (visionScanner.ts) — ground-truth
+   *  design/slogan (e.g. "text 'Later Gator'") so the design name doesn't depend on a poorly-written
+   *  title. Null when there's no image, the scan failed, or the product isn't a design product. */
+  visionDesign?: { designTheme: string; visualElements: string[]; seedKeywords: string[] } | null
   /** Reasoning-class model for the audit step, e.g. 'o4-mini' */
   auditModel: string
   /** NDJSON keepalive emitter — called before each stage */
@@ -469,8 +473,30 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   // VERBATIM. Substring match (not word-set) so paraphrases like "See You Later Alligator"
   // for a "Later Gator" design DON'T satisfy it. Drives the retry to restore it.
   if (designName) {
-    if (!lc.includes(designName.toLowerCase())) {
+    const dn = designName.toLowerCase()
+    const dnIdx = lc.indexOf(dn)
+    if (dnIdx === -1) {
       problems.push(`🔴 DESIGN NAME MISSING: the title must contain the product's design name "${designName}" VERBATIM (it's the seller's design identity printed on the product). Do NOT paraphrase or substitute a synonym — use "${designName}" exactly.`)
+    } else {
+      // The design name is the product's IDENTITY — it must LEAD (right after the brand, before the
+      // product type), not trail behind a keyword-stuffed paraphrase. A design name buried mid-title
+      // means a longer paraphrase of the SAME slogan ("See You Later Alligator" for a "Later Gator"
+      // design) grabbed the lead. Force it to the front via the retry loop.
+      const bIdx = brandName ? lc.indexOf(brandName.toLowerCase()) : -1
+      const afterBrand = bIdx >= 0 ? bIdx + brandName.length : 0
+      if (dnIdx > afterBrand + 8) {
+        problems.push(`🔴 DESIGN NAME NOT LEADING: "${designName}" must come FIRST, right after the brand — it currently sits deeper in the title behind other words. Move "${designName}" to the front (after the brand) and REMOVE any longer paraphrase of the same slogan.`)
+      }
+    }
+  }
+
+  // Gender words belong ONCE. "Cool Mens Shirts for Men and Women" repeats "men" (Mens + Men) — the
+  // seller flagged this. "Men and Women" already names the audience once each; a count > 1 means a
+  // redundant gender adjective is stacked on top of the audience phrase. (counts is normalized so
+  // "Mens"→"men", "Womens"→"women".)
+  for (const g of ['men', 'women']) {
+    if ((counts.get(g) ?? 0) > 1) {
+      problems.push(`The gender word "${g}" appears more than once (e.g. "Mens Shirts ... for Men and Women") — state the audience ONCE as "for Men and Women" and drop the redundant earlier "${g}'s/${g}s".`)
     }
   }
 
@@ -835,7 +861,7 @@ async function runTitleAgent(
   // It must appear VERBATIM — do NOT paraphrase it (e.g. keep "Later Gator", never swap it
   // for "See You Later Alligator" or "Crocodile Design"). PR #91.
   const designLine = designName
-    ? `\n🔴 MANDATORY — the title MUST contain the product's DESIGN NAME exactly as written: "${designName}". This is the seller's design identity printed on the product. Use it VERBATIM — never paraphrase, expand, or substitute a synonym for it.\n`
+    ? `\n🔴 MANDATORY — the title MUST LEAD with the product's DESIGN NAME exactly as written: "${designName}". Place it FIRST, immediately after the brand "${brandName}" and BEFORE the product type — it is the seller's design identity printed on the product and the main thing shoppers recognize. Use it VERBATIM (never paraphrase, expand, or substitute a synonym). Do NOT also include a longer paraphrase or alternate wording of the SAME slogan elsewhere in the title — e.g. if the design is "Later Gator", do NOT also write "See You Later Alligator" (that is the same slogan twice and wastes characters). Lead with "${designName}", then the product type.\n`
     : ''
   const attrPinLine = attributePin
     ? `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
@@ -1857,34 +1883,43 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
  * empty:rep / none) surfaced into titleDebug so a live regen proves which path ran.
  */
 async function extractDesignName(input: PipelineInput): Promise<{ name: string; source: string }> {
-  const { openai, repTitle, category, canonicalTitle, brandName } = input
+  const { openai, repTitle, category, canonicalTitle, brandName, visionDesign } = input
   const usingCanonical = !!(canonicalTitle && canonicalTitle.trim())
   const source = usingCanonical ? canonicalTitle!.trim() : (repTitle || '')
   const titleTag = usingCanonical ? 'canonical' : 'rep'
-  const apparel = looksApparel(category, source)
+  // GROUND TRUTH: the design is PRINTED on the product, so the IMAGE (visionScanner) names it far
+  // more reliably than a keyword-stuffed title. This is what fixes "See You Later Alligator" (a
+  // title paraphrase) beating the real printed "Later Gator".
+  const visionText = visionDesign
+    ? [visionDesign.designTheme, ...(visionDesign.visualElements || []), ...(visionDesign.seedKeywords || [])].filter(Boolean).join(' | ')
+    : ''
+  const apparel = looksApparel(category, source) || (!!visionText && looksApparel(category, visionText))
   // Design names live on apparel / novelty / print products. Skip pure-spec products (an SD card has
   // no "design" — its identity is its specs).
-  if (!source || !apparel) return { name: '', source: 'none' }
+  if ((!source && !visionText) || !apparel) return { name: '', source: 'none' }
 
-  // A candidate is valid only if it ACTUALLY appears in the source title (rejects hallucinated /
-  // paraphrased names — "See You Later Alligator" must NOT pass for a "Later Gator" design), is not
-  // the seller's own brand, and is <=5 words.
+  // A candidate is valid only if it ACTUALLY appears in the IMAGE text or the title (rejects
+  // hallucinated/paraphrased names), is not the seller's own brand, and is <=5 words.
+  const haystack = `${visionText} ${source}`.toLowerCase()
   const accept = (cand: string | undefined | null): string => {
     const n = (cand || '').trim()
     if (!n) return ''
-    if (!source.toLowerCase().includes(n.toLowerCase())) return ''
+    if (!haystack.includes(n.toLowerCase())) return ''
     if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
     return n.split(/\s+/).length <= 5 ? n : ''
   }
 
-  // Primary: LLM extraction from the canonical title.
+  // Primary: LLM extraction. The product IMAGE (what's printed on the shirt) is ground truth; the
+  // title is a keyword-stuffed paraphrase and must NOT override the artwork.
   try {
-    const system = 'You identify the DESIGN / SLOGAN NAME of a print-on-demand or novelty product from its title — the short distinctive phrase printed on it or that names the artwork (e.g. "Later Gator", "Big Dill", "Out of Office"). It is the product\'s identity, NOT generic descriptors. Return ONLY {"designName":"<short phrase, or empty string>"}.'
-    const user = `Current product title: "${source}"
+    const system = 'You identify the DESIGN / SLOGAN NAME of a print-on-demand or novelty product — the short distinctive phrase PRINTED on the artwork (e.g. "Later Gator", "Big Dill", "Out of Office"). When an IMAGE description is given, the text printed on the product is the GROUND TRUTH for the design name; the listing title is often a keyword-stuffed paraphrase and must NOT override what the artwork actually says. Return ONLY {"designName":"<short phrase, or empty string>"}.'
+    const user = `${visionText ? `What the product IMAGE actually shows (GROUND TRUTH — read off the printed artwork):\n${visionText}\n\n` : ''}Current listing title (may be keyword-stuffed / paraphrased): "${source}"
 
-Return the DESIGN/SLOGAN NAME exactly as the seller wrote it — the distinctive phrase that names this specific design (usually leads the title, before generic words like "Vintage", "90s", "T-Shirt", "Comfort Colors", "Graphic Tee", "for Men").
-- Use the seller's EXACT wording (e.g. "Later Gator", not a paraphrase like "See You Later Alligator").
-- If the title is only generic descriptors with no distinct design name, return "".
+Return the DESIGN/SLOGAN NAME exactly as it is PRINTED on the product — the distinctive phrase that names this specific design.
+- PREFER the exact text printed on the artwork (from the IMAGE) over any paraphrase in the title. E.g. if the artwork says "Later Gator", return "Later Gator" — NOT the title's longer paraphrase "See You Later Alligator".
+- Use exact wording; do not expand abbreviations or rewrite the slogan.
+- Strip generic descriptors ("Vintage", "90s", "T-Shirt", "Comfort Colors", "Graphic Tee", "for Men").
+- If there is no distinct design name (only generic descriptors), return "".
 - Max 5 words.
 
 Return ONLY {"designName":"..."}.`
@@ -1900,6 +1935,26 @@ Return ONLY {"designName":"..."}.`
     if (llm) return { name: llm, source: `llm:${titleTag}` }
   } catch (err) {
     console.warn('[pipeline] design-name LLM extraction failed:', err)
+  }
+
+  // Vision fallback — runs BEFORE the title heuristic on purpose. The title's leading phrase is
+  // exactly the paraphrase we're avoiding ("See You Later Alligator"), so on an LLM miss the old
+  // heuristic would REGRESS to it. Prefer a phrase the IMAGE actually shows: a quoted printed string
+  // in visualElements (the scanner emits e.g. `text 'Later Gator'`), else the longest multi-word seed.
+  if (visionText) {
+    const titleCase = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    const quoted: string[] = []
+    for (const el of visionDesign?.visualElements || []) {
+      const m = String(el).match(/['"“”]([^'"“”]{2,40})['"“”]/)
+      if (m?.[1]) quoted.push(m[1].trim())
+    }
+    const multiWordSeeds = (visionDesign?.seedKeywords || [])
+      .filter((s) => typeof s === 'string' && s.trim().split(/\s+/).length >= 2)
+      .sort((a, b) => b.trim().split(/\s+/).length - a.trim().split(/\s+/).length)
+    for (const cand of [...quoted, ...multiWordSeeds]) {
+      const v = accept(titleCase(cand))
+      if (v) return { name: v, source: 'vision' }
+    }
   }
 
   // Deterministic fallback: the leading distinctive phrase. Guards against LLM flakiness/timeouts so
