@@ -197,3 +197,45 @@ export function coerceToEnum(raw: string, e: AttributeEnum): CoerceResult {
 
   return { valid: false, value: raw, accepted, changed: false }
 }
+
+/**
+ * Semantic gender/department coercion. The audit emits human audiences ("Men, Women", "Men and
+ * Women", "Unisex Adults", "Boys") that are NOT string-prefixes of Amazon's gender enum, so the
+ * generic coerceToEnum can't map them. Resolve by meaning: both genders / "unisex" → Unisex; a
+ * single gender → Mens/Womens; with a kid/baby/boys/girls qualifier → the Kids/Baby/Boys/Girls
+ * variant. Tries the most specific accepted label first and falls back toward the base. Returns
+ * null when the value carries no gender signal (caller falls back to the generic coercion).
+ */
+export function coerceGenderToEnum(raw: string, e: AttributeEnum): CoerceResult | null {
+  const accepted = e.names.length ? e.names : e.values
+  const pick = (label: string): CoerceResult | null => {
+    const hit = e.values.find((v) => v.toLowerCase() === label.toLowerCase())
+    return hit ? { valid: true, value: hit, accepted, changed: hit !== raw } : null
+  }
+  const lc = ` ${raw.toLowerCase()} `
+  const male = /\b(men|man|male|mens|boys?|guys?|gentlemen)\b/.test(lc)
+  const female = /\b(women|woman|female|womens|girls?|ladies|gals?)\b/.test(lc)
+  const unisex = /\bunisex\b/.test(lc) || (male && female)
+  if (!male && !female && !unisex) return null
+  const baby = /\b(baby|infant|infants|newborn|newborns)\b/.test(lc)
+  const kids = /\b(kid|kids|child|children|youth|toddler|toddlers|junior|juniors)\b/.test(lc)
+  const boys = /\bboys?\b/.test(lc)
+  const girls = /\bgirls?\b/.test(lc)
+
+  const tries: string[] = []
+  if (unisex) {
+    if (baby) tries.push('Unisex Baby')
+    else if (kids) tries.push('Unisex Kids')
+    tries.push('Unisex')
+  } else if (male) {
+    if (baby) tries.push('Baby Boys')
+    if (baby || kids || boys) tries.push('Boys')
+    tries.push('Mens', 'Men')
+  } else if (female) {
+    if (baby) tries.push('Baby Girls')
+    if (baby || kids || girls) tries.push('Girls')
+    tries.push('Womens', 'Women')
+  }
+  for (const t of tries) { const r = pick(t); if (r) return r }
+  return null
+}

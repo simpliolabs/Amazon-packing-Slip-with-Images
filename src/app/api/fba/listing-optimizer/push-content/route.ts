@@ -40,7 +40,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { getAttributeEnum, coerceToEnum, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
+import { getAttributeEnum, coerceToEnum, coerceGenderToEnum, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -398,7 +398,11 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
       })
       if (enumDef && enumDef.values.length > 0) {
         acceptedValues = enumDef.names.length ? enumDef.names : enumDef.values
-        const coerced = coerceToEnum(recommendedValue, enumDef)
+        // Gender/department carry free-form audiences ("Men, Women", "Unisex Adults") that aren't
+        // enum prefixes — map them semantically first, then fall back to the generic coercion.
+        const isGender = attribute.spApiKey === 'department' || attribute.spApiKey === 'target_gender'
+        const coerced = (isGender ? coerceGenderToEnum(recommendedValue, enumDef) : null)
+          ?? coerceToEnum(recommendedValue, enumDef)
         if (coerced.valid && coerced.changed) {
           normalizedFrom = recommendedValue
           recommendedValue = coerced.value
