@@ -1,26 +1,31 @@
 version: 2
 updates:
-  # npm dependencies
+  # npm dependencies — group minor/patch into ONE PR so the repo isn't flooded with a
+  # separate PR per package. Major bumps still come as individual PRs (they can break a
+  # build and deserve their own review).
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "security"
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps):"
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types:
+          - "minor"
+          - "patch"
 
-  # GitHub Actions
+  # GitHub Actions — group all action bumps into ONE PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-    labels:
-      - "dependencies"
-      - "ci"
     commit-message:
       prefix: "chore(ci):"
+    groups:
+      ci-actions:
+        patterns: ["*"]
