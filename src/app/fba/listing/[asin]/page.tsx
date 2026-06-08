@@ -3,6 +3,7 @@
 import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
+import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -884,15 +885,18 @@ export default function ListingDetailPage() {
     { id: 'variants', label: 'Variants', count: dedupByAsin(score.children).length },
     ...(kwData && kwData.topOpportunities.length > 0 ? [{ id: 'kwintel', label: 'Intelligence', count: kwData.totalKeywordsAnalyzed }] : []),
   ]
+  // Each card shows its IMPORTANCE-WEIGHTED points (max = the section's weight). The six maxes
+  // sum to 100, so the cards add up to the listing score — and a perfect listing reads 100, not
+  // 150. The % (points/weight) still reflects how good the section is. Weights: scoreWeights.ts.
   const bars = [
-    { label: 'Title', score: score.title_score, max: 25 },
-    { label: 'Bullets', score: score.bullet_score, max: 25 },
-    { label: 'Keywords', score: score.keyword_score, max: 25 },
-    // Description + Features each got their own /25 score (migration 020). Older rows are NULL
-    // until re-scored — show the cards only once populated so we never render a phantom 0%.
-    ...(score.description_score != null ? [{ label: 'Description', score: score.description_score, max: 25 }] : []),
-    ...(score.features_score != null ? [{ label: 'Features', score: score.features_score, max: 25 }] : []),
-    { label: 'A+', score: score.aplus_score, max: 25 },
+    { label: 'Title', score: weightedPoints(score.title_score, SECTION_WEIGHTS.title), max: SECTION_WEIGHTS.title },
+    { label: 'Bullets', score: weightedPoints(score.bullet_score, SECTION_WEIGHTS.bullets), max: SECTION_WEIGHTS.bullets },
+    { label: 'Keywords', score: weightedPoints(score.keyword_score, SECTION_WEIGHTS.keyword), max: SECTION_WEIGHTS.keyword },
+    // Description + Features are NULL on older rows until re-scored — show the cards only once
+    // populated so we never render a phantom 0%.
+    ...(score.description_score != null ? [{ label: 'Description', score: weightedPoints(score.description_score, SECTION_WEIGHTS.description), max: SECTION_WEIGHTS.description }] : []),
+    ...(score.features_score != null ? [{ label: 'Features', score: weightedPoints(score.features_score, SECTION_WEIGHTS.features), max: SECTION_WEIGHTS.features }] : []),
+    { label: 'A+', score: weightedPoints(score.aplus_score, SECTION_WEIGHTS.aplus), max: SECTION_WEIGHTS.aplus },
   ]
 
   // ─── Render ───────────────────────────────────────────────────────────────
