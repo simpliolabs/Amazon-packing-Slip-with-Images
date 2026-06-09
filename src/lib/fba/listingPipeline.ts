@@ -1028,7 +1028,7 @@ ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
 ${apparel
-  ? `IDEAL STRUCTURE (design-led): ${brandName} -> design name "${designName || '<design>'}" -> ${attributePin ? `garment brand "${attributePin}" as an adjective -> ` : ''}product type (Tee / T-Shirt) -> ONE grounded design descriptor -> "for ${preferredAudience || 'Men and Women'}". LEAD with the design name + product type; do NOT bury them behind keywords or the garment brand. Skeleton for THIS product: "${brandName} ${designName || 'Design'} ${attributePin ? attributePin + ' ' : ''}T-Shirt, <one grounded design descriptor> for ${preferredAudience || 'Men and Women'}".`
+  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement — lead with the brand + design name + product type (for a print-on-demand design that combination IS the main search keyword, e.g. "later gator t-shirt"), then the garment brand as an adjective, ONE grounded design detail, and the audience. Do not bury the design name behind other keywords. EXAMPLE of the target STYLE (a DIFFERENT design — copy the shape, not the words): "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}"` : ''}, audience "${preferredAudience || 'Men and Women'}".`
   : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience.`} It should read like a human-written phrase.
 
 Rules:
