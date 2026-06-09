@@ -1176,6 +1176,23 @@ Rules:
     }
   }
 
+  // Deterministic backstop (apparel): a sub-80-char title is below Amazon's ~80-char mobile floor
+  // (the validator flags <80 as "too short" and it wastes title real estate). Lead the garment brand
+  // with a comfort adjective — "Comfy Comfort Colors" — which reads better AND lifts the title past 80
+  // (PO-requested: "Comfy brings it above 80 characters"). Only when short, only when there's a garment
+  // brand in the title, and only if no comfort word is already in front of it.
+  if (apparel && title.length < 80 && attributePin) {
+    const pinEsc = attributePin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const m = title.match(new RegExp(`\\b${pinEsc}\\b`, 'i'))
+    if (m && m.index != null && !/\b(comfy|soft|cozy|comfortable)\b/i.test(title.slice(0, m.index))) {
+      const padded = `${title.slice(0, m.index)}Comfy ${title.slice(m.index)}`.replace(/\s{2,}/g, ' ').trim()
+      if (padded.length <= 150) {
+        title = padded
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      }
+    }
+  }
+
   // Deterministic backstop: the LLM keeps stacking product-type synonyms on keyword-heavy
   // non-apparel titles despite the prompt + candidate de-dup — so collapse them mechanically.
   if (!apparel) {
