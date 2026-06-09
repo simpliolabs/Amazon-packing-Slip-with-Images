@@ -1032,15 +1032,25 @@ Rules:
     const bLc = brandName ? brandName.toLowerCase() : ''
     const bIdx = bLc ? title.toLowerCase().indexOf(bLc) : -1
     const afterBrand = bIdx >= 0 ? bIdx + brandName.length : 0
-    const dnIdx = title.toLowerCase().indexOf(dn.toLowerCase())
+    // Apostrophe-tolerant find: the writer may render the name's apostrophe as ' / ’ or drop it
+    // ("Darlin" / "Darlin’"). Detect any of those as the SAME name so we hoist/insert the canonical
+    // form ("Darlin'") instead of duplicating it.
+    const dnRe = (() => { try { return new RegExp(dn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/['’]/g, "['’]?"), 'i') } catch { return null } })()
+    const dnM = dnRe ? title.match(dnRe) : null
+    const dnIdx = dnM && dnM.index != null ? dnM.index : -1
+    const dnLen = dnM ? dnM[0].length : dn.length
     let rebuilt = ''
     if (dnIdx === -1) {
       rebuilt = `${title.slice(0, afterBrand)} ${dn} ${title.slice(afterBrand)}`
     } else if (dnIdx > afterBrand + 8) {
-      const without = `${title.slice(0, dnIdx)} ${title.slice(dnIdx + dn.length)}`.replace(/\s{2,}/g, ' ')
+      const without = `${title.slice(0, dnIdx)} ${title.slice(dnIdx + dnLen)}`.replace(/\s{2,}/g, ' ')
       const wbIdx = bLc ? without.toLowerCase().indexOf(bLc) : -1
       const wAfter = wbIdx >= 0 ? wbIdx + brandName.length : 0
       rebuilt = `${without.slice(0, wAfter)} ${dn} ${without.slice(wAfter)}`
+    } else if (dnM && dnM[0] !== dn) {
+      // Already leading, but a different apostrophe form ("Darlin" / "Darlin’") — normalize it in
+      // place to the canonical "Darlin'" so the seller's exact design name shows.
+      rebuilt = `${title.slice(0, dnIdx)}${dn}${title.slice(dnIdx + dnLen)}`
     }
     rebuilt = rebuilt.replace(/\s{2,}/g, ' ').trim()
     if (rebuilt && rebuilt !== title && rebuilt.length <= 200) {
@@ -2002,6 +2012,20 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
     return n
   }
 
+  // Recover the design name's EXACT form from the seller's title: the LLM commonly drops the
+  // apostrophe ("Darlin" for "Darlin'") and accept() lets it pass (substring match). The title is
+  // authoritative for punctuation. Then normalize a curly apostrophe (U+2019) to a straight one so
+  // all downstream matching is consistent. Generalizes to Lovin', Y'all, Mom's, etc.
+  const snapToSource = (n: string): string => {
+    if (!n) return n
+    const pat = n.split(/\s+/).filter(Boolean)
+      .map((w) => w.replace(/['’][A-Za-z]*$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `(?:['’][A-Za-z]*)?`)
+      .join('\\s+')
+    try { const m = source.match(new RegExp(`\\b${pat}`, 'i')); if (m?.[0]) return m[0].replace(/\s+/g, ' ').trim() } catch { /* keep n */ }
+    return n
+  }
+  const finalize = (n: string): string => snapToSource(n).replace(/’/g, "'")
+
   // PRIMARY — the LLM makes the semantic call. Reliability lever = FEW-SHOT demonstrations (arXiv
   // 2403.02130: ~80% -> ~91% F1) spanning the distribution: short-brand-vs-long-paraphrase,
   // long-slogan-IS-the-design, one-word, mid-length, and generic -> empty.
@@ -2036,7 +2060,7 @@ Return ONLY {"designName":"<phrase or empty string>"}.`
     })
     const parsed = parseJsonLoose<{ designName?: string }>(r.choices[0]?.message?.content || '{}')
     const llm = accept(parsed.designName)
-    if (llm) return { name: llm, source: `llm:${titleTag}` }
+    if (llm) return { name: finalize(llm), source: `llm:${titleTag}` }
   } catch (err) {
     console.warn('[pipeline] design-name LLM extraction failed:', err)
   }
@@ -2046,13 +2070,13 @@ Return ONLY {"designName":"<phrase or empty string>"}.`
   for (const el of visionDesign?.visualElements || []) {
     const m = String(el).match(/['"“”]([^'"“”]{2,40})['"“”]/)
     const v = accept(m?.[1] ? titleCase(m[1]) : '')
-    if (v) return { name: v, source: 'vision' }
+    if (v) return { name: finalize(v), source: 'vision' }
   }
 
   // FALLBACK 2 (last resort) — the title's leading distinctive phrase. May be a paraphrase, but gives
   // the deterministic lead-enforcement something to anchor when both the LLM and image come up empty.
   const heur = accept(leadingDesignPhrase(source, brandName))
-  if (heur) return { name: heur, source: `heuristic:${titleTag}` }
+  if (heur) return { name: finalize(heur), source: `heuristic:${titleTag}` }
 
   return { name: '', source: `empty:${titleTag}` }
 }
