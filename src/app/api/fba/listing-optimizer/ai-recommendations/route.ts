@@ -310,7 +310,9 @@ Every CRITICAL and UPGRADE keyword must appear somewhere: title, a bullet, or ba
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { parent_asin } = body as { parent_asin: string }
+    // regenerate_section: 'title'|'bullets'|'description'|'keywords'|'all' — bypass the 7-day cooling
+    // lock for that section so the seller can iterate before the settling window is up.
+    const { parent_asin, regenerate_section } = body as { parent_asin: string; regenerate_section?: string }
 
     if (!parent_asin) {
       return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
@@ -642,8 +644,44 @@ export async function POST(req: NextRequest) {
             if (!recNorm || children.length === 0) return false
             return children.every((c) => norm(getLive(c)) === recNorm)
           }
+
+          // ── 7-DAY COOLING LOCK (Convergence Stages 3-4) — a section the seller SHIPPED within the
+          // last 7 days stays DONE while Amazon applies it + the listing settles/ranks. It must NOT
+          // flip back to "Do Now" on a fresh score that dipped ("scores regress after I ship"). Source
+          // of truth: keyword_push_log (last ACCEPTED push per field). Overridden per section via
+          // regenerate_section so the seller can iterate before the window is up.
+          const COOLING_MS = 7 * 24 * 60 * 60 * 1000
+          const lastPushMs: Record<string, number> = {}
+          try {
+            const { data: pl } = await supabase.from('keyword_push_log')
+              .select('field, pushed_at').eq('parent_asin', parent_asin).eq('status', 'accepted')
+              .order('pushed_at', { ascending: false })   // migration 015 column is pushed_at, NOT created_at (code review caught this)
+            for (const r of (pl ?? []) as { field: string | null; pushed_at: string }[]) {
+              if (r.field && !(r.field in lastPushMs)) lastPushMs[r.field] = new Date(r.pushed_at).getTime()
+            }
+          } catch { /* best-effort — no push log → no cooling lock */ }
+          const coolFieldFor = (el: string): string =>
+            el === 'title' ? 'title' : el === 'description' ? 'description'
+            : el === 'backend_keywords' ? 'keywords' : /^bullet_\d+$/.test(el) ? 'bullets' : ''
+          const nowMs = Date.now()
+
           for (const item of result.action_plan as ActionPlanItem[]) {
             if (item.verdict !== 'REPLACE') continue
+            // (0) COOLING LOCK: shipped within 7 days → keep DONE (settling), unless the seller asked to
+            // regenerate THIS section now. This is what stops a just-pushed section from regressing to
+            // "Do Now" on a fresh score that dipped while Amazon is still applying + ranking it.
+            const cf = coolFieldFor(item.element)
+            const pushedMs = cf ? lastPushMs[cf] : undefined
+            const overridden = regenerate_section === 'all' || (!!cf && regenerate_section === cf)
+            if (pushedMs && !overridden && (nowMs - pushedMs) < COOLING_MS) {
+              const daysAgo = Math.max(1, Math.round((nowMs - pushedMs) / (24 * 60 * 60 * 1000)))
+              const daysLeft = Math.max(1, Math.ceil((COOLING_MS - (nowMs - pushedMs)) / (24 * 60 * 60 * 1000)))
+              item.verdict = 'DONE'
+              item.current_status = `✓ Shipped ${daysAgo}d ago — settling (Amazon applies + ranks over ~7 days). Locked ${daysLeft}d more; use Regenerate to override.`
+              item.instruction = 'No action — recently shipped. Let it settle, or click Regenerate to override the 7-day lock.'
+              if (item.priority !== 'HIGH') item.priority = 'NONE'
+              continue
+            }
             let live = false
             if (item.element === 'title') {
               // Capacity families have per-child titles — compare each child to its own

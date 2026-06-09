@@ -563,16 +563,18 @@ export default function ListingDetailPage() {
     setCompetitorSaving(false)
   }
 
-  // Generate AI recommendations (streaming)
-  const generateAiRecs = useCallback(async () => {
+  // Generate AI recommendations (streaming). `regenerateSection` ('title'|'bullets'|'description'|
+  // 'keywords'|'all') overrides the 7-day cooling lock for that one section so the seller can iterate
+  // before the settling window is up.
+  const generateAiRecs = useCallback(async (regenerateSection?: string) => {
     setAiLoading(true)
     setAiError(null)
-    setAiProgress('Starting AI audit...')
+    setAiProgress(regenerateSection ? `Regenerating ${regenerateSection}…` : 'Starting AI audit...')
     try {
       const resp = await fetch('/api/fba/listing-optimizer/ai-recommendations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parent_asin: asin }),
+        body: JSON.stringify({ parent_asin: asin, ...(regenerateSection ? { regenerate_section: regenerateSection } : {}) }),
       })
       if (!resp.ok) throw new Error('AI generation failed')
 
@@ -1018,7 +1020,7 @@ export default function ListingDetailPage() {
             <Icon.External className="w-3.5 h-3.5" /> Edit A+ Content
           </a>
           <button
-            onClick={generateAiRecs}
+            onClick={() => generateAiRecs()}
             disabled={aiLoading}
             className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-violet-200">
             <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Generating…' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
@@ -1224,7 +1226,7 @@ export default function ListingDetailPage() {
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center">
           <p className="text-sm text-slate-500 mb-4">{aiLoading ? (aiProgress || 'Running AI audit…') : 'Run an AI audit to see the recommended changes for this listing.'}</p>
           {!aiLoading && (
-            <button onClick={generateAiRecs} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 transition-colors cursor-pointer">
+            <button onClick={() => generateAiRecs()} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 transition-colors cursor-pointer">
               <Icon.Sparkles className="w-3.5 h-3.5" /> Run AI Audit
             </button>
           )}
@@ -1393,6 +1395,19 @@ export default function ListingDetailPage() {
                     <p className="text-xs mt-1.5 text-slate-500">
                       <span className="font-medium text-slate-600">Current:</span> {item.current_status}
                     </p>
+
+                    {/* Cooling lock: a recently-shipped section is "settling" (locked ~7 days so Amazon
+                        applies + ranks it before we change it again). Let the seller override and
+                        regenerate JUST this section before the window is up. */}
+                    {item.verdict === 'DONE' && typeof item.current_status === 'string' && item.current_status.includes('settling') && (() => {
+                      const coolSec = item.element === 'title' ? 'title' : item.element === 'description' ? 'description' : item.element === 'backend_keywords' ? 'keywords' : /^bullet_\d+$/.test(item.element) ? 'bullets' : ''
+                      return coolSec ? (
+                        <button onClick={() => generateAiRecs(coolSec)} disabled={aiLoading}
+                          className="mt-1.5 text-[11px] text-violet-700 hover:text-violet-900 underline disabled:opacity-50">
+                          ↻ Regenerate this section now (override the 7-day lock)
+                        </button>
+                      ) : null
+                    })()}
 
                     {/* Row 3: Instruction */}
                     {item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
@@ -1752,7 +1767,7 @@ export default function ListingDetailPage() {
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center">
           <p className="text-sm text-slate-500 mb-1">The recommendations loaded, but the action plan came back empty.</p>
           <p className="text-xs text-slate-400 mb-4">Regenerate to rebuild the per-section changes.</p>
-          <button onClick={generateAiRecs} disabled={aiLoading} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 transition-colors cursor-pointer disabled:opacity-50">
+          <button onClick={() => generateAiRecs()} disabled={aiLoading} className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 transition-colors cursor-pointer disabled:opacity-50">
             <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Regenerating…' : 'Regenerate'}
           </button>
         </div>
@@ -1767,7 +1782,7 @@ export default function ListingDetailPage() {
             {!aiRecs && !aiLoading && (
               <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center">
                 <p className="text-sm text-slate-500 mb-3">No AI audit yet. Generate one to see the keyword placement plan.</p>
-                <button onClick={generateAiRecs} className="text-xs bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg">
+                <button onClick={() => generateAiRecs()} className="text-xs bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg">
                   Run AI Audit
                 </button>
               </div>
