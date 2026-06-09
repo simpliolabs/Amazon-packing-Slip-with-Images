@@ -996,9 +996,11 @@ async function runTitleAgent(
     : ''
   const attrPinLine = attributePin
     ? apparel
-      // Garment brand is an ADJECTIVE on the product type ("Comfort Colors Tee"), NEVER "for Comfort
-      // Colors" (it's the fabric brand, not a compatibility target — that "for" was the live wart).
-      ? `\nInclude the garment/blank brand "${attributePin}" as an ADJECTIVE directly before the product type (e.g. "${attributePin} Tee" or "${attributePin} T-Shirt"). NEVER write "for ${attributePin}" — it is the fabric brand, not a compatibility target.\n`
+      // Garment brand goes AFTER the welded design-name + product-type phrase ("Later Gator T-Shirt,
+      // Comfort Colors ..."), NEVER between the design name and the product type — splitting them
+      // breaks the #1 exact-match keyword "<design> t-shirt" (the seller's top ranking opportunity).
+      // And NEVER "for <brand>" (it's the fabric, not a compatibility target).
+      ? `\nInclude the garment/blank brand "${attributePin}" AFTER the design-name + product-type phrase — e.g. "...${designName || 'Later Gator'} T-Shirt, ${attributePin} Alligator Tee...". Do NOT place "${attributePin}" BETWEEN the design name and the product type: that splits the exact-match keyword "${designName || 'Later Gator'} T-Shirt", which is the single highest ranking opportunity. NEVER write "for ${attributePin}".\n`
       : `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
     : ''
   // UPGRADE keywords = ranking signals the seller has demonstrated traffic on (present in
@@ -1028,7 +1030,7 @@ ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
 ${apparel
-  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement — lead with the brand + design name + product type (for a print-on-demand design that combination IS the main search keyword, e.g. "later gator t-shirt"), then the garment brand as an adjective, ONE grounded design detail, and the audience. Do not bury the design name behind other keywords. EXAMPLE of the target STYLE (a DIFFERENT design — copy the shape, not the words): "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}"` : ''}, audience "${preferredAudience || 'Men and Women'}".`
+  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — because that exact phrase is the seller's #1 search keyword and SPLITTING it (e.g. "${designName || 'Later Gator'} Comfort Colors T-Shirt") destroys the exact-match ranking. AFTER that phrase, add the garment brand + ONE grounded design detail, then the audience. EXAMPLE of the target shape (a DIFFERENT design — copy the shape, not the words): "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women" — note "Later Gator T-Shirt" stays together, THEN "Comfort Colors". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (placed AFTER "<design> T-Shirt")` : ''}, audience "${preferredAudience || 'Men and Women'}".`
   : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience.`} It should read like a human-written phrase.
 
 Rules:
