@@ -913,6 +913,22 @@ export async function POST(req: NextRequest) {
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
 
+          // ── Persist a MANUAL title override AS the recommendation (broadcast-title products only) ──
+          // When the seller pushes their OWN title, the live content becomes their title but the stored
+          // recommendation is still the AI's. That leaves live != recommendation FOREVER: the cohesion row
+          // shows "needs update", and the NEXT ship would push the AI title over the seller's. So we make
+          // their pushed title the recommendation — it sticks, cohesion goes green, re-ship is a no-op.
+          // Capacity families are excluded (their per-GB titles must not collapse to one string).
+          if (field === 'title' && typeof title_override === 'string' && title_override.trim()) {
+            try {
+              const { data: rt } = await db.from('listing_seo_recommendations').select('per_child_titles').eq('parent_asin', parent_asin).single()
+              const isCapFam = Array.isArray(rt?.per_child_titles) && rt.per_child_titles.length > 1
+              if (!isCapFam) {
+                await db.from('listing_seo_recommendations').update({ recommended_title: title_override.trim().slice(0, 200) }).eq('parent_asin', parent_asin)
+              }
+            } catch (e) { console.warn('[push-content] persist manual title as recommendation failed (non-fatal):', e) }
+          }
+
           // PERSIST verdict=DONE for the pushed section — ONLY when EVERY pushed SKU succeeded
           // (failed === 0). A push with failures (or a selective re-push where some stragglers still
           // error) must NOT flip the card to DONE, or the seller stops before the field is actually
