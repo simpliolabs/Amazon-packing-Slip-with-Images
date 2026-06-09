@@ -2232,9 +2232,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // that MUST survive into the title verbatim — the agent kept paraphrasing it away.
   const { name: designName, source: designSource } = await extractDesignName(input)
 
+  // Apparel with a clear DESIGN NAME: the design name anchors the title, so do NOT also FORCE a long
+  // slogan keyword (e.g. "see you later alligator shirt") into it. Forcing both jams the same design
+  // in twice and makes the title read like keyword soup — the exact "Later Gator See You Later
+  // Alligator" clutter the PO rejected. The forced pin was overriding the designLine's "don't
+  // paraphrase the slogan" rule; dropping it lets the title stay clean + concise. The slogan still
+  // ranks via the bullets + backend pool. Short money keywords (<=3 words) are still pinned.
+  const titleMustInclude = (apparelProduct && designName && mustInclude && mustInclude.split(/\s+/).length >= 4)
+    ? undefined
+    : mustInclude
+
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, mustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
+  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
 
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
