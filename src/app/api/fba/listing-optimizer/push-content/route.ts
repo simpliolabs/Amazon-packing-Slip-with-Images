@@ -706,10 +706,10 @@ export async function POST(req: NextRequest) {
   // Validate the body BEFORE opening the stream — a 400 here is a real client error,
   // not a mid-push failure. Keeps the streaming envelope reserved for things that
   // can actually fail asynchronously.
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[] }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
-  const { parent_asin, confirm, field: rawField, detail_field: detailField } = body
+  const { parent_asin, confirm, field: rawField, detail_field: detailField, skus } = body
   if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
   if (confirm !== true) {
     return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
@@ -789,7 +789,19 @@ export async function POST(req: NextRequest) {
 
         // ── REGULAR FIELDS branch (title / bullets / description / keywords) ──
         const field: PushField = isPushField(rawField) ? rawField : 'keywords'
-        const diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
+        let diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
+        // Selective re-push: when the client sends a SKU subset ("push just the stale ones"), narrow to
+        // those — the seller fixes stragglers WITHOUT re-shipping all SKUs, and the smaller batch
+        // finishes well under the proxy's stream window (the cause of the "stream ended" drop on 131).
+        // CRUCIAL: also include each requested SKU's FBA/FBM TWIN (same child ASIN). The verify panel
+        // only lists DB children, not the live-discovered twins, so a stale child's twin would never be
+        // in `skus` — re-pushing the child alone would leave the twin offer divergent (adversarial review
+        // caught this; it would re-open the #36 FBA/FBM parity bug). Matching by shared ASIN fixes both.
+        if (Array.isArray(skus)) {   // present (even empty) → selective; an empty list filters to NOTHING, never "push all"
+          const wantSkus = new Set(skus)
+          const wantAsins = new Set(diff.filter((d) => wantSkus.has(d.sku) && d.asin).map((d) => d.asin))
+          diff = diff.filter((d) => wantSkus.has(d.sku) || (d.asin != null && wantAsins.has(d.asin)))
+        }
         if (diff.length === 0) {
           emit({
             type: 'result',
@@ -888,11 +900,12 @@ export async function POST(req: NextRequest) {
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
 
-          // PERSIST verdict=DONE for the pushed section. Without this, the card snaps back to
-          // "Do Now" the moment the page refetches recommendations: the client only marked DONE
-          // in local state, while listing_seo_recommendations.action_plan still held the pipeline's
-          // forced 'REPLACE'. We just shipped the recommended value, so live now matches it → DONE.
-          try {
+          // PERSIST verdict=DONE for the pushed section — ONLY when EVERY pushed SKU succeeded
+          // (failed === 0). A push with failures (or a selective re-push where some stragglers still
+          // error) must NOT flip the card to DONE, or the seller stops before the field is actually
+          // consistent on Amazon (adversarial review). Without persisting, the card snaps back to
+          // "Do Now" on the next recommendations refetch — so we persist only when truly fully shipped.
+          if (failed === 0) try {
             const { data: recRow } = await db.from('listing_seo_recommendations')
               .select('action_plan').eq('parent_asin', parent_asin).single()
             const plan = Array.isArray(recRow?.action_plan) ? recRow.action_plan as Array<Record<string, unknown>> : null

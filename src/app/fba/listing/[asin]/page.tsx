@@ -675,14 +675,18 @@ export default function ListingDetailPage() {
    * warm so the push survives container restarts and nginx idle-timeouts (the original
    * 502 Bad Gateway failure mode).
    */
-  const confirmPush = useCallback(async () => {
+  const confirmPush = useCallback(async (onlySkus?: string[]) => {
     setPushError(null); setPushLoading(true); setPushPhase('starting')
-    setPushProgress([])
+    setPushProgress([]); setVerifyResults(null)   // clear stale verify counts so a re-push doesn't show pre-push state
     let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } | null = null
     let streamError: string | null = null
+    const skuStatus = new Map<string, string>()   // latest status per SKU — rebuilds a partial result if the stream drops
+    let serverTotal = 0                            // real diff size from the 'started' event (NOT just SKUs-seen-before-drop)
     try {
       const body: Record<string, unknown> = { parent_asin: asin, field: pushField, confirm: true }
       if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
+      // Selective re-push: only the stale SKUs (fix stragglers without re-shipping all of them).
+      if (onlySkus && onlySkus.length > 0) body.skus = onlySkus
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -707,7 +711,9 @@ export default function ListingDetailPage() {
         try { msg = JSON.parse(line) } catch { return }
         if (msg.type === 'started') {
           setPushPhase('pushing')
+          if (typeof msg.total === 'number') serverTotal = msg.total
         } else if (msg.type === 'progress' && msg.sku && msg.status) {
+          skuStatus.set(msg.sku, msg.status)   // for the partial-result rebuild if the stream drops
           // Upsert per-SKU progress row. Validating overwritten by accepted/failed as the
           // SKU moves through the loop.
           setPushProgress((prev) => {
@@ -746,9 +752,29 @@ export default function ListingDetailPage() {
       if (buffer.trim()) handleLine(buffer)
 
       if (streamError) throw new Error(streamError)
-      if (!finalResult) throw new Error('Stream ended without a result event.')
       // TS loses narrowing across the closure-mutated `finalResult` — re-assert the shape.
-      const data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } = finalResult
+      let data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField }
+      if (finalResult) {
+        data = finalResult
+      } else {
+        // The stream dropped BEFORE the final result event — the proxy window on a long 100+ SKU push.
+        // The writes that already ACCEPTED are real, so don't throw a scary error: rebuild a partial
+        // result from the per-SKU statuses so the seller sees what landed and can re-check + push ONLY
+        // the stragglers (instead of re-shipping everything and re-triggering the same drop).
+        const statuses = [...skuStatus.values()]
+        const accepted = statuses.filter((s) => s === 'accepted').length
+        const failed = statuses.filter((s) => s === 'failed').length
+        if (accepted === 0) throw new Error('Stream ended without a result event.')
+        // Use the REAL diff size from the 'started' event, not just SKUs-seen-before-the-drop, so the
+        // seller isn't told "20 of 25" when 131 were queued (adversarial review caught this).
+        const realTotal = serverTotal || statuses.length
+        const pending = Math.max(0, realTotal - accepted - failed)
+        data = { field: pushField, pushed: accepted, failed, total: realTotal, message: `Push interrupted — ${accepted} of ${realTotal} SKU(s) reached Amazon${pending > 0 ? `, ${pending} not yet sent` : ''}. The connection dropped mid-stream. Re-check live below, then push just the stale ones.`, results: [] }
+      }
+      // A field is only "fully shipped" when a COMPLETE stream landed every SKU with zero failures.
+      // A partial/interrupted push (rebuilt result) or any failure must NOT collapse the card to DONE —
+      // that would tell the seller the field is shipped while SKUs are still stale (adversarial review).
+      const fullyShipped = !!finalResult && data.failed === 0 && data.total > 0 && data.pushed === data.total
 
       setPushResults(data)
       setPushPreview(null)
@@ -765,8 +791,10 @@ export default function ListingDetailPage() {
           if (found) setScore(found)
         } catch { /* best-effort — the score still updates on next load */ }
 
-        // Mark matching action_plan items DONE locally so the card collapses to the
-        // ✓ Pushed state immediately (audit JSON is frozen until Regenerate).
+        // Mark matching action_plan items DONE locally — ONLY when FULLY shipped. A partial/interrupted
+        // push leaves the card in REPLACE so the seller re-checks + finishes the stragglers (else we'd
+        // falsely report a half-pushed field as done — adversarial review caught this).
+        if (fullyShipped) {
         const matchesPushedField = (elem: string): boolean => {
           if (pushField === 'title') return elem === 'title'
           if (pushField === 'description') return elem === 'description'
@@ -790,6 +818,7 @@ export default function ListingDetailPage() {
           })
           return { ...prev, action_plan }
         })
+        } // end if (fullyShipped)
       }
     } catch (e) {
       // If we have any progress rows, the seller knows what landed (the stream told them
@@ -2287,6 +2316,15 @@ export default function ListingDetailPage() {
                           <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> stale</span>
                           <span className="text-slate-500">· {verifyResults.total} SKUs checked</span>
                         </p>
+                        {verifyResults.stale > 0 && pushField !== 'details' && (
+                          <button
+                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches).map((v) => v.sku))}
+                            disabled={pushLoading}
+                            className="mb-2 text-[11px] bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-md font-medium disabled:opacity-50"
+                          >
+                            Push just the {verifyResults.stale} stale SKU{verifyResults.stale === 1 ? '' : 's'} → (skips the {verifyResults.matched} already applied)
+                          </button>
+                        )}
                         <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-[25vh] overflow-y-auto bg-white">
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`px-2 py-1.5 text-[11px] flex items-center gap-2 ${v.isParent ? 'bg-violet-50' : ''}`}>
@@ -2307,7 +2345,7 @@ export default function ListingDetailPage() {
 
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
-                    <button onClick={confirmPush} disabled={pushPreview.changed === 0}
+                    <button onClick={() => confirmPush()} disabled={pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
                       Confirm &amp; Ship {pushPreview.field === 'details' && pushPreview.detail_field
                         ? pushPreview.detail_field
@@ -2361,6 +2399,15 @@ export default function ListingDetailPage() {
                           </span>
                           <span className="text-slate-500">· {verifyResults.total} SKUs checked{verifyResults.attribute_key ? ` · /attributes/${verifyResults.attribute_key}` : ''}</span>
                         </p>
+                        {verifyResults.stale > 0 && pushField !== 'details' && (
+                          <button
+                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches).map((v) => v.sku))}
+                            disabled={pushLoading}
+                            className="mb-2 text-[11px] bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-md font-medium disabled:opacity-50"
+                          >
+                            Push just the {verifyResults.stale} stale SKU{verifyResults.stale === 1 ? '' : 's'} → (skips the {verifyResults.matched} already applied)
+                          </button>
+                        )}
                         <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-[35vh] overflow-y-auto bg-white">
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`p-2.5 text-xs ${v.isParent ? 'bg-violet-50' : ''}`}>
