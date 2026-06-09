@@ -849,6 +849,49 @@ function dedupeAudiencePhrases(title: string): string {
 
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
+/** COUNCIL for the title (PO directive: big decisions DEBATE instead of one agent). Reuses the
+ *  fully-built title brief (system+user) so every hard constraint still applies, then runs:
+ *  3 persona proposers (creative / SEO / conversion) -> a ruthless adversary critique -> a judge that
+ *  synthesizes the single best title. The judge's output flows through runTitleAgent's existing
+ *  validate + deterministic backstops (brand-lead, design-name lead, gender de-dup, Title-Case), so
+ *  the council is additive, not a new failure mode. Fails open to a single agent if all drafts error. */
+async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string> {
+  const ask = async (system: string, user: string, temperature: number, max_tokens = 120): Promise<string> => {
+    try {
+      // Per-call timeout + NO retries: a hung gpt-4.1-mini call must not stall the keepalive-less
+      // title stage past Cloudflare's ~100s idle window (adversarial review caught this — the SDK
+      // default is a 10-min timeout). On timeout this voice fails open; the council still has its
+      // other voices + the single-agent fallback. 20s is generous for gpt-4.1-mini.
+      const r = await openai.chat.completions.create({ model: 'gpt-4.1-mini', messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature, max_tokens }, { timeout: 20_000, maxRetries: 0 })
+      return (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+    } catch { return '' }
+  }
+  const personas: { sys: string; temp: number }[] = [
+    { sys: 'You are an award-winning apparel brand COPYWRITER. Write the most compelling, human, DESIGN-LED title — the kind a shopper stops and clicks. ', temp: 0.6 },
+    { sys: 'You are an Amazon SEO STRATEGIST. Capture the most legitimate search value WITHOUT stuffing: the design name leads, then only the highest-value real terms that fit naturally — the rest belongs in bullets/backend. ', temp: 0.3 },
+    { sys: 'You are a CONVERSION strategist focused on trust + click-through. Write a CLEAN, professional title — design name + product type up front, clear audience, nothing that reads like spam. ', temp: 0.4 },
+  ]
+  const drafts = (await Promise.all(personas.map((p) => ask(p.sys + baseSystem, baseUser, p.temp)))).filter(Boolean)
+  if (drafts.length === 0) return ask(baseSystem, baseUser, 0.3)            // fail open: single agent
+  if (drafts.length === 1) return drafts[0]
+  onProgress?.('Title council: drafts in, adversary reviewing...')          // keepalive (resets idle timer)
+  const numbered = drafts.map((t, i) => `${i + 1}. ${t}`).join('\n')
+  const critique = await ask(
+    'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 125 chars, brand not first, and weak click appeal. Be specific.',
+    `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
+    0.3, 400,
+  )
+  onProgress?.('Title council: judge synthesizing the winner...')           // keepalive
+  const judged = await ask(
+    baseSystem + ' You are the JUDGE: merge the strongest, COMPLIANT elements into ONE final title that satisfies every rule in the brief. Output ONLY the final title string — no quotes, no explanation.',
+    `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
+    0.2,
+  )
+  return judged || drafts[0]
+}
+
+// ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
+
 async function runTitleAgent(
   input: PipelineInput,
   candidates: TitleCandidate[],
@@ -924,13 +967,22 @@ Rules:
 - 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands and shoppers search for them. Weave the top 2-3 in using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example: "...Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')}". This is legal referential use and captures real buyer traffic.` : ''}
 - Must read like a human wrote it. Return ONLY the title.`
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4.1-mini',
-    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    temperature: 0.3,
-    max_tokens: 120,
-  })
-  let title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+  // COUNCIL (PO directive: big decisions DEBATE, not one agent). Apparel/design titles — where the
+  // keyword-stuffing problem lives — run the 3-persona debate -> adversary -> judge over the SAME
+  // brief. Non-apparel keeps the single fast agent (those titles already work). Either way the result
+  // flows through the validate + deterministic backstops below, so the hard rules still hold.
+  let title: string
+  if (apparel) {
+    title = await runTitleCouncil(openai, system, user, input.onProgress)
+  } else {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0.3,
+      max_tokens: 120,
+    })
+    title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+  }
   let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) : ['No title generated.']
   let retried = false
 
@@ -949,7 +1001,9 @@ Rules:
     const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     if (corrected) {
       const cp = validateTitle(corrected, brandName, mustInclude, attributePin, upgradeKws, designName)
-      if (cp.length <= problems.length) { title = corrected; problems = cp }
+      // Require a STRICT improvement (fewer problems) to replace — otherwise a same-count single-agent
+      // rewrite could silently discard a clean, debated council title (adversarial review caught this).
+      if (cp.length < problems.length) { title = corrected; problems = cp }
     }
   }
 
