@@ -676,7 +676,12 @@ export function scoreListingContent(
   // ── 1b. TITLE KEYWORD INTELLIGENCE (capped to top 10 UPGRADE keywords) ───────
   // UPGRADE keywords = present in bullets but NOT in title (should be promoted).
   // Capped to top 10 by opportunity score — these are the ones worth acting on.
-  if (scoringCtx.totalKeywords > 0 && scoringCtx.upgradeCount > 0) {
+  // Apparel titles are DESIGN-LED, not keyword-stuffed — upgrade keywords belong in bullets/backend,
+  // not crammed into the title. Docking the apparel title for "missing" upgrade keywords is exactly
+  // what drove the stuffing the design-grounded title agent now avoids, and it re-triggered the "ship"
+  // nag on an otherwise-clean title. So skip this penalty for apparel. Non-apparel keeps it (specs like
+  // 256GB / UHS-I genuinely ARE title search terms there).
+  if (!apparel && scoringCtx.totalKeywords > 0 && scoringCtx.upgradeCount > 0) {
     const kwList = scoringCtx.topUpgradeKeywords.slice(0, 3).map(k => `"${k}"`).join(', ')
     if (scoringCtx.upgradeCount >= 7) {
       titleScore -= 5
