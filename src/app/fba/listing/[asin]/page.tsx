@@ -882,6 +882,15 @@ export default function ListingDetailPage() {
     setVerifyLoading(false)
   }, [asin, pushField, pushDetailField])
 
+  // Honest "will change" count for a MANUAL title override: the preview's `changed` is computed vs the
+  // AI recommendation, but the seller may have typed something else. Compare each SKU's LIVE title to
+  // the TYPED title so the modal shows only the variants that genuinely differ — the rest are skipped
+  // server-side (loadDiff filters changed===false), so we must not claim they'll all change.
+  const titleOverrideChanged = (pushField === 'title' && pushPreview?.broadcast && editTitle.trim())
+    ? pushPreview.diff.filter((d) => (d.current ?? '') !== editTitle.trim().slice(0, 200)).length
+    : null
+  const displayChanged = titleOverrideChanged ?? pushPreview?.changed ?? 0
+
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
 
   const placementGroups = (() => {
@@ -2236,10 +2245,10 @@ export default function ListingDetailPage() {
                         <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white font-semibold mr-1.5 whitespace-nowrap">Parent</span>
                         {pushPreview.field === 'details' ? (
                           <>The same <b>{pushPreview.detail_field}</b> value is written to <b>all {pushPreview.count}</b> SKUs (each ASIN&apos;s FBA + FBM + the variation parent).{' '}
-                          <b>{pushPreview.changed}</b> currently differ and will change.</>
+                          <b>{displayChanged}</b> currently differ and will change.</>
                         ) : (
                           <>The same {pushPreview.label.toLowerCase()} is written to <b>all {pushPreview.count}</b> SKUs — including each ASIN&apos;s matching FBA + FBM.{' '}
-                          <b>{pushPreview.changed}</b> currently differ and will change.</>
+                          <b>{displayChanged}</b> currently differ and will change.</>
                         )}
                       </p>
                     </div>
@@ -2425,10 +2434,12 @@ export default function ListingDetailPage() {
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
                     <button onClick={() => confirmPush()}
-                      disabled={pushField === 'title' && pushPreview.broadcast ? !editTitle.trim() : pushPreview.changed === 0}
+                      disabled={pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
                       {pushField === 'title' && pushPreview.broadcast
-                        ? 'Push this title to all variants'
+                        ? (displayChanged === 0
+                            ? 'All variants already have this title'
+                            : <>Push this title to {displayChanged} variant{displayChanged !== 1 ? 's' : ''} that need it</>)
                         : <>Confirm &amp; Ship {pushPreview.field === 'details' && pushPreview.detail_field
                             ? pushPreview.detail_field
                             : pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}</>}
