@@ -802,18 +802,20 @@ export async function POST(req: NextRequest) {
         // ── REGULAR FIELDS branch (title / bullets / description / keywords) ──
         const field: PushField = isPushField(rawField) ? rawField : 'keywords'
         const titleOv = field === 'title' && typeof title_override === 'string' && title_override.trim() ? title_override.trim() : undefined
-        let diff = (await loadDiff(parent_asin, field, titleOv)).filter((d) => d.changed && d.raw != null)
-        // Selective re-push: when the client sends a SKU subset ("push just the stale ones"), narrow to
-        // those — the seller fixes stragglers WITHOUT re-shipping all SKUs, and the smaller batch
-        // finishes well under the proxy's stream window (the cause of the "stream ended" drop on 131).
-        // CRUCIAL: also include each requested SKU's FBA/FBM TWIN (same child ASIN). The verify panel
-        // only lists DB children, not the live-discovered twins, so a stale child's twin would never be
-        // in `skus` — re-pushing the child alone would leave the twin offer divergent (adversarial review
-        // caught this; it would re-open the #36 FBA/FBM parity bug). Matching by shared ASIN fixes both.
-        if (Array.isArray(skus)) {   // present (even empty) → selective; an empty list filters to NOTHING, never "push all"
+        const rawDiff = (await loadDiff(parent_asin, field, titleOv)).filter((d) => d.raw != null)
+        let diff: DiffRow[]
+        // Selective re-push ("push just the stale ones"): FORCE the requested SKUs (+ their FBA/FBM twins
+        // by shared ASIN) even if the local cache says they already match. They are stale on AMAZON — the
+        // verify checks live state, while the cache was optimistically write-through-updated on the first
+        // push. Filtering by `changed` (a cache comparison) here would skip exactly the stragglers the
+        // seller is trying to fix -> "Nothing to push" (the live bug the PO hit). A FULL push keeps the
+        // changed filter. Twin-by-ASIN inclusion preserves the #36 FBA/FBM parity guarantee.
+        if (Array.isArray(skus)) {   // present (even empty) → selective; an empty list pushes NOTHING, never "all"
           const wantSkus = new Set(skus)
-          const wantAsins = new Set(diff.filter((d) => wantSkus.has(d.sku) && d.asin).map((d) => d.asin))
-          diff = diff.filter((d) => wantSkus.has(d.sku) || (d.asin != null && wantAsins.has(d.asin)))
+          const wantAsins = new Set(rawDiff.filter((d) => wantSkus.has(d.sku) && d.asin).map((d) => d.asin))
+          diff = rawDiff.filter((d) => wantSkus.has(d.sku) || (d.asin != null && wantAsins.has(d.asin)))
+        } else {
+          diff = rawDiff.filter((d) => d.changed)
         }
         if (diff.length === 0) {
           emit({

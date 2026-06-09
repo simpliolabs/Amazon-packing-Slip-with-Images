@@ -709,7 +709,10 @@ export default function ListingDetailPage() {
    */
   const confirmPush = useCallback(async (onlySkus?: string[]) => {
     setPushError(null); setPushLoading(true); setPushPhase('starting')
-    setPushProgress([]); setVerifyResults(null)   // clear stale verify counts so a re-push doesn't show pre-push state
+    // Clear the PREVIOUS push's results + verify panel so a selective re-push ("push just the stale
+    // ones") shows its OWN loading + per-SKU progress, instead of silently sitting behind the old
+    // results — the PO saw it "close without action" because the re-push ran but stayed hidden.
+    setPushProgress([]); setVerifyResults(null); setPushResults(null)
     let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } | null = null
     let streamError: string | null = null
     const skuStatus = new Map<string, string>()   // latest status per SKU — rebuilds a partial result if the stream drops
