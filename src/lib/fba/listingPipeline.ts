@@ -1969,24 +1969,14 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   // no "design" — its identity is its specs).
   if ((!source && !visionText) || !apparel) return { name: '', source: 'none' }
 
-  // A candidate is valid only if it ACTUALLY appears in the IMAGE text or the title (rejects
-  // hallucinated/paraphrased names), is not the seller's own brand, and is <=5 words.
+  // Identify the DESIGN NAME. "Which phrase names the design" is a SEMANTIC call, so the LLM is the
+  // PRIMARY extractor; the deterministic pieces only VALIDATE its answer or stand in when it returns
+  // nothing. (Earlier versions collected vision search-term seeds + picked "fewest words", which
+  // overfit: junk seeds beat long names and 1-word names — verified across designs.)
   const haystack = `${visionText} ${source}`.toLowerCase()
-  const accept = (cand: string | undefined | null): string => {
-    const n = (cand || '').trim()
-    if (!n) return ''
-    if (!haystack.includes(n.toLowerCase())) return ''
-    if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
-    return n.split(/\s+/).length <= 5 ? n : ''
-  }
-
-  // A design has often TWO valid phrases — a punchy brand name ("Later Gator") and a long printed
-  // slogan of the same joke ("See You Later Alligator") — and the seller's title frequently LEADS
-  // with the long paraphrase. Picking via a single source (LLM / longest-seed / title-lead) is a
-  // coin-flip: it sometimes returns the long slogan and buries the short name (the original bug,
-  // intermittently). So COLLECT candidates from every source and deterministically prefer the
-  // CONCISE design name (fewest words) — the punchy phrase that should lead the title.
-  const GENERIC_TAIL = /^(t-?shirts?|tshirts?|shirts?|tees?|hoodies?|sweat\w*|mugs?|stickers?|tanks?|graphic|vintage|retro|classic|\d{2}s|cool|funny|comfort|colou?rs?|gift|present|apparel|clothing|design|art|lover|premium)$/i
+  // Conservative generics to strip from a candidate's EDGES (product types, blank brand, audience) —
+  // NOT subjective words like "cool"/"funny" that can be part of a design ("Cool Cats", "Big Dill").
+  const GENERIC_TAIL = /^(t-?shirts?|tshirts?|shirts?|tees?|hoodies?|sweat\w*|sweaters?|tanks?|graphics?|vintage|retro|classic|\d{2}s|comfort|colou?rs?|apparel|clothing|garments?|premium|quality|soft|blank|unisex|m[ae]ns?|wom[ae]ns?|ladies)$/i
   const trimGeneric = (s: string): string => {
     let w = s.trim().split(/\s+/)
     while (w.length > 1 && GENERIC_TAIL.test(w[w.length - 1])) w = w.slice(0, -1)
@@ -1994,23 +1984,49 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
     return w.join(' ')
   }
   const titleCase = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
-  const candidates: string[] = []
-  const addCand = (c: string | undefined | null) => {
-    const a = accept(trimGeneric((c || '').trim()))
-    if (a && a.split(/\s+/).length >= 2 && !candidates.some((x) => x.toLowerCase() === a.toLowerCase())) candidates.push(a)
+  // accept(): a design name must ACTUALLY appear in the title or image text (rejects LLM
+  // hallucination/paraphrase), is not the seller's own brand, is 1-6 words, and is not entirely
+  // generic. Generic edge words are trimmed first ("Later Gator Shirt" -> "Later Gator").
+  const accept = (cand: string | undefined | null): string => {
+    // Strip WRAPPING quotes only — double/smart quotes always, single quotes only as a balanced
+    // pair — so a word-final apostrophe survives ("Darlin'" stays "Darlin'").
+    let raw = (cand || '').trim().replace(/^["“”]+|["“”]+$/g, '')
+    if (raw.length > 1 && raw.startsWith("'") && raw.endsWith("'")) raw = raw.slice(1, -1)
+    const n = trimGeneric(raw)
+    if (!n) return ''
+    const words = n.split(/\s+/)
+    if (words.length > 6) return ''
+    if (words.every((w) => GENERIC_TAIL.test(w))) return ''
+    if (!haystack.includes(n.toLowerCase())) return ''
+    if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
+    return n
   }
 
-  // 1. LLM extraction — asked for the SHORT brand name, not the long printed slogan.
+  // PRIMARY — the LLM makes the semantic call. Reliability lever = FEW-SHOT demonstrations (arXiv
+  // 2403.02130: ~80% -> ~91% F1) spanning the distribution: short-brand-vs-long-paraphrase,
+  // long-slogan-IS-the-design, one-word, mid-length, and generic -> empty.
   try {
-    const system = 'You identify the DESIGN NAME of a print-on-demand / novelty product — the SHORT, punchy, brandable phrase that names the artwork (usually 2-3 words; e.g. "Later Gator", "Big Dill", "Out of Office"). If the design has BOTH a short brand name AND a longer printed slogan of the same joke, return the SHORT name (e.g. return "Later Gator", NOT "See You Later Alligator"). Return ONLY {"designName":"<short phrase, or empty string>"}.'
-    const user = `${visionText ? `What the product IMAGE shows (read off the artwork):\n${visionText}\n\n` : ''}Listing title (often keyword-stuffed): "${source}"
+    const system = `You extract the DESIGN NAME of a print-on-demand apparel/novelty product: the distinctive phrase that NAMES the artwork (its slogan, character, or joke) as the seller brands it. It is NOT the product type, blank/garment brand, audience, or generic descriptors.
 
-Return the SHORT design name (2-3 words) that names this specific design.
-- Prefer the CONCISE brandable phrase over a long printed sentence ("Later Gator", NOT "See You Later Alligator").
-- Use wording that actually appears above. Strip generic descriptors ("Vintage", "90s", "T-Shirt", "Comfort Colors", "for Men").
-- If there is no distinct design name, return "".
+- If the design has a SHORT brandable name AND a longer printed slogan of the SAME joke, return the SHORT name.
+- If the design's identity IS a full slogan with no shorter form, return the whole slogan.
+- Use wording that actually appears in the Title or Image below — never invent or paraphrase.
+- If the listing is only generic descriptors (a blank tee, no distinct design), return "".
 
-Return ONLY {"designName":"..."}.`
+Examples:
+Title: THE CEO See You Later Alligator Shirt Later Gator Comfort Colors Gators Tee for Men and Women | Image: cartoon alligator, text 'Later Gator'
+=> {"designName":"Later Gator"}
+Title: Comfort Colors Houston I Have So Many Problems Raccoon Shirt Funny Meme Graphic Tee
+=> {"designName":"Houston I Have So Many Problems"}
+Title: Comfort Colors Darlin' T-Shirt Country Western Graphic Tee Vintage Rodeo for Women
+=> {"designName":"Darlin'"}
+Title: Comfort Colors I Could Be Meaner Shirt Sarcastic Funny Saying Tee
+=> {"designName":"I Could Be Meaner"}
+Title: Gildan Unisex Soft Cotton Crewneck T-Shirt Premium Blank Tee Vintage
+=> {"designName":""}
+
+Return ONLY {"designName":"<phrase or empty string>"}.`
+    const user = `${visionText ? `Image: ${visionText}\n` : ''}Title: ${source}\n\nReturn ONLY {"designName":"..."}.`
     const r = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
@@ -2019,27 +2035,24 @@ Return ONLY {"designName":"..."}.`
       response_format: { type: 'json_object' },
     })
     const parsed = parseJsonLoose<{ designName?: string }>(r.choices[0]?.message?.content || '{}')
-    addCand(parsed.designName)
+    const llm = accept(parsed.designName)
+    if (llm) return { name: llm, source: `llm:${titleTag}` }
   } catch (err) {
     console.warn('[pipeline] design-name LLM extraction failed:', err)
   }
 
-  // 2. Vision — quoted printed strings (the scanner emits e.g. `text 'Later Gator'`) + seed phrases.
+  // FALLBACK 1 (LLM empty/failed) — a QUOTED printed string from the image (the scanner emits e.g.
+  // `text 'Later Gator'`): literally what's on the artwork, a clean signal unlike search-term seeds.
   for (const el of visionDesign?.visualElements || []) {
     const m = String(el).match(/['"“”]([^'"“”]{2,40})['"“”]/)
-    if (m?.[1]) addCand(titleCase(m[1]))
+    const v = accept(m?.[1] ? titleCase(m[1]) : '')
+    if (v) return { name: v, source: 'vision' }
   }
-  for (const seed of visionDesign?.seedKeywords || []) addCand(titleCase(String(seed)))
 
-  // 3. Heuristic — the title's leading distinctive phrase.
-  addCand(leadingDesignPhrase(source, brandName))
-
-  if (candidates.length > 0) {
-    // Prefer the CONCISE design name: fewest words, then shorter overall. Punchy "Later Gator" (2
-    // words) beats the verbose "See You Later Alligator" (4) reliably — no LLM coin-flip.
-    candidates.sort((a, b) => a.split(/\s+/).length - b.split(/\s+/).length || a.length - b.length)
-    return { name: candidates[0], source: `concise:${titleTag}` }
-  }
+  // FALLBACK 2 (last resort) — the title's leading distinctive phrase. May be a paraphrase, but gives
+  // the deterministic lead-enforcement something to anchor when both the LLM and image come up empty.
+  const heur = accept(leadingDesignPhrase(source, brandName))
+  if (heur) return { name: heur, source: `heuristic:${titleTag}` }
 
   return { name: '', source: `empty:${titleTag}` }
 }
