@@ -894,6 +894,31 @@ export default function ListingDetailPage() {
     : null
   const displayChanged = titleOverrideChanged ?? pushPreview?.changed ?? 0
 
+  // C1 — ADVISORY ONLY (never gates the Confirm button). A backend-keyword push is "mostly lateral"
+  // when every changing child is ALREADY full (≥200 chars, ≤250 bytes, comma-free → no length/byte/
+  // comma penalty left to fix) AND its recommended terms overlap heavily with the live terms (few new
+  // tokens → the ranking terms are already indexed). We surface only a SOFT hint — we do NOT hide the
+  // push or claim a guarantee — because client-side we can't see the opportunity-keyword list. If the
+  // live field is short/over-cap, we show nothing (that push can genuinely raise the score).
+  const lateralKeywordAdvisory = (() => {
+    if (!pushPreview || pushPreview.field !== 'keywords') return null
+    const rows = pushPreview.diff.filter((d) => d.changed && !d.isParent)
+    if (rows.length === 0) return null
+    const enc = new TextEncoder()
+    const toks = (s: string) => new Set((s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+    const jaccard = (a: string, b: string) => {
+      const A = toks(a), B = toks(b)
+      if (!A.size || !B.size) return 0
+      let inter = 0; A.forEach((t) => { if (B.has(t)) inter++ })
+      return inter / (A.size + B.size - inter)
+    }
+    const allMaxed = rows.every((d) => (d.current || '').length >= 200 && enc.encode(d.current || '').length <= 250 && !(d.current || '').includes(','))
+    if (!allMaxed) return null
+    const overlaps = rows.map((d) => jaccard(d.current || '', d.proposed || ''))
+    if (!overlaps.every((o) => o >= 0.70)) return null
+    return { pct: Math.round((100 * overlaps.reduce((s, o) => s + o, 0)) / overlaps.length) }
+  })()
+
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
 
   const placementGroups = (() => {
@@ -2271,6 +2296,17 @@ export default function ListingDetailPage() {
                     Every value is checked with Amazon (VALIDATION_PREVIEW) before any live write, and the previous value is saved for rollback.
                     {pushPreview.field === 'keywords' && ' Backend strings are capped at 250 bytes.'}
                   </p>
+
+                  {lateralKeywordAdvisory && (
+                    <div className="bg-sky-50 border border-sky-200 rounded-lg p-3 mb-3 flex gap-2">
+                      <svg className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                      </svg>
+                      <p className="text-xs text-sky-900 leading-relaxed">
+                        <b>Mostly lateral (~{lateralKeywordAdvisory.pct}% of terms unchanged).</b> These SKUs are already at full strength (≥200 chars, ≤250 bytes), so the high-traffic terms are already indexed — pushing is <b>unlikely to move your keyword score</b>. Skim the changed rows below: push only if a <i>major</i> missing keyword is being added. To actually lift the score, add the missing top keywords to your <b>title/bullets</b>, not the backend.
+                      </p>
+                    </div>
+                  )}
 
                   {pushPreview.broadcast ? (
                     /* Broadcast: show the single new value once, then which children currently differ */
