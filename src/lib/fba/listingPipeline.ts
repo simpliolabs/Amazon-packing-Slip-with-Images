@@ -1030,7 +1030,7 @@ ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
 ${apparel
-  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — because that exact phrase is the seller's #1 search keyword and SPLITTING it (e.g. "${designName || 'Later Gator'} Comfort Colors T-Shirt") destroys the exact-match ranking. AFTER that phrase, add the garment brand + ONE grounded design detail, then the audience. EXAMPLE of the target shape (a DIFFERENT design — copy the shape, not the words): "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women" — note "Later Gator T-Shirt" stays together, THEN "Comfort Colors". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (placed AFTER "<design> T-Shirt")` : ''}, audience "${preferredAudience || 'Men and Women'}".`
+  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier (e.g. "Comfy Comfort Colors Alligator Shirt"). Then end with the audience. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — use the real "<subject> shirt" keyword instead. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words): "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}"` : ''}, design subject from the image, audience "${preferredAudience || 'Men and Women'}".`
   : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience.`} It should read like a human-written phrase.
 
 Rules:
@@ -1154,6 +1154,24 @@ Rules:
     const tidied = dedupeAudiencePhrases(title)
     if (tidied && tidied !== title) {
       title = tidied
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    }
+  }
+
+  // Deterministic backstop (apparel): never let the EXACT product-type word stutter — "Later Gator
+  // T-Shirt, Comfort Colors T-Shirt" reads terribly (PO-flagged "THIS IS TERRIBLE"). The welded
+  // "<design> T-Shirt" keeps its T-Shirt; every LATER identical "T-Shirt"/"Tshirt" is varied to "Tee"
+  // so the product type is never repeated verbatim. A genuinely different second mention like
+  // "Alligator Shirt" is untouched — only the exact-same word is de-stuttered.
+  if (apparel) {
+    let seenTee = 0
+    const destuttered = title.replace(/\bt-?shirts?\b/gi, (m) => {
+      seenTee++
+      if (seenTee <= 1) return m
+      return /s$/i.test(m) ? 'Tees' : 'Tee'
+    })
+    if (destuttered !== title) {
+      title = destuttered.replace(/\s{2,}/g, ' ').trim()
       problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
     }
   }
