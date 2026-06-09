@@ -982,7 +982,11 @@ async function runTitleAgent(
     ? `\nSearchable product keyphrases shoppers actually type — work them in AFTER the mandatory keyword${apparel ? ' (e.g. a blank-brand term like "comfort colors graphic tee")' : ' (titles under 110 chars have room for more — keep adding while you have budget)'}:\n  ${attributes.join(', ')}\n`
     : ''
   const mustLine = mustInclude
-    ? `\n🔴 MANDATORY #1 — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
+    ? apparel
+      // Apparel is DESIGN-led: the design name + product type lead. Weave the money keyword in only
+      // where it reads naturally — do NOT front-load it ahead of the design name / product type.
+      ? `\nWeave the keyword "${mustInclude}" in naturally ONLY where it fits the design-led phrase — do NOT force it ahead of the design name or the product type.\n`
+      : `\n🔴 MANDATORY #1 — the title MUST contain this highest-search-volume keyword VERBATIM and FRONT-LOADED (it is your single biggest money term — never drop it): "${mustInclude}"\n`
     : ''
   // The seller's design/slogan name is the PRODUCT'S IDENTITY (the artwork printed on it).
   // It must appear VERBATIM — do NOT paraphrase it (e.g. keep "Later Gator", never swap it
@@ -991,7 +995,11 @@ async function runTitleAgent(
     ? `\n🔴 MANDATORY — the title MUST LEAD with the product's DESIGN NAME exactly as written: "${designName}". Place it FIRST, immediately after the brand "${brandName}" and BEFORE the product type — it is the seller's design identity printed on the product and the main thing shoppers recognize. Use it VERBATIM (never paraphrase, expand, or substitute a synonym). Do NOT also include a longer paraphrase or alternate wording of the SAME slogan elsewhere in the title — e.g. if the design is "Later Gator", do NOT also write "See You Later Alligator" (that is the same slogan twice and wastes characters). Lead with "${designName}", then the product type.\n`
     : ''
   const attrPinLine = attributePin
-    ? `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
+    ? apparel
+      // Garment brand is an ADJECTIVE on the product type ("Comfort Colors Tee"), NEVER "for Comfort
+      // Colors" (it's the fabric brand, not a compatibility target — that "for" was the live wart).
+      ? `\nInclude the garment/blank brand "${attributePin}" as an ADJECTIVE directly before the product type (e.g. "${attributePin} Tee" or "${attributePin} T-Shirt"). NEVER write "for ${attributePin}" — it is the fabric brand, not a compatibility target.\n`
+      : `\n🔴 MANDATORY #2 — the title MUST ALSO contain the blank/garment brand "${attributePin}" (a strategic ranking attribute the seller ranks for). Place it after the #1 keyword.\n`
     : ''
   // UPGRADE keywords = ranking signals the seller has demonstrated traffic on (present in
   // bullets, missing from title). Amazon weights title 3-5× over bullets, so dragging these
@@ -1019,10 +1027,12 @@ Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped —
 ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
-Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : `${apparel ? 'ONE supporting keyphrase' : 'multiple supporting keyphrases/specs from above (fill the title)'}`}, then the audience. It should read like a human-written phrase.
+${apparel
+  ? `IDEAL STRUCTURE (design-led): ${brandName} -> design name "${designName || '<design>'}" -> ${attributePin ? `garment brand "${attributePin}" as an adjective -> ` : ''}product type (Tee / T-Shirt) -> ONE grounded design descriptor -> "for ${preferredAudience || 'Men and Women'}". LEAD with the design name + product type; do NOT bury them behind keywords or the garment brand. Skeleton for THIS product: "${brandName} ${designName || 'Design'} ${attributePin ? attributePin + ' ' : ''}T-Shirt, <one grounded design descriptor> for ${preferredAudience || 'Men and Women'}".`
+  : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience.`} It should read like a human-written phrase.
 
 Rules:
-- FRONT-LOAD the mandatory keyword in the first ~80 characters (that's all mobile shows).
+- ${apparel ? "LEAD with the brand, the design name, then the product type within the first ~80 characters (that's all mobile shows) — design-led, NOT keyword-led." : 'FRONT-LOAD the mandatory keyword in the first ~80 characters (that\'s all mobile shows).'}
 - Do NOT use " - " dashes or " | " pipes to separate sections — flow as natural language (a single comma is OK only if it genuinely reads better). Amazon indexes the title as a bag of words, so separators add nothing and only cost characters.
 - ${apparel ? '80-125 characters' : 'TARGET 110-125 characters (Amazon indexes every word — use the budget; titles under 100 chars are leaving ranking on the table)'}. Title Case. ONE consistent audience (never mix kids with men/women).
 - ${apparel ? 'Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").' : 'Name the product type ONCE using the single clearest term — do NOT stack synonyms for the SAME product. If you write "Sticky Notes", do NOT also add "Post It Notes" / "Sticky Note" / another "Notes" phrase; pick the ONE clearest term and let the other synonyms live in the backend keywords. No noun may appear more than twice in the whole title (e.g. never "Notes ... Notes ... Notes"). Do NOT reframe the product as apparel / a t-shirt / "graphic tee" / clothing unless it genuinely is one. Keep the title BROAD: do NOT frame it around a single niche use-case or audience (e.g. "for Bible Study", "for Nurses", "for Teachers") — those narrow a general product and belong in the backend keywords + a bullet, NOT the title.'}
@@ -1122,6 +1132,18 @@ Rules:
       }
     }
   } catch { /* fail-open */ }
+
+  // Deterministic backstop (apparel): the garment blank brand is an ATTRIBUTE, not a compatibility
+  // target — strip any stray "for <blank brand>" the LLM produced ("Later Gator for Comfort Colors"
+  // -> "Later Gator Comfort Colors"). The audience "for Men and Women" is untouched. Verified live wart.
+  if (apparel && attributePin) {
+    const pin = attributePin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const stripped = title.replace(new RegExp(`\\bfor\\s+(${pin})\\b`, 'i'), '$1').replace(/\s{2,}/g, ' ').trim()
+    if (stripped !== title) {
+      title = stripped
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    }
+  }
 
   // Deterministic backstop (all categories): kill a redundant gendered audience the LLM stacked on
   // top of the inclusive one ("for Women for Men and Women" → "for Men and Women"). The validator
