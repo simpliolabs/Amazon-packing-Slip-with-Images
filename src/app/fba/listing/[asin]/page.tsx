@@ -228,6 +228,11 @@ export default function ListingDetailPage() {
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyResults, setVerifyResults] = useState<VerifyPayload | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
+  // ── Manual title editor (B): the seller types/edits the title in the Ship-Title modal, scores it
+  // with the real /score-title engine, and pushes THEIR title — control for when the council wobbles.
+  const [editTitle, setEditTitle] = useState<string>('')
+  const [titleScore, setTitleScore] = useState<{ titleScore: number; maxTitleScore: number; overallScore: number; ruleProblems: string[]; suppressionRisk: boolean } | null>(null)
+  const [titleScoreLoading, setTitleScoreLoading] = useState(false)
   // ── Live push progress — populated from NDJSON stream events. Each entry tracks one SKU's
   // state as the route patches it in the loop. Replaces the old all-or-nothing 'Pushing…'
   // spinner with a per-SKU readout, AND eliminates the proxy-502 failure mode entirely
@@ -662,10 +667,35 @@ export default function ListingDetailPage() {
       const data = await readJsonOrThrowGateway(resp, 'preview') as { error?: string }
       if (!resp.ok) throw new Error(data.error || 'Preview failed')
       setPushPreview(data as PushPreview)
+      if (field === 'title') {
+        // Seed the editable title box with the AI's proposed title — ONLY for broadcast-title products.
+        // Capacity families (per-child titles) keep their per-GB titles; a single typed string would
+        // clobber them, so the editor is disabled there and editTitle stays empty (adversarial review).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const d = data as any
+        setEditTitle(d?.broadcast && typeof d.proposedValue === 'string' ? d.proposedValue : '')
+        setTitleScore(null)
+      }
     } catch (e) {
       setPushError(e instanceof Error ? e.message : 'Preview failed')
     }
     setPushLoading(false)
+  }, [asin])
+
+  /** Score the seller's TYPED title with the real engine (same scoreListingContent + validateTitle
+   *  the dashboard uses) so they see the score + Amazon-rule violations BEFORE pushing their own title. */
+  const scoreTitle = useCallback(async (text: string) => {
+    if (!text.trim()) { setTitleScore(null); return }
+    setTitleScoreLoading(true)
+    try {
+      const resp = await fetch('/api/fba/listing-optimizer/score-title', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: asin, title: text.trim() }),
+      })
+      const data = await resp.json()
+      setTitleScore(resp.ok ? data : null)
+    } catch { setTitleScore(null) }
+    setTitleScoreLoading(false)
   }, [asin])
 
   /**
@@ -687,6 +717,8 @@ export default function ListingDetailPage() {
       if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
       // Selective re-push: only the stale SKUs (fix stragglers without re-shipping all of them).
       if (onlySkus && onlySkus.length > 0) body.skus = onlySkus
+      // Manual title override: push the seller's TYPED title (from the editable box) instead of the AI's.
+      if (pushField === 'title' && editTitle.trim()) body.title_override = editTitle.trim()
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -827,7 +859,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField])
+  }, [asin, pushField, pushDetailField, editTitle])
 
   /** Verify what Amazon ACTUALLY has live right now for the just-pushed field.
    *  Useful when a push was Accepted but the seller doesn't see it on Seller Central
@@ -2229,6 +2261,38 @@ export default function ListingDetailPage() {
                         ) : pushPreview.field === 'description' ? (
                           <div className="text-xs text-slate-800 max-h-56 overflow-y-auto leading-relaxed [&_li]:ml-4 [&_li]:list-disc [&_p]:mb-2 [&_b]:font-semibold"
                                dangerouslySetInnerHTML={{ __html: String(pushPreview.proposedValue ?? '') }} />
+                        ) : pushPreview.field === 'title' ? (
+                          /* Manual title editor — type/keep/rewrite the title, score it, push YOUR version */
+                          <div className="space-y-2">
+                            <textarea
+                              value={editTitle}
+                              onChange={(e) => { setEditTitle(e.target.value); setTitleScore(null) }}
+                              rows={3}
+                              maxLength={200}
+                              className="w-full text-xs text-slate-900 border border-slate-300 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 resize-y"
+                              placeholder="Type or edit the title to push to all SKUs…"
+                            />
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`text-[10px] font-medium ${editTitle.length > 200 ? 'text-red-600' : editTitle.length < 80 ? 'text-amber-600' : 'text-slate-500'}`}>
+                                {editTitle.length}/200 chars{editTitle.length > 0 && editTitle.length < 80 ? ' · under 80 (Amazon mobile cutoff)' : ''}
+                              </span>
+                              <button onClick={() => scoreTitle(editTitle)} disabled={titleScoreLoading || !editTitle.trim()}
+                                className="text-[10px] bg-slate-700 hover:bg-slate-800 text-white px-2 py-0.5 rounded font-medium disabled:opacity-50">
+                                {titleScoreLoading ? 'Scoring…' : 'Check score + Amazon rules'}
+                              </button>
+                            </div>
+                            {titleScore && (
+                              <div className={`text-[11px] rounded-md p-2 border ${titleScore.suppressionRisk ? 'bg-red-50 border-red-200' : titleScore.titleScore >= 23 ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+                                <p className="font-semibold text-slate-800">Title score: {titleScore.titleScore}/{titleScore.maxTitleScore} · overall would be {titleScore.overallScore}/100</p>
+                                {titleScore.suppressionRisk && <p className="text-red-700 font-semibold mt-1">🚫 Amazon-policy risk — fix before pushing:</p>}
+                                {titleScore.ruleProblems.length > 0 ? (
+                                  <ul className="list-disc pl-4 mt-1 space-y-0.5 text-slate-700">
+                                    {titleScore.ruleProblems.slice(0, 6).map((p, i) => <li key={i}>{p}</li>)}
+                                  </ul>
+                                ) : <p className="text-emerald-700 mt-1">✓ No Amazon-rule violations.</p>}
+                              </div>
+                            )}
+                          </div>
                         ) : (
                           <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{String(pushPreview.proposedValue ?? '')}</p>
                         )}
@@ -2345,11 +2409,14 @@ export default function ListingDetailPage() {
 
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
-                    <button onClick={() => confirmPush()} disabled={pushPreview.changed === 0}
+                    <button onClick={() => confirmPush()}
+                      disabled={pushField === 'title' && pushPreview.broadcast ? !editTitle.trim() : pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
-                      Confirm &amp; Ship {pushPreview.field === 'details' && pushPreview.detail_field
-                        ? pushPreview.detail_field
-                        : pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}
+                      {pushField === 'title' && pushPreview.broadcast
+                        ? 'Push this title to all variants'
+                        : <>Confirm &amp; Ship {pushPreview.field === 'details' && pushPreview.detail_field
+                            ? pushPreview.detail_field
+                            : pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}</>}
                     </button>
                   </div>
                 </>

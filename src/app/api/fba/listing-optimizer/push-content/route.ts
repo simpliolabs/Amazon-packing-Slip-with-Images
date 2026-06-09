@@ -164,7 +164,7 @@ async function findParentSku(sellerId: string, token: string, parentAsin: string
  * SKU stale (the bug this fixes). Keywords are per-color, so we resolve them by ASIN and
  * apply the same string to both SKUs of a pair (per_child_keywords holds one SKU per ASIN).
  */
-async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]> {
+async function loadDiff(parentAsin: string, field: PushField, titleOverride?: string): Promise<DiffRow[]> {
   const supabase = await createAdminClient()
 
   const { data: recRow } = await supabase
@@ -181,6 +181,13 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
      *  SKU-specific title when present, otherwise falls back to recommended_title. */
     per_child_titles?: { sku: string; asin: string; title: string }[] | null
   }
+
+  // A manual title override broadcasts ONE typed string to every SKU. That is correct for broadcast-
+  // title products (apparel) but would CLOBBER a capacity family's distinct per-GB titles — stamping
+  // "128GB" onto the 32GB SKU on the live PDP (adversarial review caught this). So the override is
+  // honored ONLY when this is NOT a per-child-title family; otherwise we fall back to resolveProposed.
+  const isCapacityFamily = Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1
+  const effectiveTitleOverride = titleOverride && !isCapacityFamily ? titleOverride : undefined
 
   const { data: rowsRaw } = await supabase
     .from('listing_content')
@@ -205,6 +212,9 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
     .map((row): DiffRow => {
       const proposed = field === 'keywords'
         ? (asinToKeywords.has(row.asin) ? capBytes((asinToKeywords.get(row.asin) || '').trim(), 250) : null)
+        // Manual title override: the seller typed their own title in the Ship-Title box → broadcast it
+        // verbatim to every SKU (capped at Amazon's 200-char title limit), bypassing the AI recommendation.
+        : (field === 'title' && effectiveTitleOverride) ? effectiveTitleOverride.slice(0, 200)
         : resolveProposed(field, rec, new Map(), row.sku)
       const proposedStr = asCompare(proposed)
       const current = currentValue(field, row as unknown as Record<string, unknown>)
@@ -297,9 +307,11 @@ async function loadDiff(parentAsin: string, field: PushField): Promise<DiffRow[]
         // Resolve the parent's proposed value per-field.
         let parentValue: string | string[] | null = null
         if (field === 'title') {
-          parentValue = Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1
-            ? (stripCapacity(rec.recommended_title ?? '') || null)
-            : (rec.recommended_title ?? null)
+          parentValue = effectiveTitleOverride
+            ? effectiveTitleOverride.slice(0, 200)
+            : Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1
+              ? (stripCapacity(rec.recommended_title ?? '') || null)
+              : (rec.recommended_title ?? null)
         } else if (field === 'bullets') {
           parentValue = resolveProposed('bullets', rec, new Map(), parentSku)
         } else if (field === 'description') {
@@ -706,10 +718,10 @@ export async function POST(req: NextRequest) {
   // Validate the body BEFORE opening the stream — a 400 here is a real client error,
   // not a mid-push failure. Keeps the streaming envelope reserved for things that
   // can actually fail asynchronously.
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[] }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
-  const { parent_asin, confirm, field: rawField, detail_field: detailField, skus } = body
+  const { parent_asin, confirm, field: rawField, detail_field: detailField, skus, title_override } = body
   if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
   if (confirm !== true) {
     return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
@@ -789,7 +801,8 @@ export async function POST(req: NextRequest) {
 
         // ── REGULAR FIELDS branch (title / bullets / description / keywords) ──
         const field: PushField = isPushField(rawField) ? rawField : 'keywords'
-        let diff = (await loadDiff(parent_asin, field)).filter((d) => d.changed && d.raw != null)
+        const titleOv = field === 'title' && typeof title_override === 'string' && title_override.trim() ? title_override.trim() : undefined
+        let diff = (await loadDiff(parent_asin, field, titleOv)).filter((d) => d.changed && d.raw != null)
         // Selective re-push: when the client sends a SKU subset ("push just the stale ones"), narrow to
         // those — the seller fixes stragglers WITHOUT re-shipping all SKUs, and the smaller batch
         // finishes well under the proxy's stream window (the cause of the "stream ended" drop on 131).
