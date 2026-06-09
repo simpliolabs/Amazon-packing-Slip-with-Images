@@ -856,16 +856,29 @@ function dedupeAudiencePhrases(title: string): string {
  *  validate + deterministic backstops (brand-lead, design-name lead, gender de-dup, Title-Case), so
  *  the council is additive, not a new failure mode. Fails open to a single agent if all drafts error. */
 async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string> {
-  const ask = async (system: string, user: string, temperature: number, max_tokens = 120): Promise<string> => {
+  // The 3 proposers stay on fast gpt-4.1-mini (cheap, diverse drafts). The adversary + judge — where
+  // judgment decides the title — run on GPT-5 (PO directive). GPT-5 reasoning models REJECT
+  // `temperature` and use `max_completion_tokens` (not `max_tokens`), so the params branch by model.
+  // Per-call timeout + NO retries: a hung call must not stall the keepalive-less title stage past
+  // Cloudflare's ~100s idle window (a keepalive fires between stages, not during a call, so each call
+  // must finish under that on its own). GPT-5 reasons slower, so it gets 60s; gpt-4.1-mini gets 20s.
+  const ask = async (system: string, user: string, temperature: number, max_tokens = 120, model = 'gpt-4.1-mini', timeoutMs = 20_000): Promise<string> => {
     try {
-      // Per-call timeout + NO retries: a hung gpt-4.1-mini call must not stall the keepalive-less
-      // title stage past Cloudflare's ~100s idle window (adversarial review caught this — the SDK
-      // default is a 10-min timeout). On timeout this voice fails open; the council still has its
-      // other voices + the single-agent fallback. 20s is generous for gpt-4.1-mini.
-      const r = await openai.chat.completions.create({ model: 'gpt-4.1-mini', messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature, max_tokens }, { timeout: 20_000, maxRetries: 0 })
+      const isGpt5 = /^(gpt-5|o\d)/.test(model)
+      const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+      const r = await openai.chat.completions.create(
+        isGpt5
+          // reasoning tokens count against max_completion_tokens — a tight cap returns an EMPTY title
+          // (finish_reason 'length') and silently fails open. Generous floor + 'low' effort keeps the
+          // synthesis fast AND non-empty (adversarial review caught the truncation→empty→fallback trap).
+          ? { model, messages, max_completion_tokens: Math.max(max_tokens, 4000), reasoning_effort: 'low' }
+          : { model, messages, temperature, max_tokens },
+        { timeout: timeoutMs, maxRetries: 0 },
+      )
       return (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     } catch { return '' }
   }
+  const COUNCIL_MODEL = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'   // adversary + judge model (PR: title-council GPT-5)
   const personas: { sys: string; temp: number }[] = [
     { sys: 'You are an award-winning apparel brand COPYWRITER. Write the most compelling, human, DESIGN-LED title — the kind a shopper stops and clicks. ', temp: 0.6 },
     { sys: 'You are an Amazon SEO STRATEGIST. Capture the most legitimate search value WITHOUT stuffing: the design name leads, then only the highest-value real terms that fit naturally — the rest belongs in bullets/backend. ', temp: 0.3 },
@@ -879,15 +892,18 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
   const critique = await ask(
     'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 125 chars, brand not first, and weak click appeal. Be specific.',
     `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
-    0.3, 400,
+    0.3, 400, COUNCIL_MODEL, 60_000,
   )
   onProgress?.('Title council: judge synthesizing the winner...')           // keepalive
   const judged = await ask(
     baseSystem + ' You are the JUDGE: merge the strongest, COMPLIANT elements into ONE final title that satisfies every rule in the brief. Output ONLY the final title string — no quotes, no explanation.',
     `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
-    0.2,
+    0.2, 120, COUNCIL_MODEL, 60_000,
   )
-  return judged || drafts[0]
+  // Fail open to the SEO/anti-stuffing draft (persona #2), NOT the creative one (#0): if the GPT-5
+  // judge errors or returns empty, the leanest draft is the safest fallback. Logged so it's visible.
+  if (!judged) console.warn('[title-council] judge returned empty — failing open to the SEO/anti-stuffing draft')
+  return judged || drafts[1] || drafts[0]
 }
 
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
@@ -912,6 +928,53 @@ async function runTitleAgent(
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle } = input
   const apparel = looksApparel(category, repTitle)
+
+  // 🎯 DESIGN-GROUNDED TITLE (apparel) — the root fix for keyword-stuffed titles. The TITLE may only
+  // carry keywords GROUNDED in the actual design: the design name, what the image scan literally sees,
+  // the garment/blank brand, the product type, and the audience. High-volume-but-ungrounded keywords
+  // ("vintage 90s", "cool shirts") are stripped from the TITLE's keyword pools HERE — so the brief
+  // (and the council reading it) never see them, AND validateTitle below never demands them. They are
+  // NOT lost: the bullets + backend agents build their keyword pools independently and still rank them.
+  // "Clear the counter" so even the council debate can't stuff. Gated on having a design signal so a
+  // vision miss can't over-strip; the strict ALL-words-grounded bar is what keeps vibe-guesses out.
+  if (apparel && (designName || input.visionDesign)) {
+    const groundVocab = new Set<string>()
+    const addWords = (s?: string | null) => {
+      if (!s) return
+      for (const w of s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+        const stem = w.replace(/s$/, '')
+        if (stem.length > 1 && !MINOR_WORDS.has(stem)) groundVocab.add(stem)
+      }
+    }
+    addWords(designName)                                   // the seller's design identity
+    addWords(input.visionDesign?.designTheme)              // what the image scan read
+    for (const el of input.visionDesign?.visualElements || []) addWords(el)
+    for (const sk of input.visionDesign?.seedKeywords || []) addWords(sk)
+    addWords(attributePin)                                 // garment/blank brand IS a real product attribute (trusted)
+    addWords(preferredAudience)                            // men / women
+    // Generic tone/structural/gift words make NO factual claim about the artwork, so they're always
+    // allowed. Only DISTINCTIVE words — the design's motifs AND era/style CLAIMS ("vintage", "90s",
+    // "retro") — must be grounded in the actual design. This blocks ungrounded guesses ("vintage 90s")
+    // while keeping legitimately generic phrases ("funny cat shirt", "alligator gift") so the pool is
+    // never over-stripped into a too-short title (adversarial review caught the brittle all-words bar).
+    const FREE = new Set(['cool', 'funny', 'cute', 'awesome', 'best', 'great', 'perfect', 'novelty', 'graphic', 'gift', 'lover', 'fan', 'apparel', 'clothing', 'outfit', 'wear', 'design', 'tee', 'shirt', 'tshirt', 'sweatshirt', 'hoodie', 'tank', 'top'])
+    const isGrounded = (kw: string): boolean => {
+      const distinctive = kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+        .map((w) => w.replace(/s$/, ''))
+        .filter((w) => w.length > 1 && !MINOR_WORDS.has(w) && !FREE.has(w))
+      return distinctive.every((w) => groundVocab.has(w))   // every DISTINCTIVE word must be on the design
+    }
+    // The verbatim money keyword (mustInclude) is the PRIMARY leak — it is mandated + hard-validated
+    // into the title, bypassing the candidate filter. If it's an ungrounded CLAIM ("vintage 90s shirt")
+    // rather than a design term ("alligator shirt"), drop the mandate (it still ranks from bullets/
+    // backend). NOTE: attributePin (the blank/garment brand) is NOT design-gated — it's a real PRODUCT
+    // attribute, not a design claim, so grounding is the wrong test for it; it's trusted + added above.
+    if (mustInclude && !isGrounded(mustInclude)) mustInclude = undefined
+    candidates = candidates.filter((c) => isGrounded(c.keyword))
+    upgradeKws = upgradeKws.filter(isGrounded)
+    attributes = attributes.filter(isGrounded)
+  }
+
   const candidateList = candidates
     .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
     .join('\n')
@@ -935,11 +998,15 @@ async function runTitleAgent(
   // INTO the title is the highest-leverage move available. The scorer penalizes the title
   // when 3+ are missing; the validator below fails on the same threshold so the retry loop
   // is responsible for covering them, not the seller.
-  const upgradeLine = upgradeKws.length >= 3
-    ? `\n🟡 MANDATORY #3 — these UPGRADE keywords already drive your bullets' search traffic but are MISSING from your live title. Amazon weights title keywords 3-5× more than bullets — folding them into the title is your single highest-leverage SEO move. Include AT LEAST ${Math.max(3, upgradeKws.length - 2)} of these (more is better, fit as many as the budget allows):\n  ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
-    : upgradeKws.length > 0
-      ? `\nTry to include these UPGRADE keywords too (they drive bullet traffic but are missing from the title): ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
-      : ''
+  const upgradeLine = upgradeKws.length === 0
+    ? ''
+    : apparel
+      // Apparel: design-led titles do NOT chase keyword coverage. These are already grounding-filtered
+      // above, so offer at most ONE and never mandate — a clean title beats coverage every time.
+      ? `\nIf — and ONLY if — one of these fits naturally and is genuinely about the design, you MAY include a single one (never force them; a clean title wins): ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
+      : upgradeKws.length >= 3
+        ? `\n🟡 MANDATORY #3 — these UPGRADE keywords already drive your bullets' search traffic but are MISSING from your live title. Amazon weights title keywords 3-5× more than bullets — folding them into the title is your single highest-leverage SEO move. Include AT LEAST ${Math.max(3, upgradeKws.length - 2)} of these (more is better, fit as many as the budget allows):\n  ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
+        : `\nTry to include these UPGRADE keywords too (they drive bullet traffic but are missing from the title): ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
   const audienceLine = preferredAudience
     ? `\nAUDIENCE: end with "for ${preferredAudience}" (this product is for ${preferredAudience} — do NOT narrow it to a single gender if it says Men and Women).\n`
     : ''
