@@ -1178,14 +1178,18 @@ Rules:
 
   // Deterministic backstop (apparel): a sub-80-char title is below Amazon's ~80-char mobile floor
   // (the validator flags <80 as "too short" and it wastes title real estate). Lead the garment brand
-  // with a comfort adjective — "Comfy Comfort Colors" — which reads better AND lifts the title past 80
-  // (PO-requested: "Comfy brings it above 80 characters"). Only when short, only when there's a garment
-  // brand in the title, and only if no comfort word is already in front of it.
+  // with a FEEL adjective — "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the
+  // title past 80. The word VARIES by a stable design hash so it's never hardcoded to one (PO: "if can
+  // be Comfy, it can be Soft, Cool etc") yet stays consistent for a given product. Only when short,
+  // only when there's a garment brand in the title, and only if no feel word is already in front of it.
   if (apparel && title.length < 80 && attributePin) {
     const pinEsc = attributePin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const m = title.match(new RegExp(`\\b${pinEsc}\\b`, 'i'))
-    if (m && m.index != null && !/\b(comfy|soft|cozy|comfortable)\b/i.test(title.slice(0, m.index))) {
-      const padded = `${title.slice(0, m.index)}Comfy ${title.slice(m.index)}`.replace(/\s{2,}/g, ' ').trim()
+    if (m && m.index != null && !/\b(comfy|soft|cozy|cool|cute|premium|comfortable)\b/i.test(title.slice(0, m.index))) {
+      const FEEL = ['Soft', 'Comfy', 'Cozy', 'Cool']
+      const seed = (designName || title).split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+      const mod = FEEL[seed % FEEL.length]
+      const padded = `${title.slice(0, m.index)}${mod} ${title.slice(m.index)}`.replace(/\s{2,}/g, ' ').trim()
       if (padded.length <= 150) {
         title = padded
         problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
