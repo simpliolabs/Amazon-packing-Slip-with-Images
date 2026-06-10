@@ -1316,7 +1316,7 @@ export default function ListingDetailPage() {
         // Groups each child's CURRENT value to show whether the variants are consistent or split,
         // how many need updating, and which SKUs hold which version.
         const normV = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim()
-        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string, optimal: boolean) => {
+        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string, optimal: boolean, recFor?: (c: ChildContentRow) => string) => {
           const groups = new Map<string, string[]>()
           for (const c of variants) {
             const v = normV(getCurrent(c))
@@ -1324,17 +1324,23 @@ export default function ListingDetailPage() {
             groups.get(v)!.push(c.sku)
           }
           const versions = [...groups.entries()].map(([value, skus]) => ({ value, skus })).sort((a, b) => b.skus.length - a.skus.length)
-          const rec = normV(recommended)
           // When the section already scores MAX it's optimal — don't flag "N need update" against a
           // fresh AI draft that's never byte-identical (same reason the action item becomes DONE not
           // REPLACE). Keeps this row consistent with a 25/25 score instead of contradicting it.
-          const needUpdate = optimal ? 0 : variants.filter(c => normV(getCurrent(c)) !== rec).length
-          return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal }
+          // recFor (capacity families): compare each child to ITS OWN per-child target (its own GB), not
+          // one broadcast value — otherwise the divergent 128/32 GB titles read as "need update".
+          const needUpdate = optimal ? 0 : variants.filter(c => normV(getCurrent(c)) !== normV(recFor ? recFor(c) : recommended)).length
+          return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal, perChild: !!recFor }
         }
+        // Capacity families: TITLE is PER-CHILD (each variant keeps its own GB), like Backend — NOT a
+        // broadcast "should match" field. Compare each child to ITS OWN per-child title; the Ship push
+        // (pushFields resolveProposed) already resolves per-SKU, so this is the matching display/count fix.
+        const titleBySku = new Map<string, string>((recs.per_child_titles ?? []).map(t => [t.sku, t.title] as [string, string]))
+        const titleRecFor = (c: ChildContentRow) => titleBySku.get(c.sku) ?? recs.recommended_title
         const cohFields = [
-          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 23), copyVal: recs.recommended_title },
-          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 23), copyVal: (recs.recommended_bullets ?? []).join('\n') },
-          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description, (score.description_score ?? 0) >= 23), copyVal: recs.recommended_description },
+          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 23, isCapacityFamily ? titleRecFor : undefined), copyVal: recs.recommended_title, perChildTitles: isCapacityFamily ? (recs.per_child_titles ?? []) : null },
+          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 23), copyVal: (recs.recommended_bullets ?? []).join('\n'), perChildTitles: null },
+          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description, (score.description_score ?? 0) >= 23), copyVal: recs.recommended_description, perChildTitles: null },
         ]
         return (
         <section>
@@ -1354,7 +1360,7 @@ export default function ListingDetailPage() {
                       <div key={f.key}>
                         <button onClick={() => toggle(`coh-${f.key}`)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-slate-50 transition-colors">
                           <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 flex-shrink-0 hidden sm:inline">should match</span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 hidden sm:inline ${f.coh.perChild ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>{f.coh.perChild ? 'unique each' : 'should match'}</span>
                           {split
                             ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
                             : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
@@ -1367,6 +1373,26 @@ export default function ListingDetailPage() {
                         </button>
                         {open && (
                           <div className="px-4 pb-3 pt-1 bg-slate-50/60 space-y-2">
+                            {f.perChildTitles ? (
+                              // Capacity family: show each variant's OWN-capacity target (never one broadcast
+                              // 64GB title for all). The Ship push already resolves per-SKU (pushFields).
+                              <div className="bg-indigo-50 border border-indigo-200 rounded p-2">
+                                <div className="flex items-start justify-between gap-2">
+                                  <p className="text-[10px] font-bold text-indigo-800 uppercase">Per-variant — each keeps its own capacity:</p>
+                                  {f.coh.needUpdate > 0 && (
+                                    <button onClick={() => openPushPreview('title')} className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap flex-shrink-0">Ship →</button>
+                                  )}
+                                </div>
+                                <div className="mt-1.5 space-y-1.5">
+                                  {f.perChildTitles.map((t, ti) => (
+                                    <div key={ti} className="bg-white border border-slate-200 rounded px-2 py-1">
+                                      <p className="text-[10px] font-mono text-slate-400 break-words">{t.sku}</p>
+                                      <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{t.title}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
                             <div className="flex items-start justify-between gap-2 bg-green-50 border border-green-200 rounded p-2">
                               <div className="min-w-0">
                                 <p className="text-[10px] font-bold text-green-800 uppercase">Update all {f.coh.total} variants to:</p>
@@ -1381,7 +1407,8 @@ export default function ListingDetailPage() {
                                 )}
                               </div>
                             </div>
-                            <p className="text-[10px] font-medium text-slate-500 uppercase">Current values across your variants{split ? ' — these diverge:' : ':'}</p>
+                            )}
+                            <p className="text-[10px] font-medium text-slate-500 uppercase">{f.coh.perChild ? 'Current per-variant titles:' : `Current values across your variants${split ? ' — these diverge:' : ':'}`}</p>
                             {f.coh.versions.map((v, vi) => (
                               <details key={vi} className="bg-white border border-slate-200 rounded">
                                 <summary className="cursor-pointer px-2 py-1 text-[11px] flex items-center gap-2">
