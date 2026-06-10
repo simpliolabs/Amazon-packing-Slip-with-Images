@@ -1377,6 +1377,8 @@ ${attrLine}
 
 Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
+- AUDIENCE MATCH: do NOT mention kids, children, toddlers, youth, boys, or girls unless the title says so — match the title's audience exactly (an adult "for Men and Women" listing must NOT reference kids).
+- NO PHRASE OVERUSE: do NOT repeat any single brand or material name (e.g. "Comfort Colors") more than TWICE across the 5 bullets — vary the wording.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
 - 80-200 characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
 - 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}

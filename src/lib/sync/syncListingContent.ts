@@ -583,6 +583,21 @@ function titleLooksApparel(title: string): boolean {
   return /\b(shirt|t-?shirt|tee|tees|hoodie|sweatshirt|sweater|tank|crewneck|pullover|apparel|hat|cap|beanie|socks?|leggings|joggers|shorts|dress|jacket)\b/i.test(title)
 }
 
+// Seasonal terms — keep in sync with listingPipeline.ts:100 (SEASONAL_TERMS). The bullet-coverage
+// check excludes these: per the product strategy, seasonal keywords belong in BACKEND terms, not
+// bullets/title (unless the design itself is seasonal), so docking the bullets for lacking them is
+// wrong (it fights the strategy). Duplicated, not imported, to avoid a scorer→pipeline circular dep.
+const BULLET_SEASONAL_TERMS = [
+  'christmas', 'xmas', 'halloween', 'valentines', 'valentine', 'easter',
+  'thanksgiving', 'mothers day', 'mother day', 'fathers day', 'father day',
+  'back to school', 'last day of school', 'schools out', 'school out',
+  'independence day', '4th of july', 'fourth of july', 'july 4th',
+  'st patrick', 'new year', 'new years', 'memorial day', 'labor day',
+  'spring break', 'summer break', 'winter break', 'black friday',
+  'cyber monday', 'prime day', 'hanukkah',
+]
+const isSeasonalKw = (kw: string) => BULLET_SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
+
 export function scoreListingContent(
   parentContent: ListingContentRow | null,
   childContents: ListingContentRow[],
@@ -729,13 +744,21 @@ export function scoreListingContent(
     // Opportunity-keyword coverage — the real reason a well-formed bullet still gets flagged for
     // REPLACE: it misses the product's top opportunity keywords (what the AI rewrite weaves in).
     // Without this, mechanically-perfect bullets score 25/25 while the action plan says "replace".
+    // SEASONAL keywords are EXCLUDED — they belong in backend, not bullets (product strategy), so a
+    // missing seasonal term must not dock the bullets. Coverage is TOKEN-based (consistent with the
+    // keyword-intelligence check below), so a natural paraphrase counts: bullets saying "see you later
+    // alligator vibe" cover the keyword "see you later alligator shirt" (every token present across the
+    // bullets). The old exact-substring check missed paraphrases and pinned good bullets at a low score.
     const bulletOppKw = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
+      .filter((k) => !isSeasonalKw(k))
     if (bulletOppKw.length > 0) {
-      const bulletLc = bullets.join(' ').toLowerCase()
-      const missingOpp = bulletOppKw.filter(k => !bulletLc.includes(k.toLowerCase()))
+      const BKW_STOP = new Set(['for', 'the', 'a', 'an', 'and', 'with', 'of', 'to', 'in', 'on', 'your', 'you', 'that', 'this'])
+      const bWords = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1 && !BKW_STOP.has(t))
+      const bulletWordSet = new Set(bWords(bullets.join(' ')))
+      const missingOpp = bulletOppKw.filter((k) => { const w = bWords(k); return w.length === 0 || !w.every((x) => bulletWordSet.has(x)) })
       if (missingOpp.length >= 2) {
         bulletScore -= Math.min(12, missingOpp.length * 2)
-        issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets are well-formed but miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. That's why the AI Recommendations flag bullets for REPLACE: the rewrite weaves these in.`, auto_fixable: false })
+        issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. The AI rewrite weaves these in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
       }
     }
 
