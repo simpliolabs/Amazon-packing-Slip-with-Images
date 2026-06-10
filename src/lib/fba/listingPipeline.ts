@@ -906,6 +906,72 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
   return judged || drafts[1] || drafts[0]
 }
 
+/** Bullets COUNCIL (PR: bullets-council) — mirrors runTitleCouncil for the 5-bullet ARRAY. Bullets are
+ *  an 18% (>=15%) rank-factor field, and the bullet score's single biggest lever is opportunity-keyword
+ *  COVERAGE (syncListingContent docks up to -12 for missing top keywords). So 3 persona proposers draft
+ *  5-bullet sets, a GPT-5 adversary hunts MISSING-keyword coverage + weak hooks + role/accuracy slips,
+ *  and a GPT-5 judge synthesizes the best-covered compliant set. Output still flows the caller's
+ *  role-leak guard + validateBullets retry, so the council is additive. Fails open to a single agent. */
+async function runBulletsCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string[]> {
+  // Proposers + judge return JSON {bullets:[5]}; the adversary returns prose. GPT-5 reasoning models
+  // reject `temperature` and use `max_completion_tokens` — params branch by model (same as the title
+  // council). Per-call timeout + NO retries so a hung call can't stall past Cloudflare's ~100s idle
+  // window (a keepalive fires BETWEEN stages, not during a call; each call finishes under its own cap).
+  const askBullets = async (system: string, user: string, temperature: number, model = 'gpt-4.1-mini', timeoutMs = 20_000): Promise<string[]> => {
+    try {
+      const isGpt5 = /^(gpt-5|o\d)/.test(model)
+      const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+      const r = await openai.chat.completions.create(
+        isGpt5
+          ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' as const, response_format: { type: 'json_object' as const } }
+          : { model, messages, temperature, max_tokens: 1200, response_format: { type: 'json_object' as const } },
+        { timeout: timeoutMs, maxRetries: 0 },
+      )
+      const parsed = parseJsonLoose<{ bullets?: string[] }>(r.choices[0]?.message?.content || '{}')
+      return Array.isArray(parsed.bullets) ? parsed.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+    } catch { return [] }
+  }
+  const askText = async (system: string, user: string, model: string, timeoutMs: number): Promise<string> => {
+    try {
+      const isGpt5 = /^(gpt-5|o\d)/.test(model)
+      const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+      const r = await openai.chat.completions.create(
+        isGpt5
+          ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' as const }
+          : { model, messages, temperature: 0.3, max_tokens: 500 },
+        { timeout: timeoutMs, maxRetries: 0 },
+      )
+      return (r.choices[0]?.message?.content || '').trim()
+    } catch { return '' }
+  }
+  const COUNCIL_MODEL = process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+  const personas: { sys: string; temp: number }[] = [
+    { sys: 'You are an award-winning apparel COPYWRITER. Write 5 bullets a shopper FEELS — vivid CAPS benefit hooks, human voice, design-led. ', temp: 0.6 },
+    { sys: 'You are an Amazon SEO STRATEGIST. The required search keyphrases in the brief MUST appear across the 5 bullets, woven naturally and accurately — maximizing legitimate keyword COVERAGE without stuffing is your job. ', temp: 0.3 },
+    { sys: 'You are a CONVERSION strategist. Every bullet leads with a crisp 2-3 word CAPS benefit hook; all 5 are scannable, accurate, and trustworthy. ', temp: 0.4 },
+  ]
+  const drafts = (await Promise.all(personas.map((p) => askBullets(p.sys + baseSystem, baseUser, p.temp)))).filter((d) => d.length > 0)
+  if (drafts.length === 0) return askBullets(baseSystem, baseUser, 0.4)        // fail open: single agent
+  if (drafts.length === 1) return drafts[0]
+  onProgress?.('Bullets council: drafts in, adversary reviewing...')           // keepalive (resets idle timer)
+  const numbered = drafts.map((d, i) => `Set ${i + 1}:\n${d.map((b, j) => `  ${j + 1}. ${b}`).join('\n')}`).join('\n\n')
+  const critique = await askText(
+    'You are a ruthless Amazon listing critic. Attack each 5-bullet set for: (1) MISSING required keyphrases from the brief — name exactly which are absent from each set; (2) weak, duplicate, or non-CAPS benefit hooks; (3) any claim of a profession/role/occasion/audience NOT in the title (accuracy failure); (4) keyword stuffing or bullets under ~100 chars. Be specific per set.',
+    `Brief the bullets must satisfy:\n${baseUser}\n\nCandidate 5-bullet sets for the SAME product:\n${numbered}\n\nCritique EACH set, then name which set covers the required keyphrases best.`,
+    COUNCIL_MODEL, 60_000,
+  )
+  onProgress?.('Bullets council: judge synthesizing the winner...')            // keepalive
+  const judged = await askBullets(
+    baseSystem + ' You are the JUDGE: merge the strongest, ACCURATE elements into ONE final set of 5 bullets that covers EVERY required keyphrase from the brief, each starting with a CAPS benefit hook, none implying a role/occasion not in the title. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.',
+    `${baseUser}\n\nCandidate sets:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final set as {"bullets":[...]}.`,
+    0.2, COUNCIL_MODEL, 60_000,
+  )
+  // Fail open to the SEO/coverage draft (persona #1), NOT the creative one (#0): if the judge errors or
+  // returns empty/invalid JSON, the coverage-optimized draft is the safest fallback. Logged so it's visible.
+  if (judged.length === 0) console.warn('[bullets-council] judge returned empty — failing open to the SEO/coverage draft')
+  return judged.length > 0 ? judged : (drafts[1] || drafts[0])
+}
+
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
 async function runTitleAgent(
@@ -1318,15 +1384,24 @@ Rules per bullet:
 - 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands shoppers search for. Devote ONE bullet to compatibility using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example hook: "WIDE COMPATIBILITY - Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras and more...".` : ''}
 Return ONLY the JSON object.`
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4.1-mini',
-    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    temperature: 0.4,
-    max_tokens: 1200,
-    response_format: { type: 'json_object' },
-  })
-  const parsed = parseJsonLoose<{ bullets?: string[] }>(completion.choices[0]?.message?.content || '{}')
-  let bullets = Array.isArray(parsed.bullets) ? parsed.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+  // Bullets COUNCIL for apparel (the 18% >=15% rank-factor field). The bullet score's biggest lever is
+  // opportunity-keyword COVERAGE (-12 max), so apparel runs 3 proposers -> GPT-5 adversary -> GPT-5 judge
+  // to maximize legitimate coverage, mirroring the title council. Output still flows the role-leak guard
+  // + validateBullets retry below, so it's additive (fails open). Non-apparel keeps the single fast call.
+  let bullets: string[]
+  if (apparel) {
+    bullets = await runBulletsCouncil(openai, system, user, input.onProgress)
+  } else {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0.4,
+      max_tokens: 1200,
+      response_format: { type: 'json_object' },
+    })
+    const parsed = parseJsonLoose<{ bullets?: string[] }>(completion.choices[0]?.message?.content || '{}')
+    bullets = Array.isArray(parsed.bullets) ? parsed.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
+  }
 
   // Deterministic role-leak guard. The prompt forbids profession claims, but gpt-4.1-mini
   // occasionally slips ("PLAYFUL TEACHER VIBE"). Detect role words not in the title, retry
