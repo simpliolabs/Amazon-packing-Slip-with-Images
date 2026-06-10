@@ -732,7 +732,7 @@ export async function POST(req: NextRequest) {
               item.verdict = 'DONE'
               item.current_status = `✓ Shipped ${daysAgo}d ago — settling (Amazon applies + ranks over ~7 days). Locked ${daysLeft}d more; use Regenerate to override.`
               item.instruction = 'No action — recently shipped. Let it settle, or click Regenerate to override the 7-day lock.'
-              if (item.priority !== 'HIGH') item.priority = 'NONE'
+              item.priority = 'NONE'   // a DONE (cooling-locked) item is not actionable — never keep the HIGH pill
               continue
             }
             let live = false
@@ -789,7 +789,7 @@ export async function POST(req: NextRequest) {
               item.instruction = live
                 ? 'No action required — your last push wrote this exact content. The copy box stays below if you need it.'
                 : 'No action required — this section is already strong. The copy box below is an optional alternative.'
-              if (item.priority !== 'HIGH') item.priority = 'NONE'
+              item.priority = 'NONE'   // a DONE item is not actionable — never keep the HIGH pill
             }
           }
 

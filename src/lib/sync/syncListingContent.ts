@@ -931,7 +931,7 @@ export function scoreListingContent(
     if (scoringCtx.productDetailsGaps >= 5) {
       featuresScore -= 5
       const detailExamples = apparel ? 'Material, Fabric Type, Fit Type, Department' : 'Material, Color, Size, Department'
-      issues.push({ field: 'product_details', severity: 'warning', message: `${scoringCtx.productDetailsGaps} Product Detail fields are missing or incomplete (e.g. ${detailExamples}). These fields power Amazon\'s filtered search and comparison tables. Go to Seller Central → Edit Listing → More Details and fill in every applicable field. Missing product details = invisible in filtered searches.`, auto_fixable: false })
+      issues.push({ field: 'product_details', severity: 'warning', message: `We recommend confirming or refining ${scoringCtx.productDetailsGaps} product-detail values (e.g. ${detailExamples}) — these power Amazon\'s filtered search + comparison tables. Many may already be set; the AI Recommendations tab shows the suggested value for each so you can confirm or refine it.`, auto_fixable: false })
     } else if (scoringCtx.productDetailsGaps >= 3) {
       featuresScore -= 3
       issues.push({ field: 'product_details', severity: 'info', message: `${scoringCtx.productDetailsGaps} Product Detail fields could be improved. Check the AI Recommendations tab for specific suggestions — each completed field improves your visibility in Amazon\'s filtered search results.`, auto_fixable: false })

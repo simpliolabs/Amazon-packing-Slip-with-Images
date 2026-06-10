@@ -1473,7 +1473,9 @@ export default function ListingDetailPage() {
                           <span className="ml-auto text-[11px] flex-shrink-0">
                             {f.coh.needUpdate > 0
                               ? <span className="text-amber-700 flex items-center gap-1">{f.coh.needUpdate} need update</span>
-                              : <span className="text-green-700">up to date</span>}
+                              : (f.coh.distinct > 1 && !f.coh.perChild)
+                                ? <span className="text-amber-700">variants differ — unify</span>
+                                : <span className="text-green-700">up to date</span>}
                           </span>
                           <span className="text-xs text-slate-400 flex-shrink-0">{open ? '▾' : '▸'}</span>
                         </button>
@@ -1507,8 +1509,10 @@ export default function ListingDetailPage() {
                               <div className="flex items-center gap-1.5 flex-shrink-0">
                                 <button onClick={() => copy(f.copyVal || '', `coh-${f.key}`)} className="text-[10px] bg-green-600 hover:bg-green-700 text-white px-2 py-0.5 rounded">{copied === `coh-${f.key}` ? 'Copied!' : 'Copy'}</button>
                                 {/* Ship the broadcast value to Amazon — same push the Edit-Once card uses, surfaced here
-                                    so "N need update" always has a one-click path (the seller's "no way to update it"). */}
-                                {f.coh.needUpdate > 0 && (
+                                    so "N need update" always has a one-click path (the seller's "no way to update it").
+                                    Also fires when the variants DIVERGE (distinct>1) even if the score is "optimal" — the
+                                    optimal gate zeroes needUpdate, but diverging variants still need unifying. */}
+                                {(f.coh.needUpdate > 0 || (f.coh.distinct > 1 && !f.coh.perChild)) && (
                                   <button onClick={() => openPushPreview(f.key as 'title' | 'bullets' | 'description')} className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap">Ship →</button>
                                 )}
                               </div>
