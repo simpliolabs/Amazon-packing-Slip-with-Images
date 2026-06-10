@@ -95,6 +95,11 @@ export interface ProductDetailImprovement {
   current_value: string | null
   recommended_value: string
   reason: string
+  // Part 2b — enum validation metadata stored by validate-at-regen (see route ~632).
+  is_enum?: boolean
+  enum_valid?: boolean
+  enum_accepted?: string[]
+  normalized_from?: string
 }
 
 export interface PerChildKeywords {

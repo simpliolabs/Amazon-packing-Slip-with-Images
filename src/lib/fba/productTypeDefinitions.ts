@@ -243,11 +243,34 @@ export function coerceToEnum(raw: string, e: AttributeEnum): CoerceResult {
   const exact = pairs.find((p) => p.token === rawN)
   if (exact) return { valid: true, value: exact.value, accepted, changed: exact.value !== raw }
 
+  const prefixHits = new Set<string>()
   let best: { token: string; value: string } | null = null
   for (const p of pairs) {
-    if (p.token && rawN.startsWith(p.token) && (!best || p.token.length > best.token.length)) best = p
+    if (p.token && rawN.startsWith(p.token)) { prefixHits.add(p.value); if (!best || p.token.length > best.token.length) best = p }
   }
-  if (best) return { valid: true, value: best.value, accepted, changed: best.value !== raw }
+  // Only auto-coerce when the prefix match is UNAMBIGUOUS. "Cotton Blended" matching BOTH "Cotton" and
+  // "Cotton Blend" must fall through to the whole-word check / picker, not silently pick the longest
+  // (adversarial review: a silent wrong-coercion would bypass the seller-picker and ship LIVE).
+  if (best && prefixHits.size === 1) return { valid: true, value: best.value, accepted, changed: best.value !== raw }
+
+  // 3. else an accepted value that appears as a WHOLE-WORD token-subsequence INSIDE the input
+  //    ("Unisex relaxed fit" -> "Relaxed" — the audit often puts the audience first, the real
+  //    attribute second, so it isn't a prefix). Only when EXACTLY ONE accepted value matches — an
+  //    ambiguous input ("slim relaxed feel" -> Slim AND Relaxed) stays invalid so the seller picks.
+  //    (Found live 2026-06-09: prefix-only missed "Unisex relaxed fit".)
+  const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+  const rawWords = words(raw)
+  const isSub = (sub: string[], arr: string[]) => {
+    if (!sub.length) return false
+    for (let s = 0; s + sub.length <= arr.length; s++) if (sub.every((w, k) => arr[s + k] === w)) return true
+    return false
+  }
+  const wordHits = new Set<string>()
+  for (const i of liveIdx) {
+    const cands = e.names[i] != null ? [e.values[i], String(e.names[i])] : [e.values[i]]
+    if (cands.some((c) => isSub(words(c), rawWords))) wordHits.add(e.values[i])
+  }
+  if (wordHits.size === 1) { const v = [...wordHits][0]; return { valid: true, value: v, accepted, changed: v !== raw } }
 
   return { valid: false, value: raw, accepted, changed: false }
 }

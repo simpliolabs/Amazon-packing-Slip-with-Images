@@ -27,7 +27,7 @@ import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 export interface PipelinePerChildKeywords { sku: string; asin: string; keywords: string }
 export interface PipelineVariantCorrection { sku: string; field: string; current: string; replace_with: string; reason: string }
 export interface PipelineCannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
-export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string }
+export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string }
 export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; exact_text: string; why: string }
 export interface PipelineAplusModuleAction { module_type: string; action: 'ADD' | 'EDIT' | 'KEEP'; content_brief: string; position: number }
 export interface PipelineActionPlanItem {
