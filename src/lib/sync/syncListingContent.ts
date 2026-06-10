@@ -324,6 +324,14 @@ interface ScoringContext {
   /** Brand name — exempted from the ALL CAPS check (e.g. "THE CEO" is the seller's
    *  brand identity, not a style-guide violation). Resolved from settings/catalog. */
   brandName?: string
+  /** KeywordPlan (#93) — the generator's ACTUAL bullet opportunity set (topOpportunityKwsForBullets) from
+   *  the persisted/injected plan. When present (length>0) the scorer docks bullets against THIS exact set
+   *  instead of a separately-derived DB set, closing the source/relevance-gate/title-exclusion divergence.
+   *  Absent/empty → fall back to the legacy topCritical∪topUpgrade derivation (backward-compatible). */
+  bulletPlanKeywords?: string[]
+  /** KeywordPlan (#92) — the real extractDesignName output ('' for generic/non-apparel). The scorer docks a
+   *  section that drops the design name the title anchors. From the plan, NOT a capacity-unsafe title heuristic. */
+  planDesignName?: string
 }
 
 /**
@@ -516,6 +524,22 @@ export async function fetchScoringContext(
     // Non-fatal: listing_seo_recommendations may not exist for this parent
     console.warn(`[Scoring] recommendations lookup failed for ${parentAsin}:`, err instanceof Error ? err.message : String(err))
   }
+
+  // 2b. KeywordPlan (#92/#93) — read in its OWN try/catch + OWN select so a not-yet-migrated `keyword_plan`
+  // column can't break the product_details read above (a combined select would error the whole row, losing
+  // BOTH). When the column/row/plan is absent, ctx.bulletPlanKeywords/planDesignName stay undefined and the
+  // scorer falls back to its legacy behavior (fully backward-compatible — no score regression, no crash).
+  try {
+    const { data: planRow } = await supabase
+      .from('listing_seo_recommendations')
+      .select('keyword_plan')
+      .eq('parent_asin', parentAsin)
+      .single()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const kp = (planRow as any)?.keyword_plan
+    if (kp && Array.isArray(kp.bullets)) ctx.bulletPlanKeywords = kp.bullets.filter((k: unknown): k is string => typeof k === 'string')
+    if (kp && typeof kp.designName === 'string') ctx.planDesignName = kp.designName
+  } catch { /* keyword_plan column not present (pre-migration) — fall back to legacy scoring */ }
 
   // 3. Brand name — used by the scorer to EXEMPT the brand from the ALL CAPS check
   // (e.g. "THE CEO" is the seller's brand identity, not a violation). Read from
@@ -756,13 +780,17 @@ export function scoreListingContent(
     // keyword-intelligence check below), so a natural paraphrase counts: bullets saying "see you later
     // alligator vibe" cover the keyword "see you later alligator shirt" (every token present across the
     // bullets). The old exact-substring check missed paraphrases and pinned good bullets at a low score.
-    const bulletOppKw = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
-      .filter((k) => !isSeasonalKw(k))
-      // Align the scorer's bullet universe to the GENERATOR's pool (listingPipeline topOpportunityKwsForBullets
-      // caps at <=6 words): don't dock for a long-tail the generator deliberately won't force into a bullet, or
-      // bullets can never reach max no matter how well the pipeline runs (adversarial-review finding). The
-      // deeper source/gate unification (same rows + same coverage gate both sides) is the deferred KeywordPlan.
-      .filter((k) => k.split(/\s+/).length <= 6)
+    // #93 — when the persisted/injected KeywordPlan is present, dock bullets against the generator's EXACT
+    // target set (topOpportunityKwsForBullets), so the scorer's universe == the generator's by SOURCE — not
+    // just via the shared coverage predicate. This closes the residual source/relevance-gate/title-exclusion
+    // divergence. Absent/empty plan → fall back to the legacy DB derivation, capped to <=6 words to match the
+    // generator's pool (the #160 alignment). Seasonal stays excluded on BOTH paths (belt-and-suspenders — the
+    // generator already strips seasonal from its pool).
+    const bulletOppKw = (scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
+      ? scoringCtx.bulletPlanKeywords.filter((k) => !isSeasonalKw(k))
+      : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
+          .filter((k) => !isSeasonalKw(k))
+          .filter((k) => k.split(/\s+/).length <= 6)
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
@@ -907,6 +935,41 @@ export function scoreListingContent(
   }
 
   keywordScore = Math.max(0, keywordScore)
+
+  // ── 4c. CROSS-SECTION DESIGN-NAME COHESION (#92) ──────────────────────────────────
+  // The seller's design name (e.g. "Later Gator") anchors the title. If it anchors the title but is
+  // token-missing from the live bullets or live backend, the listing under-indexes its own hook — dock the
+  // section that dropped it. The design name comes from the persisted KeywordPlan (the REAL extractDesignName
+  // output), NEVER a title heuristic (a heuristic is capacity-unsafe — it would read "64GB" as the design
+  // name on an SD-card family). No-ops for generic/non-apparel (planDesignName '' or absent). Uses the shared
+  // token predicate so "later-gator" / "Later, Gator!" count as present (no false dock on punctuation). The
+  // dock is PURELY ADDITIVE (it never raises a score and never marks anything DONE — it can only push a
+  // section away from the DONE threshold, never toward it).
+  const designName = (scoringCtx.planDesignName ?? '').trim()
+  if (designName) {
+    const inTitle = missingBulletKeywords([title], [designName]).length === 0
+    if (inTitle) {   // only enforce cohesion when the design genuinely anchors the title
+      // DEDUPE (adversarial-review): if the design name is already OWNED by a bullet-opportunity keyword,
+      // the #93 coverage dock above ALREADY charges its tokens when they're missing from the bullets — so
+      // skip the bullet cohesion dock here to avoid penalizing ONE missing fact twice on bullet_score ("two
+      // levers, one number", the pattern that got the prior Option-C gate reverted). The BACKEND dock has no
+      // such overlap (the #93 dock is bullets-only), so it stays unconditional. Recomputed from ctx (the
+      // bullet block's local bulletOppKw is out of scope here); broader-than-exact is safe — it only makes us
+      // MORE likely to skip the bullet dock, never to dock wrongly.
+      const oppSet = (scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
+        ? scoringCtx.bulletPlanKeywords
+        : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
+      const designOwnedByOppSet = oppSet.some((k) => missingBulletKeywords([k], [designName]).length === 0)
+      if (!designOwnedByOppSet && missingBulletKeywords([bullets.join(' ')], [designName]).length > 0) {
+        bulletScore = Math.max(0, bulletScore - 4)
+        issues.push({ field: 'bullets', severity: 'warning', message: `Your design name "${designName}" anchors the title but is missing from your bullets — weave it into at least one bullet so every section reinforces the same hook (regenerate to fix automatically).`, auto_fixable: false })
+      }
+      if (missingBulletKeywords([keywords], [designName]).length > 0) {
+        keywordScore = Math.max(0, keywordScore - 4)
+        issues.push({ field: 'backend_keywords', severity: 'warning', message: `Your design name "${designName}" anchors the title but is missing from your backend search terms — add it to every child's backend keywords (regenerate to fix automatically).`, auto_fixable: false })
+      }
+    }
+  }
 
   // ── 5. A+ CONTENT SCORING ─────────────────────────────────────────────────────
   const hasAplus      = hasAplusEarly  // already read above for description check
