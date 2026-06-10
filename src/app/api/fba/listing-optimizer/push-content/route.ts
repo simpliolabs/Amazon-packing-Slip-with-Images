@@ -358,11 +358,15 @@ interface DetailContext {
   acceptedValues?: string[]
   /** The audit's original value when enum-coercion changed it (e.g. "Unisex Adult"). */
   normalizedFrom?: string
+  /** True = a constrained enum the value can't map to (uncoercible). recommendedValue stays the raw
+   *  value; the seller must pick from acceptedValues. The PREVIEW surfaces this so the modal shows a
+   *  picker; the PUSH blocks unless a valid value-override is supplied (Part 2b seller-picker). */
+  enumInvalid?: boolean
 }
 
 /** Load + validate the audit's recommendation for one detail attribute. Returns null on
  *  unknown / non-pushable detail names so the caller can return a clean 4xx. */
-async function loadDetailContext(parentAsin: string, detailField: string): Promise<{ ctx: DetailContext | null; error: string | null }> {
+async function loadDetailContext(parentAsin: string, detailField: string, valueOverride?: string): Promise<{ ctx: DetailContext | null; error: string | null }> {
   if (!detailField) return { ctx: null, error: 'detail_field is required for field=details (e.g. ?detail_field=Material).' }
   if (!isPushableDetail(detailField)) {
     return { ctx: null, error: unpushableReason(detailField) || `"${detailField}" can't be pushed from the portal.` }
@@ -392,9 +396,20 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
   // schema and coerce the value to an accepted one — "the system knows the acceptable
   // terms for any feature". Best-effort: any failure leaves the value as-is (the prior
   // behavior; VALIDATION_PREVIEW still guards the write).
-  let recommendedValue = match.recommended_value.trim()
+  // SELLER OVERRIDE (Part 2b): the seller's pick from the panel's accepted-values chips REPLACES the
+  // audit value — but it must STILL pass the enum validation below. Defense-in-depth: a direct POST
+  // could send any string, and we must NEVER write a non-member (adversarial review caught the original
+  // verbatim-passthrough). The override only skips the audit value, never the validation. Capped at
+  // 1000 chars: details are short attributes, and this also bounds a free-text override.
+  const override = (valueOverride ?? '').trim()
+  let recommendedValue = (override || match.recommended_value.trim()).slice(0, 1000)
   let acceptedValues: string[] | undefined
   let normalizedFrom: string | undefined
+  let enumInvalid = false
+
+  // ── Enum validation (Feature B) — coerce the value (audit OR seller override) to an accepted member;
+  // FLAG (don't error) when uncoercible so the PREVIEW can show the seller-picker and the PUSH blocks.
+  // Best-effort: any SP-API failure leaves the value as-is (VALIDATION_PREVIEW is the final backstop).
   try {
     const { data: skuRows } = await supabase
       .from('listing_content')
@@ -412,11 +427,8 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
       if (c.isEnum) {
         acceptedValues = c.accepted
         if (!c.valid) {
-          // EXACT-VALUE GUARD: a constrained dropdown the audit value can't map to. NEVER push a raw
-          // non-member — Amazon rejects it. Block with the accepted list so the seller fixes/picks it.
-          return { ctx: null, error: `"${recommendedValue}" is not an accepted Amazon value for "${detailField}". Accepted: ${c.accepted.slice(0, 25).join(', ')}${c.accepted.length > 25 ? ', …' : ''}. Set this one in Seller Central, or regenerate.` }
-        }
-        if (c.normalizedFrom) {
+          enumInvalid = true   // uncoercible dropdown — preview shows the picker; PUSH blocks w/o a valid override
+        } else if (c.normalizedFrom) {
           normalizedFrom = c.normalizedFrom
           recommendedValue = c.value
           console.log(`[push-content] enum-coerced ${attribute.spApiKey}: "${normalizedFrom}" -> "${recommendedValue}" (productType ${productType})`)
@@ -427,7 +439,7 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
     console.warn('[push-content] enum coercion skipped:', err)
   }
 
-  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom }, error: null }
+  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid }, error: null }
 }
 
 /** Fetch a SKU's CURRENT attribute value live from Listings Items. Best-effort: '' on failure. */
@@ -582,6 +594,8 @@ export async function GET(req: NextRequest) {
         // normalized the audit's value FROM, so the modal can show "Unisex Adult → Unisex".
         acceptedValues: ctx.acceptedValues ?? null,
         normalizedFrom: ctx.normalizedFrom ?? null,
+        // Part 2b: uncoercible dropdown — the modal shows a seller-picker over acceptedValues.
+        enum_invalid: ctx.enumInvalid ?? false,
         diff,
       })
     }
@@ -707,10 +721,10 @@ export async function POST(req: NextRequest) {
   // Validate the body BEFORE opening the stream — a 400 here is a real client error,
   // not a mid-push failure. Keeps the streaming envelope reserved for things that
   // can actually fail asynchronously.
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
-  const { parent_asin, confirm, field: rawField, detail_field: detailField, skus, title_override } = body
+  const { parent_asin, confirm, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = body
   if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
   if (confirm !== true) {
     return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
@@ -723,8 +737,13 @@ export async function POST(req: NextRequest) {
       try {
         // ── DETAILS branch ─────────────────────────────────────────────────────
         if (rawField === 'details') {
-          const { ctx, error } = await loadDetailContext(parent_asin, detailField || '')
+          const { ctx, error } = await loadDetailContext(parent_asin, detailField || '', detail_value_override)
           if (!ctx) { emit({ type: 'error', error }); controller.close(); return }
+          if (ctx.enumInvalid) {
+            // Uncoercible dropdown and no valid override picked -> refuse the write (never push a non-member).
+            emit({ type: 'error', error: `"${ctx.recommendedValue}" is not an accepted Amazon value for "${ctx.detailField}". Pick one of the accepted values${ctx.acceptedValues?.length ? `: ${ctx.acceptedValues.slice(0, 25).join(', ')}` : ''}.` })
+            controller.close(); return
+          }
           const diff = (await loadDetailDiff(parent_asin, ctx)).filter((d) => d.changed && d.raw != null)
           if (diff.length === 0) {
             emit({
