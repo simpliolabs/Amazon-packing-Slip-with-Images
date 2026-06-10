@@ -40,7 +40,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { getAttributeEnum, coerceToEnum, coerceGenderToEnum, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
+import { coerceDetailValue, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -405,19 +405,19 @@ async function loadDetailContext(parentAsin: string, detailField: string): Promi
       const token = await getAccessToken()
       const sellerId = await getSellerId()
       const productType = await getProductType(sellerId, token, sku)
-      const enumDef = await getAttributeEnum(productType, attribute.spApiKey, {
+      const c = await coerceDetailValue(productType, attribute.spApiKey, recommendedValue, {
         token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
       })
-      if (enumDef && enumDef.values.length > 0) {
-        acceptedValues = enumDef.names.length ? enumDef.names : enumDef.values
-        // Gender/department carry free-form audiences ("Men, Women", "Unisex Adults") that aren't
-        // enum prefixes — map them semantically first, then fall back to the generic coercion.
-        const isGender = attribute.spApiKey === 'department' || attribute.spApiKey === 'target_gender'
-        const coerced = (isGender ? coerceGenderToEnum(recommendedValue, enumDef) : null)
-          ?? coerceToEnum(recommendedValue, enumDef)
-        if (coerced.valid && coerced.changed) {
-          normalizedFrom = recommendedValue
-          recommendedValue = coerced.value
+      if (c.isEnum) {
+        acceptedValues = c.accepted
+        if (!c.valid) {
+          // EXACT-VALUE GUARD: a constrained dropdown the audit value can't map to. NEVER push a raw
+          // non-member — Amazon rejects it. Block with the accepted list so the seller fixes/picks it.
+          return { ctx: null, error: `"${recommendedValue}" is not an accepted Amazon value for "${detailField}". Accepted: ${c.accepted.slice(0, 25).join(', ')}${c.accepted.length > 25 ? ', …' : ''}. Set this one in Seller Central, or regenerate.` }
+        }
+        if (c.normalizedFrom) {
+          normalizedFrom = c.normalizedFrom
+          recommendedValue = c.value
           console.log(`[push-content] enum-coerced ${attribute.spApiKey}: "${normalizedFrom}" -> "${recommendedValue}" (productType ${productType})`)
         }
       }
