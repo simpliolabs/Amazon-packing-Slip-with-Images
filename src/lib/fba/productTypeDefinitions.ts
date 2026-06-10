@@ -18,6 +18,24 @@ export interface AttributeEnum {
   values: string[]
   /** Human-readable display names (enumNames), index-aligned with values when present. */
   names: string[]
+  /** Deprecated `enum` values (the schema's `enumDeprecated`) — never recommend/coerce TO these.
+   *  Amazon: "instances of deprecated enum values must be replaced with valid values." */
+  deprecated: string[]
+}
+
+/** Result of validating one product-detail value against the live product-type schema. */
+export interface DetailCoercion {
+  /** The value to show + push: the exact accepted enum member, or the raw value for free-text. */
+  value: string
+  /** Accepted enum members (display labels), deprecated excluded. Empty for free-text attributes. */
+  accepted: string[]
+  /** True = safe to push: an exact enum member, OR a free-text attribute (VALIDATION_PREVIEW guards
+   *  free-text byte-length/pattern at push time). False = a constrained enum the value can't map to. */
+  valid: boolean
+  /** True when this attribute is a constrained enum (dropdown); false = free-text input. */
+  isEnum: boolean
+  /** The original raw value when coercion changed it (e.g. "Unisex Adult" → "Unisex"). */
+  normalizedFrom?: string
 }
 
 interface FetchOpts {
@@ -107,6 +125,7 @@ function extractEnum(node: unknown): AttributeEnum | null {
       const found: AttributeEnum = {
         values: obj.enum.map((v: unknown) => String(v)),
         names: Array.isArray(obj.enumNames) ? obj.enumNames.map((v: unknown) => String(v)) : [],
+        deprecated: Array.isArray(obj.enumDeprecated) ? obj.enumDeprecated.map((v: unknown) => String(v)) : [],
       }
       if (keyName === 'value') { best = found; return }
       if (!fallback) fallback = found
@@ -130,6 +149,38 @@ export async function getAttributeEnum(
   const props = (schema as { properties?: Record<string, unknown> }).properties
   if (!props) return null
   return extractEnum(props[spApiKey])
+}
+
+/**
+ * Validate ONE product-detail value against the live product-type schema. Shared by the
+ * validate-at-recommendation step AND the push path (one source of truth, no drift). Dropdown (enum)
+ * attributes are coerced to an EXACT accepted member ("Unisex Adult" → "Unisex"); a value that can't
+ * map stays raw with valid:false so the caller surfaces `accepted` for the seller to pick. Free-text
+ * attributes pass through (the push VALIDATION_PREVIEW guards byte-length/pattern). Best-effort: a
+ * schema-fetch failure → treated as free-text pass-through, exactly the prior behavior.
+ */
+export async function coerceDetailValue(
+  productType: string,
+  spApiKey: string,
+  rawValue: string,
+  opts: FetchOpts,
+): Promise<DetailCoercion> {
+  const raw = (rawValue || '').trim()
+  const enumDef = await getAttributeEnum(productType, spApiKey, opts)
+  if (!enumDef || enumDef.values.length === 0) {
+    return { value: raw, accepted: [], valid: true, isEnum: false }   // free-text (or schema unavailable)
+  }
+  const dep = new Set(enumDef.deprecated.map((d) => d.toLowerCase()))
+  const accepted = (enumDef.names.length ? enumDef.names : enumDef.values)
+    .filter((_, i) => !dep.has(String(enumDef.values[i]).toLowerCase()))
+  // Gender/department carry free-form audiences ("Men, Women", "Unisex Adults") that aren't enum
+  // prefixes — map them semantically first, then fall back to the generic coercion.
+  const isGender = spApiKey === 'department' || spApiKey === 'target_gender'
+  const coerced = (isGender ? coerceGenderToEnum(raw, enumDef) : null) ?? coerceToEnum(raw, enumDef)
+  if (coerced.valid) {
+    return { value: coerced.value, accepted, valid: true, isEnum: true, normalizedFrom: coerced.changed ? raw : undefined }
+  }
+  return { value: raw, accepted, valid: false, isEnum: true }   // uncoercible enum — seller picks from `accepted`
 }
 
 /** Diagnostics for the ?debug=1 route branch — pinpoints WHERE enum resolution fails
@@ -177,14 +228,17 @@ export interface CoerceResult {
  *  3. else invalid — the caller surfaces `accepted` so the seller can choose.
  */
 export function coerceToEnum(raw: string, e: AttributeEnum): CoerceResult {
-  const accepted = e.names.length ? e.names : e.values
+  // Exclude deprecated enum values — never coerce TO or display a value Amazon is retiring.
+  const deprecated = new Set((e.deprecated ?? []).map(norm))
+  const liveIdx = e.values.map((_, i) => i).filter((i) => !deprecated.has(norm(e.values[i])))
+  const accepted = e.names.length ? liveIdx.map((i) => e.names[i] ?? e.values[i]) : liveIdx.map((i) => e.values[i])
   const rawN = norm(raw)
   if (!rawN) return { valid: false, value: raw, accepted, changed: false }
 
-  // Candidate (normalized-token → canonical value) pairs from both values and names.
+  // Candidate (normalized-token → canonical value) pairs from both values and names (deprecated skipped).
   const pairs: { token: string; value: string }[] = []
-  e.values.forEach((v) => pairs.push({ token: norm(v), value: v }))
-  e.names.forEach((nm, i) => { if (e.values[i] != null) pairs.push({ token: norm(nm), value: e.values[i] }) })
+  liveIdx.forEach((i) => pairs.push({ token: norm(e.values[i]), value: e.values[i] }))
+  liveIdx.forEach((i) => { if (e.names[i] != null) pairs.push({ token: norm(e.names[i]), value: e.values[i] }) })
 
   const exact = pairs.find((p) => p.token === rawN)
   if (exact) return { valid: true, value: exact.value, accepted, changed: exact.value !== raw }
