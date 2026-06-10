@@ -5,6 +5,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import RankAnalysisPanel from './RankAnalysisPanel'
+import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -187,6 +188,7 @@ export default function ListingDetailPage() {
   const [score, setScore] = useState<SeoScoreRow | null>(null)
   const [aiRecs, setAiRecs] = useState<AiRecommendations | null>(null)
   const [kwData, setKwData] = useState<KeywordIntelligenceResult | null>(null)
+  const [rankData, setRankData] = useState<RankAnalysisResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -541,6 +543,24 @@ export default function ListingDetailPage() {
       } catch { /* ignore */ }
     })()
   }, [score?.top_child_asin])
+
+  // Fetch rank analysis (0-cost free core) for the Apply-tab verdict banner. Endpoint accepts the
+  // PARENT asin and resolves to the top child internally; renders only server-authored, validated copy.
+  useEffect(() => {
+    if (!asin) return
+    let cancelled = false
+    setRankData(null) // clear on ASIN change so the banner can't flash the previous listing's verdict
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/rank-analysis/${asin}`)
+        if (resp.ok) {
+          const data = await resp.json()
+          if (!cancelled && !data.error) setRankData(data)
+        }
+      } catch { /* ignore — Apply tab works without rank context */ }
+    })()
+    return () => { cancelled = true }
+  }, [asin])
 
   // Fetch competitor ASIN
   useEffect(() => {
@@ -1346,6 +1366,53 @@ export default function ListingDetailPage() {
         <section>
           {activeTab === 'apply' && (
             <div className="space-y-6">
+              {/* ── RANK VERDICT — honest "what content can/can't do for rank" atop the suggestions.
+                  Renders ONLY server-authored, validator-clamped strings from /api/fba/rank-analysis
+                  (verdict.*). Full playbook + competitor analysis stays in the Intelligence tab. ── */}
+              {rankData?.analyzed && rankData.verdict && (
+                <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden border-l-4 border-l-violet-500">
+                  <button onClick={() => toggle('rank-verdict')} className="w-full flex items-start gap-2 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-bold text-slate-700 uppercase tracking-wide">Rank Top of Amazon</span>
+                        <span className="text-[10px] bg-white border border-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{rankData.verdict.indexedCoverage}</span>
+                        {rankData.verdict.criticalGaps > 0 && <span className="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{rankData.verdict.criticalGaps} high-opportunity gap{rankData.verdict.criticalGaps === 1 ? '' : 's'}</span>}
+                        {rankData.stale && <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Content changed — re-check in Intelligence</span>}
+                      </div>
+                      <p className="text-xs text-slate-800 mt-1">{rankData.verdict.headline}</p>
+                    </div>
+                    <span className="text-xs text-slate-400 flex-shrink-0">{expandedSections.has('rank-verdict') ? '▾' : '▸'}</span>
+                  </button>
+                  {expandedSections.has('rank-verdict') && (
+                    <div className="px-4 pb-3 pt-1 bg-slate-50/60 border-t border-slate-100">
+                      <div className="grid sm:grid-cols-2 gap-3 mt-2">
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 mb-1">Content CAN do</p>
+                          <ul className="space-y-1">
+                            {(rankData.verdict.contentCanDo ?? []).map((c, i) => (
+                              <li key={i} className="flex gap-1.5 text-[11px] text-slate-700">
+                                <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8.5l3.5 3.5L13 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>{c}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1">Content CAN&apos;T do (needs other levers)</p>
+                          <ul className="space-y-1">
+                            {(rankData.verdict.contentCannotDo ?? []).map((c, i) => (
+                              <li key={i} className="flex gap-1.5 text-[11px] text-slate-600">
+                                <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" /></svg>{c}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                      <p className="text-[11px] italic text-slate-500 mt-2">{rankData.verdict.honestNote}</p>
+                      <p className="text-[10px] text-slate-400 mt-1">Full keyword playbook + competitor analysis in the <span className="font-medium">Intelligence</span> tab.</p>
+                    </div>
+                  )}
+                </div>
+              )}
               {/* ── VARIANT COHESION — how the variants compare per field ── */}
               <div className="border border-slate-200 rounded-2xl overflow-hidden">
                 <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex items-baseline gap-2">
