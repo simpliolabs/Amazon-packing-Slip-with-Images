@@ -677,6 +677,14 @@ export async function POST(req: NextRequest) {
                 isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false),
               ).length
             }
+            // KeywordPlan (#92/#93): recommendations persist AFTER this block, so feed THIS regen's FRESH plan
+            // into ctx directly — the scorer then docks bullets against the generator's actual target set and
+            // enforces design-name cohesion off the REAL design name (parity with the next sync, which reads
+            // the persisted keyword_plan column).
+            if (result.keywordPlan) {
+              ctx.bulletPlanKeywords = result.keywordPlan.bullets
+              ctx.planDesignName = result.keywordPlan.designName
+            }
             const sc = scoreListingContent(parentOwn, scoreRows, ctx)
             secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score, description: sc.description_score, features: sc.features_score }
             await supabase.from('listing_seo_scores').update({
@@ -837,6 +845,7 @@ export async function POST(req: NextRequest) {
             keyword_reconciliation: rec.keyword_reconciliation,
             action_plan: rec.action_plan,
             per_child_titles: rec.per_child_titles ?? null,
+            keyword_plan: result.keywordPlan ?? null,   // #92/#93 — read by the scorer (sync-time parity)
           }
 
           const { error: upsertErr } = await supabase
@@ -844,6 +853,8 @@ export async function POST(req: NextRequest) {
             .upsert(dbPayload, { onConflict: 'parent_asin' })
           if (upsertErr) {
             console.warn('[AI Recs] Full upsert failed, retrying minimal payload:', upsertErr.message)
+            // The minimal payload intentionally OMITS the newer JSONB columns (incl. keyword_plan) so a
+            // missing column can't break the core-recommendations save — that's the schema-missing safety net.
             await supabase.from('listing_seo_recommendations').upsert({
               parent_asin: rec.parent_asin,
               recommended_title: rec.recommended_title,
@@ -852,6 +863,16 @@ export async function POST(req: NextRequest) {
               recommended_description: rec.recommended_description,
               generated_at: rec.generated_at,
             }, { onConflict: 'parent_asin' })
+            // Best-effort recover keyword_plan (the regen-time score was computed WITH it; if it doesn't land
+            // here too, the next sync reads NULL and the score jumps with no seller action — the trust trap).
+            // A column-safe UPDATE: if keyword_plan exists (full upsert failed transiently) this restores
+            // regen==sync parity; if the column is MISSING (pre-migration 022) it errors harmlessly → caught,
+            // and that window is closed operationally by applying migration 022 before deploy.
+            try {
+              await supabase.from('listing_seo_recommendations')
+                .update({ keyword_plan: result.keywordPlan ?? null })
+                .eq('parent_asin', rec.parent_asin)
+            } catch { /* keyword_plan column absent (pre-migration) — handled by deploying migration 022 first */ }
           }
 
           // (Issues panel + scores were refreshed UP FRONT — see the LIVE SCORE block above.)

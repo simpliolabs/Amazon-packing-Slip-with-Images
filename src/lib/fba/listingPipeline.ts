@@ -93,6 +93,12 @@ export interface PipelineResult {
   // Off-product keywords the relevance gate dropped — the API route marks these in
   // keyword_analysis so the scorer stops penalizing for keywords that target a different product.
   irrelevant_keywords: string[]
+  /** KeywordPlan (#92/#93) — the generator's ACTUAL bullet opportunity set (topOpportunityKwsForBullets)
+   *  + the real design name. Persisted so the SCORER docks bullets against the SAME set the generator
+   *  targeted (killing the source/relevance-gate/title-exclusion divergence the shared predicate alone
+   *  couldn't close) and can enforce cross-section design-name cohesion off the REAL design name — not a
+   *  capacity-unsafe title heuristic. */
+  keywordPlan: { bullets: string[]; designName: string }
   debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string }
 }
 
@@ -2733,6 +2739,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     keyword_reconciliation: Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [],
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,
+    // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
+    keywordPlan: { bullets: topOpportunityKwsForBullets, designName },
     debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource },
   }
 }
