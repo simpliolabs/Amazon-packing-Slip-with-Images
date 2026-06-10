@@ -30,6 +30,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
+import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -453,10 +454,7 @@ export async function fetchScoringContext(
         // "SD Camera Card 64GB ... Kodak and Canon" covers "sd card for camera 64gb" and is no longer
         // flagged. The old exact-substring check is why a genuinely keyword-rich title never moved off
         // 20: no realistic title contains long-tail phrases like "sd card for camera 64gb" verbatim.
-        const KW_STOP = new Set(['for','the','a','an','and','with','of','to','in','on','your','you','that','this','&'])
-        const kwToks = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t && !KW_STOP.has(t))
-        const haystackTokens = new Set(kwToks(haystack))
-        const isCovered = (kw: string) => { const t = kwToks(kw); return t.length > 0 && t.every((x) => haystackTokens.has(x)) }
+        const isCovered = makeCoverageChecker(haystack)   // shared coverage (extracted to keyword-engine/coverage.ts)
 
         // Count totals but cap what affects scoring to top 10 per category
         let criticalSeen = 0

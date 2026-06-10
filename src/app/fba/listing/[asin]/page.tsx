@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
+import RankAnalysisPanel from './RankAnalysisPanel'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -1978,6 +1979,7 @@ export default function ListingDetailPage() {
       {kwData && kwData.topOpportunities.length > 0 && (
         <section>
           {activeTab === 'kwintel' && (
+            <>
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
               {/* Summary badges */}
               <div className="flex gap-3 p-3 border-b border-slate-100 bg-slate-50">
@@ -2025,7 +2027,10 @@ export default function ListingDetailPage() {
                   ))}
                 </tbody>
               </table>
+              <p className="px-3 py-2 text-[10px] text-slate-400 border-t border-slate-100">Coverage above reflects the last Intelligence sync; the Rank panel below re-checks your live content.</p>
             </div>
+            <RankAnalysisPanel key={asin} asin={asin} />
+            </>
           )}
         </section>
       )}
