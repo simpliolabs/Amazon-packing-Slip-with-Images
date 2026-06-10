@@ -1352,6 +1352,44 @@ export default function ListingDetailPage() {
           const needUpdate = optimal ? 0 : variants.filter(c => normV(getCurrent(c)) !== normV(recFor ? recFor(c) : recommended)).length
           return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal, perChild: !!recFor }
         }
+        // Per-section RANK CONTEXT for the suggestions (integration A, increment 1b). Combines the rank
+        // COVERAGE truth (rankData.rows: youCover + coveredIn) with the AI's PLACEMENT plan
+        // (keyword_reconciliation: placed_in + action_type) so an UNCOVERED keyword maps to the section it
+        // should go in (an uncovered keyword has empty coveredIn — placed_in is what fixes that). Honest +
+        // bias-to-show: 'winnable' only for a genuinely-uncovered high-opp keyword planned for that section
+        // (cross-checked against rank coverage so we never tag an already-covered term); 'done' only when the
+        // section holds covered top keywords AND has none uncovered planned; otherwise null (no chip).
+        const rankSectionChip: Record<'title' | 'bullets' | 'backend', 'winnable' | 'done' | null> = (() => {
+          const out = { title: null, bullets: null, backend: null } as Record<'title' | 'bullets' | 'backend', 'winnable' | 'done' | null>
+          if (!rankData?.analyzed || !Array.isArray(rankData.rows) || rankData.rows.length === 0) return out
+          const norm = (p: string): 'title' | 'bullets' | 'backend' | null =>
+            p === 'title' ? 'title' : /^bullet/.test(p) ? 'bullets' : (p === 'backend_keywords' || p === 'backend') ? 'backend' : null
+          const nk = (s: string) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim()   // normalize case + whitespace; tolerates a missing keyword
+          const coveredKw = new Set<string>()
+          const covered = { title: false, bullets: false, backend: false }
+          for (const r of rankData.rows) {
+            if (!r.youCover) continue
+            coveredKw.add(nk(r.keyword))
+            for (const s of r.coveredIn ?? []) { const n = norm(s); if (n) covered[n] = true }
+          }
+          const winnable = { title: false, bullets: false, backend: false }
+          for (const kr of aiRecs?.keyword_reconciliation ?? []) {
+            if (kr.action_type !== 'CRITICAL' && kr.action_type !== 'UPGRADE') continue
+            if (!kr.keyword || coveredKw.has(nk(kr.keyword))) continue   // missing keyword OR rank already covers it → not a content move
+            for (const p of kr.placed_in ?? []) { const n = norm(p); if (n) winnable[n] = true }
+          }
+          for (const s of ['title', 'bullets', 'backend'] as const) out[s] = winnable[s] ? 'winnable' : covered[s] ? 'done' : null
+          return out
+        })()
+        // Chip never hides/disables Ship or Copy — it only reframes WHY the lever is shifting. Both labels +
+        // tooltips are asserted honest in scripts/verify-rank-honesty.mjs (no rank over-promise).
+        const rankChip = (v: 'winnable' | 'done' | null) =>
+          v === 'winnable'
+            ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 flex-shrink-0 hidden sm:inline" title="High-opportunity keyword(s) to add here — this is where content can still move you.">Content-winnable</span>
+            : v === 'done'
+              ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 flex-shrink-0 hidden sm:inline" title="Top keywords already covered here — rank now depends on reviews, price, and sales velocity, not more copy.">Content done here</span>
+              : null
+
         // Capacity families: TITLE is PER-CHILD (each variant keeps its own GB), like Backend — NOT a
         // broadcast "should match" field. Compare each child to ITS OWN per-child title; the Ship push
         // (pushFields resolveProposed) already resolves per-SKU, so this is the matching display/count fix.
@@ -1428,6 +1466,7 @@ export default function ListingDetailPage() {
                         <button onClick={() => toggle(`coh-${f.key}`)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-slate-50 transition-colors">
                           <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
                           <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 hidden sm:inline ${f.coh.perChild ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>{f.coh.perChild ? 'unique each' : 'should match'}</span>
+                          {(f.key === 'title' || f.key === 'bullets') && rankChip(rankSectionChip[f.key])}
                           {split
                             ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
                             : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
@@ -1493,6 +1532,7 @@ export default function ListingDetailPage() {
                   <div className="flex items-center gap-2 px-4 py-2">
                     <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">Backend</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 flex-shrink-0 hidden sm:inline">unique each</span>
+                    {rankChip(rankSectionChip.backend)}
                     <span className="text-[11px] text-slate-500">each variant gets its own color-specific terms</span>
                     {needsUpdate > 0 ? (
                       <span className="ml-auto flex items-center gap-2 flex-shrink-0">

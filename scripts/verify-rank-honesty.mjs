@@ -35,6 +35,11 @@ const MUST_PASS = [
   'Add this keyword to your title and bullets for indexing.',
   'A competitor holds a large share of clicks on this term.',
   'This is necessary but not sufficient for ranking.',
+  // Apply-tab rank chip labels + tooltips (integration A increment 1b) — must stay honest.
+  'Content-winnable',
+  'High-opportunity keyword(s) to add here — this is where content can still move you.',
+  'Content done here',
+  'Top keywords already covered here — rank now depends on reviews, price, and sales velocity, not more copy.',
 ]
 
 let fail = 0
