@@ -33,65 +33,9 @@ import { createAdminClient } from '@/lib/supabase/server';
 import { syncKeywordIntelligence } from '@/lib/sync/syncKeywordIntelligence';
 import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
+import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
 
-// ─── Parent → Child ASIN Resolution ─────────────────────────────────────────
-
-/**
- * Resolves an ASIN to a child ASIN with listing content.
- *
- * Priority:
- *   1. Direct match in listing_content (already a child ASIN)
- *   2. Lookup in parent_asin_rollup → top_child_asin
- *   3. Fallback: first child in listing_content where parent_asin = input
- *
- * Returns { childAsin, parentAsin } or null if unresolvable.
- */
-async function resolveToChildAsin(
-  inputAsin: string,
-  supabase: Awaited<ReturnType<typeof createAdminClient>>
-): Promise<{ childAsin: string; parentAsin: string | null } | null> {
-  // 1. Direct match — input is already a child ASIN in listing_content
-  const { data: directMatch } = await supabase
-    .from('listing_content')
-    .select('asin, parent_asin')
-    .eq('asin', inputAsin)
-    .single();
-
-  const dm = directMatch as { asin: string; parent_asin: string | null } | null;
-  if (dm) {
-    return { childAsin: dm.asin, parentAsin: dm.parent_asin };
-  }
-
-  // 2. Input is a parent ASIN — check parent_asin_rollup for top_child_asin
-  const { data: rollup } = await supabase
-    .from('parent_asin_rollup')
-    .select('top_child_asin')
-    .eq('parent_asin', inputAsin)
-    .single();
-
-  const ru = rollup as { top_child_asin: string | null } | null;
-  if (ru?.top_child_asin) {
-    console.log(`[intelligence] Resolved parent ${inputAsin} → child ${ru.top_child_asin} (via rollup)`);
-    return { childAsin: ru.top_child_asin, parentAsin: inputAsin };
-  }
-
-  // 3. Fallback: find any child in listing_content with this parent_asin
-  const { data: child } = await supabase
-    .from('listing_content')
-    .select('asin')
-    .eq('parent_asin', inputAsin)
-    .not('title', 'is', null)
-    .limit(1)
-    .single();
-
-  const ch = child as { asin: string } | null;
-  if (ch) {
-    console.log(`[intelligence] Resolved parent ${inputAsin} → child ${ch.asin} (via listing_content fallback)`);
-    return { childAsin: ch.asin, parentAsin: inputAsin };
-  }
-
-  return null;
-}
+// resolveToChildAsin extracted to @/lib/fba/resolveAsin (shared with the rank-analysis route, no fork).
 
 // ── GET ───────────────────────────────────────────────────────────────────────
 
