@@ -1573,6 +1573,10 @@ async function runBackendAgent(
   finalTitle: string,
   bullets: string[],
   remaining: AnalyzedKeyword[],
+  /** Seller's DESIGN/SLOGAN name ("Later Gator") — must survive in backend as an exact phrase even
+   *  though it's in the title. Same identity mandate the title enforces (#91/#92); the backend used to
+   *  silently drop it because it excludes title words. PR: design-name-in-backend. */
+  designName = '',
 ): Promise<PipelinePerChildKeywords[]> {
   const { openai, children, brandName, category, repTitle } = input
   const apparel = looksApparel(category, repTitle)
@@ -1584,6 +1588,9 @@ async function runBackendAgent(
   // Color names are auto-indexed from the variant attribute — never repeat them in backend.
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
   colors.forEach((c) => excludeWords.add(c))
+  // The seller's DESIGN NAME is identity, not a generic auto-indexed title word — exempt its tokens
+  // from the exclusion so the fill/dedup can't strip "later"/"gator" out of backend (#91/#92 parity).
+  ;(designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => excludeWords.delete(w))
   // Title-only word set. The role-word exception ("keep 'teacher' only if this IS a teacher
   // product") must check the TITLE, not bullets — a bullet that wrongly slips "teacher" must
   // not license it back into the backend.
@@ -1643,6 +1650,11 @@ async function runBackendAgent(
   for (const a of ['men', 'women']) {
     if (titleWords.has(a) && !coreWordSet.has(a)) { corePhrases.push(a); coreWordSet.add(a) }
   }
+  // Force the exact DESIGN phrase to LEAD the core (deterministic, like the title's design-name lead) so
+  // backend ranks for "later gator" and it survives the 228-byte cap. This is the missing must-include
+  // that let the design name silently drop from backend ("And Again"); it costs ~1 short phrase of bytes.
+  const dnPhrase = (designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (dnPhrase && !new RegExp(`\\b${dnPhrase.replace(/\s+/g, '\\s+')}\\b`).test(corePhrases.join(' '))) corePhrases.unshift(dnPhrase)
   // FILL: a small product's opportunity pool can run dry well under 250 bytes, leaving the
   // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with LLM long-tail
   // BUYER search words (gifts / occasions / recipients / themes) — run through the SAME junk /
@@ -2580,7 +2592,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const backendPool = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED'].includes(k.actionType))
     .sort((a, b) => b.opportunityScore - a.opportunityScore)
-  const perChild = await runBackendAgent(input, finalTitle, bullets, backendPool)
+  const perChild = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
 
   // Description (always generated — indexed field)
   onProgress('Writing description...')
