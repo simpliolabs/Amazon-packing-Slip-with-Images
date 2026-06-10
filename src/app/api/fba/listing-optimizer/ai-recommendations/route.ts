@@ -44,6 +44,18 @@ async function getOpenAI() {
   })
 }
 
+/** Seller's Amazon merchant id from app_settings (same source as push-content). Used by the
+ *  validate-at-regen step to resolve the product-type schema for enum validation. */
+async function getSellerId(): Promise<string> {
+  const supabase = getAdminSupabase()
+  const { data } = await supabase.from('app_settings').select('value').eq('key', 'amazon_seller_id').single()
+  const row = data as { value: string } | null
+  if (row?.value) return row.value
+  const fromEnv = process.env.AMAZON_MERCHANT_TOKEN || process.env.AMAZON_SELLER_ID
+  if (fromEnv) return fromEnv
+  throw new Error('amazon_seller_id not configured. Add it in Settings.')
+}
+
 interface ChildRow {
   sku: string
   asin: string
@@ -628,6 +640,42 @@ export async function POST(req: NextRequest) {
             }).eq('parent_asin', parent_asin)
           } catch (scoreErr) {
             console.warn('[AI Recs] Live score (verdict gating + issues panel) failed (non-fatal):', scoreErr instanceof Error ? scoreErr.message : scoreErr)
+          }
+
+          // ── VALIDATE PRODUCT DETAILS vs the live Amazon schema (E — Architecture A) ───────────
+          // Coerce each pushable broadcast detail to an EXACT accepted enum member BEFORE it is stored
+          // as a recommendation, so the panel shows the confirmed value (not the raw audit guess) and
+          // the push works 100%. Stores is_enum/enum_valid/enum_accepted/normalized_from on the item
+          // for the panel's seller-picker (Part 2b). Best-effort: any SP-API failure leaves the raw
+          // value (the push VALIDATION_PREVIEW is the final backstop). productType is process-cached.
+          try {
+            const pds = result.product_details_improvements
+            const detailSku = children[0]?.sku
+            if (Array.isArray(pds) && pds.length > 0 && detailSku) {
+              const { coerceDetailValue } = await import('@/lib/fba/productTypeDefinitions')
+              const { getProductType } = await import('@/lib/amazon/productType')
+              const { resolveDetailAttribute } = await import('@/lib/fba/productDetailAttrs')
+              const { getAccessToken } = await import('@/lib/amazon/auth')
+              const ptEndpoint = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
+              const ptMarketplace = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
+              const ptToken = await getAccessToken()
+              const ptSeller = await getSellerId()
+              const ptType = await getProductType(ptSeller, ptToken, detailSku)
+              const ptOpts = { token: ptToken, sellerId: ptSeller, marketplaceId: ptMarketplace, endpoint: ptEndpoint }
+              for (const pd of pds) {
+                const attr = resolveDetailAttribute(pd.field_name)
+                if (!attr || attr.scope !== 'broadcast') continue   // skip per-variant / unmapped attrs
+                const cd = await coerceDetailValue(ptType, attr.spApiKey, pd.recommended_value, ptOpts)
+                if (!cd.isEnum) continue                            // free-text — any value is accepted
+                const row = pd as unknown as Record<string, unknown>
+                row.is_enum = true
+                row.enum_valid = cd.valid
+                row.enum_accepted = cd.accepted
+                if (cd.valid && cd.value !== pd.recommended_value) { row.normalized_from = pd.recommended_value; pd.recommended_value = cd.value }
+              }
+            }
+          } catch (vErr) {
+            console.warn('[AI Recs] product-detail enum validation skipped (non-fatal):', vErr instanceof Error ? vErr.message : vErr)
           }
 
           // ── POST-PROCESS: mark items DONE when the section already scores MAX, or live matches ──

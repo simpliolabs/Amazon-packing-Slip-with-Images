@@ -41,6 +41,7 @@ import {
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
 import { coerceDetailValue, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
+import { getProductType } from '@/lib/amazon/productType'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -652,20 +653,8 @@ async function patchSku(
 }
 
 /** Read the productType once from the first child (variation families share one type). */
-async function getProductType(sellerId: string, token: string, sku: string): Promise<string> {
-  try {
-    const url =
-      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
-      `?marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
-    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
-    if (resp.ok) {
-      const json = await resp.json() as { summaries?: { productType?: string }[] }
-      const pt = json.summaries?.[0]?.productType
-      if (pt) return pt
-    }
-  } catch { /* fall through */ }
-  return 'PRODUCT' // generic fallback; Amazon resolves the actual type from the listing
-}
+// getProductType moved to @/lib/amazon/productType (shared + process-cached for consistent enum
+// resolution). Imported above; both loadDetailContext and the ?debug branch use the shared version.
 
 // ─── PATCH one SKU's DETAIL attribute (validation-preview, then live) ──────────
 async function patchSkuDetail(
