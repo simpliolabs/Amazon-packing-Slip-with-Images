@@ -21,6 +21,7 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
+import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
 
 // ─── Shared output types (structurally identical to the route's interfaces) ────
 
@@ -673,20 +674,16 @@ export function validateBullets(
   }
 
   // Opportunity-keyword coverage. The scorer aggregates CRITICAL ∪ UPGRADE and penalizes
-  // when 2+ are missing across the bullets joined together. We use 3+ as the retry trigger
-  // (1-2 missing is below the scorer's first penalty tier and not worth a retry round).
-  if (opportunityKws.length >= 3) {
-    const joined = bullets.join(' ').toLowerCase()
-    const joinedWords = new Set(joined.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
-    const missing = opportunityKws.filter((kw) => {
-      const phrase = kw.toLowerCase()
-      if (joined.includes(phrase)) return false
-      const words = phrase.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w && !MINOR_WORDS.has(w))
-      return !(words.length > 0 && words.every((w) => joinedWords.has(w)))
-    })
-    if (missing.length >= 3) {
-      const sample = missing.slice(0, 5).map((k) => `"${k}"`).join(', ')
-      problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE). Weave at least ${Math.max(0, missing.length - 2)} of these naturally into the bullet body text: ${sample}.`)
+  // when 2+ are missing across the bullets joined together. We trigger the retry at the SAME
+  // >=2 threshold — the shared predicate makes the validator catch EXACTLY what the scorer docks
+  // (do NOT raise this back to 3+ or the validator/scorer divergence that pinned bullets at 9/18 returns).
+  if (opportunityKws.length > 0) {
+    // SHARED predicate so the validator catches EXACTLY what the scorer docks for; trigger at >=2 (the
+    // scorer's first penalty tier) and ask to weave EACH (not "leave 2"). Kills the 9/18 rulebook divergence.
+    const missing = missingBulletKeywords(bullets, opportunityKws)
+    if (missing.length >= 2) {
+      const sample = missing.slice(0, 6).map((k) => `"${k}"`).join(', ')
+      problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE). Weave EACH naturally into the bullet body — every word of the phrase present somewhere across the 5 bullets: ${sample}.`)
     }
   }
 
@@ -1343,9 +1340,17 @@ async function runBulletsAgent(
   /** High-IQ compatibility device brands to weave in as 'Compatible with [Brand]'.
    *  PR #87 — proactively seed (title already does; bullets/desc now match). */
   compatibilityBrands: string[] = [],
+  /** Seller's DESIGN/SLOGAN name ("Later Gator") — must appear in >=1 bullet (the same identity mandate
+   *  the title + backend enforce). The deterministic backstop guarantees it lands. */
+  designName = '',
 ): Promise<string[]> {
   const { openai, brandName, category, repTitle, children } = input
   const apparel = looksApparel(category, repTitle)
+  // The seller's DESIGN/SLOGAN name ("Later Gator") is an identity keyphrase the bullets MUST carry (the
+  // title + backend already enforce it — #91/#92). Prepend it to the scored opportunity set so it LEADS the
+  // council brief and is guaranteed by the deterministic backstop (parity with the title design-name lead).
+  const dn = (designName || '').trim()
+  const oppPlusDesign = dn ? [dn, ...opportunityKws.filter((k) => k.toLowerCase() !== dn.toLowerCase())] : opportunityKws
   // Capacity family detection: do any 2 children carry different capacity tokens in their SKUs?
   // If yes, the SHARED bullets must NOT hardcode a specific GB value — each variant's title
   // carries its own capacity; shared bullets that say "128GB" mislead the 32GB and 64GB rows.
@@ -1353,10 +1358,13 @@ async function runBulletsAgent(
   for (const c of children) { const cap = capacityOf(c.sku) || capacityOf(c.title); if (cap) childCaps.add(cap) }
   const capacityFamily = !apparel && childCaps.size >= 2
   const familyCapList = [...childCaps].join(', ')
-  const topKeyphrases = remaining.slice(0, 3).map((k) => k.keyword)
+  // HARD-REQUIRE the SCORED opportunity set (exactly what the scorer + validator check) — the old brief
+  // only required 3 from a DIFFERENT list, which is why bullets stalled at 9/18. Lead the top 3; cover the
+  // rest somewhere across the 5 bullets. The validate-retry loop + deterministic backstop drive it home.
+  const requiredKws = (oppPlusDesign.length ? oppPlusDesign : remaining.slice(0, 8).map((k) => k.keyword)).slice(0, 8)
   const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
-  const topLine = topKeyphrases.length
-    ? `\n🔴 TOP SEARCH KEYPHRASES — weave ONE of these into EACH of bullets 1, 2, and 3 (verbatim or lightly reworded), ONLY where it reads naturally and accurately. These are the highest-volume terms not already in the title; bullets must reinforce them for ranking cohesion:\n${topKeyphrases.map((k) => `  - "${k}"`).join('\n')}\n`
+  const topLine = requiredKws.length
+    ? `\n🔴 REQUIRED SEARCH KEYPHRASES — these are EXACTLY what your bullet ranking is scored on. Weave EACH one somewhere across the 5 bullets (every word of the phrase present; paraphrase OK) and LEAD bullets 1, 2, 3 with the top three. Cover EVERY one that fits accurately:\n${requiredKws.map((k) => `  - "${k}"`).join('\n')}\n`
     : ''
   const attrLine = attributes.length
     ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention ${apparel ? 'the garment brand and material' : 'the key specs'} in ONE bullet${apparel ? ' (e.g. "comfort colors", "ring-spun cotton")' : ''}. Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
@@ -1561,6 +1569,50 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         if (fb.length === 5) bullets = fb
       }
     } catch { /* fail-open — keep best-so-far */ }
+  }
+
+  // 🛟 DETERMINISTIC COVERAGE BACKSTOP — guarantees the scorer's opportunity keywords (+ the design name)
+  // land in the bullets even when the LLM council/retry stalls. The title has the same design-name floor;
+  // bullets had only best-effort coverage and NO deterministic floor, which is exactly why they dead-ended
+  // at 9/18. Runs LAST — after the brand-safety judge — so nothing downstream can strip a freshly-woven
+  // token. Because nothing re-validates after it, safeKw() must itself enforce EVERY invariant the upstream
+  // passes do (it does NOT just trust the relevance gate — adversarial review caught a bare-brand hole here):
+  //   • drop all-stopword phrases — nothing real to weave (would otherwise append a meaningless tail forever);
+  //   • reject any capacity-token keyword in a capacity family (broadcast bullets must stay GB-agnostic);
+  //   • reject any keyword carrying a role/profession word not in the title (the documented teacher-leak);
+  //   • reject any keyword that introduces an UNFRAMED third-party brand / trademark — a verbatim append
+  //     can't add the required 'for [Brand]' framing, so weaving it would be a listing-suppression risk
+  //     (this is the exact check validateBullets enforces; the backstop runs after it, so it must repeat it).
+  // It appends at most ONE short clause per bullet (no keyword-soup), to the shortest bullet with room under
+  // the 200-char cap. SOFT SPOT (not an absolute guarantee): if every bullet is maxed, a keyword is dropped.
+  if (bullets.length > 0 && oppPlusDesign.length > 0) {
+    const capFamily = capacityFamilyTokens.length >= 2
+    const capRe = /\b\d{1,4}\s?(?:GB|TB|MB)\b/i
+    const ownBrand = ownBrandTokenSet(brandName || '')
+    const safeKw = (kw: string): boolean => {
+      if (bulletTokens(kw).length === 0) return false                        // all-stopword phrase — nothing to weave
+      if (capFamily && capRe.test(kw)) return false                          // capacity token in a capacity family
+      const toks = kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+      if (toks.some((t) => ROLE_WORDS.has(t) && !titleWords.has(t))) return false  // role/profession leak
+      if (findThirdPartyBrands(kw, ownBrand).length > 0) return false        // unframed third-party brand
+      if (findTrademarkPhrases(kw).length > 0) return false                  // trademark / franchise phrase
+      return true
+    }
+    const usedBullet = new Set<number>()   // at most one appended clause per bullet — prevents keyword-soup
+    for (const kw of missingBulletKeywords(bullets, oppPlusDesign)) {
+      if (!safeKw(kw)) continue
+      if (missingBulletKeywords(bullets, [kw]).length === 0) continue // already covered by an earlier append
+      // Weave into the SHORTEST not-yet-appended bullet that still has room for the clause under the 200 cap.
+      let idx = -1, shortest = Infinity
+      for (let i = 0; i < bullets.length; i++) {
+        if (usedBullet.has(i)) continue
+        const projected = bullets[i].replace(/[.\s]+$/, '').length + kw.length + 3 // ", " + trailing "."
+        if (projected <= 200 && bullets[i].length < shortest) { shortest = bullets[i].length; idx = i }
+      }
+      if (idx === -1) continue // every bullet is maxed or already used — drop this kw (the acknowledged soft spot)
+      bullets[idx] = `${bullets[idx].replace(/[.\s]+$/, '')}, ${kw}.`
+      usedBullet.add(idx)
+    }
   }
 
   return bullets
@@ -2567,7 +2619,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const topOpportunityKwsForBullets = cleanGated
     .filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE')
     .filter((k) => !isSeasonal(k.keyword))
-    .filter((k) => k.keyword.split(/\s+/).length <= 5)
+    .filter((k) => k.keyword.split(/\s+/).length <= 6)   // match the scorer (no word cap on its set); 6 = title pin's safe ceiling
     .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))   // already in title → not a bullet gap
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
@@ -2582,7 +2634,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   const capacityFamilyTokens = bulletCapTokens.size >= 2 ? [...bulletCapTokens] : []
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands)
+  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /

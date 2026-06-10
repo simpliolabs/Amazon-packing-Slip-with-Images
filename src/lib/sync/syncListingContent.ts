@@ -31,6 +31,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
+import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -500,7 +501,15 @@ export async function fetchScoringContext(
       ctx.hasAiRecommendations = true
       const pdi = rec.product_details_improvements
       if (Array.isArray(pdi)) {
-        ctx.productDetailsGaps = pdi.length
+        // MATERIALITY (#85): product_details_improvements is a PROACTIVE spec sheet — the AI suggests a
+        // value for EVERY standard attribute, even ones already filled ("err toward more"). Counting its
+        // raw length docked Features for fields that aren't actually gaps (the "10/12 but 8 to push"
+        // confusion). Count only TRUE gaps: a field with no live value, or an enum field whose current
+        // value is invalid against the live Amazon schema (is_enum/enum_valid persisted by validate-at-regen).
+        const isEmpty = (v: unknown) => !v || !String(v).trim()
+        ctx.productDetailsGaps = pdi.filter((p: { current_value?: unknown; is_enum?: boolean; enum_valid?: boolean }) =>
+          isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false),
+        ).length
       }
     }
   } catch (err) {
@@ -749,11 +758,15 @@ export function scoreListingContent(
     // bullets). The old exact-substring check missed paraphrases and pinned good bullets at a low score.
     const bulletOppKw = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
       .filter((k) => !isSeasonalKw(k))
+      // Align the scorer's bullet universe to the GENERATOR's pool (listingPipeline topOpportunityKwsForBullets
+      // caps at <=6 words): don't dock for a long-tail the generator deliberately won't force into a bullet, or
+      // bullets can never reach max no matter how well the pipeline runs (adversarial-review finding). The
+      // deeper source/gate unification (same rows + same coverage gate both sides) is the deferred KeywordPlan.
+      .filter((k) => k.split(/\s+/).length <= 6)
     if (bulletOppKw.length > 0) {
-      const BKW_STOP = new Set(['for', 'the', 'a', 'an', 'and', 'with', 'of', 'to', 'in', 'on', 'your', 'you', 'that', 'this'])
-      const bWords = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1 && !BKW_STOP.has(t))
-      const bulletWordSet = new Set(bWords(bullets.join(' ')))
-      const missingOpp = bulletOppKw.filter((k) => { const w = bWords(k); return w.length === 0 || !w.every((x) => bulletWordSet.has(x)) })
+      // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
+      // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
+      const missingOpp = missingBulletKeywords(bullets, bulletOppKw)
       if (missingOpp.length >= 2) {
         bulletScore -= Math.min(12, missingOpp.length * 2)
         issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. The AI rewrite weaves these in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })

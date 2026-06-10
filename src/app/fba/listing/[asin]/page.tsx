@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
+import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
@@ -1381,6 +1382,48 @@ export default function ListingDetailPage() {
           for (const s of ['title', 'bullets', 'backend'] as const) out[s] = winnable[s] ? 'winnable' : covered[s] ? 'done' : null
           return out
         })()
+        // ACTIONABLE RANK WORK-LIST (PO point #2: "rank was meant to provide actual actionable tasks the
+        // portal can do," not beauty/information). Maps each genuinely-uncovered high-opportunity keyword to
+        // the ONE portal action that closes it: SHIP the drafted section if the fresh AI draft ALREADY weaves
+        // the keyword (token-coverage via the SAME predicate the scorer/generator use — R5, never .includes()),
+        // else REGENERATE to get a draft that does. Honest: covered keywords never appear as "work".
+        const rankWorkList: { section: 'title' | 'bullets' | 'backend'; label: string; keywords: string[]; drafted: boolean }[] = (() => {
+          if (!rankData?.analyzed || !Array.isArray(rankData.rows) || rankData.rows.length === 0) return []
+          const norm = (p: string): 'title' | 'bullets' | 'backend' | null =>
+            p === 'title' ? 'title' : /^bullet/.test(p) ? 'bullets' : (p === 'backend_keywords' || p === 'backend') ? 'backend' : null
+          const nk = (s: string) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim()
+          const coveredKw = new Set<string>()
+          for (const r of rankData.rows) if (r.youCover) coveredKw.add(nk(r.keyword))
+          const bySection: Record<'title' | 'bullets' | 'backend', Set<string>> = { title: new Set(), bullets: new Set(), backend: new Set() }
+          for (const kr of aiRecs?.keyword_reconciliation ?? []) {
+            if (kr.action_type !== 'CRITICAL' && kr.action_type !== 'UPGRADE') continue
+            if (!kr.keyword || coveredKw.has(nk(kr.keyword))) continue   // missing keyword OR rank already covers it → not a task
+            for (const p of kr.placed_in ?? []) { const n = norm(p); if (n) bySection[n].add(kr.keyword) }
+          }
+          // "drafted" must be judged against EXACTLY what a Ship writes live. Bullets ship the one broadcast
+          // recommended_bullets. Title is the trap: for a capacity family the Ship distributes a DIFFERENT
+          // per-child title per SKU, so it's only honest to claim "draft covers it" when EVERY child's title
+          // covers the keyword — a capacity-specific term living in just one child's title would otherwise
+          // falsely promise coverage for the other SKUs (adversarial-review finding). Backend is per-child with
+          // no single broadcast draft to diff, so it always routes to Regenerate (drafted=false).
+          const perChildTitles = recs.per_child_titles ?? []
+          const titleCovers = (kws: string[]): boolean =>
+            perChildTitles.length > 1
+              ? perChildTitles.every((t) => missingBulletKeywords([t.title ?? ''], kws).length === 0)
+              : (recs.recommended_title ?? '').trim().length > 0 && missingBulletKeywords([recs.recommended_title ?? ''], kws).length === 0
+          const out: { section: 'title' | 'bullets' | 'backend'; label: string; keywords: string[]; drafted: boolean }[] = []
+          for (const sec of ['title', 'bullets', 'backend'] as const) {
+            const kws = [...bySection[sec]]
+            if (kws.length === 0) continue
+            const bulletsDraft = (recs.recommended_bullets ?? []).join(' ')
+            const drafted =
+              sec === 'title' ? titleCovers(kws)
+              : sec === 'bullets' ? (bulletsDraft.trim().length > 0 && missingBulletKeywords([bulletsDraft], kws).length === 0)
+              : false   // backend → always Regenerate
+            out.push({ section: sec, label: sec === 'title' ? 'Title' : sec === 'bullets' ? 'Bullets' : 'Backend keywords', keywords: kws, drafted })
+          }
+          return out
+        })()
         // Chip never hides/disables Ship or Copy — it only reframes WHY the lever is shifting. Both labels +
         // tooltips are asserted honest in scripts/verify-rank-honesty.mjs (no rank over-promise).
         const rankChip = (v: 'winnable' | 'done' | null) =>
@@ -1425,14 +1468,42 @@ export default function ListingDetailPage() {
                     <div className="px-4 pb-3 pt-1 bg-slate-50/60 border-t border-slate-100">
                       <div className="grid sm:grid-cols-2 gap-3 mt-2">
                         <div>
-                          <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 mb-1">Content CAN do</p>
-                          <ul className="space-y-1">
-                            {(rankData.verdict.contentCanDo ?? []).map((c, i) => (
-                              <li key={i} className="flex gap-1.5 text-[11px] text-slate-700">
-                                <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8.5l3.5 3.5L13 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>{c}
-                              </li>
-                            ))}
-                          </ul>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 mb-1">Close these gaps — do it here</p>
+                          {rankWorkList.length > 0 ? (
+                            <ul className="space-y-2">
+                              {rankWorkList.map((w) => (
+                                <li key={w.section} className="text-[11px] text-slate-700">
+                                  <div className="flex gap-1.5">
+                                    <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8.5l3.5 3.5L13 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                                    <span className="min-w-0"><span className="font-semibold">{w.label}</span> — add {w.keywords.slice(0, 3).map((k) => `“${k}”`).join(', ')}{w.keywords.length > 3 ? ` +${w.keywords.length - 3} more` : ''}</span>
+                                  </div>
+                                  <div className="mt-1 ml-5">
+                                    {w.drafted && (w.section === 'title' || w.section === 'bullets') ? (
+                                      <button onClick={() => openPushPreview(w.section as PushField)} disabled={pushLoading}
+                                        title={`The fresh AI draft already weaves ${w.keywords.length === 1 ? 'this keyword' : 'these keywords'} in — ship it live to close the gap.`}
+                                        className="inline-flex items-center gap-1 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded font-semibold disabled:opacity-50 transition-colors cursor-pointer">
+                                        <Icon.Send className="w-3 h-3" /> Ship {w.label.toLowerCase()} — draft already covers {w.keywords.length === 1 ? 'it' : 'them'}
+                                      </button>
+                                    ) : (
+                                      <button onClick={() => generateAiRecs()} disabled={aiLoading}
+                                        title={`The current draft doesn’t cover ${w.keywords.length === 1 ? 'this keyword' : 'these keywords'} yet — regenerate to weave ${w.keywords.length === 1 ? 'it' : 'them'} into the ${w.label.toLowerCase()}.`}
+                                        className="inline-flex items-center gap-1 text-[10px] bg-violet-600 hover:bg-violet-700 text-white px-2 py-1 rounded font-semibold disabled:opacity-50 transition-colors cursor-pointer">
+                                        <Icon.Sparkles className="w-3 h-3" /> Regenerate to weave {w.keywords.length === 1 ? 'it' : 'them'} in
+                                      </button>
+                                    )}
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <ul className="space-y-1">
+                              {(rankData.verdict.contentCanDo ?? []).map((c, i) => (
+                                <li key={i} className="flex gap-1.5 text-[11px] text-slate-700">
+                                  <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8.5l3.5 3.5L13 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>{c}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
                         </div>
                         <div>
                           <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1">Content CAN&apos;T do (needs other levers)</p>

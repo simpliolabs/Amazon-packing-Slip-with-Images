@@ -614,45 +614,15 @@ export async function POST(req: NextRequest) {
             }
           }
 
-          // ── LIVE SCORE (computed UP FRONT) — drives the issues panel AND verdict gating below ──
-          // Scored on the live listing_content rows (independent of the AI rewrite). Best-effort:
-          // scoring must NEVER break a generation that already produced recommendations. We need it
-          // before the action-plan loop so a section that already scores MAX can be marked DONE
-          // instead of a red REPLACE — that's the "Title 25/25 but still asked to ship it" bug.
-          let secScore: { title: number; bullet: number; keyword: number; aplus: number; description: number; features: number } | null = null
-          try {
-            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
-            const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
-            const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
-            const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
-            // This regen's recommendations (incl. product_details_improvements) are persisted to
-            // listing_seo_recommendations AFTER this block — so fetchScoringContext just read the
-            // PREVIOUS regen's (stale) product-detail count. Override with THIS regen's fresh count
-            // so the Features score reflects the specs we just generated, not a one-regen-old value.
-            if (Array.isArray(result.product_details_improvements)) ctx.productDetailsGaps = result.product_details_improvements.length
-            const sc = scoreListingContent(parentOwn, scoreRows, ctx)
-            secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score, description: sc.description_score, features: sc.features_score }
-            await supabase.from('listing_seo_scores').update({
-              title_score: sc.title_score,
-              bullet_score: sc.bullet_score,
-              keyword_score: sc.keyword_score,
-              aplus_score: sc.aplus_score,
-              description_score: sc.description_score,
-              features_score: sc.features_score,
-              overall_score: sc.overall_score,
-              issues: sc.issues,
-              child_override_count: sc.child_override_count,
-            }).eq('parent_asin', parent_asin)
-          } catch (scoreErr) {
-            console.warn('[AI Recs] Live score (verdict gating + issues panel) failed (non-fatal):', scoreErr instanceof Error ? scoreErr.message : scoreErr)
-          }
-
           // ── VALIDATE PRODUCT DETAILS vs the live Amazon schema (E — Architecture A) ───────────
           // Coerce each pushable broadcast detail to an EXACT accepted enum member BEFORE it is stored
           // as a recommendation, so the panel shows the confirmed value (not the raw audit guess) and
           // the push works 100%. Stores is_enum/enum_valid/enum_accepted/normalized_from on the item
           // for the panel's seller-picker (Part 2b). Best-effort: any SP-API failure leaves the raw
           // value (the push VALIDATION_PREVIEW is the final backstop). productType is process-cached.
+          // RUNS BEFORE the live score below so the Features count can fold in enum-invalid fields in the
+          // SAME pass — otherwise the score steps DOWN on the next sync with no seller action (the
+          // "scores regress when I did nothing" trust trap; adversarial-review finding).
           try {
             const pds = result.product_details_improvements
             const detailSku = children[0]?.sku
@@ -681,6 +651,47 @@ export async function POST(req: NextRequest) {
             }
           } catch (vErr) {
             console.warn('[AI Recs] product-detail enum validation skipped (non-fatal):', vErr instanceof Error ? vErr.message : vErr)
+          }
+
+          // ── LIVE SCORE (computed UP FRONT) — drives the issues panel AND verdict gating below ──
+          // Scored on the live listing_content rows (independent of the AI rewrite). Best-effort:
+          // scoring must NEVER break a generation that already produced recommendations. We need it
+          // before the action-plan loop so a section that already scores MAX can be marked DONE
+          // instead of a red REPLACE — that's the "Title 25/25 but still asked to ship it" bug.
+          let secScore: { title: number; bullet: number; keyword: number; aplus: number; description: number; features: number } | null = null
+          try {
+            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+            const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
+            const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
+            const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
+            // This regen's recommendations (incl. product_details_improvements) are persisted to
+            // listing_seo_recommendations AFTER this block — so fetchScoringContext just read the
+            // PREVIOUS regen's (stale) product-detail count. Override with THIS regen's fresh count.
+            // MATERIALITY (#85): count only TRUE gaps (empty value OR enum-invalid), not the full proactive
+            // spec-sheet length (which wrongly docked already-filled fields — the "10/12 but 8 to push"
+            // confusion). The enum validation ran just above, so is_enum/enum_valid are set here — using the
+            // SAME predicate as syncListingContent keeps THIS regen's score == the next sync's (no flip-flop).
+            if (Array.isArray(result.product_details_improvements)) {
+              const isEmpty = (v: string | null) => !v || !String(v).trim()
+              ctx.productDetailsGaps = result.product_details_improvements.filter((p) =>
+                isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false),
+              ).length
+            }
+            const sc = scoreListingContent(parentOwn, scoreRows, ctx)
+            secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score, description: sc.description_score, features: sc.features_score }
+            await supabase.from('listing_seo_scores').update({
+              title_score: sc.title_score,
+              bullet_score: sc.bullet_score,
+              keyword_score: sc.keyword_score,
+              aplus_score: sc.aplus_score,
+              description_score: sc.description_score,
+              features_score: sc.features_score,
+              overall_score: sc.overall_score,
+              issues: sc.issues,
+              child_override_count: sc.child_override_count,
+            }).eq('parent_asin', parent_asin)
+          } catch (scoreErr) {
+            console.warn('[AI Recs] Live score (verdict gating + issues panel) failed (non-fatal):', scoreErr instanceof Error ? scoreErr.message : scoreErr)
           }
 
           // ── POST-PROCESS: mark items DONE when the section already scores MAX, or live matches ──
