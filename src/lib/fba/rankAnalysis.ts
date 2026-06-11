@@ -11,7 +11,7 @@
  */
 import type OpenAI from 'openai'
 import { createHash } from 'node:crypto'
-import { getStoredAnalysis } from '@/lib/keyword-engine'
+import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { isWithinBudget } from '@/lib/keyword-engine/cacheService'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 import { fetchShareOfVoice } from '@/lib/sync/jungleScoutClient'
@@ -38,6 +38,10 @@ export interface RankPlaybookRow {
   sellerVisible: boolean | null       // in this keyword's top returned listings; null = not measured
   sovStatus: SovStatus
   priority: number                    // 1..N (deterministic fallback: opportunity desc)
+  /** Outcome loop (#89): SQP share movement since the last monthly snapshot. Absent/null until ≥2 months of
+   *  history exist (insufficient_data → null). `text` is server-authored + sanitize()-clamped and only ever
+   *  asserts correlation ("rose AFTER a change"), NEVER causation. */
+  shareSignal?: { direction: 'rose' | 'flat' | 'fell'; text: string } | null
 }
 
 export interface RankVerdict {
@@ -189,6 +193,10 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
 
   const check = makeCoverageChecker(haystack)
 
+  // Outcome loop (#89): per-keyword SQP share movement since the last monthly snapshot. Best-effort — {} (so
+  // every shareSignal is null) until ≥2 months of history accrue or if the snapshots table isn't migrated.
+  const signals = await computeOutcomeSignals(childAsin, supabase).catch(() => ({}))
+
   const rows: RankPlaybookRow[] = kws.map((k) => {
     const flagCover = ([k.inTitle && 'title', k.inBullets && 'bullets', k.inDescription && 'description', k.inBackend && 'backend'].filter(Boolean)) as string[]
     let youCover = flagCover.length > 0
@@ -196,6 +204,21 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     // Stale-flag fallback: presence flags are a snapshot; if all false, trust the LIVE token check.
     if (!youCover && check(k.keyword)) { youCover = true; coveredIn = ['(live content)'] }
     const actionType = k.actionType as ActionType
+    // Author the honest share-movement line server-side + sanitize it (correlation only, never causation).
+    const sig = (signals as Record<string, { direction: string; shareAfter: number | null; contentChangedBetween: boolean; nonContentBottleneck: boolean }>)[k.keyword.toLowerCase()]
+    let shareSignal: RankPlaybookRow['shareSignal'] = null
+    if (sig && sig.direction !== 'insufficient_data' && sig.shareAfter != null) {
+      const pct = Math.round(sig.shareAfter)
+      let text: string
+      if (sig.direction === 'rose') {
+        text = sig.contentChangedBetween ? `Share rose to ${pct}% after your last content change.` : `Share rose to ${pct}% (no content change in this window).`
+      } else if (sig.nonContentBottleneck) {
+        text = `Share ${sig.direction === 'fell' ? 'fell to' : 'flat at'} ${pct}% despite your last content change — rank now likely depends on reviews, price, and velocity, not more copy.`
+      } else {
+        text = `Share ${sig.direction === 'fell' ? 'fell to' : 'flat at'} ${pct}% (no content change in this window).`
+      }
+      shareSignal = { direction: sig.direction as 'rose' | 'flat' | 'fell', text: sanitize(text) }
+    }
     return {
       keyword: k.keyword,
       volume: k.searchVolume,
@@ -210,6 +233,7 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
       sellerVisible: null,
       sovStatus: 'not_run' as SovStatus,
       priority: 0,
+      shareSignal,
     }
   })
 

@@ -198,7 +198,16 @@ export default function RankAnalysisPanel({ asin }: { asin: string }) {
                         {r.youCover ? <Check /> : <Cross />}
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-slate-600">{r.contentAction}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {r.contentAction}
+                      {/* Outcome loop (#89): honest share-movement line (correlation, never causation). Renders
+                          nothing until ≥2 months of share history exist. */}
+                      {r.shareSignal && (
+                        <span className={`block text-[10px] mt-0.5 ${r.shareSignal.direction === 'rose' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                          {r.shareSignal.text}
+                        </span>
+                      )}
+                    </td>
                     {showComp && (
                       <td className="px-3 py-2 text-slate-600">
                         {r.sovStatus === 'ok' && r.topCompetitorBrand ? (

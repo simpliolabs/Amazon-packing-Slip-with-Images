@@ -29,3 +29,8 @@ export {
   isWithinBudget,
   getApiUsageStats,
 } from './cacheService';
+
+// Outcome loop (task #89): per-keyword SQP share time-series → rose/flat/fell signal.
+export { captureShareSnapshots } from './shareSnapshots';
+export { computeOutcomeSignals } from './outcomeSignals';
+export type { OutcomeSignal } from './outcomeSignals';
