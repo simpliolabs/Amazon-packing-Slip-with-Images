@@ -662,19 +662,24 @@ export function scoreListingContent(
   const apparel = titleLooksApparel(title)
   if (!title) {
     titleScore = 0
-    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with your primary keyword, then brand, then key attributes. Target 80-150 chars (Amazon recommends ≤80 for mobile).', auto_fixable: false })
+    issues.push({ field: 'title', severity: 'critical', message: 'Title is missing entirely. Go to Seller Central → Edit Listing → Vital Info. Lead with your brand, then your design/product name, then your top keyword. Aim ≤75 chars — Amazon\'s new title limit (effective July 27, 2026; all categories except media).', auto_fixable: false })
   } else {
     const titleLen = title.length
 
     if (titleLen < 50) {
       titleScore -= 10
-      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to contain meaningful keywords. Target 80-120 chars with your brand, product type, and top 2-3 keywords.`, auto_fixable: false })
+      issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to carry meaningful keywords. Aim 50-75 chars: brand + design/product name + your top keyword (Amazon's new ≤75 limit, July 27, 2026).`, auto_fixable: false })
     } else if (titleLen > 200) {
       titleScore -= 10
       issues.push({ field: 'title', severity: 'critical', message: `Title is ${titleLen} chars — exceeds Amazon's 200-char hard limit. This may cause listing suppression. Immediately shorten by removing redundant phrases and moving keywords to bullets/backend.`, auto_fixable: false })
-    } else if (titleLen > 150) {
-      titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — exceeds the 150-char recommended limit. Amazon truncates long titles on mobile (80 chars visible) and in search results. Remove filler words and move lower-volume keywords to bullets or backend keywords.`, auto_fixable: false })
+    } else if (titleLen > 75) {
+      // Amazon's NEW title rule (effective 2026-07-27): all non-media categories must be ≤75 chars
+      // INCLUDING spaces, or Amazon AUTO-REWRITES the title for you (undoing the keyword + design-name
+      // SEO this tool builds). The extra detail moves to the new 125-char Item Highlights field. WARNING
+      // ONLY for now — NO dock — because the entire catalog is currently >75; the title generator flips to
+      // ≤75 in a follow-up PR, which is when the dock turns on. This lets the seller ship a compliant title
+      // on THEIR terms before Amazon does it for them. (Supersedes the old 150-char recommended band.)
+      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — over Amazon's NEW 75-character limit (effective July 27, 2026; every category except media). After that date Amazon AUTO-REWRITES titles over 75 chars, which can undo your keyword and design-name SEO. Ship a ≤75-char title on your terms first; move the extra detail (materials, recommended uses) into the new 125-char Item Highlights field as comma-separated phrases.`, auto_fixable: false })
     }
 
     // ALL CAPS check — the message says brand names + technical acronyms are exempt;
