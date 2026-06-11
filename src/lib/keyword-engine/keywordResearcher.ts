@@ -57,7 +57,7 @@ export interface KeywordResearchResult {
   /** How many JS API credits were consumed */
   creditsUsed: number;
   /** Source of the seed term */
-  source: 'vision' | 'title' | 'manual';
+  source: 'vision' | 'title' | 'manual' | 'category';
   /** ISO timestamp */
   researchedAt: string;
 }
@@ -83,9 +83,15 @@ export async function researchKeywords(
     forceRefresh?: boolean;
     listingTitle?: string;
     manualSeed?: string;
+    /** CATEGORY-level seed derived from the live SP-API productType ("self stick notes") — the
+     *  fix for the seed-quality trap: a vision/title seed is PRODUCT-LITERAL ("post it notes
+     *  variety pack"), so Phase 2 returns our own phrasing back and Phase 3 crowns whoever wins
+     *  that narrow query — never the category winner whose keywords we need. Supplied by the
+     *  caller for NON-apparel only (apparel niches are design-led; vision seeds them better). */
+    categorySeed?: string;
   } = {}
 ): Promise<KeywordResearchResult> {
-  const { forceRefresh = false, listingTitle, manualSeed } = options;
+  const { forceRefresh = false, listingTitle, manualSeed, categorySeed } = options;
 
   // Check cache first
   if (!forceRefresh) {
@@ -98,11 +104,14 @@ export async function researchKeywords(
 
   // ── Phase 1: Get 1 Seed Term ──────────────────────────────────────────────
   let seed: string;
-  let source: 'vision' | 'title' | 'manual';
+  let source: 'vision' | 'title' | 'manual' | 'category';
 
   if (manualSeed) {
     seed = manualSeed;
     source = 'manual';
+  } else if (categorySeed) {
+    seed = categorySeed;
+    source = 'category';
   } else {
     const visionSeed = await getTopVisionSeed(asin);
     if (visionSeed) {

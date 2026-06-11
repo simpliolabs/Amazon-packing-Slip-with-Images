@@ -225,9 +225,19 @@ export async function POST(
       .single();
     const listingTitle = (listingRow as { title?: string } | null)?.title || undefined;
 
+    // Optional seller-typed research seed (Intelligence tab "Re-research" box). Tolerant parse —
+    // the POST historically has no body, so absence must not break the existing trigger.
+    let manualSeed: string | undefined;
+    try {
+      const body = (await request.json()) as { seed?: string } | null;
+      const s = (body?.seed ?? '').trim();
+      if (s) manualSeed = s.slice(0, 80);
+    } catch { /* no body — legacy trigger */ }
+
     // Fire and forget — run sync in background using resolved child ASIN
     syncKeywordIntelligence(childAsin, {
       forceRefresh: true,
+      manualSeed,
       competitorAsin,
       parentAsin: inputAsin,
       listingTitle,
