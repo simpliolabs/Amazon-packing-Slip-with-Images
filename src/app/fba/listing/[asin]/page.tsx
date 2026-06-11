@@ -82,6 +82,7 @@ interface AnalyzedKeyword {
   searchVolume: number; keywordSales: number; competingProducts: number
   asinImpressionShare: number; asinClickShare: number; asinPurchaseShare: number
   inTitle: boolean; inBullets: boolean; inDescription: boolean; inBackend: boolean
+  titleDensity?: number | null
   dataSource: string
 }
 
@@ -2504,7 +2505,15 @@ export default function ListingDetailPage() {
                 <tbody className="divide-y divide-slate-100">
                   {kwData.topOpportunities.slice(0, 20).map((kw, i) => (
                     <tr key={i} className="hover:bg-slate-50">
-                      <td className="px-3 py-2 text-slate-800">{kw.keyword}</td>
+                      <td className="px-3 py-2 text-slate-800">
+                        {kw.keyword}
+                        {kw.titleDensity != null && kw.titleDensity <= 2 && kw.searchVolume >= 500 && (
+                          <span className="ml-1.5 text-[9px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold whitespace-nowrap"
+                            title={`Title Density ${kw.titleDensity} (from your H10 import): only ${kw.titleDensity} page-1 competitor${kw.titleDensity === 1 ? ' has' : 's have'} this exact phrase in their TITLE — putting it in your title or Item Highlights is a low-competition win. The title generator already prefers these on ties.`}>
+                            TD {kw.titleDensity} · title win
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-right text-slate-600">{kw.searchVolume.toLocaleString()}</td>
                       <td className={`px-3 py-2 text-right font-semibold ${kw.opportunityScore >= 70 ? 'text-violet-700' : kw.opportunityScore >= 40 ? 'text-slate-700' : 'text-slate-400'}`}>{Math.round(kw.opportunityScore)}</td>
                       <td className="px-3 py-2">

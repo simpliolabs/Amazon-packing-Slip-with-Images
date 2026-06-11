@@ -83,6 +83,10 @@ export interface AnalyzedKeyword {
   inBackend: boolean;
   // Meta
   dataSource: 'sqp' | 'jungle_scout' | 'inherited';
+  /** H10 Title Density (import-only): page-1 competitors with the EXACT phrase in their TITLE.
+   *  0-2 with real volume = an outsized, low-competition title/highlights win. null for native
+   *  SQP/JS keywords (those sources don't measure it). */
+  titleDensity?: number | null;
   scoreBreakdown?: object;
 }
 

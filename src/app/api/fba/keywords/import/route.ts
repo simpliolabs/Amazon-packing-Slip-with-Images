@@ -81,6 +81,7 @@ export async function POST(req: NextRequest) {
     const cSales = col('keyword sales')
     const cComp = col('competing products')
     const cRank = col('organic rank')
+    const cTd = col('title density')
     if (cKw === -1 || cVol === -1) {
       return NextResponse.json({ error: `Couldn't find "Keyword Phrase" / "Search Volume" columns. Headers seen: ${table[0].join(', ')}` }, { status: 400 })
     }
@@ -126,6 +127,9 @@ export async function POST(req: NextRequest) {
 
     const seen = new Set<string>()
     const jsRows: JungleScoutKeywordRow[] = []
+    // Title Density per keyword (H10-only metric, carried OUTSIDE the engine row shape and
+    // re-attached after the engine run — TD 0-2 + volume = an easy title/highlights win).
+    const tdByKeyword = new Map<string, number>()
     let skippedExisting = 0
     for (const r of table.slice(1)) {
       const keyword = (r[cKw] ?? '').trim().toLowerCase()
@@ -133,6 +137,7 @@ export async function POST(req: NextRequest) {
       if (seen.has(keyword)) continue
       seen.add(keyword)
       if (existing.has(keyword)) { skippedExisting++; continue }
+      if (cTd >= 0 && String(r[cTd] ?? '').trim() !== '' && String(r[cTd]).trim() !== '-') tdByKeyword.set(keyword, num(r[cTd]))
       const sales = cSales >= 0 ? num(r[cSales]) : 0
       jsRows.push({
         keyword,
@@ -165,6 +170,7 @@ export async function POST(req: NextRequest) {
       search_volume: kw.searchVolume,
       competing_products: kw.competingProducts,
       keyword_sales: kw.keywordSales,
+      title_density: tdByKeyword.get(kw.keyword.toLowerCase()) ?? null,
       data_source: 'import',
       analyzed_at: new Date().toISOString(),
     }))
@@ -173,10 +179,14 @@ export async function POST(req: NextRequest) {
       const chunk = rows.slice(i, i + 100)
       const { error } = await db.from('keyword_analysis').upsert(chunk, { onConflict: 'asin,keyword', ignoreDuplicates: true })
       if (error) {
-        // 23514 = CHECK violation → migration 024 not applied yet. Honest, actionable error.
-        const msg = (error as { code?: string; message?: string }).code === '23514' || /check constraint/i.test((error as { message?: string }).message ?? '')
+        // 23514 = CHECK violation → migration 024 missing; PGRST204/42703 = unknown column →
+        // migration 025 (title_density) missing. Honest, actionable errors either way.
+        const e = error as { code?: string; message?: string }
+        const msg = e.code === '23514' || /check constraint/i.test(e.message ?? '')
           ? 'Migration 024 not applied — run 024_keyword_import_source.sql in Supabase, then retry.'
-          : (error as { message?: string }).message ?? 'insert failed'
+          : e.code === 'PGRST204' || e.code === '42703' || /title_density/i.test(e.message ?? '')
+            ? 'Migration 025 not applied — run 025_keyword_title_density.sql in Supabase, then retry.'
+            : e.message ?? 'insert failed'
         return NextResponse.json({ error: msg, imported: inserted }, { status: 500 })
       }
       inserted += chunk.length
