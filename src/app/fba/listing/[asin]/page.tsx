@@ -1684,7 +1684,14 @@ export default function ListingDetailPage() {
                             ) : (
                             <div className="flex items-start justify-between gap-2 bg-green-50 border border-green-200 rounded p-2">
                               <div className="min-w-0">
-                                <p className="text-[10px] font-bold text-green-800 uppercase">Update all {f.coh.total} variants to:</p>
+                                <p className="text-[10px] font-bold text-green-800 uppercase">
+                                  Update all {f.coh.total} variants to:
+                                  {f.key === 'title' && f.copyVal ? (
+                                    <span className={`ml-2 normal-case font-semibold ${f.copyVal.length > 75 ? 'text-amber-600' : 'text-green-700'}`}>
+                                      {f.copyVal.length}/75 chars{f.copyVal.length > 75 ? ' — over Amazon’s new limit' : ' ✓'}
+                                    </span>
+                                  ) : null}
+                                </p>
                                 <p className="text-xs text-slate-800 whitespace-pre-wrap break-words mt-0.5">{f.copyVal || '(none)'}</p>
                               </div>
                               <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -1704,6 +1711,9 @@ export default function ListingDetailPage() {
                               <details key={vi} className="bg-white border border-slate-200 rounded">
                                 <summary className="cursor-pointer px-2 py-1 text-[11px] flex items-center gap-2">
                                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 flex-shrink-0">{v.skus.length} variant{v.skus.length === 1 ? '' : 's'}</span>
+                                  {f.key === 'title' && v.value ? (
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 font-medium ${v.value.length > 75 ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>{v.value.length}c</span>
+                                  ) : null}
                                   <span className="truncate text-slate-500">{v.value ? (v.value.length > 90 ? v.value.slice(0, 90) + '…' : v.value) : '(empty)'}</span>
                                 </summary>
                                 <p className="px-2 pb-2 text-[10px] text-slate-400 font-mono break-words">{v.skus.join(', ')}</p>

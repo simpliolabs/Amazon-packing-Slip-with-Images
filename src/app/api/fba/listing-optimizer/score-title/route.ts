@@ -57,8 +57,16 @@ export async function POST(req: NextRequest) {
     // number the dashboard would show, not an estimate.
     const trimmed = title.trim()
     const parentContent = { ...rep, title: trimmed }
+    // Score the TYPED title, not the live one: scoreListingContent derives its title via
+    // sellerBaseTitle = longest-common-prefix of the CHILDREN's live titles (suffix-stripping for
+    // per-SKU " -Color-Size" tails). With 100+ identical live children, that consensus silently
+    // REPLACED the typed draft — a compliant 74-char draft was scored as the live 82-char title
+    // and docked -5 (>75) -3 (front-load) = 17/25 ("you suggest a title then score it 17/25").
+    // Overriding every child title with the typed one makes the consensus the typed title itself;
+    // bullets/keywords/A+ stay live — exactly "what's my score if I ship THIS title".
+    const childrenForScore = children.map((c) => ({ ...c, title: trimmed }))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const score = scoreListingContent(parentContent as any, children as any, scoringCtx)
+    const score = scoreListingContent(parentContent as any, childrenForScore as any, scoringCtx)
 
     // Granular Amazon-rule + SEO check for the typed title.
     const ruleProblems = validateTitle(trimmed, brandName)
