@@ -173,6 +173,29 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // "EXPECTED (PUSHED)" must mean what we actually PUSHED. The recommendation row a push came
+    // from can VANISH on the next regen (the audit picks a fresh 5-10 menu attributes), which made
+    // verify show stale-with-empty-expected on a fully-APPLIED push (live had "Relaxed" on 80/83
+    // SKUs, expected was blank). Fall back to the last ACCEPTED push per SKU from keyword_push_log
+    // when the rec no longer carries the field. Details only: the other fields' rec columns are
+    // replaced on regen, never removed. Best-effort: no log rows → no fallback (legacy behavior).
+    const pushedFallback = new Map<string, string>()
+    if (field === 'details' && detailKey) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: pl } = await (supabase as any)
+          .from('keyword_push_log')
+          .select('sku, new_value, pushed_at')
+          .eq('parent_asin', parentAsin)
+          .eq('field', `details:${detailKey}`)
+          .eq('status', 'accepted')
+          .order('pushed_at', { ascending: false })
+        for (const r of (pl ?? []) as { sku: string | null; new_value: string | null }[]) {
+          if (r.sku && r.new_value && !pushedFallback.has(r.sku)) pushedFallback.set(r.sku, r.new_value)
+        }
+      } catch { /* best-effort — log table missing/unreadable just means no fallback */ }
+    }
+
     // Collect every SKU we would have pushed to (children from listing_content + the parent
     // SKU we discover via Listings Items). The parent is included for broadcast fields and
     // for details, because the verify endpoint should mirror what push-content covers.
@@ -212,17 +235,22 @@ export async function GET(req: NextRequest) {
       targets.push({ sku: parentSku, asin: parentAsin, isParent: true })
     }
 
-    const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; matches: boolean; lastUpdatedDate: string | null }[] = []
+    const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource: 'recommendation' | 'push_log' | 'none'; matches: boolean; lastUpdatedDate: string | null }[] = []
     for (let i = 0; i < targets.length; i += 5) {
       const batch = targets.slice(i, i + 5)
       const settled = await Promise.all(batch.map(async (t) => {
         const listing = await getListing(sellerId, token, t.sku)
         const currentLive = extractLive(field, detailKey, listing)
-        const expected = expectedFor(field, rec, t.sku, t.isParent, detailFriendly || null)
+        let expected = expectedFor(field, rec, t.sku, t.isParent, detailFriendly || null)
+        let expectedSource: 'recommendation' | 'push_log' | 'none' = expected ? 'recommendation' : 'none'
+        if (!expected) {
+          const fb = pushedFallback.get(t.sku)
+          if (fb) { expected = fb; expectedSource = 'push_log' }
+        }
         const lastUpdatedDate = listing?.summaries?.[0]?.lastUpdatedDate ?? null
         return {
           sku: t.sku, asin: t.asin, isParent: t.isParent,
-          currentLive, expected,
+          currentLive, expected, expectedSource,
           matches: currentLive.length > 0 && currentLive.trim() === expected.trim(),
           lastUpdatedDate,
         }
@@ -234,6 +262,9 @@ export async function GET(req: NextRequest) {
 
     const matched = results.filter((r) => r.matches).length
     const stale   = results.filter((r) => !r.matches && r.expected.length > 0).length
+    // No expectation anywhere (not in the rec, never logged as pushed) — its own bucket so the UI
+    // never paints these as "stale" (which implied a failed push when there was nothing to compare).
+    const unknown = results.filter((r) => r.expected.length === 0).length
     return NextResponse.json({
       parent_asin: parentAsin,
       field,
@@ -248,6 +279,7 @@ export async function GET(req: NextRequest) {
       total: results.length,
       matched,
       stale,
+      unknown,
       results,
     })
   } catch (err) {

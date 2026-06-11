@@ -232,8 +232,8 @@ export default function ListingDetailPage() {
   // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
   // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
   // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
-  interface VerifyResultRow { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; matches: boolean; lastUpdatedDate: string | null }
-  interface VerifyPayload { total: number; matched: number; stale: number; results: VerifyResultRow[]; attribute_key?: string }
+  interface VerifyResultRow { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource?: 'recommendation' | 'push_log' | 'none'; matches: boolean; lastUpdatedDate: string | null }
+  interface VerifyPayload { total: number; matched: number; stale: number; unknown?: number; results: VerifyResultRow[]; attribute_key?: string }
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyResults, setVerifyResults] = useState<VerifyPayload | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
@@ -2867,7 +2867,7 @@ export default function ListingDetailPage() {
                         </p>
                         {verifyResults.stale > 0 && pushField !== 'details' && (
                           <button
-                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches).map((v) => v.sku))}
+                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches && v.expected).map((v) => v.sku))}
                             disabled={pushLoading}
                             className="mb-2 text-[11px] bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-md font-medium disabled:opacity-50"
                           >
@@ -2951,11 +2951,16 @@ export default function ListingDetailPage() {
                           <span className="inline-flex items-center gap-1 mr-3">
                             <span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> still stale (Amazon processing or rejected)
                           </span>
+                          {(verifyResults.unknown ?? 0) > 0 && (
+                            <span className="inline-flex items-center gap-1 mr-3">
+                              <span className="w-2 h-2 rounded-full bg-slate-400" /> <b>{verifyResults.unknown}</b> no expectation (nothing pushed or recommended to compare)
+                            </span>
+                          )}
                           <span className="text-slate-500">· {verifyResults.total} SKUs checked{verifyResults.attribute_key ? ` · /attributes/${verifyResults.attribute_key}` : ''}</span>
                         </p>
                         {verifyResults.stale > 0 && pushField !== 'details' && (
                           <button
-                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches).map((v) => v.sku))}
+                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches && v.expected).map((v) => v.sku))}
                             disabled={pushLoading}
                             className="mb-2 text-[11px] bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-md font-medium disabled:opacity-50"
                           >
@@ -2966,8 +2971,8 @@ export default function ListingDetailPage() {
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`p-2.5 text-xs ${v.isParent ? 'bg-violet-50' : ''}`}>
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                                  {v.matches ? '✓ applied' : 'stale'}
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.expected ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
+                                  {v.matches ? '✓ applied' : v.expected ? 'stale' : 'no expectation'}
                                 </span>
                                 <span className="font-mono text-slate-700">{v.sku}</span>
                                 {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
@@ -2984,8 +2989,10 @@ export default function ListingDetailPage() {
                                     <p className="text-[10px] text-slate-600 whitespace-pre-wrap break-words">{v.currentLive || <em className="text-slate-400">(empty)</em>}</p>
                                   </div>
                                   <div>
-                                    <p className="text-[10px] font-semibold text-emerald-700 uppercase mb-0.5">Expected (pushed)</p>
-                                    <p className="text-[10px] text-slate-700 whitespace-pre-wrap break-words">{v.expected || <em className="text-slate-400">(empty)</em>}</p>
+                                    <p className="text-[10px] font-semibold text-emerald-700 uppercase mb-0.5">
+                                      Expected (pushed){v.expectedSource === 'push_log' ? <span className="ml-1 normal-case font-normal text-slate-400">(from push history — the recommendation has since been regenerated)</span> : null}
+                                    </p>
+                                    <p className="text-[10px] text-slate-700 whitespace-pre-wrap break-words">{v.expected || <em className="text-slate-400">nothing to compare — this field isn&apos;t in the current recommendations and no push of it was ever logged</em>}</p>
                                   </div>
                                 </div>
                               )}
