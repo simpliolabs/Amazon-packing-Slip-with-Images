@@ -87,6 +87,9 @@ export interface AnalyzedKeyword {
    *  0-2 with real volume = an outsized, low-competition title/highlights win. null for native
    *  SQP/JS keywords (those sources don't measure it). */
   titleDensity?: number | null;
+  /** OUR organic rank for this keyword (Jungle Scout, measured on every fresh research).
+   *  null = not ranking / not measured. The rank tracker snapshots this over time. */
+  organicRank?: number | null;
   scoreBreakdown?: object;
 }
 
@@ -117,6 +120,7 @@ function normalizeSQPRow(row: SQPKeywordRow): {
   asinClickShare: number;
   asinPurchaseShare: number;
   relevanceRank: number;
+  organicRank: number | null;
 } {
   // Approximate competing products from total impressions
   // Assumption: average product gets ~500 impressions per keyword per month
@@ -133,6 +137,7 @@ function normalizeSQPRow(row: SQPKeywordRow): {
     asinClickShare: (row.asinClickShare ?? 0) * 100,
     asinPurchaseShare: (row.asinPurchaseShare ?? 0) * 100,
     relevanceRank: row.searchQueryScore ?? 50,
+    organicRank: null,   // SQP doesn't measure organic rank — JS rows carry it
   };
 }
 
@@ -145,6 +150,7 @@ function normalizeJungleScoutRow(row: JungleScoutKeywordRow): {
   asinClickShare: number;
   asinPurchaseShare: number;
   relevanceRank: number;
+  organicRank: number | null;
 } {
   // easeOfRankingScore: 0-100, higher = easier to rank (Jungle Scout's Cerebro IQ equivalent)
   // relevancyScore: purchase-intent signal — how much buying intent flows through this keyword
@@ -179,6 +185,9 @@ function normalizeJungleScoutRow(row: JungleScoutKeywordRow): {
     asinClickShare: 0,
     asinPurchaseShare: 0,
     relevanceRank,
+    // OUR organic rank for this keyword (JS measures it on every fetch). 0 = not ranking → null
+    // so "unranked" is explicit, not a fake position 0 (the rank tracker stores both states).
+    organicRank: (row.organicRank ?? 0) > 0 ? row.organicRank! : null,
   };
 }
 
@@ -262,6 +271,7 @@ export function runKeywordEngine(
       inDescription: presence.inDescription,
       inBackend: presence.inBackend,
       dataSource,
+      organicRank: normalized.organicRank,
       scoreBreakdown: score.scoreBreakdown,
     });
   }

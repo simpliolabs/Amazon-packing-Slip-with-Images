@@ -83,6 +83,8 @@ interface AnalyzedKeyword {
   asinImpressionShare: number; asinClickShare: number; asinPurchaseShare: number
   inTitle: boolean; inBullets: boolean; inDescription: boolean; inBackend: boolean
   titleDensity?: number | null
+  organicRank?: number | null
+  prevOrganicRank?: number | null
   dataSource: string
 }
 
@@ -2452,7 +2454,8 @@ export default function ListingDetailPage() {
               )}
               {/* Re-research with a CATEGORY (or custom) seed — the seed decides the whole keyword
                   universe: niche query + which competitor gets harvested. Blank = auto seed (the
-                  product type for non-apparel, the design/title for apparel). Costs 3 JS credits. */}
+                  product type for non-apparel, the design/title for apparel). Costs 4 JS credits
+                  (niche + SOV + competitor harvest + OUR organic ranks for the tracker). */}
               <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-100 bg-violet-50/40 flex-wrap">
                 <input
                   type="text"
@@ -2483,9 +2486,9 @@ export default function ListingDetailPage() {
                   }}
                   disabled={kwResearchBusy}
                   className="text-xs bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50 whitespace-nowrap"
-                  title="Runs the full research pipeline fresh: niche keywords + Share-of-Voice competitor discovery + the #1 competitor's keyword harvest. Spends 3 Jungle Scout credits."
+                  title="Runs the full research pipeline fresh: niche keywords + Share-of-Voice competitor discovery + the #1 competitor's keyword harvest + OUR organic ranks (feeds the Rank column + tracker). Spends 4 Jungle Scout credits."
                 >
-                  {kwResearchBusy ? 'Starting…' : 'Re-research (3 JS credits) →'}
+                  {kwResearchBusy ? 'Starting…' : 'Re-research (4 JS credits) →'}
                 </button>
               </div>
               {kwResearchMsg && (
@@ -2498,6 +2501,7 @@ export default function ListingDetailPage() {
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Keyword</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500">Vol</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is">Opp</th>
+                    <th className="text-right px-3 py-2 font-medium text-slate-500" title="YOUR organic rank for this keyword (Jungle Scout, measured on each Re-research). Arrow = movement vs the previous snapshot. — = not ranking.">Rank</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Present In</th>
                   </tr>
@@ -2516,6 +2520,26 @@ export default function ListingDetailPage() {
                       </td>
                       <td className="px-3 py-2 text-right text-slate-600">{kw.searchVolume.toLocaleString()}</td>
                       <td className={`px-3 py-2 text-right font-semibold ${kw.opportunityScore >= 70 ? 'text-violet-700' : kw.opportunityScore >= 40 ? 'text-slate-700' : 'text-slate-400'}`}>{Math.round(kw.opportunityScore)}</td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {kw.organicRank != null ? (
+                          <span className="text-slate-700 font-medium">
+                            #{kw.organicRank}
+                            {kw.prevOrganicRank != null && kw.prevOrganicRank !== kw.organicRank && (
+                              <span className={`ml-1 text-[10px] font-semibold ${kw.organicRank < kw.prevOrganicRank ? 'text-emerald-600' : 'text-red-500'}`}
+                                title={`Was #${kw.prevOrganicRank} at the previous check`}>
+                                {kw.organicRank < kw.prevOrganicRank ? '▲' : '▼'}{Math.abs(kw.prevOrganicRank - kw.organicRank)}
+                              </span>
+                            )}
+                            {kw.prevOrganicRank == null && kw.organicRank != null && (
+                              <span className="ml-1 text-[10px] font-semibold text-emerald-600" title="Newly ranking — wasn't ranked at the previous check">new</span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300" title={kw.prevOrganicRank != null ? `Dropped out — was #${kw.prevOrganicRank} at the previous check` : 'Not ranking (or not yet measured — ranks come from Jungle Scout research)'}>
+                            {kw.prevOrganicRank != null ? `— (was #${kw.prevOrganicRank})` : '—'}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                           kw.actionType === 'CRITICAL' ? 'bg-red-100 text-red-700'
