@@ -109,23 +109,42 @@ export async function storeAnalysis(
     search_volume: kw.searchVolume,
     competing_products: kw.competingProducts,
     keyword_sales: kw.keywordSales,
+    title_density: kw.titleDensity ?? null,
     data_source: kw.dataSource,
     analyzed_at: new Date().toISOString(),
   }));
 
-  // Clear existing analysis for this ASIN to remove stale/filtered keywords
+  // Clear existing analysis for this ASIN — EXCEPT imported keywords (data_source='import').
+  // Those came from the seller's competitor research (H10 CSV, PR #176); a fresh native sync
+  // must never wipe them — without this guard the Re-research button (PR #177) would delete
+  // the import minutes after it was made. On a keyword collision the upsert below lets the
+  // FRESH native row win (it carries live presence flags + SQP/JS metrics), which naturally
+  // "graduates" an imported keyword to a native one once our sources start seeing it.
   await supabase
     .from('keyword_analysis')
     .delete()
-    .eq('asin', asin);
+    .eq('asin', asin)
+    .neq('data_source', 'import');
 
-  // Batch insert in chunks of 100 to avoid payload limits
+  // Batch UPSERT in chunks of 100 (upsert, not insert: a surviving imported row with the same
+  // keyword must not abort the whole chunk — unique (asin, keyword)).
   const chunkSize = 100;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
-    await supabase
+    const { error } = await supabase
       .from('keyword_analysis')
-      .insert(chunk);
+      .upsert(chunk, { onConflict: 'asin,keyword' });
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /title_density/i.test(error.message ?? ''))) {
+      // Migration 025 (title_density) not applied yet — NEVER let the new column break a native
+      // sync: retry the chunk without it (same fallback pattern as push-content's logPush).
+      const legacy = chunk.map((row) => {
+        const { title_density: _omitted, ...rest } = row;
+        return rest;
+      });
+      await supabase.from('keyword_analysis').upsert(legacy, { onConflict: 'asin,keyword' });
+    } else if (error) {
+      console.warn('[storeAnalysis] upsert failed:', error.message);
+    }
   }
 }
 
@@ -165,6 +184,7 @@ export async function getStoredAnalysis(
     inDescription: row.in_description,
     inBackend: row.in_backend,
     dataSource: row.data_source,
+    titleDensity: row.title_density ?? null,
   }));
 }
 

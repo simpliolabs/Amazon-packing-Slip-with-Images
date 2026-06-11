@@ -867,10 +867,17 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
     return 0
   }
 
+  // Title-Density tiebreak (G3, import-only metric — H10 Cerebro): among near-equal opportunity,
+  // prefer a keyword FEW page-1 competitors carry in their TITLE (TD 0-2 with real volume = an
+  // open lane the 75-char title can own; "college essentials" 33k/mo had TD=0). Same contract as
+  // the outcome tiebreak: reorders TIES only, never across opportunity tiers, no-op when null.
+  const tdRank = (k: AnalyzedKeyword): number =>
+    k.titleDensity != null && k.titleDensity <= 2 && k.searchVolume >= 500 ? 1 : 0
+
   const eligible = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !isSeasonal(k.keyword))
-    .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (riseRank(b.keyword) - riseRank(a.keyword)))
+    .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (tdRank(b) - tdRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
 
   // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
   // product. The old "keep the higher-opportunity one at >=60% overlap" rule caused synonym + niche
