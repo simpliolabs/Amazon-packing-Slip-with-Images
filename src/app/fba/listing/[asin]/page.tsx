@@ -1388,7 +1388,11 @@ export default function ListingDetailPage() {
         // the keyword (token-coverage via the SAME predicate the scorer/generator use — R5, never .includes()),
         // else REGENERATE to get a draft that does. Honest: covered keywords never appear as "work".
         const rankWorkList: { section: 'title' | 'bullets' | 'backend'; label: string; keywords: string[]; drafted: boolean }[] = (() => {
-          if (!rankData?.analyzed || !Array.isArray(rankData.rows) || rankData.rows.length === 0) return []
+          // Suppress the actionable work-list when the rank analysis is STALE (live content changed since it
+          // ran) — otherwise it shows "Ship — draft already covers them" / "Regenerate" off outdated coverage
+          // (PO saw it suggest re-shipping bullets just pushed). The banner's "re-check in Intelligence" is the
+          // honest next step; the buttons return after a fresh analysis.
+          if (!rankData?.analyzed || rankData.stale || !Array.isArray(rankData.rows) || rankData.rows.length === 0) return []
           const norm = (p: string): 'title' | 'bullets' | 'backend' | null =>
             p === 'title' ? 'title' : /^bullet/.test(p) ? 'bullets' : (p === 'backend_keywords' || p === 'backend') ? 'backend' : null
           const nk = (s: string) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim()

@@ -151,6 +151,23 @@ export async function getAttributeEnum(
   return extractEnum(props[spApiKey])
 }
 
+/** True if `spApiKey` is a real attribute in THIS product type's live schema. Apparel attrs
+ *  (department, fit_type, fabric_type) are ABSENT on office/electronics product types — pushing one
+ *  there 400s with "the provided attribute path is not valid", and recommending one creates an
+ *  unfillable Features gap (a permanent dock the seller can never close). schema-unavailable →
+ *  returns true (FAIL-OPEN: never block a legitimate push or drop a real field on a transient fetch error). */
+export async function attributeExistsInSchema(
+  productType: string,
+  spApiKey: string,
+  opts: FetchOpts,
+): Promise<boolean> {
+  const schema = await fetchProductTypeSchema(productType, opts)
+  if (!schema) return true
+  const props = (schema as { properties?: Record<string, unknown> }).properties
+  if (!props) return true
+  return Object.prototype.hasOwnProperty.call(props, spApiKey)
+}
+
 /**
  * Validate ONE product-detail value against the live product-type schema. Shared by the
  * validate-at-recommendation step AND the push path (one source of truth, no drift). Dropdown (enum)
