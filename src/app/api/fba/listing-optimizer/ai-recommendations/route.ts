@@ -727,9 +727,13 @@ export async function POST(req: NextRequest) {
             // confusion). The enum validation ran just above, so is_enum/enum_valid are set here — using the
             // SAME predicate as syncListingContent keeps THIS regen's score == the next sync's (no flip-flop).
             if (Array.isArray(result.product_details_improvements)) {
+              const { isWriteBlockedPreLaunch } = await import('@/lib/fba/productDetailAttrs')
               const isEmpty = (v: string | null) => !v || !String(v).trim()
+              // Pre-launch Item Highlights are write-BLOCKED by Amazon ("currently unsupported") —
+              // not a closable gap until July 27, 2026, so it must not dock Features (mirrors sync).
               ctx.productDetailsGaps = result.product_details_improvements.filter((p) =>
-                isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false),
+                !isWriteBlockedPreLaunch(p.field_name, (p as unknown as { sp_api_key?: string }).sp_api_key) &&
+                (isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false)),
               ).length
             }
             // KeywordPlan (#92/#93): recommendations persist AFTER this block, so feed THIS regen's FRESH plan

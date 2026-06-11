@@ -141,6 +141,19 @@ export function buildDetailPatchValue(
   return [{ value: normalized, marketplace_id: marketplaceId, language_tag: languageTag }]
 }
 
+/** Amazon shipped the Item Highlights ATTRIBUTE (`title_differentiation`) ahead of its July 27,
+ *  2026 launch: it's in the product-type schema and the Seller Central form, but the Listings
+ *  Items API still REFUSES writes — "This attribute 'Item Highlight' is currently unsupported"
+ *  (live-verified 0/10 on B0F86LPSHZ, 2026-06-11). Until the launch date an empty Item Highlight
+ *  must NOT count as a Features gap: the seller cannot close it (the unfillable-gap trust trap).
+ *  From launch day it counts — and pushes — like any other field, with no code change. */
+export function isWriteBlockedPreLaunch(fieldName: string | null | undefined, spApiKey: string | null | undefined, now = new Date()): boolean {
+  if (now >= new Date('2026-07-27T00:00:00Z')) return false
+  const squash = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, '')
+  const f = squash(String(fieldName ?? ''))
+  return spApiKey === 'title_differentiation' || f === 'itemhighlight' || f === 'itemhighlights' || f === 'titledifferentiation'
+}
+
 /**
  * Read the listing's CURRENT value for an attribute key from the cached attributes blob.
  * Listings Items returns attributes as `Record<string, Array<{value, ...}>>`. We pull the
