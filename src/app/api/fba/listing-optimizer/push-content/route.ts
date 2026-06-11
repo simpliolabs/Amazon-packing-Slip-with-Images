@@ -40,7 +40,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { coerceDetailValue, inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
+import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -763,6 +763,20 @@ export async function POST(req: NextRequest) {
           const token = await getAccessToken()
           const sellerId = await getSellerId()
           const productType = await getProductType(sellerId, token, diff[0].sku)
+          // GUARD (PO live bug): the attribute must EXIST in THIS product type's schema. Apparel attrs
+          // (department, fit_type, fabric_type) are absent on office/electronics types — Amazon 400s EVERY
+          // patch with "the provided attribute path is not valid" (10 failed writes on a sticky-notes
+          // listing). Catch it ONCE with a clear message instead. Fail-open on a schema-fetch error.
+          const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+          if (!(await attributeExistsInSchema(productType, ctx.attribute.spApiKey, ptOpts))) {
+            emit({
+              type: 'result', parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
+              pushed: 0, failed: 0, total: 0,
+              message: `"${ctx.detailField}" is not a valid attribute for this product type (${productType}) — it doesn't apply to this category, so there's nothing to push. It shouldn't have been recommended; regenerate to refresh the suggestions.`,
+              results: [],
+            })
+            controller.close(); return
+          }
           const supabase = await createAdminClient()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const db = supabase as any
@@ -797,6 +811,48 @@ export async function POST(req: NextRequest) {
 
           const accepted = results.filter((r) => r.status === 'accepted').length
           const failed = results.filter((r) => r.status === 'failed').length
+
+          // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets ship→rise experience),
+          // instead of staying RED until the next regen re-reads Amazon. On success, mark this detail's
+          // current_value = the pushed value so the scorer's productDetailsGaps drops, then re-score.
+          // Best-effort (mirrors the regular-fields branch). Without this the details push was a "RED
+          // stays RED" dead-end — the score never moved on push (PO question: "8 → 12/12?").
+          if (accepted > 0) {
+            try {
+              const { data: recR } = await db.from('listing_seo_recommendations').select('product_details_improvements').eq('parent_asin', parent_asin).single()
+              const pdi = ((recR?.product_details_improvements ?? []) as Record<string, unknown>[])
+              let touched = false
+              const wantField = normalizeFieldName(ctx.detailField)
+              for (const p of pdi) {
+                if (normalizeFieldName(String(p.field_name ?? '')) === wantField) {
+                  p.current_value = ctx.recommendedValue; p.enum_valid = true; touched = true
+                }
+              }
+              if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
+            } catch (e) { console.warn('[push-content/details] write-through failed (non-fatal):', e) }
+            emit({ type: 'rescore', message: 'Re-scoring listing…' })
+            try {
+              const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+              const { data: kids } = await db.from('listing_content')
+                .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+                .eq('parent_asin', parent_asin)
+              const rows = (kids ?? []) as Record<string, unknown>[]
+              if (rows.length > 0) {
+                const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
+                const ctxS = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
+                const parentOwn = rows.find((r) => r.asin === parent_asin) || null
+                const score = scoreListingContent(parentOwn as never, rows as never, ctxS)
+                await db.from('listing_seo_scores').update({
+                  title_score: score.title_score, bullet_score: score.bullet_score,
+                  keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+                  description_score: score.description_score, features_score: score.features_score,
+                  overall_score: score.overall_score, issues: score.issues,
+                  child_override_count: score.child_override_count,
+                }).eq('parent_asin', parent_asin)
+              }
+            } catch (e) { console.warn('[push-content/details] re-score failed (non-fatal):', e) }
+          }
+
           emit({
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,

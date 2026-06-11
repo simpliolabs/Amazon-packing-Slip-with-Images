@@ -1694,7 +1694,13 @@ async function runBackendAgent(
     const toks: ({ w: string; minor: boolean } | null)[] = []
     for (const w of raw.split(' ')) {
       if (JUNK_WORDS.has(w)) { toks.push(null); continue }
-      if (ROLE_WORDS.has(w) && !titleWords.has(w)) { toks.push(null); continue }            // weak-relevance role
+      // ROLE WORDS ARE KEPT in the backend CORE. These phrases come from REAL opportunity keywords
+      // (SQP/JS — shoppers already reach this ASIN via "later gator teacher shirt"), and backend
+      // generic_keyword is invisible search indexing, NOT a customer-facing audience claim. The
+      // role-leak guard rightly blocks "teacher" in BULLETS; stripping it HERE made the scorer's
+      // keyword-intelligence gap permanently unclosable and the rank work-list's "Regenerate to
+      // weave it in" a false promise (PO-reported dead-end). The LLM FILL below still strips role
+      // words — those are model-invented, not data-backed.
       if (kidsWords.has(w) && !titleWords.has(w)) { toks.push(null); continue }             // wrong audience (kids)
       if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) { toks.push(null); continue }  // 3P brand: trademark risk in backend
       if (MINOR_WORDS.has(w)) { toks.push({ w, minor: true }); continue }

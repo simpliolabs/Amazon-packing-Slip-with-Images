@@ -632,7 +632,7 @@ export async function POST(req: NextRequest) {
             const pds = result.product_details_improvements
             const detailSku = children[0]?.sku
             if (Array.isArray(pds) && pds.length > 0 && detailSku) {
-              const { coerceDetailValue } = await import('@/lib/fba/productTypeDefinitions')
+              const { coerceDetailValue, attributeExistsInSchema } = await import('@/lib/fba/productTypeDefinitions')
               const { getProductType } = await import('@/lib/amazon/productType')
               const { resolveDetailAttribute } = await import('@/lib/fba/productDetailAttrs')
               const { getAccessToken } = await import('@/lib/amazon/auth')
@@ -642,9 +642,14 @@ export async function POST(req: NextRequest) {
               const ptSeller = await getSellerId()
               const ptType = await getProductType(ptSeller, ptToken, detailSku)
               const ptOpts = { token: ptToken, sellerId: ptSeller, marketplaceId: ptMarketplace, endpoint: ptEndpoint }
+              const invalidDetailFields = new Set<string>()
               for (const pd of pds) {
                 const attr = resolveDetailAttribute(pd.field_name)
                 if (!attr || attr.scope !== 'broadcast') continue   // skip per-variant / unmapped attrs
+                // DROP attributes absent from THIS product type's schema (e.g. apparel "Department" on an
+                // office product). They create an UNFILLABLE Features gap (a permanent dock the seller can
+                // never close) and 400 on push ("attribute path is not valid"). Fail-open on a schema error.
+                if (!(await attributeExistsInSchema(ptType, attr.spApiKey, ptOpts))) { invalidDetailFields.add(pd.field_name); continue }
                 const cd = await coerceDetailValue(ptType, attr.spApiKey, pd.recommended_value, ptOpts)
                 if (!cd.isEnum) continue                            // free-text — any value is accepted
                 const row = pd as unknown as Record<string, unknown>
@@ -652,6 +657,9 @@ export async function POST(req: NextRequest) {
                 row.enum_valid = cd.valid
                 row.enum_accepted = cd.accepted
                 if (cd.valid && cd.value !== pd.recommended_value) { row.normalized_from = pd.recommended_value; pd.recommended_value = cd.value }
+              }
+              if (invalidDetailFields.size > 0) {
+                result.product_details_improvements = pds.filter((p) => !invalidDetailFields.has(p.field_name))
               }
             }
           } catch (vErr) {
