@@ -7,6 +7,10 @@
     {
       "path": "/api/sync",
       "schedule": "0 */2 * * *"
+    },
+    {
+      "path": "/api/fba/cron-keyword-sync",
+      "schedule": "0 */3 3-9 * *"
     }
   ]
 }
