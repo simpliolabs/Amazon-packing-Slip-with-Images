@@ -168,6 +168,97 @@ export async function attributeExistsInSchema(
   return Object.prototype.hasOwnProperty.call(props, spApiKey)
 }
 
+const SCHEMA_TITLE_QUALIFIERS = new Set(['item', 'product', 'total'])
+/** Resolve a friendly attribute name ("Adhesive Type", "Package Quantity") to the REAL SP-API key for THIS
+ *  product type by matching the live schema's property `title`s — so ANY category's attributes become
+ *  pushable, not just the hardcoded apparel map (PO: "auto-map any item to the category's Features"). Match
+ *  order: exact (squashed) → qualifier-strip ("Package Quantity" ≈ schema "Item Package Quantity") →
+ *  UNAMBIGUOUS token-subset. Returns null on no/ambiguous match or schema-unavailable (FAIL-OPEN: caller
+ *  falls back to the static map; an ambiguous guess is never made). */
+export async function resolveSpApiKeyFromTitle(
+  productType: string,
+  friendlyName: string,
+  opts: FetchOpts,
+): Promise<{ spApiKey: string; title: string } | null> {
+  const target = norm(friendlyName)
+  if (!target) return null
+  const schema = await fetchProductTypeSchema(productType, opts)
+  const props = (schema as { properties?: Record<string, { title?: string }> } | null)?.properties
+  if (!props) return null
+  const entries = Object.entries(props)
+  // 1. exact on squashed title OR squashed key.
+  for (const [key, sub] of entries) {
+    if (norm(sub?.title || '') === target || norm(key) === target) return { spApiKey: key, title: sub?.title || key }
+  }
+  // 2. qualifier-strip: drop a leading "Item/Product/Total" from the schema title, then exact-compare.
+  for (const [key, sub] of entries) {
+    const words = (sub?.title || '').toLowerCase().split(/[\s_-]+/).filter(Boolean)
+    if (words.length > 1 && SCHEMA_TITLE_QUALIFIERS.has(words[0]) && norm(words.slice(1).join(' ')) === target) {
+      return { spApiKey: key, title: sub?.title || key }
+    }
+  }
+  // 3. unambiguous token-subset: friendly tokens ⊆ schema-title tokens, exactly ONE candidate (no guessing).
+  const tWords = friendlyName.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 1)
+  if (tWords.length) {
+    const hits: { key: string; title: string }[] = []
+    for (const [key, sub] of entries) {
+      const titleWords = new Set((sub?.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+      if (titleWords.size && tWords.every((w) => titleWords.has(w))) hits.push({ key, title: sub?.title || key })
+    }
+    if (hits.length === 1) return { spApiKey: hits[0].key, title: hits[0].title }
+  }
+  return null
+}
+
+// Schema attributes that are NOT "Product Details" panel material: identity/content sections the
+// tool manages elsewhere (title/bullets/description/keywords), structural/variation/offer keys,
+// and image locators. Everything ELSE in the live schema is fair game for the audit's menu.
+const MENU_EXCLUDE = new Set([
+  'item_name', 'bullet_point', 'product_description', 'generic_keyword', 'brand', 'manufacturer',
+  'external_product_id', 'externally_assigned_product_identifier', 'merchant_suggested_asin',
+  'supplier_declared_has_product_identifier_exemption', 'item_type_keyword', 'item_type_name',
+  'parentage_level', 'child_parent_sku_relationship', 'variation_theme', 'fulfillment_availability',
+  'condition_type', 'condition_note', 'list_price', 'purchasable_offer', 'gift_options',
+  'max_order_quantity', 'skip_offer', 'merchant_shipping_group', 'merchant_release_date',
+  'product_tax_code', 'supplier_declared_dg_hz_regulation', 'batteries_required', 'batteries_included',
+])
+// Per-variant axes — each child differs, so one broadcast value would be WRONG for the family.
+const MENU_PER_VARIANT = new Set(['color', 'size', 'memory_storage_capacity', 'style'])
+
+/** The live schema's broadcast-pushable attributes (key + display title + accepted enum values) for
+ *  the audit agent's dynamic Product-Details menu — so recommendations come FROM what THIS category
+ *  actually accepts (adhesive_type, ruling_type, …) instead of an apparel-shaped guess list (PO:
+ *  "offer up to 10 values that can improve the listing, dynamic per product category").
+ *  Best-effort: [] on schema-unavailable (caller's prompt falls back to the legacy example list). */
+export async function listPushableSchemaAttributes(
+  productType: string | null | undefined,
+  opts: FetchOpts,
+  max = 14,
+): Promise<{ key: string; title: string; accepted?: string[] }[]> {
+  if (!productType) return []
+  try {
+    const schema = await fetchProductTypeSchema(productType, opts)
+    const props = (schema as { properties?: Record<string, { title?: string }> } | null)?.properties
+    if (!props) return []
+    const out: { key: string; title: string; accepted?: string[] }[] = []
+    for (const [key, sub] of Object.entries(props)) {
+      if (MENU_EXCLUDE.has(key) || MENU_PER_VARIANT.has(key)) continue
+      if (key.includes('image_locator')) continue   // main_product_image_locator, other_product_image_locator_1…
+      const enumDef = extractEnum(sub)
+      const dep = new Set((enumDef?.deprecated ?? []).map((d) => d.toLowerCase()))
+      const accepted = enumDef
+        ? (enumDef.names.length ? enumDef.names : enumDef.values).filter((_, i) => !dep.has(String(enumDef.values[i]).toLowerCase()))
+        : []
+      out.push({ key, title: (sub?.title || key.replace(/_/g, ' ')).trim(), accepted: accepted.length ? accepted : undefined })
+      if (out.length >= max) break
+    }
+    return out
+  } catch (err) {
+    console.warn(`[productTypeDefinitions] attribute menu failed for ${productType} (non-fatal):`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
 /**
  * Validate ONE product-detail value against the live product-type schema. Shared by the
  * validate-at-recommendation step AND the push path (one source of truth, no drift). Dropdown (enum)

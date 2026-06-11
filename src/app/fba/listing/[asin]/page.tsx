@@ -42,7 +42,7 @@ interface PerChildKeywords { sku: string; asin: string; keywords: string }
 
 interface VariantCorrection { sku: string; field: string; current: string; replace_with: string; reason: string }
 interface CannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
-interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string }
+interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; sp_api_key?: string; attr_scope?: 'broadcast' | 'per-variant'; pushable?: boolean }
 
 interface AplusModuleAction {
   module_type: string; action: 'ADD' | 'EDIT' | 'KEEP'
@@ -1887,13 +1887,16 @@ export default function ListingDetailPage() {
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-semibold text-slate-700">Recommended Product Detail values</span>
                       <span className="text-[10px] text-slate-400">
-                        {recs.product_details_improvements.filter((pd) => isPushableDetail(pd.field_name)).length} pushable · {recs.product_details_improvements.length} total
+                        {recs.product_details_improvements.filter((pd) => pd.pushable ?? isPushableDetail(pd.field_name)).length} pushable · {recs.product_details_improvements.length} total
                       </span>
                     </div>
                     <div className="grid sm:grid-cols-2 gap-2">
                       {recs.product_details_improvements.map((pd, i) => {
-                        const pushable = isPushableDetail(pd.field_name)
-                        const blockedReason = pushable ? null : unpushableReason(pd.field_name)
+                        // The regen stores schema-resolved pushability (sp_api_key/pushable) per row — ANY
+                        // category's attributes get a Push button, not just the static apparel map. Rows
+                        // from before that change have no flag → fall back to the static map.
+                        const pushable = pd.pushable ?? isPushableDetail(pd.field_name)
+                        const blockedReason = pushable ? null : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
                         return (
                           <div key={i} className={`rounded-lg p-2.5 ${pushable ? 'bg-emerald-50/40 border border-emerald-100' : 'bg-slate-50'}`}>
                             <div className="flex items-center justify-between mb-0.5 gap-2">
