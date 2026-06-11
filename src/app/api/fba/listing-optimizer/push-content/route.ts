@@ -800,9 +800,15 @@ export async function POST(req: NextRequest) {
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
             const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW')
             if (!preview.ok) {
-              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
-              emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
-              await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
+              // Amazon's pre-launch wall: the attribute is in the schema + Seller Central form, but
+              // Listings-API writes stay refused until the July 27, 2026 launch. Say so plainly
+              // instead of leaving the seller to decode Amazon's "refer to the tool tip".
+              const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
+                ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
+                : preview.error
+              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr })
+              emit({ type: 'progress', sku: item.sku, status: 'failed', error: friendlyErr })
+              await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: friendlyErr })
               await sleep(PATCH_DELAY_MS)
               continue
             }

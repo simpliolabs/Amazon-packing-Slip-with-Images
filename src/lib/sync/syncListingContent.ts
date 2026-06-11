@@ -32,6 +32,7 @@ import { getAccessToken } from '@/lib/amazon/auth'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'
+import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -515,8 +516,11 @@ export async function fetchScoringContext(
         // confusion). Count only TRUE gaps: a field with no live value, or an enum field whose current
         // value is invalid against the live Amazon schema (is_enum/enum_valid persisted by validate-at-regen).
         const isEmpty = (v: unknown) => !v || !String(v).trim()
-        ctx.productDetailsGaps = pdi.filter((p: { current_value?: unknown; is_enum?: boolean; enum_valid?: boolean }) =>
-          isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false),
+        // Pre-launch Item Highlights are write-BLOCKED by Amazon ("currently unsupported") — an
+        // empty one is not a closable gap until July 27, 2026, so it must not dock Features.
+        ctx.productDetailsGaps = pdi.filter((p: { field_name?: string; sp_api_key?: string; current_value?: unknown; is_enum?: boolean; enum_valid?: boolean }) =>
+          !isWriteBlockedPreLaunch(p.field_name, p.sp_api_key) &&
+          (isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false)),
         ).length
       }
     }
