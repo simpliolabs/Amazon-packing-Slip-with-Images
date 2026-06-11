@@ -27,6 +27,7 @@ import {
   storeAnalysis,
   logApiCall,
   runKeywordEngine,
+  captureShareSnapshots,
   SQPKeywordRow,
   EngineResult,
   ListingContent,
@@ -290,6 +291,7 @@ export async function syncKeywordData(asin: string): Promise<EngineResult> {
         .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
         .eq('parent_asin', parentRow.parent_asin)
         .not('title', 'is', null)
+        .order('asin', { ascending: true })   // deterministic sibling → stable content_fingerprint for the outcome loop (#89)
         .limit(1)
         .single();
 
@@ -321,6 +323,16 @@ export async function syncKeywordData(asin: string): Promise<EngineResult> {
   // Step 5: Store analysis results
   if (result.allKeywords.length > 0) {
     await storeAnalysis(asin, result.allKeywords);
+  }
+
+  // Step 5b: Outcome loop (#89) — snapshot THIS SQP report's per-keyword share into the time-series, so the
+  // next regen can see "did share move after a content change?". Captured ONLY on a FRESH SQP fetch: a cache
+  // HIT re-runs the engine on the SAME (possibly older-month) report while snapshot_date is wall-clock-derived,
+  // so re-snapshotting across a month boundary would mislabel stale data as a NEW month (adversarial-review
+  // finding) — and the fresh-fetch run already captured that report. SQP-only (inherited/JS share=0); best-effort.
+  const sqpFreshlyFetched = !(cached && cached.length > 0)
+  if (dataSource === 'sqp' && sqpFreshlyFetched && result.allKeywords.length > 0) {
+    await captureShareSnapshots(asin, result.allKeywords, listing, supabase);
   }
 
   return result;

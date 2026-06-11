@@ -20,7 +20,7 @@
  */
 
 import OpenAI from 'openai'
-import type { AnalyzedKeyword } from '@/lib/keyword-engine'
+import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
 
 // ─── Shared output types (structurally identical to the route's interfaces) ────
@@ -73,6 +73,11 @@ export interface PipelineInput {
   visionDesign?: { designTheme: string; visualElements: string[]; seedKeywords: string[] } | null
   /** Reasoning-class model for the audit step, e.g. 'o4-mini' */
   auditModel: string
+  /** Outcome-loop signals (task #89), keyed by LOWERCASED keyword: per-keyword SQP share rose/flat/fell
+   *  since the last monthly snapshot. Used ONLY as a conservative TIEBREAK in title-candidate selection —
+   *  among near-equal opportunity, reinforce rising keywords + de-prioritize ones flat-despite-a-change.
+   *  Undefined/empty (every case until ~2 months of history exist) → strict no-op, ordering unchanged. */
+  outcomeSignals?: Record<string, OutcomeSignal>
   /** NDJSON keepalive emitter — called before each stage */
   onProgress: (msg: string) => void
 }
@@ -763,14 +768,26 @@ function extractProductNameTokens(repTitle: string | null): string[] {
     .slice(0, 3)
 }
 
-function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null): TitleCandidate[] {
+function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, outcomeSignals?: Record<string, OutcomeSignal>): TitleCandidate[] {
   const brandTokens = brandName.toLowerCase().split(/\s+/).filter(Boolean)
   const productTokens = extractProductNameTokens(repTitle)
+
+  // Outcome-loop tiebreak (#89): among near-equal opportunity, prefer a keyword whose SQP share is RISING
+  // (reinforce what's working) and de-prioritize one that's flat-despite-a-content-change (its ceiling is now
+  // non-content — reviews/price/velocity, not more copy). SECONDARY to opportunityScore: it only reorders
+  // TIES, never across opportunity tiers, never drops a keyword. Strict no-op when outcomeSignals is empty.
+  const riseRank = (kw: string): number => {
+    const s = outcomeSignals?.[kw.toLowerCase()]
+    if (!s) return 0
+    if (s.direction === 'rose') return 1
+    if (s.nonContentBottleneck) return -1
+    return 0
+  }
 
   const eligible = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !isSeasonal(k.keyword))
-    .sort((a, b) => b.opportunityScore - a.opportunityScore)
+    .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (riseRank(b.keyword) - riseRank(a.keyword)))
 
   // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
   // product. The old "keep the higher-opportunity one at >=60% overlap" rule caused synonym + niche
@@ -2513,8 +2530,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   const attributePinFinal = attributePin || undefined
 
-  // Stage 0b — candidates (code)
-  const candidates = selectTitleCandidates(analysis, brandName, repTitle)
+  // Stage 0b — candidates (code). Outcome-loop signals (#89) are a conservative tiebreak only (no-op until history exists).
+  const candidates = selectTitleCandidates(analysis, brandName, repTitle, input.outcomeSignals)
 
   // Stage 0c — top UPGRADE keywords for explicit title-coverage. UPGRADE = ranking
   // signal already present in bullets but absent from the title. The scorer in

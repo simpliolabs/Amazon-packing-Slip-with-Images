@@ -17,7 +17,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
-import { getStoredAnalysis } from '@/lib/keyword-engine'
+import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 
@@ -514,6 +514,10 @@ export async function POST(req: NextRequest) {
       .single()
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
     const analysis = (await getStoredAnalysis(analysisAsin, 50)) ?? []
+    // Outcome loop (#89): per-keyword SQP share rose/flat/fell since the last monthly snapshot — a conservative
+    // tiebreak for title-candidate selection. Best-effort: {} (no-op) until ~2 months of history accrue or if
+    // the keyword_share_snapshots table isn't migrated yet.
+    const outcomeSignals = await computeOutcomeSignals(analysisAsin, supabase).catch(() => ({}))
 
     // Build the child list for the pipeline (color/size parsed from SKU)
     const pipelineChildren = children.map((c: ChildRow) => {
@@ -583,6 +587,7 @@ export async function POST(req: NextRequest) {
             hasAplus: rep.has_aplus || false,
             hasBrandStory: rep.aplus_has_brand_story || false,
             auditModel: 'o4-mini',
+            outcomeSignals,
             onProgress: (message) => emit({ type: 'progress', message }),
           })
 
