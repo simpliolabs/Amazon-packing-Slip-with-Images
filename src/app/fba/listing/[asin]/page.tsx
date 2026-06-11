@@ -190,6 +190,7 @@ export default function ListingDetailPage() {
   const [aiRecs, setAiRecs] = useState<AiRecommendations | null>(null)
   const [kwData, setKwData] = useState<KeywordIntelligenceResult | null>(null)
   const [rankData, setRankData] = useState<RankAnalysisResult | null>(null)
+  const [rankRefreshing, setRankRefreshing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -569,6 +570,23 @@ export default function ListingDetailPage() {
       } catch { /* ignore — Apply tab works without rank context */ }
     })()
     return () => { cancelled = true }
+  }, [asin])
+
+  // FREE rank re-check (the banner's stale chip is a BUTTON now, not a dead-end): recomputes
+  // live keyword coverage server-side (0 JS credits, 0 OpenAI — pure DB + coverage math),
+  // un-stales the banner, and the actionable work-list (Ship/Regenerate per gap keyword)
+  // comes back immediately. Paid SOV data is carried forward server-side, never wiped.
+  const refreshRankFree = useCallback(async () => {
+    if (!asin) return
+    setRankRefreshing(true)
+    try {
+      const resp = await fetch(`/api/fba/rank-analysis/${asin}?refresh=free`, { cache: 'no-store' })
+      if (resp.ok) {
+        const data = await resp.json()
+        if (!data.error) setRankData(data)
+      }
+    } catch { /* best-effort — the stale-flagged data stays visible */ }
+    setRankRefreshing(false)
   }, [asin])
 
   // Fetch competitor ASIN
@@ -1568,7 +1586,18 @@ export default function ListingDetailPage() {
                         <span className="text-xs font-bold text-slate-700 uppercase tracking-wide">Rank Top of Amazon</span>
                         <span className="text-[10px] bg-white border border-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{rankData.verdict.indexedCoverage}</span>
                         {rankData.verdict.criticalGaps > 0 && <span className="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{rankData.verdict.criticalGaps} high-opportunity gap{rankData.verdict.criticalGaps === 1 ? '' : 's'}</span>}
-                        {rankData.stale && <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Content changed — re-check in Intelligence</span>}
+                        {rankData.stale && (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => { e.stopPropagation(); void refreshRankFree() }}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); void refreshRankFree() } }}
+                            title="Your content changed since this analysis ran. Re-checks keyword coverage now — free, no credits."
+                            className={`text-[10px] px-2 py-0.5 rounded-full cursor-pointer ${rankRefreshing ? 'bg-violet-100 text-violet-700 animate-pulse' : 'bg-amber-100 text-amber-700 hover:bg-amber-200 underline decoration-dotted underline-offset-2'}`}
+                          >
+                            {rankRefreshing ? 'Re-checking coverage…' : 'Content changed — Re-check now (free)'}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-slate-800 mt-1">{rankData.verdict.headline}</p>
                     </div>
@@ -1606,13 +1635,35 @@ export default function ListingDetailPage() {
                               ))}
                             </ul>
                           ) : (
-                            <ul className="space-y-1">
-                              {(rankData.verdict.contentCanDo ?? []).map((c, i) => (
-                                <li key={i} className="flex gap-1.5 text-[11px] text-slate-700">
-                                  <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8.5l3.5 3.5L13 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>{c}
-                                </li>
-                              ))}
-                            </ul>
+                            <>
+                              {/* The chip says "N high-opportunity gaps" — NAME them here even when the
+                                  actionable work-list is suppressed (stale analysis), so the banner is
+                                  never a dead-end (PO: "doesn't tell me what the 1 gap IS"). */}
+                              {(() => {
+                                const gapNames = (rankData.rows ?? []).filter((r) => !r.youCover).map((r) => r.keyword)
+                                if (gapNames.length === 0) return null
+                                return (
+                                  <div className="mb-2 bg-red-50/60 border border-red-100 rounded-lg p-2">
+                                    <p className="text-[11px] text-slate-800">
+                                      <span className="font-semibold">Gap keyword{gapNames.length === 1 ? '' : 's'}{rankData.stale ? ' (as of last check)' : ''}:</span>{' '}
+                                      {gapNames.slice(0, 5).map((k) => `“${k}”`).join(', ')}{gapNames.length > 5 ? ` +${gapNames.length - 5} more` : ''}
+                                    </p>
+                                    {rankData.stale && (
+                                      <p className="text-[10px] text-slate-500 mt-1">
+                                        Your content changed since this ran — hit <span className="font-semibold">Re-check now (free)</span> above to refresh coverage and get the one-click Ship/Regenerate actions for each gap.
+                                      </p>
+                                    )}
+                                  </div>
+                                )
+                              })()}
+                              <ul className="space-y-1">
+                                {(rankData.verdict.contentCanDo ?? []).map((c, i) => (
+                                  <li key={i} className="flex gap-1.5 text-[11px] text-slate-700">
+                                    <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8.5l3.5 3.5L13 4.5" strokeLinecap="round" strokeLinejoin="round" /></svg>{c}
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
                           )}
                         </div>
                         <div>
