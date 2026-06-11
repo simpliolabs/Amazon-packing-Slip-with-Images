@@ -46,17 +46,19 @@ export async function GET(
       );
     }
     const { childAsin, parentAsin } = resolved;
+    const refreshFree = new URL(request.url).searchParams.get('refresh') === 'free';
 
     // 1. Cache read (0 cost). maybeSingle() → a 0-row miss is null (no throw). The try/catch only
     //    fires on a REAL error (e.g. migration 021 not yet applied) → degrade to the free core.
+    let row: { content_fingerprint: string; result: RankAnalysisResult } | null = null;
     try {
       const { data: cached } = await supabase
         .from('listing_rank_analysis')
         .select('content_fingerprint, result')
         .eq('child_asin', childAsin)
         .maybeSingle();
-      const row = cached as { content_fingerprint: string; result: RankAnalysisResult } | null;
-      if (row?.result && Object.keys(row.result).length > 0) {
+      row = cached as { content_fingerprint: string; result: RankAnalysisResult } | null;
+      if (!refreshFree && row?.result && Object.keys(row.result).length > 0) {
         const fp = await contentFingerprint(parentAsin, childAsin, supabase);
         return NextResponse.json({ ...row.result, stale: fp !== row.content_fingerprint });
       }
@@ -64,9 +66,47 @@ export async function GET(
       console.warn(`[rank-analysis GET] cache read failed for ${childAsin}, serving free core:`, cacheErr);
     }
 
-    // 2. Cache miss → free core, computed live (0 cost, always honest).
+    // 2. Cache miss OR ?refresh=free (the rank banner's "Re-check now" — the stale chip was a
+    //    dead-end: "1 high-opportunity gap" with no way to act on it; PO: "NOTHING is actionable").
+    //    Recompute the FREE core live (0 JS credits, 0 OpenAI — pure DB + coverage math).
+    const analyzedAt = new Date().toISOString();
     const core = await buildFreeCore(childAsin, parentAsin, supabase);
-    return NextResponse.json(freeCoreToResult(core, childAsin, parentAsin, new Date().toISOString()));
+    const fresh = freeCoreToResult(core, childAsin, parentAsin, analyzedAt);
+
+    if (refreshFree && fresh.analyzed) {
+      // Carry forward the prior PAID per-keyword SOV + council realities BY KEYWORD — the same
+      // merge runCouncilAnalysis does, so a free re-check NEVER wipes paid competition data
+      // (the #154 blocker class). The headline intentionally resets to the deterministic
+      // baseline: the old council's wording described coverage that just changed.
+      const prior = row?.result ?? null;
+      if (prior?.rows?.length) {
+        const byKw = new Map(prior.rows.map((p) => [p.keyword.toLowerCase(), p]));
+        for (const r of fresh.rows) {
+          const p = byKw.get(r.keyword.toLowerCase());
+          if (!p) continue;
+          r.theirShare = p.theirShare;
+          r.sellerVisible = p.sellerVisible;
+          if (p.topCompetitorBrand) r.topCompetitorBrand = p.topCompetitorBrand;
+          if (p.nonContentReality) r.nonContentReality = p.nonContentReality;
+        }
+        fresh.competitionRan = prior.competitionRan;
+        fresh.creditsSpent = prior.creditsSpent;
+      }
+      // Persist with the FRESH fingerprint so the stale flag clears everywhere (full upsert is
+      // safe here: every column is supplied, nothing resets to DEFAULT). Missing table = silent.
+      try {
+        const fp = await contentFingerprint(parentAsin, childAsin, supabase);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const db = supabase as any; // listing_rank_analysis not in generated types yet (migration 021)
+        await db.from('listing_rank_analysis').upsert(
+          { child_asin: childAsin, parent_asin: parentAsin, analyzed_at: analyzedAt, competition_ran: fresh.competitionRan, credits_spent: fresh.creditsSpent, content_fingerprint: fp, result: fresh, run_lock_at: null },
+          { onConflict: 'child_asin' },
+        );
+      } catch (persistErr) {
+        if (!isMissingTable(persistErr)) console.warn(`[rank-analysis GET refresh] persist failed for ${childAsin}:`, persistErr);
+      }
+    }
+    return NextResponse.json({ ...fresh, stale: false });
 
   } catch (error) {
     console.error('[GET /api/fba/rank-analysis/[asin]]', error);
