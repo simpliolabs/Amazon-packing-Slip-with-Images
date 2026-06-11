@@ -2879,14 +2879,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // 1:1 to sp_api_key and the row rides the schema-details rails (Push button, verify, write-
   // through) with ZERO new endpoints. Deterministic value replaces any audit-guessed duplicate.
   let pdiFinal: PipelineProductDetailImprovement[] = Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : []
-  const highlightsAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === 'item_highlights')
+  // Match by key OR display title: Amazon shipped the attribute EARLY as `title_differentiation`
+  // (schema title "Item Highlight", live-verified on SELF_STICK_NOTE 2026-06-11) while the docs say
+  // `item_highlights` — the title pattern keeps this working if other categories name it differently.
+  const highlightsAttr = (input.detailAttributeMenu ?? []).find(
+    (m) => /^(?:item_highlights|title_differentiation)$/.test(m.key) || /\bhighlights?\b/i.test(m.title),
+  )
   if (highlightsAttr) {
     // String() guard: audit rows are a blind-cast o4-mini parse — a missing field_name must not
     // crash the whole regen here (this runs OUTSIDE the route's tolerant validation loop). The
     // audit-guessed duplicate is dropped EVEN when our deterministic build comes back empty —
     // an unreviewed LLM guess must never ride the pushable rails.
     const squash = (s: unknown) => String(s ?? '').toLowerCase().replace(/[\s_-]+/g, '')
-    pdiFinal = pdiFinal.filter((p) => squash(p.field_name) !== squash(highlightsAttr.title) && squash(p.field_name) !== 'itemhighlights')
+    pdiFinal = pdiFinal.filter((p) => {
+      const s = squash(p.field_name)
+      return s !== squash(highlightsAttr.title) && s !== 'itemhighlights' && s !== 'itemhighlight' && s !== 'titledifferentiation'
+    })
     const hl = buildItemHighlights(finalTitle, analysis, input.brandName, !!perChildTitles)
     if (hl) {
       pdiFinal.push({

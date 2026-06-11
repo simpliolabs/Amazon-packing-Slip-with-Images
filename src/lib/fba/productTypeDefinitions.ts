@@ -256,11 +256,13 @@ export async function listPushableSchemaAttributes(
       out.push({ key, title: (sub?.title || key.replace(/_/g, ' ')).trim(), accepted: accepted.length ? accepted : undefined })
       if (out.length >= max) break
     }
-    // ALWAYS-INCLUDE: item_highlights (the July 27, 2026 companion to the 75-char title) must make
-    // the menu whenever THIS schema has it — schema property ORDER decides the first `max` slots, so
-    // without this the feature would silently never activate for categories where it lands 15th+
-    // (adversarial-review MAJOR). Same pattern available for future must-surface attributes.
-    for (const mustKey of ['item_highlights']) {
+    // ALWAYS-INCLUDE: the Item Highlights attribute (July 27, 2026 companion to the 75-char title)
+    // must make the menu whenever THIS schema has it — schema property ORDER decides the first `max`
+    // slots, so without this the feature would silently never activate for categories where it lands
+    // 15th+ (adversarial-review MAJOR). Amazon shipped the attribute EARLY under the key
+    // `title_differentiation` (schema title "Item Highlight" — live-verified on SELF_STICK_NOTE
+    // 2026-06-11); `item_highlights` kept in case other categories use the documented name.
+    for (const mustKey of ['item_highlights', 'title_differentiation']) {
       if (!out.some((o) => o.key === mustKey) && Object.prototype.hasOwnProperty.call(props, mustKey)) {
         const sub = props[mustKey]
         const enumDef = extractEnum(sub)
