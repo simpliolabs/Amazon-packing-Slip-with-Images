@@ -191,6 +191,9 @@ export default function ListingDetailPage() {
   const [kwData, setKwData] = useState<KeywordIntelligenceResult | null>(null)
   const [rankData, setRankData] = useState<RankAnalysisResult | null>(null)
   const [rankRefreshing, setRankRefreshing] = useState(false)
+  // H10 competitor-keyword CSV import (Intelligence tab)
+  const [kwImportBusy, setKwImportBusy] = useState(false)
+  const [kwImportMsg, setKwImportMsg] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -2375,13 +2378,49 @@ export default function ListingDetailPage() {
           {activeTab === 'kwintel' && (
             <>
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-              {/* Summary badges */}
-              <div className="flex gap-3 p-3 border-b border-slate-100 bg-slate-50">
+              {/* Summary badges + competitor-keyword import (the native sources only query OUR
+                  ASIN — they can never discover keywords competitors rank on; H10 Cerebro can). */}
+              <div className="flex items-center gap-3 p-3 border-b border-slate-100 bg-slate-50 flex-wrap">
                 {kwData.summary.critical > 0 && <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">{kwData.summary.critical} Critical</span>}
                 {kwData.summary.upgrade > 0 && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{kwData.summary.upgrade} Upgrade</span>}
                 {kwData.summary.reinforce > 0 && <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">{kwData.summary.reinforce} Reinforce</span>}
                 {kwData.summary.defended > 0 && <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">{kwData.summary.defended} Defended</span>}
+                <label className={`ml-auto text-xs px-3 py-1 rounded-lg font-semibold cursor-pointer ${kwImportBusy ? 'bg-violet-100 text-violet-700 animate-pulse' : 'bg-violet-600 hover:bg-violet-700 text-white'}`}
+                  title="Import competitor-proven keywords from a Helium 10 Cerebro/Xray CSV export — they get the same scoring + presence checks as native keywords, and the next Regenerate weaves them in.">
+                  {kwImportBusy ? 'Importing…' : 'Import H10 CSV →'}
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    disabled={kwImportBusy}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0]
+                      e.target.value = ''   // allow re-selecting the same file
+                      if (!file) return
+                      setKwImportBusy(true); setKwImportMsg(null)
+                      try {
+                        const csv = await file.text()
+                        const resp = await fetch('/api/fba/keywords/import', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ parent_asin: asin, csv }),
+                        })
+                        const data = await resp.json()
+                        if (!resp.ok || data.error) { setKwImportMsg(`✗ ${data.error ?? `HTTP ${resp.status}`}`) }
+                        else {
+                          setKwImportMsg(`✓ Imported ${data.imported} new keywords (${data.skippedExisting} already known, ${data.skippedLowVolume} under 50/mo volume). Top: ${ (data.topNew ?? []).slice(0, 3).map((t: { keyword: string }) => `“${t.keyword}”`).join(', ') }. Hit Regenerate to weave them into the content.`)
+                        }
+                      } catch (err) {
+                        setKwImportMsg(`✗ ${err instanceof Error ? err.message : 'Import failed'}`)
+                      }
+                      setKwImportBusy(false)
+                    }}
+                  />
+                </label>
               </div>
+              {kwImportMsg && (
+                <p className={`px-3 py-2 text-[11px] border-b border-slate-100 ${kwImportMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>{kwImportMsg}</p>
+              )}
               {/* Top 20 keywords table */}
               <table className="w-full text-xs">
                 <thead className="bg-slate-50 border-b border-slate-200">
