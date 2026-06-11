@@ -897,6 +897,19 @@ export default function ListingDetailPage() {
         }
         const pushedAt = new Date().toISOString()
         const pushedLabel = pushField === 'details' && pushDetailField ? pushDetailField : FIELD_LABEL[pushField]
+        // Mirror the server write-through locally for the pushed DETAIL row, so its panel card
+        // flips to "✓ On Amazon" immediately (PO: "no notice after PUSH") — same mirror Auto Push
+        // does. The server already persisted current_value = pushed value; this avoids a refetch.
+        if (pushField === 'details' && pushDetailField) {
+          const pushedValue = (detailOverrideArg ?? '').trim()
+          setAiRecs((prev) => prev ? {
+            ...prev,
+            product_details_improvements: (prev.product_details_improvements ?? []).map((pd) =>
+              pd.field_name === pushDetailField
+                ? { ...pd, current_value: pushedValue || pd.recommended_value, ...(pushedValue ? { recommended_value: pushedValue } : {}), enum_valid: pd.is_enum ? true : pd.enum_valid }
+                : pd),
+          } : prev)
+        }
         setAiRecs((prev) => {
           if (!prev) return prev
           const action_plan = (prev.action_plan ?? []).map((it) => {
@@ -2075,19 +2088,30 @@ export default function ListingDetailPage() {
                         // from before that change have no flag → fall back to the static map.
                         const pushable = pd.pushable ?? isPushableDetail(pd.field_name)
                         const blockedReason = pushable ? null : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
+                        // Pushed/up-to-date state (PO: "no notice after PUSH"): the push write-through
+                        // sets current_value = recommended_value (server-side at push; mirrored locally
+                        // by the modal + Auto Push), so equality IS the "this is on Amazon" signal.
+                        const upToDate = pushable && (pd.recommended_value ?? '').trim() !== '' && (pd.current_value ?? '').trim() === (pd.recommended_value ?? '').trim()
                         return (
-                          <div key={i} className={`rounded-lg p-2.5 ${pushable ? 'bg-emerald-50/40 border border-emerald-100' : 'bg-slate-50'}`}>
+                          <div key={i} className={`rounded-lg p-2.5 ${upToDate ? 'bg-emerald-50 border border-emerald-200' : pushable ? 'bg-emerald-50/40 border border-emerald-100' : 'bg-slate-50'}`}>
                             <div className="flex items-center justify-between mb-0.5 gap-2">
-                              <span className="text-xs font-semibold text-slate-800">{pd.field_name}</span>
+                              <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5 min-w-0">
+                                <span className="truncate">{pd.field_name}</span>
+                                {upToDate && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium whitespace-nowrap" title="The live Amazon value matches this recommendation — pushed (or already correct). Amazon may take 15min–6hr to show it on the product page.">
+                                    ✓ On Amazon
+                                  </span>
+                                )}
+                              </span>
                               <div className="flex items-center gap-2 shrink-0">
                                 <button onClick={() => copy(pd.recommended_value, `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
                                 {pushable ? (
                                   <button
                                     onClick={() => openPushPreview('details', pd.field_name)}
-                                    className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap"
-                                    title={`Push ${pd.field_name} to Amazon for every child SKU`}
+                                    className={`text-[10px] px-2 py-0.5 rounded font-medium whitespace-nowrap ${upToDate ? 'border border-emerald-300 text-emerald-700 hover:bg-emerald-100' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
+                                    title={upToDate ? `Already on Amazon — opens the modal to re-push or Verify the live value per SKU` : `Push ${pd.field_name} to Amazon for every child SKU`}
                                   >
-                                    Push →
+                                    {upToDate ? 'Verify / Re-push' : 'Push →'}
                                   </button>
                                 ) : (
                                   <span
