@@ -2644,6 +2644,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .filter((k) => !isSeasonal(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)   // match the scorer (no word cap on its set); 6 = title pin's safe ceiling
     .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))   // already in title → not a bullet gap
+    // Role-word keywords (e.g. "later gator TEACHER shirt") belong in BACKEND, not bullets: the bullet agent's
+    // role-leak strip + the coverage backstop's safeKw both REFUSE to put a profession word in a bullet (no
+    // "for teachers" claim). If such a keyword stays in this plan, the scorer (which reads it via keyword_plan,
+    // #161) docks bullets for a term the bullets can NEVER carry → bullets can't reach max. Drop them here so
+    // the plan == what the generator can actually place; they still rank via the backend pool. (adversarial gap)
+    .filter((k) => {
+      const toks = k.keyword.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+      return !toks.some((t) => ROLE_WORDS.has(t) && !titleLc.includes(t))
+    })
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
