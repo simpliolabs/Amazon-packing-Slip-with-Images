@@ -49,6 +49,9 @@ export interface IntelligenceOptions {
   parentAsin?: string;
   /** Listing title (fallback seed for keyword research) */
   listingTitle?: string;
+  /** Seller-typed seed for the research pipeline (Intelligence tab "Re-research" box) — beats
+   *  every derived seed. Costs 3 JS credits per run like any fresh research. */
+  manualSeed?: string;
 }
 
 /**
@@ -70,6 +73,7 @@ export async function syncKeywordIntelligence(
     useStoredAnalysis = true,
     parentAsin,
     listingTitle,
+    manualSeed,
   } = options;
 
   // Path 1: Return stored analysis if available and not forcing refresh
@@ -124,9 +128,44 @@ export async function syncKeywordIntelligence(
 
       // No fresh cache — run the full 3-credit research pipeline
       const resolvedParent = parentAsin || await getParentAsin(asin);
+      // CATEGORY seed from the live SP-API productType (NON-apparel only) — the seed-quality fix:
+      // a vision/title seed is PRODUCT-LITERAL ("post it notes variety pack"), so the niche query
+      // returns our own phrasing and Share-of-Voice crowns whoever wins that narrow phrase — never
+      // the category winner. SELF_STICK_NOTE → "self stick notes" finds the Mr.-Pen-class niche.
+      // Apparel keeps vision/title seeds (design-led niches). Best-effort: any failure → undefined.
+      let categorySeed: string | undefined;
+      try {
+        const { getProductType } = await import('../amazon/productType');
+        const { getAccessToken } = await import('../amazon/auth');
+        const { APPAREL_PRODUCT_TYPES } = await import('../fba/listingPipeline');
+        const { data: skuRow } = await supabase
+          .from('listing_content').select('sku').eq('asin', asin).maybeSingle();
+        const sku = (skuRow as { sku?: string } | null)?.sku;
+        if (sku) {
+          const { data: sellerRow } = await supabase
+            .from('app_settings').select('value').eq('key', 'amazon_seller_id').maybeSingle();
+          const sellerId = (sellerRow as { value?: string } | null)?.value
+            || process.env.AMAZON_MERCHANT_TOKEN || process.env.AMAZON_SELLER_ID;
+          if (sellerId) {
+            const pt = await getProductType(sellerId, await getAccessToken(), sku);
+            if (pt && pt !== 'PRODUCT' && !APPAREL_PRODUCT_TYPES.test(pt.toUpperCase())) {
+              const words = pt.toLowerCase().split('_');
+              // Naive pluralize the head noun ("self stick note" → "self stick notes") — matches
+              // how shoppers type category queries.
+              if (!/s$/.test(words[words.length - 1])) words[words.length - 1] += 's';
+              categorySeed = words.join(' ');
+              console.log(`[syncKeywordIntelligence] category seed from productType ${pt}: "${categorySeed}"`);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[syncKeywordIntelligence] category-seed resolution failed (non-fatal):', e instanceof Error ? e.message : e);
+      }
       const researchResult = await researchKeywords(asin, resolvedParent || asin, {
         forceRefresh,
         listingTitle,
+        manualSeed,
+        categorySeed,
       });
 
       if (researchResult.allKeywords.length > 0) {

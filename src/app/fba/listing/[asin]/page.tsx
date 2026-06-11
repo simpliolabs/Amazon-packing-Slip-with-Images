@@ -194,6 +194,10 @@ export default function ListingDetailPage() {
   // H10 competitor-keyword CSV import (Intelligence tab)
   const [kwImportBusy, setKwImportBusy] = useState(false)
   const [kwImportMsg, setKwImportMsg] = useState<string | null>(null)
+  // Re-research with seed (Intelligence tab) — 3 JS credits per run, seller-triggered
+  const [kwSeed, setKwSeed] = useState('')
+  const [kwResearchBusy, setKwResearchBusy] = useState(false)
+  const [kwResearchMsg, setKwResearchMsg] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -2445,12 +2449,54 @@ export default function ListingDetailPage() {
               {kwImportMsg && (
                 <p className={`px-3 py-2 text-[11px] border-b border-slate-100 ${kwImportMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>{kwImportMsg}</p>
               )}
+              {/* Re-research with a CATEGORY (or custom) seed — the seed decides the whole keyword
+                  universe: niche query + which competitor gets harvested. Blank = auto seed (the
+                  product type for non-apparel, the design/title for apparel). Costs 3 JS credits. */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-100 bg-violet-50/40 flex-wrap">
+                <input
+                  type="text"
+                  value={kwSeed}
+                  onChange={(e) => setKwSeed(e.target.value)}
+                  placeholder='Research seed — blank = auto (e.g. "self stick notes")'
+                  maxLength={80}
+                  className="flex-1 min-w-[220px] text-xs border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-violet-400"
+                  disabled={kwResearchBusy}
+                />
+                <button
+                  onClick={async () => {
+                    if (kwResearchBusy) return
+                    setKwResearchBusy(true); setKwResearchMsg(null)
+                    try {
+                      const resp = await fetch(`/api/fba/intelligence/${asin}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ seed: kwSeed.trim() || undefined }),
+                      })
+                      const data = await resp.json().catch(() => ({}))
+                      if (!resp.ok || data.error) setKwResearchMsg(`✗ ${data.error ?? `HTTP ${resp.status}`}`)
+                      else setKwResearchMsg(`✓ Research started${kwSeed.trim() ? ` with seed “${kwSeed.trim()}”` : ' (auto seed)'} — runs in the background (~1 min). Reload this tab to see the refreshed pool, then Regenerate to weave new keywords into content.`)
+                    } catch (err) {
+                      setKwResearchMsg(`✗ ${err instanceof Error ? err.message : 'Failed to start research'}`)
+                    }
+                    setKwResearchBusy(false)
+                  }}
+                  disabled={kwResearchBusy}
+                  className="text-xs bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50 whitespace-nowrap"
+                  title="Runs the full research pipeline fresh: niche keywords + Share-of-Voice competitor discovery + the #1 competitor's keyword harvest. Spends 3 Jungle Scout credits."
+                >
+                  {kwResearchBusy ? 'Starting…' : 'Re-research (3 JS credits) →'}
+                </button>
+              </div>
+              {kwResearchMsg && (
+                <p className={`px-3 py-2 text-[11px] border-b border-slate-100 ${kwResearchMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>{kwResearchMsg}</p>
+              )}
               {/* Top 20 keywords table */}
               <table className="w-full text-xs">
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Keyword</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500">Vol</th>
+                    <th className="text-right px-3 py-2 font-medium text-slate-500" title="Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is">Opp</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Present In</th>
                   </tr>
@@ -2460,6 +2506,7 @@ export default function ListingDetailPage() {
                     <tr key={i} className="hover:bg-slate-50">
                       <td className="px-3 py-2 text-slate-800">{kw.keyword}</td>
                       <td className="px-3 py-2 text-right text-slate-600">{kw.searchVolume.toLocaleString()}</td>
+                      <td className={`px-3 py-2 text-right font-semibold ${kw.opportunityScore >= 70 ? 'text-violet-700' : kw.opportunityScore >= 40 ? 'text-slate-700' : 'text-slate-400'}`}>{Math.round(kw.opportunityScore)}</td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                           kw.actionType === 'CRITICAL' ? 'bg-red-100 text-red-700'

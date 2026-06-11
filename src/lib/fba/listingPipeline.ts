@@ -386,7 +386,9 @@ const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee
 // Amazon Listings-Items productTypes that ARE clothing (worn on the body) — the only families
 // where shirt/tee framing, garment blank-brands, and fit/fabric specs make sense. Matched on
 // _-delimited tokens so SWEATSHIRT hits but ADDRESS_LABEL / MEMORY_CARD never can.
-const APPAREL_PRODUCT_TYPES = /(?:^|_)(SHIRT|SWEATSHIRT|SWEATER|HOODIE|DRESS|SKIRT|PANTS|SHORTS|SOCKS|HAT|COAT|JACKET|UNDERPANTS|UNDERWEAR|BRA|PAJAMAS|SLEEPWEAR|SWIMWEAR|LEOTARD|TIGHTS|LEGGINGS|BODYSUIT|ONESIE|ROMPER|BLOUSE|CARDIGAN|VEST|ROBE|COSTUME|OUTFIT|TRACKSUIT|OVERALLS|SUIT|KURTA|SAREE|SALWAR_SUIT_SET|APPAREL)(?:_|$)/
+// Exported: keyword research seeds NON-apparel from the productType (category seed) and needs
+// the same ground-truth apparel gate (syncKeywordIntelligence).
+export const APPAREL_PRODUCT_TYPES = /(?:^|_)(SHIRT|SWEATSHIRT|SWEATER|HOODIE|DRESS|SKIRT|PANTS|SHORTS|SOCKS|HAT|COAT|JACKET|UNDERPANTS|UNDERWEAR|BRA|PAJAMAS|SLEEPWEAR|SWIMWEAR|LEOTARD|TIGHTS|LEGGINGS|BODYSUIT|ONESIE|ROMPER|BLOUSE|CARDIGAN|VEST|ROBE|COSTUME|OUTFIT|TRACKSUIT|OVERALLS|SUIT|KURTA|SAREE|SALWAR_SUIT_SET|APPAREL)(?:_|$)/
 
 // Is this an APPAREL product? The title/bullet/description framing (graphic tee, shirt, garment
 // brand, men/women audience, fabric/fit specs) only makes sense for clothing. For non-apparel
