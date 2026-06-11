@@ -461,13 +461,74 @@ function parseJsonLoose<T>(raw: string): T {
   }
 }
 
+// ─── 75-char HARD CAP (Amazon's new title limit, effective July 27, 2026) ──────
+// Deterministic last line of defense: never emit a title Amazon would auto-rewrite. Cuts at a
+// word boundary from the END (brand + design name + money keyword are all front-loaded by the
+// agent, so the tail holds the lowest-value supporting keyphrases), tidies dangling connectors/
+// punctuation, and — rather than silently narrowing the audience — DROPS a truncation-mangled
+// "for Men"/"for Women" fragment when the full title said "for Men and Women".
+export function capTitle75(title: string): string {
+  let t = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (t.length <= 75) return t
+  // Every inclusive-audience form the pipeline can emit: "for Men and Women", "Men's and
+  // Women's" (the widen-guard's possessive swap), and "&" variants.
+  const hadInclusiveAudience = /\bfor Men (?:and|&) Women\b|\bMen['’]s (?:and|&) Women['’]s\b/i.test(t)
+  let cut = t.slice(0, 76)
+  const lastSpace = cut.lastIndexOf(' ')
+  cut = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut.slice(0, 75)).trim()
+  // Strip trailing punctuation + dangling FUNCTION words left by the cut ("... Tee for" → "... Tee").
+  // A dangling content word from a split keyphrase can survive — acceptable for a last-line backstop;
+  // the agent's prompts + retries keep real titles under the cap in the normal path.
+  for (let guard = 0; guard < 6; guard++) {
+    const tidied = cut.replace(/[\s,;:&\-–—]+$/g, '').replace(/\s(?:for|and|with|in|of|to|a|an|the|or|by)$/i, '').trim()
+    if (tidied === cut) break
+    cut = tidied
+  }
+  if (hadInclusiveAudience && /\s*\b(?:for\s+)?(?:Men|Women)['’]?s?(?:\s(?:and|&))?$/i.test(cut)) {
+    cut = cut.replace(/\s*\b(?:for\s+)?(?:Men|Women)['’]?s?(?:\s(?:and|&))?$/i, '').trim().replace(/[\s,;:&\-–—]+$/g, '')
+  }
+  return cut
+}
+
+// ─── ITEM HIGHLIGHTS (Amazon's companion to the 75-char title, July 27 2026) ────
+// ~125 chars of comma-separated search phrases shown near the title and indexed for search —
+// the home for the keyphrases a ≤75-char title can no longer carry. DETERMINISTIC (no LLM):
+// highest-opportunity keywords from the gated pool, with the same hygiene the bullets enforce —
+// no seasonal terms, no audience-narrowing role words, no third-party brands, no capacity tokens
+// on capacity families, and nothing the title already fully indexes (net-new index only).
+function buildItemHighlights(finalTitle: string, pool: AnalyzedKeyword[], brandName: string, capacityFamily: boolean): string {
+  const ownBrands = ownBrandTokenSet(brandName)
+  const titleToks = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+  const seen = new Set<string>()
+  const phrases: string[] = []
+  let len = 0
+  for (const k of [...pool].sort((a, b) => b.opportunityScore - a.opportunityScore)) {
+    const kw = (k.keyword || '').trim().toLowerCase()
+    if (!kw || seen.has(kw)) continue
+    const words = kw.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+    if (words.length === 0 || words.length > 6) continue
+    if (SEASONAL_TERMS.some((s) => kw.includes(s))) continue                  // evergreen field
+    if (words.every((w) => titleToks.has(w))) continue                        // title already indexes it
+    if (words.some((w) => ROLE_WORDS.has(w) && !titleToks.has(w))) continue   // no audience-narrowing
+    if (capacityFamily && CAPACITY_RE.test(kw)) continue                      // shared field — never one capacity
+    if (findThirdPartyBrands(kw, ownBrands).length > 0) continue              // no third-party brands
+    const next = phrases.length ? len + 2 + kw.length : kw.length
+    if (next > 125) continue
+    phrases.push(kw)
+    seen.add(kw)
+    len = next
+    if (len >= 115) break                                                     // close enough — stop scanning
+  }
+  return phrases.join(', ')
+}
+
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
 export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string, upgradeKws?: string[], designName?: string): string[] {
   const problems: string[] = []
   const len = title.length
-  if (len > 150) problems.push(`Title is ${len} characters; Amazon's hard limit is 150 — shorten it (aim 80-125 for apparel).`)
-  else if (len < 80) problems.push(`Title is only ${len} characters; use at least 80 to capture more keyword space.`)
+  if (len > 75) problems.push(`Title is ${len} characters; Amazon's NEW limit is 75 (effective July 27, 2026 — longer titles get AUTO-REWRITTEN by Amazon). Cut supporting keyphrases (they belong in backend keywords / Item Highlights), keep brand + design/product name + the money keyword.`)
+  else if (len < 50) problems.push(`Title is only ${len} characters; aim 50-75 — there's room for the top keyword without breaking the 75-char limit.`)
 
   const counts = new Map<string, number>()
   title.toLowerCase().split(/\s+/).forEach((w) => {
@@ -930,7 +991,7 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
   onProgress?.('Title council: drafts in, adversary reviewing...')          // keepalive (resets idle timer)
   const numbered = drafts.map((t, i) => `${i + 1}. ${t}`).join('\n')
   const critique = await ask(
-    'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 125 chars, brand not first, and weak click appeal. Be specific.',
+    'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from July 27, 2026), brand not first, and weak click appeal. Be specific.',
     `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
     0.3, 400, COUNCIL_MODEL, 60_000,
   )
@@ -1131,18 +1192,18 @@ async function runTitleAgent(
   const user = `Brand: ${brandName}
 Category: ${category}
 ${designLine}${mustLine}${attrPinLine}${upgradeLine}
-Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — use as many as fit naturally, ${apparel ? 'typically 1-2 beyond the mandatory keyword' : 'aim for 3-5 of these alongside the mandatory keyword'}):
+Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — the title is capped at 75 chars, so ${apparel ? 'at most ONE beyond the mandatory keyword' : 'only 1-2 of these fit alongside the mandatory keyword; the rest rank via bullets/backend'}):
 ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
 ${apparel
-  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier (e.g. "Comfy Comfort Colors Alligator Shirt"). Then end with the audience. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — use the real "<subject> shirt" keyword instead. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words): "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}"` : ''}, design subject from the image, audience "${preferredAudience || 'Men and Women'}".`
+  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier ONLY if it fits the 75-char cap. Then end with the audience. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — every char counts against 75. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words; it is exactly 75 chars): "THE CEO Later Gator T-Shirt, Comfort Colors Alligator Tee for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (drop it first if over 75)` : ''}, design subject from the image, audience "${preferredAudience || 'Men and Women'}".`
   : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience.`} It should read like a human-written phrase.
 
 Rules:
-- ${apparel ? "LEAD with the brand, the design name, then the product type within the first ~80 characters (that's all mobile shows) — design-led, NOT keyword-led." : 'FRONT-LOAD the mandatory keyword in the first ~80 characters (that\'s all mobile shows).'}
+- ${apparel ? "LEAD with the brand, the design name, then the product type — design-led, NOT keyword-led. At ≤75 chars the WHOLE title shows on mobile." : 'FRONT-LOAD the mandatory keyword right after the brand — at ≤75 chars every word is prime real estate.'}
 - Do NOT use " - " dashes or " | " pipes to separate sections — flow as natural language (a single comma is OK only if it genuinely reads better). Amazon indexes the title as a bag of words, so separators add nothing and only cost characters.
-- ${apparel ? '80-125 characters' : 'TARGET 110-125 characters (Amazon indexes every word — use the budget; titles under 100 chars are leaving ranking on the table)'}. Title Case. ONE consistent audience (never mix kids with men/women).
+- ${apparel ? '50-75 characters — HARD CAP 75' : 'TARGET 60-75 characters — HARD CAP 75'} (Amazon's NEW limit, effective July 27, 2026: longer titles get AUTO-REWRITTEN by Amazon; overflow keyphrases belong in backend keywords and the Item Highlights field, NOT the title). Title Case. ONE consistent audience (never mix kids with men/women).
 - ${apparel ? 'Use the product-type word ("shirt"/"tee"/"t-shirt") AT MOST TWICE in the WHOLE title. Do NOT append "Shirt" to every keyphrase (no "Comfort Colors Shirt Vintage 90s Shirt Cool T Shirts").' : 'Name the product type ONCE using the single clearest term — do NOT stack synonyms for the SAME product. If you write "Sticky Notes", do NOT also add "Post It Notes" / "Sticky Note" / another "Notes" phrase; pick the ONE clearest term and let the other synonyms live in the backend keywords. No noun may appear more than twice in the whole title (e.g. never "Notes ... Notes ... Notes"). Do NOT reframe the product as apparel / a t-shirt / "graphic tee" / clothing unless it genuinely is one. Keep the title BROAD: do NOT frame it around a single niche use-case or audience (e.g. "for Bible Study", "for Nurses", "for Teachers") — those narrow a general product and belong in the backend keywords + a bullet, NOT the title.'}
 - ${apparel
   ? 'Include the searchable keyphrases above when they fit. Do NOT put dry product SPECS (material, fabric, fit, weight, dye) in the title — those are not search terms.'
@@ -1178,7 +1239,7 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: `You are an Amazon SEO title editor${apparel ? ' for apparel' : ''}. Output ONLY the corrected title string.` },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}"` : ''} then ${apparel ? 'an optional supporting keyphrase' : 'multiple supporting keyphrases (fill toward 110-125 chars)'}${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. ${apparel ? '80-125 chars' : 'TARGET 110-125 chars — use the budget'}. ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -1192,10 +1253,11 @@ Rules:
     }
   }
 
-  // Compliance guarantee: brand must lead.
+  // Compliance guarantee: brand must lead. ALWAYS prefix — the 75-char hard-cap backstop at the
+  // end trims the TAIL, so adding the brand up front can never be the thing that gets cut.
   if (title && brandName && !title.toLowerCase().includes(brandName.toLowerCase())) {
-    const prefixed = `${brandName} ${title}`.trim()
-    if (prefixed.length <= 150) { title = prefixed; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) }
+    title = `${brandName} ${title}`.trim()
+    problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
   }
 
   // Audience guarantee: never silently narrow a unisex product to one gender.
@@ -1205,7 +1267,9 @@ Rules:
       const swapped = title
         .replace(/\bfor Men\b/i, 'for Men and Women')
         .replace(/\bMen'?s\b/i, "Men's and Women's")
-      if (swapped !== title && swapped.length <= 150) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) }
+      // No length gate: widening the audience is a compliance fix; the 75-char backstop below
+      // protects length (and knows to drop a truncation-mangled audience rather than narrow it).
+      if (swapped !== title) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) }
     }
   }
 
@@ -1228,7 +1292,7 @@ Rules:
         model: 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: `Rewrite the title. ${instructions} Keep the brand "${brandName}" and the mandatory keyword${mustInclude ? ` "${mustInclude}"` : ''}. 80-150 chars. Return ONLY the title string, no quotes or markdown.` },
+          { role: 'user', content: `Rewrite the title. ${instructions} Keep the brand "${brandName}" and the mandatory keyword${mustInclude ? ` "${mustInclude}"` : ''}. 50-75 chars (HARD CAP 75). Return ONLY the title string, no quotes or markdown.` },
         ],
         temperature: 0.2,
         max_tokens: 120,
@@ -1282,13 +1346,13 @@ Rules:
     }
   }
 
-  // Deterministic backstop (apparel): a sub-80-char title is below Amazon's ~80-char mobile floor
-  // (the validator flags <80 as "too short" and it wastes title real estate). Lead the garment brand
-  // with a FEEL adjective — "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the
-  // title past 80. The word VARIES by a stable design hash so it's never hardcoded to one (PO: "if can
-  // be Comfy, it can be Soft, Cool etc") yet stays consistent for a given product. Only when short,
-  // only when there's a garment brand in the title, and only if no feel word is already in front of it.
-  if (apparel && title.length < 80 && attributePin) {
+  // Deterministic backstop (apparel): a sub-50-char title wastes real keyword space even under the
+  // 75-char cap (the validator's floor is 50). Lead the garment brand with a FEEL adjective —
+  // "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the title toward 50-75.
+  // The word VARIES by a stable design hash so it's never hardcoded to one (PO: "if can be Comfy,
+  // it can be Soft, Cool etc") yet stays consistent for a given product. Only when short, only when
+  // there's a garment brand in the title, and only if no feel word is already in front of it.
+  if (apparel && title.length < 50 && attributePin) {
     const pinEsc = attributePin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const m = title.match(new RegExp(`\\b${pinEsc}\\b`, 'i'))
     if (m && m.index != null && !/\b(comfy|soft|cozy|cool|cute|premium|comfortable)\b/i.test(title.slice(0, m.index))) {
@@ -1296,7 +1360,7 @@ Rules:
       const seed = (designName || title).split('').reduce((a, c) => a + c.charCodeAt(0), 0)
       const mod = FEEL[seed % FEEL.length]
       const padded = `${title.slice(0, m.index)}${mod} ${title.slice(m.index)}`.replace(/\s{2,}/g, ' ').trim()
-      if (padded.length <= 150) {
+      if (padded.length <= 75) {
         title = padded
         problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
       }
@@ -1360,6 +1424,20 @@ Rules:
       if (i > 0 && MINOR.has(lw)) return lw
       return w.charAt(0).toUpperCase() + w.slice(1)
     }).join(' ')
+    // Repair tech acronyms the Title-Case pass can mangle when the LLM emitted them lowercase
+    // ("Sd Card", "Usb-c", "Uhs-i", "128gb") — these are search identifiers and must read right.
+    title = title
+      .replace(/\b(\d+)\s?[Gg][Bb]\b/g, '$1GB')
+      .replace(/\b(\d+)\s?[Tt][Bb]\b/g, '$1TB')
+      .replace(/\bSd\b/g, 'SD').replace(/\bUsb\b/g, 'USB').replace(/\bUhs\b/g, 'UHS').replace(/\bHd\b/g, 'HD')
+  }
+
+  // ── HARD CAP 75 — the last gate before the title leaves the agent (Amazon auto-rewrites longer
+  // titles from July 27, 2026). Everything valuable is front-loaded by now; capTitle75 trims the
+  // tail at a word boundary and never leaves a narrowed audience fragment.
+  if (title.length > 75) {
+    title = capTitle75(title)
+    problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
   }
 
   return { title, problems, retried }
@@ -2646,7 +2724,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         let t = finalTitle
         if (baseCap && cap !== baseCap) t = finalTitle.replace(new RegExp(`\\b${baseCap}\\b`, 'gi'), cap)
         else if (!baseCap) t = finalTitle.replace(/^(\S+\s+\S+\s+\S+)/, `$1 ${cap}`)
-        return { sku: c.sku, asin: c.asin, title: truncateToBytes(t, 200) }
+        // Same 75-char hard cap as the shared title. The INSERTION path puts the capacity up front
+        // (word 4) where a tail-trim can't reach it — but the SWAP path edits the token wherever the
+        // base title carried it, which can be the tail. If the cap cut the capacity (the one thing
+        // that differs per child — the task-#90 regression class), re-insert it up front and re-cap.
+        let capped = capTitle75(t)
+        const capEsc = cap.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        if (!new RegExp(`\\b${capEsc}\\b`, 'i').test(capped)) {
+          capped = capTitle75(capped.replace(/^(\S+\s+\S+\s+\S+)/, `$1 ${cap}`))
+        }
+        return { sku: c.sku, asin: c.asin, title: capped }
       })
     }
   }
@@ -2786,6 +2873,31 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   synth('description', description, 'parent', 'Your live description is not optimized for the target keywords.', 'Replace your current description with the optimized version below, then save in Seller Central.')
   synth('backend_keywords', perChild[0]?.keywords ?? '', 'per_child', 'Your live backend search terms miss high-value keywords.', "Replace each child SKU's backend search terms with its per-variant string below.")
 
+  // ── ITEM HIGHLIGHTS row — ONLY once THIS product type's live schema accepts item_highlights
+  // (menu-gated): recommending it before Amazon ships the field would create an unfillable
+  // Features gap. field_name = the schema's OWN display title, so the route's resolver maps it
+  // 1:1 to sp_api_key and the row rides the schema-details rails (Push button, verify, write-
+  // through) with ZERO new endpoints. Deterministic value replaces any audit-guessed duplicate.
+  let pdiFinal: PipelineProductDetailImprovement[] = Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : []
+  const highlightsAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === 'item_highlights')
+  if (highlightsAttr) {
+    // String() guard: audit rows are a blind-cast o4-mini parse — a missing field_name must not
+    // crash the whole regen here (this runs OUTSIDE the route's tolerant validation loop). The
+    // audit-guessed duplicate is dropped EVEN when our deterministic build comes back empty —
+    // an unreviewed LLM guess must never ride the pushable rails.
+    const squash = (s: unknown) => String(s ?? '').toLowerCase().replace(/[\s_-]+/g, '')
+    pdiFinal = pdiFinal.filter((p) => squash(p.field_name) !== squash(highlightsAttr.title) && squash(p.field_name) !== 'itemhighlights')
+    const hl = buildItemHighlights(finalTitle, analysis, input.brandName, !!perChildTitles)
+    if (hl) {
+      pdiFinal.push({
+        field_name: highlightsAttr.title,
+        current_value: null,
+        recommended_value: hl,
+        reason: 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of comma-separated phrases shown near the title and indexed for search — carries the keyphrases the shorter title no longer can.',
+      })
+    }
+  }
+
   return {
     recommended_title: finalTitle,
     recommended_bullets: bullets,
@@ -2794,7 +2906,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     recommended_description: description,
     variant_corrections: Array.isArray(audit.variant_corrections) ? audit.variant_corrections : [],
     cannibalization_warnings: Array.isArray(audit.cannibalization_warnings) ? audit.cannibalization_warnings : [],
-    product_details_improvements: Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : [],
+    product_details_improvements: pdiFinal,
     keyword_reconciliation: Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [],
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,

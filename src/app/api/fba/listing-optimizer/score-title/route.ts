@@ -65,6 +65,9 @@ export async function POST(req: NextRequest) {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const titleIssues = (score.issues ?? []).filter((i: any) => i.field === 'title')
+    // >75 chars = Amazon AUTO-REWRITE risk (July 27, 2026), NOT suppression — it must not trip the
+    // red policy banner (adversarial review: the whole live catalog is 76-150 today and pushes fine).
+    // The ≤75 guidance still reaches the seller via the problems list itself.
     const suppressionRisk = ruleProblems.some((p) => /SUPPRESS|TRADEMARK|bare third-party|150/i.test(p))
 
     return NextResponse.json({

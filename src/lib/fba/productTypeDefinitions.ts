@@ -252,6 +252,21 @@ export async function listPushableSchemaAttributes(
       out.push({ key, title: (sub?.title || key.replace(/_/g, ' ')).trim(), accepted: accepted.length ? accepted : undefined })
       if (out.length >= max) break
     }
+    // ALWAYS-INCLUDE: item_highlights (the July 27, 2026 companion to the 75-char title) must make
+    // the menu whenever THIS schema has it — schema property ORDER decides the first `max` slots, so
+    // without this the feature would silently never activate for categories where it lands 15th+
+    // (adversarial-review MAJOR). Same pattern available for future must-surface attributes.
+    for (const mustKey of ['item_highlights']) {
+      if (!out.some((o) => o.key === mustKey) && Object.prototype.hasOwnProperty.call(props, mustKey)) {
+        const sub = props[mustKey]
+        const enumDef = extractEnum(sub)
+        const dep = new Set((enumDef?.deprecated ?? []).map((d) => d.toLowerCase()))
+        const accepted = enumDef
+          ? (enumDef.names.length ? enumDef.names : enumDef.values).filter((_, i) => !dep.has(String(enumDef.values[i]).toLowerCase()))
+          : []
+        out.push({ key: mustKey, title: (sub?.title || mustKey.replace(/_/g, ' ')).trim(), accepted: accepted.length ? accepted : undefined })
+      }
+    }
     return out
   } catch (err) {
     console.warn(`[productTypeDefinitions] attribute menu failed for ${productType} (non-fatal):`, err instanceof Error ? err.message : err)

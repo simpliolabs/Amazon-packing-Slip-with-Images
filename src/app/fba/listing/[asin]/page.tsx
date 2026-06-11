@@ -2564,8 +2564,8 @@ export default function ListingDetailPage() {
                               placeholder="Type or edit the title to push to all SKUs…"
                             />
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className={`text-[10px] font-medium ${editTitle.length > 200 ? 'text-red-600' : editTitle.length < 80 ? 'text-amber-600' : 'text-slate-500'}`}>
-                                {editTitle.length}/200 chars{editTitle.length > 0 && editTitle.length < 80 ? ' · under 80 (Amazon mobile cutoff)' : ''}
+                              <span className={`text-[10px] font-medium ${editTitle.length > 200 ? 'text-red-600' : editTitle.length > 75 || (editTitle.length > 0 && editTitle.length < 50) ? 'text-amber-600' : 'text-slate-500'}`}>
+                                {editTitle.length}/75 chars{editTitle.length > 75 ? ' · over Amazon’s NEW 75-char limit (Jul 27, 2026 — auto-rewritten after that)' : editTitle.length > 0 && editTitle.length < 50 ? ' · under 50 — room for your top keyword' : ''}
                               </span>
                               <button onClick={() => scoreTitle(editTitle)} disabled={titleScoreLoading || !editTitle.trim()}
                                 className="text-[10px] bg-slate-700 hover:bg-slate-800 text-white px-2 py-0.5 rounded font-medium disabled:opacity-50">

@@ -293,8 +293,8 @@ ${formatSection(defended, 'no defended keywords')}
 
 KEYWORD PLACEMENT RULES:
 
-RULE 1 — TITLE (2-3 keywords max):
-Build the title from the top year-round keywords by Opportunity Score. Use 2-3 keywords maximum. Prefer specific, product-relevant keywords over broad generic ones (e.g., "later gator tshirt" is better than "cool t shirts for men" for a Later Gator product because it has higher conversion intent). Title MUST be 80-150 characters. Do not include variant-specific attributes (size, color).
+RULE 1 — TITLE (1-2 keywords max):
+Build the title from the top year-round keywords by Opportunity Score. Use 1-2 keywords maximum. Prefer specific, product-relevant keywords over broad generic ones (e.g., "later gator tshirt" is better than "cool t shirts for men" for a Later Gator product because it has higher conversion intent). Title MUST be at most 75 characters (Amazon's new limit, effective July 27, 2026 — longer titles get auto-rewritten by Amazon; overflow keywords belong in backend terms and Item Highlights). Do not include variant-specific attributes (size, color).
 
 RULE 7 — SEASONAL KEYWORDS IN TITLE ONLY WHEN PRODUCT IS DESIGNED FOR THAT OCCASION:
 Keywords tied to specific events, seasons, or occasions (e.g., "last day of school", "graduation", "christmas shirt", "halloween shirt", "mothers day", "fathers day") belong in the title ONLY if the product is specifically designed for that occasion — meaning the graphic, design, or product concept is directly tied to it.
@@ -838,7 +838,7 @@ export async function POST(req: NextRequest) {
             }
             // (1) CONVERGENCE: the live section already scores STRONG (>=23/25, the seller's
             // "good enough" bar) → treat it as done and stop nagging to ship. A literal 25 isn't
-            // always reachable (long-tail keywords can't all fit a 150-char title), so a strong
+            // always reachable (long-tail keywords can't all fit a 75-char title), so a strong
             // section counts as optimized. Each element gates on its OWN sub-score: title→title,
             // bullets→bullet, backend→keyword, description→description, product_details→features.
             const STRONG = 23
