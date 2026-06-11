@@ -1,7 +1,7 @@
 'use client'
 
 import { useParams, useRouter } from 'next/navigation'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
@@ -249,6 +249,14 @@ export default function ListingDetailPage() {
   interface PushProgressRow { sku: string; status: 'validating' | 'accepted' | 'failed'; error?: string; submissionId?: string | null }
   const [pushProgress, setPushProgress] = useState<PushProgressRow[]>([])
   const [pushPhase, setPushPhase] = useState<'idle' | 'starting' | 'pushing' | 'rescoring' | 'done'>('idle')
+  // ── Auto Push (PO): one click pushes EVERY ready Product-Detail field. The seller stays on
+  // the trigger; the tool does the legwork field by field with live status. Each field goes
+  // through the SAME per-field endpoint as a manual push (validation, write-through, re-score).
+  interface BulkPushItem { field: string; value: string; status: 'ready' | 'pushing' | 'done' | 'failed'; note?: string; skip?: boolean }
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkItems, setBulkItems] = useState<BulkPushItem[]>([])
+  const [bulkRunning, setBulkRunning] = useState(false)
+  const [bulkFinished, setBulkFinished] = useState(false)
   // ── Family-SKUs view — full set of FBA + FBM twins + variation parent SKU. The DB cache
   // (listing_content) historically deduped some FBA/FBM pairs, so cards that render from
   // it alone hid the FBM twins (the seller saw "3 children" but the push hit 6).
@@ -894,6 +902,104 @@ export default function ListingDetailPage() {
     }
     setPushLoading(false)
   }, [asin, pushField, pushDetailField, editTitle])
+
+  // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
+  const bulkEligibleDetails = useMemo(() => {
+    const rows = aiRecs?.product_details_improvements ?? []
+    return rows.filter((pd) =>
+      (pd.pushable ?? isPushableDetail(pd.field_name)) &&
+      pd.enum_valid !== false &&
+      (pd.recommended_value ?? '').trim() !== '' &&
+      (pd.current_value ?? '').trim() !== pd.recommended_value.trim(),
+    )
+  }, [aiRecs])
+
+  const openBulkPush = useCallback(() => {
+    setBulkItems(bulkEligibleDetails.map((pd) => ({ field: pd.field_name, value: pd.recommended_value, status: 'ready' as const })))
+    setBulkFinished(false)
+    setBulkOpen(true)
+  }, [bulkEligibleDetails])
+
+  /** Sequential per-field pushes through the SAME endpoint as a manual push — a failure on one
+   *  field never blocks the rest; per-field status updates live; ONE score refresh at the end. */
+  const runBulkPush = useCallback(async () => {
+    if (bulkRunning) return
+    setBulkRunning(true)
+    const items = bulkItems
+    const setItem = (i: number, patch: Partial<BulkPushItem>) =>
+      setBulkItems((prev) => { const next = prev.slice(); next[i] = { ...next[i], ...patch }; return next })
+    let anyPushed = false
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].skip) { setItem(i, { note: 'Skipped' }); continue }
+      setItem(i, { status: 'pushing' })
+      try {
+        const resp = await fetch('/api/fba/listing-optimizer/push-content', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ parent_asin: asin, field: 'details', detail_field: items[i].field, confirm: true }),
+        })
+        if (!resp.ok) {
+          const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }
+          throw new Error(data.error || `HTTP ${resp.status}`)
+        }
+        if (!resp.body) throw new Error('Connection dropped before stream.')
+        // Minimal NDJSON pump: only the final result/error line matters here (per-SKU progress
+        // stays in the single-field modal; this list shows one line per FIELD).
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let result: { pushed?: number; failed?: number; total?: number; message?: string } | null = null
+        let streamError: string | null = null
+        const handleLine = (line: string) => {
+          if (!line.trim()) return
+          try {
+            const msg = JSON.parse(line) as { type?: string; pushed?: number; failed?: number; total?: number; message?: string; error?: string }
+            if (msg.type === 'result') result = msg
+            else if (msg.type === 'error') streamError = msg.error || 'Push failed mid-stream.'
+          } catch { /* keepalive/partial line */ }
+        }
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+          for (const line of lines) handleLine(line)
+        }
+        if (buffer.trim()) handleLine(buffer)
+        if (streamError) throw new Error(streamError)
+        if (!result) throw new Error('Stream ended without a result.')
+        const r = result as { pushed?: number; failed?: number; total?: number }
+        const ok = (r.failed ?? 0) === 0 && (r.pushed ?? 0) > 0
+        setItem(i, { status: ok ? 'done' : 'failed', note: `${r.pushed ?? 0}/${r.total ?? 0} variants${(r.failed ?? 0) > 0 ? `, ${r.failed} failed` : ''}` })
+        if (ok) {
+          anyPushed = true
+          // Mirror the server write-through locally so the panel row flips to up-to-date.
+          const fieldName = items[i].field
+          const value = items[i].value
+          setAiRecs((prev) => prev ? {
+            ...prev,
+            product_details_improvements: (prev.product_details_improvements ?? []).map((pd) =>
+              pd.field_name === fieldName ? { ...pd, current_value: value, enum_valid: pd.is_enum ? true : pd.enum_valid } : pd),
+          } : prev)
+        }
+      } catch (e) {
+        setItem(i, { status: 'failed', note: e instanceof Error ? e.message : 'Push failed' })
+      }
+    }
+    // ONE fresh score read at the end (each push already re-scored server-side).
+    if (anyPushed) {
+      try {
+        const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+        const sdata = await sresp.json()
+        const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+        if (found) setScore(found)
+      } catch { /* best-effort */ }
+    }
+    setBulkRunning(false)
+    setBulkFinished(true)
+  }, [asin, bulkItems, bulkRunning])
 
   /** Verify what Amazon ACTUALLY has live right now for the just-pushed field.
    *  Useful when a push was Accepted but the seller doesn't see it on Seller Central
@@ -1884,11 +1990,22 @@ export default function ListingDetailPage() {
                     Capacity) and unmapped names keep Copy + a tooltip explaining why. */}
                 {recs.product_details_improvements && recs.product_details_improvements.length > 0 && (
                   <div className="mt-3 bg-white border border-slate-200 rounded-2xl p-4">
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center justify-between mb-2 gap-2">
                       <span className="text-xs font-semibold text-slate-700">Recommended Product Detail values</span>
-                      <span className="text-[10px] text-slate-400">
-                        {recs.product_details_improvements.filter((pd) => pd.pushable ?? isPushableDetail(pd.field_name)).length} pushable · {recs.product_details_improvements.length} total
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-400">
+                          {recs.product_details_improvements.filter((pd) => pd.pushable ?? isPushableDetail(pd.field_name)).length} pushable · {recs.product_details_improvements.length} total
+                        </span>
+                        {bulkEligibleDetails.length >= 2 && (
+                          <button
+                            onClick={openBulkPush}
+                            className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded font-semibold whitespace-nowrap"
+                            title="Push every ready field to Amazon in one go — you confirm once, each field still gets full validation"
+                          >
+                            Auto Push all ready ({bulkEligibleDetails.length}) →
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="grid sm:grid-cols-2 gap-2">
                       {recs.product_details_improvements.map((pd, i) => {
@@ -2433,6 +2550,62 @@ export default function ListingDetailPage() {
       {/* ══════════════════════════════════════════════════════════════════════
           SHIP CONTENT TO AMAZON — per-section preview → confirm modal
           ══════════════════════════════════════════════════════════════════════ */}
+      {/* AUTO PUSH — one confirm, every ready Product-Detail field ships sequentially. */}
+      {bulkOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !bulkRunning && setBulkOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
+              <h3 className="text-sm font-bold text-slate-900">Auto Push — Product Details</h3>
+              <button onClick={() => !bulkRunning && setBulkOpen(false)} disabled={bulkRunning} className="text-slate-400 hover:text-slate-600 text-lg leading-none disabled:opacity-40">×</button>
+            </div>
+            <div className="px-5 py-4 space-y-2">
+              <p className="text-xs text-slate-500">
+                {bulkFinished
+                  ? 'Done. Amazon applies accepted submissions in 15 min – 6 hr; use Verify on Amazon on any field to confirm.'
+                  : `These ${bulkItems.length} fields are validated and ready. Each pushes to every variant SKU with the same checks as a manual push — a failure on one never blocks the rest.`}
+              </p>
+              <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
+                {bulkItems.map((it, i) => (
+                  <div key={i} className={`flex items-center justify-between gap-3 px-3 py-2 ${it.skip ? 'opacity-50' : ''}`}>
+                    <label className="flex items-center gap-2.5 min-w-0 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!it.skip}
+                        disabled={bulkRunning || bulkFinished}
+                        onChange={() => setBulkItems((prev) => { const next = prev.slice(); next[i] = { ...next[i], skip: !next[i].skip }; return next })}
+                        className="accent-emerald-600 shrink-0"
+                      />
+                      <span className="min-w-0">
+                        <p className="text-xs font-semibold text-slate-800">{it.field}</p>
+                        <p className="text-[11px] text-slate-500 truncate">{it.value}</p>
+                      </span>
+                    </label>
+                    <span className={`text-[10px] font-semibold whitespace-nowrap shrink-0 ${
+                      it.status === 'done' ? 'text-emerald-600' : it.status === 'failed' ? 'text-red-600' : it.status === 'pushing' ? 'text-violet-600 animate-pulse' : 'text-slate-400'
+                    }`}>
+                      {it.status === 'ready' ? 'Ready' : it.status === 'pushing' ? 'Pushing…' : it.status === 'done' ? `✓ ${it.note ?? 'Pushed'}` : `✗ ${it.note ?? 'Failed'}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 sticky bottom-0 bg-white">
+              <button onClick={() => setBulkOpen(false)} disabled={bulkRunning} className="text-xs text-slate-600 hover:text-slate-800 px-3 py-1.5 disabled:opacity-40">
+                {bulkFinished ? 'Close' : 'Cancel'}
+              </button>
+              {!bulkFinished && (
+                <button
+                  onClick={runBulkPush}
+                  disabled={bulkRunning || bulkItems.filter((it) => !it.skip).length === 0}
+                  className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg font-semibold disabled:opacity-50"
+                >
+                  {bulkRunning ? 'Pushing…' : `Push ${bulkItems.filter((it) => !it.skip).length} field${bulkItems.filter((it) => !it.skip).length === 1 ? '' : 's'} to Amazon →`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {showPushModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !pushLoading && setShowPushModal(false)}>
           <div className="bg-white rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
