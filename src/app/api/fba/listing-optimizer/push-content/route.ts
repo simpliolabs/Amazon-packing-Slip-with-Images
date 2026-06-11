@@ -36,7 +36,7 @@ import {
   cacheUpdateFor, getByteLength, capBytes,
 } from '@/lib/fba/pushFields'
 import {
-  resolveDetailAttribute, isPushableDetail, unpushableReason,
+  resolveDetailAttribute, unpushableReason,
   buildDetailPatchValue, currentDetailValue, normalizeFieldName,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
@@ -368,11 +368,6 @@ interface DetailContext {
  *  unknown / non-pushable detail names so the caller can return a clean 4xx. */
 async function loadDetailContext(parentAsin: string, detailField: string, valueOverride?: string): Promise<{ ctx: DetailContext | null; error: string | null }> {
   if (!detailField) return { ctx: null, error: 'detail_field is required for field=details (e.g. ?detail_field=Material).' }
-  if (!isPushableDetail(detailField)) {
-    return { ctx: null, error: unpushableReason(detailField) || `"${detailField}" can't be pushed from the portal.` }
-  }
-  const attribute = resolveDetailAttribute(detailField)
-  if (!attribute) return { ctx: null, error: `"${detailField}" is not a recognized product-detail attribute yet.` }
 
   const supabase = await createAdminClient()
   const { data: recRow } = await supabase
@@ -380,13 +375,23 @@ async function loadDetailContext(parentAsin: string, detailField: string, valueO
     .select('product_details_improvements')
     .eq('parent_asin', parentAsin)
     .single()
-  // product_details_improvements is JSONB; not in generated types yet.
+  // product_details_improvements is JSONB; not in generated types yet. The regen now resolves + persists
+  // sp_api_key/attr_scope/pushable per item (schema-driven), so read those.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: string }[]
+  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: string; sp_api_key?: string; attr_scope?: string; pushable?: boolean }[]
   const wanted = normalizeFieldName(detailField)
   const match = details.find((d) => normalizeFieldName(d.field_name || '') === wanted)
   if (!match || !match.recommended_value || !match.recommended_value.trim()) {
     return { ctx: null, error: `No AI recommendation found for "${detailField}". Run an AI audit first.` }
+  }
+  // Resolve the SP-API attribute: prefer the regen-resolved sp_api_key (schema-driven — works for ANY
+  // category, not just the apparel map); fall back to the static map. Reject only when neither yields a
+  // pushable broadcast attribute.
+  const attribute: DetailAttribute | undefined = (match.pushable && match.sp_api_key)
+    ? { spApiKey: match.sp_api_key, scope: 'broadcast' }
+    : resolveDetailAttribute(detailField) ?? undefined
+  if (!attribute || attribute.scope !== 'broadcast') {
+    return { ctx: null, error: unpushableReason(detailField) || `"${detailField}" isn't a pushable attribute for this product type.` }
   }
 
   // ── Enum validation (Feature B) ──────────────────────────────────────────────

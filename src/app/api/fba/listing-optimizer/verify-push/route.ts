@@ -97,7 +97,7 @@ interface RecRow {
   recommended_description?: string | null
   recommended_keywords?: string | null
   per_child_titles?: { sku: string; asin: string; title: string }[] | null
-  product_details_improvements?: { field_name?: string; recommended_value?: string }[] | null
+  product_details_improvements?: { field_name?: string; recommended_value?: string; sp_api_key?: string; pushable?: boolean }[] | null
 }
 
 /** Compute the value WE tried to push for this SKU (mirrors push-content's resolution). */
@@ -145,16 +145,6 @@ export async function GET(req: NextRequest) {
     }
     const field = rawField as VerifyField
 
-    // Resolve the SP-API attribute key for details (so extractLive knows where to look).
-    let detailKey: string | null = null
-    if (field === 'details') {
-      if (!isPushableDetail(detailFriendly)) {
-        return NextResponse.json({ error: `"${detailFriendly}" can't be verified as a pushable detail.` }, { status: 400 })
-      }
-      detailKey = resolveDetailAttribute(detailFriendly)?.spApiKey ?? null
-      if (!detailKey) return NextResponse.json({ error: `Unknown detail attribute "${detailFriendly}"` }, { status: 400 })
-    }
-
     // Load the recommendation row (so we know what we EXPECTED to push).
     const supabase = await createAdminClient()
     const { data: recRow } = await supabase
@@ -163,6 +153,25 @@ export async function GET(req: NextRequest) {
       .eq('parent_asin', parentAsin)
       .single()
     const rec = (recRow ?? {}) as RecRow
+
+    // Resolve the SP-API attribute key for details (so extractLive knows where to look).
+    // Prefer the key the regen stored on the recommendation (schema-resolved, works for ANY
+    // category); the static map only covers rows from before the schema-mapping change.
+    let detailKey: string | null = null
+    if (field === 'details') {
+      const stored = (rec.product_details_improvements ?? []).find(
+        (d) => normalizeFieldName(d.field_name || '') === normalizeFieldName(detailFriendly || ''),
+      )
+      if (stored?.pushable && stored.sp_api_key) {
+        detailKey = stored.sp_api_key
+      } else {
+        if (!isPushableDetail(detailFriendly)) {
+          return NextResponse.json({ error: `"${detailFriendly}" can't be verified as a pushable detail.` }, { status: 400 })
+        }
+        detailKey = resolveDetailAttribute(detailFriendly)?.spApiKey ?? null
+        if (!detailKey) return NextResponse.json({ error: `Unknown detail attribute "${detailFriendly}"` }, { status: 400 })
+      }
+    }
 
     // Collect every SKU we would have pushed to (children from listing_content + the parent
     // SKU we discover via Listings Items). The parent is included for broadcast fields and

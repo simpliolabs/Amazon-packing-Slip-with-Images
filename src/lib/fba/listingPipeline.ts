@@ -50,6 +50,16 @@ export interface PipelineInput {
   openai: OpenAI
   brandName: string
   category: string
+  /** SP-API productType for this family's listings (SHIRT, SELF_STICK_NOTE, MEMORY_CARD, …).
+   *  GROUND TRUTH for the apparel-vs-not branch: when set it decides outright and the
+   *  category/title text heuristic is skipped — a poisoned category string or a previously
+   *  contaminated live title can never flip the branch. Null/undefined → legacy heuristic. */
+  productType?: string | null
+  /** Live product-type schema attributes the seller can broadcast-push (SP-API key + display
+   *  title + accepted enum values, from the Product Type Definitions API). When present, the
+   *  audit agent recommends Product Details ONLY from this menu — every row is born mapped to
+   *  a real attribute of THIS category instead of guessed from an apparel-shaped example list. */
+  detailAttributeMenu?: { key: string; title: string; accepted?: string[] }[]
   analysis: AnalyzedKeyword[]
   children: PipelineChild[]
   /** Current title of the representative child — used for product-name token extraction */
@@ -373,11 +383,21 @@ function ownBrandTokenSet(brandName: string): Set<string> {
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
 
+// Amazon Listings-Items productTypes that ARE clothing (worn on the body) — the only families
+// where shirt/tee framing, garment blank-brands, and fit/fabric specs make sense. Matched on
+// _-delimited tokens so SWEATSHIRT hits but ADDRESS_LABEL / MEMORY_CARD never can.
+const APPAREL_PRODUCT_TYPES = /(?:^|_)(SHIRT|SWEATSHIRT|SWEATER|HOODIE|DRESS|SKIRT|PANTS|SHORTS|SOCKS|HAT|COAT|JACKET|UNDERPANTS|UNDERWEAR|BRA|PAJAMAS|SLEEPWEAR|SWIMWEAR|LEOTARD|TIGHTS|LEGGINGS|BODYSUIT|ONESIE|ROMPER|BLOUSE|CARDIGAN|VEST|ROBE|COSTUME|OUTFIT|TRACKSUIT|OVERALLS|SUIT|KURTA|SAREE|SALWAR_SUIT_SET|APPAREL)(?:_|$)/
+
 // Is this an APPAREL product? The title/bullet/description framing (graphic tee, shirt, garment
 // brand, men/women audience, fabric/fit specs) only makes sense for clothing. For non-apparel
 // (memory cards, mugs, mounts…) the old hardcoded framing produced nonsense — e.g. "Graphic Tee
 // for Men" on an SD card — so every agent branches on this.
-function looksApparel(category?: string | null, repTitle?: string | null): boolean {
+function looksApparel(category?: string | null, repTitle?: string | null, productType?: string | null): boolean {
+  // GROUND TRUTH FIRST: the live SP-API productType decides when known — both directions. The
+  // text sniff below once saw a hardcoded "Clothing…" category + no rescue noun for "sticky
+  // notes" and wrote "Post It Notes Sticky Note T-SHIRT… Graphic Tee for Men and Women".
+  const pt = (productType ?? '').trim().toUpperCase()
+  if (pt) return APPAREL_PRODUCT_TYPES.test(pt)
   const hay = ` ${category ?? ''} ${repTitle ?? ''} `.toLowerCase()
   // Strong non-apparel nouns WIN: a memory-card / mug listing templated from a shirt still has
   // leftover "shirt" in its data, but it is NOT clothing. The product noun decides.
@@ -1012,8 +1032,8 @@ async function runTitleAgent(
    *  identity. Mandated + validated like the money keyword. PR #91. */
   designName = '',
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
-  const { openai, brandName, category, repTitle } = input
-  const apparel = looksApparel(category, repTitle)
+  const { openai, brandName, category, repTitle, productType } = input
+  const apparel = looksApparel(category, repTitle, productType)
 
   // 🎯 DESIGN-GROUNDED TITLE (apparel) — the root fix for keyword-stuffed titles. The TITLE may only
   // carry keywords GROUNDED in the actual design: the design name, what the image scan literally sees,
@@ -1367,8 +1387,8 @@ async function runBulletsAgent(
    *  the title + backend enforce). The deterministic backstop guarantees it lands. */
   designName = '',
 ): Promise<string[]> {
-  const { openai, brandName, category, repTitle, children } = input
-  const apparel = looksApparel(category, repTitle)
+  const { openai, brandName, category, repTitle, children, productType } = input
+  const apparel = looksApparel(category, repTitle, productType)
   // The seller's DESIGN/SLOGAN name ("Later Gator") is an identity keyphrase the bullets MUST carry (the
   // title + backend already enforce it — #91/#92). Prepend it to the scored opportunity set so it LEADS the
   // council brief and is guaranteed by the deterministic backstop (parity with the title design-name lead).
@@ -1653,8 +1673,8 @@ async function runBackendAgent(
    *  silently drop it because it excludes title words. PR: design-name-in-backend. */
   designName = '',
 ): Promise<PipelinePerChildKeywords[]> {
-  const { openai, children, brandName, category, repTitle } = input
-  const apparel = looksApparel(category, repTitle)
+  const { openai, children, brandName, category, repTitle, productType } = input
+  const apparel = looksApparel(category, repTitle, productType)
 
   // Words already in title/bullets/brand — Amazon auto-indexes those, so exclude from backend.
   const excludeWords = new Set(
@@ -1873,11 +1893,18 @@ async function runAuditAgent(
   description: string,
   specs: string[],
 ): Promise<AuditResult> {
-  const { openai, auditModel, variantDetails, keywordContext, hasAplus, category, repTitle } = input
-  const apparel = looksApparel(category, repTitle)
+  const { openai, auditModel, variantDetails, keywordContext, hasAplus, category, repTitle, productType, detailAttributeMenu } = input
+  const apparel = looksApparel(category, repTitle, productType)
   const backendSummary = perChild.slice(0, 3).map((p) => `  ${p.sku}: ${p.keywords}`).join('\n')
   const specsLine = specs.length
     ? `\n=== KNOWN PRODUCT SPECS (use these to fill structured Product-Detail fields with REAL values — e.g. ${apparel ? 'Fabric Type, Material, Fit Type, Department' : 'Material, Capacity, Compatibility, Item Dimensions'}) ===\n${specs.join(', ')}\n`
+    : ''
+  // Live schema menu (PO: "auto-map any item to the category's Features") — the ONLY attributes
+  // Amazon accepts for THIS product type, with their real enum values. When present the audit
+  // picks from it instead of guessing apparel-shaped field names (Department on sticky notes).
+  const menu = (detailAttributeMenu ?? []).slice(0, 14)
+  const menuLine = menu.length
+    ? `\n=== AMAZON ATTRIBUTE MENU for this product type (the ONLY Product-Detail field names Amazon accepts here) ===\n${menu.map((m) => `- ${m.title}${m.accepted?.length ? ` [accepted values: ${m.accepted.slice(0, 12).join(' | ')}]` : ''}`).join('\n')}\n`
     : ''
 
   const system = `You are a senior Amazon SEO auditor. Return ONLY valid JSON.
@@ -1891,7 +1918,7 @@ BACKEND (sample of per-child):
 ${backendSummary}
 DESCRIPTION: ${description ? 'provided (HTML)' : '(none)'}
 A+ exists: ${hasAplus}
-${specsLine}
+${specsLine}${menuLine}
 === CURRENT LISTING (for variant health + product details) ===
 ${variantDetails}
 
@@ -1911,7 +1938,7 @@ Rules:
 - Review EVERY element in the action plan (title, bullet_1..5, backend_keywords, description, aplus_modules, brand_story, product_details, images). For title/bullets/backend/description, the replacement_content is the FINALIZED content above — restate it, do not invent new copy.
 - DESCRIPTION: even if A+ exists, the field is still indexed for search — mark CREATE/EDIT (not SKIP) and note that customers see A+ but Amazon indexes this field.
 - CANNIBALIZATION: children in ONE variation family do NOT compete in search. Leave cannibalization_warnings empty unless the SAME backend string is duplicated identically across many children. Never report cross-listing cannibalization (not assessable here).
-- PRODUCT DETAILS: the structured attributes in Seller Central → More Details power Amazon's filtered search + the spec comparison table, and are almost always under-filled. Do NOT assume they're already set — PROACTIVELY recommend a value for EVERY standard attribute a shopper filters THIS product type by. ${apparel ? 'Cover (as applicable): Material, Fabric Type, Fit Type, Care Instructions, Department, Neck Style, Sleeve Type, Closure Type.' : 'Cover (adapt to the ACTUAL product — e.g. for a memory/SD card): Capacity, Read Speed, Write Speed, Speed Class, Video Speed Class, Flash Memory Type, Form Factor, Hardware Interface, Compatible Devices, Manufacturer Warranty. NOT apparel fields like Fabric Weight or Fit Type.'} Derive recommended_value from the title/bullets/keywords/specs above; set current_value to null when you can't confirm it from the listing. Emit 5-10 — these win filtered search, so err toward MORE rather than fewer.
+- PRODUCT DETAILS: the structured attributes in Seller Central → More Details power Amazon's filtered search + the spec comparison table, and are almost always under-filled. Do NOT assume they're already set — PROACTIVELY recommend a value for EVERY standard attribute a shopper filters THIS product type by. ${menu.length ? 'Use ONLY field names from the AMAZON ATTRIBUTE MENU above, with the EXACT names shown — any other field name is rejected by Amazon for this product type. Where the menu lists accepted values, recommended_value MUST be one of them, verbatim. Pick the 5-10 menu attributes that most improve filtered search for THIS product.' : apparel ? 'Cover (as applicable): Material, Fabric Type, Fit Type, Care Instructions, Department, Neck Style, Sleeve Type, Closure Type.' : 'Cover (adapt to the ACTUAL product — e.g. for a memory/SD card): Capacity, Read Speed, Write Speed, Speed Class, Video Speed Class, Flash Memory Type, Form Factor, Hardware Interface, Compatible Devices, Manufacturer Warranty. NOT apparel fields like Fabric Weight or Fit Type.'} Derive recommended_value from the title/bullets/keywords/specs above; set current_value to null when you can't confirm it from the listing. Emit 5-10 — these win filtered search, so err toward MORE rather than fewer.
 - A+ modules: more modules lift conversion and dwell time; A+ body text is not a confirmed ranking field, so recommend filling image ALT-TEXT for discoverability.
 Return ONLY the JSON object.`
 
@@ -1927,8 +1954,8 @@ Return ONLY the JSON object.`
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
 async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = []): Promise<string> {
-  const { openai, category, repTitle, children } = input
-  const apparel = looksApparel(category, repTitle)
+  const { openai, category, repTitle, children, productType } = input
+  const apparel = looksApparel(category, repTitle, productType)
   // Capacity-family detection (mirrors bullets): shared description must NOT hardcode a
   // capacity that doesn't match every variant.
   const descChildCaps = new Set<string>()
@@ -2238,8 +2265,8 @@ interface ProductAttributes {
 }
 
 async function extractProductAttributes(input: PipelineInput): Promise<ProductAttributes> {
-  const { openai, repTitle, variantDetails, category } = input
-  const apparel = looksApparel(category, repTitle)
+  const { openai, repTitle, variantDetails, category, productType } = input
+  const apparel = looksApparel(category, repTitle, productType)
   const text = `${repTitle ?? ''}\n${variantDetails}`.slice(0, 4000).trim()
   if (!text) return { searchKeyphrases: [], specs: [] }
   const system = `You extract product attributes from an existing Amazon${apparel ? ' apparel' : ''} listing, split into searchable keyphrases vs specs. Return ONLY valid JSON: {"searchKeyphrases":["..."],"specs":["..."]}.`
@@ -2318,7 +2345,7 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
  * empty:rep / none) surfaced into titleDebug so a live regen proves which path ran.
  */
 async function extractDesignName(input: PipelineInput): Promise<{ name: string; source: string }> {
-  const { openai, repTitle, category, canonicalTitle, brandName, visionDesign } = input
+  const { openai, repTitle, category, canonicalTitle, brandName, visionDesign, productType } = input
   const usingCanonical = !!(canonicalTitle && canonicalTitle.trim())
   const source = usingCanonical ? canonicalTitle!.trim() : (repTitle || '')
   const titleTag = usingCanonical ? 'canonical' : 'rep'
@@ -2328,7 +2355,7 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   const visionText = visionDesign
     ? [visionDesign.designTheme, ...(visionDesign.visualElements || []), ...(visionDesign.seedKeywords || [])].filter(Boolean).join(' | ')
     : ''
-  const apparel = looksApparel(category, source) || (!!visionText && looksApparel(category, visionText))
+  const apparel = looksApparel(category, source, productType) || (!!visionText && looksApparel(category, visionText, productType))
   // Design names live on apparel / novelty / print products. Skip pure-spec products (an SD card has
   // no "design" — its identity is its specs).
   if ((!source && !visionText) || !apparel) return { name: '', source: 'none' }
@@ -2479,7 +2506,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // into the title-candidate / bullets / backend pools, and reinforce them in the prompts.
   onProgress('Extracting product attributes...')
   const attrs = await extractProductAttributes(input)
-  const apparelProduct = looksApparel(input.category, repTitle)
+  const apparelProduct = looksApparel(input.category, repTitle, input.productType)
   // Non-apparel listings are sometimes templated from a shirt, so their data carries apparel
   // contamination ("graphic tee", "ring-spun cotton", "for men"). Strip it for non-apparel so a
   // memory card / mug never inherits clothing language in the keyword pool, specs, or title.

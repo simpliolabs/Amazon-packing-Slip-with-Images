@@ -100,6 +100,12 @@ export interface ProductDetailImprovement {
   enum_valid?: boolean
   enum_accepted?: string[]
   normalized_from?: string
+  // Schema-driven mapping: the REAL SP-API key resolved from the live product-type schema (static map OR
+  // dynamic title-match), the attribute scope, and whether it's pushable — so the UI/push use the resolved
+  // key for ANY category, not the hardcoded apparel map. Persisted on the JSONB item (no migration).
+  sp_api_key?: string
+  attr_scope?: 'broadcast' | 'per-variant'
+  pushable?: boolean
 }
 
 export interface PerChildKeywords {
@@ -529,6 +535,36 @@ export async function POST(req: NextRequest) {
       return { sku: c.sku, asin: c.asin, color: color || null, size: size || null, title: c.title || null }
     })
 
+    // ── GROUND-TRUTH PRODUCT TYPE + dynamic detail menu (fetched BEFORE the pipeline) ─────────
+    // The live SP-API productType (SHIRT, SELF_STICK_NOTE, …) decides apparel-vs-not framing for
+    // every agent — the old hardcoded "Clothing…" category below made looksApparel treat EVERY
+    // product as apparel (sticky notes titled "…T-Shirt, Graphic Tee for Men and Women"). The
+    // schema attribute menu makes Product-Detail recommendations come from what THIS category
+    // actually accepts (PO: "dynamic per product category"). Best-effort: null/[] on any SP-API
+    // failure keeps the legacy text heuristic + example list.
+    let ptType: string | null = null
+    let ptOpts: { token: string; sellerId: string; marketplaceId: string; endpoint: string } | null = null
+    let detailMenu: { key: string; title: string; accepted?: string[] }[] = []
+    try {
+      const { getProductType } = await import('@/lib/amazon/productType')
+      const { getAccessToken } = await import('@/lib/amazon/auth')
+      const { listPushableSchemaAttributes } = await import('@/lib/fba/productTypeDefinitions')
+      const ptToken = await getAccessToken()
+      ptOpts = {
+        token: ptToken,
+        sellerId: await getSellerId(),
+        marketplaceId: process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER',
+        endpoint: process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com',
+      }
+      ptType = children[0]?.sku ? await getProductType(ptOpts.sellerId, ptToken, children[0].sku) : null
+      detailMenu = await listPushableSchemaAttributes(ptType, ptOpts)
+    } catch (e) {
+      console.warn('[ai-recommendations] productType/menu resolution failed (non-fatal):', e instanceof Error ? e.message : e)
+    }
+    // Truthful prompt category from the real productType ("Self Stick Note") — the hardcoded
+    // clothing path is only the legacy fallback when the PT lookup fails.
+    const ptCategory = ptType ? ptType.toLowerCase().replace(/_/g, ' ').replace(/\b[a-z]/g, (c) => c.toUpperCase()) : null
+
     const openai = await getOpenAI()
     const encoder = new TextEncoder()
 
@@ -572,7 +608,9 @@ export async function POST(req: NextRequest) {
           const result = await runListingPipeline({
             openai,
             brandName,
-            category: inputJson.category,
+            category: ptCategory ?? inputJson.category,
+            productType: ptType,
+            detailAttributeMenu: detailMenu,
             analysis,
             children: pipelineChildren,
             repTitle: rep.title,
@@ -631,28 +669,32 @@ export async function POST(req: NextRequest) {
           try {
             const pds = result.product_details_improvements
             const detailSku = children[0]?.sku
-            if (Array.isArray(pds) && pds.length > 0 && detailSku) {
-              const { coerceDetailValue, attributeExistsInSchema } = await import('@/lib/fba/productTypeDefinitions')
-              const { getProductType } = await import('@/lib/amazon/productType')
+            // ptType/ptOpts were resolved ONCE before the pipeline (the same values that drove the
+            // apparel branch + attribute menu) — no PT → can't validate, leave rows as-is (legacy).
+            if (Array.isArray(pds) && pds.length > 0 && detailSku && ptType && ptOpts) {
+              const { coerceDetailValue, attributeExistsInSchema, resolveSpApiKeyFromTitle } = await import('@/lib/fba/productTypeDefinitions')
               const { resolveDetailAttribute } = await import('@/lib/fba/productDetailAttrs')
-              const { getAccessToken } = await import('@/lib/amazon/auth')
-              const ptEndpoint = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
-              const ptMarketplace = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
-              const ptToken = await getAccessToken()
-              const ptSeller = await getSellerId()
-              const ptType = await getProductType(ptSeller, ptToken, detailSku)
-              const ptOpts = { token: ptToken, sellerId: ptSeller, marketplaceId: ptMarketplace, endpoint: ptEndpoint }
               const invalidDetailFields = new Set<string>()
               for (const pd of pds) {
-                const attr = resolveDetailAttribute(pd.field_name)
-                if (!attr || attr.scope !== 'broadcast') continue   // skip per-variant / unmapped attrs
-                // DROP attributes absent from THIS product type's schema (e.g. apparel "Department" on an
-                // office product). They create an UNFILLABLE Features gap (a permanent dock the seller can
-                // never close) and 400 on push ("attribute path is not valid"). Fail-open on a schema error.
-                if (!(await attributeExistsInSchema(ptType, attr.spApiKey, ptOpts))) { invalidDetailFields.add(pd.field_name); continue }
-                const cd = await coerceDetailValue(ptType, attr.spApiKey, pd.recommended_value, ptOpts)
-                if (!cd.isEnum) continue                            // free-text — any value is accepted
                 const row = pd as unknown as Record<string, unknown>
+                const staticAttr = resolveDetailAttribute(pd.field_name)
+                // Per-variant attrs (Color/Size/Capacity) are never broadcast-pushable here — mark + skip.
+                if (staticAttr && staticAttr.scope !== 'broadcast') { row.attr_scope = 'per-variant'; row.pushable = false; continue }
+                // Resolve the REAL spApiKey: the static map first, else a DYNAMIC schema title-match — so ANY
+                // category's attributes (adhesive_type, item_package_quantity, …) become pushable, not just the
+                // hardcoded apparel map (PO: "auto-map any item to the category's Features").
+                const spApiKey = staticAttr?.spApiKey ?? (await resolveSpApiKeyFromTitle(ptType, pd.field_name, ptOpts))?.spApiKey ?? null
+                if (!spApiKey) { row.pushable = false; continue }   // genuinely unmappable → "Manual" (seller can still set it)
+                // DROP a statically-mapped attr whose key is ABSENT from THIS schema (apparel "Department" on
+                // an office product) — unfillable Features gap + 400 on push. Fail-open on a schema error.
+                if (!(await attributeExistsInSchema(ptType, spApiKey, ptOpts))) { invalidDetailFields.add(pd.field_name); continue }
+                row.sp_api_key = spApiKey
+                row.attr_scope = 'broadcast'
+                row.pushable = true
+                // Coerce the value against the schema enum — now ALSO for non-apparel attrs, so a wrong guess
+                // like Material="Thick paper" is validated against the real enum (the accuracy fix, for free).
+                const cd = await coerceDetailValue(ptType, spApiKey, pd.recommended_value, ptOpts)
+                if (!cd.isEnum) continue                            // free-text — any value is accepted
                 row.is_enum = true
                 row.enum_valid = cd.valid
                 row.enum_accepted = cd.accepted
