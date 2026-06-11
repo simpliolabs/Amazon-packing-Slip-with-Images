@@ -218,6 +218,10 @@ const MENU_EXCLUDE = new Set([
   'external_product_id', 'externally_assigned_product_identifier', 'merchant_suggested_asin',
   'supplier_declared_has_product_identifier_exemption', 'item_type_keyword', 'item_type_name',
   'parentage_level', 'child_parent_sku_relationship', 'variation_theme', 'fulfillment_availability',
+  // package_contains_sku is a STRUCTURED per-SKU attribute (each child lists its own SKU+quantity) —
+  // broadcasting one string to the family is wrong-shaped and Amazon rejects it (live-verified
+  // 2026-06-11 on B0F86LPSHZ: 0/10 accepted). Never offer it on the audit menu.
+  'package_contains_sku',
   'condition_type', 'condition_note', 'list_price', 'purchasable_offer', 'gift_options',
   'max_order_quantity', 'skip_offer', 'merchant_shipping_group', 'merchant_release_date',
   'product_tax_code', 'supplier_declared_dg_hz_regulation', 'batteries_required', 'batteries_included',
