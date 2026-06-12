@@ -2473,7 +2473,34 @@ export default function ListingDetailPage() {
                 {kwData.summary.upgrade > 0 && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{kwData.summary.upgrade} Upgrade</span>}
                 {kwData.summary.reinforce > 0 && <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">{kwData.summary.reinforce} Reinforce</span>}
                 {kwData.summary.defended > 0 && <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">{kwData.summary.defended} Defended</span>}
-                <label className={`ml-auto text-xs px-3 py-1 rounded-lg font-semibold cursor-pointer ${kwImportBusy ? 'bg-violet-100 text-violet-700 animate-pulse' : 'bg-violet-600 hover:bg-violet-700 text-white'}`}
+                {/* G6 — Sponsored Products seed list, built client-side from the keywords already
+                    loaded (no endpoint, no credits). Exact match; prioritized by proven sales and
+                    LOW title density (few competitors carry the phrase in their title = winnable,
+                    typically cheaper clicks). ALL opportunity keywords are included — sorting is
+                    the prioritization, nothing is silently dropped. */}
+                <button
+                  className="ml-auto text-xs px-3 py-1 rounded-lg font-semibold border border-violet-600 text-violet-700 hover:bg-violet-50"
+                  title="Download a Sponsored Products seed CSV (exact match) from this keyword set — prioritized by keyword sales + low title density. No credits; builds from data already on screen."
+                  onClick={() => {
+                    const all = ((kwData as unknown as { allKeywords?: AnalyzedKeyword[] }).allKeywords ?? kwData.topOpportunities)
+                      .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE'].includes(k.actionType))
+                    // PPC priority: proven purchases dominate, volume assists, low-TD bonus
+                    // (TD ≤2 = almost nobody titles the phrase — exact-match gold).
+                    const prio = (k: AnalyzedKeyword) =>
+                      (k.keywordSales ?? 0) * 2 + (k.searchVolume ?? 0) / 100 + ((k.titleDensity ?? 99) <= 2 ? 50 : 0)
+                    const rows = [...all].sort((a, b) => prio(b) - prio(a))
+                    const esc = (v: unknown) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s }
+                    const csv = ['Keyword,Match Type,Search Volume,Keyword Sales,Opportunity,Title Density,Our Rank,Action']
+                      .concat(rows.map((k) => [k.keyword, 'Exact', k.searchVolume ?? '', k.keywordSales ?? '', k.opportunityScore ?? '', k.titleDensity ?? '', k.organicRank ?? '', k.actionType].map(esc).join(',')))
+                      .join('\n')
+                    const a = document.createElement('a')
+                    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+                    a.download = `ppc-seeds-${asin}.csv`
+                    a.click()
+                    URL.revokeObjectURL(a.href)
+                  }}
+                >Export PPC seeds (CSV)</button>
+                <label className={`text-xs px-3 py-1 rounded-lg font-semibold cursor-pointer ${kwImportBusy ? 'bg-violet-100 text-violet-700 animate-pulse' : 'bg-violet-600 hover:bg-violet-700 text-white'}`}
                   title="Import competitor-proven keywords from a Helium 10 Cerebro/Xray CSV export — they get the same scoring + presence checks as native keywords, and the next Regenerate weaves them in.">
                   {kwImportBusy ? 'Importing…' : 'Import H10 CSV →'}
                   <input
