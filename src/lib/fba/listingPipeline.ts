@@ -840,7 +840,7 @@ export function validateDescription(
 
 // ─── Stage 0 — candidate preparation (code only) ───────────────────────────────
 
-interface TitleCandidate { keyword: string; opportunityScore: number; role: 'keyphrase' | 'descriptive' | 'audience' }
+interface TitleCandidate { keyword: string; opportunityScore: number; role: 'keyphrase' | 'descriptive' | 'audience'; organicRank?: number | null }
 
 function extractProductNameTokens(repTitle: string | null): string[] {
   return (repTitle ?? '')
@@ -874,10 +874,17 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
   const tdRank = (k: AnalyzedKeyword): number =>
     k.titleDensity != null && k.titleDensity <= 2 && k.searchVolume >= 500 ? 1 : 0
 
+  // Striking-distance tiebreak (rank tracker, #179): we rank #11-30 for the keyword — page 2 /
+  // bottom of page 1. Title placement (Amazon's heaviest content field) moves THESE fastest;
+  // a keyword we rank #200 for needs more than a title spot, and #1-10 is already won. Same
+  // conservative contract as the other tiebreaks: ties only, no-op when rank is unmeasured.
+  const strikeRank = (k: AnalyzedKeyword): number =>
+    k.organicRank != null && k.organicRank >= 11 && k.organicRank <= 30 ? 1 : 0
+
   const eligible = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !isSeasonal(k.keyword))
-    .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (tdRank(b) - tdRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
+    .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (tdRank(b) - tdRank(a)) || (strikeRank(b) - strikeRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
 
   // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
   // product. The old "keep the higher-opportunity one at >=60% overlap" rule caused synonym + niche
@@ -902,7 +909,7 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
     return 'descriptive'
   }
 
-  return deduped.slice(0, 7).map((k) => ({ keyword: k.keyword, opportunityScore: k.opportunityScore, role: roleOf(k.keyword) }))
+  return deduped.slice(0, 7).map((k) => ({ keyword: k.keyword, opportunityScore: k.opportunityScore, role: roleOf(k.keyword), organicRank: k.organicRank ?? null }))
 }
 
 /** Deterministic backstop for NON-APPAREL titles: gpt-4.1-mini keeps stacking product-type synonyms
@@ -1152,7 +1159,16 @@ async function runTitleAgent(
   }
 
   const candidateList = candidates
-    .map((c) => `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role})`)
+    .map((c) => {
+      // Rank context for the writer/council: striking distance (#11-30) = a title spot moves
+      // this keyword fastest; already top-10 = defend, don't burn budget chasing it harder.
+      const rank = c.organicRank != null
+        ? c.organicRank <= 10 ? `, we already rank #${c.organicRank} — defend`
+          : c.organicRank <= 30 ? `, we rank #${c.organicRank} — STRIKING DISTANCE, title placement moves this fastest`
+            : `, we rank #${c.organicRank}`
+        : ''
+      return `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role}${rank})`
+    })
     .join('\n')
   const attrLine = attributes.length
     ? `\nSearchable product keyphrases shoppers actually type — work them in AFTER the mandatory keyword${apparel ? ' (e.g. a blank-brand term like "comfort colors graphic tee")' : ' (titles under 110 chars have room for more — keep adding while you have budget)'}:\n  ${attributes.join(', ')}\n`
@@ -1496,6 +1512,17 @@ async function runBulletsAgent(
   const topLine = requiredKws.length
     ? `\n🔴 REQUIRED SEARCH KEYPHRASES — these are EXACTLY what your bullet ranking is scored on. Weave EACH one somewhere across the 5 bullets (every word of the phrase present; paraphrase OK) and LEAD bullets 1, 2, 3 with the top three. Cover EVERY one that fits accurately:\n${requiredKws.map((k) => `  - "${k}"`).join('\n')}\n`
     : ''
+  // Rank context for the council — SEPARATE from the required strings above (those are verbatim
+  // machine-checked; annotating them would break coverage validation). Striking distance (#11-30)
+  // = stronger bullet coverage moves rank fastest; top-10 = defend what's working.
+  const rankedCtx = remaining
+    .filter((k) => k.organicRank != null)
+    .slice(0, 8)
+    .map((k) => `"${k.keyword}" #${k.organicRank}${k.organicRank! >= 11 && k.organicRank! <= 30 ? ' (striking distance)' : k.organicRank! <= 10 ? ' (defend)' : ''}`)
+    .join(', ')
+  const rankLine = rankedCtx
+    ? `\nCURRENT ORGANIC RANKS (context, not extra requirements — prioritize natural, leading coverage for striking-distance terms): ${rankedCtx}\n`
+    : ''
   const attrLine = attributes.length
     ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention ${apparel ? 'the garment brand and material' : 'the key specs'} in ONE bullet${apparel ? ' (e.g. "comfort colors", "ring-spun cotton")' : ''}. Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
     : ''
@@ -1506,7 +1533,7 @@ async function runBulletsAgent(
 - ${apparel ? 'This is a GRAPHIC TEE; its design is ONLY what the title above says.' : 'This product is EXACTLY what the title above describes — do NOT reframe it as apparel, a t-shirt, "graphic tee", clothing, or "fashion" unless the title literally says so.'} Do NOT claim it is FOR a profession, role, or audience not explicitly named in the title. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title.
 - A keyword being in the candidate list does NOT make it usable — SKIP any keyword that forces an inaccurate or awkward claim. Fewer-but-accurate beats more-but-wrong.
 - Before returning, RE-READ each bullet: if any implies the product is for a specific job/role/occasion NOT named in the title — or reframes it as a product type it is not — REWRITE it to describe the actual product instead.
-${topLine}
+${topLine}${rankLine}
 These are ADDITIONAL candidate keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally and accurately:
 ${kwList || '  (none — focus on benefits)'}
 ${attrLine}
