@@ -2551,7 +2551,7 @@ export default function ListingDetailPage() {
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is">Opp</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="YOUR organic rank for this keyword (Jungle Scout, measured on each Re-research). Arrow = movement vs the previous snapshot. — = not ranking.">Rank</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
-                    <th className="text-left px-3 py-2 font-medium text-slate-500" title="Where this keyword appears in YOUR listing — T=Title, B=Bullets, D=Description, K=Backend keywords. Snapshot from the last Intelligence sync/Re-research: push content, then Re-research to refresh these flags.">Present In</th>
+                    <th className="text-left px-3 py-2 font-medium text-slate-500" title="Where this keyword appears in YOUR listing — T=Title, B=Bullets, D=Description, K=Backend keywords. Checked LIVE against your current content every time this tab loads (push content, reload, and the flags update — no re-research needed).">Present In</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -2612,7 +2612,7 @@ export default function ListingDetailPage() {
                   ))}
                 </tbody>
               </table>
-              <p className="px-3 py-2 text-[10px] text-slate-400 border-t border-slate-100">Coverage above reflects the last Intelligence sync; the Rank panel below re-checks your live content.</p>
+              <p className="px-3 py-2 text-[10px] text-slate-400 border-t border-slate-100">Present-In flags are checked live against your current content on every load; Action chips and scores reflect the last research run.</p>
             </div>
             <RankAnalysisPanel key={asin} asin={asin} />
             </>
