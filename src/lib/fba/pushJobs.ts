@@ -1,0 +1,189 @@
+/**
+ * Server-side push jobs (PR #184) — "survives tab close + deploys, global status bar".
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A push job is one executePush() run (one field / detail field for one parent),
+ * persisted in push_jobs and executed by THIS module inside the long-lived node
+ * container. The browser only creates the row and polls — closing the tab changes
+ * nothing on the server.
+ *
+ * Concurrency: jobs run strictly ONE at a time via a module-level promise chain.
+ * The streaming path already throttles 200ms/SKU for Amazon's 5 rps limit; running
+ * two job loops in parallel would double the patch rate, so we serialize instead.
+ * (Coolify runs a single node process — a module singleton is sufficient here.)
+ *
+ * Deploy survival is the WATCHDOG's job, not the runner's: a deploy kills this
+ * process mid-loop, the row stays 'running' with a stale heartbeat, and the
+ * read-side watchdog (markStaleJobs, called from the poll endpoint — the
+ * Cloud-Run-watchdog-on-READ pattern) flips it to 'interrupted' with recovery
+ * guidance. kickQueuedJobs() then restarts any still-queued work in the new
+ * container, again from the read path: polling is the heartbeat of the system.
+ */
+
+import { createAdminClient } from '@/lib/supabase/server'
+import { executePush, type PushParams } from '@/lib/fba/pushExecutor'
+
+export interface PushJobRow {
+  id: string
+  parent_asin: string
+  field: string | null
+  detail_field: string | null
+  payload: PushParams
+  status: 'queued' | 'running' | 'done' | 'failed' | 'interrupted'
+  total: number
+  accepted: number
+  failed: number
+  progress: Record<string, unknown>[]
+  message: string | null
+  created_at: string
+  started_at: string | null
+  heartbeat_at: string | null
+  finished_at: string | null
+}
+
+/** Heartbeats older than this on a 'running' job mean the container died mid-push. */
+export const STALE_RUNNING_MS = 120_000
+
+// One-at-a-time execution. Each enqueue appends to the chain; the catch keeps a
+// crashed job from wedging every job behind it.
+let chain: Promise<void> = Promise.resolve()
+
+/** Fire-and-forget: append a job to the in-process run queue. Safe to call twice
+ *  for the same id — runJob's atomic queued→running claim makes the second a no-op. */
+export function enqueueJobRun(jobId: string): void {
+  chain = chain.then(() => runJob(jobId)).catch((e) => {
+    console.error('[push-jobs] runner crashed (chain preserved):', e)
+  })
+}
+
+async function runJob(jobId: string): Promise<void> {
+  const supabase = await createAdminClient()
+
+  // Atomic claim: only queued→running transitions win. A duplicate kick (POST + poll
+  // self-heal racing) or an already-finished job matches 0 rows and we walk away.
+  const nowIso = new Date().toISOString()
+  const { data: claimed } = await supabase
+    .from('push_jobs')
+    .update({ status: 'running', started_at: nowIso, heartbeat_at: nowIso } as never)
+    .eq('id', jobId)
+    .eq('status', 'queued')
+    .select('*')
+  const job = (claimed as PushJobRow[] | null)?.[0]
+  if (!job) return
+
+  // Heartbeat on an interval, not just on events: executePush has quiet stretches
+  // (initial diff load, the post-push re-score) where no events fire for a while —
+  // without this the watchdog could call a healthy slow job "interrupted".
+  const beat = setInterval(() => {
+    void supabase.from('push_jobs').update({ heartbeat_at: new Date().toISOString() } as never).eq('id', jobId)
+  }, 30_000)
+
+  const events: Record<string, unknown>[] = []
+  let total = 0, accepted = 0, failed = 0
+  let message: string | null = null
+  let sawResult = false
+  let lastFlush = 0
+  let finished = false
+
+  const flush = async (force = false) => {
+    if (finished) return // never let a late throttled write trample the final row
+    const now = Date.now()
+    if (!force && now - lastFlush < 2_500) return
+    lastFlush = now
+    await supabase.from('push_jobs').update({
+      total, accepted, failed, message,
+      progress: events.slice(-60), // tail only — counts/message carry the summary
+      heartbeat_at: new Date().toISOString(),
+    } as never).eq('id', jobId)
+  }
+
+  // Same event vocabulary as the streaming modal (see executePush docblock).
+  const emit = (obj: Record<string, unknown>) => {
+    events.push(obj)
+    const t = obj.type
+    if (t === 'started') {
+      total = Number(obj.total ?? 0) || total
+      message = `Pushing ${String(obj.detail_field ?? obj.field ?? '')}…`
+    } else if (t === 'progress') {
+      if (obj.status === 'accepted') accepted++
+      else if (obj.status === 'failed') failed++
+      message = `${accepted + failed}/${total || '?'} SKUs (${accepted} accepted${failed ? `, ${failed} failed` : ''})`
+    } else if (t === 'rescore') {
+      message = String(obj.message ?? 'Re-scoring…')
+    } else if (t === 'result') {
+      sawResult = true
+      accepted = Number(obj.pushed ?? accepted)
+      failed = Number(obj.failed ?? failed)
+      total = Number(obj.total ?? total)
+      message = String(obj.message ?? message ?? '')
+    } else if (t === 'error') {
+      message = String(obj.error ?? 'Push failed')
+    }
+    void flush() // throttled, fire-and-forget — the loop never waits on bookkeeping
+  }
+
+  // Absolute ceiling: the interval heartbeat above would keep a HUNG push looking
+  // healthy forever (the watchdog only catches process death), wedging the serialized
+  // chain. 30min is several times the longest real push (147 SKUs ≈ 5-8min); past it
+  // we declare the job failed and let the chain move on. (The abandoned loop may keep
+  // running harmlessly — `finished` below blocks any further writes from it.)
+  let ceiling: ReturnType<typeof setTimeout> | null = null
+  try {
+    await Promise.race([
+      executePush(job.payload, emit),
+      new Promise<void>((resolve) => {
+        ceiling = setTimeout(() => {
+          emit({ type: 'error', error: 'Push exceeded the 30-minute job ceiling and was abandoned. Already-accepted SKUs stayed pushed — Verify on Amazon, then push just the stale.' })
+          resolve()
+        }, 30 * 60_000)
+      }),
+    ])
+  } finally {
+    clearInterval(beat)
+    if (ceiling) clearTimeout(ceiling)
+  }
+
+  // Terminal status mirrors the modal's semantics: a 'result' event = the loop ran to
+  // completion (even with some failed SKUs — they're counted and listed); no result
+  // means executePush ended on a terminal 'error' instead.
+  finished = true
+  const status = sawResult ? 'done' : 'failed'
+  await supabase.from('push_jobs').update({
+    status,
+    total, accepted, failed, message,
+    progress: events.slice(-60),
+    heartbeat_at: new Date().toISOString(),
+    finished_at: new Date().toISOString(),
+  } as never).eq('id', jobId)
+}
+
+/** READ-side watchdog: any 'running' job whose heartbeat is older than the threshold was
+ *  killed mid-push (deploy/restart). Flip it to 'interrupted' with recovery guidance —
+ *  already-accepted SKUs stayed pushed; Verify → "Push just the stale" recovers the rest. */
+export async function markStaleJobs(): Promise<void> {
+  const supabase = await createAdminClient()
+  const cutoff = new Date(Date.now() - STALE_RUNNING_MS).toISOString()
+  await supabase
+    .from('push_jobs')
+    .update({
+      status: 'interrupted',
+      message: 'Interrupted by a server restart/deploy. Already-accepted SKUs stayed pushed — open the field\'s Ship modal → Verify on Amazon → "Push just the stale".',
+      finished_at: new Date().toISOString(),
+    } as never)
+    .eq('status', 'running')
+    .lt('heartbeat_at', cutoff)
+}
+
+/** READ-side self-heal: after a deploy the new process has an empty in-memory chain while
+ *  queued rows wait in the table. If nothing is genuinely running, kick the oldest queued
+ *  job. Called from the poll endpoint, so the status bar's own polling restarts the queue. */
+export async function kickQueuedJobs(): Promise<void> {
+  const supabase = await createAdminClient()
+  const { data: running } = await supabase
+    .from('push_jobs').select('id').eq('status', 'running').limit(1)
+  if ((running as { id: string }[] | null)?.length) return
+  const { data: queued } = await supabase
+    .from('push_jobs').select('id').eq('status', 'queued')
+    .order('created_at', { ascending: true }).limit(1)
+  const next = (queued as { id: string }[] | null)?.[0]
+  if (next) enqueueJobRun(next.id)
+}

@@ -773,6 +773,43 @@ export default function ListingDetailPage() {
     setTitleScoreLoading(false)
   }, [asin])
 
+  /** Build the exact push-content POST body — shared by the streaming push (confirmPush)
+   *  and the server-side queue (queueBackgroundPush) so the two paths can never drift. */
+  const buildPushBody = useCallback((onlySkus?: string[], detailOverrideArg?: string): Record<string, unknown> => {
+    const body: Record<string, unknown> = { parent_asin: asin, field: pushField, confirm: true }
+    if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
+    // Part 2b: the seller's pick for an uncoercible dropdown — push this exact accepted value.
+    if (pushField === 'details' && (detailOverrideArg ?? '').trim()) body.detail_value_override = (detailOverrideArg ?? '').trim()
+    // Selective re-push: only the stale SKUs (fix stragglers without re-shipping all of them).
+    if (onlySkus && onlySkus.length > 0) body.skus = onlySkus
+    // Manual title override: push the seller's TYPED title (from the editable box) instead of the AI's.
+    if (pushField === 'title' && editTitle.trim()) body.title_override = editTitle.trim()
+    return body
+  }, [asin, pushField, pushDetailField, editTitle])
+
+  /** Queue the push as a SERVER-side job (PR #184): it survives tab close and deploys.
+   *  The global status bar (every portal page) tracks it; nothing is streamed back here. */
+  const [queueLoading, setQueueLoading] = useState(false)
+  const queueBackgroundPush = useCallback(async (detailOverrideArg?: string) => {
+    setPushError(null); setQueueLoading(true)
+    try {
+      const resp = await fetch('/api/fba/push-jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildPushBody(undefined, detailOverrideArg)),
+      })
+      const data = await resp.json() as { id?: string; error?: string }
+      if (!resp.ok || !data.id) throw new Error(data.error || 'Failed to queue the push')
+      // Hand off to the status bar: poke it so the job appears IMMEDIATELY (no silent
+      // gap between the modal closing and the next poll tick).
+      window.dispatchEvent(new Event('push-jobs-changed'))
+      setShowPushModal(false)
+      setPushPreview(null)
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : 'Failed to queue the push')
+    }
+    setQueueLoading(false)
+  }, [buildPushBody])
+
   /**
    * Stream-consume the NDJSON push response. Each emit() from the server arrives as a
    * newline-delimited JSON line; we accumulate the read buffer until a newline, parse,
@@ -791,14 +828,7 @@ export default function ListingDetailPage() {
     const skuStatus = new Map<string, string>()   // latest status per SKU — rebuilds a partial result if the stream drops
     let serverTotal = 0                            // real diff size from the 'started' event (NOT just SKUs-seen-before-drop)
     try {
-      const body: Record<string, unknown> = { parent_asin: asin, field: pushField, confirm: true }
-      if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
-      // Part 2b: the seller's pick for an uncoercible dropdown — push this exact accepted value.
-      if (pushField === 'details' && (detailOverrideArg ?? '').trim()) body.detail_value_override = (detailOverrideArg ?? '').trim()
-      // Selective re-push: only the stale SKUs (fix stragglers without re-shipping all of them).
-      if (onlySkus && onlySkus.length > 0) body.skus = onlySkus
-      // Manual title override: push the seller's TYPED title (from the editable box) instead of the AI's.
-      if (pushField === 'title' && editTitle.trim()) body.title_override = editTitle.trim()
+      const body = buildPushBody(onlySkus, detailOverrideArg)
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -952,7 +982,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField, editTitle])
+  }, [asin, pushField, pushDetailField, buildPushBody])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   const bulkEligibleDetails = useMemo(() => {
@@ -3142,6 +3172,14 @@ export default function ListingDetailPage() {
 
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
+                    {/* Server-side queue (PR #184): runs on the server, survives tab close + deploys;
+                        the global status bar (bottom of every page) tracks it. Same body as Confirm & Ship. */}
+                    <button onClick={() => queueBackgroundPush(pushField === 'details' && pushPreview.enum_invalid ? (detailOverride.trim() || undefined) : undefined)}
+                      disabled={queueLoading || (pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushField === 'details' && pushPreview.enum_invalid ? !detailOverride.trim() : pushPreview.changed === 0)}
+                      title="Runs on the server — safe to close this tab. Track it in the status bar at the bottom of any page."
+                      className="text-xs px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
+                      {queueLoading ? 'Queueing…' : 'Queue in background'}
+                    </button>
                     <button onClick={() => confirmPush(undefined, pushField === 'details' && pushPreview.enum_invalid ? (detailOverride.trim() || undefined) : undefined)}
                       disabled={pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushField === 'details' && pushPreview.enum_invalid ? !detailOverride.trim() : pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
