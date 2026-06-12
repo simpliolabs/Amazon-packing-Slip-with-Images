@@ -2800,11 +2800,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // spec/keyphrase whose garment word contradicts the seller's own titles + the SP-API
   // productType BEFORE it can reach a brief (the output backstop below catches the rest).
   const garmentTrust = `${input.canonicalTitle ?? ''} ${repTitle ?? ''} ${input.productType ?? ''}`.toLowerCase()
+  // Contradicted strings are KEPT here (not just dropped): the Features optimizer turns them
+  // into FLAG-AND-FIX detail rows below — "find things and fix things", not silently discard
+  // (PO: the catalog saying "sweatshirt" on a tee family is itself a defect to surface).
+  const catalogBoilerplate: string[] = []
   if (apparelProduct) {
     const contradictsGarment = (s: string) => {
       const ws = s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
       return ws.some((w) => GARMENT_TYPE_WORDS.has(w) && !new RegExp(`\\b${w.replace(/s$/, '')}`, 'i').test(garmentTrust))
     }
+    for (const s of [...attrs.specs, ...attrs.searchKeyphrases]) if (contradictsGarment(s)) catalogBoilerplate.push(s)
     attrs.specs = attrs.specs.filter((s) => !contradictsGarment(s))
     attrs.searchKeyphrases = attrs.searchKeyphrases.filter((s) => !contradictsGarment(s))
   }
@@ -3001,6 +3006,48 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (!new RegExp(`\\bfor ${aud}\\b`, 'i').test(finalTitle)) {
         finalTitle = capTitle75(`${finalTitle.replace(/\s+for\s+(?:men|women)(?:\s+and\s+(?:men|women))?\s*$/i, '')} for ${aud}`)
       }
+    }
+    // FILL the 75-char budget (PO: "61/75 — under-utilizing the title, WHY?"): after every
+    // truthfulness guard, append the highest-value UNUSED keyword phrases before the
+    // audience tail. Source = the already-filtered candidate pool (color/role/capacity
+    // keywords never reached it), then each addition re-passes the motif+garment strips —
+    // a fill can never smuggle back what a guard removed. Truthful AND maximal.
+    if (apparelProduct && finalTitle.length < 70) {
+      const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+      const tail = tailMatch ? tailMatch[0] : ''
+      let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
+      const headToks = new Set(bulletTokens(head))
+      const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+      const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
+      const MASC_T = /\bm[ae]ns?\b/i
+      // The seller's OWN canonical descriptors join the pool (pre-trusted — their words about
+      // their product): for a 55–65 char title, "Vintage Rodeo" / "Country Western" are the
+      // best truthful fillers. Bigrams from the canonical title, variant suffix stripped.
+      const canonPhrases: string[] = []
+      const canonClean = (input.canonicalTitle ?? '').replace(/(\s+-\s+[A-Za-z][A-Za-z -]{1,24}){1,2}\s*$/, '')
+      // Bigrams WITHIN punctuation segments only — across a comma they'd splice nonsense
+      // ("…Graphic Tee, Vintage Rodeo…" must never yield "Tee Vintage").
+      for (const seg of canonClean.split(/[,\-–—|]/)) {
+        const segWords = seg.replace(/[^A-Za-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+        for (let i = 0; i + 1 < segWords.length; i++) {
+          const big = `${segWords[i]} ${segWords[i + 1]}`
+          if (bulletTokens(big).length === 2) canonPhrases.push(big)
+        }
+      }
+      for (const kw of [...candidates.map((c) => c.keyword), ...canonPhrases]) {
+        const toks = bulletTokens(kw)
+        if (toks.length === 0 || toks.every((t) => headToks.has(t))) continue       // adds nothing new
+        if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
+        if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
+        const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+        if (safe !== kw) continue                                                   // a guard objected — skip whole phrase
+        const next = `${head}, ${titleCaseKw(safe)}`
+        if ((next + tail).length > 75) continue
+        head = next
+        for (const t of toks) headToks.add(t)
+        if ((head + tail).length >= 70) break
+      }
+      finalTitle = `${head}${tail}`
     }
   } else {
     finalTitle = (input.priorTitle || repTitle || '').trim()
@@ -3270,6 +3317,29 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       return p
     })
   }
+  // FLAG-AND-FIX rows for catalog blank-boilerplate (PO: "our system needs to FLAG and
+  // recommend a FIX — that's why we have the product features optimizer"). Each garment-
+  // contradicting attribute string the input scrub caught becomes a Features row with the
+  // corrected value (garment word swapped to this family's true product type), riding the
+  // normal detail rails (Style is broadcast-pushable; otherwise the row is a Manual card).
+  if (apparelProduct && catalogBoilerplate.length > 0) {
+    const trueType = /\bt[\s-]?shirts?\b|\btees?\b/i.test(`${input.canonicalTitle ?? ''} ${repTitle ?? ''}`) ? 'T-Shirt'
+      : (input.productType ?? 'SHIRT').toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase())
+    const seenFix = new Set<string>()
+    for (const raw of catalogBoilerplate.slice(0, 2)) {
+      const fixed = raw.replace(new RegExp(`\\b(?:${[...GARMENT_TYPE_WORDS].join('|')})\\b`, 'gi'), trueType)
+        .replace(/\s{2,}/g, ' ').trim()
+      if (seenFix.has(fixed)) continue
+      seenFix.add(fixed)
+      pdiFinal.push({
+        field_name: 'Style',
+        current_value: raw,
+        recommended_value: fixed.replace(/\b\w/g, (ch) => ch.toUpperCase()),
+        reason: `Your Amazon catalog attribute says "${raw}" — that is the blank manufacturer's boilerplate, not this listing (your title says ${trueType}). It confuses Amazon's indexing and was excluded from the generated content. Push the corrected value or fix it in Seller Central → Edit Listing.`,
+      })
+    }
+  }
+
   // Match by key OR display title: Amazon shipped the attribute EARLY as `title_differentiation`
   // (schema title "Item Highlight", live-verified on SELF_STICK_NOTE 2026-06-11) while the docs say
   // `item_highlights` — the title pattern keeps this working if other categories name it differently.
