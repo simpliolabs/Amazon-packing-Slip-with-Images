@@ -3358,8 +3358,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // plain/blank on a regular-cut printed tee — JS category phrases describe the NICHE, not this
   // product); hard-lean opposite-gender tokens. The design-name anchor is exempt (identity).
   const backendTruthHay = `${input.canonicalTitle ?? ''} ${repTitle} ${designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
+  // Amazon's search-terms guideline is explicit on BOTH of these (Seller Central, "Use search
+  // terms effectively"): no brand names — not even your own (the brand attribute already indexes
+  // it; the canonical-bigram byte-fill was appending "the ceo" to every child — PO: "WHY does it
+  // add our Brand name to the Keywords?") — and no stop words (Amazon ignores them in queries;
+  // every one wastes bytes a real term could use). Design-name tokens stay EXEMPT: "Darlin'" is
+  // the product's identity, not the brand, even when the brand phrase contains it.
+  const AMZ_BACKEND_STOPWORDS = new Set(['a', 'an', 'and', 'by', 'for', 'of', 'the', 'with'])
+  const brandToksForBackend = ownBrandTokenSet(brandName)
+  ;(designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => brandToksForBackend.delete(w))
   const banBackendTok = (w: string): boolean => {
     if (w.length === 1 && !/\d/.test(w)) return true
+    if (AMZ_BACKEND_STOPWORDS.has(w)) return true
+    if (brandToksForBackend.has(w)) return true
     if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
     if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
     if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
