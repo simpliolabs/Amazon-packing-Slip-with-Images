@@ -525,6 +525,30 @@ export async function POST(req: NextRequest) {
     const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null } | null
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
     const analysis = (await getStoredAnalysis(analysisAsin, 50)) ?? []
+
+    // ── #79 per-section regen: load the STORED recommendation — its title/bullets anchor the
+    // partial run (bullets regenerate against the already-approved title). Row missing or
+    // priors absent → fall back to a FULL regen so the seller always gets a result.
+    let storedRec: Record<string, unknown> | null = null
+    let onlySection: 'title' | 'bullets' | 'description' | 'keywords' | undefined
+    if (['title', 'bullets', 'description', 'keywords'].includes(regenerate_section ?? '')) {
+      const { data: recRow } = await supabase
+        .from('listing_seo_recommendations')
+        .select('*')
+        .eq('parent_asin', parent_asin)
+        .single()
+      storedRec = recRow as Record<string, unknown> | null
+      const priorTitle = String(storedRec?.recommended_title ?? '')
+      const priorBullets = Array.isArray(storedRec?.recommended_bullets) ? (storedRec?.recommended_bullets as string[]) : []
+      const usable = !!storedRec && !!priorTitle &&
+        (regenerate_section === 'title' || regenerate_section === 'bullets' || priorBullets.length > 0)
+      if (usable) {
+        onlySection = regenerate_section as typeof onlySection
+        console.log(`[ai-recommendations] #79 partial regen: ${regenerate_section} only for ${parent_asin}`)
+      } else {
+        console.log(`[ai-recommendations] #79 partial regen requested but no usable stored row — falling back to FULL regen for ${parent_asin}`)
+      }
+    }
     // Outcome loop (#89): per-keyword SQP share rose/flat/fell since the last monthly snapshot — a conservative
     // tiebreak for title-candidate selection. Best-effort: {} (no-op) until ~2 months of history accrue or if
     // the keyword_share_snapshots table isn't migrated yet.
@@ -635,8 +659,74 @@ export async function POST(req: NextRequest) {
             hasBrandStory: rep.aplus_has_brand_story || false,
             auditModel: 'o4-mini',
             outcomeSignals,
+            // #79 — partial run: one stage only, anchored on the stored recommendation.
+            onlySection,
+            priorTitle: onlySection ? String(storedRec?.recommended_title ?? '') : null,
+            priorBullets: onlySection && Array.isArray(storedRec?.recommended_bullets) ? (storedRec?.recommended_bullets as string[]) : null,
             onProgress: (message) => emit({ type: 'progress', message }),
           })
+
+          // ── #79 partial persist: update ONLY the regenerated section's columns + patch its
+          // action-plan card; everything else on the stored row stays exactly as the seller
+          // approved it. Skips the audit, noise-persist, enum-validation and live-score stages
+          // (live content didn't change — the scores still describe it).
+          if (result.regeneratedSection && storedRec) {
+            emit({ type: 'progress', message: 'Saving the regenerated section…' })
+            const sec = result.regeneratedSection
+            const storedPlan = (storedRec.keyword_plan as { bullets?: string[]; designName?: string } | null) ?? {}
+            let actionPlan = Array.isArray(storedRec.action_plan) ? [...(storedRec.action_plan as Record<string, unknown>[])] : []
+            const patchItem = (match: (el: string) => boolean, content: string | string[]) => {
+              actionPlan = actionPlan.map((it) => match(String(it.element ?? ''))
+                ? { ...it, verdict: 'REPLACE', replacement_content: content, current_status: 'Section regenerated — review the new copy below.', notes: `Regenerated ${new Date().toISOString()} (per-section).` }
+                : it)
+            }
+            const upd: Record<string, unknown> = { generated_at: new Date().toISOString() }
+            if (sec === 'title') {
+              upd.recommended_title = result.recommended_title
+              if (result.per_child_titles) upd.per_child_titles = result.per_child_titles
+              upd.keyword_plan = { bullets: storedPlan.bullets ?? [], designName: result.keywordPlan.designName }
+              patchItem((el) => el === 'title', result.recommended_title)
+            } else if (sec === 'bullets') {
+              upd.recommended_bullets = result.recommended_bullets
+              upd.keyword_plan = { bullets: result.keywordPlan.bullets, designName: result.keywordPlan.designName || storedPlan.designName || '' }
+              result.recommended_bullets.forEach((b, i) => patchItem((el) => el === `bullet_${i + 1}`, b))
+            } else if (sec === 'description') {
+              upd.recommended_description = result.recommended_description
+              patchItem((el) => el === 'description', result.recommended_description)
+            } else {
+              upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
+              patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
+            }
+            upd.action_plan = actionPlan
+            const { error: updErr } = await supabase
+              .from('listing_seo_recommendations')
+              .update(upd as never)
+              .eq('parent_asin', parent_asin)
+            if (updErr) {
+              emit({ type: 'error', error: `Failed to save the regenerated ${sec}: ${updErr.message}` })
+              controller.close()
+              return
+            }
+            // Emit the MERGED recommendation (stored row + the new section) in the exact shape
+            // the page already consumes — the client code needs zero changes.
+            const merged = { ...storedRec, ...upd } as Record<string, unknown>
+            const perChildKw = sec === 'keywords'
+              ? result.per_child_keywords
+              : (() => { try { const a = JSON.parse(String(storedRec.recommended_keywords ?? '[]')); return Array.isArray(a) ? a : [] } catch { return [] } })()
+            emit({
+              type: 'result',
+              recommendations: {
+                ...merged,
+                per_child_keywords: perChildKw,
+                recommended_keywords: perChildKw[0]?.keywords ?? '',
+              },
+              keywordIntelligenceUsed: true,
+              regenerated_section: sec,
+              titleDebug: result.debug,
+            })
+            controller.close()
+            return
+          }
 
           emit({ type: 'progress', message: 'Saving to database...' })
 
