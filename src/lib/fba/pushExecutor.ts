@@ -753,6 +753,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                   description_score: score.description_score, features_score: score.features_score,
                   overall_score: score.overall_score, issues: score.issues,
                   child_override_count: score.child_override_count,
+                  scored_at: new Date().toISOString(),  // freshness stamp — was stuck at the last full Sync
                 }).eq('parent_asin', parent_asin)
               }
             } catch (e) { console.warn('[push-content/details] re-score failed (non-fatal):', e) }
@@ -880,6 +881,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                 overall_score: score.overall_score, issues: score.issues,
                 child_override_count: score.child_override_count,
                 product_title: newProductTitle,
+                scored_at: new Date().toISOString(),  // freshness stamp — was stuck at the last full Sync
               }).eq('parent_asin', parent_asin)
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }

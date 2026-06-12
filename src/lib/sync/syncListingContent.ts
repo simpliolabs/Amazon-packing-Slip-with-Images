@@ -466,6 +466,29 @@ export async function fetchScoringContext(
         // 20: no realistic title contains long-tail phrases like "sd card for camera 64gb" verbatim.
         const isCovered = makeCoverageChecker(haystack)   // shared coverage (extracted to keyword-engine/coverage.ts)
 
+        // AUDIENCE-LEAN guard: under a hard Female/Male selection the generator deliberately
+        // REFUSES opposite-gender keywords ("mens comfort colors tshirt" on a Female listing —
+        // PR #198 strips them from backend). Counting those as CRITICAL gaps docks the seller
+        // for obeying their own selection (live: keyword card pinned at 19/25 with the gap
+        // message literally naming a mens keyword on a Female run). Skip them from gap
+        // counting under hard leans; lean_*/unisex unaffected. KEEP IN SYNC with the
+        // FEM/MASC regexes in listingPipeline. Best-effort read — missing column = no guard.
+        let hardLean: 'male' | 'female' | null = null
+        try {
+          const { data: leanRow } = await supabase
+            .from('listing_seo_scores').select('*').eq('parent_asin', parentAsin).maybeSingle()
+          const al = (leanRow as { audience_lean?: string | null } | null)?.audience_lean
+          if (al === 'male' || al === 'female') hardLean = al
+        } catch { /* no guard */ }
+        const FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
+        const MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
+        const leanExcluded = (kw: string): boolean => {
+          if (!hardLean) return false
+          return hardLean === 'female'
+            ? (MASC_RE.test(kw) && !FEM_RE.test(kw))
+            : (FEM_RE.test(kw) && !MASC_RE.test(kw))
+        }
+
         // Count totals but cap what affects scoring to top 10 per category
         let criticalSeen = 0
         let upgradeSeen = 0
@@ -473,6 +496,7 @@ export async function fetchScoringContext(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const r = row as any
           ctx.totalKeywords++
+          if (leanExcluded(String(r.keyword ?? ''))) continue  // the seller's audience choice bans it — not a gap
           switch (r.action_type) {
             case 'CRITICAL':
               if (isCovered(r.keyword)) break  // already in the live copy — not a gap
@@ -928,16 +952,13 @@ export function scoreListingContent(
     issues.push({ field: 'backend_keywords', severity: 'info', message: 'Backend keywords contain commas — Amazon treats commas as characters, not separators, wasting space. Remove all commas and use spaces only. "128gb, sd card" → "128gb sd card" saves 2 chars per term and recovers keyword slots.', auto_fixable: false })
   }
 
-  // Keyword overlap — title words repeated in backend keywords waste space
-  if (title && keywords) {
-    const titleTokens = tokenize(title)
-    const kwTokens = tokenize(keywords)
-    const overlap = [...titleTokens].filter(w => kwTokens.has(w) && w.length > 4)
-    if (overlap.length > 3) {
-      keywordScore -= 3
-      issues.push({ field: 'backend_keywords', severity: 'info', message: `Backend keywords repeat ${overlap.length} words already in your title (e.g. "${overlap.slice(0,3).join('", "')}""). Amazon already indexes title words — repeating them in backend keywords wastes space. Replace them with NEW terms: misspellings, synonyms, and long-tail phrases not in the title.`, auto_fixable: false })
-    }
-  }
+  // Title-overlap dock RETIRED (was -3 when backend repeated >3 title words): the seller's
+  // CHOSEN backend strategy is HYBRID — the generator deliberately includes the TOP search
+  // phrases even when they appear in the title ("utilize the best Jungle Scout terms"), so
+  // this dock fired on essentially every listing and contradicted the strategy (the #188
+  // trap-class: never dock for what the generator is designed to do). Whole-phrase backend
+  // entries also reinforce exact-phrase matching, so the "wasted space" premise was shaky.
+  // No issue row either — telling the seller to remove strategy-mandated terms is noise.
 
   // Image count check
   const imageCount = representativeContent.image_count || 0
