@@ -228,6 +228,21 @@ const GARMENT_TYPE_WORDS = new Set([
   'fleece', 'sweater', 'sweaters', 'jacket', 'jackets', 'coat', 'coats',
   'tank', 'tanks', 'polo', 'polos', 'onesie', 'romper', 'leggings',
 ])
+
+// STYLE/CUT claims — sibling of GARMENT_TYPE_WORDS for the backend token gate. Jungle Scout's
+// top category phrases describe the whole "comfort colors" NICHE, not this product: "cropped
+// comfort colors", "pocket tee", "blank tshirts", "oversized boxy" — tokens that mis-describe a
+// regular-cut printed graphic tee (PO: 'Super BAD keywords "cropped pocket solid plain black for
+// cotton oversized blank"'). Like garment words, a style/cut token needs corroboration from the
+// SELLER'S OWN text (canonical/rep title, design, product type) to enter backend keywords —
+// "blank"/"plain" additionally attract wholesale buyers hunting unprinted shirts, the wrong
+// customer for a graphic tee. Fabric/material words (cotton, lightweight) stay free — they
+// describe the blank's substance, not a contradictable cut.
+const STYLE_CUT_WORDS = new Set([
+  'cropped', 'crop', 'pocket', 'boxy', 'oversized', 'oversize', 'slim', 'fitted',
+  'muscle', 'raglan', 'ringer', 'sleeveless', 'henley', 'longline', 'flowy', 'baggy',
+  'distressed', 'bleached', 'plain', 'blank', 'solid', 'tall', 'petite', 'maternity',
+])
 function stripContradictedGarments(text: string, trustedHaystack: string): string {
   if (!text) return text
   const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
@@ -274,6 +289,9 @@ function fillBackendToBudget(
   poolKeywords: string[],
   ownBrands: Set<string>,
   capacityFamily: boolean,
+  /** Same token truth gate the core uses — pool phrases can carry sibling colors and
+   *  ungrounded style words; the byte-fill must not smuggle back what the core banned. */
+  banTok: (w: string) => boolean = () => false,
 ): string {
   let out = (keywords || '').trim()
   if (getByteLength(out) >= 244) return out
@@ -299,6 +317,7 @@ function fillBackendToBudget(
     for (const raw of cand.split(/\s+/)) {
       const tok = normTok(raw)
       if (tok.length <= 1 || have.has(tok)) continue
+      if (banTok(tok)) continue
       if (getByteLength(`${out} ${tok}`) > 250) continue
       out = `${out} ${tok}`
       have.add(tok)
@@ -2048,6 +2067,10 @@ async function runBackendAgent(
    *  though it's in the title. Same identity mandate the title enforces (#91/#92); the backend used to
    *  silently drop it because it excludes title words. PR: design-name-in-backend. */
   designName = '',
+  /** Token truth gate (built in pipeline scope): ungrounded style/cut/garment claims, sibling
+   *  variants' colors, stray single letters, hard-lean opposite-gender tokens. Applied to the
+   *  CORE and the LLM fill — NOT to the per-color tail (the tail IS this child's own color). */
+  banTok: (w: string) => boolean = () => false,
 ): Promise<PipelinePerChildKeywords[]> {
   const { openai, children, brandName, category, repTitle, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
@@ -2090,6 +2113,7 @@ async function runBackendAgent(
     const toks: ({ w: string; minor: boolean } | null)[] = []
     for (const w of raw.split(' ')) {
       if (JUNK_WORDS.has(w)) { toks.push(null); continue }
+      if (banTok(w)) { toks.push(null); continue }            // truth gate: ungrounded style/color/gender/stray
       // ROLE WORDS ARE KEPT in the backend CORE. These phrases come from REAL opportunity keywords
       // (SQP/JS — shoppers already reach this ASIN via "later gator teacher shirt"), and backend
       // generic_keyword is invisible search indexing, NOT a customer-facing audience claim. The
@@ -2155,6 +2179,7 @@ Return ONLY the JSON.`
       const fillOut: string[] = []
       for (const w of (fillParsed.keywords || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
         if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w)) continue
+        if (banTok(w)) continue                                        // truth gate (same as the core)
         if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue          // weak-relevance role
         if (kidsWords.has(w) && !titleWords.has(w)) continue           // wrong audience
         if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) continue  // 3P brand: trademark risk
@@ -3311,29 +3336,55 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   onProgress('Distributing backend keywords + writing description...')
   const backendPool = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED', 'OPTIMIZED'].includes(k.actionType))
+    // HARD lean (#203 symmetry): the scorer no longer counts opposite-gender keywords as gaps —
+    // the generator must not PLACE them either. Placing then post-stripping left orphaned
+    // connectors mid-string ("…black t shirts for…" once "men" was removed).
+    .filter((k) => {
+      if (lean !== 'female' && lean !== 'male') return true
+      const fem = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i.test(k.keyword)
+      const masc = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i.test(k.keyword)
+      return lean === 'female' ? !(masc && !fem) : !(fem && !masc)
+    })
     .sort((a, b) =>
       (b.keywordSales || 0) - (a.keywordSales || 0) ||
       (b.searchVolume || 0) - (a.searchVolume || 0) ||
       b.opportunityScore - a.opportunityScore)
+
+  // TOKEN TRUTH GATE for every word that enters a backend string (core, LLM fill, byte-fill) —
+  // the deterministic "council" the PO asked for ("Super BAD keywords — how did the council
+  // approve this?"). Bans: stray single letters from "t-shirt" splits; OTHER variants' colors
+  // on a multi-color family (each child's own color arrives via its per-color tail); style/cut/
+  // garment claims the seller's own text doesn't corroborate (cropped/pocket/boxy/oversized/
+  // plain/blank on a regular-cut printed tee — JS category phrases describe the NICHE, not this
+  // product); hard-lean opposite-gender tokens. The design-name anchor is exempt (identity).
+  const backendTruthHay = `${input.canonicalTitle ?? ''} ${repTitle} ${designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
+  const banBackendTok = (w: string): boolean => {
+    if (w.length === 1 && !/\d/.test(w)) return true
+    if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
+    if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
+    if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
+    if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
+    return false
+  }
   // #79 partial runs: exactly one of the pair, anchored on the stored title+bullets.
   if (only === 'keywords') {
     const ownB = ownBrandTokenSet(brandName)
     const finishBackend = (rows: PipelinePerChildKeywords[]): PipelinePerChildKeywords[] => {
       let out = rows.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok),
       }))
       if (lean === 'female' || lean === 'male') {
         out = out.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
       }
       return out
     }
-    let perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName))
+    let perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
     let problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
     if (problems.length > 0) {
       // One retry — the failures here are transient LLM truncations/hiccups, not logic.
       onProgress('Backend output looked degraded — retrying…')
-      perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName))
+      perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
       problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
     }
     if (problems.length > 0) {
@@ -3358,7 +3409,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // speed-up (PO gate): only genuinely independent calls overlap; the council stages
   // (proposers → adversary → judge) stay sequential because their order IS the quality.
   let [perChild, descriptionRaw] = await Promise.all([
-    runBackendAgent(input, finalTitle, bullets, backendPool, designName),
+    runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok),
     runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands),
   ])
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
@@ -3368,7 +3419,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const ownB = ownBrandTokenSet(brandName)
     let out = rows.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok),
     }))
     // HARD audience: backend search terms drop the opposite gender's standalone tokens
     // (PO caught "…darlin mens black men…" persisting on a Female listing).
@@ -3384,7 +3435,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     let problems = backendOutputProblems(perChild, input.children, apparelProduct)
     if (problems.length > 0) {
       onProgress('Backend output looked degraded — retrying…')
-      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, designName))
+      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
       problems = backendOutputProblems(perChild, input.children, apparelProduct)
       if (problems.length > 0) console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
     }
