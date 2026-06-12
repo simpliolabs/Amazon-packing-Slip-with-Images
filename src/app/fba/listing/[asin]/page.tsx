@@ -582,6 +582,16 @@ export default function ListingDetailPage() {
     return () => { cancelled = true }
   }, [asin])
 
+  // Tab-close guard: the push/Auto-Push stream lives in THIS tab's JS — modal close and SPA
+  // navigation are safe, but closing/refreshing the browser tab kills the stream mid-push.
+  // Ask the browser to confirm so an employee can't lose a half-sent push by accident.
+  useEffect(() => {
+    if (!pushLoading && !bulkRunning) return
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [pushLoading, bulkRunning])
+
   // FREE rank re-check (the banner's stale chip is a BUTTON now, not a dead-end): recomputes
   // live keyword coverage server-side (0 JS credits, 0 OpenAI — pure DB + coverage math),
   // un-stales the banner, and the actionable work-list (Ship/Regenerate per gap keyword)
@@ -2764,11 +2774,11 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       {/* AUTO PUSH — one confirm, every ready Product-Detail field ships sequentially. */}
       {bulkOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !bulkRunning && setBulkOpen(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setBulkOpen(false)}>
           <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
               <h3 className="text-sm font-bold text-slate-900">Auto Push — Product Details</h3>
-              <button onClick={() => !bulkRunning && setBulkOpen(false)} disabled={bulkRunning} className="text-slate-400 hover:text-slate-600 text-lg leading-none disabled:opacity-40">×</button>
+              <button onClick={() => setBulkOpen(false)} title={bulkRunning ? 'Safe to close — Auto Push keeps running in this tab (progress pill bottom-right). Just don’t close the browser tab itself.' : 'Close'} className="text-slate-400 hover:text-slate-600 text-lg leading-none">×</button>
             </div>
             <div className="px-5 py-4 space-y-2">
               <p className="text-xs text-slate-500">
@@ -2802,8 +2812,8 @@ export default function ListingDetailPage() {
               </div>
             </div>
             <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 sticky bottom-0 bg-white">
-              <button onClick={() => setBulkOpen(false)} disabled={bulkRunning} className="text-xs text-slate-600 hover:text-slate-800 px-3 py-1.5 disabled:opacity-40">
-                {bulkFinished ? 'Close' : 'Cancel'}
+              <button onClick={() => setBulkOpen(false)} className="text-xs text-slate-600 hover:text-slate-800 px-3 py-1.5">
+                {bulkFinished ? 'Close' : bulkRunning ? 'Hide (keeps running)' : 'Cancel'}
               </button>
               {!bulkFinished && (
                 <button
@@ -2818,8 +2828,25 @@ export default function ListingDetailPage() {
           </div>
         </div>
       )}
+      {/* Floating push pill — the push fetch lives in the PAGE's JS, not the modal, so the
+          modal can close while the stream keeps running (PO: "an employee needs to watch an
+          item send for 5 min"). Within-tab navigation is safe; only closing the browser TAB
+          kills the stream (guarded by beforeunload below). */}
+      {((pushLoading && !showPushModal) || (bulkRunning && !bulkOpen)) && (
+        <button
+          onClick={() => (bulkRunning && !bulkOpen ? setBulkOpen(true) : setShowPushModal(true))}
+          className="fixed bottom-4 right-4 z-40 flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-lg"
+          title="A push is still running in this tab — click to view progress. Keep this browser tab open until it finishes."
+        >
+          <span className="animate-spin w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full" />
+          {bulkRunning && !bulkOpen
+            ? `Auto Push running… ${bulkItems.filter((i) => i.status === 'done' || i.status === 'failed').length}/${bulkItems.filter((i) => !i.skip).length} fields`
+            : `Pushing ${pushField === 'details' && pushDetailField ? pushDetailField : FIELD_LABEL[pushField]}… ${pushProgress.filter((p) => p.status === 'accepted').length} accepted`}
+          <span className="underline decoration-dotted underline-offset-2">view</span>
+        </button>
+      )}
       {showPushModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !pushLoading && setShowPushModal(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowPushModal(false)}>
           <div className="bg-white rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
               <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900">
@@ -2832,10 +2859,9 @@ export default function ListingDetailPage() {
                 )}
               </h3>
               <button
-                onClick={() => !pushLoading && setShowPushModal(false)}
-                disabled={pushLoading}
-                title={pushLoading ? 'Locked while sending — closing mid-push could leave some SKUs updated and some not. It unlocks the moment the stream finishes.' : 'Close'}
-                className={`text-lg leading-none ${pushLoading ? 'text-slate-200 cursor-not-allowed' : 'text-slate-400 hover:text-slate-600'}`}
+                onClick={() => setShowPushModal(false)}
+                title={pushLoading ? 'Safe to close — the push keeps running in this tab (a progress pill appears bottom-right). Just don’t close the browser tab itself.' : 'Close'}
+                className="text-lg leading-none text-slate-400 hover:text-slate-600"
               >&times;</button>
             </div>
 
@@ -2855,7 +2881,7 @@ export default function ListingDetailPage() {
                     </p>
                     {(pushPhase === 'pushing' || pushPhase === 'starting') && (
                       <p className="text-[10px] text-slate-400 mt-1">
-                        Closing is locked while sending. If the connection drops anyway (page refresh / navigation), already-accepted SKUs stay pushed — re-open this modal and use <b>Verify on Amazon</b>, then <b>Push just the stale</b>.
+                        You can <b>close this and keep working</b> — the push continues in this tab (progress pill bottom-right). Just don&apos;t close the browser tab; if it drops anyway, already-accepted SKUs stay pushed — re-open and use <b>Verify on Amazon</b> → <b>Push just the stale</b>.
                       </p>
                     )}
                   </div>
