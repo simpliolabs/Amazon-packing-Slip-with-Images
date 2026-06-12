@@ -1672,9 +1672,17 @@ export default function ListingDetailPage() {
                                       {gapNames.slice(0, 5).map((k) => `“${k}”`).join(', ')}{gapNames.length > 5 ? ` +${gapNames.length - 5} more` : ''}
                                     </p>
                                     {rankData.stale && (
-                                      <p className="text-[10px] text-slate-500 mt-1">
-                                        Your content changed since this ran — hit <span className="font-semibold">Re-check now (free)</span> above to refresh coverage and get the one-click Ship/Regenerate actions for each gap.
-                                      </p>
+                                      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                                        <button
+                                          onClick={() => void refreshRankFree()}
+                                          disabled={rankRefreshing}
+                                          className="text-[10px] bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 rounded font-semibold disabled:opacity-50"
+                                          title="Recomputes keyword coverage against your CURRENT content — free, no credits. The one-click Ship/Regenerate actions for each gap return right after."
+                                        >
+                                          {rankRefreshing ? 'Re-checking…' : 'Re-check now (free)'}
+                                        </button>
+                                        <span className="text-[10px] text-slate-500">Your content changed since this ran — re-check to refresh coverage and unlock the one-click Ship/Regenerate actions per gap.</span>
+                                      </div>
                                     )}
                                   </div>
                                 )
@@ -2503,7 +2511,7 @@ export default function ListingDetailPage() {
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is">Opp</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="YOUR organic rank for this keyword (Jungle Scout, measured on each Re-research). Arrow = movement vs the previous snapshot. — = not ranking.">Rank</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
-                    <th className="text-left px-3 py-2 font-medium text-slate-500">Present In</th>
+                    <th className="text-left px-3 py-2 font-medium text-slate-500" title="Where this keyword appears in YOUR listing — T=Title, B=Bullets, D=Description, K=Backend keywords. Snapshot from the last Intelligence sync/Re-research: push content, then Re-research to refresh these flags.">Present In</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -2551,12 +2559,12 @@ export default function ListingDetailPage() {
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex gap-1">
-                          {kw.inTitle && <span className="text-[9px] bg-blue-50 text-blue-600 px-1 rounded">T</span>}
-                          {kw.inBullets && <span className="text-[9px] bg-green-50 text-green-600 px-1 rounded">B</span>}
-                          {kw.inDescription && <span className="text-[9px] bg-purple-50 text-purple-600 px-1 rounded">D</span>}
-                          {kw.inBackend && <span className="text-[9px] bg-slate-100 text-slate-600 px-1 rounded">K</span>}
+                          {kw.inTitle && <span className="text-[9px] bg-blue-50 text-blue-600 px-1 rounded" title="In your Title (as of the last sync)">T</span>}
+                          {kw.inBullets && <span className="text-[9px] bg-green-50 text-green-600 px-1 rounded" title="In your Bullets (as of the last sync)">B</span>}
+                          {kw.inDescription && <span className="text-[9px] bg-purple-50 text-purple-600 px-1 rounded" title="In your Description (as of the last sync)">D</span>}
+                          {kw.inBackend && <span className="text-[9px] bg-slate-100 text-slate-600 px-1 rounded" title="In your Backend search terms (as of the last sync)">K</span>}
                           {!kw.inTitle && !kw.inBullets && !kw.inDescription && !kw.inBackend && (
-                            <span className="text-[9px] text-red-500">nowhere</span>
+                            <span className="text-[9px] text-red-500" title="Not found anywhere in your listing at the last sync — Regenerate weaves it in, then Ship">nowhere</span>
                           )}
                         </div>
                       </td>
@@ -2823,7 +2831,12 @@ export default function ListingDetailPage() {
                   <span className="text-[10px] text-slate-500 font-mono ml-1">/attributes/{pushPreview.attribute_key}</span>
                 )}
               </h3>
-              <button onClick={() => !pushLoading && setShowPushModal(false)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+              <button
+                onClick={() => !pushLoading && setShowPushModal(false)}
+                disabled={pushLoading}
+                title={pushLoading ? 'Locked while sending — closing mid-push could leave some SKUs updated and some not. It unlocks the moment the stream finishes.' : 'Close'}
+                className={`text-lg leading-none ${pushLoading ? 'text-slate-200 cursor-not-allowed' : 'text-slate-400 hover:text-slate-600'}`}
+              >&times;</button>
             </div>
 
             <div className="p-5">
@@ -2840,6 +2853,11 @@ export default function ListingDetailPage() {
                         : pushPreview ? 'Pushing to Amazon…'
                         : 'Loading preview…'}
                     </p>
+                    {(pushPhase === 'pushing' || pushPhase === 'starting') && (
+                      <p className="text-[10px] text-slate-400 mt-1">
+                        Closing is locked while sending. If the connection drops anyway (page refresh / navigation), already-accepted SKUs stay pushed — re-open this modal and use <b>Verify on Amazon</b>, then <b>Push just the stale</b>.
+                      </p>
+                    )}
                   </div>
                   {/* Live per-SKU stream — visible during the push, kept after on success
                        so the seller can scroll back to see what each SKU did. The stream
