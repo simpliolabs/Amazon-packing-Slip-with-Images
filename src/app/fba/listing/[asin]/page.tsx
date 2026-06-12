@@ -252,6 +252,9 @@ export default function ListingDetailPage() {
   /** Part 2b — the value the seller picked from Amazon's accepted list for an uncoercible dropdown
    *  detail (e.g. Material "100% ring-spun cotton" → pick "Cotton"). Sent as detail_value_override. */
   const [detailOverride, setDetailOverride] = useState<string>('')
+  // Cancel support for a streaming push: the token travels with the push body; Stop POSTs it back.
+  const pushCancelTokenRef = useRef<string | null>(null)
+  const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
   const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
@@ -770,7 +773,7 @@ export default function ListingDetailPage() {
     }
     setPushField(field)
     setPushDetailField(field === 'details' ? (detailField ?? null) : null)
-    setPushError(null); setPushResults(null); setPushPreview(null); setDetailOverride(''); setVerifyResults(null); setVerifyError(null); setPushProgress([]); setPushPhase('idle'); setShowPushModal(true); setPushLoading(true)
+    setPushError(null); setPushResults(null); setPushPreview(null); setDetailOverride(''); setVerifyResults(null); setVerifyError(null); setPushProgress([]); setPushPhase('idle'); setCancelRequested(false); pushCancelTokenRef.current = null; setShowPushModal(true); setPushLoading(true)
     try {
       const qs = field === 'details' && detailField
         ? `&detail_field=${encodeURIComponent(detailField)}`
@@ -824,6 +827,20 @@ export default function ListingDetailPage() {
     return body
   }, [asin, pushField, pushDetailField, editTitle])
 
+  /** Ask the server to stop the running streaming push between SKUs (PO: "NO way to
+   *  cancel when it starts"). Already-accepted SKUs stay pushed — Amazon has them. */
+  const stopPush = useCallback(async () => {
+    const token = pushCancelTokenRef.current
+    if (!token) return
+    setCancelRequested(true)
+    try {
+      await fetch('/api/fba/listing-optimizer/push-content', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel', cancel_token: token }),
+      })
+    } catch { /* loop keeps going; the button stays pressed and the user can retry */ }
+  }, [])
+
   /** Queue the push as a SERVER-side job (PR #184): it survives tab close and deploys.
    *  The global status bar (every portal page) tracks it; nothing is streamed back here. */
   const [queueLoading, setQueueLoading] = useState(false)
@@ -860,12 +877,17 @@ export default function ListingDetailPage() {
     // ones") shows its OWN loading + per-SKU progress, instead of silently sitting behind the old
     // results — the PO saw it "close without action" because the re-push ran but stayed hidden.
     setPushProgress([]); setVerifyResults(null); setPushResults(null)
+    // Cancel support (PO: "NO way to cancel when it starts") — a per-push token; the Stop
+    // button POSTs {action:'cancel', cancel_token} and the server loop stops between SKUs.
+    const cancelToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `p${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+    pushCancelTokenRef.current = cancelToken
+    setCancelRequested(false)
     let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } | null = null
     let streamError: string | null = null
     const skuStatus = new Map<string, string>()   // latest status per SKU — rebuilds a partial result if the stream drops
     let serverTotal = 0                            // real diff size from the 'started' event (NOT just SKUs-seen-before-drop)
     try {
-      const body = buildPushBody(onlySkus, detailOverrideArg)
+      const body = { ...buildPushBody(onlySkus, detailOverrideArg), cancel_token: cancelToken }
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3090,6 +3112,17 @@ export default function ListingDetailPage() {
                       <p className="text-[10px] text-slate-400 mt-1">
                         You can <b>close this and keep working</b> — the push continues in this tab (progress pill bottom-right). Just don&apos;t close the browser tab; if it drops anyway, already-accepted SKUs stay pushed — re-open and use <b>Verify on Amazon</b> → <b>Push just the stale</b>.
                       </p>
+                    )}
+                    {/* PO: "NO way to cancel when it starts" — server-side stop between SKUs.
+                        Already-accepted SKUs stay pushed (Amazon has them); the rest untouched. */}
+                    {(pushPhase === 'pushing' || pushPhase === 'starting') && (
+                      <button
+                        onClick={stopPush}
+                        disabled={cancelRequested}
+                        className="mt-2 text-xs px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60 font-medium"
+                      >
+                        {cancelRequested ? 'Stopping after the current SKU…' : '■ Stop push'}
+                      </button>
                     )}
                   </div>
                   {/* Live per-SKU stream — visible during the push, kept after on success

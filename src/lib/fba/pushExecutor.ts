@@ -40,7 +40,21 @@ import {
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, getDetailValueShape, buildShapedDetailValue, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
-import { getProductType } from '@/lib/amazon/productType'
+import { getProductType, tryGetProductType } from '@/lib/amazon/productType'
+
+// ── Cancellation (streaming pushes) ──────────────────────────────────────────
+// PO: "NO way to cancel when it starts." The client sends a cancel_token with the push
+// body and POSTs {action:'cancel', cancel_token} to flip it here; the SKU loops check
+// between SKUs and stop cleanly (already-accepted SKUs stay pushed — Amazon has them).
+// In-memory is correct on this single long-lived container. Queued background jobs are
+// separate (cancel those before they start by not queueing / future job-cancel).
+const _cancelledPushes = new Set<string>()
+export function requestPushCancel(token: string): void { if (token) _cancelledPushes.add(token) }
+function pushCancelled(token: string | undefined): boolean {
+  if (!token || !_cancelledPushes.has(token)) return false
+  _cancelledPushes.delete(token)
+  return true
+}
 
 export const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 export const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -366,6 +380,11 @@ interface DetailContext {
    *  (live-verified 0/89 applied) — the value must sit on the sub-field the editor reads
    *  (neck.neck_style, sleeve.type, …). null/undefined = flat attribute, legacy builder. */
   valueShape?: DetailValueShape | null
+  /** STRICTLY-resolved productType (never the 'PRODUCT' fallback). Resolved ONCE here so the
+   *  schema check, enum coercion, value shape, and the per-SKU patches all agree — the live
+   *  failure was the push re-resolving on a transient blip, getting generic 'PRODUCT', and
+   *  Amazon rejecting all 82 patches ("The provided value for 'neck' is invalid"). */
+  productType?: string | null
 }
 
 /** Load + validate the audit's recommendation for one detail attribute. Returns null on
@@ -419,10 +438,15 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   let normalizedFrom: string | undefined
   let enumInvalid = false
   let valueShape: DetailValueShape | null = null
+  let resolvedPt: string | null = null
+  let hadSku = false
 
-  // ── Enum validation (Feature B) — coerce the value (audit OR seller override) to an accepted member;
-  // FLAG (don't error) when uncoercible so the PREVIEW can show the seller-picker and the PUSH blocks.
-  // Best-effort: any SP-API failure leaves the value as-is (VALIDATION_PREVIEW is the final backstop).
+  // ── productType: STRICT, resolved ONCE. The generic 'PRODUCT' fallback poisons everything
+  // downstream for details (schema check, enum coercion, value shape, the patches themselves) —
+  // live failure: a transient blip right after a deploy resolved 'PRODUCT' and Amazon rejected
+  // the whole 82-SKU family ("The provided value for 'neck' is invalid") with a false
+  // "not valid for this product type (PRODUCT)" message blaming the recommendation.
+  // The enum coercion/shape below stay best-effort (VALIDATION_PREVIEW backstops them).
   try {
     const { data: skuRows } = await supabase
       .from('listing_content')
@@ -431,33 +455,44 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
       .limit(1)
     const sku = (skuRows as { sku?: string }[] | null)?.[0]?.sku
     if (sku) {
+      hadSku = true
       const token = await getAccessToken()
       const sellerId = await getSellerId()
-      const productType = await getProductType(sellerId, token, sku)
-      const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
-      const c = await coerceDetailValue(productType, attribute.spApiKey, recommendedValue, ptOpts)
-      if (c.isEnum) {
-        acceptedValues = c.accepted
-        if (!c.valid) {
-          enumInvalid = true   // uncoercible dropdown — preview shows the picker; PUSH blocks w/o a valid override
-        } else if (c.normalizedFrom) {
-          normalizedFrom = c.normalizedFrom
-          recommendedValue = c.value
-          console.log(`[push-content] enum-coerced ${attribute.spApiKey}: "${normalizedFrom}" -> "${recommendedValue}" (productType ${productType})`)
+      resolvedPt = await tryGetProductType(sellerId, token, sku)
+      if (resolvedPt) {
+        const productType = resolvedPt
+        const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+        try {
+          const c = await coerceDetailValue(productType, attribute.spApiKey, recommendedValue, ptOpts)
+          if (c.isEnum) {
+            acceptedValues = c.accepted
+            if (!c.valid) {
+              enumInvalid = true   // uncoercible dropdown — preview shows the picker; PUSH blocks w/o a valid override
+            } else if (c.normalizedFrom) {
+              normalizedFrom = c.normalizedFrom
+              recommendedValue = c.value
+              console.log(`[push-content] enum-coerced ${attribute.spApiKey}: "${normalizedFrom}" -> "${recommendedValue}" (productType ${productType})`)
+            }
+          }
+          // COMPOSITE shape (neck/closure/sleeve): derive the nested patch path from the same
+          // schema. Best-effort like the coercion — null keeps the legacy flat builder.
+          valueShape = await getDetailValueShape(productType, attribute.spApiKey, ptOpts)
+          if (valueShape) {
+            console.log(`[push-content] composite attribute ${attribute.spApiKey}: value path ${valueShape.path.join('.')} (productType ${productType})`)
+          }
+        } catch (err) {
+          console.warn('[push-content] enum coercion skipped:', err)
         }
-      }
-      // COMPOSITE shape (neck/closure/sleeve): derive the nested patch path from the same
-      // schema. Best-effort like the coercion — null keeps the legacy flat builder.
-      valueShape = await getDetailValueShape(productType, attribute.spApiKey, ptOpts)
-      if (valueShape) {
-        console.log(`[push-content] composite attribute ${attribute.spApiKey}: value path ${valueShape.path.join('.')} (productType ${productType})`)
       }
     }
   } catch (err) {
-    console.warn('[push-content] enum coercion skipped:', err)
+    console.warn('[push-content] detail context prep failed:', err)
+  }
+  if (hadSku && !resolvedPt) {
+    return { ctx: null, error: `Amazon didn't return this listing's product type just now (usually a transient hiccup right after a deploy). Nothing was pushed — try again in a minute.` }
   }
 
-  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape }, error: null }
+  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape, productType: resolvedPt }, error: null }
 }
 
 /** Fetch a SKU's CURRENT attribute value live from Listings Items. Best-effort: '' on failure. */
@@ -643,6 +678,9 @@ export interface PushParams {
   skus?: string[]
   title_override?: string
   detail_value_override?: string
+  /** Client-generated id for this push; POST {action:'cancel', cancel_token} stops the loop
+   *  between SKUs (already-accepted SKUs stay pushed — they're Amazon's now). */
+  cancel_token?: string
 }
 
 export type PushEmit = (obj: Record<string, unknown>) => void
@@ -677,7 +715,14 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           })
           const token = await getAccessToken()
           const sellerId = await getSellerId()
-          const productType = await getProductType(sellerId, token, diff[0].sku)
+          // STRICT type from the context (resolved once, never the 'PRODUCT' fallback) — the
+          // schema check, the coerced value, the value shape, and these patches must all agree.
+          let productType = ctx.productType ?? null
+          if (!productType) productType = await tryGetProductType(sellerId, token, diff[0].sku)
+          if (!productType) {
+            emit({ type: 'error', error: `Amazon didn't return this listing's product type just now (usually a transient hiccup right after a deploy). Nothing was pushed — try again in a minute.` })
+            return
+          }
           // GUARD (PO live bug): the attribute must EXIST in THIS product type's schema. Apparel attrs
           // (department, fit_type, fabric_type) are absent on office/electronics types — Amazon 400s EVERY
           // patch with "the provided attribute path is not valid" (10 failed writes on a sticky-notes
@@ -705,7 +750,9 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           }
 
           const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+          let cancelled = false
           for (const item of diff) {
+            if (pushCancelled(params.cancel_token)) { cancelled = true; break }
             const newValueStr = ctx.recommendedValue
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
             const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape)
@@ -781,8 +828,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
-            pushed: accepted, failed, total: results.length,
-            message: `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+            pushed: accepted, failed, total: results.length, cancelled: cancelled || undefined,
+            message: cancelled
+              ? `Stopped by you — ${accepted}/${results.length} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
+              : `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
             results,
           })
           return
@@ -839,7 +888,9 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         }
 
         const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+        let cancelled = false
         for (const item of diff) {
+          if (pushCancelled(params.cancel_token)) { cancelled = true; break }
           const value = item.raw as string | string[]
           const newValueStr = asCompare(value)
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
@@ -911,7 +962,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // shows "needs update", and the NEXT ship would push the AI title over the seller's. So we make
           // their pushed title the recommendation — it sticks, cohesion goes green, re-ship is a no-op.
           // Capacity families are excluded (their per-GB titles must not collapse to one string).
-          if (field === 'title' && typeof title_override === 'string' && title_override.trim()) {
+          if (!cancelled && field === 'title' && typeof title_override === 'string' && title_override.trim()) {
             try {
               const { data: rt } = await db.from('listing_seo_recommendations').select('per_child_titles').eq('parent_asin', parent_asin).single()
               const isCapFam = Array.isArray(rt?.per_child_titles) && rt.per_child_titles.length > 1
@@ -922,11 +973,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           }
 
           // PERSIST verdict=DONE for the pushed section — ONLY when EVERY pushed SKU succeeded
-          // (failed === 0). A push with failures (or a selective re-push where some stragglers still
-          // error) must NOT flip the card to DONE, or the seller stops before the field is actually
-          // consistent on Amazon (adversarial review). Without persisting, the card snaps back to
-          // "Do Now" on the next recommendations refetch — so we persist only when truly fully shipped.
-          if (failed === 0) try {
+          // (failed === 0) AND the push wasn't cancelled mid-way (a stopped push has untouched
+          // SKUs — failed===0 would lie DONE onto an incomplete field). A push with failures
+          // (or a selective re-push where some stragglers still error) must NOT flip the card to
+          // DONE, or the seller stops before the field is actually consistent on Amazon.
+          if (failed === 0 && !cancelled) try {
             const { data: recRow } = await db.from('listing_seo_recommendations')
               .select('action_plan').eq('parent_asin', parent_asin).single()
             const plan = Array.isArray(recRow?.action_plan) ? recRow.action_plan as Array<Record<string, unknown>> : null
@@ -956,8 +1007,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         emit({
           type: 'result',
           parent_asin, field,
-          pushed: accepted, failed, total: results.length,
-          message: `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+          pushed: accepted, failed, total: results.length, cancelled: cancelled || undefined,
+          message: cancelled
+            ? `Stopped by you — ${accepted}/${results.length} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
+            : `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
           results,
         })
       } catch (err) {

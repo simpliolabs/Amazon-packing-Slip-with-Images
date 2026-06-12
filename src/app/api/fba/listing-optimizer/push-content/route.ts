@@ -23,7 +23,7 @@ import { resolveDetailAttribute } from '@/lib/fba/productDetailAttrs'
 import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueShape, buildShapedDetailValue } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
 import {
-  executePush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff,
+  executePush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff, requestPushCancel,
   ENDPOINT, MARKETPLACE_ID, type PushEmit,
 } from '@/lib/fba/pushExecutor'
 
@@ -149,9 +149,15 @@ export async function POST(req: NextRequest) {
   // Validate the body BEFORE opening the stream — a 400 here is a real client error,
   // not a mid-push failure. Keeps the streaming envelope reserved for things that
   // can actually fail asynchronously.
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string; action?: string; cancel_token?: string }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
+  // Cancel a running streaming push (PO: "NO way to cancel when it starts") — flips the
+  // in-memory flag; the SKU loop stops between SKUs and emits a cancelled result.
+  if (body.action === 'cancel' && typeof body.cancel_token === 'string' && body.cancel_token) {
+    requestPushCancel(body.cancel_token)
+    return NextResponse.json({ ok: true })
+  }
   const { parent_asin, confirm, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = body
   if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
   if (confirm !== true) {
@@ -168,7 +174,7 @@ export async function POST(req: NextRequest) {
         try { controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n')) }
         catch { /* client gone — keep pushing */ }
       }
-      await executePush({ parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override }, emit)
+      await executePush({ parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override, cancel_token: body.cancel_token }, emit)
       try { controller.close() } catch { /* already closed by disconnect */ }
     },
   })
