@@ -148,3 +148,42 @@ export function checkPresence(
     usageGapMultiplier,
   };
 }
+
+/**
+ * OR-presence across multiple content rows (an ASIN's FBA + FBM twin rows): the keyword
+ * is "in title" when it is in ANY row's title, etc. Each row is checked INDIVIDUALLY and
+ * the flags are OR'd — never check against concatenated rows, which would let half a
+ * phrase in row A plus half in row B fake a match that NEITHER row contains. The usage
+ * gap multiplier is re-derived from the OR'd flags with the same ladder as checkPresence.
+ */
+export function checkPresenceAny(
+  keyword: string,
+  listings: ListingContent[]
+): PresenceResult {
+  if (listings.length === 0) return checkPresence(keyword, {});
+  if (listings.length === 1) return checkPresence(keyword, listings[0]);
+
+  const results = listings.map((l) => checkPresence(keyword, l));
+  const inTitle       = results.some((r) => r.inTitle);
+  const inBullets     = results.some((r) => r.inBullets);
+  const inDescription = results.some((r) => r.inDescription);
+  const inBackend     = results.some((r) => r.inBackend);
+
+  const coverageCount = [inTitle, inBullets, inDescription, inBackend]
+    .filter(Boolean).length;
+
+  let usageGapMultiplier: number;
+  if (!inTitle && !inBullets && !inBackend && !inDescription) {
+    usageGapMultiplier = 3.0;
+  } else if (!inTitle && !inBullets) {
+    usageGapMultiplier = inBackend ? 1.8 : 2.5;
+  } else if (!inTitle && inBullets) {
+    usageGapMultiplier = 2.0;
+  } else if (inTitle && !inBullets) {
+    usageGapMultiplier = 1.5;
+  } else {
+    usageGapMultiplier = 1.0;
+  }
+
+  return { inTitle, inBullets, inDescription, inBackend, coverageCount, usageGapMultiplier };
+}
