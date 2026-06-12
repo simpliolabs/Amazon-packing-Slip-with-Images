@@ -3001,6 +3001,32 @@ export default function ListingDetailPage() {
 
             <div className="p-5">
               {pushError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 mb-3">{pushError}</p>}
+              {/* The error copy says "use Verify on Amazon" — give the seller that button RIGHT
+                  HERE (the full verify panel lives in the preview view, which may not be rendered
+                  in an early-failure state — PO hit a 502 during a deploy and had no way to act). */}
+              {pushError && !pushResults && (
+                <div className="mb-3 -mt-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={runVerify}
+                      disabled={verifyLoading}
+                      className="text-xs px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50">
+                      {verifyLoading ? 'Checking Amazon live…' : 'Verify on Amazon — did it apply?'}
+                    </button>
+                    <button onClick={() => setShowPushModal(false)} className="text-xs px-3 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Close</button>
+                  </div>
+                  {verifyError && <p className="text-xs text-red-600 mt-1.5">{verifyError}</p>}
+                  {verifyResults && (
+                    <p className="text-xs text-slate-700 mt-1.5 bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                      <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-green-500" /> <b>{verifyResults.matched}</b> applied</span>
+                      <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> stale</span>
+                      {verifyResults.stale > 0
+                        ? '— reopen this Ship button: it will offer "Push just the stale" so nothing is double-submitted.'
+                        : '— everything landed; no retry needed.'}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {pushLoading && !pushResults && (
                 <div className="py-4">
