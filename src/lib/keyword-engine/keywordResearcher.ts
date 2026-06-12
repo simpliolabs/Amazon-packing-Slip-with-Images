@@ -167,6 +167,38 @@ export async function researchKeywords(
     console.log(`[keywordResearcher] Phase 3: No competitor found in SOV. Skipping Phase 4.`);
   }
 
+  // ── Phase 4b: keywords_by_asin on OUR ASIN (1 credit) — "import OUR ranking keywords".
+  // This is the ONLY honest source of OUR organic rank per keyword (the competitor fetch in
+  // Phase 4 carries the COMPETITOR's ranks; niche rows carry none). The rank overlays onto
+  // niche/competitor rows by keyword, and our-only ranked keywords join the pool. Because
+  // keywords_by_asin returns every keyword the ASIN ranks for, ABSENCE of a rank after this
+  // overlay genuinely means "not ranking" — which the rank tracker records as null.
+  let ourRankedCount = 0;
+  try {
+    const ourMap = await fetchKeywordsByASIN([asin]);
+    const ourKeywords = ourMap.get(asin) ?? [];
+    creditsUsed++;
+    const ourByKw = new Map(ourKeywords.map((k) => [k.keyword.toLowerCase(), k]));
+    const overlay = (rows: JungleScoutKeywordRow[]) => {
+      for (const r of rows) {
+        const ours = ourByKw.get(r.keyword.toLowerCase());
+        if (ours && (ours.organicRank ?? 0) > 0) { r.organicRank = ours.organicRank; ourRankedCount++; }
+        else r.organicRank = undefined;   // competitor's rank must NEVER masquerade as ours
+        ourByKw.delete(r.keyword.toLowerCase());
+      }
+    };
+    overlay(nicheKeywords);
+    overlay(competitorKeywords);
+    // Keywords we rank for that neither the niche query nor the competitor surfaced — they ARE
+    // our ranking keywords (the PO's ask); add them so the pool + tracker know about them.
+    for (const leftover of ourByKw.values()) {
+      if ((leftover.organicRank ?? 0) > 0) { nicheKeywords.push(leftover); ourRankedCount++; }
+    }
+    console.log(`[keywordResearcher] Phase 4b: OUR ranks overlaid — ranking on ${ourRankedCount} keywords.`);
+  } catch (e) {
+    console.warn('[keywordResearcher] Phase 4b (our ranks) failed (non-fatal):', e instanceof Error ? e.message : e);
+  }
+
   // ── Phase 5: Merge + 3-Bucket Categorization ──────────────────────────────
   const buckets = categorizeBuckets(nicheKeywords, competitorKeywords);
   const allKeywords = [...buckets.primary, ...buckets.competitorMatch, ...buckets.competitorGaps];

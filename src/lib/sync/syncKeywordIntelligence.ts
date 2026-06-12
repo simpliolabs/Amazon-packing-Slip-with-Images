@@ -28,6 +28,7 @@ import {
   storeAnalysis,
   EngineResult,
 } from '../keyword-engine';
+import { captureRankSnapshots } from '../keyword-engine/cacheService';
 import { researchKeywords } from '../keyword-engine/keywordResearcher';
 import { createClient } from '@supabase/supabase-js';
 
@@ -182,6 +183,13 @@ export async function syncKeywordIntelligence(
         // Merge JS results into SQP results (SQP takes precedence for same keywords)
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
         await storeAnalysis(asin, mergedKeywords);
+
+        // Rank tracker (PO: "track OUR ranking keywords over time"): snapshot our organic rank
+        // per keyword from this FRESH Jungle Scout measurement. The cache-hit path deliberately
+        // does NOT capture — its ranks were measured (and snapshotted) at the original fetch.
+        await captureRankSnapshots(asin, researchResult.allKeywords.map((k) => ({
+          keyword: k.keyword, organicRank: k.organicRank ?? null, searchVolume: k.searchVolume ?? null,
+        })));
 
         console.log(`[syncKeywordIntelligence] Research pipeline complete for ${asin}: ${researchResult.allKeywords.length} keywords, ${researchResult.creditsUsed} credits, competitor: ${researchResult.competitor?.asin || 'none'}`);
 

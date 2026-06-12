@@ -110,6 +110,7 @@ export async function storeAnalysis(
     competing_products: kw.competingProducts,
     keyword_sales: kw.keywordSales,
     title_density: kw.titleDensity ?? null,
+    organic_rank: kw.organicRank ?? null,
     data_source: kw.dataSource,
     analyzed_at: new Date().toISOString(),
   }));
@@ -134,11 +135,11 @@ export async function storeAnalysis(
     const { error } = await supabase
       .from('keyword_analysis')
       .upsert(chunk, { onConflict: 'asin,keyword' });
-    if (error && (error.code === '42703' || error.code === 'PGRST204' || /title_density/i.test(error.message ?? ''))) {
-      // Migration 025 (title_density) not applied yet — NEVER let the new column break a native
-      // sync: retry the chunk without it (same fallback pattern as push-content's logPush).
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /title_density|organic_rank/i.test(error.message ?? ''))) {
+      // Migration 025/026 (title_density / organic_rank) not applied yet — NEVER let a new
+      // column break a native sync: retry without them (same fallback pattern as logPush).
       const legacy = chunk.map((row) => {
-        const { title_density: _omitted, ...rest } = row;
+        const { title_density: _omitTd, organic_rank: _omitRank, ...rest } = row;
         return rest;
       });
       await supabase.from('keyword_analysis').upsert(legacy, { onConflict: 'asin,keyword' });
@@ -185,7 +186,46 @@ export async function getStoredAnalysis(
     inBackend: row.in_backend,
     dataSource: row.data_source,
     titleDensity: row.title_density ?? null,
+    organicRank: row.organic_rank ?? null,
   }));
+}
+
+/**
+ * Rank tracker capture (PO: "track OUR ranking keywords over time"): one snapshot row per
+ * (asin, keyword, DAY) of our Jungle Scout organic rank — same-day re-runs collapse via upsert.
+ * organic_rank NULL = checked-but-not-ranking (the row's presence still marks the check, so the
+ * series shows when we entered/left the rankings). Best-effort: a missing table (migration 026
+ * not applied) must never break a keyword sync — mirrors the share-snapshots contract (#162).
+ */
+export async function captureRankSnapshots(
+  asin: string,
+  rows: { keyword: string; organicRank?: number | null; searchVolume?: number | null }[]
+): Promise<void> {
+  if (!rows || rows.length === 0) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const snaps = rows
+    .filter((r) => r.keyword && r.keyword.trim())
+    .map((r) => ({
+      asin,
+      keyword: r.keyword.toLowerCase().trim(),
+      snapshot_date: today,
+      organic_rank: (r.organicRank ?? 0) > 0 ? r.organicRank : null,
+      search_volume: r.searchVolume ?? null,
+    }));
+  if (snaps.length === 0) return;
+  try {
+    for (let i = 0; i < snaps.length; i += 100) {
+      const { error } = await supabase
+        .from('keyword_rank_snapshots')
+        .upsert(snaps.slice(i, i + 100), { onConflict: 'asin,keyword,snapshot_date' });
+      if (error) {
+        console.warn('[captureRankSnapshots] upsert failed (non-fatal):', error.message);
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn('[captureRankSnapshots] failed (non-fatal):', e instanceof Error ? e.message : e);
+  }
 }
 
 // ─── API Budget Protection ────────────────────────────────────────────────────

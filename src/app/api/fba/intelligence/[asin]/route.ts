@@ -155,6 +155,41 @@ export async function GET(
       }
     }
 
+    // ── Rank-tracker trend enrichment: attach the PREVIOUS snapshot's organic rank per keyword
+    // so the table can show movement (12 ▲ was 18). One bounded query; best-effort — a missing
+    // table (migration 026 not applied) or any error leaves rows un-enriched, never breaks GET.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const db = supabase as any; // keyword_rank_snapshots not in generated types yet (migration 026)
+      const { data: snaps } = await db
+        .from('keyword_rank_snapshots')
+        .select('keyword, organic_rank, snapshot_date')
+        .eq('asin', childAsin)
+        .order('snapshot_date', { ascending: false })
+        .limit(400);
+      if (Array.isArray(snaps) && snaps.length > 0) {
+        // First row per keyword = latest snapshot, second = previous.
+        const latest = new Map<string, number | null>();
+        const prev = new Map<string, number | null>();
+        for (const s of snaps as { keyword: string; organic_rank: number | null }[]) {
+          const k = s.keyword.toLowerCase();
+          if (!latest.has(k)) latest.set(k, s.organic_rank);
+          else if (!prev.has(k)) prev.set(k, s.organic_rank);
+        }
+        const enrich = (rows?: { keyword: string; organicRank?: number | null; prevOrganicRank?: number | null }[]) => {
+          for (const r of rows ?? []) {
+            const k = r.keyword.toLowerCase();
+            if (r.organicRank == null && latest.has(k)) r.organicRank = latest.get(k) ?? null;
+            if (prev.has(k)) r.prevOrganicRank = prev.get(k) ?? null;
+          }
+        };
+        enrich((result as { topOpportunities?: { keyword: string }[] }).topOpportunities);
+        enrich((result as { allKeywords?: { keyword: string }[] }).allKeywords);
+      }
+    } catch (e) {
+      console.warn('[intelligence GET] rank-trend enrichment skipped (non-fatal):', e instanceof Error ? e.message : e);
+    }
+
     // Get API usage stats for the UI meter
     const rawUsage = await getApiUsageStats();
     const jsStatus = await getJungleScoutStatus();
