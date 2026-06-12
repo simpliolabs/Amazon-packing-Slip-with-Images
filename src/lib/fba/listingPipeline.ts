@@ -249,6 +249,58 @@ function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
   return s.replace(re, '').replace(/\s{2,}/g, ' ').trim()
 }
 
+/** Fill each child's backend string toward the 250-byte budget (PO: "NOT utilizing all
+ *  250 characters" — the agent's ~240 target landed at 228, leaving ~20 bytes of free
+ *  ranking real estate per child). Additions, in trust order:
+ *    1. The SELLER'S OWN canonical-title descriptor bigrams ("country western", "vintage
+ *       rodeo") — the PO's exact catch: "COUNTRY… was not part of the new suggestions".
+ *       These are pre-trusted (their words about their product) and segment-aware (never
+ *       spliced across punctuation).
+ *    2. Leftover pool keywords (already relevance-gated), skipping third-party brands and
+ *       capacity tokens on capacity families.
+ *  Only NOVEL tokens are appended (the field is a token soup — duplicates waste bytes),
+ *  and the 250-byte hard cap is never crossed. Runs BEFORE the hard-lean gender strip so
+ *  the strip cleans additions too. */
+function fillBackendToBudget(
+  keywords: string,
+  canonicalTitle: string | null | undefined,
+  poolKeywords: string[],
+  ownBrands: Set<string>,
+  capacityFamily: boolean,
+): string {
+  let out = (keywords || '').trim()
+  if (getByteLength(out) >= 244) return out
+  // Token-normalized novelty: the field is a token soup (Amazon matches tokens, not
+  // phrases), so compare and append WITHOUT punctuation — "darlin'" must not be appended
+  // as a duplicate of the already-present "darlin".
+  const normTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const have = new Set(out.split(/\s+/).map(normTok).filter(Boolean))
+  const candidates: string[] = []
+  // 1. canonical descriptor bigrams, segment-aware (strip the trailing " - Color - Size" suffix)
+  const canonClean = (canonicalTitle ?? '').replace(/(\s+-\s+[A-Za-z][A-Za-z -]{1,24}){1,2}\s*$/, '')
+  for (const seg of canonClean.split(/[,\-–—|]/)) {
+    const w = seg.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1)
+    for (let i = 0; i + 1 < w.length; i++) candidates.push(`${w[i]} ${w[i + 1]}`)
+  }
+  // 2. leftover pool keywords
+  candidates.push(...poolKeywords.map((k) => k.toLowerCase()))
+  for (const cand of candidates) {
+    if (capacityFamily && CAPACITY_RE.test(cand)) continue
+    if (findThirdPartyBrands(cand, ownBrands).length > 0) continue
+    // Append token-by-token so a partial fit still lands ("country" must not be lost
+    // just because "country western" as a whole missed the cap by a byte).
+    for (const raw of cand.split(/\s+/)) {
+      const tok = normTok(raw)
+      if (tok.length <= 1 || have.has(tok)) continue
+      if (getByteLength(`${out} ${tok}`) > 250) continue
+      out = `${out} ${tok}`
+      have.add(tok)
+    }
+    if (getByteLength(out) >= 244) break
+  }
+  return out
+}
+
 /** Fix the doubled article when the brand itself starts with "THE" — the agents write
  *  "with the THE CEO Darlin' T-Shirt" (live nit the PO spotted in a description). */
 function fixDoubledArticleBeforeBrand(text: string, brandName: string): string {
@@ -3211,6 +3263,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // #79 partial runs: exactly one of the pair, anchored on the stored title+bullets.
   if (only === 'keywords') {
     let perChildOnly = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
+    const ownB = ownBrandTokenSet(brandName)
+    perChildOnly = perChildOnly.map((p) => ({
+      ...p,
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
+    }))
     if (lean === 'female' || lean === 'male') {
       perChildOnly = perChildOnly.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
     }
@@ -3233,6 +3290,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     runBackendAgent(input, finalTitle, bullets, backendPool, designName),
     runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands),
   ])
+  // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
+  // "country western" — then leftover pool keywords), THEN the hard-lean gender strip
+  // so the strip cleans additions too.
+  {
+    const ownB = ownBrandTokenSet(brandName)
+    perChild = perChild.map((p) => ({
+      ...p,
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
+    }))
+  }
   // HARD audience: backend search terms drop the opposite gender's standalone tokens
   // (PO caught "…darlin mens black men…" persisting on a Female listing).
   if (lean === 'female' || lean === 'male') {
