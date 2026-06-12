@@ -109,17 +109,18 @@ export default function RankAnalysisPanel({ asin }: { asin: string }) {
             {data?.stale && <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Content changed — refresh</span>}
             <button
               onClick={() => run(false)} disabled={busy}
+              title="Rebuilds the rank playbook from your CURRENT content + keywords, then runs the AI analyst council (3 analysts → adversary → judge) for the honest verdict. No Jungle Scout credits — uses your OpenAI key (~a cent)."
               className="text-xs px-3 py-2 min-h-[40px] rounded-lg bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-50 cursor-pointer">
               {running === 'council' ? 'Analyzing…' : data?.analyzed ? 'Refresh analysis' : 'Run analysis'}
             </button>
             <button
               onClick={() => run(true)} disabled={busy}
-              title="Pulls live competitor Share-of-Voice — uses up to 10 Jungle Scout credits"
+              title="Everything Refresh analysis does, PLUS live Share-of-Voice per top keyword: which competitor owns the clicks, their share %, and whether YOU appear in the top listings. Uses up to 10 Jungle Scout credits."
               className="text-xs px-3 py-2 min-h-[40px] rounded-lg border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 cursor-pointer">
               {running === 'competition' ? 'Checking competitors…' : 'Analyze competition'}
             </button>
           </div>
-          <p className="text-[10px] text-slate-400">&ldquo;Analyze competition&rdquo; uses up to 10 Jungle Scout credits.</p>
+          <p className="text-[10px] text-slate-400">Refresh analysis = free re-check on current content (AI verdict, no credits) · Analyze competition = + who owns the clicks per keyword (up to 10 JS credits)</p>
         </div>
       </div>
 
