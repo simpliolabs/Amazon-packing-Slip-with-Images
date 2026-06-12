@@ -216,6 +216,39 @@ function stripUngroundedMotifs(text: string, trustedHaystack: string): string {
   return text.replace(re, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!;:])/g, '$1').replace(/,\s*,/g, ',').trim()
 }
 
+// GARMENT-TYPE words that flip the PRODUCT IDENTITY. The Amazon catalog attributes often
+// carry the BLANK manufacturer's boilerplate (live failure: a Comfort Colors T-SHIRT family
+// whose catalog attrs said "Men's Heavyweight Crewneck Sweatshirt Cotton Blend Pullover" —
+// the title agent treated attrs as trusted product facts and titled a tee as a fleece
+// pullover). RULE: a garment word may only appear when the SELLER's text (canonical/rep
+// title, design name) or the SP-API productType corroborates it. Material/fit words
+// (cotton, heavyweight, crewneck) are NOT listed — they don't flip the product type.
+const GARMENT_TYPE_WORDS = new Set([
+  'sweatshirt', 'sweatshirts', 'hoodie', 'hoodies', 'pullover', 'pullovers',
+  'fleece', 'sweater', 'sweaters', 'jacket', 'jackets', 'coat', 'coats',
+  'tank', 'tanks', 'polo', 'polos', 'onesie', 'romper', 'leggings',
+])
+function stripContradictedGarments(text: string, trustedHaystack: string): string {
+  if (!text) return text
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+  const bad = [...new Set(words.filter((w) => GARMENT_TYPE_WORDS.has(w) && !new RegExp(`\\b${w.replace(/s$/, '')}`, 'i').test(trustedHaystack)))]
+  if (bad.length === 0) return text
+  const re = new RegExp(`\\b(?:${bad.join('|')})\\b`, 'gi')
+  return text.replace(re, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!;:])/g, '$1').replace(/,\s*,/g, ',').trim()
+}
+
+/** HARD audience normalization (seller selected Male or Female outright): the opposite
+ *  gender's word must not survive into customer copy. Deterministic swap — "Men's" →
+ *  "Women's", "Men" → "Women" (mirrored for Male) — keeps the sentence readable.
+ *  \b prevents "women" matching inside itself. Lean_* selections do NOT use this. */
+function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
+  if (!text) return text
+  if (audience === 'Women') {
+    return text.replace(/\bmen'?s\b/gi, "Women's").replace(/\bmens\b/gi, 'Womens').replace(/\bmen\b/gi, 'Women')
+  }
+  return text.replace(/\bwomen'?s\b/gi, "Men's").replace(/\bwomens\b/gi, 'Mens').replace(/\bwomen\b/gi, 'Men')
+}
+
 // Basic garment-color words. On a MULTI-variant apparel family, BROADCAST content (title /
 // bullets) is shared across every color, so a keyword carrying one specific color ("plain
 // black tshirt men") mis-describes the other 80 variants — the JS research runs against ONE
@@ -2760,6 +2793,21 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   onProgress('Extracting product attributes...')
   const attrs = await extractProductAttributes(input)
   const apparelProduct = looksApparel(input.category, repTitle, input.productType)
+  // GARMENT-TYPE truthfulness (input scrub): the catalog attributes often carry the BLANK
+  // manufacturer's boilerplate — live failure: a Comfort Colors T-SHIRT family whose attrs
+  // said "Men's Heavyweight Crewneck Sweatshirt Cotton Blend Pullover", and because attrs
+  // are TRUSTED product facts the title agent titled a tee as a fleece pullover. Scrub any
+  // spec/keyphrase whose garment word contradicts the seller's own titles + the SP-API
+  // productType BEFORE it can reach a brief (the output backstop below catches the rest).
+  const garmentTrust = `${input.canonicalTitle ?? ''} ${repTitle ?? ''} ${input.productType ?? ''}`.toLowerCase()
+  if (apparelProduct) {
+    const contradictsGarment = (s: string) => {
+      const ws = s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+      return ws.some((w) => GARMENT_TYPE_WORDS.has(w) && !new RegExp(`\\b${w.replace(/s$/, '')}`, 'i').test(garmentTrust))
+    }
+    attrs.specs = attrs.specs.filter((s) => !contradictsGarment(s))
+    attrs.searchKeyphrases = attrs.searchKeyphrases.filter((s) => !contradictsGarment(s))
+  }
   // Non-apparel listings are sometimes templated from a shirt, so their data carries apparel
   // contamination ("graphic tee", "ring-spun cotton", "for men"). Strip it for non-apparel so a
   // memory card / mug never inherits clothing language in the keyword pool, specs, or title.
@@ -2943,7 +2991,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // Vision-hallucination backstop: strip VISUAL MOTIF claims ("heart") the seller's own
     // text doesn't corroborate (live failure: vision read a heart into the Darlin' script
     // font → "Heart Graphic Tee" recommended). Seller text = canonical + rep titles + design.
-    finalTitle = apparelProduct ? stripUngroundedMotifs(t.title, motifTrust) : t.title
+    finalTitle = apparelProduct ? stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()) : t.title
+    // HARD audience (seller selected Male/Female outright): no opposite-gender word may
+    // survive, and the title must end with the chosen audience. The live failure shipped
+    // "THE CEO Darlin' Men's Heavyweight…" with no "for Women" tail on a Female run.
+    if (apparelProduct && (lean === 'female' || lean === 'male')) {
+      const aud = lean === 'female' ? 'Women' as const : 'Men' as const
+      finalTitle = enforceHardAudience(finalTitle, aud)
+      if (!new RegExp(`\\bfor ${aud}\\b`, 'i').test(finalTitle)) {
+        finalTitle = capTitle75(`${finalTitle.replace(/\s+for\s+(?:men|women)(?:\s+and\s+(?:men|women))?\s*$/i, '')} for ${aud}`)
+      }
+    }
   } else {
     finalTitle = (input.priorTitle || repTitle || '').trim()
   }
@@ -3054,8 +3112,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (!only || only === 'bullets') {
     onProgress('Writing bullets...')
     const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
-    // Same vision-hallucination backstop as the title (motif words need seller corroboration).
-    bullets = apparelProduct ? rawBullets.map((b) => stripUngroundedMotifs(b, motifTrust)) : rawBullets
+    // Same vision-hallucination backstop as the title (motif words need seller corroboration),
+    // plus the garment-type guard (no "fleece pullover" bullets on a t-shirt family) and the
+    // hard-audience swap (no "this men's crew" on a Female-selected listing).
+    bullets = apparelProduct
+      ? rawBullets.map((b) => stripContradictedGarments(stripUngroundedMotifs(b, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()))
+      : rawBullets
+    if (apparelProduct && (lean === 'female' || lean === 'male')) {
+      bullets = bullets.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
+    }
   } else {
     bullets = input.priorBullets ?? []
   }
@@ -3082,7 +3147,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('keywords', { per_child_keywords: perChildOnly })
   }
   if (only === 'description') {
-    const descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
+    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
+    if (apparelProduct) descriptionOnly = stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+    if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     onProgress('Description regenerated.')
     return partialResult('description', { recommended_description: descriptionOnly })
   }
@@ -3090,10 +3157,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // identical prompts and inputs as before, just issued concurrently. Quality-neutral
   // speed-up (PO gate): only genuinely independent calls overlap; the council stages
   // (proposers → adversary → judge) stay sequential because their order IS the quality.
-  const [perChild, description] = await Promise.all([
+  const [perChild, descriptionRaw] = await Promise.all([
     runBackendAgent(input, finalTitle, bullets, backendPool, designName),
     runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands),
   ])
+  // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience).
+  let description = apparelProduct
+    ? stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+    : descriptionRaw
+  if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
@@ -3182,6 +3254,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     current_value: p.current_value == null ? null : detailValueToString(p.current_value),
     recommended_value: detailValueToString(p.recommended_value),
   }))
+  // AUDIENCE-LEAN override for audit-guessed DEMOGRAPHIC details: the audit echoes the
+  // catalog's (often blank-boilerplate) demographics and ignored the seller's selector —
+  // live failure: Department "Mens" + Target Gender "male" recommended on a FEMALE run.
+  // Deterministic per-lean map; the validate-at-regen enum coercion downstream snaps these
+  // to this product type's exact accepted members.
+  if (apparelProduct && lean) {
+    const dem = lean === 'female' ? { dept: 'Womens', gender: 'Female' }
+      : lean === 'male' ? { dept: 'Mens', gender: 'Male' }
+      : { dept: 'Unisex', gender: 'Unisex' }
+    pdiFinal = pdiFinal.map((p) => {
+      const f = p.field_name.toLowerCase().trim()
+      if (f === 'department') return { ...p, recommended_value: dem.dept, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
+      if (f === 'target gender') return { ...p, recommended_value: dem.gender, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
+      return p
+    })
+  }
   // Match by key OR display title: Amazon shipped the attribute EARLY as `title_differentiation`
   // (schema title "Item Highlight", live-verified on SELF_STICK_NOTE 2026-06-11) while the docs say
   // `item_highlights` — the title pattern keeps this working if other categories name it differently.
