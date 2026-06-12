@@ -1,21 +1,21 @@
 /**
  * /api/fba/listing-optimizer/push-content
- * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ * ─────────────────────────────────────────────────────────────────────────────
  * Generalized, per-field push of optimized listing content to Amazon via
  * patchListingsItem. Supersedes the keyword-only push-keywords route.
  *
- *   field=title       â†’ /attributes/item_name           (BROADCAST to every child SKU)
- *   field=bullets     â†’ /attributes/bullet_point         (BROADCAST â€” 5-value array)
- *   field=description â†’ /attributes/product_description   (BROADCAST)
- *   field=keywords    â†’ /attributes/generic_keyword       (PER-CHILD â€” unique per SKU)
+ *   field=title       → /attributes/item_name           (BROADCAST to every child SKU)
+ *   field=bullets     → /attributes/bullet_point         (BROADCAST — 5-value array)
+ *   field=description → /attributes/product_description   (BROADCAST)
+ *   field=keywords    → /attributes/generic_keyword       (PER-CHILD — unique per SKU)
  *
  * Each content section ships INDEPENDENTLY with its own approval. "Broadcast"
  * fields are parent-level content that must be identical across all children, so
  * the single recommended value is written to every (ASIN-deduped) child. Keywords
  * are per-child (each color/size its own string).
  *
- * GET  ?parent_asin=&field=  â†’ PREVIEW: per-SKU diff (current vs proposed), no writes.
- * POST { parent_asin, field, confirm:true } â†’ PUSH: VALIDATION_PREVIEW then live PATCH
+ * GET  ?parent_asin=&field=  → PREVIEW: per-SKU diff (current vs proposed), no writes.
+ * POST { parent_asin, field, confirm:true } → PUSH: VALIDATION_PREVIEW then live PATCH
  *      per SKU, throttled, with a keyword_push_log row per SKU (field-tagged; rollback).
  *
  * Safety:
@@ -36,7 +36,7 @@ import {
 } from '@/lib/fba/pushFields'
 import {
   resolveDetailAttribute, unpushableReason,
-  buildDetailPatchValue, currentDetailValue, normalizeFieldName,
+  buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema } from '@/lib/fba/productTypeDefinitions'
@@ -82,7 +82,7 @@ function parsePerChild(raw: string | null): Map<string, string> {
     if (Array.isArray(arr)) {
       for (const r of arr) if (r?.sku && typeof r.keywords === 'string') map.set(r.sku, r.keywords)
     }
-  } catch { /* legacy/non-JSON â€” no per-child data */ }
+  } catch { /* legacy/non-JSON — no per-child data */ }
   return map
 }
 
@@ -115,7 +115,7 @@ function isSystemSku(sku: string): boolean {
 }
 
 /** Strip trailing fulfillment suffix so an FBA SKU and its FBM twin compare equal:
- *  "DAFEI-482-32G-FBA" â†’ "DAFEI-482-32G", "DAFEI-482-32G" â†’ "DAFEI-482-32G". */
+ *  "DAFEI-482-32G-FBA" → "DAFEI-482-32G", "DAFEI-482-32G" → "DAFEI-482-32G". */
 function stripFulfillmentSuffix(sku: string): string {
   return sku.replace(/[-_](?:FBA|FBM|AFN|MFN|FN)$/i, '')
 }
@@ -160,7 +160,7 @@ async function findParentSku(sellerId: string, token: string, parentAsin: string
  * Load the proposed (recommended) + current (cached) value for EVERY SKU of the parent.
  *
  * We deliberately do NOT dedup by ASIN: an ASIN can have both an FBA and an FBM SKU, and
- * the seller needs BOTH listings updated â€” pushing a title to only one leaves the matching
+ * the seller needs BOTH listings updated — pushing a title to only one leaves the matching
  * SKU stale (the bug this fixes). Keywords are per-color, so we resolve them by ASIN and
  * apply the same string to both SKUs of a pair (per_child_keywords holds one SKU per ASIN).
  */
@@ -183,7 +183,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
   }
 
   // A manual title override broadcasts ONE typed string to every SKU. That is correct for broadcast-
-  // title products (apparel) but would CLOBBER a capacity family's distinct per-GB titles â€” stamping
+  // title products (apparel) but would CLOBBER a capacity family's distinct per-GB titles — stamping
   // "128GB" onto the 32GB SKU on the live PDP (adversarial review caught this). So the override is
   // honored ONLY when this is NOT a per-child-title family; otherwise we fall back to resolveProposed.
   const isCapacityFamily = Array.isArray(rec.per_child_titles) && rec.per_child_titles.length > 1
@@ -194,13 +194,13 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     .select(CONTENT_COLUMNS)
     .eq('parent_asin', parentAsin)
     .order('sku', { ascending: true })
-  const rows = (rowsRaw ?? []) as ContentRow[] // every SKU â€” FBA and FBM both get pushed
+  const rows = (rowsRaw ?? []) as ContentRow[] // every SKU — FBA and FBM both get pushed
 
-  // Keywords are per-color (per-ASIN). Map ASIN â†’ string so BOTH the FBA and FBM SKU of a
+  // Keywords are per-color (per-ASIN). Map ASIN → string so BOTH the FBA and FBM SKU of a
   // pair receive the same per-child keywords.
   const asinToKeywords = new Map<string, string>()
   if (field === 'keywords') {
-    const perChild = parsePerChild(rec.recommended_keywords ?? null) // sku â†’ keywords (one SKU per ASIN)
+    const perChild = parsePerChild(rec.recommended_keywords ?? null) // sku → keywords (one SKU per ASIN)
     const skuToAsin = new Map(rows.map((r) => [r.sku, r.asin]))
     for (const [sku, kw] of perChild) {
       const asin = skuToAsin.get(sku)
@@ -212,7 +212,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     .map((row): DiffRow => {
       const proposed = field === 'keywords'
         ? (asinToKeywords.has(row.asin) ? capBytes((asinToKeywords.get(row.asin) || '').trim(), 250) : null)
-        // Manual title override: the seller typed their own title in the Ship-Title box â†’ broadcast it
+        // Manual title override: the seller typed their own title in the Ship-Title box → broadcast it
         // verbatim to every SKU (capped at Amazon's 200-char title limit), bypassing the AI recommendation.
         : (field === 'title' && effectiveTitleOverride) ? effectiveTitleOverride.slice(0, 200)
         : resolveProposed(field, rec, new Map(), row.sku)
@@ -231,7 +231,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     .filter((d) => d.raw != null) // keywords: drops SKUs whose ASIN has no per-child recommendation
   if (baseDiff.length === 0) return baseDiff
 
-  // â”€â”€ ENRICH with FBM twin SKUs discovered live from Amazon â”€â”€
+  // ── ENRICH with FBM twin SKUs discovered live from Amazon ──
   // listing_content historically deduped some FBA/FBM pairs; the user expects the push to hit
   // BOTH. Ask SP-API Listings Items per ASIN to find every SKU this seller has under that ASIN,
   // and add any SKU we don't already have to the diff with the SAME proposed value.
@@ -250,7 +250,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
           if (knownSkus.has(d.sku)) continue // already in the diff
           // INHERITANCE rule: a newly-discovered SKU under the same ASIN is a TWIN (typically the
           // FBM half of an FBA/FBM pair). It must inherit the SAME proposed value as its sibling
-          // â€” NOT fall back to the broadcast title via resolveProposed, which would assign the
+          // — NOT fall back to the broadcast title via resolveProposed, which would assign the
           // wrong capacity.
           // TWIN-NAME GUARD: only inherit from a source SKU whose NAME (minus fulfillment suffix)
           // matches the discovered SKU's name. Sellers occasionally assign multiple unrelated SKUs
@@ -261,7 +261,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
           const sourceRow = baseDiff.find(
             (b) => b.asin === asin && stripFulfillmentSuffix(b.sku) === discoveredBase,
           ) ?? null
-          if (!sourceRow) continue // not a true FBA/FBM twin â€” leave it alone
+          if (!sourceRow) continue // not a true FBA/FBM twin — leave it alone
           const proposed = field === 'keywords'
             ? (asinToKeywords.has(asin) ? capBytes((asinToKeywords.get(asin) || '').trim(), 250) : null)
             : sourceRow.raw // <- inherit verbatim from the source row, so FBM gets the FBA's title
@@ -283,13 +283,13 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
         }
       }
     }
-  } catch { /* enrichment is best-effort â€” don't block the preview */ }
+  } catch { /* enrichment is best-effort — don't block the preview */ }
 
-  // â”€â”€ PARENT SKU row for BROADCAST field pushes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── PARENT SKU row for BROADCAST field pushes ────────────────────────────────
   // The variation parent (e.g. Memory-Card-P) is non-buyable but DOES carry its own
   // item_name / bullet_point / product_description. Amazon's PDP and search results
   // surface the PARENT's content for the variation hub, so a child-only push leaves
-  // the customer-visible parent stale â€” which is why pushing bullets to all children
+  // the customer-visible parent stale — which is why pushing bullets to all children
   // looked like "nothing changed on Amazon" an hour later (we never wrote the
   // parent's bullets).
   //
@@ -337,8 +337,8 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
   return baseDiff
 }
 
-// â”€â”€â”€ PRODUCT DETAILS â€” parallel path for field=details â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Details push is one ATTRIBUTE per click (Material, Brand, Fit Type, â€¦). The
+// ─── PRODUCT DETAILS — parallel path for field=details ─────────────────────────
+// Details push is one ATTRIBUTE per click (Material, Brand, Fit Type, …). The
 // friendly name comes from the audit's product_details_improvements; we resolve
 // it to an SP-API key via productDetailAttrs and build the patch with the same
 // twin-SKU expansion logic title uses.
@@ -350,7 +350,7 @@ interface DetailContext {
   attribute: DetailAttribute
   /** The single value to push across every (FBA+FBM, child) SKU under the parent.
    *  Already coerced to an accepted enum value when the attribute is a constrained
-   *  enum (e.g. "Unisex Adult" â†’ "Unisex"). */
+   *  enum (e.g. "Unisex Adult" → "Unisex"). */
   recommendedValue: string
   /** When the attribute is a constrained enum, the accepted values (for the seller to
    *  pick from if the audit's value couldn't be mapped). Undefined for free-text attrs. */
@@ -377,13 +377,16 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   // product_details_improvements is JSONB; not in generated types yet. The regen now resolves + persists
   // sp_api_key/attr_scope/pushable per item (schema-driven), so read those.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: string; sp_api_key?: string; attr_scope?: string; pushable?: boolean }[]
+  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: unknown; sp_api_key?: string; attr_scope?: string; pushable?: boolean }[]
   const wanted = normalizeFieldName(detailField)
-  const match = details.find((d) => normalizeFieldName(d.field_name || '') === wanted)
-  if (!match || !match.recommended_value || !match.recommended_value.trim()) {
+  const match = details.find((d) => normalizeFieldName(detailValueToString(d.field_name)) === wanted)
+  // Historical rows can carry NON-STRING values (the LLM emitted an array/number — crashed
+  // the B0GCF11RKL listing page); normalize before any .trim() so the push path never throws.
+  const matchValue = detailValueToString(match?.recommended_value)
+  if (!match || !matchValue.trim()) {
     return { ctx: null, error: `No AI recommendation found for "${detailField}". Run an AI audit first.` }
   }
-  // Resolve the SP-API attribute: prefer the regen-resolved sp_api_key (schema-driven â€” works for ANY
+  // Resolve the SP-API attribute: prefer the regen-resolved sp_api_key (schema-driven — works for ANY
   // category, not just the apparel map); fall back to the static map. Reject only when neither yields a
   // pushable broadcast attribute.
   const attribute: DetailAttribute | undefined = (match.pushable && match.sp_api_key)
@@ -393,25 +396,25 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
     return { ctx: null, error: unpushableReason(detailField) || `"${detailField}" isn't a pushable attribute for this product type.` }
   }
 
-  // â”€â”€ Enum validation (Feature B) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Enum validation (Feature B) ──────────────────────────────────────────────
   // Some attributes are constrained enums (apparel `department` accepts only
   // {Unisex, Unisex Baby, Unisex Kids} for this product type). The audit emits a
   // free-text value ("Unisex Adult") that Amazon rejects. Read the LIVE product-type
-  // schema and coerce the value to an accepted one â€” "the system knows the acceptable
+  // schema and coerce the value to an accepted one — "the system knows the acceptable
   // terms for any feature". Best-effort: any failure leaves the value as-is (the prior
   // behavior; VALIDATION_PREVIEW still guards the write).
   // SELLER OVERRIDE (Part 2b): the seller's pick from the panel's accepted-values chips REPLACES the
-  // audit value â€” but it must STILL pass the enum validation below. Defense-in-depth: a direct POST
+  // audit value — but it must STILL pass the enum validation below. Defense-in-depth: a direct POST
   // could send any string, and we must NEVER write a non-member (adversarial review caught the original
   // verbatim-passthrough). The override only skips the audit value, never the validation. Capped at
   // 1000 chars: details are short attributes, and this also bounds a free-text override.
   const override = (valueOverride ?? '').trim()
-  let recommendedValue = (override || match.recommended_value.trim()).slice(0, 1000)
+  let recommendedValue = (override || matchValue.trim()).slice(0, 1000)
   let acceptedValues: string[] | undefined
   let normalizedFrom: string | undefined
   let enumInvalid = false
 
-  // â”€â”€ Enum validation (Feature B) â€” coerce the value (audit OR seller override) to an accepted member;
+  // ── Enum validation (Feature B) — coerce the value (audit OR seller override) to an accepted member;
   // FLAG (don't error) when uncoercible so the PREVIEW can show the seller-picker and the PUSH blocks.
   // Best-effort: any SP-API failure leaves the value as-is (VALIDATION_PREVIEW is the final backstop).
   try {
@@ -431,7 +434,7 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
       if (c.isEnum) {
         acceptedValues = c.accepted
         if (!c.valid) {
-          enumInvalid = true   // uncoercible dropdown â€” preview shows the picker; PUSH blocks w/o a valid override
+          enumInvalid = true   // uncoercible dropdown — preview shows the picker; PUSH blocks w/o a valid override
         } else if (c.normalizedFrom) {
           normalizedFrom = c.normalizedFrom
           recommendedValue = c.value
@@ -491,7 +494,7 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
     const discovered = await discoverSkusForAsin(sellerId, token, asin)
     for (const d of discovered) {
       if (knownSkus.has(d.sku)) continue
-      // TWIN-NAME GUARD: same rule as title push â€” only inherit when the discovered SKU's
+      // TWIN-NAME GUARD: same rule as title push — only inherit when the discovered SKU's
       // stripped name matches one of our DB rows under this ASIN. Avoids accidentally
       // pushing to unrelated SKUs that share the ASIN through a stale mapping.
       const discoveredBase = stripFulfillmentSuffix(d.sku)
@@ -538,7 +541,7 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
 }
 
 
-// â”€â”€â”€ PATCH one SKU's attribute (validation-preview, then live) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── PATCH one SKU's attribute (validation-preview, then live) ──────────────────
 async function patchSku(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: string, value: string | string[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
@@ -572,7 +575,7 @@ async function patchSku(
 // getProductType moved to @/lib/amazon/productType (shared + process-cached for consistent enum
 // resolution). Imported above; both loadDetailContext and the ?debug branch use the shared version.
 
-// â”€â”€â”€ PATCH one SKU's DETAIL attribute (validation-preview, then live) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── PATCH one SKU's DETAIL attribute (validation-preview, then live) ──────────
 async function patchSkuDetail(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: DetailAttribute, value: string, mode: 'VALIDATION_PREVIEW' | 'LIVE',
@@ -603,7 +606,7 @@ async function patchSkuDetail(
   return { ok: true, submissionId: json.submissionId ?? null }
 }
 
-// â”€â”€â”€ The push engine â€” shared by the streaming route and background jobs â”€â”€â”€â”€â”€â”€â”€
+// ─── The push engine — shared by the streaming route and background jobs ───────
 // Extracted verbatim from the POST handler of push-content/route.ts (PR #184) so
 // the SAME battle-tested loop powers both delivery modes:
 //   - streaming: the route wraps emit() around controller.enqueue (NDJSON to browser)
@@ -613,10 +616,10 @@ async function patchSkuDetail(
 //   {type:'progress', sku, status:'validating'|'accepted'|'failed', error?, submissionId?, current?, proposed?}
 //   {type:'rescore',  message}
 //   {type:'result',   pushed, failed, total, message, results, field, detail_field?, attribute_key?}
-//   {type:'error',    error, results?}   â€” terminal; never thrown, always emitted
+//   {type:'error',    error, results?}   — terminal; never thrown, always emitted
 // executePush NEVER throws and NEVER returns a value: terminal failures emit {type:'error'}.
 
-/** Params for one push execution â€” identical to the POST body minus `confirm`. */
+/** Params for one push execution — identical to the POST body minus `confirm`. */
 export interface PushParams {
   parent_asin: string
   field?: string
@@ -631,7 +634,7 @@ export type PushEmit = (obj: Record<string, unknown>) => void
 export async function executePush(params: PushParams, emit: PushEmit): Promise<void> {
   const { parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = params
   try {
-        // â”€â”€ DETAILS branch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ── DETAILS branch ─────────────────────────────────────────────────────
         if (rawField === 'details') {
           const { ctx, error } = await loadDetailContext(parent_asin, detailField || '', detail_value_override)
           if (!ctx) { emit({ type: 'error', error }); return }
@@ -646,7 +649,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               type: 'result',
               parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
               pushed: 0, failed: 0, total: 0,
-              message: `Nothing to push â€” every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
+              message: `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
               results: [],
             })
             return
@@ -660,7 +663,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           const sellerId = await getSellerId()
           const productType = await getProductType(sellerId, token, diff[0].sku)
           // GUARD (PO live bug): the attribute must EXIST in THIS product type's schema. Apparel attrs
-          // (department, fit_type, fabric_type) are absent on office/electronics types â€” Amazon 400s EVERY
+          // (department, fit_type, fabric_type) are absent on office/electronics types — Amazon 400s EVERY
           // patch with "the provided attribute path is not valid" (10 failed writes on a sticky-notes
           // listing). Catch it ONCE with a clear message instead. Fail-open on a schema-fetch error.
           const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
@@ -668,7 +671,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             emit({
               type: 'result', parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
               pushed: 0, failed: 0, total: 0,
-              message: `"${ctx.detailField}" is not a valid attribute for this product type (${productType}) â€” it doesn't apply to this category, so there's nothing to push. It shouldn't have been recommended; regenerate to refresh the suggestions.`,
+              message: `"${ctx.detailField}" is not a valid attribute for this product type (${productType}) — it doesn't apply to this category, so there's nothing to push. It shouldn't have been recommended; regenerate to refresh the suggestions.`,
               results: [],
             })
             return
@@ -695,7 +698,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               // Listings-API writes stay refused until the July 27, 2026 launch. Say so plainly
               // instead of leaving the seller to decode Amazon's "refer to the tool tip".
               const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
-                ? `${preview.error} â€” Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
+                ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
                 : preview.error
               results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr })
               emit({ type: 'progress', sku: item.sku, status: 'failed', error: friendlyErr })
@@ -714,11 +717,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           const accepted = results.filter((r) => r.status === 'accepted').length
           const failed = results.filter((r) => r.status === 'failed').length
 
-          // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets shipâ†’rise experience),
+          // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets ship→rise experience),
           // instead of staying RED until the next regen re-reads Amazon. On success, mark this detail's
           // current_value = the pushed value so the scorer's productDetailsGaps drops, then re-score.
           // Best-effort (mirrors the regular-fields branch). Without this the details push was a "RED
-          // stays RED" dead-end â€” the score never moved on push (PO question: "8 â†’ 12/12?").
+          // stays RED" dead-end — the score never moved on push (PO question: "8 → 12/12?").
           if (accepted > 0) {
             try {
               const { data: recR } = await db.from('listing_seo_recommendations').select('product_details_improvements').eq('parent_asin', parent_asin).single()
@@ -732,7 +735,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               }
               if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
             } catch (e) { console.warn('[push-content/details] write-through failed (non-fatal):', e) }
-            emit({ type: 'rescore', message: 'Re-scoring listingâ€¦' })
+            emit({ type: 'rescore', message: 'Re-scoring listing…' })
             try {
               const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
               const { data: kids } = await db.from('listing_content')
@@ -765,18 +768,18 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           return
         }
 
-        // â”€â”€ REGULAR FIELDS branch (title / bullets / description / keywords) â”€â”€
+        // ── REGULAR FIELDS branch (title / bullets / description / keywords) ──
         const field: PushField = isPushField(rawField) ? rawField : 'keywords'
         const titleOv = field === 'title' && typeof title_override === 'string' && title_override.trim() ? title_override.trim() : undefined
         const rawDiff = (await loadDiff(parent_asin, field, titleOv)).filter((d) => d.raw != null)
         let diff: DiffRow[]
         // Selective re-push ("push just the stale ones"): FORCE the requested SKUs (+ their FBA/FBM twins
-        // by shared ASIN) even if the local cache says they already match. They are stale on AMAZON â€” the
+        // by shared ASIN) even if the local cache says they already match. They are stale on AMAZON — the
         // verify checks live state, while the cache was optimistically write-through-updated on the first
         // push. Filtering by `changed` (a cache comparison) here would skip exactly the stragglers the
         // seller is trying to fix -> "Nothing to push" (the live bug the PO hit). A FULL push keeps the
         // changed filter. Twin-by-ASIN inclusion preserves the #36 FBA/FBM parity guarantee.
-        if (Array.isArray(skus)) {   // present (even empty) â†’ selective; an empty list pushes NOTHING, never "all"
+        if (Array.isArray(skus)) {   // present (even empty) → selective; an empty list pushes NOTHING, never "all"
           const wantSkus = new Set(skus)
           const wantAsins = new Set(rawDiff.filter((d) => wantSkus.has(d.sku) && d.asin).map((d) => d.asin))
           diff = rawDiff.filter((d) => wantSkus.has(d.sku) || (d.asin != null && wantAsins.has(d.asin)))
@@ -787,7 +790,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({
             type: 'result',
             parent_asin, field, pushed: 0, failed: 0, total: 0,
-            message: `Nothing to push â€” all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
+            message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
             results: [],
           })
           return
@@ -848,7 +851,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
 
         // Re-score so the page's score reflects the just-pushed values. Best-effort.
         if (accepted > 0) {
-          emit({ type: 'rescore', message: 'Re-scoring listingâ€¦' })
+          emit({ type: 'rescore', message: 'Re-scoring listing…' })
           try {
             const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
             const { data: kids } = await db.from('listing_content')
@@ -881,11 +884,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
 
-          // â”€â”€ Persist a MANUAL title override AS the recommendation (broadcast-title products only) â”€â”€
+          // ── Persist a MANUAL title override AS the recommendation (broadcast-title products only) ──
           // When the seller pushes their OWN title, the live content becomes their title but the stored
           // recommendation is still the AI's. That leaves live != recommendation FOREVER: the cohesion row
           // shows "needs update", and the NEXT ship would push the AI title over the seller's. So we make
-          // their pushed title the recommendation â€” it sticks, cohesion goes green, re-ship is a no-op.
+          // their pushed title the recommendation — it sticks, cohesion goes green, re-ship is a no-op.
           // Capacity families are excluded (their per-GB titles must not collapse to one string).
           if (field === 'title' && typeof title_override === 'string' && title_override.trim()) {
             try {
@@ -897,11 +900,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             } catch (e) { console.warn('[push-content] persist manual title as recommendation failed (non-fatal):', e) }
           }
 
-          // PERSIST verdict=DONE for the pushed section â€” ONLY when EVERY pushed SKU succeeded
+          // PERSIST verdict=DONE for the pushed section — ONLY when EVERY pushed SKU succeeded
           // (failed === 0). A push with failures (or a selective re-push where some stragglers still
           // error) must NOT flip the card to DONE, or the seller stops before the field is actually
           // consistent on Amazon (adversarial review). Without persisting, the card snaps back to
-          // "Do Now" on the next recommendations refetch â€” so we persist only when truly fully shipped.
+          // "Do Now" on the next recommendations refetch — so we persist only when truly fully shipped.
           if (failed === 0) try {
             const { data: recRow } = await db.from('listing_seo_recommendations')
               .select('action_plan').eq('parent_asin', parent_asin).single()
@@ -917,8 +920,8 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               for (const it of plan) {
                 if (isPushed(String(it.element)) && it.verdict !== 'DONE' && it.verdict !== 'SKIP') {
                   it.verdict = 'DONE'
-                  it.current_status = `âœ“ Shipped to Amazon â€” live ${lbl} now matches the recommended version.`
-                  it.instruction = 'No action required â€” you pushed this. The copy box stays below if you need it.'
+                  it.current_status = `✓ Shipped to Amazon — live ${lbl} now matches the recommended version.`
+                  it.instruction = 'No action required — you pushed this. The copy box stays below if you need it.'
                   if (it.priority !== 'HIGH') it.priority = 'NONE'
                   changed = true
                 }

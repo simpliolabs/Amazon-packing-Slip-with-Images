@@ -33,7 +33,7 @@ import { isPushField, resolveProposed, asCompare, type PushField } from '@/lib/f
 // attributes) — details is a separate code path in push-content and here.
 type VerifyField = PushField | 'details'
 import {
-  resolveDetailAttribute, isPushableDetail, currentDetailValue, normalizeFieldName,
+  resolveDetailAttribute, isPushableDetail, currentDetailValue, normalizeFieldName, detailValueToString,
 } from '@/lib/fba/productDetailAttrs'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -109,7 +109,8 @@ function expectedFor(
     const entry = (rec.product_details_improvements ?? []).find(
       (d) => normalizeFieldName(d.field_name || '') === normalizeFieldName(detailFriendlyName || ''),
     )
-    return (entry?.recommended_value ?? '').trim()
+    // Historical rows can carry non-string values (LLM array/number) — normalize, never throw.
+    return detailValueToString(entry?.recommended_value).trim()
   }
   if (field === 'keywords') {
     try {

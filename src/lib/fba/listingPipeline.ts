@@ -22,6 +22,7 @@
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
+import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 
 // ─── Shared output types (structurally identical to the route's interfaces) ────
 
@@ -2915,6 +2916,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // 1:1 to sp_api_key and the row rides the schema-details rails (Push button, verify, write-
   // through) with ZERO new endpoints. Deterministic value replaces any audit-guessed duplicate.
   let pdiFinal: PipelineProductDetailImprovement[] = Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : []
+  // The audit rows are a blind-cast LLM parse: recommended_value can arrive as an ARRAY
+  // (Additional Features: ["Water Proof","Shock Proof"]) or a bare number — every consumer
+  // (.trim(), byte caps, PATCH bodies) assumes string, and the listing page hard-crashed on
+  // B0GCF11RKL until normalized. Stringify at the write boundary so persisted rows are clean.
+  pdiFinal = pdiFinal.map((p) => ({
+    ...p,
+    field_name: detailValueToString(p.field_name),
+    current_value: p.current_value == null ? null : detailValueToString(p.current_value),
+    recommended_value: detailValueToString(p.recommended_value),
+  }))
   // Match by key OR display title: Amazon shipped the attribute EARLY as `title_differentiation`
   // (schema title "Item Highlight", live-verified on SELF_STICK_NOTE 2026-06-11) while the docs say
   // `item_highlights` — the title pattern keeps this working if other categories name it differently.

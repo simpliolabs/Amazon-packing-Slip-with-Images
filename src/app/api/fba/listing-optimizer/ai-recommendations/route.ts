@@ -19,6 +19,7 @@ import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
+import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 
 function getAdminSupabase() {
@@ -1015,6 +1016,20 @@ export async function GET(req: NextRequest) {
   const per_child_titles: { sku: string; asin: string; title: string }[] =
     Array.isArray(data.per_child_titles) ? data.per_child_titles : []
 
+  // product_details_improvements is a blind-persisted LLM parse: values can be arrays
+  // (["Water Proof","Shock Proof"]) or numbers on rows written before the pipeline
+  // normalized at the write boundary. Every UI consumer .trim()s these — the B0GCF11RKL
+  // page hard-crashed on exactly this — so normalize HERE too, healing ALL historical
+  // rows without requiring a regen.
+  const product_details_improvements = Array.isArray(data.product_details_improvements)
+    ? (data.product_details_improvements as Record<string, unknown>[]).map((p) => ({
+        ...p,
+        field_name: detailValueToString(p.field_name),
+        current_value: p.current_value == null ? null : detailValueToString(p.current_value),
+        recommended_value: detailValueToString(p.recommended_value),
+      }))
+    : data.product_details_improvements
+
   return NextResponse.json({
     recommendations: {
       ...data,
@@ -1022,6 +1037,7 @@ export async function GET(req: NextRequest) {
       per_child_titles,
       keyword_reconciliation,
       action_plan,
+      product_details_improvements,
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords.length > 0
         ? per_child_keywords[0].keywords
