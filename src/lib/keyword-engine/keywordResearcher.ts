@@ -138,9 +138,13 @@ export async function researchKeywords(
   const sovCompetitors = await fetchShareOfVoice(seed);
   creditsUsed++;
 
-  // Pick #1 competitor (excluding our own ASIN and parent ASIN)
+  // Pick the TOP-3 competitors (excluding our own ASINs). One keywords_by_asin request covers
+  // up to 10 ASINs = ONE credit, so tripling the harvest costs the same as harvesting one
+  // (G2': the Cerebro-replacement competitor mining, post-H10). #1 stays the stored/displayed
+  // competitor; the page[size]=100 row cap now spans all three (volume-sorted, top terms win).
   const ownAsins = new Set([asin, parentAsin]);
-  const topCompetitor = sovCompetitors.find(c => !ownAsins.has(c.asin));
+  const topCompetitors = sovCompetitors.filter(c => !ownAsins.has(c.asin)).slice(0, 3);
+  const topCompetitor = topCompetitors[0];
 
   let competitor: CompetitorMeta | null = null;
   let competitorKeywords: JungleScoutKeywordRow[] = [];
@@ -153,16 +157,16 @@ export async function researchKeywords(
       clicksShare: topCompetitor.clicksShare,
       conversionsShare: topCompetitor.conversionsShare,
     };
-    console.log(`[keywordResearcher] Phase 3: #1 competitor = ${topCompetitor.asin} (${topCompetitor.brand}, ${Math.round(topCompetitor.clicksShare * 100)}% clicks)`);
+    console.log(`[keywordResearcher] Phase 3: top competitors = ${topCompetitors.map(c => `${c.asin} (${c.brand}, ${Math.round(c.clicksShare * 100)}%)`).join(', ')}`);
 
-    // Store competitor metadata in DB
+    // Store #1 competitor metadata in DB (display + rank panel unchanged)
     await storeCompetitorMeta(parentAsin, competitor);
 
-    // ── Phase 4: keywords_by_asin on #1 competitor (1 credit) ─────────────
-    const compMap = await fetchKeywordsByASIN([topCompetitor.asin]);
-    competitorKeywords = compMap.get(topCompetitor.asin) ?? [];
+    // ── Phase 4: keywords_by_asin on the top-3 competitors (ONE call = 1 credit) ─────────
+    const compMap = await fetchKeywordsByASIN(topCompetitors.map(c => c.asin));
+    competitorKeywords = topCompetitors.flatMap(c => compMap.get(c.asin) ?? []);
     creditsUsed++;
-    console.log(`[keywordResearcher] Phase 4: ${competitorKeywords.length} competitor keywords from ${topCompetitor.asin}`);
+    console.log(`[keywordResearcher] Phase 4: ${competitorKeywords.length} competitor keywords from ${topCompetitors.length} competitor(s), 1 credit`);
   } else {
     console.log(`[keywordResearcher] Phase 3: No competitor found in SOV. Skipping Phase 4.`);
   }
