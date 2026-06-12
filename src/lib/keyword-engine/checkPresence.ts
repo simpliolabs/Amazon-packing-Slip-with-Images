@@ -47,7 +47,16 @@ function tokenize(text: string): Set<string> {
   const standard = lower
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(Boolean)
+    // Digit-letter bridge: split "128gb" → {128, gb} (and "usb3" → {usb, 3}) so solid and
+    // spaced forms match each other — a live title "…128GB…" must satisfy the keyword
+    // "128 gb sd card" (B0GCF11RKL showed "nowhere" for keywords plainly in the title).
+    // Split-ONLY (the solid form is dropped) keeps the normalization symmetric, since text
+    // and keyword both pass through this same tokenizer.
+    .flatMap((t) => {
+      const m = t.match(/^(\d+)([a-z]+)$/) || t.match(/^([a-z]+)(\d+)$/);
+      return m ? [m[1], m[2]] : [t];
+    });
   // Collapsed tokens: join hyphen-separated segments into a single token
   // e.g. "t-shirt" → "tshirt", "long-sleeve" → "longsleeve"
   const collapsed = lower

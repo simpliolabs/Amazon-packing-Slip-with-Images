@@ -811,12 +811,19 @@ export function scoreListingContent(
       for (const x of m ?? []) familyCaps.add(x.toUpperCase().replace(/[^0-9TG]/g, '') + 'B')
     }
     const isCapacityFamily = familyCaps.size >= 2
+    // COLOR sibling of the capacity guard: on a MULTI-variant apparel family the broadcast
+    // bullets are shared across every color, so a keyword carrying one specific color
+    // ("plain black tshirt men") can never be woven — don't dock for it. Per-child backend
+    // keeps the color terms. KEEP IN SYNC with BASIC_COLOR_RE in listingPipeline.
+    const colorRe = /\b(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)\b/i
+    const isColorNeutralFamily = apparel && childContents.length > 1
     const bulletOppKw = ((scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
       ? scoringCtx.bulletPlanKeywords.filter((k) => !isSeasonalKw(k))
       : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
           .filter((k) => !isSeasonalKw(k))
           .filter((k) => k.split(/\s+/).length <= 6)
     ).filter((k) => !isCapacityFamily || !capRe.test(k))
+     .filter((k) => !isColorNeutralFamily || !colorRe.test(k))
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).

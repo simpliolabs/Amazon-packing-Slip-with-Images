@@ -697,6 +697,15 @@ export default function ListingDetailPage() {
 
       if (finalResult?.recommendations) {
         setAiRecs(finalResult.recommendations)
+        // The regen route just re-scored server-side (LIVE SCORE block) — refetch so the
+        // score cards update in place. Without this the PO saw the PRE-audit scores until
+        // a hard refresh (the push handlers already do this; the regen handler never did).
+        try {
+          const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+          const sdata = await sresp.json()
+          const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+          if (found) setScore(found)
+        } catch { /* best-effort — next load shows it */ }
       } else {
         throw new Error('No recommendations received')
       }

@@ -161,6 +161,15 @@ const ROLE_WORDS = new Set([
   'coach', 'coaches', 'professor', 'professors', 'principal', 'student', 'students',
 ])
 
+// Basic garment-color words. On a MULTI-variant apparel family, BROADCAST content (title /
+// bullets) is shared across every color, so a keyword carrying one specific color ("plain
+// black tshirt men") mis-describes the other 80 variants — the JS research runs against ONE
+// child (whatever color it happens to be) and drags its color into the pool. Color keywords
+// still rank per-child via the backend strings (each child gets its OWN color terms). A
+// design name containing a color ("Black Cat") is unaffected — it flows via the verbatim
+// design-name anchor, not the keyword pool. KEEP IN SYNC with the copy in syncListingContent.
+const BASIC_COLOR_RE = /\b(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)\b/i
+
 /**
  * Third-party brand names that REQUIRE 'for [Brand]' or 'compatible with [Brand]' framing
  * in titles and bullets. Amazon's Jan 2025 enforcement (tightened Q4 2025): bare third-party
@@ -1186,7 +1195,10 @@ async function runTitleAgent(
   // for "See You Later Alligator" or "Crocodile Design"). PR #91.
   const designLine = designName
     ? `\n🔴 MANDATORY — the title MUST LEAD with the product's DESIGN NAME exactly as written: "${designName}". Place it FIRST, immediately after the brand "${brandName}" and BEFORE the product type — it is the seller's design identity printed on the product and the main thing shoppers recognize. Use it VERBATIM (never paraphrase, expand, or substitute a synonym). Do NOT also include a longer paraphrase or alternate wording of the SAME slogan elsewhere in the title — e.g. if the design is "Later Gator", do NOT also write "See You Later Alligator" (that is the same slogan twice and wastes characters). Lead with "${designName}", then the product type.\n`
-    : ''
+    // No design name resolved: forbid INVENTING one. Without this, an unanchored agent
+    // fabricated a fake collection name ("Urban Pulse") that exists nowhere in the seller's
+    // listing or keywords (B0FKLGWZ4C — the real design "Darlin'" failed extraction).
+    : `\n🔴 Do NOT invent a design, collection, or style name. Every distinctive phrase in the title must come from the CURRENT title or the keywords listed below — if the current title leads with a distinctive phrase, keep it verbatim.\n`
   const attrPinLine = attributePin
     ? apparel
       // Garment brand goes AFTER the welded design-name + product-type phrase ("Later Gator T-Shirt,
@@ -2440,7 +2452,13 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
   const lead: string[] = []
   for (const w of words) {
     const clean = w.replace(/[^A-Za-z0-9']/g, '')
-    if (!clean || STOP.test(clean)) break
+    // SKIP generics BEFORE the design phrase starts, stop at the first generic AFTER it:
+    // "Comfort Colors Darlin' T-Shirt …" used to BREAK on word 1 ("comfort") and return ''
+    // — the heuristic could only find designs at the very start of the title (B0FKLGWZ4C).
+    if (!clean || STOP.test(clean)) {
+      if (lead.length === 0) continue
+      break
+    }
     lead.push(clean)
     if (lead.length >= 5) break
   }
@@ -2479,7 +2497,13 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   // PRIMARY extractor; the deterministic pieces only VALIDATE its answer or stand in when it returns
   // nothing. (Earlier versions collected vision search-term seeds + picked "fewest words", which
   // overfit: junk seeds beat long names and 1-word names — verified across designs.)
-  const haystack = `${visionText} ${source}`.toLowerCase()
+  // Normalize curly apostrophes BEFORE matching: the canonical title often carries "Darlin’"
+  // (U+2019) while the LLM answers with a straight "Darlin'" — the substring check then
+  // rejected the CORRECT answer and the design anchor silently vanished (B0FKLGWZ4C: the
+  // unanchored agent invented "Urban Pulse"). snapToSource/finalize still recover the
+  // title's exact punctuation afterwards.
+  const normApos = (s: string) => s.replace(/[’‘]/g, "'")
+  const haystack = normApos(`${visionText} ${source}`.toLowerCase())
   // Conservative generics to strip from a candidate's EDGES (product types, blank brand, audience) —
   // NOT subjective words like "cool"/"funny" that can be part of a design ("Cool Cats", "Big Dill").
   const GENERIC_TAIL = /^(t-?shirts?|tshirts?|shirts?|tees?|hoodies?|sweat\w*|sweaters?|tanks?|graphics?|vintage|retro|classic|\d{2}s|comfort|colou?rs?|apparel|clothing|garments?|premium|quality|soft|blank|unisex|m[ae]ns?|wom[ae]ns?|ladies)$/i
@@ -2503,7 +2527,7 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
     const words = n.split(/\s+/)
     if (words.length > 6) return ''
     if (words.every((w) => GENERIC_TAIL.test(w))) return ''
-    if (!haystack.includes(n.toLowerCase())) return ''
+    if (!haystack.includes(normApos(n.toLowerCase()))) return ''
     if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
     return n
   }
@@ -2679,7 +2703,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const attributePinFinal = attributePin || undefined
 
   // Stage 0b — candidates (code). Outcome-loop signals (#89) are a conservative tiebreak only (no-op until history exists).
+  // Multi-variant apparel family → broadcast title/bullets must stay color-neutral (see
+  // BASIC_COLOR_RE). The JS research child happened to be one color and dragged it into the
+  // pool — live failure: "Black T Shirts" recommended as the shared title for 82 colors.
+  const colorNeutralFamily = apparelProduct && input.children.length > 1
   const candidates = selectTitleCandidates(analysis, brandName, repTitle, input.outcomeSignals)
+    .filter((c) => !colorNeutralFamily || !BASIC_COLOR_RE.test(c.keyword))
 
   // Stage 0c — top UPGRADE keywords for explicit title-coverage. UPGRADE = ranking
   // signal already present in bullets but absent from the title. The scorer in
@@ -2690,6 +2719,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const topUpgradeKws = cleanGated
     .filter((k) => k.actionType === 'UPGRADE')
     .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword))  // color-neutral broadcast title
     .filter((k) => k.keyword.split(/\s+/).length <= 6)  // skip long-tail phrases that wouldn't fit
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)                                        // matches the scorer's top-10 cap
@@ -2736,7 +2766,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // ranks via the bullets + backend pool. Short money keywords (<=3 words) are still pinned.
   const titleMustInclude = (apparelProduct && designName && mustInclude && mustInclude.split(/\s+/).length >= 4)
     ? undefined
-    : mustInclude
+    // A color-bearing pin would FORCE the color into the shared title — same leak, stronger.
+    : (colorNeutralFamily && mustInclude && BASIC_COLOR_RE.test(mustInclude) ? undefined : mustInclude)
 
   // Stage 1 — Title
   onProgress('Writing title...')
@@ -2828,6 +2859,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // (#161 reads it via keyword_plan) docks bullets for keywords the generator must
     // refuse: B0GCF11RKL froze at 17/25 AFTER shipping. Drop them so plan == placeable.
     .filter((k) => capacityFamilyTokens.length === 0 || !CAPACITY_RE.test(k.keyword))
+    // Color sibling of the capacity rule above: broadcast bullets shared across a multi-color
+    // apparel family must not demand one variant's color (B0FKLGWZ4C plan carried
+    // "plain black tshirt men" for 82 colors). Per-child backend keeps the color terms.
+    .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword))
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
