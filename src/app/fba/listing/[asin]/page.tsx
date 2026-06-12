@@ -50,11 +50,11 @@ interface ProductDetailImprovement { field_name: string; current_value: string |
  *  The stored/pushed value must stay the API token (that's what the schema accepts), so
  *  prettify at DISPLAY only: exact label from the row's accepted list when one matches,
  *  else Title-Case the snake token. Human-looking values pass through untouched. */
+const squashEnumVal = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
 function prettyDetailValue(value: string | null | undefined, accepted?: string[]): string {
   const v = (value ?? '').trim()
   if (!v || !/^[a-z0-9]+(?:_[a-z0-9]+)+$/.test(v)) return v
-  const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
-  const hit = (accepted ?? []).find((a) => squash(a) === squash(v))
+  const hit = (accepted ?? []).find((a) => squashEnumVal(a) === squashEnumVal(v))
   if (hit) return hit
   return v.split('_').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ')
 }
@@ -3213,7 +3213,7 @@ export default function ListingDetailPage() {
                             )}
                           </div>
                         ) : (
-                          <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{String(pushPreview.proposedValue ?? '')}</p>
+                          <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{pushPreview.field === 'details' ? prettyDetailValue(String(pushPreview.proposedValue ?? ''), pushPreview.acceptedValues ?? undefined) : String(pushPreview.proposedValue ?? '')}</p>
                         )}
                       </div>
                       {/* Feature B — show Amazon's accepted vocabulary for enum attributes so the
@@ -3239,19 +3239,37 @@ export default function ListingDetailPage() {
                             {detailOverride && <p className="text-[11px] text-emerald-700 mt-1.5 font-medium">Will push: {detailOverride}</p>}
                           </div>
                         ) : (
+                          /* Valid enum — the chips are STILL a picker (PO: "I can't choose/change any
+                             of the other values if I want, WHY?"). Clicking a different accepted value
+                             overrides what ships; clicking the recommended one clears the override.
+                             The server re-validates + re-coerces the override and recompares every
+                             SKU against it at push time, so the preview counts can't mislead. */
                           <div className="bg-sky-50 border border-sky-200 rounded-md p-2.5 mb-3">
                             {pushPreview.normalizedFrom && (
                               <p className="text-[11px] text-sky-900 mb-1.5">
-                                Normalized <span className="font-mono line-through text-slate-500">{pushPreview.normalizedFrom}</span> → <span className="font-mono font-semibold text-emerald-700">{String(pushPreview.proposedValue ?? '')}</span> to match Amazon&apos;s accepted terms.
+                                Normalized <span className="font-mono line-through text-slate-500">{pushPreview.normalizedFrom}</span> → <span className="font-mono font-semibold text-emerald-700">{prettyDetailValue(String(pushPreview.proposedValue ?? ''), pushPreview.acceptedValues)}</span> to match Amazon&apos;s accepted terms.
                               </p>
                             )}
-                            <p className="text-[10px] text-sky-800 leading-relaxed">
-                              <span className="font-bold uppercase mr-1">Amazon accepts</span>
-                              {pushPreview.acceptedValues.slice(0, 12).map((v, i) => (
-                                <span key={i} className={`inline-block mr-1 mb-1 px-1.5 py-0.5 rounded border ${String(pushPreview.proposedValue ?? '').toLowerCase() === v.toLowerCase() ? 'bg-emerald-100 border-emerald-300 text-emerald-800 font-semibold' : 'bg-white border-slate-200 text-slate-600'}`}>{v}</span>
-                              ))}
-                              {pushPreview.acceptedValues.length > 12 && <span className="text-slate-400">+{pushPreview.acceptedValues.length - 12} more</span>}
-                            </p>
+                            <p className="text-[10px] text-sky-800 font-bold uppercase mb-1">Amazon accepts — click a value to push it instead</p>
+                            <div className="flex flex-wrap gap-1">
+                              {pushPreview.acceptedValues.map((v, i) => {
+                                const isRecommended = squashEnumVal(v) === squashEnumVal(String(pushPreview.proposedValue ?? ''))
+                                const isChosen = detailOverride ? detailOverride === v : isRecommended
+                                return (
+                                  <button
+                                    key={i}
+                                    onClick={() => setDetailOverride(isRecommended ? '' : v)}
+                                    title={isRecommended ? 'The recommended value' : `Push “${v}” to every SKU instead`}
+                                    className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${isChosen ? 'bg-emerald-600 border-emerald-600 text-white font-semibold' : 'bg-white border-slate-300 text-slate-700 hover:border-emerald-400 hover:bg-emerald-50'}`}
+                                  >
+                                    {v}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                            {detailOverride.trim() !== '' && squashEnumVal(detailOverride) !== squashEnumVal(String(pushPreview.proposedValue ?? '')) && (
+                              <p className="text-[11px] text-emerald-700 mt-1.5 font-medium">Will push: {detailOverride} — every SKU is re-compared against this value at push time.</p>
+                            )}
                           </div>
                         )
                       )}
@@ -3351,19 +3369,21 @@ export default function ListingDetailPage() {
                     <button onClick={() => setShowPushModal(false)} className="text-xs px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
                     {/* Server-side queue (PR #184): runs on the server, survives tab close + deploys;
                         the global status bar (bottom of every page) tracks it. Same body as Confirm & Ship. */}
-                    <button onClick={() => queueBackgroundPush(pushField === 'details' && pushPreview.enum_invalid ? (detailOverride.trim() || undefined) : undefined)}
-                      disabled={queueLoading || (pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushField === 'details' && pushPreview.enum_invalid ? !detailOverride.trim() : pushPreview.changed === 0)}
+                    <button onClick={() => queueBackgroundPush(pushField === 'details' ? (detailOverride.trim() || undefined) : undefined)}
+                      disabled={queueLoading || (pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushField === 'details' ? (pushPreview.enum_invalid ? !detailOverride.trim() : (detailOverride.trim() ? false : pushPreview.changed === 0)) : pushPreview.changed === 0)}
                       title="Runs on the server — safe to close this tab. Track it in the status bar at the bottom of any page."
                       className="text-xs px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
                       {queueLoading ? 'Queueing…' : 'Queue in background'}
                     </button>
-                    <button onClick={() => confirmPush(undefined, pushField === 'details' && pushPreview.enum_invalid ? (detailOverride.trim() || undefined) : undefined)}
-                      disabled={pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushField === 'details' && pushPreview.enum_invalid ? !detailOverride.trim() : pushPreview.changed === 0}
+                    <button onClick={() => confirmPush(undefined, pushField === 'details' ? (detailOverride.trim() || undefined) : undefined)}
+                      disabled={pushField === 'title' && pushPreview.broadcast ? (!editTitle.trim() || displayChanged === 0) : pushField === 'details' ? (pushPreview.enum_invalid ? !detailOverride.trim() : (detailOverride.trim() ? false : pushPreview.changed === 0)) : pushPreview.changed === 0}
                       className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">
                       {pushField === 'title' && pushPreview.broadcast
                         ? (displayChanged === 0
                             ? 'All variants already have this title'
                             : <>Push this title to {displayChanged} variant{displayChanged !== 1 ? 's' : ''} that need it</>)
+                        : pushField === 'details' && detailOverride.trim() && !pushPreview.enum_invalid
+                        ? <>Confirm &amp; Ship {pushPreview.detail_field} = “{detailOverride}” to all SKUs</>
                         : <>Confirm &amp; Ship {pushPreview.field === 'details' && pushPreview.detail_field
                             ? pushPreview.detail_field
                             : pushPreview.label.toLowerCase()} to {pushPreview.changed} SKU{pushPreview.changed !== 1 ? 's' : ''}</>}

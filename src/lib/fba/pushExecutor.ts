@@ -746,7 +746,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const wantField = normalizeFieldName(ctx.detailField)
               for (const p of pdi) {
                 if (normalizeFieldName(String(p.field_name ?? '')) === wantField) {
-                  p.current_value = ctx.recommendedValue; p.enum_valid = true; touched = true
+                  // recommended_value too: a seller-picked override (or an enum coercion) IS the
+                  // recommendation of record once pushed — without this the panel showed the stale
+                  // audit value forever and the "✓ On Amazon" equality badge could never light up.
+                  p.current_value = ctx.recommendedValue; p.recommended_value = ctx.recommendedValue; p.enum_valid = true; touched = true
                 }
               }
               if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
