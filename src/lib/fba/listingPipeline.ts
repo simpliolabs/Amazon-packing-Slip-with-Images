@@ -161,6 +161,16 @@ const ROLE_WORDS = new Set([
   'coach', 'coaches', 'professor', 'professors', 'principal', 'student', 'students',
 ])
 
+// G4 — audience/relation words that are legitimate in GIFT framing ("great gift for
+// teachers, nurses, mom") even though they stay banned as product-identity claims.
+// ROLE_WORDS ∪ common gift recipients the seller's niches search for (college, nursing,
+// bible study, family relations). Used to build the GIFT & OCCASION bullet's audience pool.
+const AUDIENCE_GIFT_WORDS = new Set([
+  ...ROLE_WORDS,
+  'college', 'nursing', 'bible', 'church', 'mom', 'dad', 'mama', 'grandma', 'grandpa',
+  'wife', 'husband', 'sister', 'brother', 'aunt', 'uncle', 'girlfriend', 'boyfriend',
+])
+
 // Basic garment-color words. On a MULTI-variant apparel family, BROADCAST content (title /
 // bullets) is shared across every color, so a keyword carrying one specific color ("plain
 // black tshirt men") mis-describes the other 80 variants — the JS research runs against ONE
@@ -1510,6 +1520,22 @@ async function runBulletsAgent(
   // council brief and is guaranteed by the deterministic backstop (parity with the title design-name lead).
   const dn = (designName || '').trim()
   const oppPlusDesign = dn ? [dn, ...opportunityKws.filter((k) => k.toLowerCase() !== dn.toLowerCase())] : opportunityKws
+  // G4 — GIFT & OCCASION audience pool. Role/audience keywords are (correctly) excluded from
+  // every other pool as product-identity claims, but they ARE legitimate gift framings
+  // ("great gift for teachers") — the one compliant home for these search words in customer
+  // copy. Read from RAW input.analysis (the relevance gate + plan filters strip exactly these,
+  // same reason compatibilityBrands reads raw), top distinct audience words by opportunity.
+  const giftAudiences: string[] = []
+  if (apparel) {
+    const seenAud = new Set<string>()
+    const rankedKw = [...input.analysis].sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    for (const k of rankedKw) {
+      for (const w of k.keyword.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+        if (AUDIENCE_GIFT_WORDS.has(w) && !seenAud.has(w)) { seenAud.add(w); giftAudiences.push(w) }
+      }
+      if (giftAudiences.length >= 4) break
+    }
+  }
   // Capacity family detection: do any 2 children carry different capacity tokens in their SKUs?
   // If yes, the SHARED bullets must NOT hardcode a specific GB value — each variant's title
   // carries its own capacity; shared bullets that say "128GB" mislead the 32GB and 64GB rows.
@@ -1543,7 +1569,7 @@ async function runBulletsAgent(
   const user = `The title is FINAL (do not change it): "${finalTitle}"
 
 🚫 ACCURACY IS THE #1 RULE — violating it is a failure:
-- ${apparel ? 'This is a GRAPHIC TEE; its design is ONLY what the title above says.' : 'This product is EXACTLY what the title above describes — do NOT reframe it as apparel, a t-shirt, "graphic tee", clothing, or "fashion" unless the title literally says so.'} Do NOT claim it is FOR a profession, role, or audience not explicitly named in the title. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title.
+- ${apparel ? 'This is a GRAPHIC TEE; its design is ONLY what the title above says.' : 'This product is EXACTLY what the title above describes — do NOT reframe it as apparel, a t-shirt, "graphic tee", clothing, or "fashion" unless the title literally says so.'} Do NOT claim it is FOR a profession, role, or audience not explicitly named in the title. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title.${giftAudiences.length > 0 ? ' ONE EXCEPTION — GIFT FRAMING: inside an explicit gift phrase ("great gift for teachers, nurses…") these audience words ARE allowed: a gift suggestion is a use-case, not a product-identity claim. The exception applies ONLY to the dedicated gift bullet described below.' : ''}
 - A keyword being in the candidate list does NOT make it usable — SKIP any keyword that forces an inaccurate or awkward claim. Fewer-but-accurate beats more-but-wrong.
 - Before returning, RE-READ each bullet: if any implies the product is for a specific job/role/occasion NOT named in the title — or reframes it as a product type it is not — REWRITE it to describe the actual product instead.
 ${topLine}${rankLine}
@@ -1561,7 +1587,8 @@ Rules per bullet:
 - 80-200 characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
 - 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}
 - Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.${compatibilityBrands.length > 0 ? `
-- 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands shoppers search for. Devote ONE bullet to compatibility using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example hook: "WIDE COMPATIBILITY - Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras and more...".` : ''}
+- 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands shoppers search for. Devote ONE bullet to compatibility using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example hook: "WIDE COMPATIBILITY - Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras and more...".` : ''}${giftAudiences.length > 0 ? `
+- 🎁 GIFT & OCCASION (bullet 5): devote the LAST bullet to gifting, framed STRICTLY as a gift suggestion — e.g. "PERFECT GIFT - Great gift for ${giftAudiences.slice(0, 3).join(', ')} and anyone who loves the design…". Use these audience words shoppers actually search: ${giftAudiences.join(', ')}. NEVER claim the product IS a ${giftAudiences[0]} item — only that it makes a great gift for them. Keep it truthful to the design.` : ''}
 Return ONLY the JSON object.`
 
   // Bullets COUNCIL for apparel (the 18% >=15% rank-factor field). The bullet score's biggest lever is
@@ -1587,9 +1614,15 @@ Return ONLY the JSON object.`
   // occasionally slips ("PLAYFUL TEACHER VIBE"). Detect role words not in the title, retry
   // once with a pointed correction, then strip any residual role tokens as a hard backstop.
   const titleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
+  // G4 — gift-framed audience words are NOT leaks: "great gift for teachers, nurses…" is a
+  // gift suggestion (a use-case), not a product-identity claim. Mask explicit gift clauses
+  // BEFORE leak-scanning so the dedicated gift bullet survives while bare role claims
+  // ("PLAYFUL TEACHER VIBE") are still caught and stripped.
+  const GIFT_CLAUSE_RE = /\bgifts?(?:\s+ideas?)?\s+for\s+[^.;:!?]{0,90}/gi
+  const maskGiftClauses = (s: string): string => s.replace(GIFT_CLAUSE_RE, ' ')
   const leakedRoles = (bs: string[]): string[] => {
     const found = new Set<string>()
-    for (const b of bs) for (const w of b.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+    for (const b of bs) for (const w of maskGiftClauses(b).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
       if (ROLE_WORDS.has(w) && !titleWords.has(w)) found.add(w)
     }
     return [...found]
@@ -1601,7 +1634,7 @@ Return ONLY the JSON object.`
         model: 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: `Your previous bullets WRONGLY implied this product is for: ${leaked.join(', ')}. It is NOT — it is "${finalTitle}". Rewrite ALL 5 bullets describing ONLY the actual product; NEVER use the words ${leaked.join(', ')} or any profession/role word. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+          { role: 'user', content: `Your previous bullets WRONGLY implied this product is for: ${leaked.join(', ')}. It is NOT — it is "${finalTitle}". Rewrite ALL 5 bullets describing ONLY the actual product; NEVER use the words ${leaked.join(', ')} or any profession/role word${giftAudiences.length > 0 ? ' EXCEPT inside an explicit gift phrase ("great gift for …") — the dedicated gift bullet is CORRECT, keep it' : ''}. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         ],
         temperature: 0.3,
         max_tokens: 1200,
@@ -1613,9 +1646,23 @@ Return ONLY the JSON object.`
     } catch { /* keep best-so-far */ }
   }
   if (leaked.length > 0) {
-    // Hard backstop: remove residual role tokens (rare) — drops the bad word, keeps the sentence.
+    // Hard backstop: remove residual role tokens (rare) — drops the bad word, keeps the
+    // sentence. Gift clauses are preserved verbatim (leakedRoles masked them, so `leaked`
+    // only contains words found OUTSIDE gift framing — strip outside-only to match).
     const roleRe = new RegExp(`\\b(?:${leaked.join('|')})\\b`, 'gi')
-    bullets = bullets.map((b) => b.replace(roleRe, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!])/g, '$1').trim())
+    bullets = bullets.map((b) => {
+      const parts: string[] = []
+      let last = 0
+      GIFT_CLAUSE_RE.lastIndex = 0
+      let m: RegExpExecArray | null
+      while ((m = GIFT_CLAUSE_RE.exec(b))) {
+        parts.push(b.slice(last, m.index).replace(roleRe, ''))
+        parts.push(m[0])
+        last = m.index + m[0].length
+      }
+      parts.push(b.slice(last).replace(roleRe, ''))
+      return parts.join('').replace(/\s{2,}/g, ' ').replace(/\s+([.,!])/g, '$1').trim()
+    })
   }
 
   // ── Brand-safety + length + opportunity coverage retry (validateBullets) ─────
