@@ -52,6 +52,39 @@ interface FetchOpts {
 // warmup must never poison every later push with a permanent null (that bug shipped first).
 const _schemaCache = new Map<string, Record<string, unknown>>()
 
+// SECOND tier (migration 028): the in-process map resets on every deploy, so the FIRST
+// regen/push after each deploy re-downloaded every schema from SP-API. pt_schema_cache
+// persists successful schemas across deploys: memory miss → DB (7-day TTL) → live fetch →
+// write back to both. STRICTLY best-effort — a missing table or DB error falls through to
+// the live fetch exactly as before; VALIDATION_PREVIEW remains the backstop for staleness.
+const SCHEMA_DB_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+async function readSchemaFromDb(key: string): Promise<Record<string, unknown> | null> {
+  try {
+    const { createAdminClient } = await import('@/lib/supabase/server')
+    const supabase = await createAdminClient()
+    const { data } = await supabase
+      .from('pt_schema_cache')
+      .select('schema, fetched_at')
+      .eq('cache_key', key)
+      .maybeSingle()
+    const row = data as { schema?: Record<string, unknown>; fetched_at?: string } | null
+    if (!row?.schema || !row.fetched_at) return null
+    if (Date.now() - new Date(row.fetched_at).getTime() > SCHEMA_DB_TTL_MS) return null
+    return row.schema
+  } catch { return null }
+}
+
+async function writeSchemaToDb(key: string, schema: Record<string, unknown>): Promise<void> {
+  try {
+    const { createAdminClient } = await import('@/lib/supabase/server')
+    const supabase = await createAdminClient()
+    await supabase
+      .from('pt_schema_cache')
+      .upsert({ cache_key: key, schema, fetched_at: new Date().toISOString() } as never, { onConflict: 'cache_key' } as never)
+  } catch { /* best-effort — next deploy just re-downloads */ }
+}
+
 /** Diagnostics from a fetch attempt, surfaced by the ?debug=1 route branch. */
 export interface SchemaFetchDebug {
   productType: string
@@ -73,6 +106,14 @@ async function fetchProductTypeSchema(
   if (cached) {
     if (debug) { debug.cached = true; debug.topPropertyCount = Object.keys((cached as { properties?: object }).properties ?? {}).length }
     return cached
+  }
+
+  // Tier 2: persisted cache survives deploys (the in-process map above does not).
+  const fromDb = await readSchemaFromDb(key)
+  if (fromDb) {
+    _schemaCache.set(key, fromDb)
+    if (debug) { debug.cached = true; debug.topPropertyCount = Object.keys((fromDb as { properties?: object }).properties ?? {}).length }
+    return fromDb
   }
 
   let schema: Record<string, unknown> | null = null
@@ -105,6 +146,7 @@ async function fetchProductTypeSchema(
   // Cache ONLY on success — never poison future calls with a transient null.
   if (schema) {
     _schemaCache.set(key, schema)
+    await writeSchemaToDb(key, schema)
     if (debug) debug.topPropertyCount = Object.keys((schema as { properties?: object }).properties ?? {}).length
   }
   return schema
