@@ -76,6 +76,15 @@ export interface PipelineInput {
    *  lean_male/lean_female keep the unisex tail but re-weight gendered keywords across every
    *  pool; unisex forces the neutral tail. Null = legacy keyword-derived audience. */
   audienceLean?: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
+  /** #79 per-section regen — run ONLY this section's agent (~30-60s instead of the full
+   *  3-4min chain). Other sections anchor on the seller's STORED recommendation: bullets
+   *  regenerate against priorTitle; description/keywords against priorTitle+priorBullets.
+   *  The audit stage is skipped entirely (the stored action plan is patched by the route). */
+  onlySection?: 'title' | 'bullets' | 'description' | 'keywords'
+  /** Stored recommended_title — REQUIRED context when onlySection ≠ 'title'. */
+  priorTitle?: string | null
+  /** Stored recommended_bullets — REQUIRED context when onlySection ∈ description/keywords. */
+  priorBullets?: string[] | null
   /** Per-variant content block (for the audit's variant-health check) */
   variantDetails: string
   /** Keyword intelligence context block (reused for the audit agent) */
@@ -122,6 +131,9 @@ export interface PipelineResult {
    *  capacity-unsafe title heuristic. */
   keywordPlan: { bullets: string[]; designName: string }
   debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string }
+  /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
+   *  meaningful; the route merges them into the STORED recommendation row. */
+  regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
 }
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
@@ -2896,14 +2908,45 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // A color-bearing pin would FORCE the color into the shared title — same leak, stronger.
     : (colorNeutralFamily && mustInclude && BASIC_COLOR_RE.test(mustInclude) ? undefined : mustInclude)
 
-  // Stage 1 — Title
-  onProgress('Writing title...')
-  const { title: rawTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
-  // Vision-hallucination backstop: strip VISUAL MOTIF claims ("heart") the seller's own
-  // text doesn't corroborate (live failure: vision read a heart into the Darlin' script
-  // font → "Heart Graphic Tee" recommended). Seller text = canonical + rep titles + design.
+  // #79 per-section regen plumbing: a partial run executes ONE stage against the stored
+  // priors and returns immediately — the route merges the field into the persisted row.
+  const only = input.onlySection
+  const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => ({
+    recommended_title: input.priorTitle ?? '',
+    recommended_bullets: input.priorBullets ?? [],
+    per_child_keywords: [],
+    per_child_titles: undefined,
+    recommended_description: '',
+    variant_corrections: [],
+    cannibalization_warnings: [],
+    product_details_improvements: [],
+    keyword_reconciliation: [],
+    action_plan: [],
+    irrelevant_keywords: irrelevantKeywords,
+    keywordPlan: { bullets: [], designName },
+    debug: { titleProblems: [], candidatesUsed: [], titleRetried: false, designName, designSource },
+    regeneratedSection: section,
+    ...fields,
+  })
+
+  // Stage 1 — Title (skipped on a non-title partial run: the stored title is the anchor,
+  // so e.g. regenerated bullets keep deduping against the title the seller already approved)
   const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
-  const finalTitle = apparelProduct ? stripUngroundedMotifs(rawTitle, motifTrust) : rawTitle
+  let finalTitle: string
+  let titleProblems: string[] = []
+  let retried = false
+  if (!only || only === 'title') {
+    onProgress('Writing title...')
+    const t = await runTitleAgent(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
+    titleProblems = t.problems
+    retried = t.retried
+    // Vision-hallucination backstop: strip VISUAL MOTIF claims ("heart") the seller's own
+    // text doesn't corroborate (live failure: vision read a heart into the Darlin' script
+    // font → "Heart Graphic Tee" recommended). Seller text = canonical + rep titles + design.
+    finalTitle = apparelProduct ? stripUngroundedMotifs(t.title, motifTrust) : t.title
+  } else {
+    finalTitle = (input.priorTitle || repTitle || '').trim()
+  }
 
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
@@ -2911,7 +2954,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // suppression. Apparel is excluded by apparelProduct AND never matches the capacity pattern,
   // so its title stays the single shared/broadcast value untouched.
   let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
-  if (!apparelProduct) {
+  if (!apparelProduct && (!only || only === 'title')) {
     const childCap = new Map<string, string>()
     // Capacity from the SKU first (reliable — e.g. "...-32G-FBA"); the child's CURRENT title is
     // an unreliable fallback (it can be a templated/wrong title — part of why we're optimizing).
@@ -2936,6 +2979,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         return { sku: c.sku, asin: c.asin, title: capped }
       })
     }
+  }
+
+  if (only === 'title') {
+    onProgress('Title regenerated.')
+    return partialResult('title', {
+      recommended_title: finalTitle,
+      per_child_titles: perChildTitles,
+      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource },
+    })
   }
 
   // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
@@ -2998,10 +3050,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
-  onProgress('Writing bullets...')
-  const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
-  // Same vision-hallucination backstop as the title (motif words need seller corroboration).
-  const bullets = apparelProduct ? rawBullets.map((b) => stripUngroundedMotifs(b, motifTrust)) : rawBullets
+  let bullets: string[]
+  if (!only || only === 'bullets') {
+    onProgress('Writing bullets...')
+    const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
+    // Same vision-hallucination backstop as the title (motif words need seller corroboration).
+    bullets = apparelProduct ? rawBullets.map((b) => stripUngroundedMotifs(b, motifTrust)) : rawBullets
+  } else {
+    bullets = input.priorBullets ?? []
+  }
+  if (only === 'bullets') {
+    onProgress('Bullets regenerated.')
+    return partialResult('bullets', {
+      recommended_bullets: bullets,
+      keywordPlan: { bullets: topOpportunityKwsForBullets, designName },
+    })
+  }
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
@@ -3011,6 +3075,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const backendPool = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED'].includes(k.actionType))
     .sort((a, b) => b.opportunityScore - a.opportunityScore)
+  // #79 partial runs: exactly one of the pair, anchored on the stored title+bullets.
+  if (only === 'keywords') {
+    const perChildOnly = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
+    onProgress('Backend keywords regenerated.')
+    return partialResult('keywords', { per_child_keywords: perChildOnly })
+  }
+  if (only === 'description') {
+    const descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
+    onProgress('Description regenerated.')
+    return partialResult('description', { recommended_description: descriptionOnly })
+  }
   // Backend and description BOTH depend on (title, bullets) but NOT on each other —
   // identical prompts and inputs as before, just issued concurrently. Quality-neutral
   // speed-up (PO gate): only genuinely independent calls overlap; the council stages

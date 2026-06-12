@@ -1925,7 +1925,24 @@ export default function ListingDetailPage() {
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-medium">
                         {item.level === 'parent' ? 'Parent Level' : 'Per Child'}
                       </span>
-                      <span className="ml-auto text-[10px] font-mono text-slate-400">{item.verdict}</span>
+                      {/* #79 per-section regen: re-run JUST this section's agent (~30-60s, a
+                          fraction of the cost) anchored on the stored title — the full audit
+                          button above is untouched for whole-listing refreshes. */}
+                      {(() => {
+                        const sectionOf: Record<string, string> = { title: 'title', description: 'description', backend_keywords: 'keywords', bullet_1: 'bullets' }
+                        const section = sectionOf[item.element]
+                        if (!section) return null
+                        return (
+                          <button
+                            onClick={() => generateAiRecs(section)}
+                            disabled={aiLoading}
+                            title={`Regenerate only the ${section === 'keywords' ? 'backend keywords' : section} — title/bullets keep their full quality council (~1-2 min); description/backend ~30-60s. Either way a fraction of the full 3-4 min audit. Other sections keep your stored recommendation; everything stays anchored on the stored title.`}
+                            className="ml-auto text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 font-medium">
+                            {aiLoading ? '…' : `↻ Regenerate ${section === 'keywords' ? 'backend' : section === 'bullets' ? 'all 5 bullets' : section}`}
+                          </button>
+                        )
+                      })()}
+                      <span className={`${['title', 'description', 'backend_keywords', 'bullet_1'].includes(item.element) ? '' : 'ml-auto '}text-[10px] font-mono text-slate-400`}>{item.verdict}</span>
                     </div>
 
                     {/* Row 2: Current Status */}
