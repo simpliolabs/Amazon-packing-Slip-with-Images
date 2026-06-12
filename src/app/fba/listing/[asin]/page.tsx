@@ -1014,7 +1014,12 @@ export default function ListingDetailPage() {
       (pd.pushable ?? isPushableDetail(pd.field_name)) &&
       pd.enum_valid !== false &&
       (pd.recommended_value ?? '').trim() !== '' &&
-      (pd.current_value ?? '').trim() !== pd.recommended_value.trim(),
+      (pd.current_value ?? '').trim() !== pd.recommended_value.trim() &&
+      // Item Highlight is write-blocked by Amazon until its July 27, 2026 launch (error
+      // 100476 everywhere, incl. Seller Central) — including it in Auto Push guarantees a
+      // failed row every run. Excluded until launch day; the single-field card still shows
+      // it for copy/planning. KEEP IN SYNC with isWriteBlockedPreLaunch (server).
+      !((/title_differentiation|item_highlights/i.test(pd.sp_api_key ?? '') || /^item highlights?$/i.test(pd.field_name.trim())) && Date.now() < Date.parse('2026-07-27T00:00:00Z')),
     )
   }, [aiRecs])
 
@@ -1095,7 +1100,19 @@ export default function ListingDetailPage() {
           } : prev)
         }
       } catch (e) {
-        setItem(i, { status: 'failed', note: e instanceof Error ? e.message : 'Push failed' })
+        const msg = e instanceof Error ? e.message : 'Push failed'
+        setItem(i, { status: 'failed', note: msg })
+        // GATEWAY-class failure (502 / dead stream / dropped connection) = the SERVER is
+        // restarting — almost always a Coolify deploy mid-sequence (live failure: Neck
+        // succeeded, then Sleeve/Closure/Highlight all died one after another while the
+        // runner kept hammering the restarting container). STOP the sequence and hold the
+        // rest instead of burning every remaining field against a dead server.
+        if (/502|Bad Gateway|Stream ended|Connection dropped|gateway/i.test(msg)) {
+          for (let j = i + 1; j < items.length; j++) {
+            if (!items[j].skip) setItem(j, { note: 'Held — server restart detected (likely a deploy). Close and re-run Auto Push in ~3 minutes; fields already accepted stay pushed.' })
+          }
+          break
+        }
       }
     }
     // ONE fresh score read at the end (each push already re-scored server-side).
@@ -2281,6 +2298,16 @@ export default function ListingDetailPage() {
                   {needsUpdate > 0
                     ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">{needsUpdate} of {perChildRows.length} need update</span>
                     : <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium">all {perChildRows.length} match</span>}
+                  {/* PO: "I don't see a way to regenerate just keywords" — the per-section button
+                      lived only on the action-plan card; surface it HERE where the per-variant
+                      strings actually display. */}
+                  <button
+                    onClick={() => generateAiRecs('keywords')}
+                    disabled={aiLoading}
+                    title="Regenerate only the per-variant backend search terms (~30-60s) — anchored on the stored title + bullets; fills each child to the 250-byte budget."
+                    className="text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 font-medium">
+                    {aiLoading ? '⏳ Regenerating… hold on' : '↻ Regenerate backend'}
+                  </button>
                 </div>
                 {backendItem?.instruction && <p className="text-xs text-slate-600 mb-2">{backendItem.instruction}</p>}
                 {perChildRows.length === 0 ? (
@@ -2936,10 +2963,16 @@ export default function ListingDetailPage() {
                         <p className="text-[11px] text-slate-500 truncate">{it.value}</p>
                       </span>
                     </label>
-                    <span className={`text-[10px] font-semibold whitespace-nowrap shrink-0 ${
+                    {/* Long error/held notes WRAP in their own column instead of overflowing
+                        across the field label (the 502 message was painting over the rows). */}
+                    <span className={`text-[10px] font-semibold shrink-0 max-w-[55%] text-right ${
                       it.status === 'done' ? 'text-emerald-600' : it.status === 'failed' ? 'text-red-600' : it.status === 'pushing' ? 'text-violet-600 animate-pulse' : 'text-slate-400'
                     }`}>
-                      {it.status === 'ready' ? 'Ready' : it.status === 'pushing' ? 'Pushing…' : it.status === 'done' ? `✓ ${it.note ?? 'Pushed'}` : `✗ ${it.note ?? 'Failed'}`}
+                      {it.status === 'ready'
+                        ? (it.note ? <span className="block whitespace-normal break-words font-normal">{it.note}</span> : 'Ready')
+                        : it.status === 'pushing' ? 'Pushing…'
+                        : it.status === 'done' ? `✓ ${it.note ?? 'Pushed'}`
+                        : <span className="block whitespace-normal break-words">✗ {it.note ?? 'Failed'}</span>}
                     </span>
                   </div>
                 ))}
