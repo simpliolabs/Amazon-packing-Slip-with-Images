@@ -2873,15 +2873,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
   // synonyms / occasion / seasonal. Whole coherent phrases, filled toward ~240 bytes.
   // Sorted by opportunity so the highest-value phrases land first.
-  onProgress('Distributing backend keywords...')
+  onProgress('Distributing backend keywords + writing description...')
   const backendPool = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED'].includes(k.actionType))
     .sort((a, b) => b.opportunityScore - a.opportunityScore)
-  const perChild = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
-
-  // Description (always generated — indexed field)
-  onProgress('Writing description...')
-  const description = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
+  // Backend and description BOTH depend on (title, bullets) but NOT on each other —
+  // identical prompts and inputs as before, just issued concurrently. Quality-neutral
+  // speed-up (PO gate): only genuinely independent calls overlap; the council stages
+  // (proposers → adversary → judge) stay sequential because their order IS the quality.
+  const [perChild, description] = await Promise.all([
+    runBackendAgent(input, finalTitle, bullets, backendPool, designName),
+    runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands),
+  ])
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
