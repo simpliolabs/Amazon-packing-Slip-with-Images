@@ -30,7 +30,7 @@ import {
 } from '../keyword-engine';
 import { captureRankSnapshots } from '../keyword-engine/cacheService';
 import { researchKeywords } from '../keyword-engine/keywordResearcher';
-import { loadListingContentForPresence } from '../keyword-engine/loadListingContent';
+import { loadListingRowsForPresence } from '../keyword-engine/loadListingContent';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -110,9 +110,10 @@ export async function syncKeywordIntelligence(
         // Re-run engine on cached data to get fresh presence analysis.
         // NOT .single(): an ASIN has FBA+FBM twin rows and .single() errors on 2+ matches,
         // which silently fed {} to the engine → every keyword flagged "nowhere" (B0FK8NM9RT).
-        const listing = await loadListingContentForPresence(supabase, asin);
+        // ALL twin rows are passed — presence is OR'd per row (divergent twins can't shadow).
+        const listingRows = await loadListingRowsForPresence(supabase, asin);
 
-        const jsResult = runKeywordEngine(asin, rawCached as import('../keyword-engine').RawKeywordRow[], listing ?? {}, 'jungle_scout');
+        const jsResult = runKeywordEngine(asin, rawCached as import('../keyword-engine').RawKeywordRow[], listingRows, 'jungle_scout');
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
         await storeAnalysis(asin, mergedKeywords);
 
@@ -169,11 +170,11 @@ export async function syncKeywordIntelligence(
       });
 
       if (researchResult.allKeywords.length > 0) {
-        // Fetch listing content for presence check (twin-safe — see loadListingContentForPresence)
-        const listing = await loadListingContentForPresence(supabase, asin);
+        // Fetch listing content for presence check (twin-safe; all rows, OR'd per row)
+        const listingRows = await loadListingRowsForPresence(supabase, asin);
 
         // Run engine on research results (against OUR listing content)
-        const jsResult = runKeywordEngine(asin, researchResult.allKeywords, listing ?? {}, 'jungle_scout');
+        const jsResult = runKeywordEngine(asin, researchResult.allKeywords, listingRows, 'jungle_scout');
 
         // Merge JS results into SQP results (SQP takes precedence for same keywords)
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);

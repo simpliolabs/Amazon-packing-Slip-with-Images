@@ -11,7 +11,7 @@
  * All other engine files are pure functions called from here.
  */
 
-import { checkPresence, ListingContent } from './checkPresence';
+import { checkPresence, checkPresenceAny, ListingContent } from './checkPresence';
 import { calculateScore, ScoringInputs } from './calculateScore';
 import { generateAction, prioritizeActions, KeywordAction, ActionContext } from './generateActions';
 
@@ -196,7 +196,9 @@ function normalizeJungleScoutRow(row: JungleScoutKeywordRow): {
 export function runKeywordEngine(
   asin: string,
   rawKeywords: RawKeywordRow[],
-  listing: ListingContent,
+  // Single row, or ALL of the ASIN's listing_content rows (FBA+FBM twins) — presence is
+  // then OR'd per row (checkPresenceAny) so divergent twins can't shadow each other.
+  listing: ListingContent | ListingContent[],
   dataSource: 'sqp' | 'jungle_scout' | 'inherited'
 ): EngineResult {
   if (!rawKeywords || rawKeywords.length === 0) {
@@ -222,8 +224,10 @@ export function runKeywordEngine(
     // Skip keywords with zero volume (noise)
     if (normalized.searchVolume < 50) continue;
 
-    // Step 1: Check presence in listing
-    const presence = checkPresence(normalized.keyword, listing);
+    // Step 1: Check presence in listing (per-row OR when twin rows are passed)
+    const presence = Array.isArray(listing)
+      ? checkPresenceAny(normalized.keyword, listing)
+      : checkPresence(normalized.keyword, listing);
 
     // Step 2: Calculate opportunity score
     const scoringInputs: ScoringInputs = {

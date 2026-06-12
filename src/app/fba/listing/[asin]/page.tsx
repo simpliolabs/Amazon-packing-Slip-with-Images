@@ -2599,12 +2599,12 @@ export default function ListingDetailPage() {
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex gap-1">
-                          {kw.inTitle && <span className="text-[9px] bg-blue-50 text-blue-600 px-1 rounded" title="In your Title (as of the last sync)">T</span>}
-                          {kw.inBullets && <span className="text-[9px] bg-green-50 text-green-600 px-1 rounded" title="In your Bullets (as of the last sync)">B</span>}
-                          {kw.inDescription && <span className="text-[9px] bg-purple-50 text-purple-600 px-1 rounded" title="In your Description (as of the last sync)">D</span>}
-                          {kw.inBackend && <span className="text-[9px] bg-slate-100 text-slate-600 px-1 rounded" title="In your Backend search terms (as of the last sync)">K</span>}
+                          {kw.inTitle && <span className="text-[9px] bg-blue-50 text-blue-600 px-1 rounded" title="In your Title (checked live against current content)">T</span>}
+                          {kw.inBullets && <span className="text-[9px] bg-green-50 text-green-600 px-1 rounded" title="In your Bullets (checked live against current content)">B</span>}
+                          {kw.inDescription && <span className="text-[9px] bg-purple-50 text-purple-600 px-1 rounded" title="In your Description (checked live against current content)">D</span>}
+                          {kw.inBackend && <span className="text-[9px] bg-slate-100 text-slate-600 px-1 rounded" title="In your Backend search terms (checked live against current content)">K</span>}
                           {!kw.inTitle && !kw.inBullets && !kw.inDescription && !kw.inBackend && (
-                            <span className="text-[9px] text-red-500" title="Not found anywhere in your listing at the last sync — Regenerate weaves it in, then Ship">nowhere</span>
+                            <span className="text-[9px] text-red-500" title="Not found anywhere in your current listing content (checked live) — Regenerate weaves it in, then Ship">nowhere</span>
                           )}
                         </div>
                       </td>

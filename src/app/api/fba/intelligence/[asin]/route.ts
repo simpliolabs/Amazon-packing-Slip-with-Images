@@ -34,8 +34,8 @@ import { syncKeywordIntelligence } from '@/lib/sync/syncKeywordIntelligence';
 import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
-import { checkPresence } from '@/lib/keyword-engine/checkPresence';
-import { loadListingContentForPresence } from '@/lib/keyword-engine/loadListingContent';
+import { checkPresenceAny } from '@/lib/keyword-engine/checkPresence';
+import { loadListingRowsForPresence, loadRepresentativeListingRow } from '@/lib/keyword-engine/loadListingContent';
 
 // resolveToChildAsin extracted to @/lib/fba/resolveAsin (shared with the rank-analysis route, no fork).
 
@@ -134,8 +134,9 @@ export async function GET(
       const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
 
       // Fetch listing title for seed fallback (needed when no vision identity exists).
-      // Twin-safe: .single() errors when the ASIN has FBA+FBM rows (see loadListingContentForPresence).
-      const listingTitle = (await loadListingContentForPresence(supabase, childAsin))?.title || undefined;
+      // Twin-safe: .single() errors when the ASIN has FBA+FBM rows. Representative row, NOT
+      // the presence union — a seed must be ONE title, not two concatenated.
+      const listingTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined;
 
       // Full sync path — use resolved child ASIN
       result = await syncKeywordIntelligence(childAsin, {
@@ -196,12 +197,13 @@ export async function GET(
     // research run (they price the opportunity at research time). Best-effort: a missing
     // content row leaves stored flags untouched.
     try {
-      const live = await loadListingContentForPresence(supabase, childAsin);
-      if (live) {
+      const liveRows = await loadListingRowsForPresence(supabase, childAsin);
+      if (liveRows.length > 0) {
         type PresenceRow = { keyword: string; inTitle?: boolean; inBullets?: boolean; inDescription?: boolean; inBackend?: boolean };
         const recompute = (rows?: PresenceRow[]) => {
           for (const r of rows ?? []) {
-            const p = checkPresence(r.keyword, live);
+            // OR'd across the ASIN's FBA+FBM twin rows — divergent twins can't shadow each other.
+            const p = checkPresenceAny(r.keyword, liveRows);
             r.inTitle = p.inTitle;
             r.inBullets = p.inBullets;
             r.inDescription = p.inDescription;
@@ -277,8 +279,8 @@ export async function POST(
       .single();
     const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
 
-    // Fetch listing title for seed fallback (twin-safe — .single() errors on FBA+FBM rows)
-    const listingTitle = (await loadListingContentForPresence(supabase, childAsin))?.title || undefined;
+    // Fetch listing title for seed fallback (twin-safe; representative row — a seed must be ONE title)
+    const listingTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined;
 
     // Optional seller-typed research seed (Intelligence tab "Re-research" box). Tolerant parse —
     // the POST historically has no body, so absence must not break the existing trigger.
