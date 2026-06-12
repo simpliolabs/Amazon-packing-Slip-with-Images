@@ -20,7 +20,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { FIELD_CONFIG, isPushField } from '@/lib/fba/pushFields'
 import { resolveDetailAttribute } from '@/lib/fba/productDetailAttrs'
-import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueShape, buildShapedDetailValue } from '@/lib/fba/productTypeDefinitions'
+import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, getAttributeSubschema } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
 import {
   executePush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff, requestPushCancel,
@@ -69,7 +69,11 @@ export async function GET(req: NextRequest) {
       // of the exact patch entry — read-only proof of the write shape before any push.
       const valueShape = await getDetailValueShape(productType, spApiKey, ptOpts)
       const samplePatchValue = valueShape ? buildShapedDetailValue(valueShape, '<VALUE>', MARKETPLACE_ID) : null
-      return NextResponse.json({ sku, detailField, spApiKey, resolvedVia, productType, valueShape, samplePatchValue, ...inspect })
+      // Ground truth for shape debugging: the RAW subschema node + every calibration variant
+      // the push would probe (the static read guessed wrong on SHIRT neck — see the raw JSON).
+      const rawSubschema = await getAttributeSubschema(productType, spApiKey, ptOpts)
+      const calibrationVariants = valueShape ? buildShapedDetailValueVariants(valueShape, '<VALUE>', MARKETPLACE_ID) : null
+      return NextResponse.json({ sku, detailField, spApiKey, resolvedVia, productType, valueShape, samplePatchValue, calibrationVariants, rawSubschema, ...inspect })
     }
 
     // ── DETAILS branch ─────────────────────────────────────────────────────────

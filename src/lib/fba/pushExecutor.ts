@@ -39,7 +39,12 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, getDetailValueShape, buildShapedDetailValue, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
+import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
+
+// Winning write-form per (productType|attribute), discovered by calibration against Amazon's
+// validator. Process-lifetime: schemas are static, so the form that validates once keeps
+// validating; a deploy restart just re-calibrates on the next push (one extra preview call).
+const _detailFormCache = new Map<string, number>()
 import { getProductType, tryGetProductType } from '@/lib/amazon/productType'
 
 // ── Cancellation (streaming pushes) ──────────────────────────────────────────
@@ -626,15 +631,17 @@ async function patchSkuDetail(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: DetailAttribute, value: string, mode: 'VALIDATION_PREVIEW' | 'LIVE',
   valueShape?: DetailValueShape | null,
+  /** Calibrated patch value (a specific write-form variant) — overrides the builders. */
+  patchValue?: Record<string, unknown>[],
 ): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
       // Composite attributes (SHIRT neck/closure/sleeve) need the value on their schema
       // sub-field — the flat shape is accepted then silently dropped (0/89 applied live).
-      value: valueShape
+      value: patchValue ?? (valueShape
         ? buildShapedDetailValue(valueShape, value, MARKETPLACE_ID)
-        : buildDetailPatchValue(attribute, value, MARKETPLACE_ID) }],
+        : buildDetailPatchValue(attribute, value, MARKETPLACE_ID)) }],
   }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
   const url =
@@ -749,13 +756,44 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             } catch (e) { console.warn('[push-content/details] keyword_push_log insert failed:', e) }
           }
 
+          // ── CALIBRATE the write form against Amazon's own validator (composites only) ──
+          // Reading the schema statically guessed wrong on SHIRT neck (every patch INVALID,
+          // live 2026-06-12): the same sub-field can be a {value,language_tag} object, a bare
+          // enum string, or a oneOf union of both. VALIDATION_PREVIEW performs no write — so
+          // probe the variants on the FIRST SKU, use the survivor for the whole family, and
+          // refuse loudly if Amazon rejects them all (no more 82-row failure cascades).
+          let calibratedValueFor: ((v: string) => Record<string, unknown>[] | undefined) = () => undefined
+          if (ctx.valueShape) {
+            const shape = ctx.valueShape
+            const formKey = `${productType}|${ctx.attribute.spApiKey}`
+            const variants = buildShapedDetailValueVariants(shape, ctx.recommendedValue, MARKETPLACE_ID)
+            let winIdx = _detailFormCache.has(formKey) ? (_detailFormCache.get(formKey) as number) : -1
+            if (winIdx < 0 || winIdx >= variants.length) {
+              winIdx = -1
+              let lastErr: string | undefined
+              for (let i = 0; i < variants.length; i++) {
+                emit({ type: 'progress', sku: diff[0].sku, status: 'validating', current: diff[0].current, proposed: ctx.recommendedValue })
+                const probe = await patchSkuDetail(sellerId, token, productType, diff[0].sku, ctx.attribute, ctx.recommendedValue, 'VALIDATION_PREVIEW', shape, variants[i].value)
+                if (probe.ok) { winIdx = i; _detailFormCache.set(formKey, i); break }
+                lastErr = probe.error
+                await sleep(PATCH_DELAY_MS)
+              }
+              if (winIdx < 0) {
+                emit({ type: 'error', error: `Amazon's validator rejected every known write form for "${ctx.detailField}" (${ctx.attribute.spApiKey}) — nothing was pushed to any SKU. Amazon's message: ${lastErr ?? '(none)'}` })
+                return
+              }
+              console.log(`[push-content] calibrated ${formKey} -> write form "${variants[winIdx].id}"`)
+            }
+            calibratedValueFor = (v: string) => buildShapedDetailValueVariants(shape, v, MARKETPLACE_ID)[winIdx]?.value
+          }
+
           const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
           let cancelled = false
           for (const item of diff) {
             if (pushCancelled(params.cancel_token)) { cancelled = true; break }
             const newValueStr = ctx.recommendedValue
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
-            const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape)
+            const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape, calibratedValueFor(newValueStr))
             if (!preview.ok) {
               // Amazon's pre-launch wall: the attribute is in the schema + Seller Central form, but
               // Listings-API writes stay refused until the July 27, 2026 launch. Say so plainly
@@ -769,7 +807,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               await sleep(PATCH_DELAY_MS)
               continue
             }
-            const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape)
+            const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape, calibratedValueFor(newValueStr))
             const status = live.ok ? 'accepted' : 'failed'
             results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
