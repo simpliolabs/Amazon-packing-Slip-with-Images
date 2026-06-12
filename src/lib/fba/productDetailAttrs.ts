@@ -21,6 +21,29 @@
 
 import type { PatchValueEntry } from '@/lib/fba/pushFields'
 
+/**
+ * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
+ * emit arrays (Additional Features: ["Water Proof","Shock Proof","Temperature Proof"] —
+ * the exact row that hard-crashed the B0GCF11RKL listing page) or bare numbers (capacity
+ * specs). Every consumer downstream (.trim(), byte caps, PATCH bodies) assumes string, so
+ * normalize at EVERY boundary with this: pipeline write, recommendations GET, push read.
+ */
+export function detailValueToString(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  if (Array.isArray(v)) return v.map((x) => detailValueToString(x)).filter(Boolean).join(', ')
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (typeof v === 'object') {
+    // {value, unit} shapes from spec-style audits; anything else degrades to JSON.
+    const o = v as Record<string, unknown>
+    if (typeof o.value === 'string' || typeof o.value === 'number') {
+      return `${o.value}${typeof o.unit === 'string' && o.unit ? ` ${o.unit}` : ''}`
+    }
+    try { return JSON.stringify(v) } catch { return '' }
+  }
+  return String(v)
+}
+
 export type DetailScope = 'broadcast' | 'per-variant'
 
 export interface DetailAttribute {
