@@ -524,7 +524,11 @@ export async function POST(req: NextRequest) {
       .single()
     const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null } | null
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
-    const analysis = (await getStoredAnalysis(analysisAsin, 50)) ?? []
+    // 150, not 50: opportunityScore is gap-amplified, so right after the seller PUSHES
+    // keywords the covered terms collapse to raw/3 and sink BELOW the top-50 cut — the
+    // next regen then never even saw the listing's best (now-covered) terms. The pipeline's
+    // own pools slice and byte-cap downstream; passing the full stored universe costs nothing.
+    const analysis = (await getStoredAnalysis(analysisAsin, 150)) ?? []
 
     // ── #79 per-section regen: load the STORED recommendation — its title/bullets anchor the
     // partial run (bullets regenerate against the already-approved title). Row missing or
