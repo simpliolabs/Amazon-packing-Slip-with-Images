@@ -237,6 +237,18 @@ function stripContradictedGarments(text: string, trustedHaystack: string): strin
   return text.replace(re, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!;:])/g, '$1').replace(/,\s*,/g, ',').trim()
 }
 
+/** BACKEND variant of the hard-audience rule: search terms are invisible, so instead of
+ *  swapping we REMOVE the opposite gender's standalone tokens ("…darlin mens black men…"
+ *  on a Female listing — PO: "it is still using MAN/MEN in keywords, WHY?"). Compound
+ *  words survive (\b keeps "businesswoman" intact under Male). Lean_* keeps both genders
+ *  (soft re-weighting only — cross-traffic is the point of lean). */
+function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
+  const re = lean === 'female'
+    ? /\b(?:men|mens|man|male|boys?)\b/gi
+    : /\b(?:women|womens|woman|ladies|female|girls?)\b/gi
+  return s.replace(re, '').replace(/\s{2,}/g, ' ').trim()
+}
+
 /** HARD audience normalization (seller selected Male or Female outright): the opposite
  *  gender's word must not survive into customer copy. Deterministic swap — "Men's" →
  *  "Women's", "Men" → "Women" (mirrored for Male) — keeps the sentence readable.
@@ -3189,7 +3201,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .sort((a, b) => b.opportunityScore - a.opportunityScore)
   // #79 partial runs: exactly one of the pair, anchored on the stored title+bullets.
   if (only === 'keywords') {
-    const perChildOnly = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
+    let perChildOnly = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
+    if (lean === 'female' || lean === 'male') {
+      perChildOnly = perChildOnly.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+    }
     onProgress('Backend keywords regenerated.')
     return partialResult('keywords', { per_child_keywords: perChildOnly })
   }
@@ -3204,10 +3219,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // identical prompts and inputs as before, just issued concurrently. Quality-neutral
   // speed-up (PO gate): only genuinely independent calls overlap; the council stages
   // (proposers → adversary → judge) stay sequential because their order IS the quality.
-  const [perChild, descriptionRaw] = await Promise.all([
+  let [perChild, descriptionRaw] = await Promise.all([
     runBackendAgent(input, finalTitle, bullets, backendPool, designName),
     runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands),
   ])
+  // HARD audience: backend search terms drop the opposite gender's standalone tokens
+  // (PO caught "…darlin mens black men…" persisting on a Female listing).
+  if (lean === 'female' || lean === 'male') {
+    perChild = perChild.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+  }
   // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience).
   let description = apparelProduct
     ? stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())

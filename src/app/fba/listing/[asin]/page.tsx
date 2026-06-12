@@ -1,7 +1,7 @@
 'use client'
 
 import { useParams, useRouter } from 'next/navigation'
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
@@ -269,6 +269,11 @@ export default function ListingDetailPage() {
   const [bulkItems, setBulkItems] = useState<BulkPushItem[]>([])
   const [bulkRunning, setBulkRunning] = useState(false)
   const [bulkFinished, setBulkFinished] = useState(false)
+  // Mirrors (pushLoading || bulkRunning) for guards inside STABLE callbacks — a ref can't
+  // go stale the way a useCallback-captured boolean can (the concurrent-push guard relies
+  // on this being current at click time).
+  const pushActiveRef = useRef(false)
+  useEffect(() => { pushActiveRef.current = pushLoading || bulkRunning }, [pushLoading, bulkRunning])
   // ── Family-SKUs view — full set of FBA + FBM twins + variation parent SKU. The DB cache
   // (listing_content) historically deduped some FBA/FBM pairs, so cards that render from
   // it alone hid the FBM twins (the seller saw "3 children" but the push hit 6).
@@ -741,6 +746,14 @@ export default function ListingDetailPage() {
   // ─── Ship a content section to Amazon (preview → confirm) ─────────────────
   // detailField is only used for field='details' (one detail per click).
   const openPushPreview = useCallback(async (field: PushField, detailField?: string) => {
+    // CONCURRENT-PUSH GUARD: this function RESETS all shared push state below. Opening a
+    // second Ship modal while a push streams would clobber the running push's tracking
+    // (PO lost the title push's pill mid-146-SKU send by clicking Push keywords — the
+    // server still finished it, but the UI lost it and both streams raced the same state).
+    if (pushActiveRef.current) {
+      window.alert('A push is still running (see the progress pill, bottom-right). Let it finish, or use "Queue in background" next time — queued pushes run server-side and can overlap safely.')
+      return
+    }
     setPushField(field)
     setPushDetailField(field === 'details' ? (detailField ?? null) : null)
     setPushError(null); setPushResults(null); setPushPreview(null); setDetailOverride(''); setVerifyResults(null); setVerifyError(null); setPushProgress([]); setPushPhase('idle'); setShowPushModal(true); setPushLoading(true)
@@ -1006,6 +1019,12 @@ export default function ListingDetailPage() {
   }, [aiRecs])
 
   const openBulkPush = useCallback(() => {
+    // Same concurrent-push guard as openPushPreview — Auto Push must not start while a
+    // single push streams (two streams race the UI and double the SP-API rate).
+    if (pushActiveRef.current) {
+      window.alert('A push is still running (see the progress pill, bottom-right). Let it finish before starting Auto Push.')
+      return
+    }
     setBulkItems(bulkEligibleDetails.map((pd) => ({ field: pd.field_name, value: pd.recommended_value, status: 'ready' as const })))
     setBulkFinished(false)
     setBulkOpen(true)
@@ -1938,7 +1957,7 @@ export default function ListingDetailPage() {
                             disabled={aiLoading}
                             title={`Regenerate only the ${section === 'keywords' ? 'backend keywords' : section} — title/bullets keep their full quality council (~1-2 min); description/backend ~30-60s. Either way a fraction of the full 3-4 min audit. Other sections keep your stored recommendation; everything stays anchored on the stored title.`}
                             className="ml-auto text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 font-medium">
-                            {aiLoading ? '…' : `↻ Regenerate ${section === 'keywords' ? 'backend' : section === 'bullets' ? 'all 5 bullets' : section}`}
+                            {aiLoading ? '⏳ Regenerating… hold on' : `↻ Regenerate ${section === 'keywords' ? 'backend' : section === 'bullets' ? 'all 5 bullets' : section}`}
                           </button>
                         )
                       })()}
