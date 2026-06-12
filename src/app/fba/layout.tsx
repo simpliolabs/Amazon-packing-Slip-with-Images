@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import DashboardLayout from '@/components/layout/DashboardLayout'
+import PushJobsBar from '@/components/fba/PushJobsBar'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 
 export default async function FBALayout({ children }: { children: React.ReactNode }) {
@@ -27,6 +28,9 @@ export default async function FBALayout({ children }: { children: React.ReactNod
   return (
     <DashboardLayout userRole={profile.role} userEmail={profile.email}>
       {children}
+      {/* Global push-queue status bar (PR #184): fixed-position, renders only while
+          jobs exist; its polling also drives the queue watchdog + self-heal. */}
+      <PushJobsBar />
     </DashboardLayout>
   )
 }
