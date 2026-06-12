@@ -34,6 +34,8 @@ import { syncKeywordIntelligence } from '@/lib/sync/syncKeywordIntelligence';
 import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
+import { checkPresence } from '@/lib/keyword-engine/checkPresence';
+import { loadListingContentForPresence } from '@/lib/keyword-engine/loadListingContent';
 
 // resolveToChildAsin extracted to @/lib/fba/resolveAsin (shared with the rank-analysis route, no fork).
 
@@ -131,13 +133,9 @@ export async function GET(
         .single();
       const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
 
-      // Fetch listing title for seed fallback (needed when no vision identity exists)
-      const { data: listingRow } = await supabase
-        .from('listing_content')
-        .select('title')
-        .eq('asin', childAsin)
-        .single();
-      const listingTitle = (listingRow as { title?: string } | null)?.title || undefined;
+      // Fetch listing title for seed fallback (needed when no vision identity exists).
+      // Twin-safe: .single() errors when the ASIN has FBA+FBM rows (see loadListingContentForPresence).
+      const listingTitle = (await loadListingContentForPresence(supabase, childAsin))?.title || undefined;
 
       // Full sync path — use resolved child ASIN
       result = await syncKeywordIntelligence(childAsin, {
@@ -188,6 +186,33 @@ export async function GET(
       }
     } catch (e) {
       console.warn('[intelligence GET] rank-trend enrichment skipped (non-fatal):', e instanceof Error ? e.message : e);
+    }
+
+    // ── LIVE Present-In: stored inTitle/inBullets/… flags freeze at research time — and the
+    // .single() twin bug used to compute them against {} (every keyword "nowhere" while the
+    // live title literally contained the phrase — B0FK8NM9RT). Recompute against CURRENT
+    // content on every read so the Present-In column always matches what's live, agreeing
+    // with the rank panel by construction. Action chips/scores intentionally stay from the
+    // research run (they price the opportunity at research time). Best-effort: a missing
+    // content row leaves stored flags untouched.
+    try {
+      const live = await loadListingContentForPresence(supabase, childAsin);
+      if (live) {
+        type PresenceRow = { keyword: string; inTitle?: boolean; inBullets?: boolean; inDescription?: boolean; inBackend?: boolean };
+        const recompute = (rows?: PresenceRow[]) => {
+          for (const r of rows ?? []) {
+            const p = checkPresence(r.keyword, live);
+            r.inTitle = p.inTitle;
+            r.inBullets = p.inBullets;
+            r.inDescription = p.inDescription;
+            r.inBackend = p.inBackend;
+          }
+        };
+        recompute((result as { topOpportunities?: PresenceRow[] }).topOpportunities);
+        recompute((result as { allKeywords?: PresenceRow[] }).allKeywords);
+      }
+    } catch (e) {
+      console.warn('[intelligence GET] live presence recompute skipped (non-fatal):', e instanceof Error ? e.message : e);
     }
 
     // Get API usage stats for the UI meter
@@ -252,13 +277,8 @@ export async function POST(
       .single();
     const competitorAsin = (scoreData as { competitor_asin?: string } | null)?.competitor_asin || undefined;
 
-    // Fetch listing title for seed fallback
-    const { data: listingRow } = await supabase
-      .from('listing_content')
-      .select('title')
-      .eq('asin', childAsin)
-      .single();
-    const listingTitle = (listingRow as { title?: string } | null)?.title || undefined;
+    // Fetch listing title for seed fallback (twin-safe — .single() errors on FBA+FBM rows)
+    const listingTitle = (await loadListingContentForPresence(supabase, childAsin))?.title || undefined;
 
     // Optional seller-typed research seed (Intelligence tab "Re-research" box). Tolerant parse —
     // the POST historically has no body, so absence must not break the existing trigger.
