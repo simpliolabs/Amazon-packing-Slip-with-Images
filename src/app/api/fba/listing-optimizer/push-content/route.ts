@@ -20,7 +20,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { FIELD_CONFIG, isPushField } from '@/lib/fba/pushFields'
 import { resolveDetailAttribute } from '@/lib/fba/productDetailAttrs'
-import { inspectProductTypeAttribute } from '@/lib/fba/productTypeDefinitions'
+import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueShape, buildShapedDetailValue } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
 import {
   executePush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff,
@@ -41,8 +41,6 @@ export async function GET(req: NextRequest) {
     //    attribute presence, extraction). ?product_type= overrides the resolved type.
     if (url.searchParams.get('debug') === '1' && rawField === 'details') {
       const detailField = url.searchParams.get('detail_field') || 'Department'
-      const attribute = resolveDetailAttribute(detailField)
-      if (!attribute) return NextResponse.json({ error: `unknown detail "${detailField}"` }, { status: 400 })
       const supabase = await createAdminClient()
       const { data: skuRows } = await supabase.from('listing_content').select('sku').eq('parent_asin', parentAsin).limit(1)
       const sku = (skuRows as { sku?: string }[] | null)?.[0]?.sku ?? null
@@ -56,10 +54,22 @@ export async function GET(req: NextRequest) {
       } catch (e) {
         return NextResponse.json({ stage: 'auth', sku, error: e instanceof Error ? e.message : String(e) })
       }
-      const inspect = await inspectProductTypeAttribute(productType, attribute.spApiKey, {
-        token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
-      })
-      return NextResponse.json({ sku, detailField, spApiKey: attribute.spApiKey, productType, ...inspect })
+      const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+      // Resolve like the regen does: static map first, else the dynamic schema-title match —
+      // so the debug view can introspect composite keys ("Neck" → `neck`), not just static names.
+      let spApiKey = resolveDetailAttribute(detailField)?.spApiKey ?? null
+      let resolvedVia: 'static' | 'schema-title' | null = spApiKey ? 'static' : null
+      if (!spApiKey) {
+        const dyn = await resolveSpApiKeyFromTitle(productType, detailField, ptOpts)
+        if (dyn) { spApiKey = dyn.spApiKey; resolvedVia = 'schema-title' }
+      }
+      if (!spApiKey) return NextResponse.json({ error: `unknown detail "${detailField}" (no static or schema-title match)` }, { status: 400 })
+      const inspect = await inspectProductTypeAttribute(productType, spApiKey, ptOpts)
+      // The composite value path the push will use (null = flat legacy shape) + a sample
+      // of the exact patch entry — read-only proof of the write shape before any push.
+      const valueShape = await getDetailValueShape(productType, spApiKey, ptOpts)
+      const samplePatchValue = valueShape ? buildShapedDetailValue(valueShape, '<VALUE>', MARKETPLACE_ID) : null
+      return NextResponse.json({ sku, detailField, spApiKey, resolvedVia, productType, valueShape, samplePatchValue, ...inspect })
     }
 
     // ── DETAILS branch ─────────────────────────────────────────────────────────

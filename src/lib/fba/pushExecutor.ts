@@ -39,7 +39,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema } from '@/lib/fba/productTypeDefinitions'
+import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, getDetailValueShape, buildShapedDetailValue, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
 
 export const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -361,6 +361,11 @@ interface DetailContext {
    *  value; the seller must pick from acceptedValues. The PREVIEW surfaces this so the modal shows a
    *  picker; the PUSH blocks unless a valid value-override is supplied (Part 2b seller-picker). */
   enumInvalid?: boolean
+  /** COMPOSITE attributes only (SHIRT neck/closure/sleeve): the schema-derived nesting for the
+   *  patch value. The flat shape into a composite is ACCEPTED then silently dropped by Amazon
+   *  (live-verified 0/89 applied) — the value must sit on the sub-field the editor reads
+   *  (neck.neck_style, sleeve.type, …). null/undefined = flat attribute, legacy builder. */
+  valueShape?: DetailValueShape | null
 }
 
 /** Load + validate the audit's recommendation for one detail attribute. Returns null on
@@ -413,6 +418,7 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   let acceptedValues: string[] | undefined
   let normalizedFrom: string | undefined
   let enumInvalid = false
+  let valueShape: DetailValueShape | null = null
 
   // ── Enum validation (Feature B) — coerce the value (audit OR seller override) to an accepted member;
   // FLAG (don't error) when uncoercible so the PREVIEW can show the seller-picker and the PUSH blocks.
@@ -428,9 +434,8 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
       const token = await getAccessToken()
       const sellerId = await getSellerId()
       const productType = await getProductType(sellerId, token, sku)
-      const c = await coerceDetailValue(productType, attribute.spApiKey, recommendedValue, {
-        token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT,
-      })
+      const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+      const c = await coerceDetailValue(productType, attribute.spApiKey, recommendedValue, ptOpts)
       if (c.isEnum) {
         acceptedValues = c.accepted
         if (!c.valid) {
@@ -441,12 +446,18 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
           console.log(`[push-content] enum-coerced ${attribute.spApiKey}: "${normalizedFrom}" -> "${recommendedValue}" (productType ${productType})`)
         }
       }
+      // COMPOSITE shape (neck/closure/sleeve): derive the nested patch path from the same
+      // schema. Best-effort like the coercion — null keeps the legacy flat builder.
+      valueShape = await getDetailValueShape(productType, attribute.spApiKey, ptOpts)
+      if (valueShape) {
+        console.log(`[push-content] composite attribute ${attribute.spApiKey}: value path ${valueShape.path.join('.')} (productType ${productType})`)
+      }
     }
   } catch (err) {
     console.warn('[push-content] enum coercion skipped:', err)
   }
 
-  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid }, error: null }
+  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape }, error: null }
 }
 
 /** Fetch a SKU's CURRENT attribute value live from Listings Items. Best-effort: '' on failure. */
@@ -579,11 +590,16 @@ async function patchSku(
 async function patchSkuDetail(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: DetailAttribute, value: string, mode: 'VALIDATION_PREVIEW' | 'LIVE',
+  valueShape?: DetailValueShape | null,
 ): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
-      value: buildDetailPatchValue(attribute, value, MARKETPLACE_ID) }],
+      // Composite attributes (SHIRT neck/closure/sleeve) need the value on their schema
+      // sub-field — the flat shape is accepted then silently dropped (0/89 applied live).
+      value: valueShape
+        ? buildShapedDetailValue(valueShape, value, MARKETPLACE_ID)
+        : buildDetailPatchValue(attribute, value, MARKETPLACE_ID) }],
   }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
   const url =
@@ -692,7 +708,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           for (const item of diff) {
             const newValueStr = ctx.recommendedValue
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
-            const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW')
+            const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape)
             if (!preview.ok) {
               // Amazon's pre-launch wall: the attribute is in the schema + Seller Central form, but
               // Listings-API writes stay refused until the July 27, 2026 launch. Say so plainly
@@ -706,7 +722,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               await sleep(PATCH_DELAY_MS)
               continue
             }
-            const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE')
+            const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape)
             const status = live.ok ? 'accepted' : 'failed'
             results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })

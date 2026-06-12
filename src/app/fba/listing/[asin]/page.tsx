@@ -45,6 +45,20 @@ interface VariantCorrection { sku: string; field: string; current: string; repla
 interface CannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
 interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; sp_api_key?: string; attr_scope?: 'broadcast' | 'per-variant'; pushable?: boolean }
 
+/** Some Amazon enums store machine tokens, not labels — SHIRT sleeve accepts "short_sleeve"
+ *  while the editor displays "Short Sleeve" (PO: "Short_sleeve should be Short Sleeve").
+ *  The stored/pushed value must stay the API token (that's what the schema accepts), so
+ *  prettify at DISPLAY only: exact label from the row's accepted list when one matches,
+ *  else Title-Case the snake token. Human-looking values pass through untouched. */
+function prettyDetailValue(value: string | null | undefined, accepted?: string[]): string {
+  const v = (value ?? '').trim()
+  if (!v || !/^[a-z0-9]+(?:_[a-z0-9]+)+$/.test(v)) return v
+  const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const hit = (accepted ?? []).find((a) => squash(a) === squash(v))
+  if (hit) return hit
+  return v.split('_').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ')
+}
+
 interface AplusModuleAction {
   module_type: string; action: 'ADD' | 'EDIT' | 'KEEP'
   content_brief: string; position: number
@@ -2256,7 +2270,7 @@ export default function ListingDetailPage() {
                                 )}
                               </span>
                               <div className="flex items-center gap-2 shrink-0">
-                                <button onClick={() => copy(pd.recommended_value, `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
+                                <button onClick={() => copy(prettyDetailValue(pd.recommended_value, pd.enum_accepted), `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
                                 {pushable ? (
                                   <button
                                     onClick={() => openPushPreview('details', pd.field_name)}
@@ -2275,9 +2289,9 @@ export default function ListingDetailPage() {
                                 )}
                               </div>
                             </div>
-                            <p className="text-xs text-slate-700">{pd.recommended_value}</p>
+                            <p className="text-xs text-slate-700">{prettyDetailValue(pd.recommended_value, pd.enum_accepted)}</p>
                             {pd.current_value && pd.current_value !== pd.recommended_value && (
-                              <p className="text-[10px] text-slate-400 line-through mt-1 break-words">{pd.current_value}</p>
+                              <p className="text-[10px] text-slate-400 line-through mt-1 break-words">{prettyDetailValue(pd.current_value, pd.enum_accepted)}</p>
                             )}
                             {!pushable && blockedReason && (
                               <p className="text-[10px] text-slate-500 italic mt-1">{blockedReason}</p>
@@ -3279,8 +3293,8 @@ export default function ListingDetailPage() {
                               <span>{d.sku}</span>
                               <span className="text-slate-400">({sizeLabel})</span>
                             </div>
-                            <p className="text-slate-400 line-through mb-0.5 break-words">{d.current || '(empty — Amazon will validate the new value)'}</p>
-                            <p className={`break-words ${d.isParent ? 'text-violet-800' : 'text-emerald-700'}`}>{d.proposed}</p>
+                            <p className="text-slate-400 line-through mb-0.5 break-words">{(pushPreview.field === 'details' ? prettyDetailValue(d.current) : d.current) || '(empty — Amazon will validate the new value)'}</p>
+                            <p className={`break-words ${d.isParent ? 'text-violet-800' : 'text-emerald-700'}`}>{pushPreview.field === 'details' ? prettyDetailValue(d.proposed) : d.proposed}</p>
                           </div>
                         )
                       })}

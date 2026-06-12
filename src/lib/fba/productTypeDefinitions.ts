@@ -354,6 +354,123 @@ export async function coerceDetailValue(
   return { value: raw, accepted, valid: false, isEnum: true }   // uncoercible enum — seller picks from `accepted`
 }
 
+/**
+ * COMPOSITE attribute value shape (the Neck/Closure/Sleeve no-op-push bug, 2026-06-12).
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Apparel schemas don't expose `neck_style`/`closure_type`/`sleeve_type` as top-level
+ * attributes — the live SHIRT schema (157 properties) only has the CONTAINERS `neck`,
+ * `closure`, `sleeve`, whose array items hold sub-objects (the Seller Central form's
+ * "Neck Style", "Closure Type", "Sleeve Type" fields). Pushing the flat
+ * `[{value, marketplace_id, language_tag}]` shape into a container PASSES
+ * VALIDATION_PREVIEW and gets ACCEPTED — then Amazon's processor silently drops it:
+ * live-verified 0/89 SKUs carrying `neck`/`closure` hours after an accepted 157-SKU
+ * push, while lastUpdatedDate moved (the submission processed, the value vanished).
+ *
+ * Fix: derive the value PATH from the attribute's own subschema (the same traversal
+ * preference extractEnum uses — first `value`-keyed enum, else any enum, else a
+ * `value`-named string property) and build the patch along it:
+ *   neck   → path [neck_style, value] → [{ neck_style: {value, language_tag?}, marketplace_id? }]
+ *   sleeve → path [type, value]       → [{ type: {value, language_tag?}, marketplace_id? }]
+ * Simple attributes resolve to path [value] → callers keep the proven flat builder
+ * (getDetailValueShape returns null for them — zero change to working pushes).
+ */
+export interface DetailValueShape {
+  /** Property-key path from the attribute's array-item root to the value leaf,
+   *  e.g. ['neck_style','value'] for SHIRT `neck`. Always non-empty. */
+  path: string[]
+  /** Index-aligned with `path`: the object CONTAINING path[i] also declares a
+   *  language_tag sibling there (so the builder adds it at that level only). */
+  languageTagAt: boolean[]
+  /** The attribute's item root declares marketplace_id (attached to the entry). */
+  hasMarketplaceId: boolean
+}
+
+/** Walk one attribute subschema and locate the value leaf + its property path.
+ *  Mirrors extractEnum's preference order so the path lands on the SAME field the
+ *  enum coercion validated against: (1) first enum under a property named `value`,
+ *  (2) first enum under any property, (3) first string property named `value`.
+ *  Exported for the ?debug route and shape tests; production callers use
+ *  getDetailValueShape (which also applies the flat-attribute bypass). */
+export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | null {
+  type Hit = { shape: DetailValueShape; kind: 'valueEnum' | 'anyEnum' | 'valueString' }
+  const hits: Hit[] = []
+  let rootHasMarketplaceId = false
+  let sawRootProps = false
+  const visit = (n: unknown, path: string[], langs: boolean[], depth: number): void => {
+    if (!n || typeof n !== 'object' || depth > 12) return
+    if (Array.isArray(n)) { for (const item of n) visit(item, path, langs, depth + 1); return }
+    const obj = n as Record<string, unknown>
+    const props = obj.properties as Record<string, unknown> | undefined
+    if (props && typeof props === 'object') {
+      // The FIRST properties map we meet is the array-item root — marketplace_id lives there.
+      if (!sawRootProps) { sawRootProps = true; rootHasMarketplaceId = Object.prototype.hasOwnProperty.call(props, 'marketplace_id') }
+      const hasLang = Object.prototype.hasOwnProperty.call(props, 'language_tag')
+      for (const [key, sub] of Object.entries(props)) {
+        // Plumbing keys never carry the attribute's value: ids/locale, and `unit` —
+        // a measurement-unit enum ("inches") must not win the path over the real field.
+        if (key === 'marketplace_id' || key === 'language_tag' || key === 'unit') continue
+        const s = sub as Record<string, unknown> | null
+        const nextPath = [...path, key]
+        const nextLangs = [...langs, hasLang]
+        if (s && typeof s === 'object' && Array.isArray(s.enum) && s.enum.length) {
+          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, hasMarketplaceId: false }, kind: key === 'value' ? 'valueEnum' : 'anyEnum' })
+        } else if (s && typeof s === 'object' && key === 'value' && (s.type === 'string' || s.type == null)) {
+          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, hasMarketplaceId: false }, kind: 'valueString' })
+        }
+        visit(sub, nextPath, nextLangs, depth + 1)
+      }
+      return
+    }
+    // Structural wrappers (items, oneOf/anyOf/allOf, …) — descend without extending the path.
+    for (const k of Object.keys(obj)) {
+      if (k === 'enum' || k === 'enumNames') continue
+      visit(obj[k], path, langs, depth + 1)
+    }
+  }
+  visit(attrNode, [], [], 0)
+  const pick = hits.find((h) => h.kind === 'valueEnum') ?? hits.find((h) => h.kind === 'anyEnum') ?? hits.find((h) => h.kind === 'valueString')
+  if (!pick) return null
+  return { ...pick.shape, hasMarketplaceId: rootHasMarketplaceId }
+}
+
+/** The schema-derived value shape for one attribute — or null when it's a plain
+ *  flat attribute (path = [value]) / schema unavailable, in which case the caller
+ *  keeps the legacy flat `{value, marketplace_id, language_tag}` builder verbatim. */
+export async function getDetailValueShape(
+  productType: string,
+  spApiKey: string,
+  opts: FetchOpts,
+): Promise<DetailValueShape | null> {
+  const schema = await fetchProductTypeSchema(productType, opts)
+  const props = (schema as { properties?: Record<string, unknown> } | null)?.properties
+  if (!props) return null
+  const shape = analyzeDetailValueShape(props[spApiKey])
+  if (!shape) return null
+  // Flat attributes (Fit Type, Model Number, Package Quantity…) keep the battle-tested
+  // legacy builder — the shaped path only engages for composites (neck/closure/sleeve…).
+  if (shape.path.length === 1 && shape.path[0] === 'value') return null
+  return shape
+}
+
+/** Build the patch entry along a composite path:
+ *  ['neck_style','value'] + "Crew Neck" → [{ neck_style: { value, language_tag? }, marketplace_id? }] */
+export function buildShapedDetailValue(
+  shape: DetailValueShape,
+  rawValue: string,
+  marketplaceId: string,
+  languageTag = 'en_US',
+): Record<string, unknown>[] {
+  let inner: unknown = rawValue
+  for (let i = shape.path.length - 1; i >= 0; i--) {
+    const wrapper: Record<string, unknown> = { [shape.path[i]]: inner }
+    if (shape.languageTagAt[i]) wrapper.language_tag = languageTag
+    inner = wrapper
+  }
+  const entry = inner as Record<string, unknown>
+  if (shape.hasMarketplaceId) entry.marketplace_id = marketplaceId
+  return [entry]
+}
+
 /** Diagnostics for the ?debug=1 route branch — pinpoints WHERE enum resolution fails
  *  (definitions HTTP status, presigned-schema status, attribute presence, extraction). */
 export async function inspectProductTypeAttribute(

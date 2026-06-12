@@ -181,6 +181,13 @@ export function isWriteBlockedPreLaunch(fieldName: string | null | undefined, sp
  * Read the listing's CURRENT value for an attribute key from the cached attributes blob.
  * Listings Items returns attributes as `Record<string, Array<{value, ...}>>`. We pull the
  * first entry's `value` and stringify it.
+ *
+ * COMPOSITE attributes (SHIRT `neck`/`closure`/`sleeve`) carry no top-level `value` —
+ * the data sits on a sub-field: neck: [{ neck_style: {value: "Crew Neck"}, … }]. Without
+ * the deep fallback every read of a composite returned '' forever (verify showed 0/89
+ * even for genuinely-applied values, and the diff's `current` column stayed blank).
+ * Fallback order: first `value`-keyed primitive anywhere in the entry, else the first
+ * primitive leaf that isn't marketplace/language/unit plumbing.
  */
 export function currentDetailValue(
   attributes: Record<string, unknown> | null | undefined,
@@ -190,6 +197,23 @@ export function currentDetailValue(
   if (!Array.isArray(arr) || arr.length === 0) return ''
   const first = arr[0] as { value?: unknown }
   const v = first?.value
-  if (v == null) return ''
-  return String(v).trim()
+  if (v != null) return String(v).trim()
+
+  const SKIP = new Set(['marketplace_id', 'language_tag', 'unit'])
+  let valueLeaf: string | null = null
+  let anyLeaf: string | null = null
+  const walk = (n: unknown, key: string, depth: number): void => {
+    if (valueLeaf || n == null || depth > 6 || SKIP.has(key)) return
+    if (typeof n === 'string' || typeof n === 'number' || typeof n === 'boolean') {
+      const s = String(n).trim()
+      if (!s) return
+      if (key === 'value') valueLeaf = s
+      else if (anyLeaf == null) anyLeaf = s
+      return
+    }
+    if (Array.isArray(n)) { for (const item of n) walk(item, key, depth + 1); return }
+    if (typeof n === 'object') { for (const [k, sub] of Object.entries(n as Record<string, unknown>)) walk(sub, k, depth + 1) }
+  }
+  walk(first, '', 0)
+  return (valueLeaf ?? anyLeaf ?? '').trim()
 }
