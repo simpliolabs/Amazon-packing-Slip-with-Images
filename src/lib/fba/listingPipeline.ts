@@ -246,7 +246,14 @@ function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
   const re = lean === 'female'
     ? /\b(?:men|mens|man|male|boys?)\b/gi
     : /\b(?:women|womens|woman|ladies|female|girls?)\b/gi
-  return s.replace(re, '').replace(/\s{2,}/g, ' ').trim()
+  let out = s.replace(re, '').replace(/\s{2,}/g, ' ').trim()
+  // Removing a token can orphan its connector ("rodeo shirt for men" → "rodeo shirt for") —
+  // a dangling preposition wastes bytes and shipped live on every child (PO screenshot).
+  // Trim connector words off both ends until a content word anchors them.
+  const EDGE_CONNECTOR = /^(?:for|with|and|or|the|a|an|to|in|on|of)\s+|\s+(?:for|with|and|or|the|a|an|to|in|on|of)$/i
+  let prev = ''
+  while (prev !== out) { prev = out; out = out.replace(EDGE_CONNECTOR, '').trim() }
+  return out
 }
 
 /** Fill each child's backend string toward the 250-byte budget (PO: "NOT utilizing all
@@ -299,6 +306,29 @@ function fillBackendToBudget(
     if (getByteLength(out) >= 244) break
   }
   return out
+}
+
+/** Post-conditions for a backend-keywords regen — catches SILENT degradation. Every LLM step
+ *  in the backend chain is try/catch best-effort, so a truncated/failed call doesn't error, it
+ *  quietly ships garbage as if healthy (live 2026-06-12: 131-byte IDENTICAL token soup across
+ *  82 children persisted without a whisper). Returns human-readable problems; [] = healthy. */
+function backendOutputProblems(
+  perChild: PipelinePerChildKeywords[],
+  children: PipelineInput['children'],
+  apparel: boolean,
+): string[] {
+  const problems: string[] = []
+  if (perChild.length === 0) return ['no per-child keyword rows were generated']
+  const minBytes = Math.min(...perChild.map((p) => getByteLength(p.keywords || '')))
+  // 190 floor: healthy output lands 244-250 (the fill's target); even a thin catalog with
+  // canonical bigrams clears 200. Only a starved pool / failed fill lands below.
+  if (minBytes < 190) problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill`)
+  const distinctColors = new Set(children.map((c) => (c.color || 'default').toLowerCase())).size
+  const distinctStrings = new Set(perChild.map((p) => p.keywords)).size
+  if (apparel && distinctColors >= 3 && distinctStrings < 2) {
+    problems.push(`all ${perChild.length} children share one identical string across ${distinctColors} colors — the per-color tail failed`)
+  }
+  return problems
 }
 
 /** Fix the doubled article when the brand itself starts with "THE" — the agents write
@@ -2156,20 +2186,31 @@ Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words,
 Return ONLY the JSON object.`
 
   const tailMap = new Map<string, string>()
-  if (apparel) try {  // color shade synonyms are an apparel concept — skip for non-apparel
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      temperature: 0.5,
-      max_tokens: 800,
-      response_format: { type: 'json_object' },
-    })
-    const parsed = parseJsonLoose<{ groups?: { color: string; keywords: string }[] }>(completion.choices[0]?.message?.content || '{}')
-    for (const g of parsed.groups ?? []) {
-      if (g?.color && typeof g.keywords === 'string') tailMap.set(g.color.toLowerCase(), g.keywords.trim())
+  if (apparel) {
+    // max_tokens 2000, not 800: a big apparel family (Darlin' = 25+ colors) sat right at the
+    // 800-token JSON truncation edge — a truncated response parses to NOTHING, the catch
+    // swallowed it, and every child silently shipped the IDENTICAL bare core (live 2026-06-12:
+    // 82 children, one string). One retry for the same reason — truncation/hiccups are transient.
+    for (let attempt = 0; attempt < 2 && tailMap.size === 0; attempt++) {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          temperature: 0.5,
+          max_tokens: 2000,
+          response_format: { type: 'json_object' },
+        })
+        const parsed = parseJsonLoose<{ groups?: { color: string; keywords: string }[] }>(completion.choices[0]?.message?.content || '{}')
+        for (const g of parsed.groups ?? []) {
+          if (g?.color && typeof g.keywords === 'string') tailMap.set(g.color.toLowerCase(), g.keywords.trim())
+        }
+      } catch {
+        /* tail is best-effort; core still ships */
+      }
     }
-  } catch {
-    /* tail is best-effort; core still ships */
+    if (colors.length > 1 && tailMap.size === 0) {
+      console.warn(`[runBackendAgent] color-tail call returned nothing for ${colors.length} colors — children will share the core string`)
+    }
   }
 
   // ── Per-child CAPACITY awareness ──
@@ -3255,21 +3296,51 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
   // synonyms / occasion / seasonal. Whole coherent phrases, filled toward ~240 bytes.
-  // Sorted by opportunity so the highest-value phrases land first.
+  //
+  // POOL COMPOSITION — the push-starvation trap (live 2026-06-12): opportunityScore is
+  // gap-AMPLIFIED (raw × usageGap 1-3), so the moment the seller PUSHES the keywords the
+  // covered terms' scores collapse to raw/3 and flip toward OPTIMIZED ("fully covered").
+  // Filtering OPTIMIZED out + sorting by the collapsed score made the FIRST regen after a
+  // push draw from the uncovered dregs (opposite-gender terms the hard-lean strip then
+  // deletes, junk long-tail) — B0FKLGWZ4C regenerated 131-byte identical token soup from a
+  // 100-keyword universe. The optimizer must never treat its own placed keywords as
+  // worthless: OPTIMIZED stays IN the backend pool (it IS the hybrid's "best JS terms"),
+  // and the sort uses RAW market value (sales, then volume) which no push can deflate.
+  // IRRELEVANT (noise-marked) stays excluded. Bullets/title pools keep gap-chasing —
+  // placement decisions SHOULD prefer gaps; the backend hybrid should not.
   onProgress('Distributing backend keywords + writing description...')
   const backendPool = analysis
-    .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED'].includes(k.actionType))
-    .sort((a, b) => b.opportunityScore - a.opportunityScore)
+    .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED', 'OPTIMIZED'].includes(k.actionType))
+    .sort((a, b) =>
+      (b.keywordSales || 0) - (a.keywordSales || 0) ||
+      (b.searchVolume || 0) - (a.searchVolume || 0) ||
+      b.opportunityScore - a.opportunityScore)
   // #79 partial runs: exactly one of the pair, anchored on the stored title+bullets.
   if (only === 'keywords') {
-    let perChildOnly = await runBackendAgent(input, finalTitle, bullets, backendPool, designName)
     const ownB = ownBrandTokenSet(brandName)
-    perChildOnly = perChildOnly.map((p) => ({
-      ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
-    }))
-    if (lean === 'female' || lean === 'male') {
-      perChildOnly = perChildOnly.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+    const finishBackend = (rows: PipelinePerChildKeywords[]): PipelinePerChildKeywords[] => {
+      let out = rows.map((p) => ({
+        ...p,
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
+      }))
+      if (lean === 'female' || lean === 'male') {
+        out = out.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+      }
+      return out
+    }
+    let perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName))
+    let problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
+    if (problems.length > 0) {
+      // One retry — the failures here are transient LLM truncations/hiccups, not logic.
+      onProgress('Backend output looked degraded — retrying…')
+      perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName))
+      problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
+    }
+    if (problems.length > 0) {
+      // HONEST FAILURE (a keywords-only regen has exactly one job): refuse to persist
+      // degraded strings. Throwing aborts before the partial-persist step, so the seller's
+      // previous keywords stay exactly as approved.
+      throw new Error(`Backend keyword regen came back degraded (${problems.join('; ')}). Your previous keywords are untouched — run Regenerate backend again in a minute.`)
     }
     onProgress('Backend keywords regenerated.')
     return partialResult('keywords', { per_child_keywords: perChildOnly })
@@ -3293,17 +3364,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
   // "country western" — then leftover pool keywords), THEN the hard-lean gender strip
   // so the strip cleans additions too.
-  {
+  const finishBackendFull = (rows: PipelinePerChildKeywords[]): PipelinePerChildKeywords[] => {
     const ownB = ownBrandTokenSet(brandName)
-    perChild = perChild.map((p) => ({
+    let out = rows.map((p) => ({
       ...p,
       keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2),
     }))
+    // HARD audience: backend search terms drop the opposite gender's standalone tokens
+    // (PO caught "…darlin mens black men…" persisting on a Female listing).
+    if (lean === 'female' || lean === 'male') {
+      out = out.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+    }
+    return out
   }
-  // HARD audience: backend search terms drop the opposite gender's standalone tokens
-  // (PO caught "…darlin mens black men…" persisting on a Female listing).
-  if (lean === 'female' || lean === 'male') {
-    perChild = perChild.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+  perChild = finishBackendFull(perChild)
+  // Same degraded-output gate as the keywords-only path, but a FULL regen carries five other
+  // sections — retry the backend once, then proceed with a loud log rather than nuking the run.
+  {
+    let problems = backendOutputProblems(perChild, input.children, apparelProduct)
+    if (problems.length > 0) {
+      onProgress('Backend output looked degraded — retrying…')
+      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, designName))
+      problems = backendOutputProblems(perChild, input.children, apparelProduct)
+      if (problems.length > 0) console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
+    }
   }
   // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience).
   let description = apparelProduct
