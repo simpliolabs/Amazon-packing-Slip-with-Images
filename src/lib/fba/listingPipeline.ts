@@ -2792,6 +2792,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   remainingForBullets.sort((a, b) => b.opportunityScore - a.opportunityScore)
 
   // Stage 2 — Bullets
+  // Capacity-family detection — used by the plan filter just below AND passed to the bullets
+  // validator (PR #76) so the retry loop rejects bullets that hardcode a specific GB/TB/MB
+  // when the family spans ≥2 capacities. Mirrors the agent prompt's own capacity rule but
+  // enforces it through validation, not just instruction.
+  const bulletCapTokens = new Set<string>()
+  for (const c of input.children) {
+    const cap = capacityOf(c.sku) || capacityOf(c.title)
+    if (cap) bulletCapTokens.add(cap.toUpperCase())
+  }
+  const capacityFamilyTokens = bulletCapTokens.size >= 2 ? [...bulletCapTokens] : []
+
   // Opportunity pool for the bullets retry validator: top CRITICAL ∪ UPGRADE keywords (same
   // discipline title gets in Stage 0c, but for bullets we keep BOTH tiers since the bullets
   // scorer penalizes when 2+ CRITICAL-or-UPGRADE keywords are missing across all 5 bullets).
@@ -2810,18 +2821,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const toks = k.keyword.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
       return !toks.some((t) => ROLE_WORDS.has(t) && !titleLc.includes(t))
     })
+    // CAPACITY keywords ("128 gb sd card") belong in PER-CHILD titles/backend, never in
+    // broadcast bullets: the capacity validator + the backstop's safeKw REFUSE a hardcoded
+    // GB/TB in bullets shared across 32/64/128GB variants (it would mis-describe the
+    // siblings). Same trap as the role-word filter above — left in the plan, the scorer
+    // (#161 reads it via keyword_plan) docks bullets for keywords the generator must
+    // refuse: B0GCF11RKL froze at 17/25 AFTER shipping. Drop them so plan == placeable.
+    .filter((k) => capacityFamilyTokens.length === 0 || !CAPACITY_RE.test(k.keyword))
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
-  // Capacity-family detection — passed to the bullets validator (PR #76) so the retry
-  // loop rejects bullets that hardcode a specific GB/TB/MB when the family spans ≥2 capacities.
-  // Mirrors the agent prompt's own capacity rule but enforces it through validation, not just instruction.
-  const bulletCapTokens = new Set<string>()
-  for (const c of input.children) {
-    const cap = capacityOf(c.sku) || capacityOf(c.title)
-    if (cap) bulletCapTokens.add(cap.toUpperCase())
-  }
-  const capacityFamilyTokens = bulletCapTokens.size >= 2 ? [...bulletCapTokens] : []
   onProgress('Writing bullets...')
   const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
 

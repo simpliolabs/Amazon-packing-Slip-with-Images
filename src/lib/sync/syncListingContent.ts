@@ -796,11 +796,27 @@ export function scoreListingContent(
     // divergence. Absent/empty plan → fall back to the legacy DB derivation, capped to <=6 words to match the
     // generator's pool (the #160 alignment). Seasonal stays excluded on BOTH paths (belt-and-suspenders — the
     // generator already strips seasonal from its pool).
-    const bulletOppKw = (scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
+    // CAPACITY-FAMILY guard: when the children span ≥2 distinct GB/TB capacities, broadcast
+    // bullets can never carry a capacity keyword ("128 gb sd card") — the generator's
+    // capacity validator + the backstop's safeKw refuse it because a hardcoded capacity
+    // would mis-describe the sibling variants. Don't dock bullets for keywords the system
+    // itself must refuse (B0GCF11RKL froze at 17/25 AFTER shipping the recommended bullets).
+    // Applied to BOTH paths so plans persisted before the pipeline-side filter (and the
+    // legacy fallback) heal on the next re-score. KEEP IN SYNC with CAPACITY_RE/capacityOf
+    // in listingPipeline ("32G"/"64G." → 32GB/64GB).
+    const capRe = /\b(\d{1,4})\s?(t|g)b?\b/i
+    const familyCaps = new Set<string>()
+    for (const c of childContents) {
+      const m = `${c.sku ?? ''} ${c.title ?? ''}`.match(/\b(\d{1,4})\s?(t|g)b?\b/gi)
+      for (const x of m ?? []) familyCaps.add(x.toUpperCase().replace(/[^0-9TG]/g, '') + 'B')
+    }
+    const isCapacityFamily = familyCaps.size >= 2
+    const bulletOppKw = ((scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
       ? scoringCtx.bulletPlanKeywords.filter((k) => !isSeasonalKw(k))
       : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
           .filter((k) => !isSeasonalKw(k))
           .filter((k) => k.split(/\s+/).length <= 6)
+    ).filter((k) => !isCapacityFamily || !capRe.test(k))
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
