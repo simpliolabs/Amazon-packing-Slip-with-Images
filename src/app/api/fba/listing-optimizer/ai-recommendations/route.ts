@@ -954,7 +954,21 @@ export async function POST(req: NextRequest) {
               else if (item.element === 'product_details') secVal = secScore.features
             }
             const sectionOptimal = secVal !== null && secVal >= STRONG
-            if (live || sectionOptimal) {
+            // COHESION gate for BROADCAST sections: a strong score on the representative child
+            // means nothing if the variants carry DIFFERENT live versions — the seller saw the
+            // DESCRIPTION card say "DONE (25/25), no change needed" while the cohesion row said
+            // "variants differ — unify" (the perfect-score-vs-ship contradiction, broadcast
+            // edition). `live` already implies cohesion (every child matches the rec); only the
+            // score path needs the guard. Backend keywords are unique-per-child — exempt.
+            let distinctVersions = 0
+            if (item.element === 'title') distinctVersions = new Set(children.map((c) => norm(c.title)).filter(Boolean)).size
+            else if (item.element === 'description') distinctVersions = new Set(children.map((c) => norm(c.description)).filter(Boolean)).size
+            else if (/^bullet_(\d+)$/.test(item.element)) {
+              const n = Number(item.element.split('_')[1])
+              distinctVersions = new Set(children.map((c) => norm((c as unknown as Record<string, string | null>)[`bullet_${n}`])).filter(Boolean)).size
+            }
+            const divergent = !live && distinctVersions > 1
+            if ((live || sectionOptimal) && !divergent) {
               item.verdict = 'DONE'
               const label = item.element === 'backend_keywords' ? 'backend search terms'
                 : item.element === 'description' ? 'description'
@@ -967,6 +981,13 @@ export async function POST(req: NextRequest) {
                 ? 'No action required — your last push wrote this exact content. The copy box stays below if you need it.'
                 : 'No action required — this section is already strong. The copy box below is an optional alternative.'
               item.priority = 'NONE'   // a DONE item is not actionable — never keep the HIGH pill
+            } else if (sectionOptimal && divergent) {
+              // Strong but INCONSISTENT: quality isn't the problem — unity is. Same message
+              // as the cohesion row, so the two surfaces agree instead of contradicting.
+              item.verdict = 'REPLACE'
+              item.priority = 'MEDIUM'
+              item.current_status = `Strong copy (${secVal}/25) BUT your ${children.length} variants carry ${distinctVersions} different live versions — Ship once to unify them.`
+              item.instruction = 'Quality is fine; consistency is the gap. Ship the recommended version below so every variant matches (one click writes all of them).'
             }
           }
 

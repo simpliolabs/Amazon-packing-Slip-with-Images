@@ -249,6 +249,14 @@ function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
   return s.replace(re, '').replace(/\s{2,}/g, ' ').trim()
 }
 
+/** Fix the doubled article when the brand itself starts with "THE" — the agents write
+ *  "with the THE CEO Darlin' T-Shirt" (live nit the PO spotted in a description). */
+function fixDoubledArticleBeforeBrand(text: string, brandName: string): string {
+  if (!text || !/^the\s/i.test(brandName)) return text
+  const esc = brandName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return text.replace(new RegExp(`\\b(?:the|a|an)\\s+(?=${esc}\\b)`, 'gi'), '')
+}
+
 /** HARD audience normalization (seller selected Male or Female outright): the opposite
  *  gender's word must not survive into customer copy. Deterministic swap — "Men's" →
  *  "Women's", "Men" → "Women" (mirrored for Male) — keeps the sentence readable.
@@ -3180,6 +3188,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (apparelProduct && (lean === 'female' || lean === 'male')) {
       bullets = bullets.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
     }
+    bullets = bullets.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
   } else {
     bullets = input.priorBullets ?? []
   }
@@ -3212,6 +3221,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
     if (apparelProduct) descriptionOnly = stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
+    descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
     onProgress('Description regenerated.')
     return partialResult('description', { recommended_description: descriptionOnly })
   }
@@ -3233,6 +3243,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     ? stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
     : descriptionRaw
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
+  description = fixDoubledArticleBeforeBrand(description, brandName)
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
