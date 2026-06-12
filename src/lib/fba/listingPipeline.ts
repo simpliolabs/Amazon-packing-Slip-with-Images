@@ -70,6 +70,12 @@ export interface PipelineInput {
    *  repTitle is children[0] = the alphabetically-first variant, often a stale/secondary title that
    *  does NOT lead with the design name. Null when no score row exists. */
   canonicalTitle?: string | null
+  /** Seller-declared audience lean (PR #195, persisted in listing_seo_scores.audience_lean).
+   *  The seller knows the design's audience better than keyword statistics ("Darlin'" reads
+   *  female even when unisex keywords dominate). male/female narrow the title tail outright;
+   *  lean_male/lean_female keep the unisex tail but re-weight gendered keywords across every
+   *  pool; unisex forces the neutral tail. Null = legacy keyword-derived audience. */
+  audienceLean?: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
   /** Per-variant content block (for the audit's variant-health check) */
   variantDetails: string
   /** Keyword intelligence context block (reused for the audit agent) */
@@ -170,6 +176,33 @@ const AUDIENCE_GIFT_WORDS = new Set([
   'college', 'nursing', 'bible', 'church', 'mom', 'dad', 'mama', 'grandma', 'grandpa',
   'wife', 'husband', 'sister', 'brother', 'aunt', 'uncle', 'girlfriend', 'boyfriend',
 ])
+
+// VISUAL MOTIF nouns — claims about what is PRINTED on the artwork. The vision scan is a
+// useful witness but it HALLUCINATES motifs (live failure: it read a heart into the Darlin'
+// script font → "Comfort Colors Heart Graphic Tee" recommended for a country-western design
+// with no heart anywhere). RULE: a motif word may only appear in customer-facing copy when
+// the SELLER's own text corroborates it (canonical/live title or design name) — vision alone
+// is never sufficient for a visual claim. Generic style words are NOT motifs (handled by the
+// grounding vocab); this list is concrete drawable THINGS.
+const VISUAL_MOTIF_WORDS = new Set([
+  'heart', 'hearts', 'sunflower', 'sunflowers', 'butterfly', 'butterflies', 'skull', 'skulls',
+  'flag', 'flags', 'cross', 'crosses', 'anchor', 'rose', 'roses', 'daisy', 'daisies',
+  'leopard', 'cheetah', 'cow', 'horse', 'horses', 'cactus', 'lightning', 'rainbow',
+  'flamingo', 'peach', 'snake', 'eagle', 'wolf', 'bear', 'gnome', 'pumpkin', 'ghost',
+  'santa', 'angel', 'mushroom', 'dragonfly', 'hummingbird', 'owl', 'fox',
+])
+
+/** Strip motif words the seller's own text doesn't corroborate (vision-hallucination backstop).
+ *  trustedHaystack = canonical title + rep title + design name, lowercased. Word-boundary
+ *  removal + punctuation/space cleanup — drops the bad word, keeps the sentence. */
+function stripUngroundedMotifs(text: string, trustedHaystack: string): string {
+  if (!text) return text
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+  const bad = [...new Set(words.filter((w) => VISUAL_MOTIF_WORDS.has(w) && !new RegExp(`\\b${w.replace(/s$/, '')}`, 'i').test(trustedHaystack)))]
+  if (bad.length === 0) return text
+  const re = new RegExp(`\\b(?:${bad.join('|')})\\b`, 'gi')
+  return text.replace(re, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!;:])/g, '$1').replace(/,\s*,/g, ',').trim()
+}
 
 // Basic garment-color words. On a MULTI-variant apparel family, BROADCAST content (title /
 // bullets) is shared across every color, so a keyword carrying one specific color ("plain
@@ -1155,6 +1188,25 @@ async function runTitleAgent(
     for (const sk of input.visionDesign?.seedKeywords || []) addWords(sk)
     addWords(attributePin)                                 // garment/blank brand IS a real product attribute (trusted)
     addWords(preferredAudience)                            // men / women
+    // The SELLER'S OWN titles are legitimate grounding — they wrote them about their own
+    // product. Without these, real descriptors ("Country Western", "Vintage Rodeo") were
+    // dropped as "ungrounded" whenever the vision scan missed them, while a vision
+    // hallucination ("heart") sailed through — backwards trust (B0FKLGWZ4C).
+    addWords(input.canonicalTitle)
+    addWords(input.repTitle)
+    // TRUSTED tier for VISUAL MOTIF claims: seller text only — vision is a witness, not
+    // a source, for what's printed on the artwork (it read a heart into a script font).
+    const motifVocab = new Set<string>()
+    const addMotifWords = (s?: string | null) => {
+      if (!s) return
+      for (const w of s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+        const stem = w.replace(/s$/, '')
+        if (stem.length > 1) motifVocab.add(stem)
+      }
+    }
+    addMotifWords(designName)
+    addMotifWords(input.canonicalTitle)
+    addMotifWords(input.repTitle)
     // Generic tone/structural/gift words make NO factual claim about the artwork, so they're always
     // allowed. Only DISTINCTIVE words — the design's motifs AND era/style CLAIMS ("vintage", "90s",
     // "retro") — must be grounded in the actual design. This blocks ungrounded guesses ("vintage 90s")
@@ -1165,7 +1217,10 @@ async function runTitleAgent(
       const distinctive = kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
         .map((w) => w.replace(/s$/, ''))
         .filter((w) => w.length > 1 && !MINOR_WORDS.has(w) && !FREE.has(w))
-      return distinctive.every((w) => groundVocab.has(w))   // every DISTINCTIVE word must be on the design
+      // Motif nouns get the STRICTER test (seller text only); everything else may be
+      // grounded by the wider vocab (which includes vision + seller titles).
+      return distinctive.every((w) =>
+        (VISUAL_MOTIF_WORDS.has(w) || VISUAL_MOTIF_WORDS.has(`${w}s`)) ? motifVocab.has(w) : groundVocab.has(w))
     }
     // The verbatim money keyword (mustInclude) is the PRIMARY leak — it is mandated + hard-validated
     // into the title, bypassing the candidate filter. If it's an ungrounded CLAIM ("vintage 90s shirt")
@@ -2711,6 +2766,25 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // PIN the single highest SEARCH-VOLUME real keyword (not a synthetic attribute, not
   // seasonal — seasonal belongs in backend) so the title agent can never drop the money
   // term. This is what stopped "see you later alligator shirt" (22.7k/mo) from surviving.
+  // Seller-declared audience lean (PR #195): re-weight gendered keywords across EVERY pool
+  // BEFORE any pool is built. The seller knows the design's audience better than keyword
+  // statistics ("Darlin'" reads female even when unisex keywords dominate). lean_* is a soft
+  // re-ranking (boost matching gender, demote opposite); hard male/female demotes the
+  // opposite gender harder. Sorting-only — nothing is dropped, backend still carries both.
+  const lean = (apparelProduct && input.audienceLean) || null
+  if (lean && lean !== 'unisex') {
+    const FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
+    const MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i   // \b keeps "women" from matching "men"
+    const femaleish = lean === 'female' || lean === 'lean_female'
+    const boostRe = femaleish ? FEM_RE : MASC_RE
+    const demoteRe = femaleish ? MASC_RE : FEM_RE
+    const hard = lean === 'male' || lean === 'female'
+    for (const k of analysis) {
+      if (boostRe.test(k.keyword) && !demoteRe.test(k.keyword)) k.opportunityScore = (k.opportunityScore || 0) * 1.2
+      else if (demoteRe.test(k.keyword) && !boostRe.test(k.keyword)) k.opportunityScore = (k.opportunityScore || 0) * (hard ? 0.5 : 0.8)
+    }
+  }
+
   const mustIncludeKw = cleanGated
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !isSeasonal(k.keyword))
@@ -2725,7 +2799,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const audienceText = `${repTitle ?? ''} ${attrs.specs.join(' ')} ${cleanGated.map((k) => k.keyword).join(' ')}`.toLowerCase()
   const mentionsWomen = /\bwom[ae]n\b|womens|ladies|female/.test(audienceText)
   const mentionsMen = /\bm[ae]n\b|mens|male/.test(audienceText)
+  // Seller-declared lean OVERRIDES the keyword-derived audience: hard male/female narrows
+  // the title tail outright (their explicit choice); lean_*/unisex keeps the broad tail
+  // (lean already re-weighted the pools above).
   const preferredAudience = !apparelProduct ? ''
+    : lean === 'male' ? 'Men'
+    : lean === 'female' ? 'Women'
+    : lean ? 'Men and Women'
     : /\bunisex\b/.test(audienceText) || (mentionsWomen && mentionsMen) ? 'Men and Women'
     : mentionsWomen ? 'Women'
     : mentionsMen ? 'Men'
@@ -2818,7 +2898,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Stage 1 — Title
   onProgress('Writing title...')
-  const { title: finalTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
+  const { title: rawTitle, problems: titleProblems, retried } = await runTitleAgent(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
+  // Vision-hallucination backstop: strip VISUAL MOTIF claims ("heart") the seller's own
+  // text doesn't corroborate (live failure: vision read a heart into the Darlin' script
+  // font → "Heart Graphic Tee" recommended). Seller text = canonical + rep titles + design.
+  const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
+  const finalTitle = apparelProduct ? stripUngroundedMotifs(rawTitle, motifTrust) : rawTitle
 
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
@@ -2914,7 +2999,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .slice(0, 10)
     .map((k) => k.keyword)
   onProgress('Writing bullets...')
-  const bullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
+  const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
+  // Same vision-hallucination backstop as the title (motif words need seller corroboration).
+  const bullets = apparelProduct ? rawBullets.map((b) => stripUngroundedMotifs(b, motifTrust)) : rawBullets
 
   // Stage 3 — Backend keywords. HYBRID (PO-chosen): include the TOP product keyphrases
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /

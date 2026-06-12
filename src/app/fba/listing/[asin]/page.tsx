@@ -30,6 +30,7 @@ interface SeoScoreRow {
   issues: SeoIssue[]; child_count: number; child_override_count: number
   top_child_asin: string | null; product_title: string | null
   image_url: string | null; total_units_30d: number; scored_at: string
+  audience_lean?: string | null
   children: ChildContentRow[]
 }
 
@@ -1281,10 +1282,41 @@ export default function ListingDetailPage() {
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors cursor-pointer">
             <Icon.External className="w-3.5 h-3.5" /> Edit A+ Content
           </a>
+          {/* PR #195 — seller-declared audience lean. Persisted on the score row; the next
+              Regenerate reads it: re-weights gendered keywords across every pool and sets the
+              title tail ("for Women" / "for Men and Women"). The seller knows the design's
+              audience better than keyword statistics (Darlin' reads female). */}
+          <select
+            value={score?.audience_lean ?? ''}
+            onChange={async (e) => {
+              const v = e.target.value || null
+              const prev = score?.audience_lean ?? null
+              setScore((s) => (s ? { ...s, audience_lean: v } : s))
+              try {
+                const resp = await fetch('/api/fba/audience-lean', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ parent_asin: asin, audience_lean: v }),
+                })
+                const data = await resp.json()
+                if (!resp.ok) throw new Error(data.error || 'Save failed')
+              } catch (err) {
+                setScore((s) => (s ? { ...s, audience_lean: prev } : s))
+                setAiError(err instanceof Error ? err.message : 'Failed to save audience')
+              }
+            }}
+            title="Who is this design for? Influences the ENTIRE next audit: gendered keywords are boosted/demoted across title, bullets, description and backend, and the title ends with the matching audience. Lean = unisex listing weighted toward that audience; Male/Female = narrow the title outright."
+            className="ml-auto text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-2 py-2 cursor-pointer">
+            <option value="">Audience: Auto</option>
+            <option value="unisex">Unisex</option>
+            <option value="lean_female">Lean Female</option>
+            <option value="lean_male">Lean Male</option>
+            <option value="female">Female</option>
+            <option value="male">Male</option>
+          </select>
           <button
             onClick={() => generateAiRecs()}
             disabled={aiLoading}
-            className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-violet-200">
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-sm shadow-violet-200">
             <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Generating…' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
           </button>
         </div>

@@ -514,11 +514,15 @@ export async function POST(req: NextRequest) {
     }
 
     // ─── Resolve the keyword-bearing ASIN and load the analysis for the pipeline ───
-    const { data: pipelineScoreRow } = await supabase
+    // select('*'), NOT a column list: audience_lean (migration 029) may not exist yet, and a
+    // missing column in an explicit select errors the WHOLE query — losing product_title
+    // (the canonical title that anchors design-name extraction). '*' is pre/post-migration safe.
+    const { data: pipelineScoreRowRaw } = await supabase
       .from('listing_seo_scores')
-      .select('top_child_asin, product_title')
+      .select('*')
       .eq('parent_asin', parent_asin)
       .single()
+    const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null } | null
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
     const analysis = (await getStoredAnalysis(analysisAsin, 50)) ?? []
     // Outcome loop (#89): per-keyword SQP share rose/flat/fell since the last monthly snapshot — a conservative
@@ -618,6 +622,10 @@ export async function POST(req: NextRequest) {
             // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
             // the alphabetically-first variant and often does NOT lead with the design name.
             canonicalTitle: pipelineScoreRow?.product_title ?? null,
+            // Seller-declared audience lean (PR #195) — persisted on the score row by the
+            // listing-page selector; re-weights gendered keywords + sets the title tail.
+            audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')
+              ? pipelineScoreRow?.audience_lean : null) as 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null,
             // Vision-read design identity — the printed artwork is ground truth for the design name,
             // overriding a paraphrased title (PR: vision-based design recognition / Feature A).
             visionDesign,
