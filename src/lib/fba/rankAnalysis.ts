@@ -186,10 +186,33 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
   const haystack = await buildHaystack(parentAsin, childAsin, supabase)
   const fingerprint = createHash('sha1').update(haystack).digest('hex')
 
-  const kws = await getStoredAnalysis(childAsin, 100)
+  let kws = await getStoredAnalysis(childAsin, 100)
   if (!kws || kws.length === 0) {
     return { analyzed: false, reason: 'no_keywords', rows: [], top10: [], coverage: { covered: 0, total: 0 }, criticalGaps: 0, contentFingerprint: fingerprint, baselineVerdict: buildBaselineVerdict(0, 0, 0) }
   }
+
+  // HARD audience lean (#203 symmetry, third site): under a seller-selected Male/Female,
+  // the generators REFUSE opposite-gender keywords everywhere — so the rank playbook must
+  // not present them as gaps to close. Live failure: the panel told the seller to "weave in"
+  // 'mens comfort colors tshirt' and 'plain black tshirt men' on a FEMALE-selected listing —
+  // a demand the regen is designed to never satisfy. lean_*/unisex keep both (cross-traffic
+  // is the point of lean). KEEP IN SYNC with syncListingContent + listingPipeline regexes.
+  try {
+    const { data: leanRow } = await supabase
+      .from('listing_seo_scores').select('*').eq('parent_asin', parentAsin ?? childAsin).maybeSingle()
+    const al = (leanRow as { audience_lean?: string | null } | null)?.audience_lean
+    if (al === 'male' || al === 'female') {
+      const FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
+      const MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
+      kws = kws.filter((k) => {
+        const fem = FEM_RE.test(k.keyword), masc = MASC_RE.test(k.keyword)
+        return al === 'female' ? !(masc && !fem) : !(fem && !masc)
+      })
+      if (kws.length === 0) {
+        return { analyzed: false, reason: 'no_keywords', rows: [], top10: [], coverage: { covered: 0, total: 0 }, criticalGaps: 0, contentFingerprint: fingerprint, baselineVerdict: buildBaselineVerdict(0, 0, 0) }
+      }
+    }
+  } catch { /* lean read is best-effort — no filter on failure */ }
 
   const check = makeCoverageChecker(haystack)
 

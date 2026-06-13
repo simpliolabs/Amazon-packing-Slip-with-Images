@@ -276,20 +276,34 @@ const MENU_PER_VARIANT = new Set(['color', 'size', 'memory_storage_capacity', 's
  *  actually accepts (adhesive_type, ruling_type, …) instead of an apparel-shaped guess list (PO:
  *  "offer up to 10 values that can improve the listing, dynamic per product category").
  *  Best-effort: [] on schema-unavailable (caller's prompt falls back to the legacy example list). */
+// SEO-bearing attribute keys buyers actually search/filter by — these lead the audit menu.
+// Without ranking, the menu was "first 14 in SCHEMA order", which on SHIRT (157 props) spent
+// slots on voltage/wattage while occasion/theme/pattern landed 15th+ and were never offered
+// (PO: "Why only 4 extra values? are there no extra features that will help us rank better?").
+const MENU_SEO_PRIORITY = /occasion|theme|pattern|special_feature|lifestyle|style_name|collar|neck|sleeve|closure|fit_type|material|fabric|care_instructions|age_range|target_gender|department|season|sport|character|team_name|league|item_type_name|top_style|weave|finish|shape/
+// Compliance/electrical/logistics noise — real schema keys that never help a shopper find the
+// product; they go LAST so they only appear when nothing better fills the menu.
+const MENU_NOISE = /voltage|wattage|batter|compliance|regulat|warrant|hazmat|ghs|safety|unspsc|fcc_|dsa_|epr_|package_(?:weight|dimension|level|quantity)|item_(?:weight|dimension)|country_of_origin|manufacturer|external|gtin|upc|ean/
+
 export async function listPushableSchemaAttributes(
   productType: string | null | undefined,
   opts: FetchOpts,
-  max = 14,
+  max = 26,
 ): Promise<{ key: string; title: string; accepted?: string[] }[]> {
   if (!productType) return []
   try {
     const schema = await fetchProductTypeSchema(productType, opts)
     const props = (schema as { properties?: Record<string, { title?: string }> } | null)?.properties
     if (!props) return []
+    const eligible = Object.entries(props).filter(([key]) =>
+      !MENU_EXCLUDE.has(key) && !MENU_PER_VARIANT.has(key) && !key.includes('image_locator'))
+    // SEO-bearing keys first, compliance noise last, schema order within each band.
+    // NOISE tested FIRST: compliance_age_range contains "age_range" and must not
+    // ride the SEO band (the unit test caught exactly this precedence).
+    const band = (key: string): number => (MENU_NOISE.test(key) ? 2 : MENU_SEO_PRIORITY.test(key) ? 0 : 1)
+    eligible.sort((a, b) => band(a[0]) - band(b[0]))
     const out: { key: string; title: string; accepted?: string[] }[] = []
-    for (const [key, sub] of Object.entries(props)) {
-      if (MENU_EXCLUDE.has(key) || MENU_PER_VARIANT.has(key)) continue
-      if (key.includes('image_locator')) continue   // main_product_image_locator, other_product_image_locator_1…
+    for (const [key, sub] of eligible) {
       const enumDef = extractEnum(sub)
       const dep = new Set((enumDef?.deprecated ?? []).map((d) => d.toLowerCase()))
       const accepted = enumDef
@@ -469,6 +483,50 @@ export function buildShapedDetailValue(
   const entry = inner as Record<string, unknown>
   if (shape.hasMarketplaceId) entry.marketplace_id = marketplaceId
   return [entry]
+}
+
+/** Every plausible write-form for a composite value, most-likely first. Reading the schema
+ *  statically guessed WRONG on SHIRT `neck` (live 2026-06-12: the derived
+ *  {neck_style:{value,language_tag}} form drew "The provided value for 'neck' is invalid"
+ *  on every SKU — schemas express the same sub-field as {value,language_tag} objects, bare
+ *  enum strings, or oneOf unions of both). So the push CALIBRATES instead of guessing: it
+ *  tries these on the FIRST SKU in VALIDATION_PREVIEW (no write happens) and uses the form
+ *  Amazon validates. The flat legacy form is deliberately ABSENT for composites — it
+ *  validates and then silently no-ops (the #204 discovery), the one failure mode
+ *  calibration must never pick. */
+export function buildShapedDetailValueVariants(
+  shape: DetailValueShape,
+  rawValue: string,
+  marketplaceId: string,
+  languageTag = 'en_US',
+): { id: string; value: Record<string, unknown>[] }[] {
+  const out: { id: string; value: Record<string, unknown>[] }[] = []
+  out.push({ id: 'shaped', value: buildShapedDetailValue(shape, rawValue, marketplaceId, languageTag) })
+  if (shape.languageTagAt.some(Boolean)) {
+    const noLang: DetailValueShape = { ...shape, languageTagAt: shape.languageTagAt.map(() => false) }
+    out.push({ id: 'shaped-no-lang', value: buildShapedDetailValue(noLang, rawValue, marketplaceId, languageTag) })
+  }
+  if (shape.path.length > 1 && shape.path[shape.path.length - 1] === 'value') {
+    // The sub-field as a BARE string: [{ neck_style: "Crew Neck", marketplace_id }]
+    const direct: DetailValueShape = {
+      path: shape.path.slice(0, -1),
+      languageTagAt: shape.languageTagAt.slice(0, -1).map(() => false),
+      hasMarketplaceId: shape.hasMarketplaceId,
+    }
+    out.push({ id: 'direct-leaf', value: buildShapedDetailValue(direct, rawValue, marketplaceId, languageTag) })
+  }
+  const seen = new Set<string>()
+  return out.filter((v) => { const k = JSON.stringify(v.value); if (seen.has(k)) return false; seen.add(k); return true })
+}
+
+/** The RAW subschema node for one attribute — the ?debug=2 ground-truth view (read-only). */
+export async function getAttributeSubschema(
+  productType: string,
+  spApiKey: string,
+  opts: FetchOpts,
+): Promise<unknown> {
+  const schema = await fetchProductTypeSchema(productType, opts)
+  return (schema as { properties?: Record<string, unknown> } | null)?.properties?.[spApiKey] ?? null
 }
 
 /** Diagnostics for the ?debug=1 route branch — pinpoints WHERE enum resolution fails
