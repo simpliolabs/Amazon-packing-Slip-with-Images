@@ -523,7 +523,13 @@ async function fetchCurrentDetail(
  *   - twin SKUs (FBA/FBM) are discovered and added with the same proposed value
  *   - the parent SKU is ALSO included for broadcast details so the variation hub agrees
  */
-export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Promise<DiffRow[]> {
+/** The full broadcast SKU set for a parent: every child in listing_content + each child's
+ *  FBA/FBM twin (twin-name guarded) + the variation parent SKU. Extracted from loadDetailDiff
+ *  (behavior-preserving) so the single-field push AND the bulk Auto Push resolve the EXACT
+ *  same set from one place — no drift between the two paths. isParent flags the hub row. */
+export async function expandDetailSkuSet(
+  parentAsin: string, sellerId: string, token: string,
+): Promise<{ sku: string; asin: string; isParent: boolean }[]> {
   const supabase = await createAdminClient()
   const { data: rowsRaw } = await supabase
     .from('listing_content')
@@ -533,11 +539,6 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
   const rows = (rowsRaw ?? []) as { sku: string; asin: string }[]
   if (rows.length === 0) return []
 
-  const token = await getAccessToken()
-  const sellerId = await getSellerId()
-
-  // Expand to FBM twins per ASIN (same logic title push uses) so a broadcast detail also
-  // covers the FBM half of each FBA/FBM pair the seller hasn't synced into our DB.
   const knownSkus = new Set(rows.map((r) => r.sku))
   const expanded: { sku: string; asin: string }[] = [...rows]
   const asinsToProbe = [...new Set(rows.map((r) => r.asin).filter(Boolean))]
@@ -545,34 +546,35 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
     const discovered = await discoverSkusForAsin(sellerId, token, asin)
     for (const d of discovered) {
       if (knownSkus.has(d.sku)) continue
-      // TWIN-NAME GUARD: same rule as title push — only inherit when the discovered SKU's
-      // stripped name matches one of our DB rows under this ASIN. Avoids accidentally
-      // pushing to unrelated SKUs that share the ASIN through a stale mapping.
+      // TWIN-NAME GUARD: only inherit when the discovered SKU's stripped name matches one of
+      // our DB rows under this ASIN — avoids pushing to unrelated SKUs sharing the ASIN.
       const discoveredBase = stripFulfillmentSuffix(d.sku)
-      const sourceMatch = rows.find(
-        (b) => b.asin === asin && stripFulfillmentSuffix(b.sku) === discoveredBase,
-      )
+      const sourceMatch = rows.find((b) => b.asin === asin && stripFulfillmentSuffix(b.sku) === discoveredBase)
       if (!sourceMatch) continue
       expanded.push(d)
       knownSkus.add(d.sku)
     }
   }
 
-  // Optionally include the variation parent SKU (broadcast details should agree on the hub too).
+  const knownChildSkus = new Set(rows.map((r) => r.sku))
+  let parentSku: string | null = null
   try {
-    const parentSku = await findParentSku(sellerId, token, parentAsin)
-    if (parentSku && !knownSkus.has(parentSku)) {
-      expanded.push({ sku: parentSku, asin: parentAsin })
-      knownSkus.add(parentSku)
-    }
+    const ps = await findParentSku(sellerId, token, parentAsin)
+    if (ps && !knownSkus.has(ps)) { parentSku = ps; expanded.push({ sku: ps, asin: parentAsin }); knownSkus.add(ps) }
   } catch { /* parent enrichment is best-effort */ }
+
+  return expanded.map((r) => ({ sku: r.sku, asin: r.asin, isParent: r.sku === parentSku && !knownChildSkus.has(r.sku) }))
+}
+
+export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Promise<DiffRow[]> {
+  const token = await getAccessToken()
+  const sellerId = await getSellerId()
+  const expanded = await expandDetailSkuSet(parentAsin, sellerId, token)
+  if (expanded.length === 0) return []
 
   // Build the diff: one row per SKU, current fetched live, proposed = recommendedValue.
   const proposedStr = ctx.recommendedValue
-  const isParentSet = new Set<string>()
-  // Mark the parent row so the modal can label it (same flag the title diff uses).
-  const parentRow = expanded.find((r) => r.asin === parentAsin && !rows.some((rr) => rr.sku === r.sku))
-  if (parentRow) isParentSet.add(parentRow.sku)
+  const isParentSet = new Set(expanded.filter((r) => r.isParent).map((r) => r.sku))
 
   const diff: DiffRow[] = []
   for (const r of expanded) {
@@ -664,6 +666,58 @@ async function patchSkuDetail(
   return { ok: true, submissionId: json.submissionId ?? null }
 }
 
+/** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
+ *  core — Amazon's patchListingsItem accepts many ops per call). Each op is a fully-built
+ *  {op,path,value}. Amazon validates the submission ATOMICALLY: any ERROR-severity issue →
+ *  status INVALID and NOTHING applies — so the caller previews first and falls back to
+ *  per-attribute pushes when a batch preview fails, preserving failure isolation. */
+async function patchSkuMulti(
+  sellerId: string, token: string, productType: string, sku: string,
+  ops: { op: 'replace'; path: string; value: unknown }[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
+): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+  if (ops.length === 0) return { ok: true, submissionId: null }
+  const body = { productType, patches: ops }
+  const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
+  const url =
+    `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+    `?marketplaceIds=${MARKETPLACE_ID}&includedData=issues${modeParam}`
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    const txt = await resp.text()
+    return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
+  }
+  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
+  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
+  if (json.status === 'INVALID' || errorIssues.length > 0) {
+    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
+  }
+  return { ok: true, submissionId: json.submissionId ?? null }
+}
+
+/** Read ONE SKU's listing once and extract the CURRENT value of many attributes from that
+ *  single response — the bulk differ reads each SKU once (not once per field). Best-effort:
+ *  a fetch failure returns {} so every field reads as '' (→ treated as changed → pushed, the
+ *  preview then guards correctness); never throws, never silently skips a SKU. */
+async function fetchSkuDetails(
+  sellerId: string, token: string, sku: string, spApiKeys: string[],
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+      `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return out
+    const json = (await resp.json()) as { attributes?: Record<string, unknown> }
+    for (const k of spApiKeys) out[k] = currentDetailValue(json.attributes ?? null, k)
+  } catch { /* leave out empty → fields read as changed → preview-guarded push */ }
+  return out
+}
+
 // ─── The push engine — shared by the streaming route and background jobs ───────
 // Extracted verbatim from the POST handler of push-content/route.ts (PR #184) so
 // the SAME battle-tested loop powers both delivery modes:
@@ -688,6 +742,26 @@ export interface PushParams {
   /** Client-generated id for this push; POST {action:'cancel', cancel_token} stops the loop
    *  between SKUs (already-accepted SKUs stay pushed — they're Amazon's now). */
   cancel_token?: string
+  /** Bulk Auto Push (field==='details_bulk'): the friendly detail names to push together,
+   *  batched per SKU into one PATCH each (7× fewer Amazon calls than field-at-a-time). */
+  detail_fields?: string[]
+}
+
+/** Which of `eligibleFields` differ from the SKU's live value (so the batch touches only what
+ *  needs changing — the property that makes a re-run after a partial failure idempotent: an
+ *  already-correct field reads equal and is skipped). Pure + exported for unit tests. Compares
+ *  trimmed strings; an unknown current (read failure → undefined) counts as CHANGED (push,
+ *  preview guards), matching the single-field path's empty-current behavior. */
+export function changedDetailFields(
+  currents: Record<string, string | undefined>,
+  desired: Record<string, string>,
+  eligibleFields: string[],
+): string[] {
+  return eligibleFields.filter((f) => {
+    const want = (desired[f] ?? '').trim()
+    if (!want) return false
+    return (currents[f] ?? '').trim() !== want
+  })
 }
 
 export type PushEmit = (obj: Record<string, unknown>) => void
@@ -1057,4 +1131,228 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         // event has already informed the caller what happened to it.
         emit({ type: 'error', error: err instanceof Error ? err.message : 'Push failed' })
       }
+}
+
+// ─── BULK Auto Push: all selected detail attributes, batched PER SKU ───────────
+// PO efficiency ask: pushing 7 fields field-at-a-time = 7 × N-SKUs × 2 Amazon calls. Batching
+// all changed attributes for ONE SKU into ONE PATCH = N-SKUs × 2 — ~7× fewer calls, ~7× faster,
+// far less throttle/deploy-restart exposure. Amazon validates a submission ATOMICALLY (one bad
+// attribute → the whole SKU's PATCH is rejected), so this preserves the single-field path's
+// failure isolation via a PER-FIELD FALLBACK: preview the batch; if Amazon rejects it, push that
+// SKU's fields one-at-a-time so the good ones still land and only the bad one fails for that SKU.
+// Fully idempotent: it reads each SKU's live values first and batches ONLY the fields that differ,
+// so a re-run after any partial failure touches only the still-wrong SKUs.
+interface BulkFieldPlan {
+  field: string                 // friendly name (the modal's row id)
+  attribute: DetailAttribute
+  value: string
+  valueShape: DetailValueShape | null
+  /** Calibrated patch value for this field's value, or undefined (flat builder). */
+  patchValue?: Record<string, unknown>[]
+}
+
+export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit): Promise<void> {
+  const { parent_asin, detail_fields } = params
+  try {
+    const fields = (detail_fields ?? []).filter((f) => typeof f === 'string' && f.trim())
+    if (fields.length === 0) { emit({ type: 'error', error: 'No fields selected for Auto Push.' }); return }
+
+    const token = await getAccessToken()
+    const sellerId = await getSellerId()
+    const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+
+    // ── PHASE 0 — pre-flight each field (no writes): resolve ctx (strict productType, coerced
+    //    value, shape, enum-validity) + confirm the attribute exists in THIS schema. A field that
+    //    can't be pushed is RECORDED with a reason and EXCLUDED — it never blocks the others.
+    const skipped: { field: string; reason: string }[] = []
+    const plans: BulkFieldPlan[] = []
+    let productType: string | null = null
+    for (const f of fields) {
+      const { ctx, error } = await loadDetailContext(parent_asin, f)
+      if (!ctx) { skipped.push({ field: f, reason: error || 'not pushable' }); continue }
+      if (ctx.enumInvalid) { skipped.push({ field: f, reason: `"${ctx.recommendedValue}" isn't an accepted Amazon value — set it via the single Ship picker` }); continue }
+      productType = productType ?? ctx.productType ?? null
+      plans.push({ field: f, attribute: ctx.attribute, value: ctx.recommendedValue, valueShape: ctx.valueShape ?? null })
+    }
+    if (!productType) {
+      emit({ type: 'error', error: skipped.length ? `Nothing to push. ${skipped.map((s) => `${s.field}: ${s.reason}`).join(' · ')}` : 'Could not resolve the product type — try again in a minute.' })
+      return
+    }
+    // Drop fields whose attribute isn't in THIS product type's schema (apparel attr on the wrong PT).
+    const checkedPlans: BulkFieldPlan[] = []
+    for (const p of plans) {
+      if (await attributeExistsInSchema(productType, p.attribute.spApiKey, ptOpts)) checkedPlans.push(p)
+      else skipped.push({ field: p.field, reason: `not a valid attribute for ${productType}` })
+    }
+    if (checkedPlans.length === 0) {
+      emit({ type: 'error', error: `Nothing to push. ${skipped.map((s) => `${s.field}: ${s.reason}`).join(' · ')}` })
+      return
+    }
+
+    // ── PHASE 1 — SKU set (one resolution) + each SKU's CURRENT values (one GET per SKU). ──
+    const skuSet = await expandDetailSkuSet(parent_asin, sellerId, token)
+    if (skuSet.length === 0) { emit({ type: 'error', error: 'No SKUs found for this parent. Run a Sync first.' }); return }
+    const spKeys = checkedPlans.map((p) => p.attribute.spApiKey)
+
+    // ── PHASE 2 — calibrate each composite's write-form ONCE (reuse the validator-probe + cache).
+    //    A field that can't calibrate is excluded (others proceed) — never a whole-run abort.
+    for (const p of checkedPlans) {
+      if (!p.valueShape) { p.patchValue = buildDetailPatchValue(p.attribute, p.value, MARKETPLACE_ID) as unknown as Record<string, unknown>[]; continue }
+      const formKey = `${productType}|${p.attribute.spApiKey}`
+      const variants = buildShapedDetailValueVariants(p.valueShape, p.value, MARKETPLACE_ID)
+      let winIdx = _detailFormCache.has(formKey) ? (_detailFormCache.get(formKey) as number) : -1
+      if (winIdx < 0 || winIdx >= variants.length) {
+        winIdx = -1
+        for (let i = 0; i < variants.length; i++) {
+          const probe = await patchSkuMulti(sellerId, token, productType, skuSet[0].sku,
+            [{ op: 'replace', path: `/attributes/${p.attribute.spApiKey}`, value: variants[i].value }], 'VALIDATION_PREVIEW')
+          if (probe.ok) { winIdx = i; _detailFormCache.set(formKey, i); break }
+          await sleep(PATCH_DELAY_MS)
+        }
+      }
+      if (winIdx < 0) { skipped.push({ field: p.field, reason: 'Amazon rejected every known write form (calibration failed)' }); p.patchValue = undefined; p.value = '__CALIBRATION_FAILED__' }
+      else p.patchValue = variants[winIdx].value
+    }
+    const livePlans = checkedPlans.filter((p) => p.value !== '__CALIBRATION_FAILED__')
+    if (livePlans.length === 0) {
+      emit({ type: 'error', error: `Nothing to push. ${skipped.map((s) => `${s.field}: ${s.reason}`).join(' · ')}` })
+      return
+    }
+
+    const desired: Record<string, string> = {}
+    for (const p of livePlans) desired[p.attribute.spApiKey] = p.value
+    const opFor = (p: BulkFieldPlan) => ({ op: 'replace' as const, path: `/attributes/${p.attribute.spApiKey}`,
+      value: p.patchValue ?? buildDetailPatchValue(p.attribute, p.value, MARKETPLACE_ID) })
+
+    emit({ type: 'started', mode: 'details_bulk', fields: livePlans.map((p) => p.field), skipped, total: skuSet.length, broadcast: true })
+
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    const logPush = async (row: Record<string, unknown>) => {
+      try { const { error } = await db.from('keyword_push_log').insert(row); if (!error) return
+        const rest = { ...row }; delete rest.field; await db.from('keyword_push_log').insert(rest)
+      } catch (e) { console.warn('[bulk-details] keyword_push_log insert failed:', e) }
+    }
+
+    // per-field tallies + which fields actually changed at least one SKU (drives write-through).
+    const tally: Record<string, { accepted: number; failed: number }> = {}
+    for (const p of livePlans) tally[p.field] = { accepted: 0, failed: 0 }
+    let cancelled = false
+    let skusTouched = 0
+
+    // ── PHASE 3 — per SKU: read current, batch the CHANGED fields, preview→live, per-field fallback.
+    for (const s of skuSet) {
+      if (pushCancelled(params.cancel_token)) { cancelled = true; break }
+      const currents = await fetchSkuDetails(sellerId, token, s.sku, spKeys)
+      const changedKeys = changedDetailFields(currents, desired, spKeys)
+      if (changedKeys.length === 0) continue   // SKU already correct on every field — idempotent skip
+      skusTouched++
+      const changedPlans = livePlans.filter((p) => changedKeys.includes(p.attribute.spApiKey))
+      emit({ type: 'progress', sku: s.sku, status: 'validating', fields: changedPlans.map((p) => p.field) })
+
+      const ops = changedPlans.map(opFor)
+      const preview = await patchSkuMulti(sellerId, token, productType, s.sku, ops, 'VALIDATION_PREVIEW')
+      let perFieldStatus: { field: string; spApiKey: string; ok: boolean; submissionId: string | null; error?: string }[]
+
+      if (preview.ok) {
+        const live = await patchSkuMulti(sellerId, token, productType, s.sku, ops, 'LIVE')
+        if (live.ok) {
+          perFieldStatus = changedPlans.map((p) => ({ field: p.field, spApiKey: p.attribute.spApiKey, ok: true, submissionId: live.submissionId }))
+        } else {
+          // Valid preview but live rejected (race / throttle) → isolate per field for THIS sku.
+          perFieldStatus = await pushPerFieldFallback(sellerId, token, productType, s.sku, changedPlans)
+        }
+      } else {
+        // Atomic batch rejected (≥1 bad attribute) → per-field so the good ones still land.
+        perFieldStatus = await pushPerFieldFallback(sellerId, token, productType, s.sku, changedPlans)
+      }
+
+      for (const r of perFieldStatus) {
+        tally[r.field][r.ok ? 'accepted' : 'failed']++
+        await logPush({ parent_asin, sku: s.sku, field: `details:${r.spApiKey}`, previous_value: currents[r.spApiKey] ?? '', new_value: desired[r.spApiKey], submission_id: r.submissionId, status: r.ok ? 'accepted' : 'failed', error_message: r.ok ? null : r.error })
+      }
+      const skuFailed = perFieldStatus.filter((r) => !r.ok)
+      emit({ type: 'progress', sku: s.sku, status: skuFailed.length === 0 ? 'accepted' : (skuFailed.length === perFieldStatus.length ? 'failed' : 'partial'),
+        fields: changedPlans.map((p) => p.field), failedFields: skuFailed.map((r) => r.field), error: skuFailed[0]?.error })
+      await sleep(PATCH_DELAY_MS)
+    }
+
+    // ── PHASE 4 — write-through (per field with ≥1 accept) + ONE re-score for the whole batch.
+    const acceptedFields = livePlans.filter((p) => tally[p.field].accepted > 0)
+    if (acceptedFields.length > 0) {
+      try {
+        const { data: recR } = await db.from('listing_seo_recommendations').select('product_details_improvements').eq('parent_asin', parent_asin).single()
+        const pdi = ((recR?.product_details_improvements ?? []) as Record<string, unknown>[])
+        let touched = false
+        for (const p of acceptedFields) {
+          const wantField = normalizeFieldName(p.field)
+          for (const row of pdi) {
+            if (normalizeFieldName(String(row.field_name ?? '')) === wantField) { row.current_value = p.value; row.recommended_value = p.value; row.enum_valid = true; touched = true }
+          }
+        }
+        if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
+      } catch (e) { console.warn('[bulk-details] write-through failed (non-fatal):', e) }
+
+      emit({ type: 'rescore', message: 'Re-scoring listing…' })
+      try {
+        const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+        const { data: kids } = await db.from('listing_content')
+          .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+          .eq('parent_asin', parent_asin)
+        const rows = (kids ?? []) as Record<string, unknown>[]
+        if (rows.length > 0) {
+          const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
+          const ctxS = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
+          const parentOwn = rows.find((r) => r.asin === parent_asin) || null
+          const score = scoreListingContent(parentOwn as never, rows as never, ctxS)
+          await db.from('listing_seo_scores').update({
+            title_score: score.title_score, bullet_score: score.bullet_score, keyword_score: score.keyword_score,
+            aplus_score: score.aplus_score, description_score: score.description_score, features_score: score.features_score,
+            overall_score: score.overall_score, issues: score.issues, child_override_count: score.child_override_count,
+            scored_at: new Date().toISOString(),
+          }).eq('parent_asin', parent_asin)
+        }
+      } catch (e) { console.warn('[bulk-details] re-score failed (non-fatal):', e) }
+    }
+
+    const perField = [
+      ...livePlans.map((p) => ({ field: p.field, accepted: tally[p.field].accepted, failed: tally[p.field].failed })),
+      ...skipped.map((s) => ({ field: s.field, accepted: 0, failed: 0, skippedReason: s.reason })),
+    ]
+    const totalAccepted = livePlans.reduce((n, p) => n + tally[p.field].accepted, 0)
+    const totalFailed = livePlans.reduce((n, p) => n + tally[p.field].failed, 0)
+    emit({
+      type: 'result', mode: 'details_bulk', parent_asin, perField,
+      pushed: totalAccepted, failed: totalFailed, total: skusTouched, cancelled: cancelled || undefined,
+      message: cancelled
+        ? `Stopped by you — ${skusTouched} SKU(s) processed before the stop; accepted fields stay pushed, the rest are untouched.`
+        : `Auto Push done — ${livePlans.length} field(s) across ${skusTouched} SKU(s) that needed it${skipped.length ? `; ${skipped.length} field(s) skipped` : ''}. Changes reflect in 15min–6hr; use Verify live to confirm.`,
+    })
+  } catch (err) {
+    emit({ type: 'error', error: err instanceof Error ? err.message : 'Auto Push failed' })
+  }
+}
+
+/** Per-field fallback for ONE SKU when the atomic batch is rejected — push each field's single
+ *  attribute alone so the valid ones still land and only the offending one fails for this SKU. */
+async function pushPerFieldFallback(
+  sellerId: string, token: string, productType: string, sku: string,
+  plans: BulkFieldPlan[],
+): Promise<{ field: string; spApiKey: string; ok: boolean; submissionId: string | null; error?: string }[]> {
+  const out: { field: string; spApiKey: string; ok: boolean; submissionId: string | null; error?: string }[] = []
+  for (const p of plans) {
+    const preview = await patchSkuDetail(sellerId, token, productType, sku, p.attribute, p.value, 'VALIDATION_PREVIEW', p.valueShape, p.patchValue)
+    if (!preview.ok) {
+      const friendly = preview.error && /currently unsupported/i.test(preview.error)
+        ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (launch July 27, 2026).`
+        : preview.error
+      out.push({ field: p.field, spApiKey: p.attribute.spApiKey, ok: false, submissionId: null, error: friendly })
+      await sleep(PATCH_DELAY_MS); continue
+    }
+    const live = await patchSkuDetail(sellerId, token, productType, sku, p.attribute, p.value, 'LIVE', p.valueShape, p.patchValue)
+    out.push({ field: p.field, spApiKey: p.attribute.spApiKey, ok: live.ok, submissionId: live.submissionId, error: live.error })
+    await sleep(PATCH_DELAY_MS)
+  }
+  return out
 }
