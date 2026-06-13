@@ -88,6 +88,24 @@ interface AiRecommendations {
   keyword_reconciliation?: KeywordReconciliation[]
   action_plan?: ActionPlanItem[]
   generated_at: string; keyword_opportunities_used?: number
+  /** Last ACCEPTED push timestamp per field (title/bullets/description/keywords, details:<key>),
+   *  from keyword_push_log — surfaced as "Shipped <date>" on each shippable row. */
+  field_pushed_at?: Record<string, string>
+}
+
+/** Compact relative date for audit/ship timestamps ("2h ago", "3d ago", "Jun 11"). */
+function relDate(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return ''
+  const mins = Math.round((Date.now() - t) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.round(hrs / 24)
+  if (days <= 7) return `${days}d ago`
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 interface AnalyzedKeyword {
@@ -1393,6 +1411,11 @@ export default function ListingDetailPage() {
           </button>
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
+        {aiRecs?.generated_at && !aiLoading && (
+          <p className="text-[11px] text-slate-400 mt-2" title={new Date(aiRecs.generated_at).toLocaleString()}>
+            AI audit generated {relDate(aiRecs.generated_at)}
+          </p>
+        )}
 
         {/* Competitor ASIN input for reverse keyword lookup */}
         <div className="mt-4 pt-4 border-t border-slate-100 flex flex-wrap items-center gap-2">
@@ -1879,22 +1902,31 @@ export default function ListingDetailPage() {
                     const open = expandedSections.has(`coh-${f.key}`)
                     return (
                       <div key={f.key}>
-                        <button onClick={() => toggle(`coh-${f.key}`)} className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-slate-50 transition-colors">
-                          <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 hidden sm:inline ${f.coh.perChild ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>{f.coh.perChild ? 'unique each' : 'should match'}</span>
-                          {(f.key === 'title' || f.key === 'bullets') && rankChip(rankSectionChip[f.key])}
-                          {split
-                            ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
-                            : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
-                          <span className="ml-auto text-[11px] flex-shrink-0">
+                        {/* Header is a flex row (not a single button) so the always-present "Verify live"
+                            button isn't nested inside the toggle — PO: needs Verify on EVERY field incl.
+                            up-to-date ones, to confirm Amazon applied it and re-push stragglers. */}
+                        <div className="w-full flex items-center gap-2 px-4 py-2 hover:bg-slate-50 transition-colors">
+                          <button onClick={() => toggle(`coh-${f.key}`)} className="flex items-center gap-2 text-left flex-1 min-w-0">
+                            <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 hidden sm:inline ${f.coh.perChild ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>{f.coh.perChild ? 'unique each' : 'should match'}</span>
+                            {(f.key === 'title' || f.key === 'bullets') && rankChip(rankSectionChip[f.key])}
+                            {split
+                              ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
+                              : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
+                          </button>
+                          {aiRecs?.field_pushed_at?.[f.key] && (
+                            <span className="text-[10px] text-slate-400 flex-shrink-0 hidden md:inline" title={`Last shipped to Amazon ${new Date(aiRecs.field_pushed_at[f.key]).toLocaleString()}`}>shipped {relDate(aiRecs.field_pushed_at[f.key])}</span>
+                          )}
+                          <span className="text-[11px] flex-shrink-0">
                             {f.coh.needUpdate > 0
                               ? <span className="text-amber-700 flex items-center gap-1">{f.coh.needUpdate} need update</span>
                               : (f.coh.distinct > 1 && !f.coh.perChild)
                                 ? <span className="text-amber-700">variants differ — unify</span>
                                 : <span className="text-green-700">up to date</span>}
                           </span>
-                          <span className="text-xs text-slate-400 flex-shrink-0">{open ? '▾' : '▸'}</span>
-                        </button>
+                          <button onClick={() => openPushPreview(f.key as 'title' | 'bullets' | 'description')} className="text-[10px] px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 font-medium flex-shrink-0" title="Read the LIVE value on Amazon for every SKU — confirms what actually applied, and offers to re-push any that are still stale.">Verify live</button>
+                          <button onClick={() => toggle(`coh-${f.key}`)} className="text-xs text-slate-400 flex-shrink-0">{open ? '▾' : '▸'}</button>
+                        </div>
                         {open && (
                           <div className="px-4 pb-3 pt-1 bg-slate-50/60 space-y-2">
                             {f.perChildTitles ? (
@@ -1963,15 +1995,19 @@ export default function ListingDetailPage() {
                     <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">Backend</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 flex-shrink-0 hidden sm:inline">unique each</span>
                     {rankChip(rankSectionChip.backend)}
-                    <span className="text-[11px] text-slate-500">each variant gets its own color-specific terms</span>
-                    {needsUpdate > 0 ? (
-                      <span className="ml-auto flex items-center gap-2 flex-shrink-0">
-                        <span className="text-[11px] text-amber-700">{needsUpdate} need update</span>
+                    <span className="text-[11px] text-slate-500 hidden sm:inline">each variant gets its own color-specific terms</span>
+                    <span className="ml-auto flex items-center gap-2 flex-shrink-0">
+                      {aiRecs?.field_pushed_at?.keywords && (
+                        <span className="text-[10px] text-slate-400 hidden md:inline" title={`Last shipped to Amazon ${new Date(aiRecs.field_pushed_at.keywords).toLocaleString()}`}>shipped {relDate(aiRecs.field_pushed_at.keywords)}</span>
+                      )}
+                      {needsUpdate > 0
+                        ? <span className="text-[11px] text-amber-700">{needsUpdate} need update</span>
+                        : <span className="text-[11px] text-emerald-600 font-medium">✓ up to date</span>}
+                      <button onClick={() => openPushPreview('keywords')} className="text-[10px] px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 font-medium" title="Read the LIVE backend value on Amazon for every SKU — confirms what applied and re-pushes stragglers.">Verify live</button>
+                      {needsUpdate > 0 && (
                         <button onClick={() => openPushPreview('keywords')} className="text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded-md font-medium">Ship →</button>
-                      </span>
-                    ) : (
-                      <span className="ml-auto text-[11px] text-emerald-600 font-medium flex-shrink-0">✓ up to date</span>
-                    )}
+                      )}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -2314,6 +2350,9 @@ export default function ListingDetailPage() {
                             <p className="text-xs text-slate-700">{prettyDetailValue(pd.recommended_value, pd.enum_accepted)}</p>
                             {pd.current_value && pd.current_value !== pd.recommended_value && (
                               <p className="text-[10px] text-slate-400 line-through mt-1 break-words">{prettyDetailValue(pd.current_value, pd.enum_accepted)}</p>
+                            )}
+                            {pd.sp_api_key && aiRecs?.field_pushed_at?.[`details:${pd.sp_api_key}`] && (
+                              <p className="text-[10px] text-slate-400 mt-1" title={`Last shipped to Amazon ${new Date(aiRecs.field_pushed_at[`details:${pd.sp_api_key}`]).toLocaleString()}`}>shipped {relDate(aiRecs.field_pushed_at[`details:${pd.sp_api_key}`])}</p>
                             )}
                             {!pushable && blockedReason && (
                               <p className="text-[10px] text-slate-500 italic mt-1">{blockedReason}</p>
