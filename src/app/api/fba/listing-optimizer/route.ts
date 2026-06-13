@@ -14,19 +14,25 @@ import { syncListingContent } from '@/lib/sync/syncListingContent'
 
 // ── GET ───────────────────────────────────────────────────────────────────────
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const supabase = await createAdminClient()
 
-    // Top parents with issues (score < 100), ranked by 30d sales. Fetch HEADROOM (20, not 10)
-    // because some top rows are GHOSTS — stale score rows whose children have moved/been removed
-    // (0 live children). Those are filtered out below, then we slice to the real top 10.
+    // How many best-selling parents to return (PO: "display + optimize more than 10 top sellers").
+    // Default 25; clamp 1..200. The card grid is ranked by 30d sales so the highest-impact
+    // listings always lead — "Show more" just extends the same ranked list.
+    const limitParam = Number(new URL(req.url).searchParams.get('limit'))
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(Math.floor(limitParam), 200) : 25
+
+    // Ranked by 30d sales. Fetch HEADROOM (2× the requested count) because some top rows are
+    // GHOSTS — stale score rows whose children have moved/been removed (0 live children). Those
+    // are filtered out below, then we slice to the requested count.
     const { data: scores, error: scoresErr } = await supabase
       .from('listing_seo_scores')
       .select('*')
       .lt('overall_score', 100)
       .order('total_units_30d', { ascending: false })
-      .limit(20)
+      .limit(Math.min(limit * 2, 400))
 
     if (scoresErr) {
       return NextResponse.json({ error: scoresErr.message }, { status: 500 })
@@ -90,11 +96,16 @@ export async function GET() {
       // the authoritative fix. It replaces the racy client-side hide/redirect heuristics (#89/#90)
       // that depended on a per-parent orphan-check which often hadn't resolved before the click.
       .filter(r => r.children.length > 0)
-      .slice(0, 10)
+      .slice(0, limit)
+
+    // hasMore: a full headroom fetch that still filled the requested count means there are
+    // likely more sellers below — drives the dashboard's "Show more" affordance.
+    const hasMore = (scores as ScoreRow[]).length >= Math.min(limit * 2, 400) && result.length >= limit
 
     return NextResponse.json({
       scores: result,
       lastSyncedAt: latestSync?.scored_at || null,
+      hasMore,
     })
 
   } catch (err) {

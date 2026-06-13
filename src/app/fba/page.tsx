@@ -374,6 +374,10 @@ export default function FBAIntelligencePage() {
 
   // Listing Optimizer state
   const [seoScores, setSeoScores] = useState<SeoScoreRow[]>([])
+  // How many best-selling parents to show (PO: "display + optimize more than 10 top sellers").
+  // "Show more" bumps this and refetches the same sales-ranked list, extended.
+  const [seoLimit, setSeoLimit] = useState(25)
+  const [seoHasMore, setSeoHasMore] = useState(false)
   const [seoLoading, setSeoLoading] = useState(false)
   const [seoSyncing, setSeoSyncing] = useState(false)
   const [seoLastSynced, setSeoLastSynced] = useState<string | null>(null)
@@ -1048,8 +1052,10 @@ export default function FBAIntelligencePage() {
     finally { setListingsLoading(false) }
   }, [])
 
-  // Fetch SEO scores for the Listing Optimizer section
-  const fetchSeoScores = useCallback(async (triggerSync = false) => {
+  // Fetch SEO scores for the Listing Optimizer section. `limitArg` controls how many
+  // best-selling parents to return (the "Show more" control passes a larger value).
+  const fetchSeoScores = useCallback(async (triggerSync = false, limitArg = 25) => {
+    const scoresUrl = `/api/fba/listing-optimizer?limit=${limitArg}`
     setSeoLoading(true)
     setSeoError(null)
     try {
@@ -1071,9 +1077,10 @@ export default function FBAIntelligencePage() {
         }
         if (syncJson.status === 'done') {
           // Sync completed within timeout — fetch scores immediately
-          const resp = await fetch('/api/fba/listing-optimizer')
+          const resp = await fetch(scoresUrl)
           const json = await resp.json()
           setSeoScores(json.scores || [])
+          setSeoHasMore(!!json.hasMore)
           setSeoLastSynced(json.lastSyncedAt || null)
           setSeoSyncing(false)
           setSeoLoading(false)
@@ -1085,10 +1092,11 @@ export default function FBAIntelligencePage() {
         const pollInterval = setInterval(async () => {
           attempts++
           try {
-            const resp = await fetch('/api/fba/listing-optimizer')
+            const resp = await fetch(scoresUrl)
             const json = await resp.json()
             if (json.scores && json.scores.length > 0) {
               setSeoScores(json.scores)
+              setSeoHasMore(!!json.hasMore)
               setSeoLastSynced(json.lastSyncedAt)
               setSeoSyncing(false)
               clearInterval(pollInterval)
@@ -1101,9 +1109,10 @@ export default function FBAIntelligencePage() {
         setSeoLoading(false)
         return
       }
-      const resp = await fetch('/api/fba/listing-optimizer')
+      const resp = await fetch(scoresUrl)
       const json = await resp.json()
       setSeoScores(json.scores || [])
+      setSeoHasMore(!!json.hasMore)
       setSeoLastSynced(json.lastSyncedAt || null)
     } catch (e) { console.error(e) }
     finally { setSeoLoading(false) }
@@ -2584,7 +2593,8 @@ export default function FBAIntelligencePage() {
               <div>
                 <h3 className="text-base font-semibold text-gray-900">Listing Optimizer</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Top 10 best-selling parent ASINs with SEO gaps — fix title, bullets, keywords, and A+ content
+                  Best-selling parent ASINs with SEO gaps, ranked by 30-day sales — fix title, bullets, keywords, and A+ content
+                  {seoScores.length > 0 && <span className="text-gray-400"> · showing {seoScores.length}</span>}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -3299,6 +3309,18 @@ export default function FBAIntelligencePage() {
                   )
                 })}
               </div>
+              {/* PO: "display + optimize more than 10 top sellers" — extend the sales-ranked list. */}
+              {seoHasMore && (
+                <div className="flex justify-center mt-5">
+                  <button
+                    onClick={() => { const next = seoLimit + 25; setSeoLimit(next); fetchSeoScores(false, next) }}
+                    disabled={seoLoading}
+                    className="text-sm px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 font-medium"
+                  >
+                    {seoLoading ? 'Loading…' : 'Show more sellers (next 25) →'}
+                  </button>
+                </div>
+              )}
             </>
             )}
           </div>
