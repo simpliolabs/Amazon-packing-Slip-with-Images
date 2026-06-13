@@ -350,6 +350,22 @@ function backendOutputProblems(
   return problems
 }
 
+/** Drop repeated tokens from a backend search-term string, keeping the FIRST occurrence
+ *  (so a force-led design phrase survives intact). Amazon indexes each token once — a repeat
+ *  is wasted budget. Compares on normalized tokens (punctuation-stripped) so "darlin'" and
+ *  "darlin" collapse; keeps the original spelling of the first hit. */
+function dedupeTokenSoup(s: string): string {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of (s || '').split(/\s+/)) {
+    const norm = raw.toLowerCase().replace(/[^a-z0-9]/g, '')
+    if (!norm || seen.has(norm)) continue
+    seen.add(norm)
+    out.push(raw)
+  }
+  return out.join(' ')
+}
+
 /** Fix the doubled article when the brand itself starts with "THE" — the agents write
  *  "with the THE CEO Darlin' T-Shirt" (live nit the PO spotted in a description). */
 function fixDoubledArticleBeforeBrand(text: string, brandName: string): string {
@@ -2264,7 +2280,12 @@ Return ONLY the JSON object.`
     const tailWords = tail.toLowerCase().split(/\s+/)
       .filter((w) => w && !effectiveCoreWords.has(w) && !excludeWords.has(w) && !MINOR_WORDS.has(w))
       .slice(0, 3)   // at most 3 color words — the PO does NOT want 10 color synonyms
-    return truncateToBytes(`${effectiveCore} ${tailWords.join(' ')}`.trim(), 250)
+    // Token dedup (PO: design phrase "could be meaner" appeared twice — the force-led design
+    // phrase + a keyword carrying the same words). Amazon indexes each token once anyway, so a
+    // repeat is pure wasted budget. Keep the FIRST occurrence (preserves the design-name lead),
+    // drop later dupes by normalized token; fillBackendToBudget then tops the reclaimed bytes
+    // back up with novel terms.
+    return truncateToBytes(dedupeTokenSoup(`${effectiveCore} ${tailWords.join(' ')}`.trim()), 250)
   }
 
   return children.map((c) => {
