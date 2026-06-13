@@ -395,6 +395,11 @@ export interface DetailValueShape {
   /** Index-aligned with `path`: the object CONTAINING path[i] also declares a
    *  language_tag sibling there (so the builder adds it at that level only). */
   languageTagAt: boolean[]
+  /** Index-aligned with `path`: property path[i] is itself an ARRAY in the schema, so its
+   *  content must be wrapped in `[ ]`. SHIRT `neck` = neck_style:[{value,language_tag}] —
+   *  the sub-field is an array, not an object (live-verified from the raw schema 2026-06-12;
+   *  the object form was rejected with InvalidInput on every SKU). */
+  isArrayAt: boolean[]
   /** The attribute's item root declares marketplace_id (attached to the entry). */
   hasMarketplaceId: boolean
 }
@@ -410,9 +415,9 @@ export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | n
   const hits: Hit[] = []
   let rootHasMarketplaceId = false
   let sawRootProps = false
-  const visit = (n: unknown, path: string[], langs: boolean[], depth: number): void => {
+  const visit = (n: unknown, path: string[], langs: boolean[], arrs: boolean[], depth: number): void => {
     if (!n || typeof n !== 'object' || depth > 12) return
-    if (Array.isArray(n)) { for (const item of n) visit(item, path, langs, depth + 1); return }
+    if (Array.isArray(n)) { for (const item of n) visit(item, path, langs, arrs, depth + 1); return }
     const obj = n as Record<string, unknown>
     const props = obj.properties as Record<string, unknown> | undefined
     if (props && typeof props === 'object') {
@@ -424,24 +429,27 @@ export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | n
         // a measurement-unit enum ("inches") must not win the path over the real field.
         if (key === 'marketplace_id' || key === 'language_tag' || key === 'unit') continue
         const s = sub as Record<string, unknown> | null
+        // Is this property itself an array (neck_style:[{value,language_tag}]) → wrap in [].
+        const isArr = !!s && (s.type === 'array' || s.items != null)
         const nextPath = [...path, key]
         const nextLangs = [...langs, hasLang]
+        const nextArrs = [...arrs, isArr]
         if (s && typeof s === 'object' && Array.isArray(s.enum) && s.enum.length) {
-          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, hasMarketplaceId: false }, kind: key === 'value' ? 'valueEnum' : 'anyEnum' })
+          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, isArrayAt: nextArrs, hasMarketplaceId: false }, kind: key === 'value' ? 'valueEnum' : 'anyEnum' })
         } else if (s && typeof s === 'object' && key === 'value' && (s.type === 'string' || s.type == null)) {
-          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, hasMarketplaceId: false }, kind: 'valueString' })
+          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, isArrayAt: nextArrs, hasMarketplaceId: false }, kind: 'valueString' })
         }
-        visit(sub, nextPath, nextLangs, depth + 1)
+        visit(sub, nextPath, nextLangs, nextArrs, depth + 1)
       }
       return
     }
     // Structural wrappers (items, oneOf/anyOf/allOf, …) — descend without extending the path.
     for (const k of Object.keys(obj)) {
       if (k === 'enum' || k === 'enumNames') continue
-      visit(obj[k], path, langs, depth + 1)
+      visit(obj[k], path, langs, arrs, depth + 1)
     }
   }
-  visit(attrNode, [], [], 0)
+  visit(attrNode, [], [], [], 0)
   const pick = hits.find((h) => h.kind === 'valueEnum') ?? hits.find((h) => h.kind === 'anyEnum') ?? hits.find((h) => h.kind === 'valueString')
   if (!pick) return null
   return { ...pick.shape, hasMarketplaceId: rootHasMarketplaceId }
@@ -466,8 +474,9 @@ export async function getDetailValueShape(
   return shape
 }
 
-/** Build the patch entry along a composite path:
- *  ['neck_style','value'] + "Crew Neck" → [{ neck_style: { value, language_tag? }, marketplace_id? }] */
+/** Build the patch entry along a composite path, wrapping array-typed segments in `[ ]`:
+ *  ['neck_style','value'] isArrayAt [true,false] + "Crew Neck"
+ *    → [{ neck_style: [{ value: "Crew Neck", language_tag }], marketplace_id }] */
 export function buildShapedDetailValue(
   shape: DetailValueShape,
   rawValue: string,
@@ -476,7 +485,7 @@ export function buildShapedDetailValue(
 ): Record<string, unknown>[] {
   let inner: unknown = rawValue
   for (let i = shape.path.length - 1; i >= 0; i--) {
-    const wrapper: Record<string, unknown> = { [shape.path[i]]: inner }
+    const wrapper: Record<string, unknown> = { [shape.path[i]]: shape.isArrayAt[i] ? [inner] : inner }
     if (shape.languageTagAt[i]) wrapper.language_tag = languageTag
     inner = wrapper
   }
@@ -507,13 +516,21 @@ export function buildShapedDetailValueVariants(
     out.push({ id: 'shaped-no-lang', value: buildShapedDetailValue(noLang, rawValue, marketplaceId, languageTag) })
   }
   if (shape.path.length > 1 && shape.path[shape.path.length - 1] === 'value') {
-    // The sub-field as a BARE string: [{ neck_style: "Crew Neck", marketplace_id }]
+    // The sub-field carrying the BARE value (array-aware): [{ neck_style: ["Crew Neck"], marketplace_id }]
     const direct: DetailValueShape = {
       path: shape.path.slice(0, -1),
       languageTagAt: shape.languageTagAt.slice(0, -1).map(() => false),
+      isArrayAt: shape.isArrayAt.slice(0, -1),
       hasMarketplaceId: shape.hasMarketplaceId,
     }
     out.push({ id: 'direct-leaf', value: buildShapedDetailValue(direct, rawValue, marketplaceId, languageTag) })
+  }
+  // OBJECT fallback: the same path WITHOUT array-wrapping any segment — for product types
+  // whose composite sub-field is a plain object, not an array. Cheap insurance; calibration
+  // picks whichever Amazon validates.
+  if (shape.isArrayAt.some(Boolean)) {
+    const noArr: DetailValueShape = { ...shape, isArrayAt: shape.isArrayAt.map(() => false) }
+    out.push({ id: 'no-array', value: buildShapedDetailValue(noArr, rawValue, marketplaceId, languageTag) })
   }
   const seen = new Set<string>()
   return out.filter((v) => { const k = JSON.stringify(v.value); if (seen.has(k)) return false; seen.add(k); return true })
