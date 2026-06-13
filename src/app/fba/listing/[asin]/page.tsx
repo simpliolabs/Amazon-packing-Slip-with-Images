@@ -1147,14 +1147,29 @@ export default function ListingDetailPage() {
           else if (msg.type === 'error') streamError = msg.error || 'Auto Push failed mid-stream.'
         } catch { /* keepalive/partial line */ }
       }
+      // WATCHDOG: a dropped stream (Coolify/Cloudflare kill long requests ~100s; the server keeps
+      // running + finishes) used to leave reader.read() hanging forever → the modal showed "Pushing…"
+      // for 40+ minutes though the push had ALREADY completed (live-confirmed: Sleeve applied on all
+      // 65 SKUs). If no chunk arrives for STALL_MS, stop waiting and tell the seller to Verify
+      // (accepted SKUs stay — the run is idempotent). Resets on every chunk.
+      const STALL_MS = 60_000
+      let streamStalled = false
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const { done, value } = await reader.read()
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const stall = new Promise<'stall'>((res) => { timer = setTimeout(() => res('stall'), STALL_MS) })
+        const next = await Promise.race([reader.read(), stall])
+        if (timer) clearTimeout(timer)
+        if (next === 'stall') { streamStalled = true; try { await reader.cancel() } catch { /* already closed */ } break }
+        const { done, value } = next as ReadableStreamReadResult<Uint8Array>
         if (done) break
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
         for (const line of lines) handleLine(line)
+      }
+      if (streamStalled && !result && !streamError) {
+        streamError = 'Connection dropped (likely a deploy or network blip). The push usually finishes on the server regardless — click Verify live on a field to confirm; already-accepted SKUs stay pushed. Re-run Auto Push to finish any that are still missing.'
       }
       if (buffer.trim()) handleLine(buffer)
       if (streamError) throw new Error(streamError)
