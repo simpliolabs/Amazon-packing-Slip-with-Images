@@ -592,19 +592,24 @@ export default function ListingDetailPage() {
     return () => { cancelled = true }
   }, [asin, router])
 
-  // Fetch keyword intelligence
+  // Fetch keyword intelligence on MOUNT, keyed on `asin` (the route param) — NOT on
+  // score.top_child_asin. Gating on the score made kwData load only AFTER the async score
+  // fetch resolved, so the Intelligence tab (gated on kwData) didn't appear until a manual
+  // refresh (PO). The endpoint resolves a parent ASIN to its top child internally
+  // (resolveToChildAsin), same pattern rank-analysis uses — so `asin` works directly and both
+  // fetches run in parallel on first load.
   useEffect(() => {
-    if (!score?.top_child_asin) return
+    if (!asin) return
     ;(async () => {
       try {
-        const resp = await fetch(`/api/fba/intelligence/${score.top_child_asin}?stored=true`)
+        const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`)
         if (resp.ok) {
           const data = await resp.json()
           if (data.totalKeywordsAnalyzed > 0) setKwData(data)
         }
       } catch { /* ignore */ }
     })()
-  }, [score?.top_child_asin])
+  }, [asin])
 
   // Fetch rank analysis (0-cost free core) for the Apply-tab verdict banner. Endpoint accepts the
   // PARENT asin and resolves to the top child internally; renders only server-authored, validated copy.

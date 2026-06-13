@@ -380,10 +380,27 @@ function fixDoubledArticleBeforeBrand(text: string, brandName: string): string {
  *  \b prevents "women" matching inside itself. Lean_* selections do NOT use this. */
 function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
   if (!text) return text
+  // FIT / STYLE / CUT is a GARMENT FACT, not an audience claim. Blanks like Comfort Colors 1717,
+  // Bella Canvas, Gildan are UNISEX relaxed — so "womens fit"/"mens fit" fabricates a gender the
+  // garment doesn't have (PO: "1717 is a unisex relaxed fit, not a womens fit"). Targeting the
+  // audience ("for Women", "gift for her") is legitimate and preserved/swapped below; the gendered
+  // MODIFIER on a fit/style/cut noun is STRIPPED (keep the noun), never swapped — so we never invent
+  // "womens fit". The opposite-gender modifier must match the apostrophe form too ("men's fit").
+  // ['’] matches BOTH the straight and curly apostrophe — the LLM/Amazon emit "women’s" (U+2019),
+  // which a straight-quote-only regex misses (the apostrophe trap, live-confirmed on this listing).
+  const GENDER = `(?:men(?:['’]s|s)?|male|males|women(?:['’]s|s)?|female|females)`
+  const FITNOUN = `(?:fit|style|cut|sizing|silhouette|cutting)`
+  const stripGenderedFit = (s: string): string => s
+    .replace(new RegExp(`\\b${GENDER}\\s+(${FITNOUN})\\b`, 'gi'), '$1')   // "womens fit" -> "fit"
+    .replace(new RegExp(`\\b(${FITNOUN})\\s+(?:for\\s+)?${GENDER}\\b`, 'gi'), '$1')   // "fit for women" -> "fit"
+  let out = stripGenderedFit(text)
+  // Swap remaining AUDIENCE-context tokens to the chosen gender (both apostrophe forms).
   if (audience === 'Women') {
-    return text.replace(/\bmen'?s\b/gi, "Women's").replace(/\bmens\b/gi, 'Womens').replace(/\bmen\b/gi, 'Women')
+    out = out.replace(/\bmen['’]?s\b/gi, "Women's").replace(/\bmens\b/gi, 'Womens').replace(/\bmen\b/gi, 'Women')
+  } else {
+    out = out.replace(/\bwomen['’]?s\b/gi, "Men's").replace(/\bwomens\b/gi, 'Mens').replace(/\bwomen\b/gi, 'Men')
   }
-  return text.replace(/\bwomen'?s\b/gi, "Men's").replace(/\bwomens\b/gi, 'Mens').replace(/\bwomen\b/gi, 'Men')
+  return out.replace(/\s{2,}/g, ' ').trim()
 }
 
 // Basic garment-color words. On a MULTI-variant apparel family, BROADCAST content (title /
@@ -1014,6 +1031,28 @@ export function validateBullets(
       const sample = missing.slice(0, 6).map((k) => `"${k}"`).join(', ')
       problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE). Weave EACH naturally into the bullet body — every word of the phrase present somewhere across the 5 bullets: ${sample}.`)
     }
+  }
+
+  // PHRASE OVERUSE — the prompt forbids repeating a blend-brand/material >2× but nothing ENFORCED it,
+  // so "comfort colors" stuffed 7× across 5 bullets shipped (PO report). Trigger the rewrite at >=3.
+  const joinedBullets = bullets.join('  \n  ').toLowerCase()
+  const OVERUSE_PHRASES = ['comfort colors', 'comfort color', 'bella canvas', 'gildan', 'next level', 'ring spun', 'ring-spun', 'garment dyed', 'garment-dyed']
+  const overused: string[] = []
+  for (const phrase of OVERUSE_PHRASES) {
+    const re = new RegExp(`\\b${phrase.replace(/[-\s]+/g, '[-\\s]?')}\\b`, 'gi')
+    const n = (joinedBullets.match(re) || []).length
+    if (n >= 3) overused.push(`"${phrase}" (${n}×)`)
+  }
+  if (overused.length > 0) {
+    problems.push(`Phrase overuse — these read as keyword stuffing (Amazon allows at most 2 of any single blend-brand/material name across the 5 bullets): ${overused.join(', ')}. Keep ONE strong mention (e.g. "authentic Comfort Colors tee"), drop the rest, and vary the wording with benefits/synonyms.`)
+  }
+  // MISSPELLINGS must never reach customer-facing bullets (PO saw "confort colors"). Shopper
+  // misspellings belong only in BACKEND search terms. \bconfort\b never matches "comfort".
+  const MISSPELLINGS = [/\bconfort\b/gi, /\btshrit\b/gi, /\bshrit\b/gi, /\bcoton\b/gi]
+  const typos = new Set<string>()
+  for (const re of MISSPELLINGS) { const m = joinedBullets.match(re); if (m) m.forEach((x) => typos.add(x.trim())) }
+  if (typos.size > 0) {
+    problems.push(`Customer-facing MISSPELLING in the bullets: ${[...typos].map((t) => `"${t}"`).join(', ')}. Spell every word correctly — misspellings damage trust and belong only in backend search terms, never in bullets.`)
   }
 
   return problems
@@ -1818,8 +1857,9 @@ ${attrLine}
 
 Rules per bullet:
 - Start with a 2-3 WORD BENEFIT HOOK in ALL CAPS, then " - ", then the benefit sentence.
-- AUDIENCE MATCH: do NOT mention kids, children, toddlers, youth, boys, or girls unless the title says so — match the title's audience exactly (an adult "for Men and Women" listing must NOT reference kids).
-- NO PHRASE OVERUSE: do NOT repeat any single brand or material name (e.g. "Comfort Colors") more than TWICE across the 5 bullets — vary the wording.
+- AUDIENCE MATCH: do NOT mention kids, children, toddlers, youth, boys, or girls unless the title says so — match the title's audience exactly (an adult "for Men and Women" listing must NOT reference kids).${apparel ? `
+- 🚫 FIT IS NOT GENDERED: the blank (e.g. Comfort Colors, Bella Canvas, Gildan) is a UNISEX relaxed-fit garment. NEVER claim a "womens fit", "mens fit", "womens style", or "mens cut" — that fabricates a gender the garment doesn't have. Describe the FIT neutrally ("relaxed fit", "classic unisex fit", "easygoing cut"). You MAY still target the buyer audience ("for women", "great gift for her") — that's marketing, not a fit claim.` : ''}
+- NO PHRASE OVERUSE: do NOT repeat any single brand or material name (e.g. "Comfort Colors", "ring-spun", "garment-dyed") more than TWICE across the 5 bullets — vary the wording. And NEVER include misspellings (e.g. "confort colors") in customer-facing bullets — spell every word correctly.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
 - 80-200 characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
 - 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}
@@ -3286,7 +3326,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // discipline title gets in Stage 0c, but for bullets we keep BOTH tiers since the bullets
   // scorer penalizes when 2+ CRITICAL-or-UPGRADE keywords are missing across all 5 bullets).
   // Sorted by opportunity, deduped against title (those don't count as bullet gaps).
-  const topOpportunityKwsForBullets = cleanGated
+  const topOppGated = cleanGated
     .filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE')
     .filter((k) => !isSeasonal(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)   // match the scorer (no word cap on its set); 6 = title pin's safe ceiling
@@ -3311,6 +3351,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // apparel family must not demand one variant's color (B0FKLGWZ4C plan carried
     // "plain black tshirt men" for 82 colors). Per-child backend keeps the color terms.
     .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword))
+  // Blend-brand VARIANT COLLAPSE: "comfort colors", "comfort colors tshirt", "comfort colors tee",
+  // "comfort colors tshirt women" are the SAME blend brand — the bullet agent saw 5+ separate
+  // "opportunities" for one phrase and stuffed it into every bullet (PO: "why is comfort colors
+  // repeating so many times in bullets?"). Keep ONLY the shortest variant per blend base so the
+  // brand is a single opportunity. The scorer reads this same set via keyword_plan (#92/#93), so
+  // dropping the longer variants keeps generator↔scorer parity — no divergence.
+  const BLEND_BASE_RE = /\b(?:comfort\s*colou?rs?|bella\s*canvas|gildan|next\s*level|american\s*apparel)\b/i
+  const blendIdx = new Map<string, number>()   // squashed blend base -> index in topOppDeduped
+  const topOppDeduped: typeof cleanGated = []
+  for (const k of topOppGated) {
+    const m = k.keyword.match(BLEND_BASE_RE)
+    if (!m) { topOppDeduped.push(k); continue }
+    const base = m[0].toLowerCase().replace(/\s+/g, '')
+    const at = blendIdx.get(base)
+    if (at == null) { blendIdx.set(base, topOppDeduped.length); topOppDeduped.push(k) }
+    else if (k.keyword.length < topOppDeduped[at].keyword.length) topOppDeduped[at] = k
+  }
+  const topOpportunityKwsForBullets = topOppDeduped
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
