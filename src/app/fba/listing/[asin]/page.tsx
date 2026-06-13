@@ -304,6 +304,9 @@ export default function ListingDetailPage() {
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkItems, setBulkItems] = useState<BulkPushItem[]>([])
   const [bulkRunning, setBulkRunning] = useState(false)
+  // Overall SKU progress for the Auto Push bar ({done,total}); total = every SKU, done = each SKU's
+  // terminal event (accepted/failed/partial/skipped) — one per SKU, so the bar reaches 100%.
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
   const [bulkFinished, setBulkFinished] = useState(false)
   // Mirrors (pushLoading || bulkRunning) for guards inside STABLE callbacks — a ref can't
   // go stale the way a useCallback-captured boolean can (the concurrent-push guard relies
@@ -1086,14 +1089,18 @@ export default function ListingDetailPage() {
   const openBulkPush = useCallback(() => {
     // Same concurrent-push guard as openPushPreview — Auto Push must not start while a
     // single push streams (two streams race the UI and double the SP-API rate).
+    // Re-opening WHILE Auto Push is running must NOT reset the rows — show the live progress
+    // (PO: "can I close the modal mid-process?" — yes, it keeps running; reopening resumes the view).
+    if (bulkRunning) { setBulkOpen(true); return }
     if (pushActiveRef.current) {
       window.alert('A push is still running (see the progress pill, bottom-right). Let it finish before starting Auto Push.')
       return
     }
     setBulkItems(bulkEligibleDetails.map((pd) => ({ field: pd.field_name, value: prettyDetailValue(pd.recommended_value, pd.enum_accepted), status: 'ready' as const, accepted: pd.enum_accepted })))
     setBulkFinished(false)
+    setBulkProgress({ done: 0, total: 0 })
     setBulkOpen(true)
-  }, [bulkEligibleDetails])
+  }, [bulkEligibleDetails, bulkRunning])
 
   /** ONE batched call: all selected detail attributes pushed PER SKU (each SKU gets a single
    *  multi-attribute PATCH) — ~7× fewer Amazon calls than field-at-a-time. The server batches
@@ -1110,6 +1117,7 @@ export default function ListingDetailPage() {
     const cancelToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `b${Math.random().toString(36).slice(2)}`
     bulkCancelTokenRef.current = cancelToken
     setCancelRequested(false)
+    setBulkProgress({ done: 0, total: 0 })
     let anyPushed = false
     try {
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
@@ -1128,9 +1136,13 @@ export default function ListingDetailPage() {
       const handleLine = (line: string) => {
         if (!line.trim()) return
         try {
-          const msg = JSON.parse(line) as { type?: string; sku?: string; status?: string; fields?: string[]; perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[]; message?: string; error?: string; skipped?: { field: string; reason: string }[] }
-          if (msg.type === 'started' && Array.isArray(msg.skipped)) {
-            for (const s of msg.skipped) setByField(s.field, { status: 'failed', note: s.reason })
+          const msg = JSON.parse(line) as { type?: string; sku?: string; status?: string; total?: number; fields?: string[]; perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[]; message?: string; error?: string; skipped?: { field: string; reason: string }[] }
+          if (msg.type === 'started') {
+            if (typeof msg.total === 'number') setBulkProgress({ done: 0, total: msg.total })
+            if (Array.isArray(msg.skipped)) for (const s of msg.skipped) setByField(s.field, { status: 'failed', note: s.reason })
+          } else if (msg.type === 'progress' && msg.status && msg.status !== 'validating') {
+            // one terminal event per SKU (accepted/failed/partial/skipped) → advance the bar
+            setBulkProgress((p) => ({ ...p, done: Math.min(p.done + 1, p.total || p.done + 1) }))
           } else if (msg.type === 'result') result = msg
           else if (msg.type === 'error') streamError = msg.error || 'Auto Push failed mid-stream.'
         } catch { /* keepalive/partial line */ }
@@ -3039,8 +3051,26 @@ export default function ListingDetailPage() {
               <p className="text-xs text-slate-500">
                 {bulkFinished
                   ? 'Done. Amazon applies accepted submissions in 15 min – 6 hr; use Verify on Amazon on any field to confirm.'
+                  : bulkRunning
+                  ? 'Pushing one PATCH per SKU. You can close this — it keeps running in this tab (reopen Auto Push to check progress). Use Stop to halt; already-accepted SKUs stay pushed.'
                   : `These ${bulkItems.length} fields are validated and ready. Each pushes to every variant SKU with the same checks as a manual push — a failure on one never blocks the rest.`}
               </p>
+              {/* Overall SKU progress bar (PO request). total = every SKU; done = each SKU's terminal
+                  event, so it reaches 100% even when some SKUs were already correct. */}
+              {(bulkRunning || (bulkFinished && bulkProgress.total > 0)) && bulkProgress.total > 0 && (
+                <div className="mt-1">
+                  <div className="flex items-center justify-between text-[10px] text-slate-500 mb-0.5">
+                    <span>{bulkFinished ? 'Complete' : 'Pushing to Amazon…'}</span>
+                    <span>{bulkProgress.done} / {bulkProgress.total} SKUs</span>
+                  </div>
+                  <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${bulkFinished ? 'bg-emerald-500' : 'bg-violet-500'}`}
+                      style={{ width: `${Math.round((bulkProgress.done / bulkProgress.total) * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
               <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
                 {bulkItems.map((it, i) => (
                   <div key={i} className={`flex items-center justify-between gap-3 px-3 py-2 ${it.skip ? 'opacity-50' : ''}`}>
