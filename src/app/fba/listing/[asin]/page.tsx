@@ -272,6 +272,7 @@ export default function ListingDetailPage() {
   const [detailOverride, setDetailOverride] = useState<string>('')
   // Cancel support for a streaming push: the token travels with the push body; Stop POSTs it back.
   const pushCancelTokenRef = useRef<string | null>(null)
+  const bulkCancelTokenRef = useRef<string | null>(null)
   const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
@@ -1089,87 +1090,84 @@ export default function ListingDetailPage() {
     setBulkOpen(true)
   }, [bulkEligibleDetails])
 
-  /** Sequential per-field pushes through the SAME endpoint as a manual push — a failure on one
-   *  field never blocks the rest; per-field status updates live; ONE score refresh at the end. */
+  /** ONE batched call: all selected detail attributes pushed PER SKU (each SKU gets a single
+   *  multi-attribute PATCH) — ~7× fewer Amazon calls than field-at-a-time. The server batches
+   *  the changed fields per SKU and falls back to per-field for any SKU whose batch is rejected,
+   *  so failure isolation is preserved. We map the final per-field tally back onto the rows. */
   const runBulkPush = useCallback(async () => {
     if (bulkRunning) return
     setBulkRunning(true)
     const items = bulkItems
-    const setItem = (i: number, patch: Partial<BulkPushItem>) =>
-      setBulkItems((prev) => { const next = prev.slice(); next[i] = { ...next[i], ...patch }; return next })
+    const fields = items.filter((it) => !it.skip).map((it) => it.field)
+    const setByField = (field: string, patch: Partial<BulkPushItem>) =>
+      setBulkItems((prev) => prev.map((it) => (it.field === field ? { ...it, ...patch } : it)))
+    for (const it of items) if (!it.skip) setByField(it.field, { status: 'pushing' })
+    const cancelToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `b${Math.random().toString(36).slice(2)}`
+    bulkCancelTokenRef.current = cancelToken
+    setCancelRequested(false)
     let anyPushed = false
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].skip) { setItem(i, { note: 'Skipped' }); continue }
-      setItem(i, { status: 'pushing' })
-      try {
-        const resp = await fetch('/api/fba/listing-optimizer/push-content', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ parent_asin: asin, field: 'details', detail_field: items[i].field, confirm: true }),
+    try {
+      const resp = await fetch('/api/fba/listing-optimizer/push-content', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: asin, field: 'details_bulk', detail_fields: fields, confirm: true, cancel_token: cancelToken }),
+      })
+      if (!resp.ok) { const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }; throw new Error(data.error || `HTTP ${resp.status}`) }
+      if (!resp.body) throw new Error('Connection dropped before stream.')
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let result: { perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[]; message?: string } | null = null
+      let streamError: string | null = null
+      const handleLine = (line: string) => {
+        if (!line.trim()) return
+        try {
+          const msg = JSON.parse(line) as { type?: string; sku?: string; status?: string; fields?: string[]; perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[]; message?: string; error?: string; skipped?: { field: string; reason: string }[] }
+          if (msg.type === 'started' && Array.isArray(msg.skipped)) {
+            for (const s of msg.skipped) setByField(s.field, { status: 'failed', note: s.reason })
+          } else if (msg.type === 'result') result = msg
+          else if (msg.type === 'error') streamError = msg.error || 'Auto Push failed mid-stream.'
+        } catch { /* keepalive/partial line */ }
+      }
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) handleLine(line)
+      }
+      if (buffer.trim()) handleLine(buffer)
+      if (streamError) throw new Error(streamError)
+      if (!result) throw new Error('Stream ended without a result.')
+      const r = result as { perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[] }
+      for (const pf of r.perField ?? []) {
+        if (pf.skippedReason) { setByField(pf.field, { status: 'failed', note: pf.skippedReason }); continue }
+        const ok = pf.failed === 0 && pf.accepted > 0
+        const upToDate = pf.failed === 0 && pf.accepted === 0   // every SKU already correct
+        if (ok) anyPushed = true
+        setByField(pf.field, {
+          status: ok || upToDate ? 'done' : 'failed',
+          note: upToDate ? 'Already up to date on all SKUs' : `${pf.accepted} pushed${pf.failed ? `, ${pf.failed} failed` : ''}`,
         })
-        if (!resp.ok) {
-          const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }
-          throw new Error(data.error || `HTTP ${resp.status}`)
-        }
-        if (!resp.body) throw new Error('Connection dropped before stream.')
-        // Minimal NDJSON pump: only the final result/error line matters here (per-SKU progress
-        // stays in the single-field modal; this list shows one line per FIELD).
-        const reader = resp.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let result: { pushed?: number; failed?: number; total?: number; message?: string } | null = null
-        let streamError: string | null = null
-        const handleLine = (line: string) => {
-          if (!line.trim()) return
-          try {
-            const msg = JSON.parse(line) as { type?: string; pushed?: number; failed?: number; total?: number; message?: string; error?: string }
-            if (msg.type === 'result') result = msg
-            else if (msg.type === 'error') streamError = msg.error || 'Push failed mid-stream.'
-          } catch { /* keepalive/partial line */ }
-        }
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() ?? ''
-          for (const line of lines) handleLine(line)
-        }
-        if (buffer.trim()) handleLine(buffer)
-        if (streamError) throw new Error(streamError)
-        if (!result) throw new Error('Stream ended without a result.')
-        const r = result as { pushed?: number; failed?: number; total?: number }
-        const ok = (r.failed ?? 0) === 0 && (r.pushed ?? 0) > 0
-        setItem(i, { status: ok ? 'done' : 'failed', note: `${r.pushed ?? 0}/${r.total ?? 0} variants${(r.failed ?? 0) > 0 ? `, ${r.failed} failed` : ''}` })
-        if (ok) {
-          anyPushed = true
-          // Mirror the server write-through locally so the panel row flips to up-to-date.
-          const fieldName = items[i].field
-          const value = items[i].value
+        if ((ok || upToDate)) {
+          const value = items.find((it) => it.field === pf.field)?.value
           setAiRecs((prev) => prev ? {
             ...prev,
             product_details_improvements: (prev.product_details_improvements ?? []).map((pd) =>
-              pd.field_name === fieldName ? { ...pd, current_value: value, enum_valid: pd.is_enum ? true : pd.enum_valid } : pd),
+              pd.field_name === pf.field ? { ...pd, current_value: value ?? pd.current_value, enum_valid: pd.is_enum ? true : pd.enum_valid } : pd),
           } : prev)
         }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : 'Push failed'
-        setItem(i, { status: 'failed', note: msg })
-        // GATEWAY-class failure (502 / dead stream / dropped connection) = the SERVER is
-        // restarting — almost always a Coolify deploy mid-sequence (live failure: Neck
-        // succeeded, then Sleeve/Closure/Highlight all died one after another while the
-        // runner kept hammering the restarting container). STOP the sequence and hold the
-        // rest instead of burning every remaining field against a dead server.
-        if (/502|Bad Gateway|Stream ended|Connection dropped|gateway/i.test(msg)) {
-          for (let j = i + 1; j < items.length; j++) {
-            if (!items[j].skip) setItem(j, { note: 'Held — server restart detected (likely a deploy). Close and re-run Auto Push in ~3 minutes; fields already accepted stay pushed.' })
-          }
-          break
-        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Auto Push failed'
+      // Gateway-class (deploy restart mid-run): the server keeps processing already-started SKUs,
+      // and the whole run is idempotent — re-running only touches still-wrong SKUs. Tell the seller.
+      const gateway = /502|Bad Gateway|Stream ended|Connection dropped|gateway/i.test(msg)
+      for (const it of items) if (!it.skip && it.status === 'pushing') {
+        setByField(it.field, { status: 'failed', note: gateway ? 'Server restart detected (likely a deploy). Re-run Auto Push in ~3 min — already-accepted SKUs stay; only still-missing ones re-push.' : msg })
       }
     }
-    // ONE fresh score read at the end (each push already re-scored server-side).
     if (anyPushed) {
       try {
         const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
@@ -1178,9 +1176,23 @@ export default function ListingDetailPage() {
         if (found) setScore(found)
       } catch { /* best-effort */ }
     }
+    bulkCancelTokenRef.current = null
     setBulkRunning(false)
     setBulkFinished(true)
   }, [asin, bulkItems, bulkRunning])
+
+  /** Stop a running Auto Push between SKUs (same server cancel as the single-push Stop). */
+  const stopBulkPush = useCallback(async () => {
+    const token = bulkCancelTokenRef.current
+    if (!token) return
+    setCancelRequested(true)
+    try {
+      await fetch('/api/fba/listing-optimizer/push-content', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel', cancel_token: token }),
+      })
+    } catch { /* the run still stops between SKUs on its own if the flag landed */ }
+  }, [])
 
   /** Verify what Amazon ACTUALLY has live right now for the just-pushed field.
    *  Useful when a push was Accepted but the seller doesn't see it on Seller Central
@@ -3057,13 +3069,18 @@ export default function ListingDetailPage() {
               <button onClick={() => setBulkOpen(false)} className="text-xs text-slate-600 hover:text-slate-800 px-3 py-1.5">
                 {bulkFinished ? 'Close' : bulkRunning ? 'Hide (keeps running)' : 'Cancel'}
               </button>
+              {bulkRunning && (
+                <button onClick={stopBulkPush} disabled={cancelRequested} className="text-xs px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60 font-medium">
+                  {cancelRequested ? 'Stopping…' : '■ Stop'}
+                </button>
+              )}
               {!bulkFinished && (
                 <button
                   onClick={runBulkPush}
                   disabled={bulkRunning || bulkItems.filter((it) => !it.skip).length === 0}
                   className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg font-semibold disabled:opacity-50"
                 >
-                  {bulkRunning ? 'Pushing…' : `Push ${bulkItems.filter((it) => !it.skip).length} field${bulkItems.filter((it) => !it.skip).length === 1 ? '' : 's'} to Amazon →`}
+                  {bulkRunning ? 'Pushing… (one PATCH per SKU)' : `Push ${bulkItems.filter((it) => !it.skip).length} field${bulkItems.filter((it) => !it.skip).length === 1 ? '' : 's'} to Amazon →`}
                 </button>
               )}
             </div>
