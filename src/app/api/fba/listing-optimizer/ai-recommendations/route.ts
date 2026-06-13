@@ -1153,6 +1153,24 @@ export async function GET(req: NextRequest) {
       }))
     : data.product_details_improvements
 
+  // Per-field LAST-SHIPPED timestamp (PO: "see when any SEO item was shipped, for all shippable
+  // items") — the most recent ACCEPTED push per field from keyword_push_log. Keys: title / bullets /
+  // description / keywords, and details as `details:<spApiKey>`. Best-effort: {} on a missing/unreadable
+  // table (migrations 015/016) — the card just shows no ship date, never errors.
+  const field_pushed_at: Record<string, string> = {}
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: pl } = await (supabase as any)
+      .from('keyword_push_log')
+      .select('field, pushed_at')
+      .eq('parent_asin', parent_asin)
+      .eq('status', 'accepted')
+      .order('pushed_at', { ascending: false })
+    for (const r of (pl ?? []) as { field: string | null; pushed_at: string | null }[]) {
+      if (r.field && r.pushed_at && !field_pushed_at[r.field]) field_pushed_at[r.field] = r.pushed_at
+    }
+  } catch { /* log table absent/unreadable — no ship dates, non-fatal */ }
+
   return NextResponse.json({
     recommendations: {
       ...data,
@@ -1161,6 +1179,7 @@ export async function GET(req: NextRequest) {
       keyword_reconciliation,
       action_plan,
       product_details_improvements,
+      field_pushed_at,
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords.length > 0
         ? per_child_keywords[0].keywords
