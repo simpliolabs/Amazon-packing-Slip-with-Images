@@ -153,7 +153,7 @@ export async function POST(req: NextRequest) {
   // Validate the body BEFORE opening the stream — a 400 here is a real client error,
   // not a mid-push failure. Keeps the streaming envelope reserved for things that
   // can actually fail asynchronously.
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; detail_fields?: string[]; skus?: string[]; title_override?: string; detail_value_override?: string; action?: string; cancel_token?: string }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; detail_fields?: string[]; detail_overrides?: Record<string, string>; skus?: string[]; title_override?: string; detail_value_override?: string; action?: string; cancel_token?: string }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
   // Cancel a running streaming push (PO: "NO way to cancel when it starts") — flips the
@@ -180,7 +180,7 @@ export async function POST(req: NextRequest) {
       }
       // Bulk Auto Push: all selected detail attributes, batched per SKU (separate executor).
       if (rawField === 'details_bulk') {
-        await executeBulkDetailsPush({ parent_asin, detail_fields: body.detail_fields, cancel_token: body.cancel_token }, emit)
+        await executeBulkDetailsPush({ parent_asin, detail_fields: body.detail_fields, detail_overrides: body.detail_overrides, cancel_token: body.cancel_token }, emit)
       } else {
         await executePush({ parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override, cancel_token: body.cancel_token }, emit)
       }

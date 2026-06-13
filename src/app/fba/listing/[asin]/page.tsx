@@ -300,7 +300,7 @@ export default function ListingDetailPage() {
   // ── Auto Push (PO): one click pushes EVERY ready Product-Detail field. The seller stays on
   // the trigger; the tool does the legwork field by field with live status. Each field goes
   // through the SAME per-field endpoint as a manual push (validation, write-through, re-score).
-  interface BulkPushItem { field: string; value: string; status: 'ready' | 'pushing' | 'done' | 'failed'; note?: string; skip?: boolean }
+  interface BulkPushItem { field: string; value: string; status: 'ready' | 'pushing' | 'done' | 'failed'; note?: string; skip?: boolean; accepted?: string[] }
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkItems, setBulkItems] = useState<BulkPushItem[]>([])
   const [bulkRunning, setBulkRunning] = useState(false)
@@ -1090,7 +1090,7 @@ export default function ListingDetailPage() {
       window.alert('A push is still running (see the progress pill, bottom-right). Let it finish before starting Auto Push.')
       return
     }
-    setBulkItems(bulkEligibleDetails.map((pd) => ({ field: pd.field_name, value: pd.recommended_value, status: 'ready' as const })))
+    setBulkItems(bulkEligibleDetails.map((pd) => ({ field: pd.field_name, value: prettyDetailValue(pd.recommended_value, pd.enum_accepted), status: 'ready' as const, accepted: pd.enum_accepted })))
     setBulkFinished(false)
     setBulkOpen(true)
   }, [bulkEligibleDetails])
@@ -1114,7 +1114,9 @@ export default function ListingDetailPage() {
     try {
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parent_asin: asin, field: 'details_bulk', detail_fields: fields, confirm: true, cancel_token: cancelToken }),
+        // Send each (possibly-edited) value as a per-field override — the server re-validates/
+        // coerces it (a wrong manual value is flagged + skipped, never pushed). PO: edit before bulk.
+        body: JSON.stringify({ parent_asin: asin, field: 'details_bulk', detail_fields: fields, detail_overrides: Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value])), confirm: true, cancel_token: cancelToken }),
       })
       if (!resp.ok) { const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }; throw new Error(data.error || `HTTP ${resp.status}`) }
       if (!resp.body) throw new Error('Connection dropped before stream.')
@@ -3042,7 +3044,7 @@ export default function ListingDetailPage() {
               <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
                 {bulkItems.map((it, i) => (
                   <div key={i} className={`flex items-center justify-between gap-3 px-3 py-2 ${it.skip ? 'opacity-50' : ''}`}>
-                    <label className="flex items-center gap-2.5 min-w-0 cursor-pointer">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <input
                         type="checkbox"
                         checked={!it.skip}
@@ -3050,11 +3052,33 @@ export default function ListingDetailPage() {
                         onChange={() => setBulkItems((prev) => { const next = prev.slice(); next[i] = { ...next[i], skip: !next[i].skip }; return next })}
                         className="accent-emerald-600 shrink-0"
                       />
-                      <span className="min-w-0">
+                      <span className="min-w-0 flex-1">
                         <p className="text-xs font-semibold text-slate-800">{it.field}</p>
-                        <p className="text-[11px] text-slate-500 truncate">{it.value}</p>
+                        {/* Editable BEFORE the bulk push (PO: "what if a value is wrong, how do I change it?").
+                            Enum fields get a dropdown of Amazon's accepted values; free-text gets an input.
+                            The server re-validates/coerces every value (loadDetailContext) — a bad manual
+                            value is flagged + skipped, never pushed. */}
+                        {bulkRunning || bulkFinished ? (
+                          <p className="text-[11px] text-slate-500 truncate">{it.value}</p>
+                        ) : it.accepted && it.accepted.length > 0 ? (
+                          <select
+                            value={it.accepted.some((a) => a === it.value) ? it.value : '__custom__'}
+                            onChange={(e) => { const v = e.target.value; if (v !== '__custom__') setBulkItems((prev) => { const n = prev.slice(); n[i] = { ...n[i], value: v }; return n }) }}
+                            className="mt-0.5 text-[11px] border border-slate-300 rounded px-1.5 py-0.5 bg-white text-slate-700 max-w-full"
+                          >
+                            {!it.accepted.includes(it.value) && <option value="__custom__">{it.value} (current)</option>}
+                            {it.accepted.map((a) => <option key={a} value={a}>{a}</option>)}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={it.value}
+                            onChange={(e) => setBulkItems((prev) => { const n = prev.slice(); n[i] = { ...n[i], value: e.target.value }; return n })}
+                            className="mt-0.5 text-[11px] border border-slate-300 rounded px-1.5 py-0.5 bg-white text-slate-700 w-full"
+                          />
+                        )}
                       </span>
-                    </label>
+                    </div>
                     {/* Long error/held notes WRAP in their own column instead of overflowing
                         across the field label (the 502 message was painting over the rows). */}
                     <span className={`text-[10px] font-semibold shrink-0 max-w-[55%] text-right ${

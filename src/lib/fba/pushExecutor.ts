@@ -745,6 +745,10 @@ export interface PushParams {
   /** Bulk Auto Push (field==='details_bulk'): the friendly detail names to push together,
    *  batched per SKU into one PATCH each (7× fewer Amazon calls than field-at-a-time). */
   detail_fields?: string[]
+  /** Per-field value overrides for the bulk push (PO edits a wrong value before pushing).
+   *  Keyed by friendly field name; each is re-validated/coerced by loadDetailContext, so a
+   *  bad manual value is flagged enumInvalid → that field is skipped, never pushed. */
+  detail_overrides?: Record<string, string>
 }
 
 /** Which of `eligibleFields` differ from the SKU's live value (so the batch touches only what
@@ -1152,7 +1156,7 @@ interface BulkFieldPlan {
 }
 
 export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit): Promise<void> {
-  const { parent_asin, detail_fields } = params
+  const { parent_asin, detail_fields, detail_overrides } = params
   try {
     const fields = (detail_fields ?? []).filter((f) => typeof f === 'string' && f.trim())
     if (fields.length === 0) { emit({ type: 'error', error: 'No fields selected for Auto Push.' }); return }
@@ -1168,7 +1172,7 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     const plans: BulkFieldPlan[] = []
     let productType: string | null = null
     for (const f of fields) {
-      const { ctx, error } = await loadDetailContext(parent_asin, f)
+      const { ctx, error } = await loadDetailContext(parent_asin, f, detail_overrides?.[f])
       if (!ctx) { skipped.push({ field: f, reason: error || 'not pushable' }); continue }
       if (ctx.enumInvalid) { skipped.push({ field: f, reason: `"${ctx.recommendedValue}" isn't an accepted Amazon value — set it via the single Ship picker` }); continue }
       productType = productType ?? ctx.productType ?? null
