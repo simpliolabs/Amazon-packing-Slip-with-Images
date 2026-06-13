@@ -210,29 +210,34 @@ export async function syncParentAsins(asins: string[]): Promise<{ map: ParentAsi
         .select('asin, units_sold_30d, revenue_30d')
         .in('asin', childAsins)
 
-      if (childSales && childSales.length > 0) {
-        const totalUnits = childSales.reduce((sum, r) => sum + (r.units_sold_30d || 0), 0)
-        const totalRevenue = childSales.reduce((sum, r) => sum + (r.revenue_30d || 0), 0)
-        const topChild = childSales.reduce((best, r) =>
-          (r.units_sold_30d || 0) > (best.units_sold_30d || 0) ? r : best, childSales[0])
-
-        await supabase
-          .from('parent_asin_rollup')
-          .upsert([{
-            parent_asin: parentAsin,
-            child_count: childAsins.length,
-            total_units_30d: totalUnits,
-            total_revenue_30d: totalRevenue,
-            total_sessions_30d: 0, // Will be enriched by traffic sync
-            total_page_views_30d: 0,
-            avg_conversion_rate: 0,
-            avg_buy_box_pct: 0,
-            top_child_asin: topChild?.asin || null,
-            top_child_units: topChild?.units_sold_30d || 0,
-            last_synced_at: new Date().toISOString(),
-          }], { onConflict: 'parent_asin' })
-          .select('parent_asin')
-      }
+      // Always upsert a rollup for a KNOWN parent (it has children in parentMap = real catalog
+      // family) — even with ZERO 30-day sales. Gating on childSales.length>0 left the seller's
+      // real-but-low-volume parents with no rollup → no listing_seo_scores row → invisible in the
+      // optimizer (PO: B0DMX156HQ is their own listing yet never appeared). The optimizer GET
+      // ghost-filters parents with 0 LIVE children (PR #93) at the read path, so a zero-sales
+      // rollup can never render a dead card; it just sinks to the bottom of the sales-ranked list.
+      const sales = childSales ?? []
+      const totalUnits = sales.reduce((sum, r) => sum + (r.units_sold_30d || 0), 0)
+      const totalRevenue = sales.reduce((sum, r) => sum + (r.revenue_30d || 0), 0)
+      const topChild = sales.length > 0
+        ? sales.reduce((best, r) => ((r.units_sold_30d || 0) > (best.units_sold_30d || 0) ? r : best), sales[0])
+        : null
+      await supabase
+        .from('parent_asin_rollup')
+        .upsert([{
+          parent_asin: parentAsin,
+          child_count: childAsins.length,
+          total_units_30d: totalUnits,
+          total_revenue_30d: totalRevenue,
+          total_sessions_30d: 0, // Will be enriched by traffic sync
+          total_page_views_30d: 0,
+          avg_conversion_rate: 0,
+          avg_buy_box_pct: 0,
+          top_child_asin: topChild?.asin || childAsins[0] || null,   // a child to score even at 0 sales
+          top_child_units: topChild?.units_sold_30d || 0,
+          last_synced_at: new Date().toISOString(),
+        }], { onConflict: 'parent_asin' })
+        .select('parent_asin')
     }
 
     console.log(`[Parent Sync] Updated ${uniqueParents.length} parent rollups`)
