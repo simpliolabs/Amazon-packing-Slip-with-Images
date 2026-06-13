@@ -1250,7 +1250,7 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       if (pushCancelled(params.cancel_token)) { cancelled = true; break }
       const currents = await fetchSkuDetails(sellerId, token, s.sku, spKeys)
       const changedKeys = changedDetailFields(currents, desired, spKeys)
-      if (changedKeys.length === 0) continue   // SKU already correct on every field — idempotent skip
+      if (changedKeys.length === 0) { emit({ type: 'progress', sku: s.sku, status: 'skipped' }); continue }   // already correct — one event per SKU so the progress bar still reaches 100%
       skusTouched++
       const changedPlans = livePlans.filter((p) => changedKeys.includes(p.attribute.spApiKey))
       emit({ type: 'progress', sku: s.sku, status: 'validating', fields: changedPlans.map((p) => p.field) })
