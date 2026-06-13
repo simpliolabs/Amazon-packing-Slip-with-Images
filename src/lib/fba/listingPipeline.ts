@@ -130,7 +130,7 @@ export interface PipelineResult {
    *  couldn't close) and can enforce cross-section design-name cohesion off the REAL design name — not a
    *  capacity-unsafe title heuristic. */
   keywordPlan: { bullets: string[]; designName: string }
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string }
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
@@ -378,6 +378,36 @@ function fixDoubledArticleBeforeBrand(text: string, brandName: string): string {
  *  gender's word must not survive into customer copy. Deterministic swap — "Men's" →
  *  "Women's", "Men" → "Women" (mirrored for Male) — keeps the sentence readable.
  *  \b prevents "women" matching inside itself. Lean_* selections do NOT use this. */
+/** Multi-design family detection (Phase 1). POD apparel sellers put SEVERAL distinct designs under
+ *  ONE parent, encoded in the SKU PREFIX — B0F6QZ34B1 (live-reviewed 2026-06-13): FHOSH64000L-BK,
+ *  FRAF64000M-BK, OF64000S-BK = three designs (FHOSH / FRAF / OF="Only Fins"), all black, sizes in
+ *  the suffix. Amazon shows the design as the "Color" variation value ("Only Fins"). The DESIGN KEY
+ *  is the SKU with its size + color + fulfillment suffix stripped; ≥2 keys each spanning ≥2 SKUs (so
+ *  the singleton parent hub never counts) = a multi-design family. Single-design colour families
+ *  (Darlin' DAR-CCG-2XL-BAY → one key "DAR-CCG") are correctly NOT flagged. */
+const SKU_SIZE_RE = /-(?:xxs|xs|s|m|l|xl|2xl|3xl|4xl|5xl|6xl|xxl|xxxl)(?=-|$)/i
+export function designKeyForSku(sku: string): string {
+  let k = (sku || '').trim().toUpperCase()
+  k = k.replace(/-(?:FBA|FBM)$/i, '')        // drop the fulfillment suffix
+  const sz = k.search(SKU_SIZE_RE)           // cut at a standalone "-2XL-" size token (DAR-CCG-2XL-BAY → DAR-CCG)
+  if (sz >= 0) k = k.slice(0, sz)
+  k = k.replace(/\d{3,}.*$/, '')             // cut at the base-number run (FHOSH64000L-BK → FHOSH)
+  return k.replace(/[-_\s]+$/, '')
+}
+export interface DesignGroup { key: string; skus: { sku: string; asin: string }[] }
+export function detectDesignGroups(children: { sku: string; asin: string }[]): { isMultiDesign: boolean; groups: DesignGroup[] } {
+  const m = new Map<string, { sku: string; asin: string }[]>()
+  for (const c of children) {
+    const k = designKeyForSku(c.sku)
+    if (!k) continue
+    if (!m.has(k)) m.set(k, [])
+    m.get(k)!.push({ sku: c.sku, asin: c.asin })
+  }
+  // A real design spans multiple sizes (≥2 SKUs); a singleton key is the parent hub / outlier.
+  const groups = [...m.entries()].filter(([, skus]) => skus.length >= 2).map(([key, skus]) => ({ key, skus }))
+  return { isMultiDesign: groups.length >= 2, groups }
+}
+
 function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
   if (!text) return text
   // FIT / STYLE / CUT is a GARMENT FACT, not an audience claim. Blanks like Comfort Colors 1717,
@@ -3149,6 +3179,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // that MUST survive into the title verbatim — the agent kept paraphrasing it away.
   const { name: designName, source: designSource } = await extractDesignName(input)
 
+  // Phase 1 multi-design detection (DEBUG-only here — Commit 1). When the family carries ≥2 distinct
+  // designs (SKU-prefix groups), the next commit branches title generation per design + per-design
+  // vision; the parent keeps a general title. For now we only OBSERVE it (no behavior change) so the
+  // detection can be verified live before the per-design title build engages.
+  const designGroupInfo = apparelProduct ? detectDesignGroups(input.children) : { isMultiDesign: false, groups: [] }
+
   // Apparel with a clear DESIGN NAME: the design name anchors the title, so do NOT also FORCE a long
   // slogan keyword (e.g. "see you later alligator shirt") into it. Forcing both jams the same design
   // in twice and makes the title read like keyword soup — the exact "Later Gator See You Later
@@ -3176,7 +3212,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     action_plan: [],
     irrelevant_keywords: irrelevantKeywords,
     keywordPlan: { bullets: [], designName },
-    debug: { titleProblems: [], candidatesUsed: [], titleRetried: false, designName, designSource },
+    debug: { titleProblems: [], candidatesUsed: [], titleRetried: false, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
     regeneratedSection: section,
     ...fields,
   })
@@ -3290,7 +3326,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('title', {
       recommended_title: finalTitle,
       per_child_titles: perChildTitles,
-      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource },
+      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
     })
   }
 
@@ -3704,6 +3740,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
     keywordPlan: { bullets: topOpportunityKwsForBullets, designName },
-    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource },
+    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
   }
 }
