@@ -460,4 +460,145 @@ function emptyResult(): KeywordResearchResult {
     researchedAt: new Date().toISOString(),
   };
 }
+
+// ─── Multi-universe niche enrichment ──────────────────────────────────────────
+// PO 2026-06-14: "The Council should be smart enough to know if they need to query MORE
+// keyword universes from JS — up to 3 — searching storage first, each query 100 keywords."
+//
+// CHEAP, ADDITIVE path (PO chose this over a full re-research): take a listing that already
+// has a researched pool and ADD the missing NICHE universe(s) — the design-theme keywords the
+// blank/product seed never surfaced (a Christian faith tee researched on "comfort colors
+// tshirt" has ZERO faith keywords). Keyword queries ONLY (no SOV/competitor re-run),
+// storage-first per universe, capped at 2 niche credits (3 universes total incl. the primary).
+// Does NOT touch researchKeywords — this is purely additive.
+
+const NICHE_APPAREL_RE = /\b(shirt|shirts|tee|tees|tshirt|tshirts|t-shirt|hoodie|sweatshirt|tank|top|tops)\b/i
+// Words that never constitute a "niche" on their own (so the blank/product itself is never
+// mistaken for a design theme).
+const NICHE_GENERIC = new Set([
+  'tshirt', 'tshirts', 'shirt', 'shirts', 'tee', 'tees', 'top', 'tops', 'apparel', 'clothing',
+  'comfort', 'colors', 'color', 'blank', 'cotton', 'graphic', 'unisex', 'mens', 'womens',
+  'women', 'men', 'plain', 'soft', 'vintage', 'oversized', 'premium',
+])
+
+function nicheTokens(s: string): string[] {
+  return s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter((w) => w.length > 2)
+}
+function nicheNorm(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+/**
+ * Derive up to `max` NICHE seed phrases from the vision identity that are DISTINCT from the
+ * primary (blank/product) seed. Pure + unit-tested. "Auto when design has a niche": a plain
+ * blank tee (designTheme generic, seedKeywords ⊆ primary) yields [] — no extra universe, no
+ * spend. A faith/fishing/funny design yields 1-2 niche seeds.
+ */
+export function deriveNicheSeeds(
+  identity: { designTheme?: string; seedKeywords?: string[]; suggestedSearchTerms?: string[]; productType?: string } | null | undefined,
+  primarySeed: string,
+  max = 2,
+): string[] {
+  if (!identity) return []
+  const primaryToks = new Set(nicheTokens(primarySeed))
+  const productWord = NICHE_APPAREL_RE.test(identity.productType || '') ? (identity.productType || '').toLowerCase() : 'tshirt'
+  const candidates: string[] = [
+    ...((identity.suggestedSearchTerms || []).slice(1)), // [0] is (or seeds) the primary
+    ...(identity.seedKeywords || []),
+    ...(identity.designTheme ? [identity.designTheme] : []),
+  ]
+  const out: string[] = []
+  // Dedup by THEME (the novel non-generic tokens), NOT the full string — otherwise the same
+  // niche emits twice ("christian tshirt" from a suggested term + "christian shirt" from a seed
+  // keyword) and crowds out genuinely distinct niches like "bible verse".
+  const seenNovel = new Set<string>()
+  for (const raw of candidates) {
+    if (out.length >= max) break
+    let s = (raw || '').toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!s) continue
+    // Must contribute a NON-generic token the primary doesn't already cover — else it isn't a
+    // real niche (the "auto when design has a niche" gate).
+    const novel = nicheTokens(s).filter((t) => !primaryToks.has(t) && !NICHE_GENERIC.has(t))
+    if (novel.length === 0) continue
+    if (novel.every((t) => seenNovel.has(t))) continue // this theme is already represented
+    for (const t of novel) seenNovel.add(t)
+    if (!NICHE_APPAREL_RE.test(s)) s = `${s} ${productWord}` // ensure a product word so JS returns product keywords
+    s = s.split(/\s+/).slice(0, 4).join(' ') // tight seeds (JS works best ≤4 words)
+    out.push(s)
+  }
+  return out
+}
+
+export interface NicheEnrichResult {
+  creditsUsed: number
+  seedsQueried: string[]
+  seedsSkippedCached: string[]
+  addedKeywordCount: number
+  totalKeywordCount: number
+  note: string
+}
+
+/**
+ * Cheap niche enrichment for an ALREADY-researched listing. Loads the cached pool, derives
+ * niche seeds from the vision identity, and for each niche NOT already in storage, fetches one
+ * keywords_by_keyword universe (100 kw, 1 credit) and merges it in. Re-caches the enriched pool.
+ * The caller then re-runs the engine so the new keywords surface in Intelligence.
+ *
+ * Credits: 0 if every niche is already cached; max 2 (the niche universes — primary already paid).
+ */
+export async function enrichResearchWithNiche(asin: string): Promise<NicheEnrichResult> {
+  const base: NicheEnrichResult = { creditsUsed: 0, seedsQueried: [], seedsSkippedCached: [], addedKeywordCount: 0, totalKeywordCount: 0, note: '' }
+  const cached = await getCachedResearch(asin)
+  if (!cached) return { ...base, note: 'No existing research to enrich — run a full research first.' }
+
+  const identity = await getVisionIdentityRaw(asin)
+  const primarySeed = cached.seedUsed || identity?.suggestedSearchTerms?.[0] || ''
+  const nicheSeeds = deriveNicheSeeds(identity, primarySeed, 2)
+  if (nicheSeeds.length === 0) {
+    return { ...base, totalKeywordCount: cached.allKeywords.length, note: 'No distinct niche detected — blank/product universe only, nothing to enrich.' }
+  }
+
+  const pool = new Map<string, JungleScoutKeywordRow>()
+  for (const k of cached.allKeywords) pool.set(k.keyword.toLowerCase(), k)
+  const poolBlob = Array.from(pool.keys()).join(' ')
+
+  const seedsQueried: string[] = []
+  const seedsSkippedCached: string[] = []
+  let creditsUsed = 0
+  let added = 0
+  for (const seed of nicheSeeds) {
+    // Storage-first: if the niche's distinctive token already saturates the pool, it's covered.
+    const distinct = nicheTokens(seed).find((t) => !NICHE_GENERIC.has(t) && !poolBlob.includes(t))
+    if (!distinct) { seedsSkippedCached.push(seed); continue }
+    const rows = await fetchKeywordsByKeyword(seed, { pageSize: 100 })
+    creditsUsed++
+    seedsQueried.push(seed)
+    for (const r of rows) {
+      const key = r.keyword.toLowerCase()
+      if (!pool.has(key)) { pool.set(key, r); added++ }
+    }
+  }
+
+  if (added > 0) {
+    const merged = Array.from(pool.values()).sort((a, b) => b.searchVolume - a.searchVolume)
+    await cacheResearch(asin, { ...cached, allKeywords: merged, researchedAt: new Date().toISOString() })
+  }
+  return {
+    creditsUsed,
+    seedsQueried,
+    seedsSkippedCached,
+    addedKeywordCount: added,
+    totalKeywordCount: pool.size,
+    note: seedsQueried.length ? `Added ${added} niche keywords from: ${seedsQueried.join(' | ')}` : 'All niche universes already in storage (0 credits).',
+  }
+}
+
+/** Read the full vision identity for niche-seed derivation. */
+async function getVisionIdentityRaw(asin: string): Promise<ProductIdentity | null> {
+  try {
+    const { data } = await supabase.from('product_identity').select('identity_data').eq('asin', asin).single()
+    if (data) return (data as { identity_data: ProductIdentity }).identity_data
+  } catch { /* product_identity may not exist for this asin */ }
+  return null
+}
 // build: 20260602191152 - HOSTNAME fix
