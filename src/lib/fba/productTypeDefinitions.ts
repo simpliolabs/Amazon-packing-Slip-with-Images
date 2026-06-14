@@ -210,6 +210,29 @@ export async function attributeExistsInSchema(
   return Object.prototype.hasOwnProperty.call(props, spApiKey)
 }
 
+/**
+ * Container fallback for suffixed apparel attributes (the 8→1 product-detail collapse,
+ * 2026-06-14). Amazon's modern apparel schema exposes CONTAINERS — `neck`, `sleeve`,
+ * `closure` (titles "Neck"/"Sleeve"/"Closure") — whose array items hold the value, NOT
+ * the flat `neck_style`/`sleeve_type`/`closure_type` keys the static map and the audit's
+ * no-menu fallback sometimes produce. When such a flat key is ABSENT from the live schema
+ * but its container (the key minus a trailing _style/_type/_description) IS present, return
+ * the container so the caller keeps + pushes the attribute instead of dropping it.
+ *
+ * PURELY ADDITIVE: callers invoke this ONLY when the primary key is already missing from the
+ * schema, so a product type that genuinely uses the flat key (it exists → no fallback needed,
+ * caller never calls this) is never rerouted. Returns null when there's no valid container.
+ */
+export async function containerKeyFallback(
+  productType: string,
+  spApiKey: string,
+  opts: FetchOpts,
+): Promise<string | null> {
+  const base = spApiKey.replace(/_(?:style|type|description)$/, '')
+  if (base === spApiKey || !base) return null
+  return (await attributeExistsInSchema(productType, base, opts)) ? base : null
+}
+
 const SCHEMA_TITLE_QUALIFIERS = new Set(['item', 'product', 'total'])
 /** Resolve a friendly attribute name ("Adhesive Type", "Package Quantity") to the REAL SP-API key for THIS
  *  product type by matching the live schema's property `title`s — so ANY category's attributes become

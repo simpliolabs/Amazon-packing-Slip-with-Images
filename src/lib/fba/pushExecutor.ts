@@ -39,7 +39,7 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
+import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
 // validator. Process-lifetime: schemas are static, so the form that validates once keeps
@@ -418,7 +418,7 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   // Resolve the SP-API attribute: prefer the regen-resolved sp_api_key (schema-driven — works for ANY
   // category, not just the apparel map); fall back to the static map. Reject only when neither yields a
   // pushable broadcast attribute.
-  const attribute: DetailAttribute | undefined = (match.pushable && match.sp_api_key)
+  let attribute: DetailAttribute | undefined = (match.pushable && match.sp_api_key)
     ? { spApiKey: match.sp_api_key, scope: 'broadcast' }
     : resolveDetailAttribute(detailField) ?? undefined
   if (!attribute || attribute.scope !== 'broadcast') {
@@ -467,6 +467,17 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
       if (resolvedPt) {
         const productType = resolvedPt
         const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+        // CONTAINER FALLBACK: if the resolved key is a suffixed apparel attr (sleeve_type) that
+        // isn't in THIS schema, reroute to the container (sleeve) before coercion/shape derivation —
+        // so a "Sleeve Type"/"Neck Style" push resolves the same valid composite as bare "Sleeve".
+        // Additive: only fires when the primary key is absent (genuine flat-key types are untouched).
+        if (!(await attributeExistsInSchema(productType, attribute.spApiKey, ptOpts))) {
+          const container = await containerKeyFallback(productType, attribute.spApiKey, ptOpts)
+          if (container && container !== attribute.spApiKey) {
+            console.log(`[push-content] container fallback: ${attribute.spApiKey} -> ${container} (productType ${productType})`)
+            attribute = { ...attribute, spApiKey: container }
+          }
+        }
         try {
           const c = await coerceDetailValue(productType, attribute.spApiKey, recommendedValue, ptOpts)
           if (c.isEnum) {

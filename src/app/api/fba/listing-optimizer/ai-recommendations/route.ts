@@ -775,7 +775,7 @@ export async function POST(req: NextRequest) {
             // ptType/ptOpts were resolved ONCE before the pipeline (the same values that drove the
             // apparel branch + attribute menu) — no PT → can't validate, leave rows as-is (legacy).
             if (Array.isArray(pds) && pds.length > 0 && detailSku && ptType && ptOpts) {
-              const { coerceDetailValue, attributeExistsInSchema, resolveSpApiKeyFromTitle } = await import('@/lib/fba/productTypeDefinitions')
+              const { coerceDetailValue, attributeExistsInSchema, containerKeyFallback, resolveSpApiKeyFromTitle } = await import('@/lib/fba/productTypeDefinitions')
               const { resolveDetailAttribute } = await import('@/lib/fba/productDetailAttrs')
               const invalidDetailFields = new Set<string>()
               for (const pd of pds) {
@@ -786,11 +786,18 @@ export async function POST(req: NextRequest) {
                 // Resolve the REAL spApiKey: the static map first, else a DYNAMIC schema title-match — so ANY
                 // category's attributes (adhesive_type, item_package_quantity, …) become pushable, not just the
                 // hardcoded apparel map (PO: "auto-map any item to the category's Features").
-                const spApiKey = staticAttr?.spApiKey ?? (await resolveSpApiKeyFromTitle(ptType, pd.field_name, ptOpts))?.spApiKey ?? null
+                let spApiKey = staticAttr?.spApiKey ?? (await resolveSpApiKeyFromTitle(ptType, pd.field_name, ptOpts))?.spApiKey ?? null
                 if (!spApiKey) { row.pushable = false; continue }   // genuinely unmappable → "Manual" (seller can still set it)
                 // DROP a statically-mapped attr whose key is ABSENT from THIS schema (apparel "Department" on
                 // an office product) — unfillable Features gap + 400 on push. Fail-open on a schema error.
-                if (!(await attributeExistsInSchema(ptType, spApiKey, ptOpts))) { invalidDetailFields.add(pd.field_name); continue }
+                if (!(await attributeExistsInSchema(ptType, spApiKey, ptOpts))) {
+                  // CONTAINER FALLBACK before dropping: a suffixed apparel key (neck_style) that's absent
+                  // reroutes to its container (neck) when THAT exists — the 8→1 detail collapse. Additive:
+                  // only runs on a would-be-drop, so genuine flat-key schemas are never rerouted.
+                  const container = await containerKeyFallback(ptType, spApiKey, ptOpts)
+                  if (container) { spApiKey = container }
+                  else { invalidDetailFields.add(pd.field_name); continue }
+                }
                 row.sp_api_key = spApiKey
                 row.attr_scope = 'broadcast'
                 row.pushable = true
