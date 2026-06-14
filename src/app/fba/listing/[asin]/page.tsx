@@ -1509,8 +1509,9 @@ export default function ListingDetailPage() {
         </div>
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
         {aiRecs?.generated_at && !aiLoading && (
-          <p className="text-[11px] text-slate-400 mt-2" title={new Date(aiRecs.generated_at).toLocaleString()}>
-            AI audit generated {relDate(aiRecs.generated_at)}
+          <p className="text-xs text-slate-600 mt-2 font-medium" title={new Date(aiRecs.generated_at).toLocaleString()}>
+            Last AI audit: <span className="font-semibold text-slate-800">{relDate(aiRecs.generated_at)}</span>
+            <span className="text-slate-400 font-normal"> · {new Date(aiRecs.generated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
           </p>
         )}
 
