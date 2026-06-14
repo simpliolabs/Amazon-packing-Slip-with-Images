@@ -246,6 +246,12 @@ export default function ListingDetailPage() {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['apply']))
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
+  // Seller-set DESIGN NAME override (migration 031). When set, the pipeline anchors every regen on
+  // this verbatim — kills the "stuck design" trap where the extractor falls through and the LLM
+  // promotes a high-volume keyword to slogan status (B0GQVL3K4B "Too Young to Retire").
+  const [designNameOverride, setDesignNameOverride] = useState<string>('')
+  const [designOverrideSaving, setDesignOverrideSaving] = useState(false)
+  const [designOverrideSavedAt, setDesignOverrideSavedAt] = useState<number | null>(null)
   const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
 
   // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords / details) ──
@@ -703,6 +709,34 @@ export default function ListingDetailPage() {
       } catch { /* ignore */ }
     })()
   }, [asin])
+
+  // Fetch seller-set design name override (migration 031). Best-effort: a missing column on a
+  // pre-migration env returns null → input stays empty → legacy LLM/heuristic extraction runs.
+  useEffect(() => {
+    if (!asin) return
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/design-name-override?parentAsin=${asin}`)
+        if (resp.ok) {
+          const data = await resp.json() as { designNameOverride?: string | null }
+          if (data.designNameOverride) setDesignNameOverride(data.designNameOverride)
+        }
+      } catch { /* ignore */ }
+    })()
+  }, [asin])
+
+  const saveDesignNameOverride = async () => {
+    setDesignOverrideSaving(true)
+    try {
+      await fetch('/api/fba/design-name-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentAsin: asin, designNameOverride: designNameOverride.trim() || null }),
+      })
+      setDesignOverrideSavedAt(Date.now())
+    } catch { /* ignore */ }
+    setDesignOverrideSaving(false)
+  }
 
   const saveCompetitorAsin = async () => {
     if (!competitorAsin || !/^[A-Z0-9]{10}$/.test(competitorAsin.toUpperCase())) return
@@ -1533,6 +1567,33 @@ export default function ListingDetailPage() {
             {competitorSaving ? 'Saving…' : 'Save'}
           </button>
           <span className="text-[11px] text-slate-400">Used for Jungle Scout lookup when your ASIN has no data</span>
+        </div>
+
+        {/* DESIGN NAME OVERRIDE (PO 2026-06-14: "how do we prevent stuck design again") — when set,
+            the regen uses this VERBATIM as the design anchor; bypasses LLM/vision/heuristic entirely.
+            Highest-leverage deterministic control for POD families where the printed artwork's
+            slogan differs from the listing title text. */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="text-xs font-medium text-slate-500 whitespace-nowrap">Design Name</label>
+          <input
+            type="text"
+            value={designNameOverride}
+            onChange={(e) => setDesignNameOverride(e.target.value)}
+            placeholder="(auto-detect — only override if regen picks the wrong slogan)"
+            className="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 w-80 focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition-shadow"
+            maxLength={80}
+          />
+          <button
+            onClick={saveDesignNameOverride}
+            disabled={designOverrideSaving}
+            className="text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors cursor-pointer">
+            {designOverrideSaving ? 'Saving…' : 'Save'}
+          </button>
+          <span className="text-[11px] text-slate-400">
+            {designOverrideSavedAt && Date.now() - designOverrideSavedAt < 5000
+              ? 'Saved — regenerate to use it'
+              : 'Locks the design phrase so the title agent can\'t pick a slogan-like keyword from the pool'}
+          </span>
         </div>
       </div>
 
