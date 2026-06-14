@@ -697,18 +697,28 @@ export function scoreListingContent(
     if (titleLen < 50) {
       titleScore -= 10
       issues.push({ field: 'title', severity: 'warning', message: `Title is only ${titleLen} chars — too short to carry meaningful keywords. Aim 50-75 chars: brand + design/product name + your top keyword (Amazon's new ≤75 limit, July 27, 2026).`, auto_fixable: false })
-    } else if (titleLen > 200) {
-      titleScore -= 10
-      issues.push({ field: 'title', severity: 'critical', message: `Title is ${titleLen} chars — exceeds Amazon's 200-char hard limit. This may cause listing suppression. Immediately shorten by removing redundant phrases and moving keywords to bullets/backend.`, auto_fixable: false })
     } else if (titleLen > 75) {
-      // Amazon's NEW title rule (effective 2026-07-27): all non-media categories must be ≤75 chars
-      // INCLUDING spaces, or Amazon AUTO-REWRITES the title for you (undoing the keyword + design-name
-      // SEO this tool builds). The extra detail moves to the new 125-char Item Highlights field.
-      // The -5 dock is ON (the plan when the warning shipped): the title GENERATOR now produces ≤75,
-      // so every listing has a compliant ready-to-ship draft after its next regen — the dock makes the
-      // work-list actionable instead of cosmetic, and shipping the draft recovers the points the same day.
-      titleScore -= 5
-      issues.push({ field: 'title', severity: 'warning', message: `Title is ${titleLen} chars — over Amazon's NEW 75-character limit (effective July 27, 2026; every category except media). After that date Amazon AUTO-REWRITES titles over 75 chars, which can undo your keyword and design-name SEO. Ship a ≤75-char title on your terms first (Regenerate for a compliant draft); move the extra detail into the new 125-char Item Highlights field as comma-separated phrases.`, auto_fixable: false })
+      // SCALED LENGTH PENALTY (PO 2026-06-14: a 200-char title scoring 18/22 means a human
+      // team will never go fix it — anything that doesn't make the title optimized SHOULD
+      // affect the score). The Amazon July-2026 hard cap is 75 chars; anything over loses
+      // SEO control AND chars are not free (every extra word past 75 is one Amazon will
+      // auto-rewrite, undoing the keyword anchoring).
+      // Curve: -5 base for crossing the cap + 1 extra penalty per 10 chars past 75, MAX -20.
+      // 76 chars: -5  (still fixable in seconds)
+      // 100 chars: -7 ("warning, ship a draft today")
+      // 150 chars: -12 ("clearly too long — fix this week")
+      // 200 chars: -17 ("title is half spam — fix NOW")
+      // 230+ chars: -20 ("the title is the listing's biggest problem")
+      const overage = titleLen - 75
+      const penalty = Math.min(20, 5 + Math.floor(overage / 10))
+      titleScore -= penalty
+      const severity: 'warning' | 'critical' = titleLen > 150 ? 'critical' : 'warning'
+      const action = titleLen > 200
+        ? `is EGREGIOUSLY long (${titleLen} chars). Amazon's 200-char hard limit puts you at suppression risk — fix immediately by trimming redundant phrases.`
+        : titleLen > 150
+          ? `is ${titleLen} chars — far over Amazon's 75-char limit (effective July 27, 2026). Amazon will AUTO-REWRITE it, undoing your SEO. Regenerate now for a compliant ≤75-char draft.`
+          : `is ${titleLen} chars — over Amazon's 75-char limit (effective July 27, 2026). Amazon will AUTO-REWRITE the title, undoing the keyword + design-name anchoring. Regenerate for a compliant ≤75-char draft; move the extra detail into the 125-char Item Highlights field.`
+      issues.push({ field: 'title', severity, message: `Title ${action}`, auto_fixable: false })
     }
 
     // ALL CAPS check — the message says brand names + technical acronyms are exempt;
