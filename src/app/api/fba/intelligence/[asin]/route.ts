@@ -150,7 +150,8 @@ export async function GET(
       if (enrichNiche) {
         try {
           const { enrichResearchWithNiche } = await import('@/lib/keyword-engine/keywordResearcher');
-          nicheEnrich = await enrichResearchWithNiche(childAsin);
+          // Pass parentAsin: vision identity is stored under the parent, so the child-only read missed it.
+          nicheEnrich = await enrichResearchWithNiche(childAsin, parentAsin || undefined);
           console.log(`[intelligence] niche enrich for ${childAsin}: ${nicheEnrich.note} (${nicheEnrich.creditsUsed} credits)`);
         } catch (e) {
           console.warn('[intelligence] niche enrich failed (non-fatal):', e instanceof Error ? e.message : e);

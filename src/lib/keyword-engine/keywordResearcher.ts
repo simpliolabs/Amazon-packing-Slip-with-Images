@@ -546,12 +546,15 @@ export interface NicheEnrichResult {
  *
  * Credits: 0 if every niche is already cached; max 2 (the niche universes — primary already paid).
  */
-export async function enrichResearchWithNiche(asin: string): Promise<NicheEnrichResult> {
+export async function enrichResearchWithNiche(asin: string, parentAsin?: string): Promise<NicheEnrichResult> {
   const base: NicheEnrichResult = { creditsUsed: 0, seedsQueried: [], seedsSkippedCached: [], addedKeywordCount: 0, totalKeywordCount: 0, note: '' }
   const cached = await getCachedResearch(asin)
   if (!cached) return { ...base, note: 'No existing research to enrich — run a full research first.' }
 
-  const identity = await getVisionIdentityRaw(asin)
+  // Vision identity is WRITTEN under the PARENT asin (ai-recommendations scanProductImage(parent_asin,…))
+  // but enrichment runs on the CHILD asin — so a child-only read missed it (adversarial-review finding,
+  // 2026-06-14: "no niche detected" for B0FKKN8XKV). Try child, then parent.
+  const identity = (await getVisionIdentityRaw(asin)) || (parentAsin ? await getVisionIdentityRaw(parentAsin) : null)
   const primarySeed = cached.seedUsed || identity?.suggestedSearchTerms?.[0] || ''
   const nicheSeeds = deriveNicheSeeds(identity, primarySeed, 2)
   if (nicheSeeds.length === 0) {
