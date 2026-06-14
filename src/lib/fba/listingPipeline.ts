@@ -3320,6 +3320,31 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         .replace(re, (m) => (++seen === 1 ? m : ''))
         .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
     }
+    // Brand-at-FRONT backstop: live regression 2026-06-13 — the LLM produced
+    // "Comfort Colors Tshirt Comfort Colors Christian Graphic Tees THE CEO I Will Praise…"
+    // (brand "THE CEO" mid-title, slogan tail truncated by capTitle75). Amazon's title rules expect
+    // brand-first, and the design name is the highest-rank token after brand. So if the title
+    // contains the brand but doesn't START with it, move the brand to the front and re-cap.
+    if (apparelProduct && brandName && finalTitle) {
+      const brandRe = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+      const m = finalTitle.match(brandRe)
+      if (m && m.index !== undefined && m.index > 0) {
+        const without = (finalTitle.slice(0, m.index) + finalTitle.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').trim()
+        finalTitle = capTitle75(`${m[0]} ${without}`)
+      }
+    }
+    // Design-name backstop: if a multi-word slogan was extracted but doesn't appear (verbatim) in
+    // the title — almost always because capTitle75 cut its tail — re-anchor it after the brand.
+    // Drops any tail filler that pushed the slogan out so the slogan survives intact.
+    if (apparelProduct && designName && designName.split(/\s+/).length >= 3 && finalTitle && !new RegExp(`\\b${designName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(finalTitle)) {
+      const brandMatch = brandName ? finalTitle.match(new RegExp(`^\\s*${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i')) : null
+      const head = brandMatch ? brandMatch[0].trim() : ''
+      const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+      const tail = tailMatch ? tailMatch[0] : ''
+      // Compose: brand + DESIGN NAME + (the rest minus brand minus tail) + tail, then cap to 75.
+      const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
+      finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
+    }
   } else {
     finalTitle = (input.priorTitle || repTitle || '').trim()
   }
