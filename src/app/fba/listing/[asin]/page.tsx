@@ -761,6 +761,11 @@ export default function ListingDetailPage() {
           const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
           if (found) setScore(found)
         } catch { /* best-effort — next load shows it */ }
+        // Recompute the Rank-Top card off CURRENT content + the LATEST rank logic (free, no credits).
+        // Without this the card kept showing the rank analysis cached BEFORE this regen — stale
+        // coverage, already-covered "gaps", and opposite-gender keywords the #210 lean filter now
+        // excludes (PO: "after regen still showing gaps + mens + asking to weave in things already in bullets").
+        refreshRankFree()
       } else {
         // Stream ended with no result AND no error event — almost always the request hit the
         // container mid-redeploy (a merge just deployed) or timed out. Nothing was changed.
@@ -772,7 +777,7 @@ export default function ListingDetailPage() {
     setAiLoading(false)
     setRegenSection(null)
     setAiProgress('')
-  }, [asin])
+  }, [asin, refreshRankFree])
 
   /** Read a JSON response defensively. Coolify/nginx returns plain-text '502 Bad Gateway'
    *  HTML when the upstream Next process times out, restarts, or OOMs mid-request — calling
@@ -1026,6 +1031,9 @@ export default function ListingDetailPage() {
           const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
           if (found) setScore(found)
         } catch { /* best-effort — the score still updates on next load */ }
+        // A content push (title/bullets/description/keywords) changed live coverage → recompute the
+        // Rank-Top card so it stops showing now-covered "gaps" (details don't affect keyword coverage).
+        if (pushField !== 'details') refreshRankFree()
 
         // Mark matching action_plan items DONE locally — ONLY when FULLY shipped. A partial/interrupted
         // push leaves the card in REPLACE so the seller re-checks + finishes the stragglers (else we'd
@@ -1076,7 +1084,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField, buildPushBody])
+  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   const bulkEligibleDetails = useMemo(() => {
