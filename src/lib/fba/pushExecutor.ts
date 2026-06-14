@@ -841,8 +841,9 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const { error: insertErr } = await db.from('keyword_push_log').insert(row)
               if (!insertErr) return
               const rest = { ...row }; delete rest.field
-              await db.from('keyword_push_log').insert(rest)
-            } catch (e) { console.warn('[push-content/details] keyword_push_log insert failed:', e) }
+              const { error: error2 } = await db.from('keyword_push_log').insert(rest)
+              if (error2) console.error('[push-content/details] keyword_push_log insert FAILED both attempts — ship date will be missing. first:', insertErr?.message ?? insertErr, '| second:', error2?.message ?? error2)
+            } catch (e) { console.error('[push-content/details] keyword_push_log insert threw:', e) }
           }
 
           // ── CALIBRATE the write form against Amazon's own validator (composites only) ──
@@ -1024,9 +1025,14 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           try {
             const { error } = await db.from('keyword_push_log').insert(row)
             if (!error) return
+            // The first attempt may fail because the migration-016 `field` column is absent — retry
+            // without it. BUT check THAT error too: supabase-js RETURNS errors (doesn't throw), so an
+            // unchecked second insert hid every real failure (table/column/constraint) → no ship date,
+            // no signal (PO: "pushed keywords, still no date"). Surface it loudly now.
             const rest = { ...row }; delete rest.field
-            await db.from('keyword_push_log').insert(rest)
-          } catch (e) { console.warn('[push-content] keyword_push_log insert failed (migrations 015/016 applied?):', e) }
+            const { error: error2 } = await db.from('keyword_push_log').insert(rest)
+            if (error2) console.error('[push-content] keyword_push_log insert FAILED both attempts — ship date will be missing. first:', error?.message ?? error, '| second:', error2?.message ?? error2)
+          } catch (e) { console.error('[push-content] keyword_push_log insert threw:', e) }
         }
 
         const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
@@ -1271,8 +1277,9 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     const db = supabase as any
     const logPush = async (row: Record<string, unknown>) => {
       try { const { error } = await db.from('keyword_push_log').insert(row); if (!error) return
-        const rest = { ...row }; delete rest.field; await db.from('keyword_push_log').insert(rest)
-      } catch (e) { console.warn('[bulk-details] keyword_push_log insert failed:', e) }
+        const rest = { ...row }; delete rest.field; const { error: error2 } = await db.from('keyword_push_log').insert(rest)
+        if (error2) console.error('[bulk-details] keyword_push_log insert FAILED both attempts — ship date will be missing. first:', error?.message ?? error, '| second:', error2?.message ?? error2)
+      } catch (e) { console.error('[bulk-details] keyword_push_log insert threw:', e) }
     }
 
     // per-field tallies + which fields actually changed at least one SKU (drives write-through).
