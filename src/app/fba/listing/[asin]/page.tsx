@@ -277,6 +277,9 @@ export default function ListingDetailPage() {
   // Cancel support for a streaming push: the token travels with the push body; Stop POSTs it back.
   const pushCancelTokenRef = useRef<string | null>(null)
   const bulkCancelTokenRef = useRef<string | null>(null)
+  // True when the stream ended without a clean result (interrupted/timeout) — the modal header
+  // shows "Interrupted" instead of "Complete" so the seller isn't told the push finished when it didn't.
+  const bulkStreamInterruptedRef = useRef(false)
   const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
@@ -1134,6 +1137,7 @@ export default function ListingDetailPage() {
     bulkCancelTokenRef.current = cancelToken
     setCancelRequested(false)
     setBulkProgress({ done: 0, total: 0 })
+    bulkStreamInterruptedRef.current = false
     let anyPushed = false
     try {
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
@@ -1211,12 +1215,19 @@ export default function ListingDetailPage() {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Auto Push failed'
-      // Gateway-class (deploy restart mid-run): the server keeps processing already-started SKUs,
-      // and the whole run is idempotent — re-running only touches still-wrong SKUs. Tell the seller.
+      // Gateway-class (deploy restart / stream stalled): the server keeps processing already-started
+      // SKUs, and the whole run is idempotent — re-running only touches still-wrong SKUs.
       const gateway = /502|Bad Gateway|Stream ended|Connection dropped|gateway/i.test(msg)
-      for (const it of items) if (!it.skip && it.status === 'pushing') {
-        setByField(it.field, { status: 'failed', note: gateway ? 'Server restart detected (likely a deploy). Re-run Auto Push in ~3 min — already-accepted SKUs stay; only still-missing ones re-push.' : msg })
-      }
+      // CLOSURE BUG FIX (live: Auto Push showed "Complete" with all rows stuck on "Pushing…" because
+      // `items[i].status === 'pushing'` checked the ORIGINAL captured array which still had
+      // status:'ready'). Read CURRENT state via functional setBulkItems and mark every not-yet-terminal
+      // row as failed with the actionable message.
+      setBulkItems((prev) => prev.map((it) =>
+        it.skip || it.status === 'done' || it.status === 'failed' ? it :
+        { ...it, status: 'failed', note: gateway ? 'Stream interrupted before completion. Already-accepted SKUs stay pushed — re-run Auto Push to finish the rest (idempotent: only still-wrong SKUs re-push).' : msg }
+      ))
+      // Record that we DID NOT receive a clean result so the header message tells the truth.
+      bulkStreamInterruptedRef.current = true
     }
     if (anyPushed) {
       try {
@@ -3081,7 +3092,9 @@ export default function ListingDetailPage() {
             <div className="px-5 py-4 space-y-2">
               <p className="text-xs text-slate-500">
                 {bulkFinished
-                  ? 'Done. Amazon applies accepted submissions in 15 min – 6 hr; use Verify on Amazon on any field to confirm.'
+                  ? (bulkStreamInterruptedRef.current
+                      ? `⚠ INTERRUPTED at ${bulkProgress.done}/${bulkProgress.total} SKUs — the stream dropped before the server finished. SKUs ACCEPTED before the drop stay pushed (Amazon has them). Re-run Auto Push to finish the rest — it’s idempotent, only still-wrong SKUs re-push. Use Verify on Amazon on any field to confirm.`
+                      : 'Done. Amazon applies accepted submissions in 15 min – 6 hr; use Verify on Amazon on any field to confirm.')
                   : bulkRunning
                   ? 'Pushing one PATCH per SKU. You can close this — it keeps running in this tab (reopen Auto Push to check progress). Use Stop to halt; already-accepted SKUs stay pushed.'
                   : `These ${bulkItems.length} fields are validated and ready. Each pushes to every variant SKU with the same checks as a manual push — a failure on one never blocks the rest.`}
@@ -3091,12 +3104,12 @@ export default function ListingDetailPage() {
               {(bulkRunning || (bulkFinished && bulkProgress.total > 0)) && bulkProgress.total > 0 && (
                 <div className="mt-1">
                   <div className="flex items-center justify-between text-[10px] text-slate-500 mb-0.5">
-                    <span>{bulkFinished ? 'Complete' : 'Pushing to Amazon…'}</span>
+                    <span className={bulkFinished && bulkStreamInterruptedRef.current ? 'text-amber-700 font-semibold' : ''}>{bulkFinished ? (bulkStreamInterruptedRef.current ? 'Interrupted' : 'Complete') : 'Pushing to Amazon…'}</span>
                     <span>{bulkProgress.done} / {bulkProgress.total} SKUs</span>
                   </div>
                   <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                     <div
-                      className={`h-full rounded-full transition-all duration-300 ${bulkFinished ? 'bg-emerald-500' : 'bg-violet-500'}`}
+                      className={`h-full rounded-full transition-all duration-300 ${bulkFinished ? (bulkStreamInterruptedRef.current ? 'bg-amber-500' : 'bg-emerald-500') : 'bg-violet-500'}`}
                       style={{ width: `${Math.round((bulkProgress.done / bulkProgress.total) * 100)}%` }}
                     />
                   </div>
