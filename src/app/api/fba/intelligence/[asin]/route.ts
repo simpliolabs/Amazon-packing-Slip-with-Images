@@ -57,6 +57,10 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const forceRefresh = searchParams.get('refresh') === 'true';
     const storedOnly = searchParams.get('stored') === 'true';
+    // Niche enrichment (PO 2026-06-14): ADD the missing design-niche keyword universe(s) to the
+    // already-researched pool (cheap — keyword queries only, ≤2 credits, storage-first), then
+    // re-process so they surface in Intelligence. Auto-detected from the vision design theme.
+    const enrichNiche = searchParams.get('enrich') === 'niche';
 
     // Resolve parent → child ASIN
     const resolved = await resolveToChildAsin(inputAsin, supabase);
@@ -138,11 +142,26 @@ export async function GET(
       // the presence union — a seed must be ONE title, not two concatenated.
       const listingTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined;
 
+      // Niche enrichment runs FIRST (adds missing design-niche universes to the cached pool),
+      // then the sync below re-processes the enriched pool (forceRefresh:false so it cache-hits
+      // — no extra full research — and useStoredAnalysis:false so the engine re-runs on the new
+      // keywords). Best-effort: a derivation/JS error leaves the pool unchanged, never breaks GET.
+      let nicheEnrich: Awaited<ReturnType<typeof import('@/lib/keyword-engine/keywordResearcher').enrichResearchWithNiche>> | null = null;
+      if (enrichNiche) {
+        try {
+          const { enrichResearchWithNiche } = await import('@/lib/keyword-engine/keywordResearcher');
+          nicheEnrich = await enrichResearchWithNiche(childAsin);
+          console.log(`[intelligence] niche enrich for ${childAsin}: ${nicheEnrich.note} (${nicheEnrich.creditsUsed} credits)`);
+        } catch (e) {
+          console.warn('[intelligence] niche enrich failed (non-fatal):', e instanceof Error ? e.message : e);
+        }
+      }
+
       // Full sync path — use resolved child ASIN
       result = await syncKeywordIntelligence(childAsin, {
-        forceRefresh,
+        forceRefresh: enrichNiche ? false : forceRefresh,
         includeJungleScout: true,
-        useStoredAnalysis: !forceRefresh,
+        useStoredAnalysis: enrichNiche ? false : !forceRefresh,
         competitorAsin,
         parentAsin: parentAsin || undefined,
         listingTitle,
@@ -151,6 +170,9 @@ export async function GET(
       // Attach parent ASIN to result
       if (parentAsin) {
         result = { ...result, parentAsin };
+      }
+      if (nicheEnrich) {
+        result = { ...result, nicheEnrich };
       }
     }
 
