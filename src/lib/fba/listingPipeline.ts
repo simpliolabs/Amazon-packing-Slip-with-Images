@@ -243,6 +243,22 @@ const STYLE_CUT_WORDS = new Set([
   'muscle', 'raglan', 'ringer', 'sleeveless', 'henley', 'longline', 'flowy', 'baggy',
   'distressed', 'bleached', 'plain', 'blank', 'solid', 'tall', 'petite', 'maternity',
 ])
+
+// OTHER blank / competitor apparel brands that must NOT appear in a product's customer-facing copy:
+// they mis-describe the actual garment (a Comfort Colors tee is NOT Gildan/Dickies) and reference a
+// competitor brand (PO: "why are DICKIES and Gildan here in bullets?"). These leak from the Jungle
+// Scout keyword pool (shoppers search competitor blanks). The product's OWN blank (attributePin,
+// e.g. "Comfort Colors") is exempted at call time. Includes common misspellings (gilden, bella convas).
+// Deliberately NOT included: ambiguous words that can be real design tokens ("champion", "next level",
+// "anvil", "district").
+const OTHER_BLANK_BRANDS_RE = /\b(?:gild[ae]n|guildan|bella\s*\+?\s*canvas|bella\s*convas|american\s*apparel|fruit\s*of\s*the\s*loom|dickies|carhartt|jerzees)\b(?:\s+(?:soft\s*style|softstyle))?/gi
+function stripCompetitorBlanks(text: string, ownBlank: string): string {
+  if (!text) return text
+  const own = (ownBlank || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  return text
+    .replace(OTHER_BLANK_BRANDS_RE, (m) => (own && m.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(own.slice(0, 6)) ? m : ''))
+    .replace(/\s{2,}/g, ' ').replace(/\s+([,.;])/g, '$1').replace(/,\s*,/g, ',').replace(/[,\s]+\.(?=\s|$)/g, '.').replace(/[,\s]+$/g, '').trim()
+}
 function stripContradictedGarments(text: string, trustedHaystack: string): string {
   if (!text) return text
   const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
@@ -2846,7 +2862,7 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
       break
     }
     lead.push(clean)
-    if (lead.length >= 5) break
+    if (lead.length >= 8) break   // slogans run long ("I Will Praise Him in Every Season" = 7 words); STOP words cap junk earlier
   }
   return lead.join(' ').trim()
 }
@@ -2911,7 +2927,7 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
     const n = trimGeneric(raw)
     if (!n) return ''
     const words = n.split(/\s+/)
-    if (words.length > 6) return ''
+    if (words.length > 8) return ''   // inspirational/scripture slogans run 7-8 words ("I Will Praise Him in Every Season")
     if (words.every((w) => GENERIC_TAIL.test(w))) return ''
     if (!haystack.includes(normApos(n.toLowerCase()))) return ''
     if (brandName && n.toLowerCase() === brandName.toLowerCase()) return ''
@@ -3294,6 +3310,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       finalTitle = `${head}${tail}`
     }
+    // Backstop: the blank-brand pin must appear ONCE. The agent sometimes padded a short title
+    // with a SECOND "Comfort Colors" (PO: "…Comfort Colors Tshirt Comfort Colors Christian").
+    // Keep the FIRST occurrence, drop later exact repeats — then tidy doubled spaces/commas.
+    if (apparelProduct && attributePinFinal && finalTitle) {
+      const re = new RegExp(`\\b${attributePinFinal.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
+      let seen = 0
+      finalTitle = finalTitle
+        .replace(re, (m) => (++seen === 1 ? m : ''))
+        .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
+    }
   } else {
     finalTitle = (input.priorTitle || repTitle || '').trim()
   }
@@ -3426,7 +3452,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // plus the garment-type guard (no "fleece pullover" bullets on a t-shirt family) and the
     // hard-audience swap (no "this men's crew" on a Female-selected listing).
     bullets = apparelProduct
-      ? rawBullets.map((b) => stripContradictedGarments(stripUngroundedMotifs(b, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()))
+      ? rawBullets.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
       : rawBullets
     if (apparelProduct && (lean === 'female' || lean === 'male')) {
       bullets = bullets.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
@@ -3534,7 +3560,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   if (only === 'description') {
     let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
-    if (apparelProduct) descriptionOnly = stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+    if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
     onProgress('Description regenerated.')
@@ -3578,7 +3604,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience).
   let description = apparelProduct
-    ? stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+    ? stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
     : descriptionRaw
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
   description = fixDoubledArticleBeforeBrand(description, brandName)
