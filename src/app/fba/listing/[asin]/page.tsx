@@ -280,6 +280,9 @@ export default function ListingDetailPage() {
   // True when the stream ended without a clean result (interrupted/timeout) — the modal header
   // shows "Interrupted" instead of "Complete" so the seller isn't told the push finished when it didn't.
   const bulkStreamInterruptedRef = useRef(false)
+  // Auto-verify queue state — shows pending + needs_attention counts in a banner so the seller
+  // knows the system is watching their pushes and which (if any) need their attention.
+  const [verifyQueue, setVerifyQueue] = useState<{ pending: number; needs_attention: number }>({ pending: 0, needs_attention: 0 })
   const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
@@ -601,6 +604,27 @@ export default function ListingDetailPage() {
     })()
     return () => { cancelled = true }
   }, [asin, router])
+
+  // Verification-queue status: pending + needs_attention for THIS parent. Polled every 60s so
+  // a freshly-enqueued push appears in the banner and a cron flip from pending → completed →
+  // needs_attention reflects without a manual refresh. Best-effort: a missing migration 030
+  // returns 0/0 (the endpoint handles it), so this never errors.
+  useEffect(() => {
+    if (!asin) return
+    let cancelled = false
+    const fetchStatus = async () => {
+      try {
+        const resp = await fetch(`/api/fba/verification-status?parent_asin=${asin}`, { cache: 'no-store' })
+        if (resp.ok) {
+          const j = await resp.json() as { pending?: number; needs_attention?: number }
+          if (!cancelled) setVerifyQueue({ pending: j.pending ?? 0, needs_attention: j.needs_attention ?? 0 })
+        }
+      } catch { /* silent — the banner just shows 0 */ }
+    }
+    fetchStatus()
+    const id = setInterval(fetchStatus, 60_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [asin])
 
   // Fetch keyword intelligence on MOUNT, keyed on `asin` (the route param) — NOT on
   // score.top_child_asin. Gating on the score made kwData load only AFTER the async score
@@ -1960,6 +1984,25 @@ export default function ListingDetailPage() {
                       <p className="text-[11px] italic text-slate-500 mt-2">{rankData.verdict.honestNote}</p>
                       <p className="text-[10px] text-slate-400 mt-1">Full keyword playbook + competitor analysis in the <span className="font-medium">Intelligence</span> tab.</p>
                     </div>
+                  )}
+                </div>
+              )}
+              {/* AUTO-VERIFY banner: shows when the cron is watching pushes for this listing
+                  (PO directive 2026-06-13: "shipping verification should be an automatic cron").
+                  Pending = a verify is scheduled; needs_attention = the cron tried max_attempts
+                  and SKUs are still stale — the seller should look. */}
+              {(verifyQueue.pending > 0 || verifyQueue.needs_attention > 0) && (
+                <div className={`rounded-lg p-2.5 mb-3 text-[11px] flex items-center gap-2 ${verifyQueue.needs_attention > 0 ? 'bg-amber-50 border border-amber-200 text-amber-900' : 'bg-emerald-50 border border-emerald-200 text-emerald-900'}`}>
+                  {verifyQueue.needs_attention > 0 ? (
+                    <>
+                      <span className="font-semibold">⚠ {verifyQueue.needs_attention} push{verifyQueue.needs_attention === 1 ? '' : 'es'} need your attention</span>
+                      <span>— the auto-verify cron tried multiple times and some SKUs are still stale on Amazon. Click <b>Verify live</b> on the affected field to see which SKUs and re-push manually.</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-semibold">✓ {verifyQueue.pending} push{verifyQueue.pending === 1 ? '' : 'es'} being auto-verified</span>
+                      <span>— the cron will re-check live on Amazon ~20 min after each push and re-push any stale SKUs automatically until 100% applied. No action needed.</span>
+                    </>
                   )}
                 </div>
               )}
