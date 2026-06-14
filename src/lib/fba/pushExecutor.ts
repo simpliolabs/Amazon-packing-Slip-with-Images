@@ -941,6 +941,21 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             } catch (e) { console.warn('[push-content/details] re-score failed (non-fatal):', e) }
           }
 
+          // AUTO-VERIFY queue: register a follow-up verify in ~20 min (within Amazon's 15-30 min
+          // application window). The cron at /api/fba/cron-verify-pushes will check live state +
+          // re-push stale SKUs until 100% applied or max_attempts hit (PO directive 2026-06-13).
+          // Wrapped in try/catch — a queue failure (e.g. migration 030 not applied yet) MUST NOT
+          // break a successful push.
+          if (accepted > 0 && !cancelled) {
+            try {
+              const { enqueueVerification } = await import('@/lib/fba/verificationQueue')
+              await enqueueVerification({
+                parent_asin, field: `details:${ctx.attribute.spApiKey}`,
+                detail_field: ctx.detailField, expected_value: ctx.recommendedValue,
+              })
+            } catch (e) { console.warn('[push-content/details] verify enqueue failed (non-fatal):', e) }
+          }
+
           emit({
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
@@ -1117,6 +1132,16 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               if (changed) await db.from('listing_seo_recommendations').update({ action_plan: plan }).eq('parent_asin', parent_asin)
             }
           } catch (e) { console.warn('[push-content] persist DONE verdict failed (non-fatal):', e) }
+        }
+
+        // AUTO-VERIFY queue (regular fields): register a follow-up verify in ~20 min. Cron
+        // re-pushes stale SKUs until 100% applied (PO directive 2026-06-13). Wrapped: queue
+        // failure must not break a successful push.
+        if (accepted > 0 && !cancelled) {
+          try {
+            const { enqueueVerification } = await import('@/lib/fba/verificationQueue')
+            await enqueueVerification({ parent_asin, field })
+          } catch (e) { console.warn('[push-content] verify enqueue failed (non-fatal):', e) }
         }
 
         const label = FIELD_CONFIG[field].label.toLowerCase()
@@ -1318,6 +1343,19 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
           }).eq('parent_asin', parent_asin)
         }
       } catch (e) { console.warn('[bulk-details] re-score failed (non-fatal):', e) }
+
+      // AUTO-VERIFY queue (bulk): one task per detail field that got at least one accept.
+      // Cron re-pushes stale SKUs until 100% applied (PO directive 2026-06-13). Wrapped:
+      // a queue failure must not break a successful bulk push.
+      if (!cancelled) try {
+        const { enqueueVerification } = await import('@/lib/fba/verificationQueue')
+        for (const p of acceptedFields) {
+          await enqueueVerification({
+            parent_asin, field: `details:${p.attribute.spApiKey}`,
+            detail_field: p.field, expected_value: p.value,
+          })
+        }
+      } catch (e) { console.warn('[bulk-details] verify enqueue failed (non-fatal):', e) }
     }
 
     const perField = [
