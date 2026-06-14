@@ -236,6 +236,10 @@ export default function ListingDetailPage() {
   const [kwResearchMsg, setKwResearchMsg] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [aiLoading, setAiLoading] = useState(false)
+  // Which section a per-section regen is running ('title'|'bullets'|'description'|'keywords'),
+  // or null for a full audit — so ONLY the regenerating section shows "Regenerating… hold on",
+  // not every section's button (PO: "pressing regenerate title also activates bullets/description").
+  const [regenSection, setRegenSection] = useState<string | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [aiProgress, setAiProgress] = useState<string>('')
   const [copied, setCopied] = useState<string | null>(null)
@@ -691,6 +695,7 @@ export default function ListingDetailPage() {
   // before the settling window is up.
   const generateAiRecs = useCallback(async (regenerateSection?: string) => {
     setAiLoading(true)
+    setRegenSection(regenerateSection ?? null)
     setAiError(null)
     setAiProgress(regenerateSection ? `Regenerating ${regenerateSection}…` : 'Starting AI audit...')
     try {
@@ -757,12 +762,15 @@ export default function ListingDetailPage() {
           if (found) setScore(found)
         } catch { /* best-effort — next load shows it */ }
       } else {
-        throw new Error('No recommendations received')
+        // Stream ended with no result AND no error event — almost always the request hit the
+        // container mid-redeploy (a merge just deployed) or timed out. Nothing was changed.
+        throw new Error('The audit didn’t come back — the server may have been redeploying or the request timed out. Nothing was changed; wait ~1 minute and Regenerate again.')
       }
     } catch (e: unknown) {
       setAiError(e instanceof Error ? e.message : 'Failed')
     }
     setAiLoading(false)
+    setRegenSection(null)
     setAiProgress('')
   }, [asin])
 
@@ -2092,7 +2100,7 @@ export default function ListingDetailPage() {
                             disabled={aiLoading}
                             title={`Regenerate only the ${section === 'keywords' ? 'backend keywords' : section} — title/bullets keep their full quality council (~1-2 min); description/backend ~30-60s. Either way a fraction of the full 3-4 min audit. Other sections keep your stored recommendation; everything stays anchored on the stored title.`}
                             className="ml-auto text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 font-medium">
-                            {aiLoading ? '⏳ Regenerating… hold on' : `↻ Regenerate ${section === 'keywords' ? 'backend' : section === 'bullets' ? 'all 5 bullets' : section}`}
+                            {aiLoading && regenSection === section ? '⏳ Regenerating… hold on' : `↻ Regenerate ${section === 'keywords' ? 'backend' : section === 'bullets' ? 'all 5 bullets' : section}`}
                           </button>
                         )
                       })()}
@@ -2427,7 +2435,7 @@ export default function ListingDetailPage() {
                     disabled={aiLoading}
                     title="Regenerate only the per-variant backend search terms (~30-60s) — anchored on the stored title + bullets; fills each child to the 250-byte budget."
                     className="text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 font-medium">
-                    {aiLoading ? '⏳ Regenerating… hold on' : '↻ Regenerate backend'}
+                    {aiLoading && regenSection === 'keywords' ? '⏳ Regenerating… hold on' : '↻ Regenerate backend'}
                   </button>
                 </div>
                 {backendItem?.instruction && <p className="text-xs text-slate-600 mb-2">{backendItem.instruction}</p>}
