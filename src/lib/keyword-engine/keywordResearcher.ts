@@ -150,6 +150,30 @@ export async function researchKeywords(
     console.log(`[keywordResearcher] Phase 2b: +${added} keywords from secondary seed "${xs}" (1 credit)`);
   }
 
+  // ── Phase 2c: EMPTY-POOL FALLBACK (PO 2026-06-15) ──────────────────────────
+  // ROOT CAUSE of "1 keyword / Intelligence tab not loading" (verified live: a forced re-research
+  // of B0GCPHGN4J/B0FKDDN44Z returned 0-1 keywords): a too-specific SLOGAN seed has no Jungle Scout
+  // search-volume data, so the pool comes back empty — and #253's promotion can't surface a pool
+  // that's empty. When the primary + secondary seeds yield a thin pool, retry ONCE with a broad
+  // niche-noun seed (buildFallbackSeed → e.g. "therapist tshirt") that JS has data for. Relevance is
+  // preserved by the downstream gate (syncKeywordIntelligence), which filters anything off-product.
+  // Fires ONLY on the low-data case (well-seeded listings like the soccer tee skip it). +1 credit.
+  const EMPTY_POOL_THRESHOLD = 10;
+  if (nicheKeywords.length < EMPTY_POOL_THRESHOLD) {
+    const fallbackSeed = buildFallbackSeed(seed, listingTitle);
+    const already = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
+    if (fallbackSeed && !already.has(fallbackSeed)) {
+      const before = nicheKeywords.length;
+      const more = await fetchKeywordsByKeyword(fallbackSeed, { pageSize: 100 });
+      creditsUsed++;
+      let added = 0;
+      for (const r of more) { const k = r.keyword.toLowerCase(); if (!already.has(k)) { nicheKeywords.push(r); already.add(k); added++; } }
+      console.log(`[keywordResearcher] Phase 2c: primary pool was thin (${before}); broad fallback seed "${fallbackSeed}" added ${added} keywords (1 credit)`);
+    } else {
+      console.log(`[keywordResearcher] Phase 2c: pool thin (${nicheKeywords.length}) but no usable broad fallback seed — leaving as-is`);
+    }
+  }
+
   // ── Phase 3: share_of_voice (1 credit) ────────────────────────────────────
   const sovCompetitors = await fetchShareOfVoice(seed);
   creditsUsed++;
@@ -372,6 +396,27 @@ export function buildSeedFromTitle(title: string): string {
   const apparelInTitle = all.find((w) => APPAREL_WORDS.has(w)) || 'tshirt'
   const seed = lead.length > 0 ? `${lead.join(' ')} ${apparelInTitle}` : `${all.slice(0, 2).join(' ')} ${apparelInTitle}`.trim()
   return seed.replace(/\s{2,}/g, ' ').trim()
+}
+
+/**
+ * A deliberately BROAD fallback seed for when the primary (+ secondary) seeds returned ~no Jungle
+ * Scout data — the "1 keyword / no Intelligence" root cause, where a too-specific slogan seed
+ * ("my therapist gave up shirt") has no JS search-volume. Take the design's single most distinctive
+ * token (the core niche noun — proxied by the LONGEST non-generic/non-apparel token across the seed
+ * + title) and pair it with the product word: "therapist tshirt", "raccoon tshirt". Broad enough
+ * that JS has data, but it keeps the niche token so the downstream relevance gate keeps results
+ * on-product (a bare "tshirt"/"graphic tee" would invite the gate's never-collapse floor to re-admit
+ * generic pollution). Returns null when no distinctive token exists (nothing useful to broaden to).
+ */
+export function buildFallbackSeed(seed: string, listingTitle?: string | null): string | null {
+  const toks = `${seed} ${listingTitle ?? ''}`.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+  const core = toks
+    .filter((t) => t.length > 3 && !SEED_GENERIC.has(t) && !APPAREL_WORDS.has(t) && !/^\d+$/.test(t))
+    .sort((a, b) => b.length - a.length)[0]
+  if (!core) return null
+  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'tshirt'
+  const fallback = `${core} ${productWord}`.replace(/\s{2,}/g, ' ').trim()
+  return fallback === seed ? null : fallback
 }
 
 // ─── Pool-entry relevance gate (anti-pollution) ─────────────────────────────────────
