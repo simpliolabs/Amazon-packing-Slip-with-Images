@@ -134,6 +134,14 @@ export interface FreeCore {
 }
 
 function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: boolean): string {
+  // IRRELEVANT first — the keyword was classified as off-product (different niche, e.g. Star Wars
+  // father's-day terms surfacing under a retirement-tee research). Adding it dilutes relevance.
+  // (PO 2026-06-14: the previous "OPTIONAL — weave into bullets/backend if natural" fallback was
+  // telling the seller to ADD off-product keywords — exactly the opposite of correct advice.)
+  // Cast to string: 'IRRELEVANT' is a runtime actionType (used in page.tsx + audit pipeline) but
+  // not yet in the ActionType union here; extending the union is a wider refactor not needed for
+  // this user-facing copy fix.
+  if ((actionType as string) === 'IRRELEVANT') return 'SKIP — off-product (different niche). Do NOT add — it would dilute your relevance.'
   if (actionType === 'CRITICAL' && !youCover) return 'ADD — high-opportunity term not yet in your copy'
   if (actionType === 'UPGRADE' && !inTitle) return 'PROMOTE — present, pull into the title (higher weight)'
   if (actionType === 'DEFENDED') return "DEFEND — you're covered here; hold it"
