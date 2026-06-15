@@ -998,11 +998,23 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         } else {
           diff = rawDiff.filter((d) => d.changed)
         }
+        // Exclude the variation PARENT from content pushes (PO 2026-06-15). The parent SKU (its row's
+        // asin === the parent ASIN) is a non-buyable variation HUB. We send only the title/bullet/desc
+        // attribute — never size — but Amazon re-validates the WHOLE parent record on any Listings
+        // PATCH and rejects it because the parent's required Shirt Size attributes (size_system/
+        // size_class/size, set at variation creation and not changeable afterward) are incomplete.
+        // So a content push to the parent can NEVER succeed; counting it as a target produced a
+        // permanent "33/34, 1 failed". The buyable children carry the displayed content, so we drop
+        // the parent → the push reports children-only = complete. (Surfaced in the message below.)
+        const parentDropped = diff.some((d) => d.asin === parent_asin)
+        if (parentDropped) diff = diff.filter((d) => d.asin !== parent_asin)
         if (diff.length === 0) {
           emit({
             type: 'result',
             parent_asin, field, pushed: 0, failed: 0, total: 0,
-            message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
+            message: parentDropped
+              ? `Nothing to push — only the variation parent matched (it's a non-buyable hub and is skipped).`
+              : `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
             results: [],
           })
           return
@@ -1168,7 +1180,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           pushed: accepted, failed, total: results.length, cancelled: cancelled || undefined,
           message: cancelled
             ? `Stopped by you — ${accepted}/${results.length} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-            : `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+            : `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentDropped ? ' (Variation parent skipped — non-buyable hub; complete its Shirt Size System/Class in Seller Central if you want its record updated.)' : ''} Changes typically reflect in 15-30 minutes.`,
           results,
         })
       } catch (err) {
