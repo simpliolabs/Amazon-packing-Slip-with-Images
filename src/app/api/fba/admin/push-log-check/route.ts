@@ -73,3 +73,56 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(out)
 }
+
+/**
+ * POST /api/fba/admin/push-log-check
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Self-diagnose for "no ship dates" — does NOT require log access (PO is not a developer).
+ * Attempts a REAL insert into keyword_push_log with a clearly-tagged diagnostic row, then
+ * immediately deletes it, and returns the EXACT Postgres error string if the write failed.
+ * That answer goes straight to the browser — no Coolify log grepping.
+ */
+export async function POST() {
+  const supabase = await createAdminClient()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = supabase as any
+
+  const diagnosticRow = {
+    parent_asin: 'DIAGNOSTIC',
+    sku: 'DIAG-TEST',
+    field: 'keywords',
+    new_value: 'diagnostic — safe to delete',
+    status: 'pending',
+  }
+
+  // Attempt 1: full row (matches what pushExecutor writes for a real push).
+  const ins = await db.from('keyword_push_log').insert(diagnosticRow).select('id')
+  if (ins.error) {
+    // Mirror pushExecutor's fallback: retry without the `field` column.
+    const fallback = { ...diagnosticRow } as Record<string, unknown>
+    delete fallback.field
+    const ins2 = await db.from('keyword_push_log').insert(fallback).select('id')
+    if (ins2.error) {
+      return NextResponse.json({
+        wrote: false,
+        verdict: 'BOTH insert attempts failed — this is exactly why ship dates are missing. The Postgres errors below tell us which column/constraint to fix.',
+        firstAttemptError: { code: ins.error.code, message: ins.error.message, details: ins.error.details, hint: ins.error.hint },
+        secondAttemptError: { code: ins2.error.code, message: ins2.error.message, details: ins2.error.details, hint: ins2.error.hint },
+      })
+    }
+    // The fallback succeeded — clean up + report.
+    if (ins2.data?.[0]?.id) await db.from('keyword_push_log').delete().eq('id', ins2.data[0].id)
+    return NextResponse.json({
+      wrote: true,
+      verdict: 'The full insert FAILED but the field-stripped fallback succeeded — meaning migration 016 (the `field` column) is missing on the live DB. Real pushes silently lose their field tag, so ship dates never index. Apply 016 (ALTER TABLE keyword_push_log ADD COLUMN IF NOT EXISTS field text NOT NULL DEFAULT \'keywords\';) and the dates will start appearing on the next push.',
+      firstAttemptError: { code: ins.error.code, message: ins.error.message, details: ins.error.details, hint: ins.error.hint },
+    })
+  }
+
+  // The full insert succeeded. Clean up.
+  if (ins.data?.[0]?.id) await db.from('keyword_push_log').delete().eq('id', ins.data[0].id)
+  return NextResponse.json({
+    wrote: true,
+    verdict: 'The diagnostic insert succeeded — keyword_push_log writes are fine. If ship dates still aren\'t appearing, the issue is somewhere else (e.g. pushes hit the route but never actually invoke logPush). Push a real field now and the date should appear.',
+  })
+}
