@@ -628,6 +628,24 @@ async function getCachedResearch(asin: string): Promise<KeywordResearchResult | 
   }
 }
 
+/**
+ * Size of the FRESH, retrievable JS research pool for this ASIN (0 if expired/absent/empty).
+ *
+ * The Intelligence self-heal gates promotion on `poolSize > storedCount`, which gives TWO guarantees
+ * in one check:
+ *   • CREDIT SAFETY — a non-zero size means getCachedResearch returned (cache not expired), so
+ *     researchKeywords(forceRefresh:false) will cache-HIT (0 Jungle Scout credits). A row's
+ *     fetched_at (researchedAt) can be set on an EXPIRED cache; THIS reflects retrievability, so a
+ *     credit-spending fetch is never triggered.
+ *   • NO CHURN/LOOP — if the cached pool is empty or no bigger than what's already stored, promotion
+ *     can't help; skipping it avoids re-running the engine every page load (storeAnalysis early-
+ *     returns on an empty merge and never advances analyzed_at, which would otherwise re-fire).
+ * Pure read; spends nothing.
+ */
+export async function freshResearchPoolSize(asin: string): Promise<number> {
+  return (await getCachedResearch(asin))?.allKeywords.length ?? 0
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function emptyResult(): KeywordResearchResult {
