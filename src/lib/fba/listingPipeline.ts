@@ -1093,7 +1093,7 @@ export function validateBullets(
     const missing = missingBulletKeywords(bullets, opportunityKws)
     if (missing.length >= 2) {
       const sample = missing.slice(0, 6).map((k) => `"${k}"`).join(', ')
-      problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE). Weave EACH naturally into the bullet body — every word of the phrase present somewhere across the 5 bullets: ${sample}.`)
+      problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE): ${sample}. Coverage is by WORD, not by phrase — SPREAD each phrase's key words naturally across DIFFERENT bullets and sentences (the full phrase does NOT need to appear contiguously). Do NOT cram a whole multi-word search string into one sentence — that reads as keyword soup.`)
     }
   }
 
@@ -1891,7 +1891,7 @@ async function runBulletsAgent(
   const requiredKws = (oppPlusDesign.length ? oppPlusDesign : remaining.slice(0, 8).map((k) => k.keyword)).slice(0, 8)
   const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
   const topLine = requiredKws.length
-    ? `\n🔴 REQUIRED SEARCH KEYPHRASES — these are EXACTLY what your bullet ranking is scored on. Weave EACH one somewhere across the 5 bullets (every word of the phrase present; paraphrase OK) and LEAD bullets 1, 2, 3 with the top three. Cover EVERY one that fits accurately:\n${requiredKws.map((k) => `  - "${k}"`).join('\n')}\n`
+    ? `\n🔴 REQUIRED SEARCH KEYPHRASES — these are EXACTLY what your bullet ranking is scored on. Coverage is by WORD, not by phrase: each phrase's key words must appear SOMEWHERE across the 5 bullets, but they can be SPREAD across different bullets and different sentences — the full phrase does NOT need to appear contiguously, and paraphrasing is fine. 🚫 NEVER cram a whole multi-word search string into one sentence (e.g. "channel the haitian soccer jersey world soccer cup 2026 aesthetic") — that reads as keyword soup and looks spammy. Instead let the words land where they fit naturally (e.g. "...haitian pride graphic tee..." in one bullet, "...ready for the 2026 world soccer cup..." in another). LEAD bullets 1, 2, 3 with the top three themes. Cover EVERY phrase that fits accurately:\n${requiredKws.map((k) => `  - "${k}"`).join('\n')}\n`
     : ''
   // Rank context for the council — SEPARATE from the required strings above (those are verbatim
   // machine-checked; annotating them would break coverage validation). Striking distance (#11-30)
@@ -2161,16 +2161,23 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
     const usedBullet = new Set<number>()   // at most one appended clause per bullet — prevents keyword-soup
     for (const kw of missingBulletKeywords(bullets, oppPlusDesign)) {
       if (!safeKw(kw)) continue
-      if (missingBulletKeywords(bullets, [kw]).length === 0) continue // already covered by an earlier append
+      // Weave only the STILL-MISSING significant tokens, not the whole phrase. Coverage is token-based,
+      // so appending the literal long-tail string verbatim ("…, haitian soccer jersey world cup 2026.")
+      // was pure keyword-soup when most of its words were already present. The minimal missing fragment
+      // satisfies the scorer just as well and reads far less spammy. (clause ⊆ kw, so the safeKw(kw) pass
+      // above already covers it — a subset can't introduce a role/brand/trademark token kw didn't carry.)
+      const have = new Set(bulletTokens(bullets.join(' ')))
+      const clause = bulletTokens(kw).filter((t) => !have.has(t)).join(' ')
+      if (clause.length === 0) continue // already covered by an earlier append
       // Weave into the SHORTEST not-yet-appended bullet that still has room for the clause under the 200 cap.
       let idx = -1, shortest = Infinity
       for (let i = 0; i < bullets.length; i++) {
         if (usedBullet.has(i)) continue
-        const projected = bullets[i].replace(/[.\s]+$/, '').length + kw.length + 3 // ", " + trailing "."
+        const projected = bullets[i].replace(/[.\s]+$/, '').length + clause.length + 3 // ", " + trailing "."
         if (projected <= 200 && bullets[i].length < shortest) { shortest = bullets[i].length; idx = i }
       }
       if (idx === -1) continue // every bullet is maxed or already used — drop this kw (the acknowledged soft spot)
-      bullets[idx] = `${bullets[idx].replace(/[.\s]+$/, '')}, ${kw}.`
+      bullets[idx] = `${bullets[idx].replace(/[.\s]+$/, '')}, ${clause}.`
       usedBullet.add(idx)
     }
   }
