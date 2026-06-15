@@ -268,11 +268,19 @@ export async function GET(req: NextRequest) {
       if (i + 5 < targets.length) await new Promise((r) => setTimeout(r, 250))
     }
 
-    const matched = results.filter((r) => r.matches).length
-    const stale   = results.filter((r) => !r.matches && r.expected.length > 0).length
+    // The variation PARENT is a non-buyable hub: #244/#245 skip it on PUSH (a content PATCH to the
+    // parent is always rejected for incomplete Shirt Size attrs), so it can NEVER match here.
+    // Counting it left verify permanently at "N applied, 1 stale" and the auto-verify cron
+    // (cron-verify-pushes) never saw matched===total → it re-pushed the parent forever / flagged
+    // needs_attention. Score the buyable CHILDREN only; keep the parent in `results` (visible) but
+    // out of the pass/fail counts so verify can actually reach 100%.
+    const scored = results.filter((r) => !r.isParent)
+    const matched = scored.filter((r) => r.matches).length
+    const stale   = scored.filter((r) => !r.matches && r.expected.length > 0).length
     // No expectation anywhere (not in the rec, never logged as pushed) — its own bucket so the UI
     // never paints these as "stale" (which implied a failed push when there was nothing to compare).
-    const unknown = results.filter((r) => r.expected.length === 0).length
+    const unknown = scored.filter((r) => r.expected.length === 0).length
+    const parentSkipped = results.length - scored.length
     return NextResponse.json({
       parent_asin: parentAsin,
       field,
@@ -284,10 +292,11 @@ export async function GET(req: NextRequest) {
         : field === 'keywords' ? 'generic_keyword'
         : undefined
       ),
-      total: results.length,
+      total: scored.length,
       matched,
       stale,
       unknown,
+      parentSkipped,
       results,
     })
   } catch (err) {

@@ -3685,8 +3685,8 @@ export default function ListingDetailPage() {
                         <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-[25vh] overflow-y-auto bg-white">
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`px-2 py-1.5 text-[11px] flex items-center gap-2 ${v.isParent ? 'bg-violet-50' : ''}`}>
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                                {v.matches ? '✓ applied' : 'stale'}
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.isParent ? 'bg-violet-100 text-violet-700' : 'bg-amber-100 text-amber-700'}`}>
+                                {v.matches ? '✓ applied' : v.isParent ? 'skipped (hub)' : 'stale'}
                               </span>
                               <span className="font-mono text-slate-700">{v.sku}</span>
                               {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
@@ -3789,8 +3789,8 @@ export default function ListingDetailPage() {
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`p-2.5 text-xs ${v.isParent ? 'bg-violet-50' : ''}`}>
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.expected ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
-                                  {v.matches ? '✓ applied' : v.expected ? 'stale' : 'no expectation'}
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.isParent ? 'bg-violet-100 text-violet-700' : v.expected ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
+                                  {v.matches ? '✓ applied' : v.isParent ? 'skipped (hub)' : v.expected ? 'stale' : 'no expectation'}
                                 </span>
                                 <span className="font-mono text-slate-700">{v.sku}</span>
                                 {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
