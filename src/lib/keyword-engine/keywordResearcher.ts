@@ -23,6 +23,7 @@ import { ProductIdentity, scanProductImage, getProductImageUrl } from './visionS
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
+import { scrubTrademarks } from '../fba/trademarkGuard';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -438,8 +439,9 @@ export async function selectSeeds(opts: {
   categorySeed?: string
 }): Promise<SeedSelection> {
   const { asin, parentAsin, listingTitle, manualSeed, categorySeed } = opts
-  if (manualSeed) return { seeds: [manualSeed], source: 'manual', escalate: { suggested: false, reason: '' } }
-  if (categorySeed) return { seeds: [categorySeed], source: 'category', escalate: { suggested: false, reason: '' } }
+  // Scrub seeds too — never spend a JS credit RESEARCHING a trademark ("world cup" → "world soccer cup").
+  if (manualSeed) return { seeds: [scrubTrademarks(manualSeed)], source: 'manual', escalate: { suggested: false, reason: '' } }
+  if (categorySeed) return { seeds: [scrubTrademarks(categorySeed)], source: 'category', escalate: { suggested: false, reason: '' } }
 
   // Gather identity context: the seller's own canonical title + design override + vision + rep title.
   let canonicalTitle: string | null = null
@@ -456,7 +458,7 @@ export async function selectSeeds(opts: {
   const productWord = (identitySrc.toLowerCase().match(/\b(t-?shirt|tshirt|tee|hoodie|sweatshirt|tank|top)\b/) || [])[0]?.replace(/[^a-z]/g, '') || 'tshirt'
 
   // Rules failover (always computable) — used if the agent is unavailable or returns nothing valid.
-  const rulesSeed = buildSeedFromTitle(canonicalTitle || listingTitle || '')
+  const rulesSeed = scrubTrademarks(buildSeedFromTitle(canonicalTitle || listingTitle || ''))
 
   // ── The Seed AGENT ──
   try {
@@ -466,9 +468,9 @@ export async function selectSeeds(opts: {
       const visionLine = identity2?.designTheme ? `Image/design theme: ${identity2.designTheme}\n` : ''
       const overrideLine = designOverride ? `Seller-confirmed design name: ${designOverride}\n` : ''
       const openai = new OpenAI({ apiKey: key })
-      const system = `You pick Amazon SEARCH SEEDS for a print-on-demand product. A seed is a SHORT 2-4 word phrase a shopper types to find THIS product's DESIGN/NICHE, ending in a product-type word (shirt/tee/etc). Return the design's REAL theme — NEVER generic qualifiers (a year like 2026, "personalized", "custom", a size, a color, or the blank/garment brand). Return 1-3 seeds, MOST important first, as JSON {"seeds":[...]}.
+      const system = `You pick Amazon SEARCH SEEDS for a print-on-demand product. A seed is a SHORT 2-4 word phrase a shopper types to find THIS product's DESIGN/NICHE, ending in a product-type word (shirt/tee/etc). Return the design's REAL theme — NEVER generic qualifiers (a year like 2026, "personalized", "custom", a size, a color, or the blank/garment brand). NEVER use a protected TRADEMARK — say "World Soccer Cup" not "World Cup" (FIFA mark), "Big Game" not "Super Bowl"; avoid FIFA/NFL/NBA/Olympics/Disney/Marvel etc. Return 1-3 seeds, MOST important first, as JSON {"seeds":[...]}.
 Examples:
-Title: Personalized 2026 World Soccer Cup T-Shirt – Fan Tee, USA Mexico Canada Host Countries => {"seeds":["world cup soccer shirt","usa soccer fan tee","world cup 2026 shirt"]}
+Title: Personalized 2026 World Soccer Cup T-Shirt – Fan Tee, USA Mexico Canada Host Countries => {"seeds":["world soccer cup shirt","usa soccer fan tee","soccer supporter tee"]}
 Title: I Am Retired I Don't Have to T-Shirt – Funny Retirement Graphic Tee => {"seeds":["funny retirement shirt","retired tshirt"]}
 Title: Comfort Colors I Will Praise Him Every Season T-Shirt – Christian Tee => {"seeds":["christian faith shirt","bible verse tee"]}
 Title: Gildan Unisex Soft Cotton Blank T-Shirt Premium => {"seeds":["blank cotton tshirt"]}`
@@ -482,7 +484,7 @@ Title: Gildan Unisex Soft Cotton Blank T-Shirt Premium => {"seeds":["blank cotto
       })
       let parsed: { seeds?: string[] } = {}
       try { parsed = JSON.parse(r.choices[0]?.message?.content || '{}') } catch { /* malformed → empty → failover */ }
-      const valid = validateSeeds(Array.isArray(parsed.seeds) ? parsed.seeds : [], identity, productWord)
+      const valid = validateSeeds(Array.isArray(parsed.seeds) ? parsed.seeds : [], identity, productWord).map(scrubTrademarks)
       if (valid.length > 0) {
         console.log(`[keywordResearcher] Seed Agent → [${valid.join(' | ')}] (identity-validated)`)
         return { seeds: valid, source: 'agent', escalate: { suggested: false, reason: '' } }

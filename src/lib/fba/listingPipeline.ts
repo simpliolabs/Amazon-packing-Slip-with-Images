@@ -23,6 +23,7 @@ import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
+import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
 
 // ─── Shared output types (structurally identical to the route's interfaces) ────
 
@@ -3244,7 +3245,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // #79 per-section regen plumbing: a partial run executes ONE stage against the stored
   // priors and returns immediately — the route merges the field into the persisted row.
   const only = input.onlySection
-  const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => ({
+  // TRADEMARK SCRUB (PO 2026-06-15): no PUBLISHED field may carry a protected mark — "World Cup" is
+  // FIFA's registered trademark, scrubbed to the seller's safe "World Soccer Cup". Applied at BOTH
+  // result chokepoints (partialResult + the full return below) so no exit path can publish an
+  // infringing mark, even one pulled from the keyword pool. Pool/Intelligence data is left as-is —
+  // only text that gets WRITTEN to Amazon is scrubbed. (Scope A; per-seller list is a scope-C follow-on.)
+  const scrubPublished = (r: PipelineResult): PipelineResult => ({
+    ...r,
+    recommended_title: scrubTrademarks(r.recommended_title),
+    recommended_bullets: scrubTrademarksArr(r.recommended_bullets),
+    recommended_description: scrubTrademarks(r.recommended_description),
+    per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubTrademarks(c.keywords) })),
+  })
+  const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => scrubPublished({
     recommended_title: input.priorTitle ?? '',
     recommended_bullets: input.priorBullets ?? [],
     per_child_keywords: [],
@@ -3806,7 +3819,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   }
 
-  return {
+  return scrubPublished({
     recommended_title: finalTitle,
     recommended_bullets: bullets,
     per_child_keywords: perChild,
@@ -3821,5 +3834,5 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
     keywordPlan: { bullets: topOpportunityKwsForBullets, designName },
     debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
-  }
+  })
 }
