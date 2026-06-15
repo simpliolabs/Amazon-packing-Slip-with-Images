@@ -77,8 +77,61 @@ export async function GET(
     let result;
 
     if (storedOnly) {
-      // Fast path: return stored analysis without any API calls
-      const stored = await getStoredAnalysis(childAsin, 100);
+      // Fast path: return stored analysis without any API calls.
+      let stored = await getStoredAnalysis(childAsin, 100);
+
+      // Real research timestamp (keyword_cache.fetched_at) — drives the self-heal below AND lets the
+      // UI detect when a background re-research completed (auto-chain). analyzedAt is the RESPONSE
+      // time, not the research time.
+      let researchedAt: string | null = null
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: cr } = await (supabase as any).from('keyword_cache')
+          .select('fetched_at').eq('asin', childAsin).eq('source', 'keyword_research').maybeSingle()
+        researchedAt = (cr as { fetched_at?: string } | null)?.fetched_at ?? null
+      } catch { /* best-effort — null just disables self-heal + completion detection */ }
+
+      // SELF-HEAL PROMOTION (PO 2026-06-15): the page reads keyword_analysis (this stored path), but
+      // the rich JS research pool lives in keyword_cache and is only promoted by a NON-stored run —
+      // which page-load never triggers — so the page showed 1 SQP keyword while a full pool sat
+      // unpromoted (root cause of "Intelligence returned only 1 keyword"). If a NEWER research pool
+      // exists than the stored analysis AND the stored analysis is thin (<=1 kw → never promoted),
+      // run a ONE-SHOT promotion: useStoredAnalysis:false bypasses the Path-1 short-circuit;
+      // forceRefresh:false cache-HITS the research → 0 Jungle Scout credits; the relevance gate (with
+      // never-collapse floor) still applies. storeAnalysis stamps analyzed_at > researchedAt, so this
+      // is idempotent — it won't re-fire on the next load (no per-load engine churn, no loop).
+      if ((!stored || stored.length <= 1) && researchedAt) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { data: aRow } = await (supabase as any).from('keyword_analysis')
+            .select('analyzed_at').eq('asin', childAsin)
+            .order('analyzed_at', { ascending: false }).limit(1).maybeSingle()
+          const lastAnalyzedAt = (aRow as { analyzed_at?: string } | null)?.analyzed_at ?? null
+          const researchNewer = !lastAnalyzedAt || new Date(researchedAt).getTime() > new Date(lastAnalyzedAt).getTime()
+          // Promote ONLY when the fresh research pool is BIGGER than what's stored. This single check
+          // gives credit safety (a non-zero fresh size ⇒ researchKeywords cache-HITS ⇒ 0 credits; an
+          // expired cache reads as 0) AND prevents per-load churn (an empty/≤stored pool can't help,
+          // so we don't re-run the engine every load when storeAnalysis won't advance analyzed_at).
+          const { freshResearchPoolSize } = await import('@/lib/keyword-engine/keywordResearcher')
+          const poolSize = await freshResearchPoolSize(childAsin)
+          if (researchNewer && poolSize > (stored?.length ?? 0)) {
+            console.log(`[intelligence] self-heal ${childAsin}: stored=${stored?.length ?? 0}, fresh pool=${poolSize} (newer than analysis ${lastAnalyzedAt}) — promoting cached pool (0 credits)`)
+            const promoteTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined
+            await syncKeywordIntelligence(childAsin, {
+              forceRefresh: false, includeJungleScout: true, useStoredAnalysis: false,
+              parentAsin: parentAsin || undefined, listingTitle: promoteTitle,
+            })
+            const promoted = await getStoredAnalysis(childAsin, 100)
+            if (promoted && promoted.length > (stored?.length ?? 0)) {
+              stored = promoted
+              console.log(`[intelligence] self-heal ${childAsin}: promoted to ${promoted.length} keywords`)
+            }
+          } else if (researchNewer) {
+            console.log(`[intelligence] self-heal ${childAsin}: fresh pool=${poolSize} not larger than stored=${stored?.length ?? 0} — skipping (no gain; cache expired reads as 0 → no credit spend)`)
+          }
+        } catch (e) { console.warn('[intelligence] self-heal promotion failed (non-fatal):', e instanceof Error ? e.message : e) }
+      }
+
       if (!stored || stored.length === 0) {
         return NextResponse.json(
           {
@@ -112,16 +165,6 @@ export async function GET(
       const defendedTop = stored.filter(k => k.actionType === 'DEFENDED')
         .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
 
-      // Real research timestamp (keyword_cache.fetched_at) so the UI can DETECT when a background
-      // re-research actually completed and auto-chain refresh→regenerate (PO 2026-06-15: "why isn't
-      // it one automatic step?"). analyzedAt below is the RESPONSE time, not the research time.
-      let researchedAt: string | null = null
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data: cr } = await (supabase as any).from('keyword_cache')
-          .select('fetched_at').eq('asin', childAsin).eq('source', 'keyword_research').maybeSingle()
-        researchedAt = (cr as { fetched_at?: string } | null)?.fetched_at ?? null
-      } catch { /* best-effort — null just disables the auto-chain's completion detection */ }
       result = {
         asin: childAsin,
         parentAsin,

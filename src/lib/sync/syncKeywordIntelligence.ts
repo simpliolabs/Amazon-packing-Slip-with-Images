@@ -100,6 +100,8 @@ export async function syncKeywordIntelligence(
   const jsStatus = await getJungleScoutStatus();
   if (includeJungleScout && jsStatus.enabled) {
     try {
+      // Parent for the relevance gate (used by BOTH the cache-hit and fresh-research paths below).
+      const resolvedParent = (parentAsin || await getParentAsin(asin)) || asin;
       // Check if we already have fresh JS data cached (avoid burning credits)
       const rawCached = await getCachedKeywords(asin, 'jungle_scout');
       const cachedAge = rawCached ? await getKeywordCacheAge(asin, 'jungle_scout') : Infinity;
@@ -113,8 +115,12 @@ export async function syncKeywordIntelligence(
         // ALL twin rows are passed — presence is OR'd per row (divergent twins can't shadow).
         const listingRows = await loadListingRowsForPresence(supabase, asin);
 
+        // Gate the CACHED pool too (the fresh-research path gated, this one didn't — drift). Same
+        // gate + never-collapse floor, so a cache-hit re-run can't re-store off-product keywords.
+        // (Gated post-engine here — the engine output carries .keyword; the raw union type doesn't.)
         const jsResult = runKeywordEngine(asin, rawCached as import('../keyword-engine').RawKeywordRow[], listingRows, 'jungle_scout');
-        const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
+        const gatedJs = await applyRelevanceGate(asin, resolvedParent, jsResult.allKeywords, listingRows, listingTitle);
+        const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, gatedJs);
         await storeAnalysis(asin, mergedKeywords);
 
         return {
@@ -127,8 +133,7 @@ export async function syncKeywordIntelligence(
         };
       }
 
-      // No fresh cache — run the full 3-credit research pipeline
-      const resolvedParent = parentAsin || await getParentAsin(asin);
+      // No fresh cache — run the full 3-credit research pipeline (resolvedParent computed above).
       // CATEGORY seed from the live SP-API productType (NON-apparel only) — the seed-quality fix:
       // a vision/title seed is PRODUCT-LITERAL ("post it notes variety pack"), so the niche query
       // returns our own phrasing and Share-of-Voice crowns whoever wins that narrow phrase — never
@@ -169,40 +174,16 @@ export async function syncKeywordIntelligence(
         categorySeed,
       });
 
+      // Instrument the research pool size so an empty/thin pool is VISIBLE in prod logs — the
+      // disambiguation the diagnosis flagged: "gate stripped to zero" vs "research returned nothing".
+      console.log(`[syncKeywordIntelligence] research pool for ${asin}: ${researchResult.allKeywords.length} kw (seed source: ${researchResult.source})`);
       if (researchResult.allKeywords.length > 0) {
         // Fetch listing content for presence check (twin-safe; all rows, OR'd per row)
         const listingRows = await loadListingRowsForPresence(supabase, asin);
 
-        // POOL-ENTRY RELEVANCE GATE (PO 2026-06-15 directive: stop the soccer-listing pollution
-        // by family/graduation/disney 2026 keywords). Filter the JS pool against the listing's
-        // OWN identity tokens BEFORE the engine + storage. Even a leaky seed can't smuggle
-        // off-product keywords into Intelligence/audit/title candidates if we gate at the boundary.
-        // Identity sources: every live listing title (representative + variants) + design override.
-        let filteredKeywords = researchResult.allKeywords;
-        try {
-          const { identityTokensOf, keywordIsRelevant } = await import('../keyword-engine/keywordResearcher');
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const db = supabase as any;
-          const { data: scoreRow } = await db.from('listing_seo_scores')
-            .select('product_title, design_name_override').eq('parent_asin', resolvedParent || asin).maybeSingle();
-          const childTitles = (listingRows ?? []).map((r) => r.title).filter(Boolean) as string[];
-          const identity = identityTokensOf(
-            scoreRow?.product_title,
-            scoreRow?.design_name_override,
-            listingTitle,
-            ...childTitles,
-          );
-          if (identity.size > 0) {
-            const before = filteredKeywords.length;
-            filteredKeywords = filteredKeywords.filter((k) => keywordIsRelevant(k.keyword, identity));
-            const dropped = before - filteredKeywords.length;
-            if (dropped > 0) {
-              console.log(`[syncKeywordIntelligence] relevance gate: kept ${filteredKeywords.length}/${before} keywords (dropped ${dropped} off-product) for ${asin}`);
-            }
-          }
-        } catch (e) {
-          console.warn('[syncKeywordIntelligence] relevance gate failed (non-fatal; pool unfiltered):', e instanceof Error ? e.message : e);
-        }
+        // Relevance gate + never-collapse floor (shared helper, applied identically to the cache-hit
+        // path above so the two can't drift; gates BEFORE the engine + storage).
+        const filteredKeywords = await applyRelevanceGate(asin, resolvedParent, researchResult.allKeywords, listingRows, listingTitle);
 
         // Run engine on research results (against OUR listing content)
         const jsResult = runKeywordEngine(asin, filteredKeywords, listingRows, 'jungle_scout');
@@ -236,6 +217,52 @@ export async function syncKeywordIntelligence(
   }
 
   return sqpResult;
+}
+
+/**
+ * POOL-ENTRY RELEVANCE GATE (PO 2026-06-15 anti-pollution: stop soccer listings pulling in
+ * family/graduation keywords). Filters the JS pool against the listing's OWN identity tokens.
+ *
+ * Applied wherever the JS pool is stored — BOTH the fresh-research and the cache-hit paths — so the
+ * two can never drift (previously only the fresh path gated; a cache-hit re-run re-stored ungated).
+ *
+ * NEVER-COLLAPSE FLOOR (PO sign-off 2026-06-15): if the gate would drop the ENTIRE pool — an
+ * over-narrow / sparse identity, e.g. a short slogan design like "my therapist gave up" — keep the
+ * pool UNFILTERED and warn. The gate is anti-pollution INSURANCE, not a hard zero; collapsing a pool
+ * to nothing is what starved Intelligence + the description-coverage dock. ALWAYS logs kept/before
+ * (even when nothing dropped) so the gate's real effect on a listing is visible in prod logs.
+ */
+async function applyRelevanceGate<T extends { keyword: string }>(
+  asin: string,
+  resolvedParent: string,
+  keywords: T[],
+  listingRows: { title?: string | null }[] | null,
+  listingTitle?: string,
+): Promise<T[]> {
+  try {
+    const { identityTokensOf, keywordIsRelevant } = await import('../keyword-engine/keywordResearcher');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any;
+    const { data: scoreRow } = await db.from('listing_seo_scores')
+      .select('product_title, design_name_override').eq('parent_asin', resolvedParent).maybeSingle();
+    const childTitles = (listingRows ?? []).map((r) => r.title).filter(Boolean) as string[];
+    const identity = identityTokensOf(scoreRow?.product_title, scoreRow?.design_name_override, listingTitle, ...childTitles);
+    if (identity.size === 0) {
+      console.log(`[syncKeywordIntelligence] relevance gate: no identity tokens for ${asin} — pool kept UNFILTERED (${keywords.length} kw)`);
+      return keywords;
+    }
+    const before = keywords.length;
+    const kept = keywords.filter((k) => keywordIsRelevant(k.keyword, identity));
+    if (kept.length === 0 && before > 0) {
+      console.warn(`[syncKeywordIntelligence] relevance gate would drop ALL ${before} kw for ${asin} (identity too narrow: [${[...identity].slice(0, 8).join(', ')}]) — keeping pool UNFILTERED (never-collapse floor)`);
+      return keywords;
+    }
+    console.log(`[syncKeywordIntelligence] relevance gate for ${asin}: kept ${kept.length}/${before} (dropped ${before - kept.length} off-product)`);
+    return kept;
+  } catch (e) {
+    console.warn('[syncKeywordIntelligence] relevance gate failed (non-fatal; pool unfiltered):', e instanceof Error ? e.message : e);
+    return keywords;
+  }
 }
 
 // ─── Cache Age Helper ───────────────────────────────────────────────────────
