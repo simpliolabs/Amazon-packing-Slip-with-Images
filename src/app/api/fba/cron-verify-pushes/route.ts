@@ -29,7 +29,7 @@ interface VerifyResult {
   matched: number
   stale: number
   total: number
-  results: { sku: string; matches: boolean }[]
+  results: { sku: string; matches: boolean; isParent?: boolean }[]
   error?: string
 }
 
@@ -144,7 +144,9 @@ export async function GET(request: NextRequest) {
     }
 
     // 3) Still stale — out of attempts? Flag for the seller.
-    const staleSkus = verify.results.filter((r) => !r.matches).map((r) => r.sku)
+    // Never re-push the variation parent — it's a non-buyable hub the executor skips anyway (#244/
+    // #245), and verify-push now excludes it from counts; guarding here avoids a wasted no-op patch.
+    const staleSkus = verify.results.filter((r) => !r.matches && !r.isParent).map((r) => r.sku)
     if (task.attempts + 1 >= task.max_attempts) {
       await flagNeedsAttention(task.id, verify.matched, verify.total, staleSkus, `Still stale on ${staleSkus.length} SKU(s) after ${task.attempts + 1} attempts.`)
       processed.push({ id: task.id, field: task.field, result: 'needs_attention', matched: verify.matched, total: verify.total })
