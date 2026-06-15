@@ -2902,15 +2902,53 @@ export default function ListingDetailPage() {
                   onClick={async () => {
                     if (kwResearchBusy) return
                     setKwResearchBusy(true); setKwResearchMsg(null)
+                    // AUTO-CHAIN (PO 2026-06-15): one click runs the whole logical flow — re-research →
+                    // (poll until the new pool lands) → refresh pool + rank → regenerate content. No
+                    // manual reload, no separate Regenerate click. Research is fire-and-forget server-side,
+                    // so we poll the real research timestamp (researchedAt) until it advances.
                     try {
+                      // 1) Snapshot the current research timestamp to detect when the NEW one lands.
+                      let prevResearchedAt: string | null = null
+                      try {
+                        const pre = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
+                        if (pre.ok) prevResearchedAt = (await pre.json())?.researchedAt ?? null
+                      } catch { /* ignore — first-ever research has no prior timestamp */ }
+
+                      // 2) Kick off the background research (4 JS credits).
                       const resp = await fetch(`/api/fba/intelligence/${asin}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ seed: kwSeed.trim() || undefined }),
                       })
                       const data = await resp.json().catch(() => ({}))
-                      if (!resp.ok || data.error) setKwResearchMsg(`✗ ${data.error ?? `HTTP ${resp.status}`}`)
-                      else setKwResearchMsg(`✓ Research started${kwSeed.trim() ? ` with seed “${kwSeed.trim()}”` : ' (auto seed)'} — runs in the background (~1 min). Reload this tab to see the refreshed pool, then Regenerate to weave new keywords into content.`)
+                      if (!resp.ok || data.error) { setKwResearchMsg(`✗ ${data.error ?? `HTTP ${resp.status}`}`); setKwResearchBusy(false); return }
+
+                      // 3) Poll until the research timestamp advances (research complete), or time out.
+                      setKwResearchMsg(`⏳ Researching keywords${kwSeed.trim() ? ` (seed “${kwSeed.trim()}”)` : ' (auto seed)'}… ~1 min, runs in background.`)
+                      const started = Date.now()
+                      const TIMEOUT_MS = 180_000
+                      let freshPool: KeywordIntelligenceResult | null = null
+                      while (Date.now() - started < TIMEOUT_MS) {
+                        await new Promise((r) => setTimeout(r, 8000))
+                        try {
+                          const poll = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
+                          if (poll.ok) {
+                            const pd = await poll.json()
+                            if (pd?.researchedAt && pd.researchedAt !== prevResearchedAt && (pd.totalKeywordsAnalyzed ?? 0) > 0) { freshPool = pd; break }
+                          }
+                        } catch { /* transient — keep polling */ }
+                      }
+                      if (!freshPool) {
+                        setKwResearchMsg('⚠ Research is taking longer than expected. Reload the tab to see the refreshed pool, then Regenerate.')
+                        setKwResearchBusy(false); return
+                      }
+
+                      // 4) Auto-chain: refresh pool + rank, then regenerate content from the new keywords.
+                      setKwData(freshPool)
+                      setKwResearchMsg('✓ New keywords in — refreshing rank and rewriting content from them…')
+                      refreshRankFree()
+                      await generateAiRecs()
+                      setKwResearchMsg('✓ Done: pool refreshed, rank updated, and content rewritten from the new keywords. Review the drafts in Apply Changes.')
                     } catch (err) {
                       setKwResearchMsg(`✗ ${err instanceof Error ? err.message : 'Failed to start research'}`)
                     }
@@ -2920,7 +2958,7 @@ export default function ListingDetailPage() {
                   className="text-xs bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50 whitespace-nowrap"
                   title="Runs the full research pipeline fresh: niche keywords + Share-of-Voice competitor discovery + the #1 competitor's keyword harvest + OUR organic ranks (feeds the Rank column + tracker). Spends 4 Jungle Scout credits."
                 >
-                  {kwResearchBusy ? 'Starting…' : 'Re-research (4 JS credits) →'}
+                  {kwResearchBusy ? 'Working…' : 'Re-research + Rewrite (4 JS credits) →'}
                 </button>
               </div>
               {kwResearchMsg && (

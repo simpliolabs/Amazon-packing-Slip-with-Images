@@ -112,10 +112,21 @@ export async function GET(
       const defendedTop = stored.filter(k => k.actionType === 'DEFENDED')
         .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
 
+      // Real research timestamp (keyword_cache.fetched_at) so the UI can DETECT when a background
+      // re-research actually completed and auto-chain refresh→regenerate (PO 2026-06-15: "why isn't
+      // it one automatic step?"). analyzedAt below is the RESPONSE time, not the research time.
+      let researchedAt: string | null = null
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: cr } = await (supabase as any).from('keyword_cache')
+          .select('fetched_at').eq('asin', childAsin).eq('source', 'keyword_research').maybeSingle()
+        researchedAt = (cr as { fetched_at?: string } | null)?.fetched_at ?? null
+      } catch { /* best-effort — null just disables the auto-chain's completion detection */ }
       result = {
         asin: childAsin,
         parentAsin,
         analyzedAt: new Date().toISOString(),
+        researchedAt,
         dataSource: stored[0]?.dataSource ?? 'sqp',
         totalKeywordsAnalyzed: stored.length,
         topOpportunities: [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop],
