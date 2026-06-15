@@ -3305,7 +3305,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // audience tail. Source = the already-filtered candidate pool (color/role/capacity
     // keywords never reached it), then each addition re-passes the motif+garment strips —
     // a fill can never smuggle back what a guard removed. Truthful AND maximal.
-    if (apparelProduct && finalTitle.length < 70) {
+    // Target ~73-75 (was 70): the old <70 trigger / >=70 break left clean titles at 65-70 with the
+    // budget unused (PO 2026-06-15: "65/75, didn't use all chars"). Trigger at <73 and keep adding
+    // (≤75) until >=73, so the title reliably approaches the cap with grounded, trademark-safe phrases.
+    if (apparelProduct && finalTitle.length < 73) {
       const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
       const tail = tailMatch ? tailMatch[0] : ''
       let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
@@ -3327,7 +3330,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           if (bulletTokens(big).length === 2) canonPhrases.push(big)
         }
       }
-      for (const kw of [...candidates.map((c) => c.keyword), ...canonPhrases]) {
+      // Filler pool: title candidates + the high-value UPGRADE keywords (proven bullet traffic, already
+      // grounding-filtered) + canonical bigrams — more grounded material so the fill reliably reaches
+      // the target instead of starving when the top candidates are already token-covered.
+      for (const kw of [...candidates.map((c) => c.keyword), ...topUpgradeKws, ...canonPhrases]) {
         const toks = bulletTokens(kw)
         if (toks.length === 0 || toks.every((t) => headToks.has(t))) continue       // adds nothing new
         if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
@@ -3338,7 +3344,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         if ((next + tail).length > 75) continue
         head = next
         for (const t of toks) headToks.add(t)
-        if ((head + tail).length >= 70) break
+        if ((head + tail).length >= 73) break
       }
       finalTitle = `${head}${tail}`
     }
