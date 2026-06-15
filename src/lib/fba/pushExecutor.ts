@@ -40,6 +40,7 @@ import {
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
+import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
 // validator. Process-lifetime: schemas are static, so the form that validates once keeps
@@ -1051,7 +1052,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         let cancelled = false
         for (const item of diff) {
           if (pushCancelled(params.cancel_token)) { cancelled = true; break }
-          const value = item.raw as string | string[]
+          // SCRUB-AT-PUSH backstop (batch 2/6): trademark-scrub the value at the moment of publish,
+          // so a MANUALLY-typed mark (the title-override box bypasses the generation-time scrub #240)
+          // or any stale stored content can never be WRITTEN to Amazon as a protected term ("World
+          // Cup" → "World Soccer Cup"). Idempotent — already-scrubbed generated content is unchanged.
+          // Applied to both shapes: title/description/keywords (string) + bullets (string[]).
+          const rawValue = item.raw as string | string[]
+          const value = Array.isArray(rawValue) ? rawValue.map(scrubTrademarks) : scrubTrademarks(rawValue)
           const newValueStr = asCompare(value)
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
           const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
