@@ -70,6 +70,13 @@ export interface PipelineInput {
    *  repTitle is children[0] = the alphabetically-first variant, often a stale/secondary title that
    *  does NOT lead with the design name. Null when no score row exists. */
   canonicalTitle?: string | null
+  /** Seller-set DESIGN NAME override (listing_seo_scores.design_name_override, migration 031).
+   *  When set, extractDesignName uses this VERBATIM — bypasses LLM / vision / leadingDesignPhrase.
+   *  Deterministic anchor for cases where the heuristic chain fails (PO 2026-06-14:
+   *  B0GQVL3K4B's canonical "Don't" curly-apostrophe broke the heuristic → no design name → title
+   *  agent picked "Too Young to Retire Too Poor to Quit" from the keyword pool). Null = legacy
+   *  LLM-and-heuristic extraction. */
+  designNameOverride?: string | null
   /** Seller-declared audience lean (PR #195, persisted in listing_seo_scores.audience_lean).
    *  The seller knows the design's audience better than keyword statistics ("Darlin'" reads
    *  female even when unisex keywords dominate). male/female narrow the title tail outright;
@@ -1537,10 +1544,12 @@ async function runTitleAgent(
   // for "See You Later Alligator" or "Crocodile Design"). PR #91.
   const designLine = designName
     ? `\n🔴 MANDATORY — the title MUST LEAD with the product's DESIGN NAME exactly as written: "${designName}". Place it FIRST, immediately after the brand "${brandName}" and BEFORE the product type — it is the seller's design identity printed on the product and the main thing shoppers recognize. Use it VERBATIM (never paraphrase, expand, or substitute a synonym). Do NOT also include a longer paraphrase or alternate wording of the SAME slogan elsewhere in the title — e.g. if the design is "Later Gator", do NOT also write "See You Later Alligator" (that is the same slogan twice and wastes characters). Lead with "${designName}", then the product type.\n`
-    // No design name resolved: forbid INVENTING one. Without this, an unanchored agent
-    // fabricated a fake collection name ("Urban Pulse") that exists nowhere in the seller's
-    // listing or keywords (B0FKLGWZ4C — the real design "Darlin'" failed extraction).
-    : `\n🔴 Do NOT invent a design, collection, or style name. Every distinctive phrase in the title must come from the CURRENT title or the keywords listed below — if the current title leads with a distinctive phrase, keep it verbatim.\n`
+    // No design name resolved: forbid INVENTING one AND forbid promoting a keyword to slogan
+    // status. Without the second rule, the agent treated a high-volume keyword that *looks* like a
+    // slogan (e.g. "too young to retire too poor to quit shirt", JS vol 488 UPGRADE on B0GQVL3K4B)
+    // as the design — even though that phrase appeared nowhere in the seller's actual listing.
+    // The CURRENT title is the only authoritative source; keywords are search terms, not design names.
+    : `\n🔴 Do NOT invent a design, collection, or style name. The design anchor MUST be the leading distinctive phrase of the CURRENT title (verbatim) — the words the seller put there. NEVER promote any keyword from the candidate list below into the design / slogan slot, even if it reads like a slogan or has high volume — those are SEARCH TERMS, not the design. If the current title has no clear distinctive lead, omit the design slot entirely and lead with the brand + product type only.\n`
   const attrPinLine = attributePin
     ? apparel
       // Garment brand goes AFTER the welded design-name + product-type phrase ("Later Gator T-Shirt,
@@ -2848,7 +2857,11 @@ Return ONLY {"searchKeyphrases":[...],"specs":[...]}.`
  *  a clear lead exists). */
 export function leadingDesignPhrase(title: string, brandName: string): string {
   const STOP = /^(?:vintage|retro|classic|\d{2,4}s?|t|tshirt|tshirts|tee|tees|shirt|shirts|hoodie|hoodies|sweatshirt|sweater|tank|top|tops|comfort|color|colors|graphic|graphics|soft|premium|quality|unisex|man|mans|men|mens|woman|womans|women|womens|ladies|youth|adult|kid|kids|toddler|baby|for|gift|gifts|funny|cute|cool|novelty|design|designs|apparel|clothing|crewneck|crew|long|short|sleeve|sleeves|cotton|ringspun|the|a|an|and|with|by|ideal|perfect|great)$/i
-  let t = (title || '').trim()
+  // Normalize curly apostrophes (U+2019 / U+2018) to straight BEFORE the word-cleaning regex runs.
+  // The cleaner strips anything not in [A-Za-z0-9'] — so a curly apostrophe ("Don’t") was
+  // silently dropped to "Dont", then accept() substring-checked it against the canonical title
+  // (which still had the curly), failed, and the design name returned empty (B0GQVL3K4B, 2026-06-14).
+  let t = (title || '').replace(/[’‘]/g, "'").trim()
   if (brandName && t.toLowerCase().startsWith(brandName.toLowerCase())) t = t.slice(brandName.length).trim()
   const words = t.replace(/[—–]+/g, ' ').split(/[\s\-]+/).filter(Boolean)
   const lead: string[] = []
@@ -2880,7 +2893,13 @@ export function leadingDesignPhrase(title: string, brandName: string): string {
  * empty:rep / none) surfaced into titleDebug so a live regen proves which path ran.
  */
 async function extractDesignName(input: PipelineInput): Promise<{ name: string; source: string }> {
-  const { openai, repTitle, category, canonicalTitle, brandName, visionDesign, productType } = input
+  const { openai, repTitle, category, canonicalTitle, brandName, visionDesign, productType, designNameOverride } = input
+  // SELLER OVERRIDE — short-circuits the whole chain (LLM + vision + heuristic). The override is the
+  // seller's deterministic answer to "what IS the design"; trust it verbatim (just normalize curly
+  // apostrophes so downstream substring checks behave). Empty/whitespace-only string falls through.
+  if (designNameOverride && designNameOverride.trim()) {
+    return { name: designNameOverride.trim().replace(/[’‘]/g, "'"), source: 'override' }
+  }
   const usingCanonical = !!(canonicalTitle && canonicalTitle.trim())
   const source = usingCanonical ? canonicalTitle!.trim() : (repTitle || '')
   const titleTag = usingCanonical ? 'canonical' : 'rep'

@@ -522,7 +522,7 @@ export async function POST(req: NextRequest) {
       .select('*')
       .eq('parent_asin', parent_asin)
       .single()
-    const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null } | null
+    const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null; design_name_override?: string | null } | null
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
     // 150, not 50: opportunityScore is gap-amplified, so right after the seller PUSHES
     // keywords the covered terms collapse to raw/3 and sink BELOW the top-50 cut — the
@@ -650,6 +650,10 @@ export async function POST(req: NextRequest) {
             // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
             // the alphabetically-first variant and often does NOT lead with the design name.
             canonicalTitle: pipelineScoreRow?.product_title ?? null,
+            // Seller-set design name override (migration 031). When set, extractDesignName uses
+            // it VERBATIM — kills the entire "stuck design" class of bugs (LLM + heuristic +
+            // vision all bypassed). Deterministic.
+            designNameOverride: pipelineScoreRow?.design_name_override ?? null,
             // Seller-declared audience lean (PR #195) — persisted on the score row by the
             // listing-page selector; re-weights gendered keywords + sets the title tail.
             audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')
