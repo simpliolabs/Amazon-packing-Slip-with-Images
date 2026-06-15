@@ -782,6 +782,31 @@ export function changedDetailFields(
 
 export type PushEmit = (obj: Record<string, unknown>) => void
 
+/**
+ * Summarize a push over a variation family. We DO push the non-buyable variation PARENT (hub) — its
+ * title/bullets/description/attributes are part of the displayed record and most parents accept the
+ * patch (this restores the pre-#244 behavior; #244 blanket-skipped ALL parents to fix one Amazon
+ * Custom family whose incomplete Shirt Size made its record reject the patch, which silently stopped
+ * EVERY normal parent from updating — the regression the PO caught). But a parent rejection must not
+ * make the push read "broken", so pass/fail is computed over the buyable CHILDREN and the parent's
+ * own outcome is surfaced as a separate, non-blocking note. `results` rows are tagged isParent.
+ */
+function summarizePush(results: { status: string; isParent?: boolean }[]): {
+  accepted: number; failed: number; childTotal: number; parentNote: string
+} {
+  const children = results.filter((r) => !r.isParent)
+  const parent = results.find((r) => r.isParent)
+  const accepted = children.filter((r) => r.status === 'accepted').length
+  const failed = children.filter((r) => r.status === 'failed').length
+  const parentNote =
+    parent?.status === 'accepted'
+      ? ' (Variation parent hub also updated.)'
+      : parent?.status === 'failed'
+        ? ' (The variation parent hub was rejected — usually an incomplete required attribute like its Shirt Size System/Class; complete it in Seller Central. The buyable variants shoppers see were updated.)'
+        : ''
+  return { accepted, failed, childTotal: children.length, parentNote }
+}
+
 export async function executePush(params: PushParams, emit: PushEmit): Promise<void> {
   const { parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = params
   try {
@@ -794,13 +819,12 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             emit({ type: 'error', error: `"${ctx.recommendedValue}" is not an accepted Amazon value for "${ctx.detailField}". Pick one of the accepted values${ctx.acceptedValues?.length ? `: ${ctx.acceptedValues.slice(0, 25).join(', ')}` : ''}.` })
             return
           }
-          // Exclude the non-buyable variation PARENT (asin === parent_asin) from detail pushes too —
-          // same reason as the broadcast fields (#244): Amazon re-validates the whole parent record on
-          // any PATCH and rejects it for incomplete required attributes (e.g. Shirt Size), so it can
-          // never accept a content/detail push. Counting it produced a permanent "1 failed".
+          // Push the parent hub too (its attributes are part of the displayed record). summarizePush()
+          // scopes pass/fail to the buyable children, so a parent that rejects the patch (an Amazon
+          // Custom family with incomplete Shirt Size) is a non-blocking note rather than blanket-skipped
+          // — the over-generalization (#244/#245) that stopped normal parents from updating.
           const rawDetailDiff = await loadDetailDiff(parent_asin, ctx)
-          const detailParentDropped = rawDetailDiff.some((d) => d.asin === parent_asin)
-          const diff = rawDetailDiff.filter((d) => d.changed && d.raw != null && d.asin !== parent_asin)
+          const diff = rawDetailDiff.filter((d) => d.changed && d.raw != null)
           if (diff.length === 0) {
             emit({
               type: 'result',
@@ -884,10 +908,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             calibratedValueFor = (v: string) => buildShapedDetailValueVariants(shape, v, MARKETPLACE_ID)[winIdx]?.value
           }
 
-          const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+          const results: { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }[] = []
           let cancelled = false
           for (const item of diff) {
             if (pushCancelled(params.cancel_token)) { cancelled = true; break }
+            const isParent = item.asin === parent_asin
             const newValueStr = ctx.recommendedValue
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
             const preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape, calibratedValueFor(newValueStr))
@@ -898,7 +923,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
                 ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
                 : preview.error
-              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr })
+              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr, isParent })
               emit({ type: 'progress', sku: item.sku, status: 'failed', error: friendlyErr })
               await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: friendlyErr })
               await sleep(PATCH_DELAY_MS)
@@ -906,14 +931,14 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             }
             const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape, calibratedValueFor(newValueStr))
             const status = live.ok ? 'accepted' : 'failed'
-            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent })
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
             await sleep(PATCH_DELAY_MS)
           }
 
-          const accepted = results.filter((r) => r.status === 'accepted').length
-          const failed = results.filter((r) => r.status === 'failed').length
+          // Pass/fail over the buyable CHILDREN; the parent hub's outcome is a non-blocking note.
+          const { accepted, failed, childTotal, parentNote } = summarizePush(results)
 
           // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets ship→rise experience),
           // instead of staying RED until the next regen re-reads Amazon. On success, mark this detail's
@@ -978,10 +1003,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
-            pushed: accepted, failed, total: results.length, cancelled: cancelled || undefined,
+            pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
             message: cancelled
-              ? `Stopped by you — ${accepted}/${results.length} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-              : `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${detailParentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''} Changes typically reflect in 15-30 minutes.`,
+              ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
+              : `Pushed ${ctx.detailField} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNote} Changes typically reflect in 15-30 minutes.`,
             results,
           })
           return
@@ -1005,23 +1030,16 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         } else {
           diff = rawDiff.filter((d) => d.changed)
         }
-        // Exclude the variation PARENT from content pushes (PO 2026-06-15). The parent SKU (its row's
-        // asin === the parent ASIN) is a non-buyable variation HUB. We send only the title/bullet/desc
-        // attribute — never size — but Amazon re-validates the WHOLE parent record on any Listings
-        // PATCH and rejects it because the parent's required Shirt Size attributes (size_system/
-        // size_class/size, set at variation creation and not changeable afterward) are incomplete.
-        // So a content push to the parent can NEVER succeed; counting it as a target produced a
-        // permanent "33/34, 1 failed". The buyable children carry the displayed content, so we drop
-        // the parent → the push reports children-only = complete. (Surfaced in the message below.)
-        const parentDropped = diff.some((d) => d.asin === parent_asin)
-        if (parentDropped) diff = diff.filter((d) => d.asin !== parent_asin)
+        // The variation PARENT is pushed too (PO 2026-06-15): its displayed title/bullets/description
+        // are part of the family record and most parents accept the patch — #244 blanket-skipping ALL
+        // parents (to fix one Amazon Custom family whose incomplete Shirt Size made its record reject
+        // the patch) silently stopped every NORMAL parent from updating. summarizePush() scopes pass/
+        // fail to the buyable children and reports a parent-only rejection as a non-blocking note.
         if (diff.length === 0) {
           emit({
             type: 'result',
             parent_asin, field, pushed: 0, failed: 0, total: 0,
-            message: parentDropped
-              ? `Nothing to push — only the variation parent matched (it's a non-buyable hub and is skipped).`
-              : `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
+            message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
             results: [],
           })
           return
@@ -1054,10 +1072,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.error('[push-content] keyword_push_log insert threw:', e) }
         }
 
-        const results: { sku: string; status: string; submissionId: string | null; error?: string }[] = []
+        const results: { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }[] = []
         let cancelled = false
         for (const item of diff) {
           if (pushCancelled(params.cancel_token)) { cancelled = true; break }
+          const isParent = item.asin === parent_asin
           // SCRUB-AT-PUSH backstop (batch 2/6): trademark-scrub the value at the moment of publish,
           // so a MANUALLY-typed mark (the title-override box bypasses the generation-time scrub #240)
           // or any stale stored content can never be WRITTEN to Amazon as a protected term ("World
@@ -1069,7 +1088,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
           const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
           if (!preview.ok) {
-            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error })
+            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error, isParent })
             emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
             await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
             await sleep(PATCH_DELAY_MS)
@@ -1077,7 +1096,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           }
           const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
           const status = live.ok ? 'accepted' : 'failed'
-          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error })
+          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent })
           emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
           await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
           if (live.ok) {
@@ -1090,8 +1109,8 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           await sleep(PATCH_DELAY_MS)
         }
 
-        const accepted = results.filter((r) => r.status === 'accepted').length
-        const failed   = results.filter((r) => r.status === 'failed').length
+        // Pass/fail over the buyable CHILDREN; the parent hub's outcome is a non-blocking note.
+        const { accepted, failed, childTotal, parentNote } = summarizePush(results)
 
         // Re-score so the page's score reflects the just-pushed values. Best-effort.
         if (accepted > 0) {
@@ -1190,10 +1209,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         emit({
           type: 'result',
           parent_asin, field,
-          pushed: accepted, failed, total: results.length, cancelled: cancelled || undefined,
+          pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
           message: cancelled
-            ? `Stopped by you — ${accepted}/${results.length} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-            : `Pushed ${label} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentDropped ? ' (Variation parent skipped — non-buyable hub; complete its Shirt Size System/Class in Seller Central if you want its record updated.)' : ''} Changes typically reflect in 15-30 minutes.`,
+            ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
+            : `Pushed ${label} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNote} Changes typically reflect in 15-30 minutes.`,
           results,
         })
       } catch (err) {
