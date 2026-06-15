@@ -362,87 +362,22 @@ export async function POST(req: NextRequest) {
     // catalog call is wrapped in try/catch and never blocks a regen.
     if (!error) {
       try {
-        const { getAccessToken: getTok } = await import('@/lib/amazon/auth')
-        const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
-        const MP = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
-        const tok = await getTok()
-        const url = `${ENDPOINT}/catalog/2022-04-01/items/${encodeURIComponent(parent_asin)}?marketplaceIds=${MP}&includedData=relationships`
-        const resp = await fetch(url, { headers: { 'x-amz-access-token': tok } })
-        if (resp.ok) {
-          const cat = await resp.json() as { relationships?: { relationships?: { type?: string; childAsins?: string[] }[] }[] }
-          const childAsins: string[] = []
-          for (const byMp of cat.relationships ?? []) for (const r of byMp.relationships ?? []) {
-            if (r.type === 'VARIATION' && Array.isArray(r.childAsins)) childAsins.push(...r.childAsins)
-          }
-          if (childAsins.length > 0) {
-            const { data: matched } = await supabase
-              .from('listing_content')
-              .select('sku, asin, parent_asin')
-              .in('asin', childAsins)
-            const matchedRows = (matched ?? []) as { sku: string; asin: string; parent_asin: string | null }[]
-
-            // (1) RE-ATTACH: child rows stored under a DIFFERENT parent → move them to this parent.
-            const movable = matchedRows.filter((r) => r.parent_asin !== parent_asin)
-            if (movable.length > 0) {
-              const movableSkus = movable.map((r) => r.sku)
-              await supabase.from('listing_content').update({ parent_asin }).in('sku', movableSkus)
-              console.log(`[ai-recommendations] self-heal: re-attached ${movableSkus.length} child SKU(s) to parent ${parent_asin}`)
-            }
-
-            // (2) BACKFILL (PO 2026-06-15): childAsins with NO listing_content row at ALL — the
-            // zero-sales / no-FBA-inventory variations (e.g. every variation of a Custom/Handmade
-            // listing) that the orders∪inventory→parent_asin funnel never ingested. The catalog is
-            // ground truth for the live family, so CREATE a minimal Active row per missing child
-            // (resolve childAsin→SKU via Listings Items) so the optimizer enumerates + pushes to the
-            // FULL family, not just the children that happened to sell. Content is left blank — the
-            // push writes the optimized values, and the next Scan Listings fills current content.
-            // SP-API only (no Jungle Scout credits). Idempotent: on re-open these rows now exist, so
-            // they're in matchedRows and skipped.
-            const knownAsins = new Set(matchedRows.map((r) => r.asin))
-            const missingAsins = childAsins.filter((a) => !knownAsins.has(a))
-            if (missingAsins.length > 0) {
-              try {
-                const { data: sidRow } = await supabase.from('app_settings').select('value').eq('key', 'amazon_seller_id').maybeSingle()
-                const sellerId = (sidRow as { value?: string } | null)?.value || process.env.AMAZON_MERCHANT_TOKEN || process.env.AMAZON_SELLER_ID || ''
-                const placeholderTitle = (childrenRaw?.[0] as { title?: string } | undefined)?.title ?? ''
-                const nowIso = new Date().toISOString()
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const newRows: any[] = []
-                if (sellerId) {
-                  for (const childAsin of missingAsins.slice(0, 60)) { // cap: a runaway family can't stall the regen
-                    const lurl = `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}?identifiers=${encodeURIComponent(childAsin)}&identifiersType=ASIN&marketplaceIds=${MP}&includedData=summaries`
-                    const lresp = await fetch(lurl, { headers: { 'x-amz-access-token': tok } })
-                    if (!lresp.ok) continue
-                    const ljson = await lresp.json() as { items?: { sku?: string }[] }
-                    for (const it of ljson.items ?? []) {
-                      if (!it.sku || /^amzn\./i.test(it.sku)) continue // skip Amazon-managed system SKUs
-                      newRows.push({
-                        sku: it.sku, asin: childAsin, parent_asin, title: placeholderTitle,
-                        bullet_1: '', bullet_2: '', bullet_3: '', bullet_4: '', bullet_5: '',
-                        description: '', backend_keywords: '', image_count: 0, has_aplus: false,
-                        content_synced_at: nowIso,
-                      })
-                    }
-                  }
-                }
-                if (newRows.length > 0) {
-                  const { error: insErr } = await supabase.from('listing_content').upsert(newRows, { onConflict: 'sku' } as never)
-                  if (insErr) console.warn('[ai-recommendations] child backfill upsert failed:', insErr.message)
-                  else console.log(`[ai-recommendations] child backfill: created ${newRows.length} missing variation row(s) for parent ${parent_asin} (${missingAsins.length} childAsins had no row)`)
-                }
-              } catch (be) { console.warn('[ai-recommendations] child backfill skipped (non-fatal):', be instanceof Error ? be.message : be) }
-            }
-
-            // Re-query once if EITHER re-attach or backfill changed the family.
-            if (movable.length > 0 || missingAsins.length > 0) {
-              const retry = await supabase
-                .from('listing_content')
-                .select(contentCols)
-                .eq('parent_asin', parent_asin)
-                .order('sku', { ascending: true })
-              childrenRaw = retry.data; error = retry.error
-            }
-          }
+        // Shared with the catalog-wide cron (cron-complete-children) so the two reconcile paths
+        // never drift — see src/lib/fba/familyReconcile.ts. Best-effort: a failure here falls
+        // through to the 404 below, never blocks a regen.
+        const { reconcileFamilyChildren } = await import('@/lib/fba/familyReconcile')
+        const placeholderTitle = (childrenRaw?.[0] as { title?: string } | undefined)?.title ?? ''
+        const rec = await reconcileFamilyChildren(parent_asin, supabase, { placeholderTitle })
+        if (rec.reattached > 0) console.log(`[ai-recommendations] self-heal: re-attached ${rec.reattached} child SKU(s) to parent ${parent_asin}`)
+        if (rec.backfilled > 0) console.log(`[ai-recommendations] child backfill: created ${rec.backfilled} missing variation row(s) for parent ${parent_asin} (${rec.missingAsins} childAsins had no row)`)
+        // Re-query once if EITHER re-attach or backfill changed the family.
+        if (rec.reattached > 0 || rec.backfilled > 0) {
+          const retry = await supabase
+            .from('listing_content')
+            .select(contentCols)
+            .eq('parent_asin', parent_asin)
+            .order('sku', { ascending: true })
+          childrenRaw = retry.data; error = retry.error
         }
       } catch (e) { console.warn('[ai-recommendations] self-heal failed (continuing with 404):', e) }
     }
