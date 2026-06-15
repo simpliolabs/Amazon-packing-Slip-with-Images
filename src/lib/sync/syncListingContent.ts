@@ -951,6 +951,16 @@ export function scoreListingContent(
         descriptionScore -= 3
         issues.push({ field: 'description', severity: 'info', message: `Description covers ${targetKws.length - missingKws.length}/${targetKws.length} top keywords — a few high-opportunity terms are missing. Shipping the optimized version would capture them.`, auto_fixable: false })
       }
+    } else {
+      // POOL TOO THIN TO CONFIRM FRESHNESS (PO 2026-06-15): targetKws < 3 means the keyword pool is
+      // empty/unresearched (no CRITICAL/UPGRADE rows in keyword_analysis — the Intelligence-pool
+      // decoupling). With nothing to check coverage against, a STALE description is indistinguishable
+      // from an optimized one — and #243 then left descriptionScore at its default 25 → 100%/12-12 →
+      // it cleared the >=23 'DONE' gate → "no change needed", so the seller was never prompted to ship.
+      // Don't hand out the DONE-clearing default when we CAN'T verify: cap below 23 so the section
+      // stays ACTIONABLE. (Stopgap; the real fix is healing the pool so coverage can actually be scored.)
+      descriptionScore = Math.min(descriptionScore, 22)
+      issues.push({ field: 'description', severity: 'info', message: 'Cannot confirm the description matches your current keyword pool — the pool is empty or unresearched. Research keywords (Intelligence tab), then regenerate the description so its coverage can be verified.', auto_fixable: false })
     }
   }
 
