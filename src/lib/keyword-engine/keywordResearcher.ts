@@ -127,6 +127,29 @@ export async function researchKeywords(
   creditsUsed++;
   console.log(`[keywordResearcher] Phase 2: ${nicheKeywords.length} niche keywords from "${seed}"`);
 
+  // ── Phase 2b: MULTI-UNIVERSE secondary seeds (PR2) ─────────────────────────
+  // PO 2026-06-14: "query MORE keyword universes from JS — up to 3 — searching storage first."
+  // The Seed Agent already returns up to 3 seeds (MOST important first); we were researching only
+  // seeds[0] and discarding the rest into seedsConsidered. A multi-theme design (e.g. a Haitian
+  // World-Soccer-Cup tee = world-soccer-cup ∪ haiti-pride ∪ soccer-supporter) only ranked on its
+  // primary universe. Research the secondary seeds too so the pool covers ALL its niches.
+  // Storage-first per seed (skip when its distinctive token already saturates the pool) and capped
+  // at +2 credits (3 universes total, exactly the PO's "up to 3"). Agent seeds are already
+  // trademark-scrubbed + identity-validated upstream, so no extra guard is needed here. Only the
+  // 'agent' source ever yields >1 seed (manual/category/rules return a single seed), so this is
+  // naturally a no-op for those paths.
+  for (const xs of seedSel.seeds.slice(1, 3)) {
+    const poolBlob = nicheKeywords.map((k) => k.keyword.toLowerCase()).join(' ');
+    const distinct = nicheTokens(xs).find((t) => !NICHE_GENERIC.has(t) && !poolBlob.includes(t));
+    if (!distinct) { console.log(`[keywordResearcher] Phase 2b: "${xs}" already covered by the pool — skipping (0 credits)`); continue; }
+    const more = await fetchKeywordsByKeyword(xs, { pageSize: 100 });
+    creditsUsed++;
+    const seen = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
+    let added = 0;
+    for (const r of more) { const k = r.keyword.toLowerCase(); if (!seen.has(k)) { nicheKeywords.push(r); seen.add(k); added++; } }
+    console.log(`[keywordResearcher] Phase 2b: +${added} keywords from secondary seed "${xs}" (1 credit)`);
+  }
+
   // ── Phase 3: share_of_voice (1 credit) ────────────────────────────────────
   const sovCompetitors = await fetchShareOfVoice(seed);
   creditsUsed++;
