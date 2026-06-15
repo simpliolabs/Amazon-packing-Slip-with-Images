@@ -793,7 +793,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             emit({ type: 'error', error: `"${ctx.recommendedValue}" is not an accepted Amazon value for "${ctx.detailField}". Pick one of the accepted values${ctx.acceptedValues?.length ? `: ${ctx.acceptedValues.slice(0, 25).join(', ')}` : ''}.` })
             return
           }
-          const diff = (await loadDetailDiff(parent_asin, ctx)).filter((d) => d.changed && d.raw != null)
+          // Exclude the non-buyable variation PARENT (asin === parent_asin) from detail pushes too —
+          // same reason as the broadcast fields (#244): Amazon re-validates the whole parent record on
+          // any PATCH and rejects it for incomplete required attributes (e.g. Shirt Size), so it can
+          // never accept a content/detail push. Counting it produced a permanent "1 failed".
+          const rawDetailDiff = await loadDetailDiff(parent_asin, ctx)
+          const detailParentDropped = rawDetailDiff.some((d) => d.asin === parent_asin)
+          const diff = rawDetailDiff.filter((d) => d.changed && d.raw != null && d.asin !== parent_asin)
           if (diff.length === 0) {
             emit({
               type: 'result',
@@ -974,7 +980,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             pushed: accepted, failed, total: results.length, cancelled: cancelled || undefined,
             message: cancelled
               ? `Stopped by you — ${accepted}/${results.length} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-              : `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}. Changes typically reflect in 15-30 minutes.`,
+              : `Pushed ${ctx.detailField} for ${accepted}/${results.length} variant${results.length === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${detailParentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''} Changes typically reflect in 15-30 minutes.`,
             results,
           })
           return
@@ -1248,7 +1254,12 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     }
 
     // ── PHASE 1 — SKU set (one resolution) + each SKU's CURRENT values (one GET per SKU). ──
-    const skuSet = await expandDetailSkuSet(parent_asin, sellerId, token)
+    const skuSetRaw = await expandDetailSkuSet(parent_asin, sellerId, token)
+    // Drop the non-buyable variation PARENT (asin === parent_asin) — it can never accept a content/
+    // detail PATCH (Amazon re-validates its whole record + rejects on incomplete required attributes),
+    // so counting it as a target produced a permanent partial-fail. Buyable children carry everything.
+    const bulkParentDropped = skuSetRaw.some((s) => s.asin === parent_asin)
+    const skuSet = skuSetRaw.filter((s) => s.asin !== parent_asin)
     if (skuSet.length === 0) { emit({ type: 'error', error: 'No SKUs found for this parent. Run a Sync first.' }); return }
     const spKeys = checkedPlans.map((p) => p.attribute.spApiKey)
 
@@ -1399,7 +1410,7 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       pushed: totalAccepted, failed: totalFailed, total: skusTouched, cancelled: cancelled || undefined,
       message: cancelled
         ? `Stopped by you — ${skusTouched} SKU(s) processed before the stop; accepted fields stay pushed, the rest are untouched.`
-        : `Auto Push done — ${livePlans.length} field(s) across ${skusTouched} SKU(s) that needed it${skipped.length ? `; ${skipped.length} field(s) skipped` : ''}. Changes reflect in 15min–6hr; use Verify live to confirm.`,
+        : `Auto Push done — ${livePlans.length} field(s) across ${skusTouched} SKU(s) that needed it${skipped.length ? `; ${skipped.length} field(s) skipped` : ''}.${bulkParentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''} Changes reflect in 15min–6hr; use Verify live to confirm.`,
     })
   } catch (err) {
     emit({ type: 'error', error: err instanceof Error ? err.message : 'Auto Push failed' })
