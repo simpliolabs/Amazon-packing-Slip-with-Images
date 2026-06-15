@@ -173,8 +173,39 @@ export async function syncKeywordIntelligence(
         // Fetch listing content for presence check (twin-safe; all rows, OR'd per row)
         const listingRows = await loadListingRowsForPresence(supabase, asin);
 
+        // POOL-ENTRY RELEVANCE GATE (PO 2026-06-15 directive: stop the soccer-listing pollution
+        // by family/graduation/disney 2026 keywords). Filter the JS pool against the listing's
+        // OWN identity tokens BEFORE the engine + storage. Even a leaky seed can't smuggle
+        // off-product keywords into Intelligence/audit/title candidates if we gate at the boundary.
+        // Identity sources: every live listing title (representative + variants) + design override.
+        let filteredKeywords = researchResult.allKeywords;
+        try {
+          const { identityTokensOf, keywordIsRelevant } = await import('../keyword-engine/keywordResearcher');
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const db = supabase as any;
+          const { data: scoreRow } = await db.from('listing_seo_scores')
+            .select('product_title, design_name_override').eq('parent_asin', resolvedParent || asin).maybeSingle();
+          const childTitles = (listingRows ?? []).map((r) => r.title).filter(Boolean) as string[];
+          const identity = identityTokensOf(
+            scoreRow?.product_title,
+            scoreRow?.design_name_override,
+            listingTitle,
+            ...childTitles,
+          );
+          if (identity.size > 0) {
+            const before = filteredKeywords.length;
+            filteredKeywords = filteredKeywords.filter((k) => keywordIsRelevant(k.keyword, identity));
+            const dropped = before - filteredKeywords.length;
+            if (dropped > 0) {
+              console.log(`[syncKeywordIntelligence] relevance gate: kept ${filteredKeywords.length}/${before} keywords (dropped ${dropped} off-product) for ${asin}`);
+            }
+          }
+        } catch (e) {
+          console.warn('[syncKeywordIntelligence] relevance gate failed (non-fatal; pool unfiltered):', e instanceof Error ? e.message : e);
+        }
+
         // Run engine on research results (against OUR listing content)
-        const jsResult = runKeywordEngine(asin, researchResult.allKeywords, listingRows, 'jungle_scout');
+        const jsResult = runKeywordEngine(asin, filteredKeywords, listingRows, 'jungle_scout');
 
         // Merge JS results into SQP results (SQP takes precedence for same keywords)
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);

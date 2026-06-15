@@ -21,6 +21,8 @@ import {
 } from '../sync/jungleScoutClient';
 import { ProductIdentity, scanProductImage, getProductImageUrl } from './visionScanner';
 import { createClient } from '@supabase/supabase-js';
+import OpenAI from 'openai';
+import { resolveOpenAIKey } from '../openai/credentials';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -57,9 +59,13 @@ export interface KeywordResearchResult {
   /** How many JS API credits were consumed */
   creditsUsed: number;
   /** Source of the seed term */
-  source: 'vision' | 'title' | 'manual' | 'category';
+  source: 'vision' | 'title' | 'manual' | 'category' | 'agent' | 'rules';
   /** ISO timestamp */
   researchedAt: string;
+  /** The 1-3 seeds the Seed Agent considered (primary first) — for surfacing + PR2 multi-universe. */
+  seedsConsidered?: string[];
+  /** Self-eval: agent underperformed → suggest escalating to a full Seed Council (C). */
+  escalate?: { suggested: boolean; reason: string };
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -102,31 +108,17 @@ export async function researchKeywords(
     }
   }
 
-  // ── Phase 1: Get 1 Seed Term ──────────────────────────────────────────────
-  let seed: string;
-  let source: 'vision' | 'title' | 'manual' | 'category';
-
-  if (manualSeed) {
-    seed = manualSeed;
-    source = 'manual';
-  } else if (categorySeed) {
-    seed = categorySeed;
-    source = 'category';
-  } else {
-    const visionSeed = await getTopVisionSeed(asin);
-    if (visionSeed) {
-      seed = visionSeed;
-      source = 'vision';
-    } else if (listingTitle) {
-      seed = buildSeedFromTitle(listingTitle);
-      source = 'title';
-    } else {
-      console.warn(`[keywordResearcher] No seed available for ${asin}. Cannot research.`);
-      return emptyResult();
-    }
+  // ── Phase 1: Seed selection — Seed Agent (identity-validated) → rules failover ────────────
+  // (was: rules-only "first 3 words" → the soccer-pollution bug. The agent reads the design's
+  // real niche; manual/category seeds still bypass it; vision feeds the agent as context.)
+  const seedSel = await selectSeeds({ asin, parentAsin, listingTitle, manualSeed, categorySeed });
+  if (seedSel.seeds.length === 0) {
+    console.warn(`[keywordResearcher] No seed available for ${asin}. Cannot research.`);
+    return emptyResult();
   }
-
-  console.log(`[keywordResearcher] Phase 1: Seed = "${seed}" (source: ${source})`);
+  const seed = seedSel.seeds[0];
+  const source = seedSel.source;
+  console.log(`[keywordResearcher] Phase 1: Seed = "${seed}" (source: ${source}; ${seedSel.seeds.length} considered: [${seedSel.seeds.join(' | ')}])`);
   let creditsUsed = 0;
 
   // ── Phase 2: keywords_by_keyword (1 credit) ───────────────────────────────
@@ -215,6 +207,8 @@ export async function researchKeywords(
     creditsUsed,
     source,
     researchedAt: new Date().toISOString(),
+    seedsConsidered: seedSel.seeds,
+    escalate: seedSel.escalate,
   };
 
   // Cache the result
@@ -312,36 +306,198 @@ async function getTopVisionSeed(asin: string): Promise<string | null> {
 
 // ─── Title-Based Seed (Fallback) ────────────────────────────────────────────
 
+// Generic tokens that NEVER carry product identity — dropping them from the seed lets the
+// distinctive word (Soccer, Christian, Retired, Fishing, …) lead. The OLD seed builder took
+// "first 3 words" of the title, so a title starting with "Personalized 2026 World Soccer Cup
+// T-Shirt" produced seed "personalized 2026 tshirt" — JS returned every 2026 family/graduation/
+// disney shirt and the actual SOCCER context never reached the pool (B0GVW83L1P, 2026-06-15).
+const SEED_GENERIC = new Set([
+  // years
+  '2020','2021','2022','2023','2024','2025','2026','2027','2028','2029','2030',
+  // qualifier-only words
+  'personalized','custom','customized','graphic','graphics','vintage','retro','classic',
+  'premium','quality','soft','blank','original','novelty','unisex','plain',
+  // sizes / colors (mirrors the old strip but expanded)
+  'small','medium','large','xl','2xl','3xl','4xl','5xl','xxl','xxxl',
+  'black','white','red','blue','green','navy','gray','grey','yellow','pink','purple','brown','orange','beige',
+  // common audience words (audience belongs in title tail, not seed)
+  'men','mens','women','womens','ladies','kid','kids','toddler','baby','adult','youth',
+  // brand-of-blank (these are the GARMENT brand, not the design)
+  'comfort','colors','gildan','jerzees','dickies','carhartt','bella','canvas',
+  // minor / structural
+  'for','and','with','the','a','an','of','to','in','on','at','by','or',
+])
+const APPAREL_WORDS = new Set(['shirt','shirts','tshirt','tshirts','t-shirt','tee','tees','top','tops','hoodie','sweatshirt','tank'])
+
 /**
- * Build a concise 2-3 word seed search term from a listing title.
- * Jungle Scout keywords_by_keyword works best with short, focused seeds.
- * Strategy: take the first meaningful noun phrase (2-3 words max).
+ * Build a concise, design-led seed from the title. Drop generic words (year, "personalized",
+ * size, color, audience, blank-brand) BEFORE picking the seed — so the design's distinctive
+ * tokens lead, not the qualifiers. Falls back gracefully when nothing distinctive remains.
  */
-function buildSeedFromTitle(title: string): string {
-  // Strip brand prefix (everything before first dash or colon)
-  const firstSegment = title.split(/\s*[-–—:]\s*/)[0].trim();
+export function buildSeedFromTitle(title: string): string {
+  // Strip brand prefix (everything before first dash or colon) — keep only the lead segment.
+  const firstSegment = title.split(/\s*[-–—:]\s*/)[0].trim()
+  // Tokenize: lowercase, strip punctuation, split on whitespace.
+  const all = firstSegment.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+  // Distinctive = NOT generic AND length > 1 — these tokens NAME the design/niche.
+  const distinctive = all.filter((w) => !SEED_GENERIC.has(w) && !APPAREL_WORDS.has(w) && w.length > 1 && !/^\d+$/.test(w))
+  // Take the FIRST 2 distinctive tokens — JS works best with 2-3 word seeds, and the first
+  // distinctive words in the seller's own title are almost always the design tokens.
+  const lead = distinctive.slice(0, 2)
+  // Add an apparel word so JS returns product keywords, not general subject queries.
+  const apparelInTitle = all.find((w) => APPAREL_WORDS.has(w)) || 'tshirt'
+  const seed = lead.length > 0 ? `${lead.join(' ')} ${apparelInTitle}` : `${all.slice(0, 2).join(' ')} ${apparelInTitle}`.trim()
+  return seed.replace(/\s{2,}/g, ' ').trim()
+}
 
-  // Remove size/color/variant words
-  const cleaned = firstSegment
-    .replace(/\b(Small|Medium|Large|XL|2XL|3XL|XXL|Black|White|Red|Blue|Green|Navy|Gray|Vintage|Retro|Soft|Classic|Premium|Original)\b/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
+// ─── Pool-entry relevance gate (anti-pollution) ─────────────────────────────────────
+// PO 2026-06-15: "B0GVW83L1P (soccer) has 61 family/graduation/disney keywords polluting the
+// pool — diagnose in FULL and find a final solution." Root: the seed leaked thematic 2026
+// queries into JS. This gate filters the JS-returned keywords against the LISTING'S identity
+// tokens BEFORE they enter the merged pool — so even a leaky seed can't smuggle off-product
+// keywords into Intelligence/audit/title-agent candidates.
 
-  // Take only first 3 words to keep the seed tight
-  const words = cleaned.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 3);
-
-  // Ensure apparel word is present
-  const hasApparel = words.some(w => /shirt|tee|top|tshirt/.test(w));
-  if (!hasApparel) {
-    // Replace last word with 'tshirt' if over 2 words, else append
-    if (words.length >= 3) {
-      words[2] = 'tshirt';
-    } else {
-      words.push('tshirt');
+/** Tokenize a string into a set of stemmed identity tokens (drops generics + tiny words). */
+export function identityTokensOf(...sources: (string | null | undefined)[]): Set<string> {
+  const out = new Set<string>()
+  for (const s of sources) {
+    if (!s) continue
+    for (const raw of s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
+      const w = raw.replace(/s$/, '')
+      if (w.length <= 2) continue
+      if (SEED_GENERIC.has(w) || APPAREL_WORDS.has(w)) continue
+      if (/^\d+$/.test(w)) continue
+      out.add(w)
     }
   }
+  return out
+}
 
-  return words.join(' ');
+/** Pure relevance check: does this keyword share ≥1 non-generic identity token with the
+ *  listing's identity? E.g. for a SOCCER listing with identity {soccer, world, cup, fan, usa,
+ *  mexico, canada, supporters, match}, "soccer jersey" passes (soccer ∈ identity); "family
+ *  vacation shirts 2026" fails (no overlap). The token "2026" is excluded from BOTH sides as
+ *  generic so a shared year alone can't smuggle pollution through. */
+export function keywordIsRelevant(keyword: string, identity: Set<string>): boolean {
+  if (identity.size === 0) return true   // no identity tokens → can't gate, accept everything
+  for (const raw of keyword.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
+    const w = raw.replace(/s$/, '')
+    if (w.length <= 2) continue
+    if (SEED_GENERIC.has(w) || APPAREL_WORDS.has(w)) continue
+    if (identity.has(w)) return true
+  }
+  return false
+}
+
+// ─── Seed Agent (PR: seed-council B) ────────────────────────────────────────
+// PO 2026-06-15: the pipeline used AI councils for OUTPUTS (title/bullets/desc) but pure RULES
+// for the research seed INPUT — that asymmetry let "Personalized 2026 World Soccer Cup" become
+// the seed "personalized 2026 tshirt" and poured 61 family/graduation keywords into a soccer
+// listing. Fix (approved design): a small AI agent picks niche-aware seeds, VALIDATED against the
+// listing's own identity tokens (drops hallucinations), with the rules builder as failover. A
+// self-eval flags weak runs so we can suggest escalating to a full multi-proposer council (C).
+
+export interface SeedSelection {
+  seeds: string[]                                  // 1-3 validated seeds, primary (best) first
+  source: 'agent' | 'rules' | 'manual' | 'category'
+  /** Self-eval: when true, the agent underperformed (no on-identity seeds / call failed) and a
+   *  full Seed Council (C) is worth trying. Surfaced so the operator can opt in. */
+  escalate: { suggested: boolean; reason: string }
+}
+
+/** PURE: keep only seeds that share an identity token (drops a hallucinated/off-product seed),
+ *  ensure each carries a product word, dedup by theme, cap at 3. Unit-tested. */
+export function validateSeeds(rawSeeds: string[], identity: Set<string>, productWord = 'tshirt'): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of rawSeeds) {
+    let s = (raw || '').toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!s) continue
+    // Hallucination guard: a seed the listing's own identity can't corroborate is dropped.
+    if (identity.size > 0 && !keywordIsRelevant(s, identity)) continue
+    // Ensure a product word so JS returns product keywords, not abstract subject queries.
+    if (!s.split(/\s+/).some((w) => APPAREL_WORDS.has(w))) s = `${s} ${productWord}`
+    s = s.split(/\s+/).slice(0, 4).join(' ')
+    const key = s.replace(/[^a-z0-9]/g, '')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(s)
+    if (out.length >= 3) break
+  }
+  return out
+}
+
+/** Select up to 3 niche-aware research seeds. AGENT-first (context judgment), validated against
+ *  the listing identity, with the rules builder (buildSeedFromTitle) as failover. manual/category
+ *  seeds bypass the agent (already authoritative). */
+export async function selectSeeds(opts: {
+  asin: string
+  parentAsin?: string
+  listingTitle?: string | null
+  manualSeed?: string
+  categorySeed?: string
+}): Promise<SeedSelection> {
+  const { asin, parentAsin, listingTitle, manualSeed, categorySeed } = opts
+  if (manualSeed) return { seeds: [manualSeed], source: 'manual', escalate: { suggested: false, reason: '' } }
+  if (categorySeed) return { seeds: [categorySeed], source: 'category', escalate: { suggested: false, reason: '' } }
+
+  // Gather identity context: the seller's own canonical title + design override + vision + rep title.
+  let canonicalTitle: string | null = null
+  let designOverride: string | null = null
+  try {
+    const { data } = await supabase.from('listing_seo_scores')
+      .select('product_title, design_name_override').eq('parent_asin', parentAsin || asin).single() as
+      { data: { product_title?: string | null; design_name_override?: string | null } | null }
+    canonicalTitle = data?.product_title ?? null
+    designOverride = data?.design_name_override ?? null
+  } catch { /* pre-migration / no row — fall back to listingTitle */ }
+  const identitySrc = canonicalTitle || listingTitle || ''
+  const identity = identityTokensOf(canonicalTitle, designOverride, listingTitle)
+  const productWord = (identitySrc.toLowerCase().match(/\b(t-?shirt|tshirt|tee|hoodie|sweatshirt|tank|top)\b/) || [])[0]?.replace(/[^a-z]/g, '') || 'tshirt'
+
+  // Rules failover (always computable) — used if the agent is unavailable or returns nothing valid.
+  const rulesSeed = buildSeedFromTitle(canonicalTitle || listingTitle || '')
+
+  // ── The Seed AGENT ──
+  try {
+    const key = await resolveOpenAIKey()
+    if (key && identitySrc) {
+      const identity2 = await getVisionIdentityRaw(asin) || (parentAsin ? await getVisionIdentityRaw(parentAsin) : null)
+      const visionLine = identity2?.designTheme ? `Image/design theme: ${identity2.designTheme}\n` : ''
+      const overrideLine = designOverride ? `Seller-confirmed design name: ${designOverride}\n` : ''
+      const openai = new OpenAI({ apiKey: key })
+      const system = `You pick Amazon SEARCH SEEDS for a print-on-demand product. A seed is a SHORT 2-4 word phrase a shopper types to find THIS product's DESIGN/NICHE, ending in a product-type word (shirt/tee/etc). Return the design's REAL theme — NEVER generic qualifiers (a year like 2026, "personalized", "custom", a size, a color, or the blank/garment brand). Return 1-3 seeds, MOST important first, as JSON {"seeds":[...]}.
+Examples:
+Title: Personalized 2026 World Soccer Cup T-Shirt – Fan Tee, USA Mexico Canada Host Countries => {"seeds":["world cup soccer shirt","usa soccer fan tee","world cup 2026 shirt"]}
+Title: I Am Retired I Don't Have to T-Shirt – Funny Retirement Graphic Tee => {"seeds":["funny retirement shirt","retired tshirt"]}
+Title: Comfort Colors I Will Praise Him Every Season T-Shirt – Christian Tee => {"seeds":["christian faith shirt","bible verse tee"]}
+Title: Gildan Unisex Soft Cotton Blank T-Shirt Premium => {"seeds":["blank cotton tshirt"]}`
+      const user = `${overrideLine}${visionLine}Title: ${identitySrc}\n\nReturn ONLY {"seeds":[...]}.`
+      const r = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        temperature: 0,
+        max_tokens: 120,
+        response_format: { type: 'json_object' },
+      })
+      let parsed: { seeds?: string[] } = {}
+      try { parsed = JSON.parse(r.choices[0]?.message?.content || '{}') } catch { /* malformed → empty → failover */ }
+      const valid = validateSeeds(Array.isArray(parsed.seeds) ? parsed.seeds : [], identity, productWord)
+      if (valid.length > 0) {
+        console.log(`[keywordResearcher] Seed Agent → [${valid.join(' | ')}] (identity-validated)`)
+        return { seeds: valid, source: 'agent', escalate: { suggested: false, reason: '' } }
+      }
+      // Agent produced nothing on-identity → failover + flag for escalation to the full council.
+      console.warn(`[keywordResearcher] Seed Agent returned no on-identity seeds for ${asin} — failing over to rules.`)
+      return { seeds: rulesSeed ? [rulesSeed] : [], source: 'rules',
+        escalate: { suggested: true, reason: 'Seed Agent produced no seeds that match this listing — a full Seed Council (multiple proposers + judge) may extract a better niche.' } }
+    }
+  } catch (e) {
+    console.warn('[keywordResearcher] Seed Agent failed (non-fatal, using rules):', e instanceof Error ? e.message : e)
+  }
+  // No OpenAI key, no title, or the call threw → rules.
+  return { seeds: rulesSeed ? [rulesSeed] : [], source: 'rules',
+    escalate: { suggested: false, reason: '' } }
 }
 
 // ─── Competitor Storage ─────────────────────────────────────────────────────
