@@ -929,6 +929,31 @@ export function scoreListingContent(
     }
   }
 
+  // ── 3c. DESCRIPTION KEYWORD COVERAGE (PO 2026-06-15 "GO description-scoring") ──────────────
+  // A stale description that misses the CURRENT high-opportunity keywords (e.g. a pre-soccer
+  // description on a now-soccer listing) used to still score 25/25 — length + title-overlap were
+  // the only checks — so the verdict marked it DONE / "no change needed" and NEVER prompted the
+  // seller to ship the freshly-optimized copy. Dock by how many of the top CRITICAL/UPGRADE phrases
+  // the live description is MISSING, so a stale one drops below the 'strong/DONE' convergence
+  // threshold and the section becomes actionable ("ship the optimized description").
+  if (descLen >= 50) {
+    const targetKws = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords].slice(0, 8)
+    if (targetKws.length >= 3) {
+      const descLower = descPlain.toLowerCase()
+      const missingKws = targetKws.filter((k) => !descLower.includes(k.toLowerCase()))
+      const coverage = (targetKws.length - missingKws.length) / targetKws.length
+      if (coverage < 0.5) {
+        // Misses most current high-value terms → stale / under-optimized. Dock enough to fall below
+        // the strong (>=23/25) convergence so the verdict stops saying "no change needed".
+        descriptionScore -= Math.min(8, 3 + missingKws.length)
+        issues.push({ field: 'description', severity: 'warning', message: `Description covers only ${targetKws.length - missingKws.length}/${targetKws.length} of your current high-opportunity keywords — it looks stale or under-optimized. Ship the optimized description below to weave in: ${missingKws.slice(0, 3).map((k) => `"${k}"`).join(', ')}.`, auto_fixable: false })
+      } else if (coverage < 0.8) {
+        descriptionScore -= 3
+        issues.push({ field: 'description', severity: 'info', message: `Description covers ${targetKws.length - missingKws.length}/${targetKws.length} top keywords — a few high-opportunity terms are missing. Shipping the optimized version would capture them.`, auto_fixable: false })
+      }
+    }
+  }
+
   descriptionScore = Math.max(0, descriptionScore)
 
   // ── 4. BACKEND KEYWORD SCORING ────────────────────────────────────────────
