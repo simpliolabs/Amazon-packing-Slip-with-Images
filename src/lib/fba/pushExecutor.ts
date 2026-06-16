@@ -224,14 +224,26 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
   // normally sourced from listing_health status='Active' (syncListingContent), but the family
   // backfill (familyReconcile) can seed rows for offerless catalog children. PATCHing such a SKU
   // makes Amazon CREATE a phantom "Missing offer" ASIN (the 2026-06-16 B0GHH4MQ7N incident) rather
-  // than update. Resolve the Active live-SKU set here and tag non-live rows so the push loop skips
-  // them. On a DB error we leave activeSkus null → DON'T over-skip (preserve push availability); the
-  // familyReconcile offer-check is the backstop for the row-seeding side.
-  const { data: liveRows, error: liveErr } = await supabase
-    .from('listing_health')
-    .select('sku')
-    .eq('parent_asin', parentAsin)
-    .eq('status', 'Active')
+  // than update. Resolve the Active live-SKU set here BY SKU (not by parent_asin) and tag non-live
+  // rows so the push loop skips them. On a DB error we leave activeSkus null → DON'T over-skip
+  // (preserve push availability); the familyReconcile offer-check is the backstop for the row-seeding side.
+  //
+  // SKU-only lookup is the right predicate: the push targets ALREADY came from listing_content
+  // WHERE parent_asin=X, so the parent linkage is established. Re-filtering listing_health by
+  // parent_asin AS WELL added a redundant + UNRELIABLE check — listing_health.parent_asin is
+  // backfilled from the Sales-&-Traffic report (syncTrafficReport), so a 0-unit listing has NULL
+  // parent_asin on its listing_health row → the prior gate matched zero SKUs → every healthy SKU
+  // skipped as "notLive". The 2026-06-16 B0FKDDN44Z incident: verify-push confirmed 121 readable
+  // live children on Amazon, but the gate skipped all 121 because their listing_health rows had
+  // no parent_asin (no traffic data). Match by SKU + status='Active' only.
+  const targetSkus = rows.map((r) => r.sku)
+  const { data: liveRows, error: liveErr } = targetSkus.length === 0
+    ? { data: [], error: null }
+    : await supabase
+        .from('listing_health')
+        .select('sku')
+        .in('sku', targetSkus)
+        .eq('status', 'Active')
   const activeSkus = liveErr ? null : new Set((liveRows ?? []).map((r) => (r as { sku: string }).sku))
 
   // Keywords are per-color (per-ASIN). Map ASIN → string so BOTH the FBA and FBM SKU of a
