@@ -1,6 +1,18 @@
 import type { NextConfig } from 'next'
 
+// Build-info baked at build time so /api/health can report exactly which commit is LIVE.
+// This kills the recurring "is it actually deployed?" guessing (2026-06-16: a failed Coolify
+// layer-export served the old build for hours with no way to tell). BUILD_TIME always works;
+// BUILD_SHA is best-effort (git may be absent in the nixpacks build image → 'unknown', harmless).
+const BUILD_TIME = new Date().toISOString()
+let BUILD_SHA = process.env.SOURCE_COMMIT || process.env.COOLIFY_GIT_COMMIT_SHA || 'unknown'
+if (BUILD_SHA === 'unknown') {
+  try { BUILD_SHA = require('child_process').execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() || 'unknown' } catch { /* git unavailable at build → stays 'unknown' */ }
+}
+
 const nextConfig: NextConfig = {
+  env: { BUILD_TIME, BUILD_SHA },
+
   // Allow images from Amazon CDN and Supabase Storage
   images: {
     remotePatterns: [
