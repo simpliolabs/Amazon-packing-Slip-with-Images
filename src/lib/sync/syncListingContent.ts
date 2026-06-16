@@ -1241,6 +1241,77 @@ export interface SyncListingContentResult {
   durationMs:     number
 }
 
+/**
+ * ON-DEMAND single-parent scoring — creates/refreshes ONE listing_seo_scores row from the
+ * listing_content we ALREADY have (DB only — no Amazon calls, no Jungle Scout credits). The regular
+ * sync (syncListingContent) only scores the top-50-by-30d-sales, so a low-traffic listing never gets
+ * a scores row and is absent from the optimizer index → its page reads "not available" (the
+ * 2026-06-16 B0FKDDN44Z / B0GCPHGN4J case). This lets ANY listing the seller opens get scored on the
+ * fly. Returns the upserted score row, or null when there is no listing_content to score (never
+ * synced — a full sync must ingest its children first).
+ */
+export async function ensureListingScored(
+  supabase: SupabaseClient,
+  parentAsin: string,
+): Promise<Record<string, unknown> | null> {
+  const { data: rowsRaw } = await supabase
+    .from('listing_content')
+    .select('sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+    .eq('parent_asin', parentAsin)
+    .order('sku', { ascending: true })
+  const rows = (rowsRaw ?? []) as ListingContentRow[]
+  if (rows.length === 0) return null // never synced — nothing to score on demand
+
+  // Dedup by ASIN (prefer the FBA SKU), mirroring the sync's representative set.
+  const asinMap = new Map<string, ListingContentRow>()
+  for (const r of rows) {
+    const existing = asinMap.get(r.asin)
+    if (!existing || r.sku.endsWith('-FBA')) asinMap.set(r.asin, r)
+  }
+  const uniqueChildren = Array.from(asinMap.values())
+
+  // Sales rank + representative child from parent_asin_rollup if present; a low-traffic listing may
+  // have no rollup row → default 0 units, first child as representative.
+  const { data: rollupRaw } = await supabase
+    .from('parent_asin_rollup')
+    .select('total_units_30d, top_child_asin')
+    .eq('parent_asin', parentAsin)
+    .maybeSingle()
+  const rollup = rollupRaw as { total_units_30d?: number; top_child_asin?: string | null } | null
+  const topChildAsin = rollup?.top_child_asin || uniqueChildren[0]?.asin || null
+  const totalUnits = rollup?.total_units_30d ?? 0
+
+  const scoringCtx = await fetchScoringContext(supabase, parentAsin, topChildAsin)
+  const parentOwnContent = uniqueChildren.find((c) => c.asin === parentAsin) || null
+  const score = scoreListingContent(parentOwnContent, uniqueChildren, scoringCtx)
+
+  const productTitle = parentOwnContent?.title || uniqueChildren[0]?.title || null
+  const { data: catalogRow } = await supabase
+    .from('catalog_products').select('image_url').eq('parent_asin', parentAsin).limit(1).maybeSingle()
+
+  const scoreRow = {
+    parent_asin:          parentAsin,
+    title_score:          score.title_score,
+    bullet_score:         score.bullet_score,
+    keyword_score:        score.keyword_score,
+    aplus_score:          score.aplus_score,
+    description_score:    score.description_score,
+    features_score:       score.features_score,
+    overall_score:        score.overall_score,
+    issues:               score.issues,
+    child_count:          uniqueChildren.length,
+    child_override_count: score.child_override_count,
+    top_child_asin:       topChildAsin,
+    product_title:        productTitle,
+    image_url:            (catalogRow as { image_url?: string } | null)?.image_url || null,
+    total_units_30d:      totalUnits,
+    scored_at:            new Date().toISOString(),
+  }
+  const { error } = await supabase.from('listing_seo_scores').upsert([scoreRow], { onConflict: 'parent_asin' })
+  if (error) { console.warn('[ensureListingScored] score upsert failed:', error.message); return null }
+  return scoreRow
+}
+
 export async function syncListingContent(
   topN = 50
 ): Promise<SyncListingContentResult> {
