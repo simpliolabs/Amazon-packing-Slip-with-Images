@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
-import { syncListingContent } from '@/lib/sync/syncListingContent'
+import { syncListingContent, ensureListingScored } from '@/lib/sync/syncListingContent'
 
 // ── GET ───────────────────────────────────────────────────────────────────────
 
@@ -97,6 +97,29 @@ export async function GET(req: Request) {
       // that depended on a per-parent orphan-check which often hadn't resolved before the click.
       .filter(r => r.children.length > 0)
       .slice(0, limit)
+
+    // ON-DEMAND SCORING: the optimizer only auto-scores the top-50-by-sales (syncListingContent), so a
+    // low-traffic listing has no listing_seo_scores row and is absent here → its page reads "not
+    // available". When the page asks for a specific asin (?ensure=), score it on the fly from existing
+    // listing_content (DB only — no Amazon / Jungle Scout calls) so it renders + joins the grid.
+    // Best-effort: a failure (or a never-synced listing with no children) just leaves it absent.
+    const ensureAsin = new URL(req.url).searchParams.get('ensure')
+    if (ensureAsin && !result.some(r => r.parent_asin === ensureAsin)) {
+      try {
+        const scored = await ensureListingScored(supabase, ensureAsin)
+        if (scored) {
+          const { data: sr } = await supabase
+            .from('listing_seo_scores').select('*').eq('parent_asin', ensureAsin).single()
+          const { data: ek } = await supabase
+            .from('listing_content')
+            .select('sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt, content_synced_at')
+            .eq('parent_asin', ensureAsin)
+            .order('sku', { ascending: true })
+          const ensuredKids = (ek || []) as ChildRow[]
+          if (sr && ensuredKids.length > 0) result.unshift({ ...(sr as ScoreRow), children: ensuredKids })
+        }
+      } catch (e) { console.warn('[listing-optimizer] ensure-score failed:', e instanceof Error ? e.message : e) }
+    }
 
     // hasMore: a full headroom fetch that still filled the requested count means there are
     // likely more sellers below — drives the dashboard's "Show more" affordance.

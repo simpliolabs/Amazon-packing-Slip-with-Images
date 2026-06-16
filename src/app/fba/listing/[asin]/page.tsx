@@ -358,10 +358,11 @@ export default function ListingDetailPage() {
   useEffect(() => {
     (async () => {
       try {
-        // Load the FULL index (the route caps at 200), not the default 25 — otherwise a listing
-        // ranked below the top 25 by sales "disappears" when opened by direct URL (PO 2026-06-15:
-        // B0GCPHGN4J 404'd). The find() below still picks out this listing's own score row.
-        const resp = await fetch('/api/fba/listing-optimizer?limit=200')
+        // Load the FULL index (capped at 200) AND ask the route to ensure THIS listing is scored
+        // (&ensure=): the optimizer only auto-scores the top-50-by-sales, so a low-traffic listing has
+        // no score row and would "disappear" when opened by direct URL (B0GCPHGN4J / B0FKDDN44Z 404'd,
+        // 2026-06-15/16). ensure= scores it on demand from existing content so the find() below resolves.
+        const resp = await fetch(`/api/fba/listing-optimizer?limit=200&ensure=${encodeURIComponent(asin)}`)
         if (!resp.ok) throw new Error('Failed to load')
         const data = await resp.json()
         const found = data.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
