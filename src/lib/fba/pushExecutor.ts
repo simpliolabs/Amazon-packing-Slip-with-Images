@@ -151,19 +151,22 @@ function stripFulfillmentSuffix(sku: string): string {
  */
 async function discoverSkusForAsin(
   sellerId: string, token: string, asin: string,
-): Promise<{ sku: string; asin: string }[]> {
+): Promise<{ sku: string; asin: string }[] | null> {
+  // null = the lookup FAILED (HTTP error / exception) — callers must NOT infer "offerless" from a
+  // failure. [] = Amazon successfully reported NO seller SKU under this ASIN — a real "this ASIN has
+  // no live seller listing" signal (the ground-truth gate's offerless test in loadDiff).
   try {
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
       `?identifiers=${encodeURIComponent(asin)}&identifiersType=ASIN` +
       `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
-    if (!resp.ok) return []
+    if (!resp.ok) return null
     const json = (await resp.json()) as { items?: { sku?: string }[] }
     return (json.items ?? [])
       .map((it) => (it.sku ? { sku: it.sku, asin } : null))
       .filter((x): x is { sku: string; asin: string } => x !== null && !isSystemSku(x.sku))
-  } catch { return [] }
+  } catch { return null }
 }
 
 /** Look up the variation-parent SKU for a parent ASIN via Listings Items search. */
@@ -220,16 +223,15 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     .order('sku', { ascending: true })
   const rows = (rowsRaw ?? []) as ContentRow[] // every SKU — FBA and FBM both get pushed
 
-  // PHANTOM-GATE REVERTED (2026-06-16). A read-side gate here (#260/#262/#263) skipped SKUs absent
-  // from the listing_health cache to stop the push from PATCHing offerless backfilled rows into
-  // phantom "Missing offer" ASINs (the B0GHH4MQ7N incident). It was the WRONG signal: listing_health
-  // is incomplete for low-traffic / print-on-demand listings, so it blanket-skipped 121 REAL live
-  // listings on B0FKDDN44Z (verified in the seller's AUTHENTICATED browser — an unauthenticated
-  // cached curl had masked it). The push is back to UPDATE-ONLY-BY-TRUST: it patches the
-  // listing_content rows it is given (the pre-#260 behavior the seller relied on). Phantom
-  // protection stays on the WRITE side — familyReconcile's offer-gate refuses to SEED offerless
-  // rows — plus a one-time cleanup of legacy offerless rows. A correct READ-side gate using
-  // ground-truth Listings-API liveness (NOT the stale listing_health cache) is the follow-up.
+  // GROUND-TRUTH PHANTOM GATE (2026-06-16). The push must not PATCH a SKU with no live Amazon
+  // listing — doing so makes Amazon CREATE a junk "Missing offer" ASIN (the B0GHH4MQ7N incident).
+  // Earlier gates (#260/#262/#263) keyed on the listing_health CACHE — the WRONG signal: it's
+  // incomplete for low-traffic/POD listings, so it blanket-skipped 121 REAL live listings on
+  // B0FKDDN44Z (#264 reverted them). This gate uses GROUND TRUTH instead: the live Listings-Items
+  // lookup (discoverSkusForAsin, already run per ASIN in the enrichment loop below). A row is skipped
+  // ONLY when that lookup SUCCEEDS and reports ZERO seller SKUs for the ASIN (= confirmed offerless).
+  // A non-empty result = real listing → push; a FAILED lookup or un-probed ASIN = unknown → push
+  // (NEVER over-skip on an API hiccup). notLive is set by the post-discovery pass further below.
 
   // Keywords are per-color (per-ASIN). Map ASIN → string so BOTH the FBA and FBM SKU of a
   // pair receive the same per-child keywords.
@@ -261,8 +263,8 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
         bytes: getByteLength(proposedStr),
         chars: proposedStr.length,
         changed: proposedStr.length > 0 && current !== proposedStr,
-        // Gate reverted (see note above): push trusts listing_content. Always pushable here; phantom
-        // protection is write-side (familyReconcile offer-gate) + legacy-row cleanup, not a read gate.
+        // Placeholder — the GROUND-TRUTH GATE pass (after the discovery loop) overwrites this: a row
+        // is notLive only if Amazon confirms its ASIN has NO seller listing (offerless phantom).
         notLive: false,
       }
     })
@@ -275,19 +277,23 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
   // and add any SKU we don't already have to the diff with the SAME proposed value.
   let token: string | null = null
   let sellerId: string | null = null
+  // GROUND-TRUTH liveness map populated by the discovery loop: asin → SKUs Amazon reports under it
+  // (null = the lookup FAILED, don't infer offerless; [] = Amazon confirms NO seller SKU under it).
+  const discoveredByAsin = new Map<string, { sku: string; asin: string }[] | null>()
   try {
     const knownSkus = new Set(baseDiff.map((d) => d.sku))
-    // Don't probe NON-LIVE rows' ASINs for FBM twins — a phantom/offerless ASIN's "twins" are junk
-    // too, and discovered twins are added UNTAGGED (proven-live by discovery), so probing a notLive
-    // ASIN could re-introduce an un-gated phantom-adjacent SKU into the patch loop. Probe live only.
-    const asinsToProbe = [...new Set(baseDiff.filter((d) => !d.notLive).map((d) => d.asin).filter((a): a is string => !!a))]
+    // Probe EVERY row's ASIN via Listings Items — this single loop serves BOTH the FBM-twin discovery
+    // AND the ground-truth liveness signal the gate uses (it replaces the reverted listing_health
+    // gate). Probing ALL rows (not a "live" subset) is required to classify each ASIN.
+    const asinsToProbe = [...new Set(baseDiff.map((d) => d.asin).filter((a): a is string => !!a))]
     if (asinsToProbe.length > 0) {
       token = await getAccessToken()
       sellerId = await getSellerId()
       const skuToCurrent = new Map(rows.map((r) => [r.sku, r]))
       for (const asin of asinsToProbe) {
         const discovered = await discoverSkusForAsin(sellerId, token, asin)
-        for (const d of discovered) {
+        discoveredByAsin.set(asin, discovered)
+        for (const d of (discovered ?? [])) {
           if (knownSkus.has(d.sku)) continue // already in the diff
           // INHERITANCE rule: a newly-discovered SKU under the same ASIN is a TWIN (typically the
           // FBM half of an FBA/FBM pair). It must inherit the SAME proposed value as its sibling
@@ -325,6 +331,25 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
       }
     }
   } catch { /* enrichment is best-effort — don't block the preview */ }
+
+  // ── GROUND-TRUTH GATE: tag confirmed-offerless rows notLive (executePush skips them) ──
+  // A row is non-pushable iff its ASIN's live lookup SUCCEEDED and returned ZERO seller SKUs — the
+  // offerless backfilled-phantom case (PATCHing it makes Amazon CREATE a "Missing offer" ASIN).
+  // Non-empty discovery = real listing → push. null (lookup failed) or un-probed ASIN = unknown →
+  // push (never over-skip on an API hiccup — the mistake the listing_health gate made). The PARENT
+  // row (added below) isn't in baseDiff yet so it's never tagged; executePush also exempts asin===parent.
+  for (const d of baseDiff) {
+    const disc = d.asin ? discoveredByAsin.get(d.asin) : undefined
+    d.notLive = Array.isArray(disc) && disc.length === 0
+  }
+  // SAFETY VALVE against the recurring blanket-skip: offerless rows are a small MINORITY of a real
+  // family. If this gate would skip HALF OR MORE of the rows, distrust it (discovery rate-limited, or
+  // Amazon returning empty en masse, or a stale asin mapping) and push everything — better a rare
+  // phantom than blanket-skipping a healthy family AGAIN (the #260/#262/#263 failure mode, 4×).
+  const wouldSkip = baseDiff.filter((d) => d.notLive).length
+  if (wouldSkip > 0 && wouldSkip >= Math.ceil(baseDiff.length / 2)) {
+    for (const d of baseDiff) d.notLive = false
+  }
 
   // ── PARENT SKU row for BROADCAST field pushes ────────────────────────────────
   // The variation parent (e.g. Memory-Card-P) is non-buyable but DOES carry its own
@@ -577,7 +602,7 @@ export async function expandDetailSkuSet(
   const asinsToProbe = [...new Set(rows.map((r) => r.asin).filter(Boolean))]
   for (const asin of asinsToProbe) {
     const discovered = await discoverSkusForAsin(sellerId, token, asin)
-    for (const d of discovered) {
+    for (const d of (discovered ?? [])) {
       if (knownSkus.has(d.sku)) continue
       // TWIN-NAME GUARD: only inherit when the discovered SKU's stripped name matches one of
       // our DB rows under this ASIN — avoids pushing to unrelated SKUs sharing the ASIN.
