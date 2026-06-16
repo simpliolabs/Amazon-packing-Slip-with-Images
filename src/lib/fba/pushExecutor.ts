@@ -229,13 +229,26 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
   // (preserve push availability); the familyReconcile offer-check is the backstop for the row-seeding side.
   //
   // SKU-only lookup is the right predicate: the push targets ALREADY came from listing_content
-  // WHERE parent_asin=X, so the parent linkage is established. Re-filtering listing_health by
-  // parent_asin AS WELL added a redundant + UNRELIABLE check — listing_health.parent_asin is
-  // backfilled from the Sales-&-Traffic report (syncTrafficReport), so a 0-unit listing has NULL
-  // parent_asin on its listing_health row → the prior gate matched zero SKUs → every healthy SKU
-  // skipped as "notLive". The 2026-06-16 B0FKDDN44Z incident: verify-push confirmed 121 readable
-  // live children on Amazon, but the gate skipped all 121 because their listing_health rows had
-  // no parent_asin (no traffic data). Match by SKU + status='Active' only.
+  // WHERE parent_asin=X, so the parent linkage is established. Two prior tightenings here were
+  // over-strict and blanket-skipped healthy listings: (1) #260 also filtered by parent_asin —
+  // unreliable for 0-unit listings whose listing_health.parent_asin is NULL (backfilled by traffic
+  // report, no traffic = no row); (2) #262 still filtered by status='Active' — listing_health.status
+  // is the verbatim value from GET_MERCHANT_LISTINGS_ALL_DATA, which classifies POD qty=0 children
+  // as 'Inactive' (still real PATCH-able listings) and freshly-created variations as 'Unknown' (via
+  // syncListings.ts:216's `|| 'Unknown'` fallback) — both wrongly rejected. The 2026-06-16
+  // B0FKDDN44Z incident: verify-push confirmed 121 readable live children on Amazon, but the gate
+  // skipped all 121 because their statuses weren't the literal string 'Active'.
+  //
+  // CORRECT PREDICATE: row presence in listing_health is itself the "is this a real Amazon listing"
+  // signal — syncListings upserts a row for every SKU returned by GET_MERCHANT_LISTINGS_ALL_DATA
+  // (every listing the seller has on Amazon). Phantom/offerless SKUs (the original B0GHH4MQ7N
+  // case) NEVER appear in that report → no listing_health row → still correctly skipped. Belt-and-
+  // suspenders: also reject the explicit non-pushable statuses the app's own listing-issues route
+  // already enumerates (Suppressed/Missing-Offer/Incomplete-Information) — those have rows but
+  // shouldn't be PATCHed. 'Inactive' is NOT in the deny-list because POD qty=0 reads as Inactive
+  // while remaining real and pushable; the truly actionable Inactive sub-cases are demuxed by
+  // listing_health.status_message from a separate report.
+  const NON_PUSHABLE_STATUSES = ['Suppressed', 'Missing Offer', 'MissingOffer', 'No Offer', 'Incomplete', 'Missing Information', 'MissingInformation']
   const targetSkus = rows.map((r) => r.sku)
   const { data: liveRows, error: liveErr } = targetSkus.length === 0
     ? { data: [], error: null }
@@ -243,7 +256,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
         .from('listing_health')
         .select('sku')
         .in('sku', targetSkus)
-        .eq('status', 'Active')
+        .not('status', 'in', `(${NON_PUSHABLE_STATUSES.map((s) => `"${s}"`).join(',')})`)
   const activeSkus = liveErr ? null : new Set((liveRows ?? []).map((r) => (r as { sku: string }).sku))
 
   // Keywords are per-color (per-ASIN). Map ASIN → string so BOTH the FBA and FBM SKU of a
