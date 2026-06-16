@@ -303,6 +303,9 @@ export async function GET(
       limit: rawUsage.jungleScout.budget,
       remaining: rawUsage.jungleScout.budget - rawUsage.jungleScout.callsUsed,
       provider: 'Jungle Scout',
+      planLimit: rawUsage.jungleScout.planLimit,
+      warningLevel: rawUsage.jungleScout.warningLevel,
+      warningMessage: rawUsage.jungleScout.warningMessage,
     };
 
     return NextResponse.json({

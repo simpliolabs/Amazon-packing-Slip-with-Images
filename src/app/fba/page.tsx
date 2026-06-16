@@ -196,6 +196,9 @@ interface ApiUsageStats {
   limit: number
   remaining: number
   provider: string
+  planLimit?: number
+  warningLevel?: 'ok' | 'approaching' | 'critical' | 'paused'
+  warningMessage?: string
 }
 
 interface ListingIssue {
@@ -3156,6 +3159,8 @@ export default function FBAIntelligencePage() {
                               used={apiUsage.used}
                               limit={apiUsage.limit}
                               provider={apiUsage.provider}
+                              warningLevel={apiUsage.warningLevel}
+                              warningMessage={apiUsage.warningMessage}
                             />
                           )}
                           <button

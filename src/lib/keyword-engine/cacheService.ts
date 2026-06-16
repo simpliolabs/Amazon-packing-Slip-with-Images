@@ -20,7 +20,9 @@ const supabase = createClient(
 );
 
 // ─── Budget Constants ─────────────────────────────────────────────────────────
-const JUNGLE_SCOUT_MONTHLY_BUDGET = 950; // Hard cap (50 below the 1,000 plan limit)
+const JUNGLE_SCOUT_MONTHLY_BUDGET = 950; // Hard cap — keyword research PAUSES here (isWithinBudget)
+const JUNGLE_SCOUT_PLAN_LIMIT = 1000;    // The paid plan's monthly call limit; JS bills $0.05/call ABOVE this.
+const JS_WARN_AT_PCT = 80;               // PO 2026-06-15: surface a usage warning at 80% of the cap, so we see overages coming.
 const CACHE_TTL_DAYS = 30;
 
 // ─── Cache Read ───────────────────────────────────────────────────────────────
@@ -280,7 +282,10 @@ export async function isWithinBudget(
  * Get current API usage stats for the UI meter.
  */
 export async function getApiUsageStats(): Promise<{
-  jungleScout: { callsUsed: number; budget: number; percentUsed: number };
+  jungleScout: {
+    callsUsed: number; budget: number; percentUsed: number; remaining: number; planLimit: number;
+    warningLevel: 'ok' | 'approaching' | 'critical' | 'paused'; warningMessage: string;
+  };
 }> {
   const { data } = await supabase
     .from('api_usage_this_month')
@@ -288,12 +293,33 @@ export async function getApiUsageStats(): Promise<{
 
   const jsRow = data?.find(r => r.provider === 'jungle_scout');
   const callsUsed = jsRow?.calls_used ?? 0;
+  const percentUsed = Math.round((callsUsed / JUNGLE_SCOUT_MONTHLY_BUDGET) * 100);
+  const remaining = Math.max(0, JUNGLE_SCOUT_MONTHLY_BUDGET - callsUsed);
+
+  // PO 2026-06-15: warn BEFORE the plan's overage kicks in. The 950 cap pauses research 50 calls below
+  // the 1,000-call plan limit (overage = $0.05/call above 1,000), so escalate as we approach the cap.
+  let warningLevel: 'ok' | 'approaching' | 'critical' | 'paused' = 'ok';
+  let warningMessage = '';
+  if (callsUsed >= JUNGLE_SCOUT_MONTHLY_BUDGET) {
+    warningLevel = 'paused';
+    warningMessage = `Jungle Scout monthly cap reached (${callsUsed}/${JUNGLE_SCOUT_MONTHLY_BUDGET}). Keyword research is PAUSED to avoid $0.05/call overages — it resets next month, or raise the cap to continue into overages.`;
+  } else if (percentUsed >= 90) {
+    warningLevel = 'critical';
+    warningMessage = `${callsUsed}/${JUNGLE_SCOUT_MONTHLY_BUDGET} Jungle Scout calls used (${percentUsed}%) — research pauses at ${JUNGLE_SCOUT_MONTHLY_BUDGET}, ${JUNGLE_SCOUT_PLAN_LIMIT - JUNGLE_SCOUT_MONTHLY_BUDGET} calls before $0.05/call overages.`;
+  } else if (percentUsed >= JS_WARN_AT_PCT) {
+    warningLevel = 'approaching';
+    warningMessage = `${callsUsed}/${JUNGLE_SCOUT_MONTHLY_BUDGET} Jungle Scout calls used (${percentUsed}%) this month — approaching the monthly cap.`;
+  }
 
   return {
     jungleScout: {
       callsUsed,
       budget: JUNGLE_SCOUT_MONTHLY_BUDGET,
-      percentUsed: Math.round((callsUsed / JUNGLE_SCOUT_MONTHLY_BUDGET) * 100),
+      percentUsed,
+      remaining,
+      planLimit: JUNGLE_SCOUT_PLAN_LIMIT,
+      warningLevel,
+      warningMessage,
     },
   };
 }
