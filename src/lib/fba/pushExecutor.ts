@@ -119,6 +119,10 @@ interface DiffRow {
   isParent?: boolean
   /** ASIN this row's seller SKU resolves to (helpful when we add FBM twins discovered live). */
   asin?: string
+  /** TRUE when this SKU is NOT a live Amazon listing (not Active in listing_health) — a backfilled/
+   *  offerless row. The push SKIPS these: PATCHing a SKU with no live offer makes Amazon CREATE a
+   *  phantom "Missing offer" ASIN instead of updating (the 2026-06-16 B0GHH4MQ7N incident). */
+  notLive?: boolean
 }
 
 /** Strip any GB/TB/MB capacity token from a title so it's safe for the variation-parent SKU.
@@ -216,6 +220,20 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     .order('sku', { ascending: true })
   const rows = (rowsRaw ?? []) as ContentRow[] // every SKU — FBA and FBM both get pushed
 
+  // UPDATE-ONLY GATE (data): a pushable child must be a LIVE Amazon listing. listing_content is
+  // normally sourced from listing_health status='Active' (syncListingContent), but the family
+  // backfill (familyReconcile) can seed rows for offerless catalog children. PATCHing such a SKU
+  // makes Amazon CREATE a phantom "Missing offer" ASIN (the 2026-06-16 B0GHH4MQ7N incident) rather
+  // than update. Resolve the Active live-SKU set here and tag non-live rows so the push loop skips
+  // them. On a DB error we leave activeSkus null → DON'T over-skip (preserve push availability); the
+  // familyReconcile offer-check is the backstop for the row-seeding side.
+  const { data: liveRows, error: liveErr } = await supabase
+    .from('listing_health')
+    .select('sku')
+    .eq('parent_asin', parentAsin)
+    .eq('status', 'Active')
+  const activeSkus = liveErr ? null : new Set((liveRows ?? []).map((r) => (r as { sku: string }).sku))
+
   // Keywords are per-color (per-ASIN). Map ASIN → string so BOTH the FBA and FBM SKU of a
   // pair receive the same per-child keywords.
   const asinToKeywords = new Map<string, string>()
@@ -246,6 +264,8 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
         bytes: getByteLength(proposedStr),
         chars: proposedStr.length,
         changed: proposedStr.length > 0 && current !== proposedStr,
+        // Non-live (not Active in listing_health) → push must SKIP, not PATCH (would create a phantom).
+        notLive: activeSkus ? !activeSkus.has(row.sku) : false,
       }
     })
     .filter((d) => d.raw != null) // keywords: drops SKUs whose ASIN has no per-child recommendation
@@ -259,7 +279,10 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
   let sellerId: string | null = null
   try {
     const knownSkus = new Set(baseDiff.map((d) => d.sku))
-    const asinsToProbe = [...new Set(baseDiff.map((d) => d.asin).filter((a): a is string => !!a))]
+    // Don't probe NON-LIVE rows' ASINs for FBM twins — a phantom/offerless ASIN's "twins" are junk
+    // too, and discovered twins are added UNTAGGED (proven-live by discovery), so probing a notLive
+    // ASIN could re-introduce an un-gated phantom-adjacent SKU into the patch loop. Probe live only.
+    const asinsToProbe = [...new Set(baseDiff.filter((d) => !d.notLive).map((d) => d.asin).filter((a): a is string => !!a))]
     if (asinsToProbe.length > 0) {
       token = await getAccessToken()
       sellerId = await getSellerId()
@@ -1030,6 +1053,14 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         } else {
           diff = rawDiff.filter((d) => d.changed)
         }
+
+        // UPDATE-ONLY GATE (action): never PATCH a SKU that isn't a live Amazon listing — that makes
+        // Amazon CREATE a phantom "Missing offer" ASIN instead of updating. loadDiff tags offerless/
+        // backfilled rows notLive (not Active in listing_health). The variation PARENT is exempt (its
+        // push is intentional and summarizePush treats a parent rejection as a non-blocking note).
+        // Applies to BOTH the full and selective paths — even an explicit re-push must not create.
+        const skippedNotLive = diff.filter((d) => d.notLive && d.asin !== parent_asin)
+        if (skippedNotLive.length > 0) diff = diff.filter((d) => !(d.notLive && d.asin !== parent_asin))
         // The variation PARENT is pushed too (PO 2026-06-15): its displayed title/bullets/description
         // are part of the family record and most parents accept the patch — #244 blanket-skipping ALL
         // parents (to fix one Amazon Custom family whose incomplete Shirt Size made its record reject
@@ -1039,8 +1070,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({
             type: 'result',
             parent_asin, field, pushed: 0, failed: 0, total: 0,
-            message: `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
-            results: [],
+            message: skippedNotLive.length > 0
+              ? `Nothing pushed — ${skippedNotLive.length} variant${skippedNotLive.length === 1 ? '' : 's'} skipped because ${skippedNotLive.length === 1 ? "it isn't" : "they aren't"} a live Amazon listing yet (Missing offer/incomplete). Complete the offer${skippedNotLive.length === 1 ? '' : 's'} in Seller Central, then re-push.`
+              : `Nothing to push — all ${FIELD_CONFIG[field].label.toLowerCase()} already match.`,
+            results: skippedNotLive.map((d) => ({ sku: d.sku, status: 'skipped', submissionId: null, error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped so the push cannot create a phantom. Complete its offer in Seller Central, then re-push.' })),
           })
           return
         }
@@ -1206,14 +1239,18 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         }
 
         const label = FIELD_CONFIG[field].label.toLowerCase()
+        const skippedNote = skippedNotLive.length > 0
+          ? ` ${skippedNotLive.length} skipped (not a live Amazon listing yet — Missing offer/incomplete; complete their offer in Seller Central, then re-push).`
+          : ''
+        const skippedResults: typeof results = skippedNotLive.map((d) => ({ sku: d.sku, status: 'skipped', submissionId: null, error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped so the push cannot create a phantom. Complete its offer in Seller Central, then re-push.' }))
         emit({
           type: 'result',
           parent_asin, field,
           pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
           message: cancelled
             ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-            : `Pushed ${label} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNote} Changes typically reflect in 15-30 minutes.`,
-          results,
+            : `Pushed ${label} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNote}${skippedNote} Changes typically reflect in 15-30 minutes.`,
+          results: [...results, ...skippedResults],
         })
       } catch (err) {
         // Emit a structured error so the caller can render it instead of choking.

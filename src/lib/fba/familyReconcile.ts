@@ -13,7 +13,9 @@
  *
  * SP-API only (no Jungle Scout credits). ADDITIVE & idempotent: content is left blank (the push
  * writes optimized values, the next Scan fills current content), re-runs skip children that now
- * have rows, and it NEVER deletes or overwrites an existing row's content.
+ * have rows, and it NEVER deletes or overwrites an existing row's content. OFFER-GATED: a child is
+ * backfilled ONLY if it has a live offer — an offerless ("Missing offer") SKU would be materialized
+ * as a phantom incomplete ASIN by a later push (the 2026-06-16 B0GHH4MQ7N incident).
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
 
@@ -82,12 +84,19 @@ export async function reconcileFamilyChildren(
       const newRows: any[] = []
       if (sellerId) {
         for (const childAsin of missingAsins.slice(0, opts.backfillCap ?? 60)) { // cap: a runaway family can't stall the run
-          const lurl = `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}?identifiers=${encodeURIComponent(childAsin)}&identifiersType=ASIN&marketplaceIds=${MP}&includedData=summaries`
+          // includedData=offers too — we backfill a child ONLY if it has a live offer (gate below).
+          const lurl = `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}?identifiers=${encodeURIComponent(childAsin)}&identifiersType=ASIN&marketplaceIds=${MP}&includedData=summaries,offers`
           const lresp = await fetch(lurl, { headers: { 'x-amz-access-token': tok } })
           if (!lresp.ok) continue
-          const ljson = await lresp.json() as { items?: { sku?: string }[] }
+          const ljson = await lresp.json() as { items?: { sku?: string; offers?: unknown[] }[] }
           for (const it of ljson.items ?? []) {
             if (!it.sku || /^amzn\./i.test(it.sku)) continue // skip Amazon-managed system SKUs
+            // OFFER GATE: only backfill children that have a LIVE offer. An offerless SKU ("Missing
+            // offer") would, when later PATCHed by a push, make Amazon CREATE a phantom incomplete
+            // ASIN. Skip — never seed an offerless/unpushable row. Scoped to the offerless case: a
+            // zero-sales / no-inventory child that DOES carry an offer still backfills (the reconcile's
+            // legitimate purpose). The push update-only gate is the backstop if a bad row slips in.
+            if (!Array.isArray(it.offers) || it.offers.length === 0) continue
             newRows.push({
               sku: it.sku, asin: childAsin, parent_asin: parentAsin, title: placeholderTitle,
               bullet_1: '', bullet_2: '', bullet_3: '', bullet_4: '', bullet_5: '',
