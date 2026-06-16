@@ -398,23 +398,51 @@ export function buildSeedFromTitle(title: string): string {
   return seed.replace(/\s{2,}/g, ' ').trim()
 }
 
+// Tone words a shopper actually TYPES for a novelty/slogan tee, + common blank-tee brands. Used by
+// buildFallbackSeed when a too-specific slogan seed returns no JS data (PO 2026-06-15: "you can pull
+// FUNNY / SARCASTIC shirt keywords, and you already have Comfort Colors in the pool").
+const FALLBACK_TONE_WORDS = new Set([
+  'funny', 'sarcastic', 'humorous', 'humor', 'sassy', 'snarky', 'witty', 'ironic', 'novelty',
+  'silly', 'hilarious', 'cheeky', 'goofy', 'punny', 'meme',
+])
+const FALLBACK_BLANK_BRANDS = [
+  'comfort colors', 'bella canvas', 'next level', 'gildan', 'american apparel', 'district', 'hanes',
+]
+
 /**
  * A deliberately BROAD fallback seed for when the primary (+ secondary) seeds returned ~no Jungle
  * Scout data — the "1 keyword / no Intelligence" root cause, where a too-specific slogan seed
- * ("my therapist gave up shirt") has no JS search-volume. Take the design's single most distinctive
- * token (the core niche noun — proxied by the LONGEST non-generic/non-apparel token across the seed
- * + title) and pair it with the product word: "therapist tshirt", "raccoon tshirt". Broad enough
- * that JS has data, but it keeps the niche token so the downstream relevance gate keeps results
- * on-product (a bare "tshirt"/"graphic tee" would invite the gate's never-collapse floor to re-admit
- * generic pollution). Returns null when no distinctive token exists (nothing useful to broaden to).
+ * ("my therapist gave up shirt", "Houston I have so many problems raccoon") has no JS search-volume.
+ *
+ * PO 2026-06-15 insight: for a slogan/novelty tee the SEARCHABLE keywords aren't the literal slogan —
+ * they're the TONE shoppers type ("funny shirt", "sarcastic shirt") and the blank BRAND already in
+ * the title ("comfort colors shirt"). Those have rich JS data AND are genuinely on-product. So prefer:
+ *   1. a detected TONE word + product word ("funny shirt"),
+ *   2. the blank BRAND + product word ("comfort colors shirt"),
+ *   3. else the longest distinctive token (the prior behavior — for designs with a real niche noun,
+ *      e.g. "therapist shirt"). The earlier longest-token-only heuristic mis-picked "problems shirt"
+ *      for the Houston/raccoon tee — exactly what this reorder fixes.
+ * The downstream relevance gate + never-collapse floor still filter/keep results appropriately.
+ * Returns null when nothing usable exists.
  */
 export function buildFallbackSeed(seed: string, listingTitle?: string | null): string | null {
-  const toks = `${seed} ${listingTitle ?? ''}`.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+  const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
+  const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'shirt'
+
+  // 1) TONE — how shoppers actually search for novelty/slogan tees.
+  const tone = toks.find((t) => FALLBACK_TONE_WORDS.has(t))
+  if (tone) return `${tone} ${productWord}`
+
+  // 2) BLANK BRAND — e.g. "comfort colors shirt".
+  const brand = FALLBACK_BLANK_BRANDS.find((b) => src.includes(b))
+  if (brand) return `${brand} ${productWord}`
+
+  // 3) Longest distinctive token — for designs that DO have a real niche noun.
   const core = toks
-    .filter((t) => t.length > 3 && !SEED_GENERIC.has(t) && !APPAREL_WORDS.has(t) && !/^\d+$/.test(t))
+    .filter((t) => t.length > 3 && !SEED_GENERIC.has(t) && !APPAREL_WORDS.has(t) && !FALLBACK_TONE_WORDS.has(t) && !/^\d+$/.test(t))
     .sort((a, b) => b.length - a.length)[0]
   if (!core) return null
-  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'tshirt'
   const fallback = `${core} ${productWord}`.replace(/\s{2,}/g, ' ').trim()
   return fallback === seed ? null : fallback
 }
