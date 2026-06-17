@@ -34,3 +34,9 @@ BEGIN
     CREATE POLICY "service_role_keyword_seed_pool" ON keyword_seed_pool FOR ALL USING (true) WITH CHECK (true);
   END IF;
 END $$;
+
+-- Tell PostgREST to pick up the new table immediately (matches migration 028). The app reads/writes
+-- this table via the supabase-js client (PostgREST), so without this the getSeedPool reads would 404
+-- against the schema cache and be silently swallowed by their try/catch — no seed reuse — until
+-- PostgREST's next auto-reload. Harmless to run repeatedly.
+NOTIFY pgrst, 'reload schema';
