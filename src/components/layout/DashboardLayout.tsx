@@ -15,6 +15,7 @@ import {
   X,
   RefreshCw,
   Package,
+  KeyRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -47,6 +48,12 @@ export default function DashboardLayout({
       href: '/fba',
       label: 'FBA Intel',
       icon: Package,
+      roles: ['admin', 'packer'],
+    },
+    {
+      href: '/fba/keywords',
+      label: 'Keyword Pool',
+      icon: KeyRound,
       roles: ['admin', 'packer'],
     },
     {
