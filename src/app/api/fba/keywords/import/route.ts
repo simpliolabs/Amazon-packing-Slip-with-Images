@@ -151,7 +151,7 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // The engine drops volume<50 noise itself; presence runs against OUR live content.
+    // The engine drops sub-MIN_SEARCH_VOLUME (10) noise itself; presence runs against OUR live content.
     const result = runKeywordEngine(analysisAsin, jsRows, (listing ?? {}) as Parameters<typeof runKeywordEngine>[2], 'jungle_scout')
     const skippedLowVolume = jsRows.length - result.allKeywords.length
 

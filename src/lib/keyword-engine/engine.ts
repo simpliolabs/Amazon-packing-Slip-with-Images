@@ -15,6 +15,17 @@ import { checkPresence, checkPresenceAny, ListingContent } from './checkPresence
 import { calculateScore, ScoringInputs } from './calculateScore';
 import { generateAction, prioritizeActions, KeywordAction, ActionContext } from './generateActions';
 
+/**
+ * Raw search-volume noise floor. Keywords below this monthly volume are dropped
+ * before scoring/storage (engine.ts loop). Lowered 50 -> 10 (PO-approved 2026-06-17)
+ * to surface genuine low-volume long-tail; 10 still drops dead/near-zero JS noise.
+ * NOTE: this is the ONLY raw-volume hard-drop in the pipeline. The relevance gate
+ * (+ #283 fromUniverse exemption) runs UPSTREAM and remains the quality guard;
+ * scoring (logNorm vScore) de-ranks low-volume terms so they sort to the bottom
+ * of the score-capped topOpportunities buckets rather than flooding the TOP list.
+ */
+export const MIN_SEARCH_VOLUME = 10;
+
 // ─── Input Types ─────────────────────────────────────────────────────────────
 
 /** Raw keyword row from SQP (Brand Analytics) */
@@ -225,8 +236,8 @@ export function runKeywordEngine(
       ? normalizeSQPRow(rawRow as SQPKeywordRow)
       : normalizeJungleScoutRow(rawRow as JungleScoutKeywordRow);
 
-    // Skip keywords with zero volume (noise)
-    if (normalized.searchVolume < 50) continue;
+    // Skip dead/near-zero-volume noise (see MIN_SEARCH_VOLUME). Real low-volume long-tail (>=10) is kept and de-ranked by scoring.
+    if (normalized.searchVolume < MIN_SEARCH_VOLUME) continue;
 
     // Step 1: Check presence in listing (per-row OR when twin rows are passed)
     const presence = Array.isArray(listing)
