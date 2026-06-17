@@ -130,6 +130,11 @@ export interface PipelineResult {
   /** Per-child titles for capacity/size-spec variation families (e.g. SD cards by GB). Undefined
    *  for apparel and single-capacity products, which use the one shared recommended_title. */
   per_child_titles?: { sku: string; asin: string; title: string }[]
+  /** Per-DESIGN bullets/description for multi-design POD apparel families. Each design group gets its
+   *  own generated set, fanned out to every SKU in the group. Undefined for single-design and
+   *  non-apparel families, which use the one shared recommended_bullets/recommended_description. */
+  per_child_bullets?: { sku: string; asin: string; bullets: string[] }[]
+  per_child_descriptions?: { sku: string; asin: string; description: string }[]
   recommended_description: string
   variant_corrections: PipelineVariantCorrection[]
   cannibalization_warnings: PipelineCannibalizationWarning[]
@@ -3578,6 +3583,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
     per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: scrubTrademarks(c.title) })),
+    // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
+    // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
+    // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
+    // these are generated + stored for the UI/push to read; nothing per-design reaches Amazon.
+    per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map(scrubTrademarks) })),
+    per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubTrademarks(c.description) })),
   })
   const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => scrubPublished({
     recommended_title: input.priorTitle ?? '',
@@ -3617,6 +3628,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Hoisted: multi-design apparel populates this in the title branch; the non-apparel capacity
   // branch below populates it for single-design capacity families. Single-design apparel: stays undefined.
   let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
+  // Per-DESIGN bullets/description fan-out (multi-design apparel only). Populated in the bullets +
+  // description stages below; stay undefined for single-design/non-apparel so the broadcast ships.
+  let perChildBullets: { sku: string; asin: string; bullets: string[] }[] | undefined
+  let perChildDescriptions: { sku: string; asin: string; description: string }[] | undefined
+  // Per-design contexts captured FROM the title loop so the bullets/description stages can reuse the
+  // (costly) per-group design-name + vision resolution WITHOUT recomputing it. Populated only when the
+  // multi-design title branch runs (full regen or a title-only partial); empty otherwise.
+  let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput }[] = []
   if (apparelMultiDesign && (!only || only === 'title')) {
     // PER-DESIGN TITLES (Phase 1 Commit 2 + hot-fix). Each design group resolves its design name
     // via this chain (PO 2026-06-17: "design name is stored as Amazon's Color attribute"):
@@ -3692,7 +3711,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       const { name: groupDesignName } = await extractDesignName(groupInput)
       const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName)
-      return { group, groupDesignName, ...r }
+      // groupInput is returned so the bullets/description stages can reuse the resolved per-group
+      // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
+      return { group, groupInput, groupDesignName, ...r }
     }))
     const allDesignNames: string[] = []
     for (const gr of groupResults) {
@@ -3701,6 +3722,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       titleProblems.push(...gr.problems.map((p) => `[${gr.group.key}] ${p}`))
       retried = retried || gr.retried
     }
+    // Capture per-group contexts (skus + resolved design name + title + groupInput) so the bullets +
+    // description stages generate PER DESIGN reusing this work — no second design-name/vision pass.
+    designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput }))
     finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
@@ -3846,6 +3870,35 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       bullets = bullets.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
     }
     bullets = bullets.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
+    // PER-DESIGN BULLETS (additive): for a multi-design POD apparel family, generate a SEPARATE set
+    // of bullets per design group (reusing the title loop's resolved group design name + vision via
+    // designGroupContexts) and fan them out to every SKU in the group. The broadcast `bullets` above
+    // is UNCHANGED — it stays the parent/fallback. Any failure here leaves perChildBullets undefined
+    // so the broadcast bullets still ship. (Only runs on a FULL regen: a bullets-only partial skips
+    // the title branch, so designGroupContexts is empty and this block is inert.)
+    if (apparelMultiDesign && designGroupContexts.length) {
+      try {
+        const groupBulletSets = await Promise.all(designGroupContexts.map(async (ctx) => {
+          const raw = await runBulletsAgent(ctx.groupInput, ctx.title, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, ctx.designName)
+          // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
+          // design (parity with per-design titles, which recompute a group-scoped motifTrust in
+          // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
+          // design grounding.
+          const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+          let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
+          if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
+          gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
+          return { skus: ctx.skus, bullets: gb }
+        }))
+        perChildBullets = []
+        for (const gs of groupBulletSets) {
+          for (const s of gs.skus) perChildBullets.push({ sku: s.sku, asin: s.asin, bullets: gs.bullets })
+        }
+      } catch (e) {
+        console.warn('[pipeline] per-design bullets failed — falling back to broadcast bullets:', e instanceof Error ? e.message : e)
+        perChildBullets = undefined
+      }
+    }
   } else {
     bullets = input.priorBullets ?? []
   }
@@ -3996,6 +4049,36 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     : descriptionRaw
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
   description = fixDoubledArticleBeforeBrand(description, brandName)
+
+  // PER-DESIGN DESCRIPTION (additive): for a multi-design POD apparel family, generate a SEPARATE
+  // description per design group (reusing the title loop's resolved group context) and fan it out to
+  // every SKU in the group. Each group's description is grounded on THAT group's bullets (the
+  // per-design bullets from above when available, else the broadcast bullets). The broadcast
+  // `description` above is UNCHANGED — it stays the parent/fallback. Any failure leaves
+  // perChildDescriptions undefined so the broadcast description still ships. (Full-regen only.)
+  if (apparelMultiDesign && designGroupContexts.length) {
+    try {
+      const groupDescSets = await Promise.all(designGroupContexts.map(async (ctx) => {
+        const repSku = ctx.skus[0]?.sku
+        const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
+        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets)
+        // Mirror the broadcast description strip chain EXACTLY, but ground motif-stripping on THIS
+        // group's own design (parity with per-design titles/bullets) — not the parent/other designs.
+        const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+        let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
+        if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
+        gd = fixDoubledArticleBeforeBrand(gd, brandName)
+        return { skus: ctx.skus, description: gd }
+      }))
+      perChildDescriptions = []
+      for (const ds of groupDescSets) {
+        for (const s of ds.skus) perChildDescriptions.push({ sku: s.sku, asin: s.asin, description: ds.description })
+      }
+    } catch (e) {
+      console.warn('[pipeline] per-design description failed — falling back to broadcast description:', e instanceof Error ? e.message : e)
+      perChildDescriptions = undefined
+    }
+  }
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
@@ -4155,6 +4238,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     recommended_bullets: bullets,
     per_child_keywords: perChild,
     per_child_titles: perChildTitles,
+    per_child_bullets: perChildBullets,
+    per_child_descriptions: perChildDescriptions,
     recommended_description: description,
     variant_corrections: Array.isArray(audit.variant_corrections) ? audit.variant_corrections : [],
     cannibalization_warnings: Array.isArray(audit.cannibalization_warnings) ? audit.cannibalization_warnings : [],
