@@ -239,6 +239,36 @@ export async function researchKeywords(
     await upsertSeedPool(seedKey, [...nicheKeywords, ...competitorKeywords], competitor, source, asin);
   }  // end FRESH RESEARCH
 
+  // ── GARMENT-BRAND universe (PO 2026-06-17): the blank/garment brand (Comfort Colors, Gildan...) is
+  // a high-volume keyword universe the Seed Agent never seeds — it seeds the DESIGN ("alligator
+  // shirt"), so "comfort colors" volumes were never captured. Research the brand as its OWN universe,
+  // stored in keyword_seed_pool keyed by the brand seed, so it's researched ONCE (1 credit) then
+  // REUSED (0 credits) across every product of that brand. The design pool above stays pure; these
+  // brand keywords are merged into THIS listing's pool only. Runs after the fresh/reuse branch so
+  // EVERY brand product gets it. The downstream relevance gate filters off-product brand terms;
+  // Phase 4b below overlays OUR organic rank onto these rows too.
+  const brandSeed = garmentBrandSeed(seed, listingTitle);
+  const brandKey = brandSeed ? normalizeSeedKey(brandSeed) : '';
+  if (brandSeed && brandKey && brandKey !== seedKey) {
+    let brandPool = forceRefresh ? null : await getSeedPool(brandKey);
+    if (!brandPool) {
+      const brandKws = await fetchKeywordsByKeyword(brandSeed, { pageSize: 100 });
+      creditsUsed++;
+      await upsertSeedPool(brandKey, brandKws, null, 'garment_brand', asin);
+      brandPool = { keywords: brandKws, competitor: null };
+      console.log(`[keywordResearcher] Garment-brand universe "${brandKey}": researched ${brandKws.length} kws (1 credit) + stored for cross-product reuse.`);
+    } else {
+      // Reused — record this ASIN as a contributor + refresh TTL (0 Jungle Scout credits).
+      await upsertSeedPool(brandKey, brandPool.keywords, brandPool.competitor, 'garment_brand', asin);
+      console.log(`[keywordResearcher] Garment-brand universe "${brandKey}": REUSED ${brandPool.keywords.length} kws (0 credits).`);
+    }
+    const seenBrand = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
+    for (const r of brandPool.keywords) {
+      const k = (r.keyword || '').toLowerCase();
+      if (k && !seenBrand.has(k)) { nicheKeywords.push({ ...r, organicRank: undefined }); seenBrand.add(k); }
+    }
+  }
+
   // ── Phase 4b: keywords_by_asin on OUR ASIN (1 credit) — "import OUR ranking keywords".
   // This is the ONLY honest source of OUR organic rank per keyword (the competitor fetch in
   // Phase 4 carries the COMPETITOR's ranks; niche rows carry none). The rank overlays onto
@@ -473,6 +503,24 @@ export function buildFallbackSeed(seed: string, listingTitle?: string | null): s
   if (!core) return null
   const fallback = `${core} ${productWord}`.replace(/\s{2,}/g, ' ').trim()
   return fallback === seed ? null : fallback
+}
+
+/**
+ * GARMENT-BRAND universe seed (PO 2026-06-17): the blank/garment brand (Comfort Colors, Gildan,
+ * Bella Canvas...) is a high-volume keyword universe the Seed Agent NEVER picks — the agent seeds the
+ * DESIGN ("alligator shirt"), not the brand, so "comfort colors" volumes were never captured. Detect
+ * a known blank brand in the title and build "{brand} {productword}" (e.g. "comfort colors shirt") so
+ * it can be researched ONCE and reused across every product of that brand via the seed pool. Returns
+ * null when no known brand is present. (Reuses FALLBACK_BLANK_BRANDS — the same list buildFallbackSeed
+ * already trusts as on-product blank brands.)
+ */
+function garmentBrandSeed(seed: string, listingTitle?: string | null): string | null {
+  const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
+  const brand = FALLBACK_BLANK_BRANDS.find((b) => src.includes(b))
+  if (!brand) return null
+  const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'shirt'
+  return `${brand} ${productWord}`
 }
 
 // ─── Pool-entry relevance gate (anti-pollution) ─────────────────────────────────────
