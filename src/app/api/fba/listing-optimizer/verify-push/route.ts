@@ -236,7 +236,7 @@ export async function GET(req: NextRequest) {
       targets.push({ sku: parentSku, asin: parentAsin, isParent: true })
     }
 
-    const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource: 'recommendation' | 'push_log' | 'none'; matches: boolean; lastUpdatedDate: string | null }[] = []
+    const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource: 'recommendation' | 'push_log' | 'none'; matches: boolean; inherited: boolean; lastUpdatedDate: string | null }[] = []
     for (let i = 0; i < targets.length; i += 5) {
       const batch = targets.slice(i, i + 5)
       const settled = await Promise.all(batch.map(async (t) => {
@@ -249,6 +249,15 @@ export async function GET(req: NextRequest) {
           if (fb) { expected = fb; expectedSource = 'push_log' }
         }
         const lastUpdatedDate = listing?.summaries?.[0]?.lastUpdatedDate ?? null
+        // INHERITED (false-stale fix, 2026-06-17): a variation CHILD's own item_name is frequently
+        // EMPTY because the title is contributed at the PARENT and Amazon shows the child a catalog-
+        // MERGED title (parent + color theme, e.g. "...Pepper"). getListingsItem returns only the
+        // seller's child-level contribution, so currentLive='' even though the title IS live on the
+        // PDP. For the TITLE field on a NON-parent child with a LIVE listing (lastUpdatedDate present)
+        // and a non-empty expected, classify empty as INHERITED-from-parent — NOT stale. Scoped to
+        // title only (details/keywords are genuinely per-child and SHOULD be set), per the
+        // don't-over-generalize rule. Live: B0G884ZJ27 / AQS-TMB-L-PEP-FBA showed (empty)/stale.
+        const inherited = field === 'title' && !t.isParent && currentLive.length === 0 && expected.length > 0 && lastUpdatedDate !== null
         return {
           sku: t.sku, asin: t.asin, isParent: t.isParent,
           currentLive, expected, expectedSource,
@@ -260,6 +269,7 @@ export async function GET(req: NextRequest) {
             currentLive.trim() === expected.trim() ||
             currentLive.toLowerCase().replace(/[^a-z0-9]/g, '') === expected.toLowerCase().replace(/[^a-z0-9]/g, '')
           ),
+          inherited,
           lastUpdatedDate,
         }
       }))
@@ -276,7 +286,10 @@ export async function GET(req: NextRequest) {
     // out of the pass/fail counts so verify can actually reach 100%.
     const scored = results.filter((r) => !r.isParent)
     const matched = scored.filter((r) => r.matches).length
-    const stale   = scored.filter((r) => !r.matches && r.expected.length > 0).length
+    // Child titles inherited from the parent (empty child item_name on a live listing) — applied,
+    // not stale. Counted separately so the seller sees "✓ inherited" rather than a false failure.
+    const inherited = scored.filter((r) => r.inherited).length
+    const stale   = scored.filter((r) => !r.matches && !r.inherited && r.expected.length > 0).length
     // No expectation anywhere (not in the rec, never logged as pushed) — its own bucket so the UI
     // never paints these as "stale" (which implied a failed push when there was nothing to compare).
     const unknown = scored.filter((r) => r.expected.length === 0).length
@@ -294,6 +307,7 @@ export async function GET(req: NextRequest) {
       ),
       total: scored.length,
       matched,
+      inherited,
       stale,
       unknown,
       parentSkipped,
