@@ -3239,6 +3239,47 @@ Rules:
       title = capTitle75(`${m[0]} ${without}`)
     }
   }
+  // TITLE-CASE (polish 2026-06-17): the council judge sometimes emits a lowercase niche word —
+  // live regression on B0F6QZ34B1 was "THE CEO fishing Funny Fishing T-Shirt for Men and Women"
+  // (lowercase "fishing"). Capitalize every major word; keep MINOR_WORDS lowercase (except the
+  // first word); leave the brand prefix verbatim (it may be intentionally all-caps, e.g. "THE CEO").
+  if (title) {
+    const brandLen = brandName && title.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
+    const head = title.slice(0, brandLen)
+    const rest = title.slice(brandLen).replace(/[A-Za-z][A-Za-z'’-]*/g, (w, off: number) => {
+      const lw = w.toLowerCase()
+      if (off > 0 && MINOR_WORDS.has(lw)) return lw
+      return w.charAt(0).toUpperCase() + w.slice(1)
+    })
+    title = head + rest
+  }
+  // FILL the 75-char budget (polish 2026-06-17): the council often lands well under 75 (live:
+  // 55/75), wasting niche-keyword real estate. Append niche-wide upgrade keyphrases (Title-Cased,
+  // comma-joined) toward ~73 chars, preserving the trailing "for {audience}". Source is
+  // topUpgradeKws ONLY (the same niche-wide pool the brief authorizes). Mirrors buildTitleFor's
+  // fill step. Design-motif guard: skip any keyword that shares a ≥2-token overlap with a single
+  // design name (blocks design phrases like "Fishing Rod"/"American Flag" while still allowing the
+  // shared niche word "fishing" — which legitimately appears inside one design name).
+  if (title.length < 73 && topUpgradeKws.length) {
+    const tailMatch = title.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+    const tail = tailMatch ? tailMatch[0] : ''
+    let fillHead = tail ? title.slice(0, title.length - tail.length) : title
+    const headToks = new Set(bulletTokens(fillHead))
+    const designTokSets = designNames.filter(Boolean).map((d) => new Set(bulletTokens(d)))
+    const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    for (const kw of topUpgradeKws) {
+      const toks = bulletTokens(kw)
+      if (toks.length === 0 || toks.every((tt) => headToks.has(tt))) continue
+      if (isAllJunk(kw)) continue
+      if (designTokSets.some((ds) => toks.filter((tt) => ds.has(tt)).length >= 2)) continue
+      const next = `${fillHead}, ${titleCaseKw(kw)}`
+      if ((next + tail).length > 75) continue
+      fillHead = next
+      for (const tt of toks) headToks.add(tt)
+      if ((fillHead + tail).length >= 73) break
+    }
+    title = `${fillHead}${tail}`
+  }
   return title
 }
 
