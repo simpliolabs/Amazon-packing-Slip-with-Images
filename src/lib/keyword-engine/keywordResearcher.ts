@@ -3,7 +3,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * Vision-first keyword research orchestrator.
  *
- * Pipeline (3 JS credits total, cached 7 days):
+ * Pipeline (3 JS credits total, cached 14 days; niche pool shared cross-listing by seed):
  *   1. Vision Scan (free) → 1 seed term
  *   2. keywords_by_keyword (1 credit) → up to 100 niche keywords
  *   3. share_of_voice (1 credit) → auto-detect #1 competitor
@@ -72,7 +72,14 @@ export interface KeywordResearchResult {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const RESEARCH_CACHE_KEY = 'keyword_research';
-const RESEARCH_TTL_DAYS = 7;
+// 14 days (PO 2026-06-17): the niche keyword universe is stable enough that re-querying Jungle
+// Scout sooner just burns credits. Applies to BOTH the per-ASIN fast-path cache (keyword_cache)
+// and the cross-listing shared niche pool (keyword_seed_pool).
+const RESEARCH_TTL_DAYS = 14;
+// Cross-listing niche pool (migration 032): Phases 2–4 are NICHE-level, so listings that resolve
+// to the same normalized seed share ONE research for 14 days. Per-ASIN organic rank (Phase 4b) is
+// NEVER stored here — it stays per-listing.
+const SEED_POOL_TABLE = 'keyword_seed_pool';
 
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 
@@ -120,10 +127,29 @@ export async function researchKeywords(
   const seed = seedSel.seeds[0];
   const source = seedSel.source;
   console.log(`[keywordResearcher] Phase 1: Seed = "${seed}" (source: ${source}; ${seedSel.seeds.length} considered: [${seedSel.seeds.join(' | ')}])`);
+  const seedKey = normalizeSeedKey(seed);
+
+  // ── SEED-POOL REUSE (migration 032; PO 2026-06-17 "query the pool before calling JS; 14-day TTL") ─
+  // The niche pool (Phases 2–4: keyword universe + competitors) is NICHE-level, not listing-level, so
+  // it is shared cross-listing by normalized seed in keyword_seed_pool. If a sibling already researched
+  // this niche and it is still fresh, reuse it for 0 Jungle Scout credits — Phase 4b below still
+  // overlays THIS listing's own organic ranks (1 credit). Ranks are per-ASIN and are NEVER stored in
+  // the shared pool, so a sibling can never inherit our ranks.
+  let nicheKeywords: JungleScoutKeywordRow[];
+  let competitorKeywords: JungleScoutKeywordRow[] = [];
+  let competitor: CompetitorMeta | null = null;
   let creditsUsed = 0;
 
+  const pooled = forceRefresh ? null : await getSeedPool(seedKey);
+  if (pooled) {
+    nicheKeywords = pooled.keywords.map((k) => ({ ...k, organicRank: undefined }));
+    competitor = pooled.competitor;
+    if (competitor) await storeCompetitorMeta(parentAsin, competitor);
+    console.log(`[keywordResearcher] SEED-POOL HIT for "${seedKey}" — reusing ${nicheKeywords.length} niche keywords (0 JS credits); overlaying OUR ranks only.`);
+  } else {  // FRESH RESEARCH — Phases 2–4 run ONLY on a seed-pool miss (to the matching brace below)
+
   // ── Phase 2: keywords_by_keyword (1 credit) ───────────────────────────────
-  const nicheKeywords = await fetchKeywordsByKeyword(seed, { pageSize: 100 });
+  nicheKeywords = await fetchKeywordsByKeyword(seed, { pageSize: 100 });
   creditsUsed++;
   console.log(`[keywordResearcher] Phase 2: ${nicheKeywords.length} niche keywords from "${seed}"`);
 
@@ -186,9 +212,6 @@ export async function researchKeywords(
   const topCompetitors = sovCompetitors.filter(c => !ownAsins.has(c.asin)).slice(0, 3);
   const topCompetitor = topCompetitors[0];
 
-  let competitor: CompetitorMeta | null = null;
-  let competitorKeywords: JungleScoutKeywordRow[] = [];
-
   if (topCompetitor) {
     competitor = {
       asin: topCompetitor.asin,
@@ -210,6 +233,11 @@ export async function researchKeywords(
   } else {
     console.log(`[keywordResearcher] Phase 3: No competitor found in SOV. Skipping Phase 4.`);
   }
+
+    // Persist the CLEAN shared niche pool (niche + competitor) BEFORE Phase 4b overlays OUR ranks,
+    // so sibling listings in this niche reuse it for 0 JS credits. upsertSeedPool strips organicRank.
+    await upsertSeedPool(seedKey, [...nicheKeywords, ...competitorKeywords], competitor, source, asin);
+  }  // end FRESH RESEARCH
 
   // ── Phase 4b: keywords_by_asin on OUR ASIN (1 credit) — "import OUR ranking keywords".
   // This is the ONLY honest source of OUR organic rank per keyword (the competitor fetch in
@@ -717,6 +745,112 @@ async function getCachedResearch(asin: string): Promise<KeywordResearchResult | 
  */
 export async function freshResearchPoolSize(asin: string): Promise<number> {
   return (await getCachedResearch(asin))?.allKeywords.length ?? 0
+}
+
+// ─── Cross-listing seed pool (migration 032) ──────────────────────────────────
+
+/**
+ * Normalize a seed phrase to a stable cross-listing pool key: lowercase, strip punctuation,
+ * collapse whitespace. "Fishing T-Shirt" and "fishing  t-shirt!" → "fishing t shirt".
+ * Deliberately does NOT fold plurals/synonyms — an imperfect match only costs one extra research
+ * (minor), whereas over-folding could merge distinct niches (pollution). Conservative on purpose.
+ */
+function normalizeSeedKey(seed: string): string {
+  return (seed || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Read the shared niche pool for a normalized seed. Returns null on miss, expiry, empty pool, OR
+ * any error (table absent pre-migration) — every "null" path makes the caller fall through to a
+ * fresh research, so this is safe to deploy BEFORE migration 032 runs.
+ */
+async function getSeedPool(
+  seedKey: string,
+): Promise<{ keywords: JungleScoutKeywordRow[]; competitor: CompetitorMeta | null } | null> {
+  if (!seedKey) return null;
+  try {
+    const { data } = await supabase
+      .from(SEED_POOL_TABLE)
+      .select('keyword_data, competitor_asin, competitor_brand, sov_percentage, expires_at')
+      .eq('seed_key', seedKey)
+      .single();
+    if (!data) return null;
+    const row = data as {
+      keyword_data: JungleScoutKeywordRow[];
+      competitor_asin: string | null;
+      competitor_brand: string | null;
+      sov_percentage: number | null;
+      expires_at: string | null;
+    };
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+      console.log(`[keywordResearcher] Seed-pool EXPIRED for "${seedKey}" (expires_at ${row.expires_at}).`);
+      return null;
+    }
+    const keywords = row.keyword_data ?? [];
+    if (keywords.length === 0) return null;
+    const competitor: CompetitorMeta | null = row.competitor_asin
+      ? {
+          asin: row.competitor_asin,
+          brand: row.competitor_brand ?? '',
+          link: `https://amazon.com/dp/${row.competitor_asin}`,
+          clicksShare: (row.sov_percentage ?? 0) / 100,
+          conversionsShare: 0,
+        }
+      : null;
+    return { keywords, competitor };
+  } catch {
+    return null; // table missing (pre-migration) or query error → treat as miss
+  }
+}
+
+/**
+ * Write/refresh the shared niche pool for a seed. organicRank is stripped defensively — per-ASIN
+ * ranks must NEVER enter the shared pool. Best-effort: a missing table (pre-migration) is logged
+ * and swallowed so a fresh research still succeeds for the originating listing.
+ */
+async function upsertSeedPool(
+  seedKey: string,
+  keywords: JungleScoutKeywordRow[],
+  competitor: CompetitorMeta | null,
+  source: string,
+  contributorAsin: string,
+): Promise<void> {
+  if (!seedKey || keywords.length === 0) return;
+  try {
+    const clean = keywords.map((k) => ({ ...k, organicRank: undefined }));
+    const expiresAt = new Date(Date.now() + RESEARCH_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const { data: existing } = await supabase
+      .from(SEED_POOL_TABLE)
+      .select('contributor_asins')
+      .eq('seed_key', seedKey)
+      .single();
+    const contributors = new Set<string>([
+      ...(((existing as { contributor_asins?: string[] } | null)?.contributor_asins) ?? []),
+      contributorAsin,
+    ]);
+    const { error } = await supabase.from(SEED_POOL_TABLE).upsert(
+      {
+        seed_key: seedKey,
+        keyword_data: clean,
+        competitor_asin: competitor?.asin ?? null,
+        competitor_brand: competitor?.brand ?? null,
+        sov_percentage: competitor ? parseFloat((competitor.clicksShare * 100).toFixed(2)) : null,
+        seed_source: source,
+        contributor_asins: Array.from(contributors),
+        fetched_at: new Date().toISOString(),
+        expires_at: expiresAt,
+      },
+      { onConflict: 'seed_key' },
+    );
+    if (error) console.error(`[keywordResearcher] Seed-pool write error for "${seedKey}":`, error.message);
+    else console.log(`[keywordResearcher] Seed-pool written for "${seedKey}" (${clean.length} kws, contributor ${contributorAsin}).`);
+  } catch (err) {
+    console.warn(`[keywordResearcher] Seed-pool write skipped for "${seedKey}" (table missing pre-migration?):`, err instanceof Error ? err.message : err);
+  }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
