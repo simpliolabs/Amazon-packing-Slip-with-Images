@@ -1,0 +1,29 @@
+Ship-dates: stop swallowing keyword_push_log insert errors + add a diagnostic endpoint
+
+PO: pushed backend keywords to B0FKKN8XKV, still no "shipped <date>" stamp. Adversarial review
+(3 agents + verification) ruled OUT the obvious suspects with code evidence: NO field-name mismatch
+(write/read/UI all use 'keywords'), insert payload is schema-valid vs migrations 015/016, and the
+read uses the service-role client so RLS isn't hiding rows. Verified live: field_pushed_at is {}
+for ALL fields (not just keywords) on B0FKKN8XKV.
+
+That leaves exactly three possibilities, which this ships the tools to distinguish:
+
+1. logPush silently swallowed errors (REAL latent bug, all 3 copies): the fallback insert
+   `delete rest.field; insert(rest)` never checked its own error, and the catch only fires on a
+   THROWN exception — but supabase-js RETURNS PostgrestError as a value. So any persistent write
+   failure (missing column, NOT NULL, type, constraint) was 100% invisible. Now both attempts'
+   errors are console.error'd with the real Postgres message ("insert FAILED both attempts").
+
+2. New read-only diagnostic GET /api/fba/admin/push-log-check?parent_asin=X probes the LIVE table
+   and returns a definitive verdict:
+   - 42P01 → table absent (migration 015 not applied)
+   - 42703 on `field` → field column absent (migration 016 not applied) → read errors → no dates
+   - table+columns OK → row count + per-field/status breakdown for the parent (so we see whether
+     rows persisted at all, and whether their status is 'accepted' vs 'failed').
+
+No writes, no credits, no migration. tsc 0.
+
+After deploy: hit the diagnostic on B0FKKN8XKV → it tells us exactly which of the three it is, and
+the next push's server log shows the real error if writes are failing.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

@@ -1,0 +1,30 @@
+Fix B0GCF11RKL page crash (LLM array detail values) + repair #184 mojibake
+
+Two production repairs in one pass:
+
+1. CRASH (PO: "Not loading: /fba/listing/B0GCF11RKL"): the audit LLM emitted
+   recommended_value as an ARRAY - Additional Features: ["Water Proof","Shock
+   Proof","Temperature Proof"] (verified by fetching the stored row from prod) -
+   and every consumer assumes string: bulkEligibleDetails' useMemo .trim() threw
+   "(e.recommended_value ?? '').trim is not a function" and killed the whole page.
+   Foundational fix, not a call-site patch: new detailValueToString(v) in
+   productDetailAttrs (arrays -> "a, b, c", numbers/booleans -> String, {value,unit}
+   -> "v u", objects -> JSON) applied at EVERY boundary:
+   - listingPipeline pdiFinal assembly (write path - future regens persist clean)
+   - ai-recommendations GET (read path - heals ALL historical rows with no regen;
+     this is what un-breaks B0GCF11RKL immediately)
+   - pushExecutor loadDetailContext (push path - .trim on the raw DB row)
+   - verify-push expectedFor (verify path)
+
+2. ENCODING (self-caught): #184 assembled pushExecutor.ts with PowerShell
+   Get-Content, which misread the BOM-less UTF-8 route as ANSI and mojibake'd
+   every non-ASCII char - including user-facing strings ("Nothing to push â€"
+   every SKU..."). Rebuilt the file from pristine git bytes (git show 193c1d2)
+   via a node script that re-applies all #184 conversions with asserted
+   replacement counts (6x close-conversions, export keywords, header, tail) and
+   fails loudly on any leftover stream artifact or mojibake byte. Verified: all
+   #184 files now scan clean.
+
+tsc exit 0.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

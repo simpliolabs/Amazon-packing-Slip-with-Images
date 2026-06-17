@@ -1,0 +1,25 @@
+Auto Push: one-click bulk ship of every ready Product-Detail field (seller-triggered)
+
+PO: "Auto Push is giving ME the ability to auto push" - a seller-facing control, not an
+unattended writer. One click on "Auto Push all ready (N)" in the Product Details panel opens
+a confirm list of every READY field (pushable + enum-valid + has a value + differs from live);
+the seller can UNCHECK any row (e.g. a weak value like Material="Other"), confirms ONCE, and
+the fields ship sequentially with live per-field status.
+
+Mechanics (zero backend changes):
+- Each field goes through the SAME per-field push-content endpoint as a manual push - full
+  validation, VALIDATION_PREVIEW guard, write-through, re-score. A failure on one field never
+  blocks the rest (per-field try/catch; status chip shows pushed-x/y or the error).
+- Minimal NDJSON pump per field (only the result/error line - per-SKU progress stays in the
+  single-field modal).
+- On success each row's current_value mirrors locally so the panel flips up-to-date and the
+  eligible count drops; ONE fresh score read at the end.
+- Eligibility excludes enum-INVALID rows (seller must pick an accepted value first) - the same
+  rule as the per-row Push button.
+
+Self-adversarial pass: per-row skip checkboxes added (without them the first real use would
+have force-pushed the two values the PO explicitly held); double-run guarded (bulkRunning);
+overlay/cancel disabled mid-run; snapshot iteration (no stale-closure on item updates);
+finished state swaps CTA to Close.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

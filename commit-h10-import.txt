@@ -1,0 +1,30 @@
+Break the self-referential keyword trap: import competitor-proven keywords (H10 CSV)
+
+PO (with Helium 10 evidence): "All the keywords are The Same, And dont seems to be high
+opportunity ranking like competitor." FACT-CONFIRMED on B0F86LPSHZ: the family's entire pool
+was 25 keywords, ~20 of them permutations of "post it / sticky notes / variety / assorted" -
+while the top competitor ranks on "college essentials" (33,418/mo), "transparent sticky notes"
+(26,068/mo), "clear sticky notes" (11,950/mo), "nursing school supplies", "bible sticky
+notes"... none of which existed in our pool.
+
+ROOT CAUSE (structural): both native sources query OUR ASIN. SQP returns queries we already
+get impressions for; Jungle Scout keywords-by-asin returns terms we already rank for. The
+pool can only deepen what we have - it can never DISCOVER what competitors win on.
+
+THE ESCAPE HATCH: POST /api/fba/keywords/import {parent_asin, csv} + an "Import H10 CSV"
+button in the Intelligence tab. Pipeline:
+- Robust CSV parse (quoted thousands-separated numbers, BOM, CRLF), header-mapped to H10
+  Cerebro/Xray columns (Keyword Phrase / Search Volume / Keyword Sales / Competing Products /
+  Organic Rank).
+- Rows ride the EXISTING engine end-to-end (runKeywordEngine): presence checked against OUR
+  live listing content, the same 0-100 opportunity scoring, same CRITICAL/UPGRADE actions.
+  Real H10 Keyword Sales feeds the engine's sales channel exactly (relevancyScore*5 inverse
+  of the proxy). Volume<50 noise dropped by the engine itself.
+- ADDITIVE upsert (deliberately NOT cacheService.storeAnalysis, which deletes the ASIN's whole
+  analysis): existing keywords always win; data_source='import' for honest provenance
+  (migration 024 extends the CHECK; friendly error if not yet applied).
+- Downstream needs zero changes: regen draws these from getStoredAnalysis; the relevance gate
+  + brand-safety judge keep off-product/branded terms (e.g. "mr pen ...") out of the copy;
+  the scorer counts the new CRITICALs - real gaps now dock, which is the point.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

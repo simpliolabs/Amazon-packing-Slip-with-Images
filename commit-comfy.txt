@@ -1,0 +1,18 @@
+fix(title): lift a sub-80-char apparel title past 80 with a "Comfy" garment-brand modifier
+
+PO: "Comfy brings it Above 80 characters." The clean title came out 77 chars — below Amazon's ~80
+mobile floor (the validator already flags <80 as too short, and it wastes title real estate). The
+seller's ideal leads the garment brand with a comfort adjective: "...Comfy Comfort Colors Alligator
+Shirt...". This reads better AND clears 80.
+
+Deterministic backstop (apparel only): when the assembled title is <80 chars and the garment brand
+is present without a comfort word in front of it, insert "Comfy " before the garment brand. Gated so
+it never fires on titles already >=80 and never double-stacks a comfort word.
+
+Unit-tested: "THE CEO Later Gator T-Shirt, Comfort Colors Alligator Shirt for Men and Women" (77)
+-> "THE CEO Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women" (83) =
+the seller's exact ideal. Already->=80 titles and titles that already say Soft/Comfy are untouched.
+
+Will live-verify the actual regenerated string reads 83 chars with "Comfy" before reporting done.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

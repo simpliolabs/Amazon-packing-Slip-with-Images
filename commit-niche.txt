@@ -1,0 +1,32 @@
+Niche keyword enrichment: add missing design-niche universes (cheap, storage-first, ≤2 credits)
+
+PO 2026-06-14: "The Council should be smart enough to know if they need to query MORE keyword
+universes from JS — up to 3 — searching storage first, each query 100 keywords." Chosen approach
+(confirmed): CHEAP niche enrichment (not a full re-research) + AUTO-detect niche from the design.
+
+Root problem (B0FKKN8XKV): research seeds on ONE term. For a Christian faith tee that resolved to
+the blank/product seed "comfort colors tshirt", so Jungle Scout returned 100% blank-tee keywords
+and ZERO christian/faith/bible keywords — the design's actual niche was never researched.
+
+This is PURELY ADDITIVE — researchKeywords (the full pipeline) is untouched:
+
+- deriveNicheSeeds(identity, primarySeed, max=2): derives up to 2 NICHE seeds from the vision
+  identity (suggestedSearchTerms[1+], seedKeywords, designTheme) that are DISTINCT from the
+  blank/product seed. "Auto when design has a niche": a plain blank tee (theme generic, seeds ⊆
+  primary) → [] (no spend); a faith/fishing/etc design → 1-2 niche seeds. Theme-deduped so the
+  same niche never emits twice (caught by a unit test: "christian tshirt"+"christian shirt" → one).
+  Pure function, 6/6 unit tests.
+
+- enrichResearchWithNiche(asin): loads the cached keyword pool, derives niche seeds, and for each
+  niche NOT already in storage (storage-first), fetches ONE keywords_by_keyword universe (100 kw,
+  1 credit) and merges it in. Re-caches the enriched pool. 0 credits if niches already cached;
+  max 2 credits (the primary universe was already paid). No SOV/competitor re-run.
+
+- Route: GET /api/fba/intelligence/[asin]?enrich=niche runs the enrichment, then re-processes the
+  enriched pool (forceRefresh:false so it cache-hits — no full re-research — useStoredAnalysis:false
+  so the engine re-runs on the new keywords) so faith keywords surface in Intelligence. Best-effort:
+  any derivation/JS error leaves the pool unchanged, never breaks the endpoint.
+
+tsc 0, 6/6 unit tests, no migration. Live ≤2-credit validation to follow once deployed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

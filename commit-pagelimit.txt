@@ -1,0 +1,18 @@
+Listing page: load the FULL optimizer index, not the default 25 (fixes direct-URL 404)
+
+PO 2026-06-15: "B0GCPHGN4J disappeared" — opening it by direct URL 404'd ("Listing not found").
+Root: the listing page fetches /api/fba/listing-optimizer with NO limit param, so the route returns
+its DEFAULT of 25 rows (ranked by 30d sales), then find()s this listing's score row in that set. Any
+listing ranked below the top 25 by sales isn't in the response → not found, even though it's a valid
+scored listing. Fix: request ?limit=200 (the route's cap) so the page sees the full set before the
+find(). Surgical one-line change; the per-listing find() is unchanged.
+
+Note: this is SEPARATE from B0GCPHGN4J's other issue — it's also ghost-filtered by the index's
+">=1 live child" invariant because its child's listing_content.parent_asin went stale (the catalog
+resolver still finds the child). That's fixed by running the family reconcile (#242 on-open / #250
+catalog cron), not by this change. This change fixes the broad "listings past the top 25 are
+unreachable by URL" bug.
+
+tsc 0. node_modules can't run next build here — will WATCH the PR CI build.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

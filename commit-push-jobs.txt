@@ -1,0 +1,51 @@
+Server-side push queue: pushes survive tab close + deploys, global status bar
+
+PO: "I Want the full server-side push queue (survives tab close + deploys, global
+status bar)". The streaming push (PR #183 made it modal-free) still died with the
+browser tab; this makes the server own the push.
+
+Core extraction (one source of truth):
+- The ENTIRE push loop moved verbatim from push-content/route.ts POST into
+  src/lib/fba/pushExecutor.ts as executePush(params, emit) - App Router forbids
+  non-verb exports from route files, so the engine lives in lib. The route is now
+  a thin shell: GET preview unchanged, POST wraps emit() around the NDJSON stream.
+  Same code path powers BOTH delivery modes; they can never drift.
+- Bonus on the STREAMING path: emit() now swallows enqueue-after-disconnect, so
+  closing the tab mid-stream no longer kills the server loop - every SKU still
+  lands, Verify shows the truth.
+
+Background jobs (src/lib/fba/pushJobs.ts + /api/fba/push-jobs + migration 027):
+- POST /api/fba/push-jobs inserts a queued push_jobs row (payload = exact
+  push-content body) and kicks an in-process runner. Jobs run ONE at a time via a
+  module promise chain (keeps total SP-API patch rate = the streaming path's 5rps
+  budget). Atomic queued->running claim makes duplicate kicks no-ops.
+- Runner maps the same started/progress/rescore/result/error events into
+  accepted/failed/total counters + a 60-event progress tail, flushed throttled
+  (2.5s) with a 30s interval heartbeat for quiet stretches (diff load, re-score).
+- Deploy survival = watchdog-on-READ (the Cloud Run lesson): every GET poll first
+  flips running-with-stale-heartbeat (>120s) jobs to 'interrupted' (with recovery
+  guidance - accepted SKUs stayed pushed, Verify -> push just the stale), THEN
+  kicks the oldest still-queued job if nothing is running. The status bar's own
+  polling is what heals the queue after a restart; no cron needed.
+- 30-minute absolute ceiling per job (adversarial self-catch): a HUNG Amazon fetch
+  would heartbeat forever and wedge the serialized chain behind it; past the
+  ceiling the job is failed and the chain moves on.
+
+Global status bar (PushJobsBar, mounted in the /fba layout = every portal page):
+- Polls /api/fba/push-jobs?active=1 (5s while active, 30s idle, paused when the
+  tab is hidden), shows queued/running/done/failed/interrupted per job with live
+  counts, links to the listing page, dismiss for finished entries.
+- 'push-jobs-changed' window event from the Ship modal makes the queued job appear
+  IMMEDIATELY (no silent 5s gap - the #175 lesson).
+
+Ship modal: new "Queue in background" button beside Confirm & Ship - same body
+builder (buildPushBody, shared so the two paths cannot drift), same disabled
+logic, closes the modal and hands off to the status bar.
+
+v1 scope notes: Auto Push (bulk details) stays on the streaming path; selective
+stale-only re-push stays streaming; duplicate queueing of the same field is
+allowed (second job no-ops naturally - Amazon just re-accepts the same values).
+
+tsc exit 0. Migration 027 SQL is in the PR body for the Supabase SQL editor.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

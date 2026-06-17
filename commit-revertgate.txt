@@ -1,0 +1,26 @@
+fix(push): REVERT the listing_health phantom-gate — it blanket-skipped real low-traffic listings
+
+The read-side gate (#260/#262/#263) skipped any SKU absent from the listing_health
+cache, to stop the push from PATCHing offerless backfilled rows into phantom
+"Missing offer" ASINs (the B0GHH4MQ7N incident). But listing_health is INCOMPLETE
+for low-traffic / print-on-demand listings, so the gate blanket-skipped all 121
+REAL, live children of B0FKDDN44Z — confirmed live via the Listings API and
+reproduced in the seller's AUTHENTICATED browser. An unauthenticated cached curl
+had masked the bug and made me wrongly believe #263 fixed it.
+
+Root flaw: listing_health can't distinguish "real listing missing from our cache"
+from "offerless phantom" — both are absent — so any gate keyed on it over-skips
+legitimate listings.
+
+Revert: push is back to UPDATE-ONLY-BY-TRUST — it patches the listing_content rows
+it is given (the pre-#260 behavior the seller relied on). notLive is hard-false;
+the skip path is now a no-op.
+
+Phantom protection retained on the WRITE side: familyReconcile's offer-gate (still
+live) refuses to SEED offerless rows into listing_content. Follow-ups tracked in
+TODO: (1) one-time cleanup of legacy pre-offer-gate offerless rows; (2) a correct
+READ-side gate using ground-truth Listings-API liveness instead of the stale
+cache; (3) no-store on the push-content GET preview so cached responses stop
+masking the live state.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

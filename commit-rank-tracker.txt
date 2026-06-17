@@ -1,0 +1,28 @@
+Rank tracker: OUR organic rank per keyword - column + time series (JS-only, post-H10)
+
+PO (cancelling H10, JS is the sole source): "import OUR ranking Keywords and create a column
+for it that we can track over time." Jungle Scout measures our organic rank per keyword; the
+engine was discarding it. This is the portal's replacement for the H10 keyword tracker.
+
+- Phase 4b in researchKeywords: keywords_by_asin on OUR ASIN (+1 credit, research = 4 total) -
+  the ONLY honest source of OUR rank (adversarial self-catch: Phase-4 rows carry the
+  COMPETITOR's organicRank and niche rows carry none - snapshotting those as ours would be
+  false data; ranks now overlay by keyword, competitor ranks are explicitly cleared, and
+  our-only ranked keywords join the pool, which IS "import our ranking keywords"). Because
+  keywords_by_asin returns every keyword the ASIN ranks for, absence after the overlay
+  genuinely means "not ranking".
+- Migration 026: keyword_analysis.organic_rank (current value) + keyword_rank_snapshots table
+  (asin, keyword, snapshot_date, organic_rank NULL = checked-not-ranking, search_volume) -
+  daily granularity, same-day re-runs collapse via UNIQUE upsert; mirrors the share-snapshots
+  contract (#162): best-effort, a missing table never breaks a sync.
+- Engine: both normalizers + AnalyzedKeyword carry organicRank (0 -> null = unranked explicit);
+  storeAnalysis/getStoredAnalysis persist + read organic_rank; the missing-column retry guard
+  now strips BOTH new columns (025/026) so pre-migration syncs can't break.
+- captureRankSnapshots() called after each FRESH research (cache-hit path deliberately skips -
+  its ranks were snapshotted at the original fetch).
+- Intelligence GET enriches rows with prevOrganicRank (one bounded snapshots query; best-effort).
+- UI: "Rank" column - #12 with green/red arrow + delta vs the previous check, "new" badge when
+  newly ranking, "- (was #N)" when dropped out, "-" when never ranked. Re-research button +
+  comments updated to 4 credits.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

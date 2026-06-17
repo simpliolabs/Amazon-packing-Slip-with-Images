@@ -1,0 +1,29 @@
+Seed-quality fix (category seed from productType + Re-research button) + Opp score column
+
+PO GOs: A (seed fix) + D (opportunity score column in the Intelligence tab).
+
+THE SEED-QUALITY TRAP (root cause of "all the keywords are the same", confirmed in
+keywordResearcher.ts): Manus's 4-phase pipeline is sound (niche query -> Share-of-Voice ->
+harvest the #1 competitor's keywords), but EVERYTHING orbits the Phase-1 seed - and the seed
+came from vision/title, which is PRODUCT-LITERAL ("post it notes variety pack"). Seeded that
+way, the niche query returns our own phrasing back and SOV crowns whoever wins that narrow
+phrase - never the category winner (Mr. Pen wins "self stick notes"). manualSeed existed in
+the lib but NO caller ever passed it, and research results cache for 30 days, freezing a bad
+seed per family.
+
+- keywordResearcher: options gain categorySeed; seed priority manualSeed > categorySeed >
+  vision > title (source: 'category').
+- syncKeywordIntelligence: resolves the category seed from the live SP-API productType for
+  NON-apparel families (SELF_STICK_NOTE -> "self stick notes" - literally the seed the PO's
+  H10 run used); apparel keeps vision/title (design-led niches). APPAREL_PRODUCT_TYPES is now
+  exported from listingPipeline for the shared ground-truth gate. Best-effort: any failure ->
+  legacy seeds. Options gain manualSeed (plumbed through).
+- intelligence route POST: tolerant body parse {seed} -> manualSeed (legacy no-body trigger
+  unchanged).
+- Intelligence tab: "Re-research (3 JS credits) ->" button + seed box (blank = auto seed);
+  fire-and-forget background run with honest "reload in ~1 min" message. Credit cost on the
+  button per the standing JS-credit consent rule.
+- D: "Opp" column (0-100 opportunity score, violet >=70) between Vol and Action, with a
+  tooltip explaining the formula inputs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

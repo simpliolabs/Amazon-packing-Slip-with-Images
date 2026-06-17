@@ -1,0 +1,42 @@
+Seed Agent: AI-chosen, identity-validated research seeds (fixes the soccer-pollution at the source)
+
+PO 2026-06-15 ("diagnose in FULL and find a final solution"): B0GVW83L1P (a SOCCER listing) had 61
+family/graduation/disney keywords polluting its pool, with "family vacation shirts 2026" / "family
+cruise shirts 2026" recommended as CRITICAL. Root cause (proven from live data + code): the pipeline
+used AI councils for every OUTPUT (title/bullets/description) but pure RULES for the research-seed
+INPUT — buildSeedFromTitle took "first 3 words" → "personalized 2026 tshirt", dropping "soccer", so
+Jungle Scout returned every 2026 family/graduation shirt. The AI/rules asymmetry WAS the bug.
+
+Approved design (B, with PO refinements): a small AI agent picks niche-aware seeds, VALIDATED against
+the listing's own identity tokens, with the rules builder as failover and a self-eval that flags weak
+runs for escalation to a full council (C). This is PR1 — the agent + failover + gate + eval, feeding
+the existing single-seed pipeline (NO extra JS credits). PR2 will add the approved "up to 3 universes,
+storage-first" multi-seed research + surface the escalation suggestion in the UI.
+
+Changes (keywordResearcher.ts):
+- selectSeeds(): the Seed Agent. Reads canonical title + design override + vision designTheme +
+  productType → gpt-4.1-mini → up to 3 seeds. manual/category seeds bypass it (already authoritative).
+- validateSeeds() [PURE, unit-tested]: drops any agent seed the listing identity can't corroborate
+  (hallucination guard), ensures a product word, dedups, caps at 3. If 0 survive → rules failover +
+  escalate.suggested=true (reason surfaced for opting into council C).
+- buildSeedFromTitle() rewritten to the failover role: drops generic tokens (year/personalized/size/
+  color/blank-brand) so the distinctive design token leads, instead of "first 3 words".
+- identityTokensOf() / keywordIsRelevant(): the pool-entry relevance gate primitives.
+- Phase 1 now calls selectSeeds (agent→rules); result carries seedsConsidered + escalate.
+
+Changes (syncKeywordIntelligence.ts):
+- Pool-entry relevance gate: filters the JS-returned pool against the listing's identity tokens BEFORE
+  the engine/storage — defense-in-depth so even a leaky seed can't smuggle off-product keywords into
+  Intelligence/audit/title candidates. Best-effort (a failure leaves the pool unfiltered, never breaks).
+
+Defense in depth: AI picks seed → rules validate (drop off-identity) → rules failover if none valid →
+relevance gate cleans the output pool. AI where judgment matters, rules as the net — fixes the asymmetry.
+
+Verified: tsc 0. Unit tests vs the live B0GVW83L1P data — seed-agent 6/6 (hallucination drop, product-
+word, dedup, escalate path), pollution gate 17/17 (all 5 soccer KEEP + 6 pollutant DROP), niche-seeds
+regression 6/6. Live ≤credit validation to follow once deployed.
+
+Follow-up (noted, not in this PR): getTopVisionSeed is now unused by Phase 1 (kept to avoid orphaning
+vision imports; remove in a cleanup pass). PR2 = multi-seed storage-first universes + UI escalation chip.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

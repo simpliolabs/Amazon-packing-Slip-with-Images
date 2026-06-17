@@ -1,0 +1,23 @@
+Pre-launch Item Highlights: no Features dock for a write-blocked field + plain-English error
+
+Live lifecycle test (B0F86LPSHZ, PO-authorized): generation GREEN (deterministic comma-separated
+keyword phrases, 118c, key title_differentiation, pushable), preview GREEN (HTTP 200, changed=10),
+PUSH -> Amazon refused all 10 SKUs at VALIDATION_PREVIEW: "This attribute 'Item Highlight' is
+currently unsupported." Staged rollout: the attribute is in the product-type schema AND the Seller
+Central form, but Listings-API writes stay closed until the July 27, 2026 launch. Our rails did
+exactly their job (clean 0/10, nothing corrupted, verify reads back empty).
+
+Two fixes this exposes:
+- isWriteBlockedPreLaunch() (productDetailAttrs): until 2026-07-27, an empty Item Highlight row
+  must NOT count as a productDetailsGaps entry - the seller cannot close it (the unfillable-gap
+  trust trap). Applied to BOTH count sites (fetchScoringContext + the regen-time override) so
+  regen score == next sync score. From launch day the helper returns false everywhere and the
+  field counts - and pushes - like any other, with zero code change.
+- push-content details branch: map Amazon's "currently unsupported... refer to the tool tip"
+  to a plain explanation (writes open July 27, 2026; the value is generated and saved; push
+  again once Amazon enables the field).
+
+The row itself STAYS visible and pushable in the panel + Auto Push list - the moment Amazon
+opens writes, the same button ships it.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

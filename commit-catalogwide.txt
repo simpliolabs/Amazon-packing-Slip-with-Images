@@ -1,0 +1,41 @@
+Catalog-wide child completion ("A"): generalize the #242 backfill to a scheduler-gated cron
+
+Batch item 6/6. #242 fixed the "only 11 of 34 variants recognized" bug ON-OPEN (when the seller
+opens a listing, we reconcile the live family + backfill missing children). "A" makes that
+proactive across the WHOLE catalog so families are complete BEFORE the seller opens them.
+
+Three parts:
+1. EXTRACT the reconcile into src/lib/fba/familyReconcile.ts :: reconcileFamilyChildren(parent,
+   supabase, opts). Verbatim move of the #242 logic (fetch live VARIATION childAsins → re-attach
+   rows under a stale parent → backfill a minimal row for any childAsin with no row at all,
+   resolving childAsin→SKU via Listings Items). Self-sufficient: resolves token/endpoint/sellerId
+   itself and borrows a sibling's title as the placeholder so cron-created rows aren't blank-titled.
+2. REFACTOR ai-recommendations (the #242 on-open path) to call the shared function. Behavior is
+   preserved (same reconcile, same log lines); the on-open path and the cron now share ONE
+   reconcile so they can never drift — the exact AI-vs-rules/two-paths asymmetry to avoid.
+3. NEW cron GET /api/fba/cron-complete-children, mirroring cron-verify-pushes (#226): CRON_SECRET
+   auth, maxDuration 600, a 4-min time budget that DEFERS overflow to the next tick (reported, not
+   silently dropped), parents sourced from listing_seo_scores (one row/parent), loops the shared
+   reconcile.
+
+SAFE BY DESIGN (PO chose "build now, safe-by-default"):
+• ADDITIVE — only UPSERTs placeholder rows for genuinely-missing children; never overwrites or
+  deletes existing content. (Same upsert as the PO-confirmed-working #242 path — a missing child's
+  SKU resolves to its own ASIN, which would already be a known row, so it can only CREATE.)
+• SP-API ONLY — zero Jungle Scout credits.
+• SCHEDULER-GATED — intentionally NOT added to vercel.json (like cron-verify-pushes). It is OFF
+  until a Coolify/external scheduler is pointed at it, so merging this PR runs nothing.
+• Idempotent + time-budgeted — a throttled or unreached parent is safely re-covered next tick.
+
+VERIFICATION: tsc 0 (the extraction, the route refactor, the new cron, and the SupabaseClient
+type all compile). node_modules has NO vitest in this sandbox, so the prescribed vitest baseline
+could NOT run here — this is the highest-blast-radius item, so before enabling the schedule please
+CANARY it on a parent or two (read + additive-upsert only, safe to run by hand):
+  curl -s -H "x-cron-secret: $CRON_SECRET" "https://slip.theceo.store/api/fba/cron-complete-children"
+and confirm children_backfilled / families_completed look sane, THEN wire the Coolify scheduler.
+
+Follow-ups (noted, not blocking): a last_reconciled_at column for fair rotation on very large
+catalogs (v1 covers a typical POD catalog in one 4-min tick); SP-API 429 backoff (a throttled
+parent currently reads as 0-children in the summary).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

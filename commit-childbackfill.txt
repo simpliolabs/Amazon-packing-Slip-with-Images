@@ -1,0 +1,33 @@
+Child backfill: on-open, create listing_content rows for the FULL live variation family (B)
+
+PO 2026-06-15 (verified via Seller Central + adversarial root-cause): an Amazon Custom/Handmade
+listing (B0GVW83L1P) has 33 ACTIVE variations but the tool recognized only 10. Root cause (confirmed
+by two independent agents): the child universe is gated by SALES ∪ FBA-INVENTORY, not the live
+variation family. listing_content.parent_asin is only backfilled for ASINs in orders ∪ FBA inventory
+(syncCatalog → syncParentAsins); the listings sync never writes parent_asin. Custom/Handmade is
+made-to-order/merchant-fulfilled (zero FBA inventory), so only the children that SOLD (10) ever get
+ingested — the other 23 zero-sales variations are structurally invisible. The existing self-heal
+fetched the live childAsins but only RE-ATTACHED existing rows; it never CREATED rows for never-synced
+children, so it couldn't recover them. This silently undercounts children on every Custom/Handmade +
+low-velocity/MFN listing in the catalog.
+
+Fix B (approved: on-open now, catalog-wide sync next): extend the ai-recommendations self-heal so that,
+for childAsins from the live Catalog VARIATION relationships that have NO listing_content row at all,
+it resolves each childAsin→SKU via the Listings Items API (identifiersType=ASIN, includedData=summaries
+— the same call family-skus uses) and upserts a minimal Active listing_content row (parent_asin set,
+content blank). The optimizer then enumerates + pushes to the FULL family. Content is intentionally
+blank — the push writes the optimized values and the next Scan Listings fills current content. SP-API
+only — no Jungle Scout credits.
+
+Safety: additive + idempotent (onConflict 'sku'; on re-open the rows exist → in matchedRows → skipped),
+Active-children-only, system-SKU (amzn.*) filtered, capped at 60 childAsins/call, fully wrapped in
+try/catch (a backfill failure never blocks the regen — it just falls back to the rows we have). Does
+NOT touch the existing 10 rows or the read logic. The re-attach + backfill share one final re-query.
+
+Verify after deploy: open B0GVW83L1P → per_child_keywords jumps 10 → 33, push modal says "33 SKUs";
+re-open → still 33 (no duplicates). tsc 0.
+
+Follow-up (A, next): make the background sync catalog-authoritative so child_count is correct
+catalog-wide for listings never opened (the bigger core-sync change — fresh-context + tested).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

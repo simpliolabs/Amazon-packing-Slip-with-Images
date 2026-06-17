@@ -1,0 +1,5 @@
+Auto Push: batch all detail attributes PER SKU (one PATCH/SKU) instead of per-VALUE field-at-a-time — ~7x fewer Amazon calls
+
+executeBulkDetailsPush: pre-flight each field (strict productType, coercion, shape, schema-exists; ineligible fields excluded with a reason, never block others), resolve the broadcast SKU set once (expandDetailSkuSet, extracted from loadDetailDiff so both paths share it), read each SKU once (fetchSkuDetails, all attrs in one GET), batch only the CHANGED fields per SKU via patchSkuMulti, per-field fallback (pushPerFieldFallback) when the atomic batch is rejected so good fields still land, write-through + ONE re-score. Calibration (#210/#211) reused per composite. Fully idempotent: reads current first, batches only differing fields, so a re-run after any partial failure touches only still-wrong SKUs. Cancel (#209) checked between SKUs; gateway-class halt on the client with an idempotent re-run note; Stop button in the bulk modal. Route dispatches field:details_bulk + detail_fields[]. changedDetailFields is a pure exported helper (8/8 unit tests). tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

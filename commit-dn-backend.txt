@@ -1,0 +1,24 @@
+fix(fba): guarantee the design name in backend search terms (Later Gator, recurring)
+
+The seller's design name kept dropping out of the BACKEND ("And Again") because
+designName was threaded into the TITLE agent only. The backend agent never
+received it, and its excludeWords set (built from the title) deliberately strips
+title words -- deleting "later"/"gator". Unlike the title (which has a
+deterministic design-name LEAD, #91/#92), backend had no must-include.
+
+Fix (runBackendAgent, mirrors the title's deterministic anchor):
+- Thread designName into runBackendAgent (+ the call site).
+- Exempt the design tokens from excludeWords so the fill/dedup can't strip them.
+- Deterministically UNSHIFT the exact design phrase to LEAD the core, so it
+  survives the 228-byte cap and lands in EVERY child's backend string. The
+  adjacency dup-check skips only when "later gator" is already adjacent (the
+  tokens existing separately across other phrases still trigger the lead).
+
+Capacity/non-apparel are safe: extractDesignName returns '' there -> all three
+parts no-op (and capacity-family + a design phrase are mutually exclusive).
+
+Adversarially reviewed (CLEAN -- lands in every child, survives the cap, no
+regression); tsc clean. The bullets design-name + holistic cross-section coverage
+are the next step.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

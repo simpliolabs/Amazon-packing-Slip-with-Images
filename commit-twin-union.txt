@@ -1,0 +1,32 @@
+Presence flags: OR across FBA+FBM twin rows (kill the divergent-twin lottery)
+
+Caught during the post-merge live verification of #186 (PO: "verify all claims").
+The deployed flags were real but computed against ONE of the ASIN's twin rows -
+and loadListingContentForPresence picked the most-populated row, which for
+B0FK951X67 was the FBM twin carrying a STALE title ("...Comfort Colors Shirt ...
+Blue Spruce"). The FBA row's actual title ("THE CEO I Could Be Meaner Tshirt
+Comfort Colors Graphic Tee for Men & Women") was shadowed, so "comfort colors
+tshirt women" (36,635/mo) still showed no T flag while "comfort colors blue
+spruce" did. A twin lottery whenever the rows diverge - exactly the pre-push
+state every un-optimized family is in.
+
+Fix - correct OR semantics, not concatenation:
+- checkPresenceAny(keyword, listings[]): checks each row INDIVIDUALLY and ORs
+  the four flags; multiplier re-derived from the OR'd flags with the same
+  ladder. Deliberately NOT a concatenated-text check: half a phrase in row A
+  plus half in row B must not fake a match neither row has (adversarial
+  self-catch - the first draft concatenated).
+- loadListingRowsForPresence returns ALL twin rows; runKeywordEngine accepts
+  ListingContent | ListingContent[] and ORs when given rows (both sync call
+  sites pass rows now).
+- intelligence GET live recompute uses checkPresenceAny over the rows.
+- loadRepresentativeListingRow (most-populated single row) kept for the
+  research title seed, which must be ONE title.
+
+Once a broadcast push converges the twins, OR-of-rows equals either row - this
+only matters for the diverged window, which is exactly when the seller is
+looking at the flags.
+
+tsc exit 0. No migration.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

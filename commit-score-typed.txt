@@ -1,0 +1,22 @@
+score-title: score the TYPED title (not the live children consensus) + char counts on every displayed title
+
+PO: "you are suggesting a new TITLE, but scoring it at 17/25" + "doesn't tell me HOW many
+characters". Two real defects:
+
+1) Check-score scored the WRONG STRING. scoreListingContent derives its title via
+   sellerBaseTitle = longest-common-prefix of the CHILDREN's live titles (suffix-stripping for
+   per-SKU " -Color-Size" tails). With 100+ identical live children that consensus silently
+   REPLACED the typed draft - the compliant 74-char draft was scored as the live 82-char title
+   and docked -5 (>75) and -3 (front-load miss on the live "TShirt" spelling) = 17/25, with the
+   issue text even saying "Title is 82 chars" for a 74-char input (live-reproduced via POST
+   /score-title on B0G884ZJ27). Fix: the scoring copy overrides every child title with the
+   typed one, so the consensus IS the typed title; bullets/keywords/A+ stay live - the number
+   now answers "what's my score if I ship THIS title". The 74-char draft scores with no length
+   or front-load dock.
+
+2) Char counts where titles are decided: the Variant Cohesion "UPDATE ALL N VARIANTS TO" box
+   shows X/75 (green <=75, amber over); each current-value version row gets a compact "Nc"
+   chip. (The Ship-Title editor already counts X/75 since #167 - a stale browser bundle showed
+   the old "/200 - under 80" hint; hard-refresh picks up the fix.)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

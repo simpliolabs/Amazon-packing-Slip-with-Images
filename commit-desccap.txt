@@ -1,0 +1,32 @@
+Description: stop false-100%/DONE when the keyword pool is empty (latent flaw in #243)
+
+PO 2026-06-15: "the description is STILL old/stale and marked as OK, not regenerated vs the new
+keyword pool." Live: B0GCPHGN4J + B0FKDDN44Z both show DESCRIPTION 100% (12/12) while their
+descriptions are stale.
+
+ROOT CAUSE (adversarially verified against the deployed scorer): #243 added the description
+keyword-COVERAGE dock (syncListingContent "3c") — the ONLY check that can detect a stale
+description — but gated its ENTIRE body behind `if (targetKws.length >= 3)`, where targetKws =
+topCriticalKeywords ∪ topUpgradeKeywords. Those arrays populate ONLY from keyword_analysis rows
+whose action_type is CRITICAL or UPGRADE. When the pool is empty (B0FKDDN44Z: 0 kw) or thin/
+non-actionable (B0GCPHGN4J: 1 DEFENDED kw), targetKws = [] → the guard is false → 3c never runs →
+no deduction fires → descriptionScore stays at its DEFAULT 25 → weightedPoints(25,12)=12 → 12/12/
+100% → it clears the page's >=23 "DONE" gate → "no change needed". So #243 — the PR meant to STOP
+false-100% — reintroduced it for exactly the empty/thin-pool case.
+
+Fix (stopgap, surgical): add the missing `else` to the targetKws gate. When the pool is too thin
+to CONFIRM freshness, cap descriptionScore to 22 (< the 23 DONE threshold) and push an info issue
+telling the seller to research keywords + regenerate. A stale description is indistinguishable from
+an optimized one with nothing to score against, so we must NOT award the DONE-clearing default 25.
+The cap is a CEILING (never raises a score) and sits INSIDE the existing `descLen >= 50` block, so
+empty/A+ descriptions (handled earlier at descLen<50) are not double-penalized.
+
+This is a DESIGN CHOICE (don't-trust-a-default-100%): option (i) cap-to-22 + info [this PR, ships
+now, stops the false-OK today] vs (ii) gate the DONE verdict on a real coverage signal rather than
+score==25. (ii) is the deeper fix but depends on the keyword-pool decoupling fix (the pool must
+actually populate before coverage means anything) — raised separately for PO sign-off.
+
+tsc 0. node_modules has no vitest in this sandbox. Surgical (one else branch). Once the pool is
+healthy (targetKws >= 3) this else is a no-op and the real coverage dock runs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

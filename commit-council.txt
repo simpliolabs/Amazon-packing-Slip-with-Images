@@ -1,0 +1,30 @@
+feat(title): in-platform COUNCIL for apparel titles (debate instead of one agent)
+
+PO directive: the "brain" was missing a council — big decisions should DEBATE, not be
+one LLM shot. Builds the council into the product for the title (the decision that kept
+coming out keyword-stuffed), and adversarially reviews it before shipping.
+
+runTitleCouncil(openai, system, user, onProgress): reuses the fully-built title brief so
+every hard constraint still applies, then runs 3 persona proposers (creative / SEO /
+conversion, in parallel) -> a ruthless adversary critique -> a judge that synthesizes the
+single best title. Apparel titles run the council; non-apparel keeps the single fast agent
+(those already work). The judge's output flows through ALL the existing deterministic
+backstops (brand-lead, design-name lead-enforcement, gender de-dup, Title-Case, validate),
+so the council is additive — not a new failure mode. Demonstrated: the council turned the
+stuffed "Later Gator See You Later Alligator Shirt ... Cool Gator Tee" into the clean
+"THE CEO Later Gator T-Shirt - Vintage 90s Cartoon Alligator ... for Men and Women".
+
+Adversarial pre-ship review (the new standing directive) caught and FIXED:
+- BLOCKER: the council added 5 LLM calls to the one pipeline stage with no keepalive, on a
+  client with the SDK's 10-min default timeout -> a hung call could stall past Cloudflare's
+  ~100s idle window and hang the regen. Fixed: per-call timeout 20s + maxRetries 0 (a hang
+  now fails that voice open), PLUS two onProgress keepalives mid-council to reset the idle
+  timer.
+- SHOULD-FIX: the post-council retry accepted a same-count single-agent rewrite (<=), which
+  could silently discard the clean council title. Tightened to require a STRICT improvement (<).
+Fail-open verified: all-drafts-fail -> single agent; judge-fail -> first draft.
+
+Apparel-only, ~5 gpt-4.1-mini calls/title (cheap). Will live-verify across Later Gator +
+Darlin' + a long-slogan design after merge.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,9 @@
+Coverage: suffix-encoded design detection + score zero-sales parents
+
+#4 designKeyForSku (extends #219 detection): now handles SUFFIX-encoded designs. B0GQVL3K4B encodes the design in the SKU suffix (640002XL-BK-I'm-Retired-TS → "I'M-RETIRED"), which the prefix-only #219 version returned EMPTY for → multi-design missed. New logic: text before the base-number run is the key (prefix/colour-family: FHOSH64000L-BK→FHOSH, DAR-CCG-2XL-BAY→DAR-CCG); when the SKU STARTS with the base number, strip leading base+size+colour and a trailing -TS to get the suffix design name. CRITICAL: the colour-strip runs ONLY in the suffix branch, so it can't break colour-family keys like DAR-CCG (the adversarial-proposed fix wrongly stripped "DAR"→"CCG" — caught by testing). 18/18 tests vs the real B0F6QZ34B1 (FHOSH/FRAF/OF), B0GQVL3K4B (I'M-RETIRED + TOO-YOUNG-TO-RETIRE), and Darlin' (single-design, unbroken).
+
+#5 syncParentAsins: parent_asin_rollup was only upserted when children had sku_sales_analytics rows (sales>0), so the seller's real-but-zero-sales parents got no rollup → no listing_seo_scores → invisible in the optimizer (PO: B0DMX156HQ is their own listing, never appeared). Now a rollup is upserted for every KNOWN parent (children in parentMap = real catalog family), totals 0 if no sales, top_child_asin falls back to the first child so the scorer has a child to read. Safe: the optimizer GET already ghost-filters parents with 0 LIVE children (PR #93) at the read path, so a zero-sales rollup can never render a dead card — it just sorts to the bottom of the sales-ranked list. B0DMX156HQ will appear after the next sync.
+
+tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

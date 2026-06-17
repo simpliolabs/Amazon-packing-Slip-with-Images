@@ -1,0 +1,24 @@
+fix(title): kill the "T-Shirt ... T-Shirt" stutter + force the design-subject keyword phrase
+
+PO flagged (rightly, and I'd wrongly called it green): the council produced "Later Gator T-Shirt,
+Comfort Colors T-Shirt with Gator Art" — "T-Shirt" repeated verbatim, and "with Gator Art" is filler
+where the ideal has the real keyword "Alligator Shirt". Not close to the target
+"Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women".
+
+Fixed at BOTH layers:
+- Brief (instruct): the second phrase must be built from the design's MAIN VISUAL SUBJECT + a
+  product-type SYNONYM (e.g. "Alligator Shirt"), with the garment brand as a modifier — because
+  "<subject> shirt/tee" is itself a high-volume search term. Two hard rules added: never repeat the
+  exact word "T-Shirt" (the welded phrase already has it), and never pad with vague filler like
+  "with Gator Art" / "cool design".
+- Deterministic backstop (enforce): for apparel, the welded "<design> T-Shirt" keeps its T-Shirt;
+  every LATER identical "T-Shirt"/"Tshirt" is varied to "Tee" so the product type is never repeated
+  verbatim. A genuinely different second mention ("Alligator Shirt") is untouched. Unit-tested: the
+  bad title -> "...T-Shirt, Comfort Colors Tee..."; the ideal -> unchanged; generalizes to other
+  designs.
+
+I am NOT calling this green. After deploy I will READ the actual regenerated title, check T-Shirt
+appears once + the design subject ("Alligator Shirt") is present + it reads like the ideal, and show
+the PO the real output — not a regex pass/fail.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

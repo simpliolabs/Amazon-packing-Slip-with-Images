@@ -1,0 +1,25 @@
+UX clarity batch: push-interrupt honesty, Present-In tooltips, button cost labels, in-box Re-check
+
+Six PO catches answered in one pass:
+
+1+2 (push modal): the X is now VISIBLY disabled while sending (was a silent no-op) with a
+tooltip explaining why; a note under the spinner states the honest interrupt semantics -
+already-ACCEPTED SKUs stay pushed if the connection drops; re-open the modal anytime and use
+Verify on Amazon -> "Push just the stale". (Verify works after any interruption, including
+after a regen, via the #172 push-history fallback.)
+
+3 (Present In "stale/unexplained"): header tooltip spells out T/B/D/K + that flags are a
+snapshot from the last Intelligence sync/Re-research; each chip and the "nowhere" marker get
+their own explanatory titles.
+
+4 (Refresh analysis): tooltip added - rebuilds the playbook from CURRENT content + runs the
+AI analyst council; NO Jungle Scout credits (OpenAI ~a cent).
+
+5 (Analyze competition): tooltip rewritten to say WHAT you get (per-keyword Share-of-Voice:
+who owns the clicks, their %, whether YOU appear) on top of the existing credit warning;
+caption line now contrasts both buttons in one sentence.
+
+6 (gap box said "hit Re-check above" with no button): the Re-check now (free) BUTTON is now
+inside the gap box itself, with the explanation beside it.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

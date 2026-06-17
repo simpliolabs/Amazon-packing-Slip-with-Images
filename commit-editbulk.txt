@@ -1,0 +1,5 @@
+Auto Push: edit a detail value before the bulk push (PO: "what if a recommended value is wrong?")
+
+The Auto Push modal now lets you change each field's value before pushing: enum fields (Department, Fit, Neck, Sleeve, Closure...) get a dropdown of Amazon's accepted values; free-text fields get an input. Edited values are sent as per-field detail_overrides; the server re-validates/coerces each via loadDetailContext, so a bad manual value is flagged (enumInvalid) and that field is skipped with a reason — never pushed. Values display as human labels (prettyDetailValue) and coerce back to the API token server-side. No edit during/after the run (read-only then). tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

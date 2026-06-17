@@ -1,0 +1,24 @@
+Background-friendly pushes: close the modal and keep working (floating progress pill)
+
+PO: "Why can't I close it? an employee needs to watch an item send for 5 min before working
+on another section." Root insight: the push stream lives in the PAGE's JavaScript, not the
+modal - the modal was never load-bearing. Closing it is safe; only closing the browser TAB
+kills the stream.
+
+- Push + Auto Push modals now close freely during a send (overlay click, X, "Hide (keeps
+  running)"). The employee works on other sections - or other listings via in-app navigation -
+  while the stream finishes.
+- Floating progress pill (bottom-right) whenever a push runs with its modal closed:
+  "Pushing Fit Type... 34 accepted - view" / "Auto Push running... 3/7 fields" -> click
+  reopens the modal mid-stream.
+- beforeunload guard while any push runs: the browser confirms before tab close/refresh -
+  the one action that genuinely interrupts (already-accepted SKUs stay pushed; Verify ->
+  "Push just the stale" recovers).
+- In-modal note updated to the new semantics.
+
+Known v1 limit (stated in PR): the pill renders on the listing page that started the push -
+navigating to another page keeps the push running but without the pill; Verify on return
+shows the result. True server-side background jobs (survive tab close + deploys) are the
+follow-up option if wanted.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

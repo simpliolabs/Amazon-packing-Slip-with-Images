@@ -1,0 +1,24 @@
+feat(bullets): bullets council for apparel — force opportunity-keyword coverage (the -12 lever)
+
+PO asked 3x why shipped bullets stay at 9/18. Root cause (verified against syncListingContent): the
+bullet score's biggest lever is opportunity-keyword COVERAGE — it docks up to -12 when the bullets
+miss the listing's top critical/upgrade keywords. On the Later Gator listing, criticals like "see you
+later alligator" and "later gator after while crocodile" sit NOWHERE, so the bullets take ~-12 ->
+13/25 (= 9/18 weighted). The single gpt-4.1-mini bullets agent + validateBullets retry wasn't covering
+them, so shipping faithfully reproduced 9/18 (NOT a re-score bug; the re-score is wired).
+
+Adds runBulletsCouncil (mirrors runTitleCouncil for the 5-bullet ARRAY): 3 persona proposers
+(copywriter / SEO-coverage / conversion, gpt-4.1-mini) -> GPT-5 adversary that hunts MISSING keyphrase
+coverage + weak hooks + role/accuracy slips -> GPT-5 judge that synthesizes the best-covered compliant
+set. Gated to apparel (mirrors the title council); non-apparel keeps the single fast call. Output still
+flows the existing role-leak guard + validateBullets retry, so the council is ADDITIVE and fails open
+(0 drafts -> single agent; 1 draft -> it; judge empty/invalid JSON -> coverage-optimized proposer).
+Model via BULLETS_COUNCIL_MODEL || TITLE_COUNCIL_MODEL || 'gpt-5'. Keepalives between stages keep each
+call under Cloudflare's ~100s idle window.
+
+NOT yet live-verified: needs merge+deploy, then regen Later Gator (B0G884ZJ27) and confirm the bullets
+cover the missing criticals and bullet_score moves off 13/25. Known follow-up: some misses ("last day
+of school" 168k/mo, "schools out for summer") may be seasonal-classified upstream and routed to
+backend rather than bullets/title — that reclassification is separate from this council.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

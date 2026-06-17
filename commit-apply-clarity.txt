@@ -1,0 +1,29 @@
+fix(fba): Apply-tab clarity — unify diverging variants, drop HIGH on DONE, feature wording
+
+Three fixes from a PO review of B0G884ZJ27's Apply tab (all "score says X but the
+suggestion says Y" confusions):
+
+1. DESCRIPTION DIVERGES, NO SHIP (real bug). The cohesion Ship button + status were
+   gated on needUpdate, which the 'optimal' score-gate forces to 0 when the section
+   scores >=23 -- even when the 76 variants DIVERGE (67/8/1). So it wrongly showed
+   "up to date" with no way to unify them. Now a broadcast field with diverging
+   variants (distinct>1 && !perChild) shows "variants differ -- unify" + the Ship
+   (pushes the recommended value to all), regardless of the optimal gate. Capacity
+   titles (perChild) untouched.
+
+2. HIGH PILL ON DONE CARDS (cosmetic). A DONE item (live-match or cooling-locked)
+   kept the pipeline's hardcoded priority=HIGH because the downgrade guard refused to
+   lower an already-HIGH item. A DONE item isn't actionable -> priority='NONE'.
+   (route.ts:735 cooling-lock + :792 live/optimal branches.)
+
+3. FEATURES "missing or incomplete" WORDING (clarity). features_score docks a flat
+   -5 for the LENGTH of product_details_improvements -- a PROACTIVE spec sheet the AI
+   emits for every standard attribute WITHOUT checking what's already filled. So a
+   10/12 score + "8 to push" is consistent; the "{N} fields are missing or
+   incomplete" message was the confusing part. Reworded to "confirm or refine {N}
+   values -- many may already be set". (The deeper "count only truly-empty fields"
+   rides with #85.)
+
+Diagnosed via parallel investigation; tsc clean. No bullet/score logic changed.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

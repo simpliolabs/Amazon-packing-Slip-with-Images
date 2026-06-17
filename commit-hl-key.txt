@@ -1,0 +1,19 @@
+Item Highlights: match Amazon's LIVE key title_differentiation (shipped early)
+
+Live discovery (B0F86LPSHZ regen on deployed #167): Amazon has ALREADY enabled the Item
+Highlights attribute on SELF_STICK_NOTE - under key title_differentiation with schema title
+'Item Highlight', not the documented item_highlights. The #166 schema rails auto-mapped it
+(audit row resolved + pushable=true with zero code), but the PR-C deterministic builder gated
+on the docs key, so the audit's own creative value (semicolon-separated, filler words) rode
+the pushable rails instead of the comma-separated keyword phrases.
+
+- assembly gate: match the menu attr by key (item_highlights|title_differentiation) OR display
+  title (\bhighlights?\b) - robust to per-category naming
+- audit-duplicate dedupe: also drops 'Item Highlight' (singular) + 'Title Differentiation'
+- listPushableSchemaAttributes ALWAYS-INCLUDE: both keys
+
+After this, regens replace the audit creative copy with the deterministic <=125-char
+comma-separated keyword phrases (the format Amazon documents) built from exactly what the
+<=75 title dropped.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

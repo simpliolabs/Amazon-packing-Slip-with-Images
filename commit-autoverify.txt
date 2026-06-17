@@ -1,0 +1,25 @@
+Auto-verify + retry cron: ship a push, the system verifies live + re-pushes stale SKUs until 100% applied (PO directive)
+
+PO 2026-06-13: "Shipping Verification Should be an Automatic Cron JOB — I should not be checking manually, I gave a command. The system should verify via Cron and if something is not verified it should be shipped again automatically, and verified on cron and shipped again until it is 100% done. If there are major flags a user should be notified — but in general this should be a back end process."
+
+Architecture (Phase 1 — backend + a banner):
+
+1. Migration 030: push_verification_tasks (parent_asin, field, detail_field, expected_value, status, attempts/max_attempts, next_check_at, last_matched_count/total/stale_skus, last_error). Partial UNIQUE on (parent, field) WHERE status IN (pending,running) guarantees ONE active task per field — a fresh push UPSERTs over the old one so we never retry a stale expected_value.
+
+2. lib/fba/verificationQueue.ts: enqueueVerification (abandons any active task for the same field, then inserts a new one with next_check_at = now+20 min — within Amazon's 15-30 min application window), claimDueTasks (atomic pending → running so two cron invocations can't double-process), completeTask, rescheduleTask (linear backoff +30 min, attempts++), flagNeedsAttention (out of attempts), softFailTask (transient verify error — no attempt consumed).
+
+3. /api/fba/cron-verify-pushes: CRON_SECRET auth (mirrors cron-keyword-sync). Time-budgeted: up to 10 tasks per run, 4 min budget so a single slow verify can't blow past maxDuration; remaining tasks soft-fail and the next tick picks them up. Per task: live verify → 100% matched = complete; <100% with attempts left = re-push the stale SKUs only (selective push via the existing skus[] parameter on executePush) + reschedule; out of attempts = needs_attention.
+
+4. pushExecutor: every accepted push (single field, details, AND bulk-details — all three result paths) enqueues a verification task. Wrapped in try/catch so a queue failure (e.g. migration 030 not applied yet) CANNOT break a successful push.
+
+5. /api/fba/verification-status?parent_asin=X: returns pending + needs_attention counts. Best-effort on a missing table.
+
+6. Listing page: a small banner above the cohesion section, polled every 60s. "✓ N pushes being auto-verified — no action needed" (emerald) vs "⚠ N pushes need your attention — the cron tried multiple times" (amber).
+
+Edge cases covered: seller re-pushes the same field (UPSERT supersedes the old task); concurrent cron invocations (atomic claim); time-budgeted (next tick picks up remaining); transient verify errors (soft-fail, no attempt consumed); migration 030 not yet applied (best-effort enqueue + best-effort status endpoint, never breaks anything).
+
+Deployment: PO needs to set up Coolify cron to GET /api/fba/cron-verify-pushes every ~5 min (with the existing CRON_SECRET header) and run migration 030 (idempotent: CREATE ... IF NOT EXISTS).
+
+Per-spApiKey logging key (details:<spApiKey>) matches keyword_push_log + #212's field_pushed_at — no schema drift. tsc 0.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

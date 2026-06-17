@@ -1,0 +1,19 @@
+Add read-only diagnostic to find where a "stuck" design name lives
+
+PO: B0GQVL3K4B keeps regenerating to title "THE CEO Too Young to Retire Too Poor to Quit
+T-Shirt for Men and Women" — but that phrase appears NOWHERE in the live Amazon title ("I Am
+Retired I Don't Have to T-Shirt – Funny Retirement Graphic Tee for Men & Women…"). So the design
+name is being read from a CACHED source. extractDesignName (listingPipeline.ts:2882-2985) accepts
+the LLM's design name only if it appears in listing_seo_scores.product_title (= canonicalTitle,
+route.ts:652) OR product_identity vision text. This endpoint surfaces both for an ASIN — plus
+the per-child listing_content titles — so we can SEE which cached source carries the bad phrase.
+
+GET /api/fba/admin/design-source-check?parent_asin=B0XYZ returns:
+- canonical_title (= listing_seo_scores.product_title)
+- per-child live titles + last_synced_at
+- vision identity (designTheme, seedKeywords, suggestedSearchTerms, visualElements) for the
+  parent + first 5 children
+
+Read-only, no writes, no credits, no migration. tsc 0.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

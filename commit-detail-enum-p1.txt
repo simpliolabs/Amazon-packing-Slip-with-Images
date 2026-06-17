@@ -1,0 +1,26 @@
+feat(push): shared coerceDetailValue validator + exact-value guard for dropdown attrs (E, part 1)
+
+Part 1 of E (PO: "product detail values must be EXACT Amazon values; push 100%"). Architecture A
+approved; this lands the shared validator + the push-side guard. Validate-at-regen + the seller-pick
+panel are part 2.
+
+- NEW coerceDetailValue(productType, spApiKey, raw, opts) in productTypeDefinitions.ts — the single
+  source of truth for validating a product-detail value against the live product-type schema. Dropdown
+  (enum) attrs coerce to an EXACT accepted member ("Unisex Adult" -> "Unisex"); a value that can't map
+  returns valid:false + the accepted list; free-text passes through (VALIDATION_PREVIEW guards
+  byte-length/pattern at push). Now also EXCLUDES enumDeprecated values (Amazon retires these) — found
+  via the SP-API meta-schema (enumDeprecated keyword).
+- push-content loadDetailContext refactored onto coerceDetailValue + an EXACT-VALUE GUARD: a dropdown
+  the value can't map to is now BLOCKED (was pushed raw -> Amazon-rejected) with the accepted list
+  surfaced, so the push never writes a non-member. Coercible + free-text behavior is unchanged.
+  Best-effort: a schema-fetch failure falls back to raw (prior behavior; VALIDATION_PREVIEW guards).
+
+Internet research (sources in PR): SP-API Product Type Definitions — enum + enumNames (index-aligned),
+enumDeprecated, maxUtf8ByteLength/pattern (free-text, preview-guarded).
+
+NOT yet live-verified: after merge+deploy, push a coercible detail (Department: "Unisex Adult" ->
+"Unisex") and an uncoercible one (Fit Type: "Unisex") — the latter must block with the accepted list.
+Low-risk note: a mis-parsed schema enum could false-block a valid value (pre-existing extractEnum
+heuristic, best-effort) — the seller sees the accepted list + can set it in Seller Central.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,29 @@
+feat(fba): per-suggestion rank chips on the Apply tab (Rank Top of Amazon, increment 1b)
+
+Tags the Variant Cohesion title/bullets rows + the Backend row with a "Content-
+winnable" or "Content done here" chip, so each suggestion carries its honest rank
+context at the point of action.
+
+CORRECT mechanism (fixes the council's ill-defined coveredIn-only mapping): an
+uncovered keyword has empty coveredIn, so it can't be mapped to a section by
+coverage alone. This combines the rank COVERAGE truth (rankData.rows: youCover +
+coveredIn) with the AI's PLACEMENT plan (keyword_reconciliation: placed_in +
+action_type) -- placed_in is what says WHERE an uncovered keyword should go.
+
+- 'winnable' (section): a genuinely-uncovered high-opportunity (CRITICAL/UPGRADE)
+  keyword is PLANNED for that section, cross-checked against rank coverage so an
+  already-covered term is never tagged.
+- 'done' (section): the section holds covered top keywords AND has none uncovered
+  planned -- rank now depends on reviews/price/velocity, not more copy.
+- else: NO chip (bias-to-show; ambiguous data never produces a false 'done').
+
+The chip is a header sibling -- it NEVER hides or disables Ship/Copy/needUpdate.
+Both new strings are asserted honest in scripts/verify-rank-honesty.mjs (10/10
+honest phrases pass; 0 over-promises).
+
+Adversarially reviewed (CLEAN on the honesty-critical no-false-'done' direction);
+fixed the 2 minor edges it found: guard a missing LLM-authored kr.keyword (render
+crash) + normalize whitespace (not just case) on the coverage cross-check. tsc
+clean. No server change, no migration.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

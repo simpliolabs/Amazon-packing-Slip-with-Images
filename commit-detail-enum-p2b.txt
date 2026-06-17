@@ -1,0 +1,34 @@
+feat(product-details): E part 2b — seller-picker for uncoercible enums + coerceToEnum substring (E complete)
+
+E Part 2b (Architecture A; uncoercible -> seller-picks, PO-approved). Completes the E feature.
+
+PICKER: an uncoercible enum (Material "100% ring-spun cotton") no longer hard-blocks. loadDetailContext
+now FLAGS enumInvalid (instead of erroring) so the push PREVIEW shows Amazon's accepted values as
+clickable chips; the seller picks the correct one and the PUSH writes that exact member. The push still
+BLOCKS if no valid value is chosen (never writes a non-member).
+- push-content: loadDetailContext(parentAsin, detailField, valueOverride?) + enumInvalid flag; GET preview
+  returns enum_invalid; POST parses detail_value_override + blocks when ctx.enumInvalid.
+- page.tsx: clickable accepted-chips picker in the push modal (enum_invalid), detailOverride state,
+  Confirm gated on a pick, confirmPush sends detail_value_override (passed as ARG — no stale closure).
+
+COERCION: coerceToEnum now also does WHOLE-WORD substring matching ("Unisex relaxed fit" -> "Relaxed" —
+the gap found in the P2a live-verify), unambiguous-only (>1 distinct match -> picker). Types: enum_*
+optional fields added to the 3 ProductDetailImprovement interfaces (page.tsx, listingPipeline, ai-recs).
+
+ADVERSARIAL REVIEW (subagent on the live-write path) found + FIXED before commit:
+- BLOCKER: the override was written VERBATIM with no membership check (a direct POST, not the UI, could
+  push junk; only backstop was VALIDATION_PREVIEW). FIX: the override now REPLACES the audit value but
+  STILL passes the enum validation below — a non-member override -> enumInvalid -> blocked. The override
+  skips the audit value, never the validation.
+- MAJOR: prefix-coercion had no ambiguity guard ("Cotton Blended" silently -> "Cotton Blend"). FIX:
+  auto-coerce only when the prefix match is UNAMBIGUOUS (one accepted value), else fall through to the
+  picker.
+- MAJOR: the details/override path had no length cap. FIX: 1000-char cap (details are short attributes).
+- MINOR (noted, not fixed): a transient schema-fetch failure degrades a known-enum to a raw push
+  (pre-existing best-effort; lower risk now that productType is process-cached).
+
+NOT yet live-verified: after merge+deploy, on B0G884ZJ27 — GET Material preview shows enum_invalid + chips;
+POST a valid pick ("Cotton") pushes; a bogus override is blocked; "Unisex relaxed fit" now auto-coerces
+to "Relaxed".
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

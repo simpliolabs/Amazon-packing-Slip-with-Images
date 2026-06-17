@@ -1,0 +1,43 @@
+Intelligence pool: promote the researched pool on load + never-collapse relevance gate
+
+PO 2026-06-15 (signed off "two surgical fixes + instrument"). Root cause of "Intelligence returned
+only 1 keyword" (B0GCPHGN4J) + the false-100% description starvation + "must manually refresh":
+the page READS keyword_analysis (?stored=true), but the rich Jungle Scout pool is WRITTEN to
+keyword_cache (source='keyword_research'). The only bridge (storeAnalysis) runs on a NON-stored
+sync, which page-load never triggers — and once even 1 stale SQP row exists, the promoter
+short-circuits. So a full pool researched today (researchedAt advanced) sat unpromoted while the
+page showed 1 SQP keyword. Verified live + by a 10-agent adversarial diagnosis.
+
+FIX 1 — SELF-HEAL PROMOTION (intelligence GET, storedOnly branch): if the stored analysis is thin
+(<=1 kw) AND a fresh research pool BIGGER than it exists, run a one-shot promotion
+(useStoredAnalysis:false bypasses the short-circuit) then re-read. The page now shows the rich pool
+on FIRST load — no manual refresh.
+  • CREDIT-SAFE (0 Jungle Scout credits), proven three ways: gated on freshResearchPoolSize() which
+    is getCachedResearch() (returns 0 when the cache is expired) so a spend can't be reached; even
+    when fresh, researchKeywords(forceRefresh:false) returns the cached pool BEFORE any paid fetch;
+    and every JS fetch is independently budget-guarded. New export freshResearchPoolSize() in
+    keywordResearcher.ts.
+  • IDEMPOTENT / no per-load churn: gated on poolSize > storedCount AND research newer than the last
+    analyzed_at; storeAnalysis stamps analyzed_at on a non-empty merge, so the next load's
+    researchNewer is false. The never-collapse floor guarantees the merge is non-empty, which is what
+    makes the no-loop property hold.
+
+FIX 2 — NEVER-COLLAPSE FLOOR + gate unification (syncKeywordIntelligence): the relevance gate (the
+soccer-pollution fix) is extracted into one shared helper applied in BOTH the fresh-research AND the
+cache-hit paths (previously only the fresh path gated — a cache-hit re-run re-stored UNGATED, a
+latent drift). FLOOR: if the gate would drop the ENTIRE pool (over-narrow / sparse-identity design,
+e.g. "my therapist gave up"), keep the pool UNFILTERED + warn — the gate is anti-pollution
+insurance, not a hard zero. This is what was starving thin-identity listings. Soccer protection is
+intact: the floor triggers ONLY on a total collapse, so as long as one on-identity keyword survives
+(soccer/world/cup) the family/graduation terms still drop.
+
+INSTRUMENT: always log the gate's kept/before counts (even when 0 dropped) + the research pool size,
+so prod logs disambiguate "gate stripped to zero" vs "research returned nothing" per listing.
+
+Adversarially reviewed (independent agent, read every credit-reachable path): no blockers; credit
+safety + no-loop + soccer protection all confirmed against the code. tsc 0. node_modules has no
+vitest in this sandbox. High blast radius (every listing's keyword pipeline + every Intelligence
+GET), so the change is defense-in-depth and additive (the floor only ever KEEPS more; the self-heal
+only fires on thin+stale+bigger-pool).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

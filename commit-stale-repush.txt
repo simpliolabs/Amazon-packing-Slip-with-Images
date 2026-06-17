@@ -1,0 +1,16 @@
+fix(push): "Push just the stale SKUs" now actually re-pushes them (was a silent no-op)
+
+PO hit this live: after a push, "Push just the 3 stale SKUs" closed without doing anything. Two bugs:
+
+1. SERVER (the real one): the selective re-push built its diff with a `.filter(d => d.changed)` FIRST.
+   `changed` compares the local CACHE, which the first push already write-through-updated to the new
+   title — so the SKUs that are stale on AMAZON (the verify checks live state) looked "matching" in the
+   cache and got filtered out -> "Nothing to push". Fix: for a selective re-push, FORCE the requested
+   SKUs (+ their FBA/FBM twins by shared ASIN) regardless of the cache; a FULL push still uses the
+   changed filter. Now the stragglers actually get re-submitted to Amazon.
+
+2. CLIENT: confirmPush did not clear the previous push's pushResults, so the re-push ran hidden behind
+   the old results view ("closed without action"). Now it clears pushResults too -> the re-push shows
+   its own loading + per-SKU progress.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

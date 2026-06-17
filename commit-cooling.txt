@@ -1,0 +1,27 @@
+feat(convergence): 7-day cooling-lock + per-section "Regenerate now" override (completes #79)
+
+PO directive (the lock half of "manual title + lock-in"): once the seller ships a section they're
+happy with, it must STOP regressing to "Do Now" while Amazon applies + ranks it. Pairs with the
+manual title scorer (#143): push a title you like -> it's locked for 7 days.
+
+- Regen verdict loop: a section whose last ACCEPTED push (keyword_push_log) was < 7 days ago is forced
+  to verdict=DONE with a "settling — locked Xd more" status, taking precedence over the live-match /
+  strong-score checks. This is what stops "scores regress after I ship" on a fresh score that dipped
+  while Amazon is still processing. Source of truth: keyword_push_log; NO migration.
+- Per-section override: POST body `regenerate_section` ('title'|'bullets'|'description'|'keywords'|
+  'all') bypasses the lock for that section. UI: a "↻ Regenerate this section now (override the 7-day
+  lock)" link on each settling section, wired through generateAiRecs(section).
+
+Code review (3 parallel reviewers, before any code) caught a real bug in the FIRST draft of this
+backend: the cooling query selected/ordered by `created_at`, but keyword_push_log's column is
+`pushed_at` (migration 015) — so the query threw, was swallowed by try/catch, and the lock did
+NOTHING. Fixed to `pushed_at`. (This is exactly why we research before writing.)
+
+Also hardened: generateAiRecs now takes an optional section arg, and the four existing
+onClick={generateAiRecs} call-sites were wrapped to () => generateAiRecs() so a click event is never
+passed as the section.
+
+Live behavior manifests after a real push (a recent accepted push log is required to trigger the
+lock) — will confirm once a section is pushed + regenerated.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

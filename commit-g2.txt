@@ -1,0 +1,19 @@
+G2': harvest the TOP-3 SOV competitors' keywords - same single credit (post-H10 Cerebro replacement)
+
+Phase 4 harvested only the #1 Share-of-Voice competitor. FACT from jungleScoutClient:
+keywords_by_asin takes up to 10 ASINs in ONE request (rows attributed via primary_asin) and
+the pipeline counts credits per CALL - so harvesting the top-3 competitors costs exactly what
+harvesting one did. With H10 cancelled this is the competitor keyword-mining lane, tripled
+for free. Research stays 4 credits total.
+
+- Phase 3 picks the top-3 SOV competitors (own ASINs excluded); #1 remains the stored/
+  displayed competitor (storeCompetitorMeta + rank panel unchanged).
+- Phase 4 fetches all three in one call; rows flatMap into competitorKeywords -> same merge,
+  bucketing (competitorMatch/competitorGaps), engine scoring, and #179 rank-overlay (which
+  already clears any competitor organicRank so it can never masquerade as ours).
+- Honest cap note: the page[size]=100 row limit now spans all three ASINs, volume-sorted -
+  top terms win; per-competitor depth shrinks, breadth triples.
+
+Strict superset of today's behavior when SOV returns a single competitor.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

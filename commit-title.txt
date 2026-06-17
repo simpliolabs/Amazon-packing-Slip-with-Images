@@ -1,0 +1,11 @@
+Title slogan truncation + blank-brand dedup + competitor-blank strip in bullets/description
+
+#1 (B0FKKN8XKV title "I Will Praise Him in Comfort Colors Tshirt Comfort Colors Christian"):
+- Slogan truncation: extractDesignName accept() capped design names at 6 words and leadingDesignPhrase capped the heuristic at 5 — so the 7-word scripture slogan "I Will Praise Him in Every Season" was cut to "I Will Praise Him in". Raised both caps to 8 (inspirational/scripture slogans run 7-8 words; STOP words still cap junk earlier). Verified the full slogan now survives.
+- "Comfort Colors" duplicated: deterministic backstop after title composition keeps the FIRST occurrence of the blank-brand pin and drops later exact repeats (the agent padded a short title with a second "Comfort Colors").
+
+#2 (PO: "why are DICKIES and Gildan here in bullets?"): competitor / OTHER blank brands (Gildan incl. the "gilden" misspelling, Bella Canvas, American Apparel, Fruit of the Loom, Dickies, Carhartt, Jerzees + their "softstyle" tail) leak from the Jungle Scout pool and mis-describe the actual blank (a Comfort Colors tee is NOT Gildan/Dickies). New stripCompetitorBlanks removes them from bullets + description, EXEMPTING the product's own blank (attributePin — a Gildan product keeps "Gildan"). Ambiguous tokens (champion/next level/anvil/district) deliberately excluded so real design slogans aren't harmed.
+
+9/9 unit tests, tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

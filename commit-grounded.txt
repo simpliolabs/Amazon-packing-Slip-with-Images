@@ -1,0 +1,44 @@
+fix(title): design-GROUND apparel titles + GPT-5 council + stop the scorer nagging clean titles
+
+LIVE verification of the title council (PR #135) FAILED: it ran end-to-end but still produced
+"THE CEO Later Gator Comfort Colors T-Shirt Vintage 90s Cool T Shirt Gator Shirts Later
+Alligator Shirt for Men and Women" (shirt 4x, gator 3x, ungrounded "Vintage 90s"). Root cause
+was NOT the council — it was the BRIEF: the title agent handed every persona a keyword
+candidateList + hard mandates ("include AT LEAST 3 UPGRADE keywords") + a forced verbatim
+mustInclude, AND validateTitle penalized the title for NOT carrying those keywords. Garbage in,
+garbage out — the council can't be cleaner than its brief allows. "Vintage 90s" is a
+high-search-volume keyword that is NOT on the design (a guess), pulled in purely by volume.
+
+THE FIX — the TITLE is now design-LED, the rest of the listing stays keyword-led:
+- Design-grounding gate (runTitleAgent, apparel only): builds a vocabulary from the design name +
+  what the image scan literally read (visionDesign) + the garment brand + audience. A keyword may
+  enter the TITLE only if every DISTINCTIVE word is on the design. Generic tone/structural/gift
+  words ("cool", "funny", "gift", "tee") are always allowed, so good phrases ("alligator lover
+  gift") survive while ungrounded CLAIMS ("vintage 90s", "retro") are dropped. The gate filters the
+  candidate pool AND upgradeKws AND — critically — the forced verbatim mustInclude (the primary
+  leak: it's mandated + hard-validated, bypassing the candidate filter). Nothing is lost: bullets +
+  backend build their keyword pools independently and still rank every ungrounded term.
+- Soft upgrade line for apparel: no more "MANDATORY #3 include AT LEAST 3" — design-led titles do
+  not chase keyword coverage.
+- GPT-5 on the council's adversary + judge (PO directive): the proposers stay on fast gpt-4.1-mini
+  for diverse drafts; the two reasoning calls run on GPT-5 (TITLE_COUNCIL_MODEL || gpt-5) with the
+  reasoning-model param shape (max_completion_tokens, no temperature, reasoning_effort low) and a 60s
+  budget. Fails open to the SEO/anti-stuffing draft, not the creative one.
+- Scorer (syncListingContent): waive the upgrade-keyword TITLE penalty for apparel. A clean
+  design-led title was being docked -3/-5 for "missing" upgrade keywords and re-triggering the
+  "ship" nag on an otherwise-perfect title — the exact 12/12-but-ship contradiction. Non-apparel
+  (where specs like 256GB/UHS-I ARE title search terms) keeps the penalty.
+
+Adversarial pre-ship review (standing directive) caught and FIXED two BLOCKERs before commit:
+1. mustInclude bypassed the gate entirely (the verbatim money keyword is the PRIMARY stuffing
+   channel) -> now grounding-gated. 2. The original all-words-grounded bar over-stripped good
+   keywords and could strand a title under 80 chars -> switched to a distinctive-words-only bar
+   (generic words always allowed). Also: GPT-5 reasoning could truncate the title to empty ->
+   raised the token floor + low effort + fail-open to the lean draft. attributePin was reviewed and
+   deliberately NOT gated (a garment brand is a product attribute, not a design claim — grounding is
+   the wrong test). Grounding predicate unit-tested on the Later Gator keyword set before commit.
+
+Will live-verify on Later Gator + Darlin' + a long-slogan design after merge — title must come out
+clean (no vintage 90s, shirt <=2x) with the score still endorsing it.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

@@ -1,0 +1,29 @@
+Title-fill reliability: fill apparel titles to ~73-75 chars (was stalling at 65-70)
+
+Batch item 3/6. PO 2026-06-15: "65/75, didn't use all chars" — clean apparel titles kept
+landing at 65-70, leaving the 75-char budget under-used. The fill block's trigger (<70) and
+break (>=70) capped it right where the PO saw the gap, and the filler pool ran dry when the
+top title candidates were already token-covered.
+
+Three surgical changes to the existing fill block:
+- Trigger <70 -> <73 (kick in for clean 70-72 char titles too).
+- Break >=70 -> >=73 (keep adding until the title reliably approaches the cap).
+- Filler pool now includes the high-value UPGRADE keywords (topUpgradeKws) alongside the
+  title candidates + canonical bigrams, so there's enough GROUNDED material to reach the
+  target instead of starving.
+
+All existing safety preserved per-addition: the 75-char hard cap (next+tail > 75 -> skip),
+the token-novelty check (adds nothing new -> skip), the gender-lean filter, and the
+motif/garment truthfulness strips run on every candidate. topUpgradeKws is already
+grounding-filtered and trademark-safe (#240 scrubs the published output too). A fill can
+still never smuggle back what a guard removed.
+
+tsc 0. node_modules has no vitest in this sandbox so pipeline.test.ts could not run, but the
+change is a contained numeric-threshold + filler-source edit with every guard intact.
+
+Note: the bullets-stuffing fix (the "keyword-stuffy bullets" batch item) is NOT in this PR.
+It needs a coverage-VALIDATOR relaxation too (a prompt-only tweak gets overridden by the
+"every word present" check that forces verbatim long-tail jamming), so it ships as its own
+PR rather than being rushed in here.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

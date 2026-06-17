@@ -1,0 +1,34 @@
+Trademark guard: never publish a protected mark ("World Cup" → "World Soccer Cup")
+
+PO 2026-06-15: "World Cup" is FIFA's registered trademark — they deliberately use "World Soccer
+Cup". The tool must never inject a protected mark into a published listing (risk: Amazon listing
+suppression + IP/account-health strike). Approved design: scope A (output scrub + seeds), substitute
+to safe phrasing where one exists, drop otherwise.
+
+This also closes a gap the Seed Agent (#239) opened: its examples used "world cup", and the relevance
+gate passes "world cup jersey" on a soccer listing (it checks relevance, not legality) — so without
+this, a re-research could pull FIFA-trademarked keywords into the title/bullets.
+
+New: src/lib/fba/trademarkGuard.ts — scrubTrademarks() / scrubTrademarksArr() / hasTrademark().
+Substitution map (extensible; per-seller config is a scope-C follow-on): World Cup→World Soccer Cup,
+Super Bowl→Big Game, FIFA/Olympics/NFL/NBA/MLB/NHL/NCAA→dropped. Case-preserving, idempotent (the safe
+phrase contains no mark), tidies artifacts from drops, word-boundary anchored (no false substring hits).
+
+Applied at the chokepoints (covers every exit path):
+- listingPipeline: a scrubPublished() helper wraps BOTH result chokepoints — the partialResult helper
+  (all partial-regen exits) AND the full return — scrubbing recommended_title, recommended_bullets,
+  recommended_description, and per_child_keywords[].keywords. Pool/Intelligence DATA is left untouched;
+  only text WRITTEN to Amazon is scrubbed.
+- keywordResearcher.selectSeeds: every seed path (manual/category/agent/rules) is scrubbed so we never
+  spend a JS credit RESEARCHING a trademark, and the Seed Agent prompt now instructs "World Soccer Cup
+  not World Cup" with trademark-safe few-shot examples.
+
+Verified: tsc 0. Unit tests — trademark 12/12 (World Cup→World Soccer Cup, FIFA World Cup collapse,
+ALLCAPS/Title-Case casing, idempotent, drop+tidy, word-boundary, the live "haitian jersey world cup
+2026" pool keyword), plus regressions seed-agent 6/6 · pollution 17/17 · niche 6/6.
+
+Scope honesty: scope A as approved. NOT covered (noted follow-ons): manual UI edits typed by the seller
+(scrub-at-push backstop), product-detail enum values (Amazon-schema-constrained, low risk), per-seller
+configurable list (scope C). per_child_titles scrub deferred until per-design titles ship.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
