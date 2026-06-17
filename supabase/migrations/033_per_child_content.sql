@@ -8,8 +8,10 @@
 --   per_child_bullets       jsonb array of { sku, asin, bullets: string[] }
 --   per_child_descriptions  jsonb array of { sku, asin, description: string }
 -- NULL/empty for single-design + non-apparel families — those keep the broadcast
--- recommended_bullets / recommended_description (unchanged behavior). The push route resolves a
--- child's value here first (same precedence as per_child_titles), else falls back to broadcast.
+-- recommended_bullets / recommended_description (unchanged behavior). PLANNED (PR3): the push route
+-- will resolve a child's value here first (same precedence as per_child_titles), else fall back to
+-- broadcast. Until PR3 wires pushExecutor/resolveProposed, these are persisted-only — the push still
+-- sends the broadcast bullets/description to every SKU.
 
 ALTER TABLE listing_seo_recommendations
   ADD COLUMN IF NOT EXISTS per_child_bullets jsonb;

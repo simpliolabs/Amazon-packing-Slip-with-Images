@@ -151,6 +151,8 @@ export interface AiRecommendations {
   recommended_keywords: string
   per_child_keywords: PerChildKeywords[]
   per_child_titles?: { sku: string; asin: string; title: string }[]
+  per_child_bullets?: { sku: string; asin: string; bullets: string[] }[]
+  per_child_descriptions?: { sku: string; asin: string; description: string }[]
   recommended_description: string
   variant_corrections: VariantCorrection[]
   cannibalization_warnings: CannibalizationWarning[]
@@ -998,6 +1000,8 @@ export async function POST(req: NextRequest) {
             recommended_keywords: result.per_child_keywords[0]?.keywords ?? '',
             per_child_keywords: result.per_child_keywords,
             per_child_titles: result.per_child_titles,
+            per_child_bullets: result.per_child_bullets,
+            per_child_descriptions: result.per_child_descriptions,
             recommended_description: result.recommended_description,
             variant_corrections: result.variant_corrections,
             cannibalization_warnings: result.cannibalization_warnings,
@@ -1024,6 +1028,9 @@ export async function POST(req: NextRequest) {
             keyword_reconciliation: rec.keyword_reconciliation,
             action_plan: rec.action_plan,
             per_child_titles: rec.per_child_titles ?? null,
+            // Per-design bullets/description (migration 033) — JSONB, only present for multi-design POD families.
+            per_child_bullets: rec.per_child_bullets ?? null,
+            per_child_descriptions: rec.per_child_descriptions ?? null,
             keyword_plan: result.keywordPlan ?? null,   // #92/#93 — read by the scorer (sync-time parity)
           }
 
