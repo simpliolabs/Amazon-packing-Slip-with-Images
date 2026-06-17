@@ -24,6 +24,8 @@ import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
+// Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
+import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 
 // ─── Shared output types (structurally identical to the route's interfaces) ────
 
@@ -3056,6 +3058,174 @@ function attributeAsKeyword(attr: string): AnalyzedKeyword {
   } as AnalyzedKeyword
 }
 
+// ─── Title helpers — extracted for single-design AND per-design multi-design reuse ──
+//
+// buildTitleFor wraps the existing runTitleAgent call + the 5 post-guards (motif-strip,
+// audience swap, fill-to-73, blank-brand dedup, brand-front, design-name backstop) so it can
+// be called once for a single-design family OR per group in a multi-design family. The single-
+// design path produces BYTE-IDENTICAL output to the pre-refactor inline block — that's the
+// regression bar. Captured-closure variables from runListingPipeline are passed as parameters.
+//
+// GUARD ORDER (do not reorder — see runTitleAgent for why each guard matters):
+//   1. Vision-hallucination strip (motif + garment)
+//   2. Hard audience enforcement
+//   3. Fill to 73 chars
+//   4. Blank-brand dedup
+//   5. Brand-at-FRONT
+//   6. Design-name backstop (re-anchor if capTitle75 truncated)
+//
+// motifTrust is computed INSIDE this function from input.canonicalTitle + input.repTitle +
+// designName, so per-design callers naturally scope grounding by passing a cloned input with
+// canonicalTitle = the group's child stored title (NOT the parent's canonical — that would
+// leak Design A's words into Design B's title; see commit2 pressure-test finding #3).
+async function buildTitleFor(
+  input: PipelineInput,
+  candidates: TitleCandidate[],
+  searchKeyphrases: string[],
+  titleMustInclude: string | undefined,
+  preferredAudience: string,
+  attributePinFinal: string | undefined,
+  topUpgradeKws: string[],
+  compatibilityBrands: string[],
+  designName: string,
+  lean: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null,
+  apparelProduct: boolean,
+  brandName: string,
+): Promise<{ title: string; problems: string[]; retried: boolean }> {
+  const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
+  const t = await runTitleAgent(input, candidates, searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
+  const titleProblems = t.problems
+  const retried = t.retried
+  // 1. Vision-hallucination backstop.
+  let finalTitle = apparelProduct ? stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()) : t.title
+  // 2. HARD audience.
+  if (apparelProduct && (lean === 'female' || lean === 'male')) {
+    const aud = lean === 'female' ? 'Women' as const : 'Men' as const
+    finalTitle = enforceHardAudience(finalTitle, aud)
+    if (!new RegExp(`\\bfor ${aud}\\b`, 'i').test(finalTitle)) {
+      finalTitle = capTitle75(`${finalTitle.replace(/\s+for\s+(?:men|women)(?:\s+and\s+(?:men|women))?\s*$/i, '')} for ${aud}`)
+    }
+  }
+  // 3. FILL the 75-char budget.
+  if (apparelProduct && finalTitle.length < 73) {
+    const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+    const tail = tailMatch ? tailMatch[0] : ''
+    let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
+    const headToks = new Set(bulletTokens(head))
+    const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
+    const MASC_T = /\bm[ae]ns?\b/i
+    const canonPhrases: string[] = []
+    const canonClean = (input.canonicalTitle ?? '').replace(/(\s+-\s+[A-Za-z][A-Za-z -]{1,24}){1,2}\s*$/, '')
+    for (const seg of canonClean.split(/[,\-–—|]/)) {
+      const segWords = seg.replace(/[^A-Za-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+      for (let i = 0; i + 1 < segWords.length; i++) {
+        const big = `${segWords[i]} ${segWords[i + 1]}`
+        if (bulletTokens(big).length === 2) canonPhrases.push(big)
+      }
+    }
+    for (const kw of [...candidates.map((c) => c.keyword), ...topUpgradeKws, ...canonPhrases]) {
+      const toks = bulletTokens(kw)
+      if (toks.length === 0 || toks.every((tt) => headToks.has(tt))) continue
+      if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
+      if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
+      const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+      if (safe !== kw) continue
+      const next = `${head}, ${titleCaseKw(safe)}`
+      if ((next + tail).length > 75) continue
+      head = next
+      for (const tt of toks) headToks.add(tt)
+      if ((head + tail).length >= 73) break
+    }
+    finalTitle = `${head}${tail}`
+  }
+  // 4. Blank-brand single-occurrence backstop.
+  if (apparelProduct && attributePinFinal && finalTitle) {
+    const re = new RegExp(`\\b${attributePinFinal.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
+    let seen = 0
+    finalTitle = finalTitle
+      .replace(re, (m) => (++seen === 1 ? m : ''))
+      .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
+  }
+  // 5. Brand-at-FRONT backstop.
+  if (apparelProduct && brandName && finalTitle) {
+    const brandRe = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+    const m = finalTitle.match(brandRe)
+    if (m && m.index !== undefined && m.index > 0) {
+      const without = (finalTitle.slice(0, m.index) + finalTitle.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').trim()
+      finalTitle = capTitle75(`${m[0]} ${without}`)
+    }
+  }
+  // 6. Design-name backstop.
+  if (apparelProduct && designName && designName.split(/\s+/).length >= 3 && finalTitle && !new RegExp(`\\b${designName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(finalTitle)) {
+    const brandMatch = brandName ? finalTitle.match(new RegExp(`^\\s*${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i')) : null
+    const head = brandMatch ? brandMatch[0].trim() : ''
+    const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+    const tail = tailMatch ? tailMatch[0] : ''
+    const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
+    finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
+  }
+  return { title: finalTitle, problems: titleProblems, retried }
+}
+
+// Multi-design parent (variation hub) niche-aware title. Children carry distinct designs that
+// SHARE A NICHE (B0F6QZ34B1's 3 fishing designs; or hiking/camping families). The parent is the
+// hub shoppers see in search results BEFORE picking a design — it must capture the NICHE and
+// product type WITHOUT naming any specific design. Reuses the existing runTitleCouncil (3
+// persona proposers → adversary critique → judge synthesis) with a parent-scoped brief; the
+// council infers the niche from the design names + top upgrade keywords. Single LLM call —
+// Karpathy simplicity: no separate niche-extractor stage. Post-guards: capTitle75 + brand-front
+// + blank-brand dedup. Design-name backstop SKIPPED (no single design name to anchor).
+async function buildNicheParentTitle(
+  openai: OpenAI,
+  brandName: string,
+  designNames: string[],
+  blankBrand: string | undefined,
+  preferredAudience: string,
+  productType: string | null,
+  topUpgradeKws: string[],
+  compatibilityBrands: string[],
+  onProgress: ((m: string) => void) | undefined,
+): Promise<string> {
+  const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'T-Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt')
+  const aud = preferredAudience || 'Men and Women'
+  const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
+  const upgradeList = topUpgradeKws.slice(0, 8).join(', ') || '(none)'
+  const compatList = compatibilityBrands.length > 0 ? compatibilityBrands.slice(0, 3).join(', ') : ''
+  const baseSystem = `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family where the children carry distinct DESIGNS that share a NICHE. The parent title is the variation hub shoppers see in search results BEFORE picking a specific design — it must capture the NICHE and product type but MUST NOT name any specific design.`
+  const baseUser = `Brand: ${brandName}
+Blank brand (if any): ${blankBrand ?? '(none)'}
+Product type: ${ptWord}
+Audience: ${aud}
+Child design names (DO NOT name any of these in the parent title — they belong to specific children): ${designNameList}
+High-value niche keywords from the keyword pool (use ONLY the ones that broadcast to ALL designs in this family — pick the niche-wide terms, skip design-specific motifs): ${upgradeList}${compatList ? `
+Compatibility (for-Brand framing if relevant): ${compatList}` : ''}
+
+Rules:
+- Brand FIRST. Then ${blankBrand ? `the blank brand "${blankBrand}", then ` : ''}the niche + product type, then optional supporting niche keyphrases that broadcast to ALL designs, then "for ${aud}" at the end.
+- HARD CAP 75 characters (Amazon auto-rewrites longer titles after July 27, 2026).
+- 50-75 chars; do not stuff. No design names, no design-specific motifs.
+- Read like a human wrote it. Return ONLY the final title string.`
+  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress)
+  let title = (judged || '').trim()
+  // Post-guards: capTitle75 + blank-brand dedup + brand-front. NO design-name backstop (intentional).
+  title = capTitle75(title)
+  if (blankBrand && title) {
+    const re = new RegExp(`\\b${blankBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
+    let seen = 0
+    title = title.replace(re, (m) => (++seen === 1 ? m : '')).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
+  }
+  if (brandName && title) {
+    const brandRe = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+    const m = title.match(brandRe)
+    if (m && m.index !== undefined && m.index > 0) {
+      const without = (title.slice(0, m.index) + title.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').trim()
+      title = capTitle75(`${m[0]} ${without}`)
+    }
+  }
+  return title
+}
+
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
 
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
@@ -3243,6 +3413,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // vision; the parent keeps a general title. For now we only OBSERVE it (no behavior change) so the
   // detection can be verified live before the per-design title build engages.
   const designGroupInfo = apparelProduct ? detectDesignGroups(input.children) : { isMultiDesign: false, groups: [] }
+  // PRESSURE-TEST FINDING #9: scorer (syncListingContent.scoreListingContent) docks bullet score
+  // when keyword_plan.designName is present but missing from a child's bullets. For multi-design,
+  // there is NO SINGLE family design name — each design has its own (in per_child_titles). Setting
+  // effectiveDesignName='' for multi-design prevents the false-negative bullet cohesion dock.
+  // Declared HERE (before partialResult) so partialResult's closure captures it.
+  const effectiveDesignName: string = apparelProduct && designGroupInfo.isMultiDesign ? '' : designName
 
   // Apparel with a clear DESIGN NAME: the design name anchors the title, so do NOT also FORCE a long
   // slogan keyword (e.g. "see you later alligator shirt") into it. Forcing both jams the same design
@@ -3269,6 +3445,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     recommended_bullets: scrubTrademarksArr(r.recommended_bullets),
     recommended_description: scrubTrademarks(r.recommended_description),
     per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubTrademarks(c.keywords) })),
+    // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
+    // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
+    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: scrubTrademarks(c.title) })),
   })
   const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => scrubPublished({
     recommended_title: input.priorTitle ?? '',
@@ -3282,7 +3461,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     keyword_reconciliation: [],
     action_plan: [],
     irrelevant_keywords: irrelevantKeywords,
-    keywordPlan: { bullets: [], designName },
+    keywordPlan: { bullets: [], designName: effectiveDesignName },
     debug: { titleProblems: [], candidatesUsed: [], titleRetried: false, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
     regeneratedSection: section,
     ...fields,
@@ -3290,112 +3469,79 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
 
   // Stage 1 — Title (skipped on a non-title partial run: the stored title is the anchor,
   // so e.g. regenerated bullets keep deduping against the title the seller already approved)
+  //
+  // BRANCH:
+  //   apparelMultiDesign → per-design loop (each group runs buildTitleFor → council via
+  //     runTitleAgent) + niche-aware parent via buildNicheParentTitle. Fans out per_child_titles.
+  //   single-design → ONE buildTitleFor call. Byte-identical output to the pre-Commit-2 inline
+  //     block (the regression bar — buildTitleFor was extracted verbatim from this block).
+  //   else (partial regen of a non-title section) → finalTitle = priorTitle anchor, unchanged.
+  // motifTrust is reused by later stages (bullets/description/keywords) for ungrounded-motif
+  // stripping, so it stays at the orchestrator scope. buildTitleFor recomputes its own from the
+  // (possibly group-scoped) input, so per-design grounding is correct.
   const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
+  const apparelMultiDesign = apparelProduct && designGroupInfo.isMultiDesign
   let finalTitle: string
   let titleProblems: string[] = []
   let retried = false
-  if (!only || only === 'title') {
-    onProgress('Writing title...')
-    const t = await runTitleAgent(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
-    titleProblems = t.problems
-    retried = t.retried
-    // Vision-hallucination backstop: strip VISUAL MOTIF claims ("heart") the seller's own
-    // text doesn't corroborate (live failure: vision read a heart into the Darlin' script
-    // font → "Heart Graphic Tee" recommended). Seller text = canonical + rep titles + design.
-    finalTitle = apparelProduct ? stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()) : t.title
-    // HARD audience (seller selected Male/Female outright): no opposite-gender word may
-    // survive, and the title must end with the chosen audience. The live failure shipped
-    // "THE CEO Darlin' Men's Heavyweight…" with no "for Women" tail on a Female run.
-    if (apparelProduct && (lean === 'female' || lean === 'male')) {
-      const aud = lean === 'female' ? 'Women' as const : 'Men' as const
-      finalTitle = enforceHardAudience(finalTitle, aud)
-      if (!new RegExp(`\\bfor ${aud}\\b`, 'i').test(finalTitle)) {
-        finalTitle = capTitle75(`${finalTitle.replace(/\s+for\s+(?:men|women)(?:\s+and\s+(?:men|women))?\s*$/i, '')} for ${aud}`)
-      }
-    }
-    // FILL the 75-char budget (PO: "61/75 — under-utilizing the title, WHY?"): after every
-    // truthfulness guard, append the highest-value UNUSED keyword phrases before the
-    // audience tail. Source = the already-filtered candidate pool (color/role/capacity
-    // keywords never reached it), then each addition re-passes the motif+garment strips —
-    // a fill can never smuggle back what a guard removed. Truthful AND maximal.
-    // Target ~73-75 (was 70): the old <70 trigger / >=70 break left clean titles at 65-70 with the
-    // budget unused (PO 2026-06-15: "65/75, didn't use all chars"). Trigger at <73 and keep adding
-    // (≤75) until >=73, so the title reliably approaches the cap with grounded, trademark-safe phrases.
-    if (apparelProduct && finalTitle.length < 73) {
-      const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
-      const tail = tailMatch ? tailMatch[0] : ''
-      let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
-      const headToks = new Set(bulletTokens(head))
-      const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
-      const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
-      const MASC_T = /\bm[ae]ns?\b/i
-      // The seller's OWN canonical descriptors join the pool (pre-trusted — their words about
-      // their product): for a 55–65 char title, "Vintage Rodeo" / "Country Western" are the
-      // best truthful fillers. Bigrams from the canonical title, variant suffix stripped.
-      const canonPhrases: string[] = []
-      const canonClean = (input.canonicalTitle ?? '').replace(/(\s+-\s+[A-Za-z][A-Za-z -]{1,24}){1,2}\s*$/, '')
-      // Bigrams WITHIN punctuation segments only — across a comma they'd splice nonsense
-      // ("…Graphic Tee, Vintage Rodeo…" must never yield "Tee Vintage").
-      for (const seg of canonClean.split(/[,\-–—|]/)) {
-        const segWords = seg.replace(/[^A-Za-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
-        for (let i = 0; i + 1 < segWords.length; i++) {
-          const big = `${segWords[i]} ${segWords[i + 1]}`
-          if (bulletTokens(big).length === 2) canonPhrases.push(big)
+  // Hoisted: multi-design apparel populates this in the title branch; the non-apparel capacity
+  // branch below populates it for single-design capacity families. Single-design apparel: stays undefined.
+  let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
+  if (apparelMultiDesign && (!only || only === 'title')) {
+    // PER-DESIGN TITLES (Phase 1 Commit 2). Each design group runs its own vision scan +
+    // extractDesignName + buildTitleFor (which internally invokes runTitleCouncil for apparel).
+    // Pressure-test mitigations applied:
+    //   - groupInput.canonicalTitle = group's child stored title (NOT parent canonical →
+    //     prevents cross-design fill-bigram leakage, finding #3)
+    //   - searchKeyphrases reused from parent's filtered pool (finding #1a)
+    //   - designNameOverride = null per group (override is parent-scoped, breaks per-design)
+    //   - vision scans parallel via Promise.all (3 designs ≈ +5s, not +15s)
+    onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
+    perChildTitles = []
+    const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
+      const groupChildren = group.skus
+        .map((s) => input.children.find((c) => c.sku === s.sku))
+        .filter((c): c is NonNullable<typeof c> => Boolean(c))
+      const repAsin = group.skus[0]?.asin ?? input.children[0]?.asin ?? ''
+      const groupRepTitle = groupChildren[0]?.title ?? input.repTitle ?? null
+      let groupVision = input.visionDesign
+      try {
+        const url = repAsin ? await getProductImageUrl(repAsin) : null
+        const identity = url && repAsin ? await scanProductImage(repAsin, url, { openai: input.openai }) : null
+        if (identity) {
+          groupVision = {
+            designTheme: identity.designTheme || '',
+            visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
+            seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
+          }
         }
+      } catch (e) { console.warn(`[pipeline] per-design vision ${repAsin} failed:`, e instanceof Error ? e.message : e) }
+      const groupInput: PipelineInput = {
+        ...input,
+        canonicalTitle: groupRepTitle,
+        repTitle: groupRepTitle ?? input.repTitle,
+        visionDesign: groupVision,
+        designNameOverride: null,
+        children: groupChildren,
       }
-      // Filler pool: title candidates + the high-value UPGRADE keywords (proven bullet traffic, already
-      // grounding-filtered) + canonical bigrams — more grounded material so the fill reliably reaches
-      // the target instead of starving when the top candidates are already token-covered.
-      for (const kw of [...candidates.map((c) => c.keyword), ...topUpgradeKws, ...canonPhrases]) {
-        const toks = bulletTokens(kw)
-        if (toks.length === 0 || toks.every((t) => headToks.has(t))) continue       // adds nothing new
-        if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
-        if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
-        const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
-        if (safe !== kw) continue                                                   // a guard objected — skip whole phrase
-        const next = `${head}, ${titleCaseKw(safe)}`
-        if ((next + tail).length > 75) continue
-        head = next
-        for (const t of toks) headToks.add(t)
-        if ((head + tail).length >= 73) break
-      }
-      finalTitle = `${head}${tail}`
+      const { name: groupDesignName } = await extractDesignName(groupInput)
+      const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName)
+      return { group, groupDesignName, ...r }
+    }))
+    const allDesignNames: string[] = []
+    for (const gr of groupResults) {
+      allDesignNames.push(gr.groupDesignName)
+      for (const s of gr.group.skus) perChildTitles.push({ sku: s.sku, asin: s.asin, title: gr.title })
+      titleProblems.push(...gr.problems.map((p) => `[${gr.group.key}] ${p}`))
+      retried = retried || gr.retried
     }
-    // Backstop: the blank-brand pin must appear ONCE. The agent sometimes padded a short title
-    // with a SECOND "Comfort Colors" (PO: "…Comfort Colors Tshirt Comfort Colors Christian").
-    // Keep the FIRST occurrence, drop later exact repeats — then tidy doubled spaces/commas.
-    if (apparelProduct && attributePinFinal && finalTitle) {
-      const re = new RegExp(`\\b${attributePinFinal.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
-      let seen = 0
-      finalTitle = finalTitle
-        .replace(re, (m) => (++seen === 1 ? m : ''))
-        .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
-    }
-    // Brand-at-FRONT backstop: live regression 2026-06-13 — the LLM produced
-    // "Comfort Colors Tshirt Comfort Colors Christian Graphic Tees THE CEO I Will Praise…"
-    // (brand "THE CEO" mid-title, slogan tail truncated by capTitle75). Amazon's title rules expect
-    // brand-first, and the design name is the highest-rank token after brand. So if the title
-    // contains the brand but doesn't START with it, move the brand to the front and re-cap.
-    if (apparelProduct && brandName && finalTitle) {
-      const brandRe = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-      const m = finalTitle.match(brandRe)
-      if (m && m.index !== undefined && m.index > 0) {
-        const without = (finalTitle.slice(0, m.index) + finalTitle.slice(m.index + m[0].length)).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').trim()
-        finalTitle = capTitle75(`${m[0]} ${without}`)
-      }
-    }
-    // Design-name backstop: if a multi-word slogan was extracted but doesn't appear (verbatim) in
-    // the title — almost always because capTitle75 cut its tail — re-anchor it after the brand.
-    // Drops any tail filler that pushed the slogan out so the slogan survives intact.
-    if (apparelProduct && designName && designName.split(/\s+/).length >= 3 && finalTitle && !new RegExp(`\\b${designName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(finalTitle)) {
-      const brandMatch = brandName ? finalTitle.match(new RegExp(`^\\s*${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i')) : null
-      const head = brandMatch ? brandMatch[0].trim() : ''
-      const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
-      const tail = tailMatch ? tailMatch[0] : ''
-      // Compose: brand + DESIGN NAME + (the rest minus brand minus tail) + tail, then cap to 75.
-      const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
-      finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
-    }
+    finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
+  } else if (!only || only === 'title') {
+    onProgress('Writing title...')
+    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName)
+    finalTitle = r.title
+    titleProblems = r.problems
+    retried = r.retried
   } else {
     finalTitle = (input.priorTitle || repTitle || '').trim()
   }
@@ -3404,8 +3550,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
   // carry its OWN capacity in the title; broadcasting one capacity to the others risks search
   // suppression. Apparel is excluded by apparelProduct AND never matches the capacity pattern,
-  // so its title stays the single shared/broadcast value untouched.
-  let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
+  // so its title stays the single shared/broadcast value untouched. (perChildTitles declaration
+  // hoisted to the title block above — multi-design apparel populates it there.)
   if (!apparelProduct && (!only || only === 'title')) {
     const childCap = new Map<string, string>()
     // Capacity from the SKU first (reliable — e.g. "...-32G-FBA"); the child's CURRENT title is
@@ -3541,7 +3687,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     onProgress('Bullets regenerated.')
     return partialResult('bullets', {
       recommended_bullets: bullets,
-      keywordPlan: { bullets: topOpportunityKwsForBullets, designName },
+      keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName },
     })
   }
 
@@ -3851,7 +3997,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
-    keywordPlan: { bullets: topOpportunityKwsForBullets, designName },
+    keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName },
     debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
   })
 }
