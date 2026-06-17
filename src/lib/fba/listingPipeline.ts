@@ -3083,6 +3083,23 @@ function attributeAsKeyword(attr: string): AnalyzedKeyword {
 // designName, so per-design callers naturally scope grounding by passing a cloned input with
 // canonicalTitle = the group's child stored title (NOT the parent's canonical — that would
 // leak Design A's words into Design B's title; see commit2 pressure-test finding #3).
+/** Final title cleanup for the per-child path: strip a DUPLICATE brand (keep the first occurrence,
+ *  drop later case-insensitive repeats) and collapse adjacent duplicate words ("Fishing Fishing" →
+ *  "Fishing"). The brand-FRONT guard only fixes a brand MISSING from index 0 — it leaves a second
+ *  mid-title brand intact (live on B0F6QZ34B1/OF: "THE CEO Only Fins T-Shirt the Ceo Fishing Fishing
+ *  Tee"). No-op on already-clean titles, so single-design output stays byte-identical. */
+function dedupeBrandAndStutter(title: string, brandName: string): string {
+  let t = (title || '').trim()
+  if (brandName && t) {
+    const re = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
+    let seen = 0
+    t = t.replace(re, () => (++seen === 1 ? brandName.trim() : ''))
+      .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
+  }
+  t = t.replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1') // "Fishing Fishing" → "Fishing"; "T-Shirt" is safe (no space)
+  return t
+}
+
 async function buildTitleFor(
   input: PipelineInput,
   candidates: TitleCandidate[],
@@ -3170,6 +3187,9 @@ async function buildTitleFor(
     const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
     finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
   }
+  // 7. Brand-dedup + adjacent-stutter cleanup (PR #272) — final pass. Guard 5 only fixes a brand
+  //    missing from the front; this removes a SECOND mid-title brand and collapses repeated words.
+  finalTitle = dedupeBrandAndStutter(finalTitle, brandName)
   return { title: finalTitle, problems: titleProblems, retried }
 }
 
