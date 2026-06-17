@@ -1,0 +1,29 @@
+Verify: exclude the variation parent from pass/fail counts (regression from #244/#245)
+
+PO 2026-06-15: every content verify showed "33 applied · 1 still stale · 34 SKUs checked" and the
+push "never marked complete" — the 1 stale being the non-buyable variation PARENT.
+
+ROOT CAUSE (verified live): #244/#245 added parent-exclusion to the PUSH (pushExecutor drops the
+diff row whose asin === parent_asin, because a content PATCH to the variation parent is always
+rejected for incomplete Shirt Size attributes). But verify-push was NOT given the same parity:
+- verify-push/route.ts:235-237 unconditionally adds the parent SKU to `targets` (isParent:true) for
+  broadcast fields, expectedFor returns the non-empty broadcast value for it, and the stale count
+  (line 272) had no !isParent guard. The parent never received the push → currentLive !== expected
+  → counted as stale. So verify could NEVER reach matched===total → "1 stale" forever, AND the
+  auto-verify cron (cron-verify-pushes) re-pushed the parent every tick / eventually flagged
+  needs_attention.
+
+Fix (parity with the push side, surgical):
+- verify-push/route.ts: score the buyable CHILDREN only — matched/stale/unknown/total are computed
+  over results.filter(r => !r.isParent); the parent stays in `results` (still visible) but out of
+  the counts, and a new `parentSkipped` field surfaces it. So verify reaches 100% (33/33) when all
+  children applied, instead of a permanent 33/34.
+- cron-verify-pushes/route.ts: guard the stale-SKU re-push list with !r.isParent so the cron never
+  wastes a no-op patch on the parent (the executor skips it anyway). Widened the result type.
+- page.tsx: the per-SKU detail list now labels the parent row "skipped (hub)" (violet) instead of
+  the alarming "stale" (amber), matching the count change.
+
+tsc 0. node_modules has no vitest in this sandbox. Surgical — only the count derivation + the
+parent's display label changed; the per-SKU live comparison and squash-match logic are untouched.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

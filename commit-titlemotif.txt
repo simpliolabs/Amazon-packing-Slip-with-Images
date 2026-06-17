@@ -1,0 +1,30 @@
+Title: stop the agent inventing a visual motif for slogan designs ("Cassette Tee" hallucination)
+
+PO 2026-06-15: B0GHH4MQ7N (a "Funny Gen X / Lots of Memories No Evidence" slogan tee) was titled
+"THE CEO Funny Gen X T-Shirt, Cassette Tee for Men and Women" — there is NO cassette in the design.
+Diagnosed from FACT: "cassette" was NOT in the keyword pool (74 generic "funny/sarcastic shirt"
+terms, no cassette) and the design name auto-detected as just "Funny Gen X" (missed the slogan). So
+"Cassette" is a pure title-agent HALLUCINATION.
+
+Root: the apparel title prompt instructs the agent to add a second phrase "built from the design's
+MAIN VISUAL SUBJECT" (e.g. "Alligator Shirt", "Skull Graphic Tee"). For an ABSTRACT slogan design
+with no concrete object, the agent invents a plausible one (Gen X → cassette). And the deterministic
+backstop stripUngroundedMotifs only strips words in a finite VISUAL_MOTIF_WORDS denylist, which
+didn't include "cassette".
+
+Two-part fix:
+1. PROMPT (source): ground the "visual subject" instruction — the subject MUST literally appear in
+   the design name/title; for a TEXT/SLOGAN design with no concrete object, do NOT invent an
+   object/prop/motif (cassette, guitar, skull, dog) — build the second phrase from the slogan THEME
+   or a TONE word instead ("Funny Gen X Tee", "Sarcastic Saying Shirt").
+2. BACKSTOP: add the nostalgia/everyday objects an LLM commonly invents (cassette, boombox, walkman,
+   vinyl, guitar, dinosaur, unicorn, llama, sloth, dragon) to VISUAL_MOTIF_WORDS — stripped ONLY when
+   the seller's own text doesn't corroborate them (a real cassette design keeps the word).
+
+This fixes the "invented object" class generally, not just "cassette". Note: getting the actual
+slogan ("Lots of Memories No Evidence") INTO the title still needs the design name to capture it —
+set the Design Name (or the design-name auto-detect improving) — that's a separate follow-up.
+
+tsc 0. node_modules can't run next build here — will WATCH the PR CI build.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

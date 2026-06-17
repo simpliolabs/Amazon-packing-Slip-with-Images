@@ -1,0 +1,8 @@
+Make "Last AI audit" timestamp visible (was tiny faint gray, PO couldn't see it)
+
+PO: "still not showing me last date I ran AI audit." The data + UI both existed
+(generated_at renders at line 1511) but as text-[11px] text-slate-400 — too faint
+to notice. Bumped to text-xs slate-600/800 with a "Last AI audit:" label, bold
+relative value, and an absolute date/time suffix. No logic change.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

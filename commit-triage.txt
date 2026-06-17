@@ -1,0 +1,9 @@
+Golf-tee triage: unisex-fit copy (fit != gender), comfort-colors bullet stuffing, Intelligence-tab refresh
+
+1. enforceHardAudience now strips the gender modifier off a fit/style/cut noun (keeps the noun) instead of swapping it, so a unisex blank never gets a fabricated "womens fit" (PO: Comfort Colors 1717 is a unisex relaxed fit). Matches both straight and curly apostrophes (the live bug used the curly form). Audience tokens ("for men"->"for Women") still swap. Plus a bullets-prompt guard: FIT IS NOT GENDERED (apparel).
+2. Blend-brand variant collapse in the bullet keyword pool (keep shortest form per blend base) so "comfort colors" is ONE opportunity, not seven -> stops the agent stuffing it into every bullet; scorer parity holds (same keyword_plan set). validateBullets backstop flags phrase overuse (blend/material >=3x triggers the rewrite loop) and customer-facing misspellings ("confort").
+3. Intelligence tab: fetch keyword intelligence keyed on asin (route param) on mount, in parallel with the score fetch, instead of gating on score.top_child_asin which resolved after render -> tab appeared only after a manual refresh. Endpoint resolves parent ASIN internally.
+
+16/16 unit tests, tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

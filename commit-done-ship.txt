@@ -1,0 +1,21 @@
+DONE vs Ship contradiction: broadcast sections need COHESION to be DONE
+
+PO screenshot pair: the cohesion row said "variants differ - unify" (Ship button)
+while the DESCRIPTION card said "DONE - already strong (25/25), no change
+needed" - about the same description. Quality vs consistency, but a seller gets
+ONE verdict.
+
+- The DONE gate (verdict-gating, sectionOptimal path) now also requires COHESION
+  for broadcast sections (title / bullets / description): distinct live versions
+  across children > 1 -> verdict REPLACE, priority MEDIUM, copy "Strong copy
+  (N/25) BUT your X variants carry Y different live versions - Ship once to
+  unify them." Matches the cohesion row instead of contradicting it.
+- The live-matched path stays DONE (everyChildMatches already implies cohesion).
+- Backend keywords exempt (unique per child by design).
+
+Plus the doubled-article nit from the same screenshot: "with the THE CEO
+Darlin..." - fixDoubledArticleBeforeBrand strips the article before THE-prefixed
+brands across title, bullets, and description (verified: no false hits on
+lowercase prose or non-THE brands).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

@@ -1,0 +1,30 @@
+fix(push): gate by SKU only, not by SKU+parent_asin — the parent_asin filter over-skipped healthy 0-unit listings
+
+#260's update-only gate filtered listing_health by both sku-target-set AND
+parent_asin. But listing_health.parent_asin is backfilled from the Sales-&-
+Traffic report (syncTrafficReport.ts:450) — and a 0-unit listing has NO row
+in that traffic report, so its listing_health.parent_asin stays NULL. The
+gate's `.eq('parent_asin', parentAsin)` then matched zero SKUs → every child
+flagged notLive → every child skipped, even though they're all real Active
+Amazon listings.
+
+Live evidence (2026-06-16 B0FKDDN44Z): verify-push showed 121 readable live
+children on Amazon, but the Ship Bullets dialog reported "Pushed 0/0, 121
+skipped (Missing offer/incomplete)". The gate was wrong, not Amazon.
+
+Fix: drop the redundant `.eq('parent_asin', parentAsin)` and gate by
+`.in('sku', targetSkus)` + `.eq('status', 'Active')`. The push targets
+ALREADY came from listing_content WHERE parent_asin=X — the parent linkage
+is established at that layer. The gate's only job is to answer "is this SKU
+a real live Amazon listing?", which the SKU-keyed query answers correctly
+regardless of whether listing_health's stale parent_asin column has caught
+up. Empty targets short-circuit; DB error still preserves push availability
+(activeSkus=null → no over-skip); true phantom rows (no listing_health
+entry) are still correctly skipped.
+
+This is the "dont-overgeneralize-specific-failures" pattern: #260 added a
+redundant defense (parent_asin filter) that ended up blanket-disabling
+pushes for the entire 0-unit listings cohort. Scope tightened to exactly
+the original intent: phantom-protection via SKU liveness, nothing more.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

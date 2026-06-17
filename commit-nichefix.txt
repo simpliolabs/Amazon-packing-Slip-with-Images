@@ -1,0 +1,19 @@
+Niche enrichment: read vision identity under PARENT asin too (was child-only → missed it)
+
+Live test of the niche enrichment on B0FKKN8XKV returned "No distinct niche detected" (0 credits).
+Adversarial review found why: getVisionIdentityRaw reads product_identity by the CHILD asin, but the
+vision scan WRITES the identity under the PARENT asin (ai-recommendations scanProductImage(parent_asin,…)).
+For a parent-rooted listing the read key never matched the write key, so identity came back null and
+deriveNicheSeeds (a pure function — correctly) returned []. deriveNicheSeeds itself was not the bug.
+
+Fix: enrichResearchWithNiche now accepts parentAsin and tries child identity, then parent identity.
+The intelligence route passes parentAsin through.
+
+NOTE (follow-up, not in this PR): if vision identity is genuinely empty for a listing (the OpenAI
+seller-key path can leave product_identity unpopulated), a design-name/canonical-title fallback seed
+source is still needed. We re-test ?enrich=niche after this lands; if B0FKKN8XKV still finds no niche,
+that confirms empty vision identity and the title-fallback becomes the next step.
+
+tsc 0, no migration, ≤2-credit behavior unchanged.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

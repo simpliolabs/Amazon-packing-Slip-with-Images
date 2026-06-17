@@ -1,0 +1,48 @@
+Ground-truth productType: kill the everything-is-apparel hardcode + schema-driven detail menu
+
+THE BUG (PO: sticky notes recommended as "...T-Shirt, Graphic Tee for Men and Women"):
+ai-recommendations hardcoded category 'Clothing, Shoes & Jewelry > ... > Novelty' for EVERY
+product, and looksApparel() text-sniffs category+title (\bclothing\b matches) -> every product
+was apparel unless rescued by a second hardcoded noun list (memory cards, mugs...) that did not
+know "sticky notes". Two stacked hardcodes; SELF_STICK_NOTE got the full apparel treatment in
+title, bullets, and description.
+
+THE FIX (no new hardcodes -- the live SP-API productType decides):
+- route: resolve productType ONCE before the pipeline (was fetched only AFTER, for enum
+  validation); pass it into PipelineInput; prompt category becomes the humanized PT
+  ("Self Stick Note") instead of the clothing path. PT lookup failure -> null -> byte-identical
+  legacy behavior (fail-open).
+- listingPipeline: looksApparel(category, repTitle, productType?) -- when PT is known it is
+  AUTHORITATIVE both directions (APPAREL_PRODUCT_TYPES token-boundary regex: SHIRT, SWEATSHIRT,
+  DRESS, ...). Kills the poisoned-category bug AND the feedback loop where a previously
+  contaminated live title ("...T-Shirt" pushed onto an office product) kept flipping it back to
+  apparel forever. All 8 call sites pass it.
+
+DYNAMIC DETAIL MENU (PO: "offer up to 10 values, dynamic per product category"):
+- productTypeDefinitions: new listPushableSchemaAttributes() -- enumerate the live product-type
+  schema's broadcast attributes (key + display title + accepted enum values via extractEnum),
+  excluding identity/structural/variation/image keys. Best-effort [] on schema failure.
+- runAuditAgent: inject the menu as "AMAZON ATTRIBUTE MENU" and switch the PRODUCT DETAILS rule
+  to "use ONLY these field names; enum values verbatim; pick the 5-10 highest-impact" -- every
+  recommendation is born mapped to a real attribute of THIS category. Department can no longer
+  be invented for sticky notes; adhesive/ruling/sheet attrs appear instead. Menu empty -> legacy
+  example-list prompt unchanged.
+
+WIRING COMPLETION (schema-detail mapping, part 2 of #164's direction):
+- ai-recommendations enum-validation block reuses the hoisted ptType/ptOpts (no duplicate
+  SP-API fetch); rows persist sp_api_key/attr_scope/pushable (prior commit on this branch).
+- page.tsx: ProductDetailImprovement carries sp_api_key/attr_scope/pushable; Push-vs-Manual
+  gates on pd.pushable ?? isPushableDetail(...) (old recs unchanged); per-variant rows get an
+  accurate "set it on each child SKU" hint.
+- verify-push: load the recommendation FIRST and prefer its stored sp_api_key (works for ANY
+  category); static map remains the legacy fallback.
+- push-content loadDetailContext: prefer the regen-stored sp_api_key when pushable (already on
+  branch); null-vs-undefined fix on the static fallback.
+
+Adversarial review (self, after 2x 529 on subagents): apparel families (SHIRT/SWEATSHIRT)
+verified unchanged at all 8 sites; fail-open paths byte-identical to today; menu titles
+round-trip exactly through resolveSpApiKeyFromTitle step-1; enum truncation happens at
+prompt-build (12/attr, 14 attrs). Known minor: a design-led non-apparel PT outside the old
+rescue list now gets generic (safe) framing instead of apparel framing -- intended.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

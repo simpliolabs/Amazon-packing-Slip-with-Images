@@ -1,0 +1,27 @@
+Push: exclude the variation parent from content pushes so the push marks COMPLETE (not 33/34)
+
+PO 2026-06-15: every content push to the Custom-listing showed "33/34, 1 failed" — the failure being
+the variation parent SKU (Custom-Cup-TS-Parent) with "the field 'size' for attribute 'Shirt Size'
+does not have enough values." Verified from FACT: our push sends a SINGLE targeted patch (e.g.
+replace /attributes/item_name) — it does NOT send size. But Amazon re-validates the ENTIRE parent
+record on any Listings PATCH, and the variation parent's required Shirt Size attributes (size_system/
+size_class/size — set at variation creation, not changeable on a parent once SKUs exist) are
+incomplete, so Amazon rejects it. A content push to the parent can therefore NEVER succeed.
+
+Fix: in the broadcast push branch (title/bullets/description/keywords), drop the variation parent
+(the diff row whose asin === parent_asin) from the target set. It's a non-buyable variation HUB — the
+buyable children carry the displayed content (all 33 succeeded). So the push now reports children-only
+= COMPLETE instead of a permanent "1 failed", and the success message notes the parent was skipped
+with the reason ("complete its Shirt Size System/Class in Seller Central if you want its record
+updated"). The "nothing to push" path also handles the parent-only case.
+
+This is the PO's explicit ask ("now parent has an error, the entire push is not marked as complete") —
+we make it complete by not counting a target that can never succeed, and we're honest about why.
+
+Scope: broadcast branch only (the fields the PO pushes — title/bullets/desc/keywords). The details
+(product-attribute) branch would also fail on the parent; same exclusion belongs there — noted as a
+small follow-up, not in this PR (the PO's active issue is the broadcast fields).
+
+tsc 0. Surgical (one filter + a message note).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

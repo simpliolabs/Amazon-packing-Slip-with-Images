@@ -1,0 +1,53 @@
+Title integrity: fix design-name extraction (Darlin'), color-neutral broadcast
+content, digit-letter presence bridge, score refresh after regen
+
+PO reports (B0FKLGWZ4C + B0GCF11RKL), all root-caused from production data:
+
+1. FABRICATED DESIGN NAME ("Urban Pulse"). The regen recommended "THE CEO Urban
+   Pulse T-Shirt Comfort Colors Black T Shirts..." for the Darlin' country-western
+   family - keyword_plan.designName was EMPTY, so the #91 anchor had nothing to
+   enforce and the agent invented a collection name. BOTH extraction paths failed
+   on this family:
+   - accept() compared the LLM answer (straight apostrophe "Darlin'") against the
+     canonical title's CURLY "Darlin'" via .includes -> rejected the CORRECT
+     answer. Fixed: normalize curly->straight on both sides before matching
+     (snapToSource still recovers the title's exact punctuation).
+   - leadingDesignPhrase() BROKE on word 1 of "Comfort Colors Darlin' T-Shirt..."
+     ("comfort" is a STOP generic) and returned '' - it could only find designs
+     at the very start of a title. Fixed: skip generics BEFORE the phrase starts,
+     stop at the first generic AFTER it. Verified vs the real canonical title:
+     now returns "Darlin".
+   - Brief hardening: when no design name resolves, the title agent is now
+     explicitly forbidden from inventing a design/collection name (must reuse the
+     current title's distinctive phrase or listed keywords).
+   With extraction fixed, the existing #91 validation REJECTS any title missing
+   "Darlin'" - "Urban Pulse" titles can no longer validate for this family.
+
+2. COLOR IN BROADCAST CONTENT ("Black T Shirts" recommended as the shared title
+   for 82 color variants). The JS research runs against ONE child (the black one)
+   and drags its color into the pool ("plain black tshirt men" was in the bullet
+   plan too). Color sibling of #188's capacity rule: on multi-variant apparel
+   families, BASIC_COLOR_RE keywords are now dropped from the title candidates,
+   the UPGRADE title-coverage list, the forced title pin, and the bullet plan -
+   and the SCORER applies the same filter (both plan + fallback paths) so
+   persisted plans heal on next re-score. Per-child backend keeps color terms
+   (each child gets its own color), and a design name containing a color ("Black
+   Cat") is unaffected - it flows via the verbatim anchor, not the pool.
+
+3. PRESENCE DIGIT-LETTER BRIDGE (B0GCF11RKL: "128 gb sd card" 10,042/mo flagged
+   K-only while the 128GB child's live title literally reads "SD Card for Camera
+   128GB"). tokenize/bulletTokens now split digit-letter tokens ("128gb" -> 128,
+   gb; "usb3" -> usb, 3) on BOTH sides (split-only keeps it symmetric), so solid
+   and spaced forms match each other. Verified: "128 gb sd card" and "128 gb sd
+   card for camera" now match the live title; "sandisk cards" stays missing ON
+   PURPOSE (Amazon policy: no competitor brands) and "standard" is a genuine gap.
+
+4. SCORES STALE AFTER REGEN (PO: "same score as before the audit, had to HARD
+   REFRESH"). generateAiRecs never refetched the score row after the regen
+   route's server-side re-score - only the push handlers did. Now refetches
+   no-store and updates the cards in place.
+
+tsc exit 0. No migration. The Darlin' family needs ONE regen after deploy to
+replace the fabricated recommendation.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

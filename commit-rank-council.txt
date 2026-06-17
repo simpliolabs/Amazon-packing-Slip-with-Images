@@ -1,0 +1,18 @@
+Wire OUR organic rank into the councils: striking-distance tiebreak + rank context in briefs
+
+Closes the last gap in the PO's wiring question ("is it completely actionable to the
+council?"): #179 stored our rank and showed it to the SELLER, but the generation councils
+never saw it - candidates carried only opportunity, briefs never said where we rank.
+
+- selectTitleCandidates: striking-distance tiebreak - rank #11-30 (page 2 / bottom of page 1)
+  wins the title spot among near-equal opportunity. Title placement moves THESE fastest;
+  #1-10 is already won, #100+ needs more than a title spot. Same ties-only contract as the
+  TD + outcome tiebreaks; no-op when rank unmeasured. Order: opportunity > TD > strike > rise.
+- Title brief candidate list annotates each keyword with rank context: "we already rank #6 -
+  defend" / "we rank #18 - STRIKING DISTANCE, title placement moves this fastest" / "#142".
+  The council debates with the rank reality in front of it.
+- Bullets council brief gains a CURRENT ORGANIC RANKS context line - deliberately SEPARATE
+  from the REQUIRED keyphrase strings (those are verbatim machine-checked by the coverage
+  validator + backstop; annotating them would break validation).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

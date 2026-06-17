@@ -1,0 +1,27 @@
+feat(product-details): validate-at-regen to exact Amazon values + productType cache (E part 2a)
+
+E Part 2a (Architecture A). Builds on part 1's shared coerceDetailValue + push guard.
+
+1. NEW src/lib/amazon/productType.ts — getProductType extracted from push-content + a process-lifetime
+   cache of SUCCESSFUL resolutions (the 'PRODUCT' fallback is never cached). Live-verify (B0G884ZJ27)
+   found enum resolution was INTERMITTENT — an attribute's enum resolved on one call and fell back to
+   free-text on the next — because getProductType occasionally hit the fallback. Caching makes it
+   CONSISTENT. push-content now imports the shared version (loadDetailContext + the ?debug branch).
+
+2. VALIDATE-AT-REGEN (ai-recommendations): after the audit produces product_details_improvements, each
+   pushable BROADCAST detail is coerced to an EXACT accepted enum member BEFORE being stored as the
+   recommendation. recommended_value is overwritten with the exact value (+ normalized_from); and
+   is_enum/enum_valid/enum_accepted are stored on the item for the panel's seller-picker (part 2b).
+   So the panel now shows CONFIRMED Amazon values for coercible details (Fit Type "Relaxed Unisex Fit"
+   -> "Relaxed") instead of the raw audit guess. Uncoercible enums (Material "100% Cotton") keep the
+   raw value + enum_valid:false; the push guard (part 1) still blocks them. Best-effort: any SP-API
+   failure leaves raw values (push VALIDATION_PREVIEW is the final backstop). getSellerId duplicated
+   (existing codebase pattern).
+
+NOT yet live-verified: after merge+deploy, regen B0G884ZJ27 and confirm the stored product details are
+coerced to exact members (Fit Type -> Relaxed) + Material carries enum_valid:false + enum_accepted.
+
+Part 2b (next): panel reads enum_valid/enum_accepted -> accepted-chips seller-picker for uncoercible
+dropdowns + a push value-override so the seller's pick is what gets written.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

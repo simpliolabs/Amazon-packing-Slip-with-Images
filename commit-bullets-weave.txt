@@ -1,0 +1,34 @@
+Bullets: stop keyword-soup — distribute keyphrase WORDS naturally, don't cram the literal phrase
+
+Batch item 4/6. PO 2026-06-15: bullets read like keyword soup — e.g. "Channel the haitian
+soccer jersey world soccer cup 2026 aesthetic", a whole long-tail search string jammed into
+one sentence.
+
+ROOT CAUSE (verified against bulletCoverage.ts): coverage is TOKEN-based, not phrase-based —
+missingBulletKeywords() only requires each significant WORD of a keyphrase to appear SOMEWHERE
+across the joined 5 bullets; the words can be SPREAD across different bullets and need NOT be
+contiguous. But two things told the model (and the code) to cram the literal phrase:
+  1. The generator prompt said "every word of the phrase present" + "LEAD bullets 1,2,3 with
+     the top three" — the model read that as "insert the whole phrase", producing soup.
+  2. The deterministic coverage backstop appended the ENTIRE keyword verbatim
+     ("…, haitian soccer jersey world cup 2026.") even when only ONE token was actually
+     missing — pure soup when most of the phrase was already present.
+
+A prompt-only tweak would have been overridden by the backstop, so this fixes BOTH sides
+without lowering coverage (the scorer uses the same token predicate):
+  • Generator prompt (REQUIRED SEARCH KEYPHRASES) + validateBullets retry message: reframe to
+    "coverage is by WORD — spread each phrase's key words across DIFFERENT bullets/sentences,
+    the full phrase need not be contiguous; NEVER cram a whole search string into one sentence",
+    with an explicit bad-vs-good example. Coverage is still required ("cover EVERY phrase").
+  • Backstop: weave only the STILL-MISSING tokens (the minimal fragment), not the whole phrase.
+    Coverage is token-based so the minimal fragment satisfies the scorer identically while
+    reading far less spammy. clause ⊆ kw, so the existing safeKw(kw) (role/brand/trademark
+    guards) already covers it — a subset can't introduce a token kw didn't carry.
+
+tsc 0. No coverage regression: the scorer + validator + backstop all share the same
+bulletCoverage predicate, and every keyphrase's tokens still end up present; only HOW they're
+distributed changes. node_modules has no vitest in this sandbox so the bullet tests couldn't
+run; the change is surgical (two prompt strings + a minimal-fragment backstop). Independent of
+the title-fill PR (different functions/lines in the same file — clean merge).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

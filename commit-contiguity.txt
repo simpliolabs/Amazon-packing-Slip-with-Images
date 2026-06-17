@@ -1,0 +1,14 @@
+fix(title): weld "<design> T-Shirt" as ONE phrase - stop splitting the #1 exact-match keyword
+
+PO caught it: the council produced "Later Gator Comfort Colors T-Shirt", which SPLITS the seller's
+single highest ranking opportunity "Later Gator T-Shirt" (the exact-match search phrase). Inserting
+the garment brand BETWEEN the design name and the product type destroys the exact-phrase relevance +
+proximity signal for the money keyword. The ideal keeps "Later Gator T-Shirt" contiguous, THEN the
+garment brand: "...Later Gator T-Shirt, Comfy Comfort Colors Alligator Shirt for Men and Women".
+
+Root cause was my own brief: it told the council to use the garment brand as an "ADJECTIVE directly
+before the product type", which contradicted the few-shot example and forced the split. Fixed both
+the attrPinLine and the structure instruction to WELD design name + product type into one unbroken
+phrase and place the garment brand AFTER it. Apparel only; non-apparel unchanged.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

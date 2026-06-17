@@ -1,0 +1,58 @@
+Titles <=75 chars (PR-B) + Item Highlights on the schema-details rails (PR-C)
+
+Amazon's July 27, 2026 rule: titles over 75 chars get AUTO-REWRITTEN in every category
+except media, and a new ~125-char Item Highlights field (comma-separated phrases) carries
+what the shorter title no longer can. The scorer learned the bands in #165; this flips the
+GENERATOR and turns on the dock, exactly as #165's comment planned.
+
+PR-B - title generation <=75 (listingPipeline.ts):
+- validateTitle: >75 problem (auto-rewrite warning) / <50 floor (was >150 / <80).
+- ALL prompt surfaces re-briefed: candidate guidance (1-2 keywords fit, rest -> bullets/
+  backend), apparel + non-apparel length rules (50-75 / 60-75, HARD CAP 75), mobile-cutoff
+  lines, retry prompt, brand-safety judge rewrite, council adversary (125 -> 75). The apparel
+  prompt's example title was itself 83 chars - replaced with an exactly-75-char shape.
+- Deterministic rails: brand-prefix guarantee now ALWAYS prefixes (cap trims tail, never the
+  brand); audience-widen guard un-gated; feel-word pad triggers <50 and caps at 75 (it would
+  have padded a perfect 70-char title); NEW exported capTitle75() final backstop - word-
+  boundary tail-trim, dangling connector/punctuation cleanup, and it DROPS a truncation-
+  mangled audience fragment (all inclusive forms: "for Men and/& Women", "Men's and Women's")
+  rather than silently narrowing it; acronym repair after Title-Case (Sd->SD, Usb->USB,
+  Uhs->UHS, Hd->HD, "128 gb"->"128GB").
+- Per-child capacity titles use capTitle75 with a capacity-survival re-insert: if the tail-trim
+  cut the swapped capacity token (the one thing that differs per child - the task-#90
+  regression class), re-insert at word 4 and re-cap.
+- syncListingContent: the >75 dock turns ON (-5) per #165's written plan - every listing now
+  has a compliant ready-to-ship draft after its next regen, so the dock makes the work-list
+  actionable; shipping the draft recovers the points the same day.
+- score-title route: >75 must NOT trip the red suppression banner (auto-rewrite != policy
+  suppression; the whole live catalog is 76-150 today and pushes fine) - guidance reaches the
+  seller via the problems list. Manual title editor hint: X/75 chars, amber >75 or <50 (was
+  "under 80 mobile cutoff").
+- Legacy V2 prompt RULE 1 (feeds the audit's keywordContext): <=75, 1-2 keywords.
+
+PR-C - Item Highlights (zero new endpoints/columns/UI):
+- buildItemHighlights(): DETERMINISTIC <=125-char comma-joined phrases from the gated keyword
+  pool (opportunity-desc), bullet-grade hygiene: no seasonal, no audience-narrowing role words,
+  no third-party brands, no capacity tokens on capacity families, nothing the title already
+  fully indexes (net-new index only).
+- Assembly: when THIS product type's live schema accepts item_highlights (menu-gated - before
+  Amazon ships the field there is NO row and NO fake Features gap), append it as a product-
+  detail row whose field_name is the schema's own display title -> the #166 resolver maps it
+  1:1 to sp_api_key -> Push button, verify-push, write-through and the Features score all ride
+  the existing schema-details rails. Audit-guessed "Item Highlights" duplicates are dropped
+  even when the deterministic build is empty (no unreviewed LLM guess on pushable rails).
+- listPushableSchemaAttributes: ALWAYS-INCLUDE item_highlights when the schema has it -
+  the 14-slot menu is filled in schema property order, so without this the feature could
+  silently never activate for whole categories (adversarial-review MAJOR).
+
+Adversarial review (subagent, 9 findings): MAJOR menu-ordering activation bug FIXED
+(always-include); capTitle75 possessive/"&" audience forms FIXED; per-child capacity-token
+loss FIXED; malformed audit row crash in dedupe FIXED (String guard); suppressionRisk
+over-flagging FIXED (reverted to true policy risks); stale 80-char editor hint FIXED;
+audit-guess survival when build empty FIXED. Accepted: no stemming in the title-covered
+check (plural echoes can spend a few highlight chars); dangling content-word after a cap
+(last-line backstop, normal path stays under 75 via prompts+retries); validateTitle still
+advises attributePin while the prompt says drop-if-over-75 (advisory-only churn of <=2
+retry calls; follow-up if seen live).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

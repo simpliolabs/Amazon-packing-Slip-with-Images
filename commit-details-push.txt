@@ -1,0 +1,42 @@
+Details push: fix HTTP-400 on invalid attrs + write-through/re-score + role-word & rank fixes
+
+The "A: GO" fix bundle + a live HTTP-400 the PO hit. All about making the
+product-detail push work 100% and move the Features score, plus two follow-ups.
+
+1. LIVE BUG — "Invalid payload provided, the provided attribute path is not valid"
+   (HTTP 400, 0/10 pushed). Pushing apparel attrs (Department/Fit Type/Fabric Type)
+   to a non-apparel product type (sticky notes) 400s because the attribute doesn't
+   exist in that product type's schema.
+   - NEW attributeExistsInSchema(productType, spApiKey) (productTypeDefinitions.ts) —
+     checks the live schema's properties; FAIL-OPEN (never blocks a valid push on a
+     fetch error).
+   - push-content details branch: GUARD before any PATCH — if the attribute isn't in
+     the schema, emit a clear "not a valid attribute for this product type" message
+     instead of N failed writes.
+   - ai-recommendations regen: DROP schema-absent broadcast attributes from
+     product_details_improvements, so they're never recommended, counted as a Features
+     gap (an unfillable permanent dock), or pushed. Root fix.
+
+2. FEATURES "push 8 → 12/12" — the details push had NO write-through and NO re-score
+   (unlike bullets/title), so the score never moved on push ("RED stays RED"). On a
+   successful details push it now sets current_value = the pushed value (+ enum_valid)
+   so productDetailsGaps drops, then re-scores — Features rises immediately, the same
+   ship→rise the bullets proved (15/25 → 25/25). field_name matched via
+   normalizeFieldName (robust to separators).
+
+3. "TEACHER" backend dead-end — the backend keyword CORE stripped role words, so the
+   regen could never add "later gator teacher shirt" to backend; the scorer's
+   keyword-intelligence gap was permanently unclosable and the rank work-list's
+   "Regenerate to weave it in" was a false promise. Role words are now KEPT in the
+   backend core (real SQP queries; generic_keyword is invisible indexing, not a
+   customer-facing claim). Bullets/title still strip them; the LLM-fill still strips
+   them (model-invented).
+
+4. RANK work-list STALE guard — return [] when rankData.stale, so it stops showing
+   "Ship — draft already covers them" off outdated coverage (PO saw it suggest
+   re-shipping bullets just pushed). Falls back to the honest "re-check in Intelligence".
+
+REVIEW: adversarial pass (1 reviewer, all 6 changes) → SOUND; applied its one
+hardening note (normalizeFieldName on the write-through match). tsc exit 0.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

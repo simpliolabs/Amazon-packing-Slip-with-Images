@@ -1,0 +1,22 @@
+Rank banner: name the gap keywords + one-click free Re-check (no more dead-end chip)
+
+PO: "NOTHING is actionable here and doesn't tell me what the 1 high opportunity gap is."
+Two causes: (a) the #164 stale-guard suppresses the actionable work-list whenever content
+changed (correct - stale coverage must not drive Ship/Regenerate buttons) but left only
+generic bullets behind; (b) the gap COUNT chip never named the keyword(s).
+
+- rank-analysis GET gains ?refresh=free: recomputes the FREE core live (0 JS credits,
+  0 OpenAI - pure DB + coverage math), carries forward prior PAID per-keyword SOV +
+  council realities BY KEYWORD (same merge as runCouncilAnalysis - a free re-check never
+  wipes paid competition data), persists with the fresh fingerprint (full upsert, every
+  column supplied), returns stale:false. no_keywords result -> no persist (never cache-mask
+  newly-synced keywords).
+- Banner stale chip is now a BUTTON: "Content changed - Re-check now (free)" -> refreshes
+  coverage inline; the per-gap Ship/Regenerate work-list returns immediately after.
+- Gap keywords are NAMED in the expanded panel even while stale ("as of last check"), so
+  the "N high-opportunity gaps" chip always tells you WHICH keywords.
+
+Known tradeoff: the chip is a role=button span inside the header button (stopPropagation
+guards the toggle); restructuring the header was out of scope.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

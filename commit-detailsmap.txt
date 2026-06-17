@@ -1,0 +1,16 @@
+Restore apparel product details (8→1 collapse): schema-bare fallback names + additive container fallback
+
+PO: B0FKKN8XKV regenerated with only 1 product detail (Item Highlight) instead of the usual 8+ (Neck/Sleeve/Closure/Fit/Material/Department/...). Investigated from facts (live schema + push debug), NOT assumptions:
+
+ROOT CAUSE (two compounding defects):
+- The live SHIRT schema exposes apparel attributes as CONTAINERS — `neck`/`sleeve`/`closure` (schema titles "Neck"/"Sleeve"/"Closure"), verified via push-content debug (resolvedVia=schema-title). The flat keys neck_style/sleeve_type/closure_type are NOT top-level properties.
+- (a) The static map (productDetailAttrs.ts) maps 'neck style'/'sleeve type'/'closure type' → neck_style/sleeve_type/closure_type. (b) The audit's NO-MENU fallback prompt literally instructs the LLM to use "Neck Style, Sleeve Type, Closure Type". The no-menu path triggers when productType resolution fails at regen time — i.e. during a deploy, exactly when the PO regenerated right after merging #222-#226.
+- Result: audit emits suffixed names → resolve to flat keys → attributeExistsInSchema=false → DROPPED. Only Item Highlight (title_differentiation, a real top-level key) survived. The healthy path (menu populated → bare "Neck"/"Sleeve") resolves dynamically and works — B0FRYMM56C has the full 8+.
+
+FIX (two changes, both verified zero-regression):
+1. Audit fallback prompt (listingPipeline.ts): use the schema's real bare names — "Neck, Sleeve, Closure" — and tell the model the suffixed variants are not valid top-level attributes. Only affects the no-menu fallback; the menu-populated path is untouched.
+2. containerKeyFallback (productTypeDefinitions.ts) — PURELY ADDITIVE: when a resolved key is absent from the live schema, strip a trailing _style/_type/_description and reroute to the container IF it exists. Wired into BOTH the audit filter (route.ts, before dropping) and the push (pushExecutor loadDetailContext, before coercion/shape). Fires ONLY on a would-be-drop, so a genuine flat-key apparel schema (where neck_style exists) is never rerouted. 8/8 unit tests incl. the key assertion that fit_type never reroutes to a non-existent "fit".
+
+Net: neck/sleeve/closure survive + push correctly whether emitted bare or suffixed, whether the menu is populated or empty. tsc 0, no migration. The composite push shape (#211 calibration) is unchanged — this only fixes WHICH key resolves.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

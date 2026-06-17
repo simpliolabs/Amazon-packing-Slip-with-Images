@@ -1,0 +1,27 @@
+Description scoring: stop false-greening a stale description (the dropped "GO description-scoring")
+
+PO 2026-06-15: "the description is STILL STALE… didn't you ship an update for it?" — honest answer:
+NO. The PO said "GO description-scoring" earlier and I got pulled into the soccer-pollution →
+trademark → Custom-listing-child cascade and never built it. This is that fix.
+
+Verified mechanism (live on B0GVW83L1P): the freshly-generated description IS current + soccer-themed
++ trademark-safe, but the scorer rated the LIVE (old) description 25/25 on a weak rubric (length +
+title-overlap only) → verdict "DONE · no change needed" → the seller was never prompted to ship the
+optimized copy, so the live description stayed stale.
+
+Fix: add a keyword-COVERAGE check to the description score. Of the top CRITICAL/UPGRADE keywords (the
+current high-opportunity terms), how many does the live description actually contain? A stale
+description on a re-themed listing misses most of them. Dock by the miss count so coverage <50% drops
+the score below the 'strong (>=23/25)' convergence threshold — so the section becomes actionable
+("ship the optimized description below to weave in: …") instead of reporting 100%/done. coverage <80%
+gets a lighter -3 info nudge.
+
+Surgical: one block added to the description scorer (syncListingContent 3c), reusing the existing
+scoringCtx.topCriticalKeywords/topUpgradeKeywords (same source the title's keyword-intelligence dock
+uses). tsc 0.
+
+Note: this lowers the SCORE + surfaces the "ship it" issue (directly fixing the "told it's 100%/no
+change needed" symptom). If the action_plan verdict needs to also flip DONE→REPLACE on a low score,
+that's a quick follow-on to confirm post-deploy.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

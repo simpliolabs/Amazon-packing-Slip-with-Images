@@ -1,0 +1,9 @@
+Per-section regen: scope the spinner to the regenerated section + clearer stream-died error
+
+PO: pressing "Regenerate title" made EVERY section's button show "Regenerating… hold on". Cause: the global aiLoading flag drove every per-section button's label. Added regenSection state (set to the section being regenerated, null for a full audit); each per-section button shows "Regenerating… hold on" ONLY when regenSection === its section — the others stay disabled (no concurrent regens) but show their normal label.
+
+"No recommendations received": the stream ended with no result AND no error event — almost always the request hit the container mid-redeploy (a merge had just deployed) or timed out. Both regen paths DO emit {type:'result', recommendations} (verified — not a partial-regen bug), so this is transient. Replaced the cryptic message with: "The audit didn't come back — the server may have been redeploying or the request timed out. Nothing was changed; wait ~1 minute and Regenerate again."
+
+tsc 0, no migration. UI-only.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

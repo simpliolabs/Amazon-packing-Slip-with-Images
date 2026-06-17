@@ -1,0 +1,37 @@
+feat(fba): Rank Top of Amazon — Competitive Rank Analyst (council + honest framing)
+
+Adds the "Rank Top of Amazon" panel to the listing-page Intelligence tab: an
+honest, evidence-based view of what content CAN and CANNOT do for organic rank.
+
+Backend (src/lib/fba/rankAnalysis.ts, /api/fba/rank-analysis/[asin]):
+- Free stored-core (0 JS credits, 0 OpenAI): top opportunity keywords x live
+  content coverage + a deterministic baseline verdict.
+- GET = 0-cost cache-read (staleness via content_fingerprint); degrades to the
+  free core if migration 021 isn't applied yet.
+- POST = full-5 council (3 analysts -> GPT-5 adversary -> GPT-5 judge), NDJSON-
+  streamed, fail-open to the deterministic baseline. OpenAI key from app_settings.
+- Opt-in ?competition=true: Jungle Scout Share-of-Voice, hard-clamped to
+  min(10, callsRemaining), credits counted from REAL billing, behind a 90s
+  ATOMIC run-lock that covers every POST.
+- HONESTY enforced server-side, not hoped: a banned-phrase validator (fail-closed
+  family match, global) clamps every LLM string; the CONTENT_CANNOT_DO / honest-
+  note floor is deterministic and immovable; the judge can only key realities to
+  exact playbook keywords. Proven by scripts/verify-rank-honesty.mjs (21/21
+  over-promises caught, 6/6 honest phrases pass).
+
+Shared extracts (no behavior change):
+- keyword-engine/coverage.ts  token coverage checker (scorer + rank share it).
+- fba/resolveAsin.ts  parent->child resolver (intelligence + rank share it).
+
+UI (RankAnalysisPanel.tsx, mounted in the kwintel tab):
+- Verdict (CAN/CAN'T do), playbook table, opt-in competition with a VISIBLE
+  credit-cost disclosure, stale badge, all states, AbortController + key remount.
+
+Migration 021 (listing_rank_analysis) MUST be applied to Supabase before the
+council can cache  GET works (free core) without it.
+
+Hardened by two adversarial-review passes (27 findings, all real ones fixed):
+non-destructive free re-runs (never wipe paid SOV), atomic lock, honest credit
+accounting, defensive UI shape-coalescing.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

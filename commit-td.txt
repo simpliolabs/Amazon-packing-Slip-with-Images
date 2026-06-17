@@ -1,0 +1,24 @@
+G3 Title Density end-to-end + CRITICAL: native re-sync no longer wipes imported keywords
+
+CRITICAL interaction fix (caught in adversarial planning BEFORE the PO hit the new button):
+cacheService.storeAnalysis deleted EVERY keyword_analysis row for the ASIN before inserting a
+fresh native sync - so the Re-research button (#177) would have wiped the PO's 44 imported
+keywords (#176) minutes after the import. Now: delete excludes data_source='import', and the
+insert becomes an UPSERT (onConflict asin,keyword) so a surviving imported row can't abort a
+chunk - on a keyword collision the FRESH native row wins (live presence flags + real SQP/JS
+metrics), which naturally graduates an imported keyword to native once our sources see it.
+
+G3 - Title Density (the H10 Cerebro metric we parsed and discarded):
+- migration 025: keyword_analysis.title_density integer NULL (import-only metric).
+- import route captures the Title Density column ("-" and blank tolerated) and persists it;
+  friendly "run migration 025" error if the column is missing (42703/PGRST204).
+- engine AnalyzedKeyword + cacheService read/write gain titleDensity (null for native rows).
+- storeAnalysis: defensive retry-without-column when 025 isn't applied yet - a native sync
+  must NEVER break on the new column (same fallback pattern as logPush).
+- selectTitleCandidates: TD tiebreak - among near-equal opportunity, prefer TD<=2 with
+  volume>=500 (an open lane the 75-char title can own; "college essentials" 33k/mo had TD=0).
+  Same contract as the outcome-loop tiebreak: ties only, never across tiers, no-op when null.
+- Intelligence tab: violet "TD n - title win" chip on qualifying keywords with a tooltip
+  explaining the play; the generator already prefers them on ties.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

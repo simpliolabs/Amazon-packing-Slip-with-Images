@@ -1,0 +1,25 @@
+Title scoring: penalize length over 75 chars on a real curve (was flat -5 regardless of overage)
+
+PO 2026-06-14: "if an old title that is 200 characters is scored at 18/22 Human team will not even
+go in to fix it, right?" Verified the cause: syncListingContent.ts:710 was a FLAT -5 for any title
+>75 chars — so a 76-char title and a 230-char title got the same penalty. Result: B0GQVL3K4B's
+230-char live title scored ~20/25 (~18/22 weighted, 82%) and looked "mostly fine" on the dashboard.
+
+New scaled curve: -5 base for crossing the 75-char cap, +1 per 10 chars over, capped at -20:
+  75 chars: 0 penalty (compliant)
+  76 chars: -5  (cross the line)
+  100 chars: -7  (warning, ship a draft today)
+  150 chars: -12 (severity flips to critical)
+  200 chars: -17 (close to suppression risk)
+  230 chars: -20 (penalty cap reached — title is the listing's biggest problem)
+
+The PO's exact 230-char title now scores 5/25 raw → 4/22 weighted → 18% — a real "fix this NOW"
+signal instead of a misleading 82%.
+
+Side change: dropped the redundant separate >200 branch (the new curve already escalates the
+severity to "critical" above 150, and the >200 message is folded into the dynamic action text).
+The 200-char hard-limit message ("suppression risk") still appears verbatim — driven by titleLen.
+
+tsc 0, 8/8 unit tests covering the curve at every breakpoint.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

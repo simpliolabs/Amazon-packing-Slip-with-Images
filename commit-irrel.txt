@@ -1,0 +1,21 @@
+Intelligence: fix IRRELEVANT keyword action text (was telling seller to ADD off-product keywords)
+
+PO 2026-06-14: B0GQVL3K4B's Intelligence tab shows Star Wars father's-day keywords ("i am your
+father star wars shirt", "star wars fathers day", etc.) labeled OFF-PRODUCT — correct — but the
+action column says "OPTIONAL — weave into bullets/backend if natural". That's exactly the
+WRONG advice — adding off-product keywords would dilute the listing's relevance.
+
+Root cause: rankAnalysis.ts:141 contentActionFor() falls through to the "OPTIONAL" text for any
+actionType that isn't CRITICAL/UPGRADE/DEFENDED — including IRRELEVANT. Added IRRELEVANT to the
+top of the branch with the correct directive: "SKIP — off-product (different niche). Do NOT add
+— it would dilute your relevance."
+
+The OFF-PRODUCT badge already rendered correctly; only the action text was misleading.
+
+NOTE: The deeper relevance-gate-at-pool-entry (so Star Wars terms never enter research in the
+first place) is queued as a follow-up — this is the immediate user-facing copy fix so the seller
+isn't told to add the wrong keywords RIGHT NOW.
+
+tsc 0, no migration. 1-line behavior change.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

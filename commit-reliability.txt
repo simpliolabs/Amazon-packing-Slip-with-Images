@@ -1,0 +1,11 @@
+Push reliability: verify squash-compare (no false "stale") + bulk-stream watchdog (no forever-"Pushing")
+
+Two real bugs found while diagnosing a B0FRYMM56C Auto Push the PO saw "running 40 minutes" — it had actually COMPLETED (live: Sleeve applied as "Short Sleeve" on all 65 SKUs):
+
+1. verify-push falsely reported applied composites as "stale": it compared the API token we push ("short_sleeve") against the display label Amazon returns ("Short Sleeve"). Now matches = exact-trim OR squash-equal (lowercase + strip non-alnum) — semantically identical modulo case/punctuation. (B0FRYMM56C Sleeve showed 0/65 matched despite being fully applied.)
+
+2. The bulk Auto Push stream could hang the modal on "Pushing..." forever when the connection dropped (Coolify/Cloudflare kill long requests ~100s; the server keeps running and finishes). Added a 60s stall watchdog: if no chunk arrives, cancel the reader and surface "connection dropped — the push usually finishes server-side; Verify live to confirm; re-run to finish stragglers (idempotent)". Resets on every chunk.
+
+tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

@@ -1,0 +1,24 @@
+Re-research auto-chain: one click runs research → refresh pool + rank → regenerate content
+
+PO 2026-06-15: "why do I have to manually refresh and separately Regenerate — isn't one automatic
+step the logical flow?" It was 3 manual steps because re-research is fire-and-forget server-side
+(intelligence POST returns immediately, no completion signal) so the UI could only say "reload to
+see," and Regenerate was a separate button.
+
+Approved design (full auto): the Re-research button now chains the whole flow.
+- Backend: the stored-intelligence GET (?stored=true) now returns `researchedAt` (the real
+  keyword_cache.fetched_at research timestamp), so the UI can DETECT completion deterministically
+  rather than guessing from pool content. Best-effort (null if absent → graceful fallback).
+- Frontend (listing page): clicking "Re-research + Rewrite" now (1) snapshots the current
+  researchedAt, (2) POSTs to start the background research, (3) polls ?stored=true every 8s until
+  researchedAt advances (or a 3-min timeout), (4) auto-refreshes the pool + rank, then (5) calls
+  generateAiRecs() to rewrite the content from the new keywords. Staged progress messages
+  (Researching → New keywords in → Done). Button label → "Re-research + Rewrite (4 JS credits)".
+
+Safe: regenerate produces a DRAFT the seller reviews before shipping — nothing auto-publishes. On
+timeout it falls back to the old manual message. No new server infra (frontend poll). The displayed
+keyword tables keep the raw JS strings per the PO's choice (only PUBLISHED content is trademark-scrubbed).
+
+tsc 0. UI/flow change; no migration, no unit-testable pure logic (polling/orchestration).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

@@ -751,7 +751,11 @@ async function cacheResearch(asin: string, result: KeywordResearchResult): Promi
   }
 }
 
-async function getCachedResearch(asin: string): Promise<KeywordResearchResult | null> {
+/** Pure DB read of the enriched research pool (source='keyword_research'): the seed-pool niche
+ *  merge (#270) + universes (#280, tagged fromUniverse). Returns null on miss/expiry/error — every
+ *  null path lets the caller fall back to the raw pull. Spends NO JS credits. Exported so the sync's
+ *  cache-hit path can re-store the enriched pool instead of the raw per-ASIN pull (the #283 fix). */
+export async function getCachedResearch(asin: string): Promise<KeywordResearchResult | null> {
   try {
     // Only select columns that actually exist in keyword_cache
     const { data } = await supabase

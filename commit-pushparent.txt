@@ -1,0 +1,34 @@
+Push: update the variation parent again (revert the #244/#245 blanket skip — it was an over-generalization)
+
+PO 2026-06-15: "why is it not updating parent and skipping them? this was not the case in previous
+versions." Correct — and verified from FACT:
+  • git: commit 7d21f06 (#244, "so the push marks COMPLETE not 33/34") is what INTRODUCED the skip.
+    Before it, every push targeted the parent too.
+  • live: B0GCPHGN4J's parent (Therapist-Gave-Up-Crew-P) has an EMPTY live title — it genuinely
+    needs the push, and it's a normal Comfort Colors listing, NOT Amazon Custom.
+
+Root cause: #244/#245 took ONE Amazon Custom family (B0GVW83L1P) whose incomplete Shirt Size made
+its record reject any PATCH, and turned "skip THAT parent" into "skip EVERY variation parent". The
+parent's title/bullets/description are part of the DISPLAYED record, so this silently stopped every
+normal parent from updating its content — the regression the PO saw.
+
+Self-correction: PUSH the parent again (restores pre-#244 behavior), but keep #244's legitimate goal
+(don't let the parent make the push read "broken"). New shared helper summarizePush() computes
+pass/fail over the buyable CHILDREN and reports the parent's own outcome as a NON-BLOCKING note:
+  • normal parent accepts → "(Variation parent hub also updated.)" — parent content now updates.
+  • Custom/incomplete parent rejects → "(parent hub rejected — complete its Shirt Size in Seller
+    Central; the buyable variants shoppers see were updated.)" — children still read 33/33 complete.
+This is strictly better than BOTH prior states (#244 hid the parent entirely; pre-#244 showed
+"33/34, 1 failed"). The push loop already handles per-SKU failures gracefully, so attempting the
+parent is safe; a successful parent push now also write-throughs its listing_content row.
+
+Applied to the broadcast (title/bullets/description) and single-detail paths. The bulk Auto-Push
+path (per-field tally — structurally different + riskier) is left for a focused follow-up and noted;
+it still skips the parent for now (no worse than today). Composes with the verify fix (#251): a
+now-pushed normal parent shows "✓ applied" in verify; a Custom one shows "skipped (hub)".
+
+tsc 0. node_modules has no vitest in this sandbox; the change restores prior behavior + centralizes
+the count/note logic in one reviewed helper. Adversarially self-reviewed (normal-succeeds /
+custom-fails-gracefully / verify-composition / cost paths).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

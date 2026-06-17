@@ -1,0 +1,58 @@
+Bullets coverage + features materiality + actionable rank work-list (BIG SWEEP)
+
+Closes the "bullets say HIGH but score 9/18", "Features 10/12 but 8 to push",
+and "rank panel is beauty, not actionable" gaps in one pass. Root cause of 9/18:
+the scorer, the bullet generator, and the validator each measured a DIFFERENT
+keyword universe with a DIFFERENT gate — no single source of truth, no floor.
+
+WHAT CHANGED
+1. Shared coverage predicate — src/lib/keyword-engine/bulletCoverage.ts (one
+   BKW_STOP, token-based missingBulletKeywords). Scorer (syncListingContent) AND
+   the bullet validator/backstop (listingPipeline) now import the SAME predicate,
+   so the generator covers EXACTLY what the scorer docks for.
+2. Align the bullet gate — validateBullets triggers at >=2 (scorer's first tier,
+   was 3+ from a different list); bullet opportunity pool word-cap 5 -> 6; the
+   council brief now HARD-REQUIRES the scored set ("REQUIRED SEARCH KEYPHRASES…
+   cover EVERY one"), not 3 from a different array.
+3. Deterministic coverage backstop — guarantees the scorer's opportunity keywords
+   (+ design name) land in the bullets even on an LLM bad day, mirroring the title
+   design-name floor. Runs LAST (after the brand-safety judge). safeKw() enforces
+   EVERY invariant itself (no upstream re-strip after it): drops all-stopword
+   phrases, capacity tokens in capacity families, role-leaks, AND unframed
+   third-party brand / trademark keywords (a verbatim append can't add 'for
+   [Brand]' framing — that hole was caught in adversarial review). At most ONE
+   short clause per bullet (no keyword-soup).
+4. Design name into bullets — oppPlusDesign prepends the seller's design name so
+   it leads the brief and is guaranteed by the backstop (title + backend already
+   enforce it; #91/#92/#159).
+5. Features materiality (#85) — productDetailsGaps now counts only TRUE gaps
+   (empty value OR enum-invalid), not the full proactive spec-sheet length that
+   docked already-filled fields. Enum validation now runs BEFORE the regen-time
+   score and uses the SAME predicate as the sync, so the Features score no longer
+   steps DOWN on the next sync with no seller action.
+6. Scorer bullet universe capped to <=6 words to match the generator's pool — the
+   scorer no longer docks for a long-tail the generator deliberately won't force.
+7. Actionable rank work-list — the "Rank Top of Amazon" panel now shows concrete
+   tasks ("Ship bullets — draft already covers them" vs "Regenerate to weave them
+   in") wired to the real Ship / Regenerate controls, using the SAME token
+   predicate. For capacity families the title Ship distributes divergent per-child
+   titles, so "draft covers it" is judged against EVERY per-child title (no false
+   promise for non-base SKUs — adversarial-review finding).
+
+VERIFICATION
+- npx tsc --noEmit -p tsconfig.json -> exit 0 (clean).
+- scripts/verify-rank-honesty.mjs -> 21/21 over-promises caught, 10/10 honest pass.
+- Internal adversarial review (3 reviewers + per-finding verifier) surfaced 8 real
+  findings; all 8 fixed in this commit before push.
+
+DELIBERATELY DEFERRED (flagged, not skipped)
+- Scorer cross-section design-cohesion PENALTY: the sync scorer can't get the real
+  design name (extractDesignName is async/needs pipeline input); the title heuristic
+  is capacity-unsafe. Generation already guarantees the design name in every section,
+  so the penalty is a follow-up that persists the real design name for the scorer.
+- Full KeywordPlan unification: this aligns the predicate + word-cap; the deeper
+  source/gate unification (same DB rows + same coverage gate on both sides) is the
+  remaining residual that can still, rarely, leave a <=6-word scorer keyword the
+  generator never sees.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

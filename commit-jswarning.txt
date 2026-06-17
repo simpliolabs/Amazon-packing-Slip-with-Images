@@ -1,0 +1,28 @@
+Jungle Scout: system warning as call usage approaches the cap (before $0.05 overages)
+
+PO 2026-06-15. Root cause of the "1 keyword / Intelligence tab empty" saga (proven by the
+manual-seed test + the JS dashboard): the Jungle Scout key was at 100/100 FREE calls — exhausted —
+so keyword research returned empty for every seed. The PO purchased the 1,000-call/mo plan ($0.05/
+call overage); a post-purchase re-research of B0GCPHGN4J now returns 8 real, on-product keywords
+(dataSource jungle_scout), confirming the data feed is live again.
+
+PO ask: "set up a system warning for how many calls we used before we go overages." The hard cap
+(JUNGLE_SCOUT_MONTHLY_BUDGET=950) already PAUSES research 50 calls below the 1,000 plan limit, so
+this adds visibility BEFORE that:
+- getApiUsageStats() now computes a warningLevel + message: 'approaching' at >=80% of the cap,
+  'critical' at >=90% (names the 50-call overage buffer), 'paused' at the cap (research paused to
+  avoid $0.05/call overages). Adds planLimit (1000) + remaining to the stats.
+- The intelligence route threads warningLevel/warningMessage into apiUsage.
+- ApiUsageMeter renders the warning under the bar (amber at 'approaching', red at 'critical'/
+  'paused') so it's visible wherever the meter shows.
+
+NOTE for the PO (not code): our monthly counter (api_usage_this_month) already counts ~120 calls
+from the free tier + this session's diagnostics, while the fresh paid plan started at 0/1000. So the
+warning/cap fire ~120 calls EARLIER than the plan's real usage — conservative/safe (warns sooner),
+but it "spends" headroom. If you want the full 950 of the paid plan, reset that monthly counter to 0
+to align it with the fresh plan — say the word and I'll do it.
+
+tsc 0. Surgical: one stats helper + the meter component + the route passthrough. Will watch the CI
+build before calling it ready (the #254 lesson).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

@@ -1,0 +1,5 @@
+Listing Optimizer: show + optimize more than the top 10 best-selling parents
+
+PO: the dashboard hard-capped the optimizer grid to the top 10 best-selling parent ASINs (route fetched 20, filtered ghosts, sliced 10). Now configurable: GET ?limit=N (default 25, clamp 1..200, 2x headroom for ghost-filtering) + hasMore flag; the dashboard defaults to 25 and adds a "Show more sellers (next 25)" button that extends the same 30-day-sales-ranked list. Heading updated to "ranked by 30-day sales · showing N". Sales ranking unchanged so highest-impact listings always lead. tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

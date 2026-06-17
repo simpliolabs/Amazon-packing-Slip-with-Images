@@ -1,0 +1,23 @@
+feat(push): advisory "mostly lateral" hint on backend-keyword pushes (C1)
+
+PO kept hitting a 100+-SKU "Ship Backend Keywords" prompt for a ~95%-identical rewrite and
+rightly asked "is this overkill? how is this a keyword-score improvement?" It usually ISN'T:
+the keyword score (syncListingContent) only improves when the backend (a) fills a short field
+(length/byte/comma deductions) or (b) covers a previously-missing top keyword. A swap between two
+already-full, ~same backend strings moves none of those — it is lateral churn.
+
+C1 is ADVISORY ONLY — it never hides or disables the Confirm button. In the keyword Ship modal it
+shows a soft sky note when EVERY changing child is already at full strength (>=200 chars, <=250
+bytes, comma-free -> no length/byte/comma penalty left to fix) AND every child's recommended terms
+overlap >=70% with its live terms (few new tokens -> ranking terms already indexed). Copy is
+deliberately hedged ("unlikely to move your keyword score... push only if a major missing keyword
+is being added") and redirects the real lever to title/bullets -- because client-side we cannot see
+the opportunity-keyword list, so we inform rather than guarantee.
+
+Why advisory, not an auto-DONE gate: an earlier auto-suppress attempt (Option C v1) was caught by
+adversarial review -- it assumed the keyword score moves ONLY via missing-keyword coverage and
+ignored the length/byte/comma/title-overlap deductions, so it would have FALSE-marked a short-backend
+listing "done" and hidden a real +4-8 gain. Hiding a push demands a faithful before/after re-score;
+a soft hint does not. So this ships the safe half now.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

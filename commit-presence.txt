@@ -1,0 +1,28 @@
+fix(push): gate by presence in listing_health + non-pushable-status deny-list, drop strict status='Active'
+
+#260 was over-strict via parent_asin. #262 was over-strict via status='Active'.
+Both rejected healthy listings whose status string isn't the literal 'Active'.
+
+Live evidence: B0FKDDN44Z's 121 TCEO-HIHSM-* children are all real, PATCH-able
+Amazon listings (verify-push: total=121, matched=107, stale=14, parentSkipped=1)
+— yet the push dialog reported "0/0 pushed, 121 skipped". Root cause:
+listing_health.status is the verbatim value from GET_MERCHANT_LISTINGS_ALL_DATA,
+which classifies print-on-demand qty=0 children as 'Inactive' (still real PATCH-
+able listings) and freshly-created variations as 'Unknown' (syncListings.ts:216's
+`|| 'Unknown'` fallback). Both are healthy from Amazon's PATCH perspective; both
+were rejected by .eq('status', 'Active').
+
+Correct predicate: row PRESENCE in listing_health is the "is this a real Amazon
+listing" signal — syncListings upserts a row for every SKU the seller has on
+Amazon. Phantom/offerless SKUs (the original B0GHH4MQ7N vector) NEVER appear in
+GET_MERCHANT_LISTINGS_ALL_DATA → no listing_health row → still correctly skipped
+(verified). Belt-and-suspenders: also reject the explicit non-pushable statuses
+the app's own listing-issues route enumerates (Suppressed / Missing-Offer /
+Incomplete-Information / their syntax variants). 'Inactive' is NOT in the deny-
+list — POD qty=0 listings remain real and pushable; the actionable Inactive
+sub-cases are demuxed by status_message via a separate report.
+
+Net: phantom-create vector remains closed; healthy POD listings (Inactive /
+Unknown) now push correctly; explicit "broken" listings are still blocked.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

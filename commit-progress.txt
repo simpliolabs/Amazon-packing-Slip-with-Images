@@ -1,0 +1,8 @@
+Auto Push: overall SKU progress bar + safe close-mid-process
+
+1. Progress bar: the modal now shows a "{done}/{total} SKUs" bar driven by the stream. The executor emits one terminal event per SKU (accepted/failed/partial, plus a new 'skipped' event for already-correct SKUs) so the bar reaches 100% even when some SKUs needed no change. started.total seeds it.
+2. Close mid-process: the modal already keeps the push running when closed (the fetch stream isn't aborted by hiding it); now re-opening Auto Push while it's running RESUMES the live view instead of resetting the rows (openBulkPush guards on bulkRunning), and the modal hint says it keeps running. Stop still halts (accepted SKUs stay).
+
+tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

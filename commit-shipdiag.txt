@@ -1,0 +1,28 @@
+Ship-dates self-diagnose: POST /api/fba/admin/push-log-check tests the write + returns the real Postgres error
+
+PO 2026-06-14: "NOT sure what you want, i am not a developer" — re: my earlier ask to grep
+Coolify logs for the keyword_push_log insert error. The PO is the PO, not a dev. They should
+NOT have to access server logs to diagnose a portal bug.
+
+Fix: extend the existing GET /api/fba/admin/push-log-check with a POST that:
+1. Attempts a REAL insert into keyword_push_log with a clearly-tagged diagnostic row
+   (parent_asin: 'DIAGNOSTIC', status: 'pending', new_value: 'diagnostic — safe to delete').
+2. If it fails, runs the field-stripped fallback (mirrors what pushExecutor.logPush does).
+3. Returns the EXACT Postgres error (code + message + details + hint) and a plain-English
+   verdict directly in the browser response.
+4. On success, immediately DELETEs the diagnostic row so the table stays clean.
+
+Three possible verdicts surfaced:
+- Both attempts succeed → writes are fine, the issue is elsewhere (e.g. pushes never call logPush).
+- Full insert fails, fallback succeeds → migration 016 missing — the `field` column isn't on the
+  live DB. Verdict tells the seller the exact SQL to apply.
+- Both fail → reports both Postgres errors so I can fix the right column/constraint without ever
+  asking the seller to read logs.
+
+PO can hit it from any browser:
+  curl -X POST https://slip.theceo.store/api/fba/admin/push-log-check
+or paste the JSON response back to me.
+
+tsc 0, no migration. Pure diagnostic (writes one row, deletes it immediately).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

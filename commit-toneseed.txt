@@ -1,0 +1,21 @@
+Fallback seed: use TONE + blank-brand for slogan tees, not the longest token (PO insight)
+
+PO 2026-06-15: after the JS purchase fixed research, B0GCPHGN4J populated (8 kw) but B0FKDDN44Z
+("Houston I Have So Many Problems Raccoon Comfort Colors") still returned 0 — its niche has no JS
+data, and #255's longest-token fallback mis-picked "problems shirt" (also no data). PO's fix: "for a
+slogan tee, pull FUNNY / SARCASTIC shirt keywords — and you already have Comfort Colors in the pool."
+Exactly right: for a novelty/slogan tee the SEARCHABLE keywords are the TONE shoppers type and the
+blank BRAND, not the literal slogan.
+
+buildFallbackSeed now prefers, in order:
+  1. a detected TONE word + product word  → "funny shirt", "sarcastic shirt"
+  2. the blank BRAND in the title + product → "comfort colors shirt"
+  3. else the longest distinctive token (prior behavior, for designs with a real niche noun → "therapist shirt")
+Verified by simulation: Houston/raccoon → "comfort colors shirt"; therapist (funny/sarcastic title)
+→ "funny shirt"; both have rich JS data, vs the old "problems shirt" (none). The downstream relevance
+gate + never-collapse floor still filter/keep results on-product.
+
+tsc 0. node_modules can't run next build here — will WATCH the PR CI build (the #254 lesson).
+Surgical: two small constant sets + reordered the existing helper. Independent of #256.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

@@ -1,0 +1,15 @@
+fix(push): persist a manual title override AS the recommendation (stop re-ship from overwriting it)
+
+PO hit this live: pushed their own title -> live content became their title, but the stored
+recommended_title was still the AI version. So live != recommendation forever -> the cohesion row
+showed "67 need update" and re-opening Ship Title proposed pushing the AI title over the seller's to
+all 132 SKUs (132 = 67 child ASINs + their FBM twins + parent). One click would have overwritten the
+seller's chosen title.
+
+Fix: after a successful manual title push (title_override set, broadcast-title product only — capacity
+families excluded so per-GB titles never collapse), write the pushed title into
+listing_seo_recommendations.recommended_title. Now live == recommendation -> cohesion goes green, the
+editable Ship-Title box re-seeds with the seller's title, and re-ship is a no-op. Pairs with the
+7-day cooling-lock so the chosen title sticks.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

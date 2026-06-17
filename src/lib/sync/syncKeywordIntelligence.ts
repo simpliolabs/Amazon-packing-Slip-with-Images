@@ -29,7 +29,7 @@ import {
   EngineResult,
 } from '../keyword-engine';
 import { captureRankSnapshots } from '../keyword-engine/cacheService';
-import { researchKeywords } from '../keyword-engine/keywordResearcher';
+import { researchKeywords, getCachedResearch } from '../keyword-engine/keywordResearcher';
 import { loadListingRowsForPresence } from '../keyword-engine/loadListingContent';
 import { createClient } from '@supabase/supabase-js';
 
@@ -115,12 +115,24 @@ export async function syncKeywordIntelligence(
         // ALL twin rows are passed — presence is OR'd per row (divergent twins can't shadow).
         const listingRows = await loadListingRowsForPresence(supabase, asin);
 
-        // Gate the CACHED pool too (the fresh-research path gated, this one didn't — drift). Same
-        // gate + never-collapse floor, so a cache-hit re-run can't re-store off-product keywords.
-        // (Gated post-engine here — the engine output carries .keyword; the raw union type doesn't.)
-        const jsResult = runKeywordEngine(asin, rawCached as import('../keyword-engine').RawKeywordRow[], listingRows, 'jungle_scout');
-        const gatedJs = await applyRelevanceGate(asin, resolvedParent, jsResult.allKeywords, listingRows, listingTitle);
-        const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, gatedJs);
+        // Source the ENRICHED research pool (keyword_research cache) when present — it carries the
+        // #270 seed-pool niche merge + #280 universes (tagged fromUniverse), which the raw per-ASIN
+        // 'jungle_scout' pull never saw. getCachedResearch is a pure DB read (0 JS credits). Without
+        // this, a steady-state reload re-stored only the raw pull and silently dropped the universes
+        // from keyword_analysis until the next forced research — the cache-hit half of the #283 miss.
+        // Falls back to the raw pull when no research cache exists yet.
+        const research = await getCachedResearch(asin);
+        const poolRows = (research && research.allKeywords.length > 0)
+          ? research.allKeywords
+          : (rawCached as import('../keyword-engine').JungleScoutKeywordRow[]);
+
+        // Gate BEFORE the engine on the raw JS rows — same ordering as the fresh-research path below,
+        // so the two can't drift (this branch used to gate post-engine, which dropped the fromUniverse
+        // flag: the other half of the #283 miss). Raw JS rows carry .keyword + fromUniverse, so the
+        // gate's universe exemption + never-collapse floor both apply.
+        const gated = await applyRelevanceGate(asin, resolvedParent, poolRows, listingRows, listingTitle);
+        const jsResult = runKeywordEngine(asin, gated as import('../keyword-engine').RawKeywordRow[], listingRows, 'jungle_scout');
+        const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
         await storeAnalysis(asin, mergedKeywords);
 
         return {

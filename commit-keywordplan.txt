@@ -1,0 +1,48 @@
+KeywordPlan: scorer↔generator parity (#93) + cross-section design cohesion (#92)
+
+One piece of plumbing (a persisted KeywordPlan) completes the holistic plan the
+shared coverage predicate (#160) started: a SINGLE source of truth for which
+keyword belongs where + the identity anchor, read by the scorer.
+
+WHAT CHANGED
+- listingPipeline.ts: PipelineResult gains keywordPlan {bullets, designName};
+  populated from the generator's ACTUAL bullet target (topOpportunityKwsForBullets)
+  + the real extractDesignName output.
+- ai-recommendations/route.ts: at regen-time scoring, injects the FRESH plan into
+  ctx (recommendations persist after the score block); persists keyword_plan in the
+  recommendations upsert.
+- syncListingContent.ts:
+  • #93 — the bullet opportunity set is now the generator's exact target set when a
+    plan is present (closes the source / relevance-gate / title-exclusion divergence
+    the shared predicate alone couldn't reach). Falls back to the legacy ≤6-word
+    derivation when absent → ZERO regression on un-regenerated rows.
+  • #92 — cross-section design-name cohesion: design name in the title but
+    token-missing from live bullets → −4 bullets; missing from backend → −4 keyword.
+    Off the REAL design name (from the plan), never a capacity-unsafe title heuristic.
+- migration 022: ADD COLUMN IF NOT EXISTS keyword_plan jsonb.
+
+ADVERSARIAL REVIEW (3 reviewers + per-finding verifier) → 4 real findings, all
+handled before push:
+- (med) regen-vs-sync flip if the recommendations upsert falls back to the minimal
+  payload → best-effort keyword_plan UPDATE recovers the transient case; the
+  column-missing window is closed by applying migration 022 BEFORE deploy.
+- (low) #92 design dock could double-charge bullet_score when the design name is
+  already owned by a #93 opportunity keyword → DEDUPE (skip the bullet cohesion dock
+  when the design is owned by the opportunity set). "two levers, one number" avoided.
+- (low) plan path is intentionally stricter than legacy (bullets must carry their
+  ASSIGNED keyword even if it's elsewhere live; shipping the bullets clears it) — by
+  design; (low) stale persisted design name → bounded −4, self-heals on regen.
+
+BACKWARD-COMPAT / SAFETY
+- Plan read in its OWN try/catch + select so a pre-migration column can't break the
+  product-details read. Write degrades via the existing minimal-payload fallback.
+  Code is safe to deploy before the migration; the scorer falls back to legacy for
+  any row without a plan.
+
+VERIFICATION: tsc exit 0; verify-bullet-coverage.mjs 9/9; verify-rank-honesty.mjs
+21/21 + 10/10.
+
+REQUIRED: apply migration 022 (supabase/migrations/022_keyword_plan.sql) before
+merging/deploying — same operational step as migration 021.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

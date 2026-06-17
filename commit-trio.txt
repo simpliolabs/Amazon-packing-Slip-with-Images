@@ -1,0 +1,13 @@
+Auto Push: truth-up the "Complete" message + closure bug fix; title: brand-front + design re-anchor backstops
+
+#1 (PO: "Auto Push stopped at 13 and marked it COMPLETE"): runBulkPush catch had a CLOSURE bug at line 1217 — the for-loop read items[i].status from the originally-captured array (where status was still 'ready'), so the condition `it.status === 'pushing'` was false for every field and nothing got marked failed. Then setBulkFinished(true) ran and the header said "Done. Amazon applies..." while rows stayed on "Pushing…" — telling the seller the push completed when it didn't. Fix: functional setBulkItems(prev => ...) reads CURRENT state and marks every not-yet-terminal row as failed with an actionable message. Also added bulkStreamInterruptedRef so when the stream ends without a clean result, the modal header shows "⚠ INTERRUPTED at X/Y SKUs — re-run Auto Push (idempotent: only still-wrong SKUs re-push)" and the bar label says "Interrupted" (amber) instead of "Complete" (green). Truth-up.
+
+#2/#3 (B0FKKN8XKV regression: "Comfort Colors Tshirt Comfort Colors Christian Graphic Tees THE CEO I Will" — brand mid-title, pin doubled, slogan tail truncated to "I Will"): two deterministic backstops added after the existing #222 pin dedup:
+(a) Brand-front: if the title contains the brand but doesn't START with it, move the brand to position 0 and re-cap (Amazon's title rule expects brand-first).
+(b) Design re-anchor: if a multi-word slogan (≥3 words) was extracted but doesn't appear verbatim in the title (capTitle75 cut its tail), re-compose "brand + designName, rest + tail" and cap to 75 — drops the filler that pushed the slogan out so the full slogan survives.
+
+Verified on the exact live string → "THE CEO I Will Praise Him in Every Season, Comfort Colors Tshirt Christian" (75 chars, brand first, single Comfort Colors, full slogan). Bullets reference the title — fixing the title fixes the "THE CEO I Will artwork" bullet phrasing.
+
+6/6 unit tests, tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

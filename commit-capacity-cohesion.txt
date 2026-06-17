@@ -1,0 +1,27 @@
+fix(fba): capacity-family titles stay per-child in Variant Cohesion (no "update all to 64GB")
+
+The Variant Cohesion panel (Apply tab) hard-coded TITLE as a broadcast "should
+match" field against the single recs.recommended_title. For a capacity-variation
+family (e.g. SD cards 128/64/32 GB) that recommended "Update all 3 variants to:"
+one 64GB title -- stamping 64GB onto the 128GB and 32GB variants.
+
+Root cause (NOT a recent regression): the panel was born broadcast-only (built
+for a 46-variant apparel example) and never adopted the isCapacityFamily gate
+(per_child_titles.length > 1) that every OTHER title surface already honors
+(header, per-child title card, and the push itself). PR #154 (rank-analysis) did
+NOT cause this.
+
+Fix (display/count/copy only -- the Ship push already resolves per-SKU via
+pushFields resolveProposed):
+- fieldCohesion() takes an optional per-child target resolver (recFor); for a
+  capacity family the title row compares each child to ITS OWN per-child title,
+  so the legitimately-divergent 128/32 GB titles no longer read as "need update".
+- The title row renders "unique each" + a per-variant list (each SKU's own
+  capacity title) instead of "should match" + "Update all N to: <one 64GB title>".
+- Capacity-families-only: apparel/single-capacity keep the broadcast path
+  unchanged. Bullets/description stay broadcast (validators strip GB from shared
+  bullets/desc).
+
+Root-caused via a parallel investigation; adversarially reviewed (CLEAN); tsc clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

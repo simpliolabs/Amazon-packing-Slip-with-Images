@@ -1,0 +1,9 @@
+Multi-design Phase 1, Commit 1: design-group detection (foundation, zero behavior change)
+
+designKeyForSku + detectDesignGroups: POD apparel families encode multiple designs in the SKU prefix (B0F6QZ34B1: FHOSH/FRAF/OF=Only Fins, all black, sizes in the suffix). The design key strips the size+color+fulfillment suffix; ≥2 keys each spanning ≥2 SKUs = a multi-design family (the singleton parent hub never counts). Single-design colour families (Darlin' DAR-CCG-*) correctly NOT flagged.
+
+Wired into the pipeline DEBUG output only (multiDesign + designGroups) so detection is verifiable on the next regen — NO change to titles/bullets/keywords/output yet. Commit 2 branches title generation per design + per-design vision; Commit 3 adds the per-design Title Editor.
+
+12/12 unit tests against all 44 real B0F6QZ34B1 SKUs + Darlin single-design SKUs. tsc 0, no migration.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

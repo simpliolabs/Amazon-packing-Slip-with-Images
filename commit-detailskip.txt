@@ -1,0 +1,16 @@
+Push details: exclude the variation parent (same as #244 for broadcast) so detail pushes mark complete
+
+Batch item 1/6. #244 excluded the non-buyable variation parent from BROADCAST pushes (title/bullets/
+description/keywords). This does the same for the DETAILS (product-attribute) push — both the single-
+detail path (loadDetailDiff) and the bulk Auto-Push path (expandDetailSkuSet) — filtering the parent
+(asin === parent_asin) from the target. Same root: Amazon re-validates the whole parent record on any
+PATCH and rejects it for incomplete required attributes (Shirt Size), so a detail push to the parent
+can never succeed; counting it left a permanent partial-fail.
+
+Verified the existing `parentOwn` logic is unaffected — it's only used in the post-push RE-SCORE (as
+the scoring representative), not in push targeting, so excluding the parent from the target set is
+orthogonal. Success messages note the parent was skipped.
+
+tsc 0. Surgical (two target filters + two message notes).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

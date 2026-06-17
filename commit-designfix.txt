@@ -1,0 +1,42 @@
+Stuck-design fix: seller override + curly-apostrophe heuristic fix + tightened no-design guardrail
+
+PO 2026-06-14: "how do we prevent stuck design again?" Confirmed GO on #1+#2+#3 together after
+diagnostic proved B0GQVL3K4B's canonical title was CORRECT but regen still produced "THE CEO
+Too Young to Retire Too Poor to Quit T-Shirt for Men and Women" — a phrase that exists nowhere
+in the live title or vision (vision identity was empty).
+
+Root cause traced in code: extractDesignName's heuristic fallback (leadingDesignPhrase) cleans
+each word with `[^A-Za-z0-9']` — curly apostrophes (U+2019) in "Don't" got stripped to "Dont",
+then accept() substring-checked it against the canonical title which still had the curly, failed,
+and returned designName = ''. With no design name AND no vision identity, the title agent's
+design-grounded keyword filter never fired — so "too young to retire too poor to quit shirt"
+(JS pool, vol 488 UPGRADE) flowed into the candidate list, and the agent's no-design-name
+prompt explicitly let it promote any candidate keyword to slogan status.
+
+THREE fixes, layered (the seller can rely on any one of them):
+
+#1 SELLER DESIGN NAME OVERRIDE (deterministic, kills the whole bug class).
+- Migration 031: ADD COLUMN listing_seo_scores.design_name_override text. Idempotent.
+- PipelineInput.designNameOverride threaded through ai-recommendations route.
+- extractDesignName short-circuits to override (normalized, curly→straight) when set — no
+  LLM call, no heuristic, no vision check.
+- New /api/fba/design-name-override GET/POST (mirrors /api/fba/competitor-asin).
+- New UI input on the listing page (right under Competitor ASIN). Save button, debounced
+  "Saved — regenerate to use it" feedback.
+
+#2 LEADING-DESIGN-PHRASE APOSTROPHE FIX (restores the heuristic fallback when override is absent).
+- leadingDesignPhrase now normalizes U+2019/U+2018 → U+0027 BEFORE the word-cleaning regex
+  strips them. "Don't" survives intact through the lead build AND the haystack check.
+- 5/5 unit tests including the exact B0GQVL3K4B canonical title.
+
+#3 TIGHTENED NO-DESIGN-NAME PROMPT (belt-and-suspenders so a future extraction failure
+   can't again let a high-volume keyword get promoted to design slogan).
+- Old rule (listingPipeline.ts:1543): "every distinctive phrase must come from the CURRENT
+  title or the keywords listed below." The "or the keywords" clause was the loophole.
+- New rule: design anchor MUST be the leading distinctive phrase of the CURRENT title only;
+  NEVER promote any candidate keyword to the design slot, even high-volume ones; if there's
+  no distinctive lead, omit the design slot and lead with brand + product type only.
+
+tsc 0, 5/5 unit tests. Migration 031 needs to run on live DB (idempotent — see migration file).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

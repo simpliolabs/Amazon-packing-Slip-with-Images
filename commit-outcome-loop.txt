@@ -1,0 +1,49 @@
+Outcome loop (#89): per-keyword SQP share time-series → next-regen signal
+
+The SQP-primary outcome loop, full sweep. Captures per-keyword impression-share
+over time, derives a rose/flat/fell signal anchored to content changes, feeds it
+as a conservative tiebreak into title-candidate selection, and surfaces an honest
+line in the rank panel. HONEST by construction: it reports correlation ("share
+rose AFTER a change"), never causation, and shows/does NOTHING until ≥2 monthly
+snapshots accrue.
+
+WHAT CHANGED
+1. CAPTURE — migration 023 (keyword_share_snapshots, one row per keyword per SQP
+   data-month, UNIQUE asin,keyword,snapshot_date) + shareSnapshots.ts. syncKeyword-
+   Data snapshots each report's normalized 0-100 share + a content fingerprint.
+   SQP-only (inherited/JS rows carry share=0); captured ONLY on a FRESH fetch (a
+   cache hit would mislabel a stale-month report — adversarial-review finding);
+   best-effort (a missing table never breaks a sync).
+2. SIGNAL — outcomeSignals.ts: rose/flat/fell per keyword, with the insufficient-
+   data guard (<2 monthly snapshots OR <100 volume → no signal) and the non-content-
+   bottleneck rule (content changed but share flat/fell → reviews/price/velocity,
+   not more copy).
+3. FEEDBACK — a conservative TIEBREAK in selectTitleCandidates: reinforce rising
+   keywords, de-prioritize stalled ones. SECONDARY to opportunityScore — only
+   reorders ties, never across opportunity tiers, never drops a keyword. Strict
+   no-op when signals are empty (every case until history accrues).
+4. UI — the rank panel shows a server-authored + sanitize()-clamped line
+   ("Share rose to X% after your last content change" / "Share flat at X% despite
+   your last change — rank now likely depends on reviews, price, and velocity").
+   Renders nothing until history exists.
+
+ADVERSARIAL REVIEW (3 reviewers + per-finding verifier) → 2 real findings, both
+fixed before push:
+- (med) month-boundary cache hit could mislabel a stale-month SQP report under a
+  new-month snapshot_date → capture now only fires on a FRESH fetch.
+- (low) non-deterministic sibling-content fallback could flip the fingerprint →
+  the sibling query is now ordered (deterministic), so the fingerprint is stable.
+
+VERIFICATION: tsc exit 0; verify-outcome-signals.mjs 13/13 (insufficient-data +
+volume guards, rose/flat/fell, non-content bottleneck, honesty + negative control);
+verify-rank-honesty.mjs + verify-bullet-coverage.mjs still green.
+
+HONEST CAVEAT: this is the machinery; it produces NO signal until ~2 monthly SQP
+snapshots accrue across a content change (SQP is monthly). It starts the clock.
+
+REQUIRED: apply migration 023 before merging/deploying (same step as 021/022).
+DEFERRED (intentional): a scheduled monthly SQP refresh cron — a cron adds no
+history within a month (SQP is monthly); manual/Intelligence syncs accrue the
+series. Add a monthly batch cron later if desired.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

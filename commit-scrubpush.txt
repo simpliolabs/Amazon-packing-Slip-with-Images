@@ -1,0 +1,17 @@
+Scrub-at-push backstop: trademark-scrub the value at publish, catching manual edits
+
+Batch item 2/6. #240 scrubs trademarks from GENERATED content, but a manually-typed mark slips
+through — the title-override box (Manual Title Scorer, #143) and any stale stored content bypass the
+generation-time scrub. The PO edits titles by hand (added "Custom"), so a hand-typed "World Cup" could
+reach Amazon. This adds the last-line-of-defense: scrub the push VALUE at the moment of publish.
+
+One clean spot: in the broadcast push loop, item.raw feeds the PATCH, the compare, and the cache
+write. Scrubbing it there covers all four content fields, both shapes (title/description/keywords =
+string, bullets = string[]), for both manual and generated content. Idempotent — already-scrubbed
+generated content is unchanged ("World Soccer Cup" contains no protected mark). So the pushed value,
+the logged value, and the cached value are all trademark-safe and consistent.
+
+tsc 0. Surgical (one import + scrub the value at its single read point). Independent of #245
+(different function in the same file — clean merge).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

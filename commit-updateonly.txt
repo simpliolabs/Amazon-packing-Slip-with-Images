@@ -1,0 +1,32 @@
+fix(push): update-only gate — never PATCH a non-live SKU into a phantom listing
+
+A title push to the ESTABLISHED family B0GHH4MQ7N created 6 brand-new
+incomplete "Missing offer" ASINs on the live account (top of Seller
+Central's Date-Created New-to-Old, orphaned, no parent link). Root cause:
+the family backfill (familyReconcile, #242/#250, runs on every open/regen)
+inserts blank listing_content rows for OFFERLESS catalog-variation
+children, and the push PATCHes every listing_content row with no
+"is this a live listing?" check — a patchListingsItem to a SKU with no
+offer is treated by Amazon as create-or-match, so it MINTS a junk listing.
+
+Two guards, both scoped to the offerless case (healthy children unaffected):
+
+1. Push is UPDATE-ONLY. loadDiff tags any row whose SKU is not Active in
+   listing_health (the same predicate syncListingContent uses to enumerate
+   children) as notLive; executePush skips them on BOTH the full and
+   selective paths and reports "N skipped — not a live listing yet;
+   complete the offer, then re-push" instead of creating. The variation
+   parent is exempt (its push is intentional; summarizePush already treats
+   a parent rejection as a non-blocking note). On a DB error activeSkus is
+   null -> no over-skip (push availability preserved); guard 2 backstops.
+   Also stops the FBM-twin enrichment from probing non-live ASINs, so a
+   phantom-adjacent twin can't slip back in untagged.
+
+2. familyReconcile backfill is OFFER-GATED: requests includedData=offers
+   and skips children with no live offer, so offerless rows are never
+   seeded into listing_content in the first place.
+
+Net: structurally impossible for a content push to create an Amazon
+listing again, regardless of what is in listing_content.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

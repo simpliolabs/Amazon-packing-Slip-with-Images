@@ -1,0 +1,31 @@
+feat(title): Manual Title Scorer — type/score/push your OWN title (control when the council wobbles)
+
+PO directive: the GPT-5 title council is stochastic (good one regen, regressed the next). The reliable
+answer is to give the seller the final word — type the exact title, see its REAL score + Amazon-rule
+check, and push it. Pairs with the 7-day cooling-lock (push a title you're happy with -> it's locked).
+
+- /score-title endpoint (already added): runs the EXACT scoreListingContent (typed title substituted
+  over live content) + validateTitle -> { titleScore/25, overallScore, ruleProblems, suppressionRisk }.
+  Read-only, no migration, no Amazon write.
+- push-content `title_override`: a manual title broadcasts the typed string to every SKU (children +
+  parent + live FBM twins), capped at 200 chars, bypassing the AI recommendation.
+- UI: the Ship-Title modal now has an editable textarea (seeded with the AI title), a "Check score +
+  Amazon rules" button -> score + 🚫 suppression/rule violations, and "Push this title to all variants".
+
+Adversarial pre-ship review caught + FIXED a BLOCKER on the live write path:
+- CAPACITY FAMILIES: the override broadcast ONE typed title to every per-GB SKU -> would stamp "128GB"
+  onto the 32GB SKU's live title, defeating per-child capacity titles, and it fired on the normal
+  Confirm flow (editTitle seeded from the first child's title). Fixed at BOTH layers: server-side
+  loadDiff IGNORES title_override when per_child_titles.length > 1 (authoritative); client-side the
+  editor only seeds/renders for broadcast-title products. Also fixed: the Confirm button was gated on
+  the AI diff (changed===0) so a typed title couldn't push when the AI title already matched — now
+  gated on the typed title being non-empty.
+
+DELIBERATE design choice (flagged, not a bug): a risky title (bare trademark) is NOT hard-blocked —
+the seller sees the 🚫 suppression banner and decides (their listing, their call). A hard
+trademark-gate is an easy fast-follow if wanted.
+
+Will live-verify the /score-title scores from fact; the live push writes to Amazon so it needs the
+PO's explicit OK to test end-to-end.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

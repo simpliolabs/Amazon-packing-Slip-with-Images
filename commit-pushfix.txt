@@ -1,0 +1,31 @@
+fix(push): selective re-push of only the stale SKUs + graceful partial-stream handling
+
+Reported live: shipping bullets to 131 SKUs threw "Stream ended without a result event" even though
+66 SKUs had already applied — the NDJSON stream dropped (proxy window on a 131-SKU one-at-a-time
+push) BEFORE the final result event, so the UI showed a hard error on a partial success. And there
+was no way to finish the stragglers without re-shipping all 131 (re-triggering the same drop).
+
+- push-content: new optional `skus[]` body param → pushes ONLY those SKUs (the stale ones). A present
+  list is authoritative; an empty list pushes NOTHING (never silently "push all").
+- Client: a "Push just the N stale SKUs" button under the Verify panel (skips the already-applied),
+  for title/bullets/description/keywords (not details).
+- Graceful partial: when the stream drops with no final result event, rebuild a partial result from
+  the per-SKU statuses (using the REAL diff size from the 'started' event, not just SKUs-seen) so the
+  seller sees "X of N reached Amazon, Y not yet sent — re-check + push the stale ones" instead of a
+  scary error. Only throws if literally zero SKUs landed.
+
+Adversarial pre-ship review (standing directive) caught + FIXED two BLOCKERs on the live-Amazon
+write path before commit:
+1. FBM TWINS were absent from the verify-derived stale list (verify-push lists DB children only, not
+   the live-discovered twins) — so "push just the stale ones" would re-push a stale child but SKIP its
+   FBM twin, leaving the two offers divergent (re-opening the #36 parity bug). Fixed: the route now
+   re-pushes each requested SKU's twin too, matched by shared child ASIN.
+2. A PARTIAL/interrupted push was being marked verdict=DONE (client on the rebuilt-partial path; server
+   gated only on accepted>0) — falsely telling the seller the field was fully shipped while SKUs were
+   still stale. Fixed: DONE is persisted ONLY when a COMPLETE stream landed every SKU with zero
+   failures (client `fullyShipped`; server `failed === 0`). Re-scoring still runs on any success.
+Also tightened: real total in the partial message; clear stale verify counts on re-push. Known
+follow-up (pre-existing, idempotent on Amazon's side): a re-push reads the write-through cache for the
+rollback `previous_value` — harmless to the catalog, but rollback evidence can drift; tracked separately.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

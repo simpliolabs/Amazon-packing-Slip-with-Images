@@ -1,0 +1,28 @@
+fix(title): apparel titles follow the IDEAL design-led structure (brand -> design -> product type)
+
+Live verify of the design-grounding fix removed "Vintage 90s" + the keyword dump (good), but the
+STRUCTURE was still wrong vs the ideal we designed: it came out "THE CEO Later Gator for Comfort
+Colors Graphic T-Shirt Gator Shirt for Men and Women" — the blank brand jammed in BEFORE the
+product type, with an awkward "for". The ideal is "THE CEO Later Gator T-Shirt ... for Men and
+Women": brand -> design name -> product type FIRST, then grounded descriptors.
+
+Root cause: I cleaned the keywords (grounding) but left the brief's RIGID mandates intact — "#1
+keyword FRONT-LOADED", "#2 blank-brand right after the #1 keyword" — which shove the garment brand
+between the design name and the product type. The Workflow demo that produced the clean ideal had
+none of those pins; it was just "brand -> design -> product type -> audience, natural language".
+
+Restructured the APPAREL brief to the ideal (non-apparel is unchanged — specs-led titles work):
+- Order: explicit design-led template + a concrete skeleton for THIS product ("<brand> <design>
+  <garment brand> T-Shirt, <one grounded descriptor> for <audience>"). LEAD with design + product
+  type; do not bury them behind keywords.
+- Garment/blank brand is an ADJECTIVE on the product type ("Comfort Colors Tee"), NEVER "for Comfort
+  Colors" (it's the fabric brand, not a compatibility target — that "for" was the live wart).
+- Money keyword: woven in naturally, no longer FRONT-LOADED ahead of the design name / product type.
+- Front-load rule: apparel leads with brand + design + product type, not the keyword.
+- Deterministic backstop: strip any stray "for <blank brand>" the LLM still emits (the audience
+  "for Men and Women" is untouched) — belt-and-suspenders for the verified wart.
+
+Will re-verify live on Later Gator: title should now read "THE CEO Later Gator [Comfort Colors]
+T-Shirt ... for Men and Women" — design-led, no "for Comfort Colors", no stuffing.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

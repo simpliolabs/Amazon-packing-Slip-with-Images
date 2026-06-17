@@ -1,0 +1,23 @@
+verify-push: "EXPECTED (PUSHED)" survives a regen — fall back to the push log
+
+PO: "verify why not" — Ship Detail Fit Type showed 147/147 accepted, then Re-check live painted
+every SKU "stale" with EXPECTED (PUSHED) = (empty) and contradictory counters (0 applied / 0
+stale / 83 checked). FACTS (live API): Amazon HAS the pushed value ("Relaxed" on 80/83 SKUs,
+lastUpdated = the push timestamps) - the push WORKED. The verify lied because expectedFor()
+reads the CURRENT recommendation row, and the family was regenerated between push and re-check:
+the new menu-driven audit picked 6 different attributes, the Fit Type row vanished, expected
+became "" - so rows rendered stale-with-empty-expected and the aggregate counted them as
+neither matched nor stale.
+
+Fix - the expectation now means what we actually PUSHED:
+- verify-push: when the rec no longer carries the detail field, fall back to the last ACCEPTED
+  push per SKU from keyword_push_log (field = details:<spApiKey>, latest pushed_at wins).
+  Details only - other fields' rec columns are replaced on regen, never removed. Legacy log
+  rows without the field column (pre-016 fallback inserts) are naturally excluded. Response
+  rows gain expectedSource: recommendation | push_log | none; aggregate gains `unknown` (rows
+  with nothing to compare) so counters always add up.
+- page.tsx: third chip state "no expectation" (slate, not amber) with an explanatory line;
+  "(from push history - the recommendation has since been regenerated)" hint on fallback rows;
+  "Push just the stale" buttons skip no-expectation rows (never blind re-push without a value).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

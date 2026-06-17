@@ -1,0 +1,37 @@
+Multi-universe seeds (PR2): research the Seed Agent's secondary universes, not just seeds[0]
+
+Batch item 5/6. PO 2026-06-14: "The Council should be smart enough to know if they need to
+query MORE keyword universes from JS — up to 3 — searching storage first, each query 100
+keywords." The Seed Agent (#239) already returns up to 3 identity-validated seeds, MOST
+important first — but researchKeywords used ONLY seeds[0] and discarded the rest into
+seedsConsidered (surfacing only). So a multi-theme design ranked on its primary universe alone.
+
+Example: a Haitian World-Soccer-Cup tee is three universes — world-soccer-cup ∪ haiti-pride ∪
+soccer-supporter. We researched "world soccer cup shirt" and never queried the haiti/supporter
+universes, so the pool (and therefore the title/bullets/backend) under-covered two of its three
+real niches.
+
+Fix — Phase 2b in researchKeywords: after the primary keywords_by_keyword query, research the
+secondary Agent seeds too (seeds[1..2]) and merge their universes into the pool. Guards:
+  • STORAGE-FIRST per seed — skip when the seed's distinctive token already saturates the pool
+    (0 credits), reusing the same nicheTokens/NICHE_GENERIC predicate the vision enrichment uses.
+  • CAPPED at +2 credits (3 universes total) — exactly the PO's "up to 3".
+  • Naturally gated: only the 'agent' source ever returns >1 seed (manual/category/rules return a
+    single seed), so this is a no-op for those paths.
+  • Agent seeds are already trademark-scrubbed + identity-validated upstream — no extra guard here.
+  • Dedup: a per-iteration `seen` set (rebuilt from the live pool) prevents re-adding keywords,
+    so the 2nd secondary seed sees the 1st's additions.
+
+This also resolves a latent two-path asymmetry: the Agent's seeds now drive initial research,
+and the existing vision-based enrichResearchWithNiche stays as the complementary ON-DEMAND
+supplement (also storage-first, so it skips universes Phase 2b already covered — no double-spend).
+
+tsc 0. node_modules has no vitest in this sandbox so the keyword tests couldn't run; the change
+is additive (one new phase block) and reuses existing, unit-tested helpers. Independent of the
+title-fill/bullets PRs (different file).
+
+FOLLOW-UP (not in this PR, small): surface seedsConsidered in the research success message
+("Researched 3 universes: X | Y | Z") — the result already carries it; only the fire-and-forget
+poll needs to thread it to the client. Core ranking value (covering all universes) is banked here.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

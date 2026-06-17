@@ -1,0 +1,35 @@
+Bullets role-word plan gap + outcome-loop monthly refresh cron
+
+Two post-sweep follow-ups (one bullets-correctness gap surfaced by the bug audit,
+one the requested outcome-loop cron).
+
+1. BULLETS ROLE-WORD PLAN GAP (listingPipeline.ts ~2642) — topOpportunityKwsForBullets
+   (= keyword_plan.bullets, read by the scorer per #161) had no role-word filter, so a
+   keyword like "later gator teacher shirt" stayed in the BULLET plan. The scorer then
+   docked bullets for it, but the bullet agent's role-leak strip + the coverage
+   backstop's safeKw both REFUSE to put a profession word in a bullet ("for teachers"
+   claim) — so the bullets could NEVER carry it and the bullet score could never reach
+   max. Now role-word keywords (whose role token isn't in the title) are dropped from
+   the bullet plan and rank via the BACKEND pool instead, so the plan == what the
+   generator can actually place. Directly serves "optimize bullets as close to perfect
+   as possible".
+
+2. OUTCOME-LOOP REFRESH CRON (new /api/fba/cron-keyword-sync + vercel.json) — refreshes
+   ASINs whose SQP cache is stale (>30d), triggering a fresh fetch + a new
+   keyword_share_snapshots row. Time-budgeted (a single SQP report is 5-8 min, so each
+   run does a small batch; a frequent schedule spreads the rest). Auth mirrors cron-sync
+   (Bearer CRON_SECRET or x-cron-secret). maxDuration 800.
+   CADENCE: SQP data is MONTHLY, so the rose/flat/fell SIGNAL can never update faster
+   than monthly (a weekly fetch re-pulls the same report and the snapshot dedups). The
+   cron runs frequently (every 3h on days 3-9, after Amazon publishes prior-month SQP)
+   only to spread the slow per-ASIN fetches across the early-month window — more
+   frequency = faster catalog COVERAGE, not a faster signal.
+
+PLATFORM NOTE: vercel.json crons fire on Vercel; on Coolify, wire a scheduled task /
+external cron to GET the endpoint with the x-cron-secret header (same dependency as the
+existing cron-sync). Requires CRON_SECRET set.
+
+VERIFICATION: tsc exit 0; verify-bullet-coverage 9/9, verify-outcome-signals 13/13,
+verify-rank-honesty 21/21+10/10.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

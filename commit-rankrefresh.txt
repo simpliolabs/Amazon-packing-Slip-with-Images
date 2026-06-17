@@ -1,0 +1,9 @@
+Rank-Top card: refresh after regen + content push so it stops showing stale/wrong gaps
+
+PO on B0FRYMM56C: the "RANK TOP OF AMAZON" card kept showing gaps for keywords already in the bullets, opposite-gender ("mens") keywords on a FEMALE listing, and 13/54 coverage — while the live rank engine returns 0 gaps, 0 mens, 37/54 (verified via GET /api/fba/rank-analysis). Root cause: the card reads rankData fetched ONCE on mount (the cached analysis). A regen/push changes live content + the #210 lean filter excludes opposite-gender keywords, but the card never re-fetched, so it showed the pre-#210, pre-push analysis indefinitely.
+
+Fix: call refreshRankFree() (free recompute, 0 credits/0 OpenAI) (1) after a successful regen in generateAiRecs, and (2) after a content push (title/bullets/description/keywords; not details) in confirmPush. The recompute re-runs buildFreeCore with current listing_content + the latest lean filter, so the card reflects what's actually covered now — no already-covered "gaps", no opposite-gender keywords.
+
+tsc 0, no migration. UI/data-freshness only.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

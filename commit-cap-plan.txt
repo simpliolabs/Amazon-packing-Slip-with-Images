@@ -1,0 +1,42 @@
+Capacity families: stop docking bullets for capacity keywords they must refuse
+
+PO (B0GCF11RKL): "Bullets sent but score not updated" - all 5 bullets DONE
+("live matches recommended") yet the card stays 12/18.
+
+From-fact diagnosis (the re-score DID run; the target was impossible):
+- bullet_score raw = 17/25 -> weighted 12/18 (matches the card exactly).
+- keyword_plan.bullets = ["128 gb sd card","128 gb sd card for camera",
+  "sd card 128gb sandisk cards","standard sd card 128gb","sd card 128"].
+- Ran the verbatim missingBulletKeywords predicate on the real live bullets:
+  exactly 4 of 5 missing -> dock min(12, 4*2)=8 -> 25-8=17. Reproduced to the point.
+- All 4 missing keywords contain a CAPACITY token - and this family spans
+  32GB/64GB/128GB sharing BROADCAST bullets. The capacity validator (#76) and
+  the backstop's safeKw (#160) REFUSE hardcoded capacities in shared bullets
+  (a "128GB" bullet lies on the 32GB variant's page). So the #161 keyword plan
+  demanded keywords the generator must refuse -> bullets frozen at 17/25 no
+  matter how many times the seller ships. Same trap class as the role-word
+  filter (#160 adversarial gap) - this is its capacity sibling.
+
+Fix at both ends (mirrors the role-word precedent):
+- listingPipeline: capacity-family detection moved ABOVE the plan build;
+  topOpportunityKwsForBullets drops capacity-token keywords (CAPACITY_RE) when
+  the family spans >=2 capacities -> future persisted plans are placeable.
+- syncListingContent: same filter on bulletOppKw (BOTH the plan path and the
+  legacy fallback - else the dock returns through the back door when a filtered
+  plan goes empty), with local capacity detection from childContents sku+title
+  ("32G"/"64G." -> 32GB/64GB; KEEP IN SYNC note). This heals plans persisted
+  BEFORE the pipeline fix - B0GCF11RKL recovers on its next re-score (any push
+  or Sync), no regen needed: plan filters to ["sd card 128"] (covered by the
+  #160 backstop clause) -> 0 missing -> bullets 25/25 raw -> 18/18 shown.
+
+The dropped keywords still rank where they belong: per-child TITLES carry the
+exact capacity ("128GB" on the 128GB child), and the backend pool keeps them.
+
+Separate finding from the same investigation (PO action, not code): the
+variation PARENT SKU (Memory-Card-P) still has EMPTY live bullets - the bullets
+diff shows 1 of 6 SKUs stale. "Push just the stale" finishes it (and triggers
+the re-score that applies this fix).
+
+tsc exit 0. No migration.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

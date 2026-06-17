@@ -1,0 +1,31 @@
+Keyword research: empty-pool fallback seed (fixes "1 keyword / Intelligence tab not loading")
+
+PO 2026-06-15. VERIFIED LIVE root cause (via authorized forced re-research, ~8 JS credits): for
+slogan listings the keyword research returns an EMPTY pool — B0FKDDN44Z's full 58s research returned
+0 keywords; B0GCPHGN4J returned 1 (the SQP brand query only). Jungle Scout has no search-volume data
+for a too-specific slogan seed ("my therapist gave up shirt"), so the pool comes back empty. #253
+(promotion) cannot surface a pool that is empty — it was aimed at the wrong layer; this fixes the
+research itself.
+
+Fix — Phase 2c in researchKeywords: when the primary + secondary (#249) seeds yield a thin pool
+(< 10 keywords), retry ONCE with a deliberately BROAD seed via buildFallbackSeed() — the design's
+single most distinctive token (the core niche noun, proxied by the longest non-generic/non-apparel
+token across the seed + title) + the product word, e.g. "therapist tshirt", "raccoon tshirt". JS has
+data for those, so the pool is no longer empty.
+
+Relevance-safe: the broad seed KEEPS the niche token, and the downstream relevance gate
+(syncKeywordIntelligence.applyRelevanceGate, with the #253 never-collapse floor) filters anything
+off-product. A bare "tshirt"/"graphic tee" was deliberately avoided — it would return generic
+keywords the gate strips to zero, tripping the floor and re-admitting pollution. Fires ONLY on the
+low-data case (well-seeded listings like the soccer tee, 100+ kw, skip it entirely). +1 JS credit
+only when it fires; dedup against the existing pool.
+
+Known limitation: the longest-token heuristic can pick a non-ideal core noun (e.g. "problems" over
+"raccoon" for the Houston listing) — still better than an empty pool, and the gate keeps the
+identity matches. A smarter (AI) seed-broadening is a possible follow-up if this proves insufficient.
+
+tsc 0. node_modules has no vitest AND can't run `next build` in this sandbox, so per the #254 lesson
+I will WATCH the PR's CI build (the real next build) before calling it ready. Surgical: one new
+exported helper + one phase block, reusing existing seed/identity helpers.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

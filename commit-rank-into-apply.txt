@@ -1,0 +1,31 @@
+feat(fba): surface the honest Rank verdict atop the Apply tab (Rank Top of Amazon, increment 1)
+
+Integration A, increment 1: the "Rank Top of Amazon" verdict (what content CAN and
+CANNOT do for organic rank) now appears as a collapsible banner at the TOP of the
+Apply Changes flow -- so the honest rank framing reaches the seller WHERE they act,
+not only in a separate Intelligence tab.
+
+- New page-level rankData state + a 0-cost GET /api/fba/rank-analysis/[asin] co-fetch
+  (mirrors the aiRecs/kwData fetches; resolves parent->child server-side; 0 JS
+  credits, 0 OpenAI).
+- The collapsible banner renders ONLY server-authored, validator-clamped strings from
+  verdict.* (headline, indexedCoverage, criticalGaps, contentCanDo/CannotDo,
+  honestNote). NO new client rank copy, NO new server fields, NO migration -- so no
+  new over-promise risk (the server banned-phrase validator still governs every
+  rank claim).
+- Cleared on ASIN change + cancelled-guard so it can't flash the previous listing's
+  verdict; defensive ?? [] coalescing; renders nothing for no-keyword listings.
+
+The standalone RankAnalysisPanel stays as the Intelligence-tab competition (SOV) +
+full-playbook drill-down (unchanged).
+
+NOTE: the design council's per-suggestion "winnable/done" chips were DEFERRED -- its
+coveredIn-based section mapping is ill-defined (an uncovered keyword has empty
+coveredIn, so the winnable chip can never fire and done-here fires spuriously). The
+winnable/done signal is content-level (global) and already conveyed by the verdict.
+A correct per-suggestion design (keyword_reconciliation.placed_in join, or the #89
+per-keyword data) is a tracked follow-up.
+
+Adversarially self-reviewed; tsc clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

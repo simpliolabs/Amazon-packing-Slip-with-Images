@@ -1,0 +1,30 @@
+fix(scoring): bullet coverage is token-based + seasonal-aware (the real 9/18 cause)
+
+PO hit 9/18 on Later Gator bullets repeatedly. Verified root cause: the bullet score's opportunity-
+keyword coverage check (syncListingContent.ts:735) docked up to -12 using EXACT-SUBSTRING matching AND
+counted SEASONAL keywords against the bullets — two flaws that fight the product strategy:
+
+1. Exact-substring: natural bullets ("see you later alligator vibe") did NOT match the keyword
+   "see you later alligator shirt", so good bullets were scored as "missing" it. The keyword-
+   intelligence check (line 459) already uses smart TOKEN matching — the bullet check didn't.
+2. Seasonal-blind: "last day of school" (168k) is a top critical, so the bullet check docked the
+   bullets for lacking it — even though the strategy correctly routes seasonal terms to BACKEND,
+   not bullets (PO rule: "no seasonal in title/bullets unless the design is seasonal").
+
+Fix: the bullet coverage check now (a) EXCLUDES seasonal keywords (BULLET_SEASONAL_TERMS, kept in
+sync with listingPipeline SEASONAL_TERMS; duplicated to avoid a scorer->pipeline circular import),
+and (b) matches by TOKEN (every significant token of the keyword present across the bullets), so a
+natural paraphrase counts. Effect: bullet scores rise to reflect reality — well-formed bullets that
+cover the concepts are no longer pinned low by verbatim-only + seasonal penalties.
+
+Also (bullets brief, listingPipeline): 2 nit-prevention rules so the council's bullets read clean —
+no kids/child references unless the title says so (the "kids gator" slip on an adult listing), and
+no brand/material phrase ("Comfort Colors") repeated more than twice across the 5 bullets.
+
+Follow-up (NOT in this PR): align validateBullets' opportunity-coverage retry check to the same
+token-based + seasonal-aware logic for full generation/scoring consistency.
+
+NOT yet live-verified: after merge+deploy, regen Later Gator (B0G884ZJ27) and confirm bullet_score
+moves up off 9/18 and the bullets read clean (no kids/Comfort-Colors-x3).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
