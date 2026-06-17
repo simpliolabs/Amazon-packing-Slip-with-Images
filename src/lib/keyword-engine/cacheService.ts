@@ -98,6 +98,12 @@ export async function storeAnalysis(
 ): Promise<void> {
   if (!keywords || keywords.length === 0) return;
 
+  // ONE timestamp for the whole run — every row written below carries it, and the stale-prune at
+  // the END deletes only this ASIN's NATIVE rows OLDER than it. This replaces the old
+  // delete-THEN-upsert order, which left keyword_analysis EMPTY if the process died between the
+  // delete and the upsert — a Coolify redeploy 502 mid-regen wiped B0G884ZJ27's Intelligence tab
+  // (2026-06-17). Upsert-first is interrupt-safe: an interrupt leaves stale rows, never an empty set.
+  const runTs = new Date().toISOString();
   const rows = keywords.map(kw => ({
     asin,
     keyword: kw.keyword,
@@ -114,23 +120,12 @@ export async function storeAnalysis(
     title_density: kw.titleDensity ?? null,
     organic_rank: kw.organicRank ?? null,
     data_source: kw.dataSource,
-    analyzed_at: new Date().toISOString(),
+    analyzed_at: runTs,
   }));
 
-  // Clear existing analysis for this ASIN — EXCEPT imported keywords (data_source='import').
-  // Those came from the seller's competitor research (H10 CSV, PR #176); a fresh native sync
-  // must never wipe them — without this guard the Re-research button (PR #177) would delete
-  // the import minutes after it was made. On a keyword collision the upsert below lets the
-  // FRESH native row win (it carries live presence flags + SQP/JS metrics), which naturally
-  // "graduates" an imported keyword to a native one once our sources start seeing it.
-  await supabase
-    .from('keyword_analysis')
-    .delete()
-    .eq('asin', asin)
-    .neq('data_source', 'import');
-
-  // Batch UPSERT in chunks of 100 (upsert, not insert: a surviving imported row with the same
-  // keyword must not abort the whole chunk — unique (asin, keyword)).
+  // Batch UPSERT FIRST in chunks of 100 (upsert, not insert: a surviving imported row with the same
+  // keyword must not abort the whole chunk — unique (asin, keyword)). Doing this BEFORE any delete
+  // guarantees the analysis is never momentarily empty.
   const chunkSize = 100;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -149,6 +144,18 @@ export async function storeAnalysis(
       console.warn('[storeAnalysis] upsert failed:', error.message);
     }
   }
+
+  // STALE-PRUNE (interrupt-safe cleanup): drop this ASIN's NATIVE rows NOT refreshed this run
+  // (older analyzed_at). Imports (data_source='import') are always preserved — the seller's H10
+  // competitor research (PR #176) must survive native re-syncs; a keyword collision already let the
+  // fresh native row win in the upsert above ("graduating" an import to native). Runs AFTER the
+  // upsert, so an interrupt before this point keeps stale rows rather than emptying the analysis.
+  await supabase
+    .from('keyword_analysis')
+    .delete()
+    .eq('asin', asin)
+    .neq('data_source', 'import')
+    .lt('analyzed_at', runTs);
 }
 
 /**

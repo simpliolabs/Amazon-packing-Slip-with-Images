@@ -649,7 +649,9 @@ export default function ListingDetailPage() {
         const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`)
         if (resp.ok) {
           const data = await resp.json()
-          if (data.totalKeywordsAnalyzed > 0) setKwData(data)
+          // Set kwData even when empty so the Intelligence tab PERSISTS (with an empty-state) rather
+          // than vanishing — a wiped/all-covered analysis previously hid the tab entirely (B0G884ZJ27).
+          setKwData(data)
         }
       } catch { /* ignore */ }
     })()
@@ -1437,7 +1439,7 @@ export default function ListingDetailPage() {
     { id: 'placement', label: 'Keyword Plan', count: aiRecs?.keyword_reconciliation?.length ?? 0 },
     { id: 'issues', label: 'Diagnostics', count: score.issues.length },
     { id: 'variants', label: 'Variants', count: dedupByAsin(score.children).length },
-    ...(kwData && kwData.topOpportunities.length > 0 ? [{ id: 'kwintel', label: 'Intelligence', count: kwData.totalKeywordsAnalyzed }] : []),
+    ...(kwData ? [{ id: 'kwintel', label: 'Intelligence', count: kwData.totalKeywordsAnalyzed }] : []),
   ]
   // Each card shows its IMPORTANCE-WEIGHTED points (max = the section's weight). The six maxes
   // sum to 100, so the cards add up to the listing score — and a perfect listing reads 100, not
@@ -2813,9 +2815,21 @@ export default function ListingDetailPage() {
       {/* ══════════════════════════════════════════════════════════════════════
           SECTION 5 — Keyword Intelligence (if available)
           ══════════════════════════════════════════════════════════════════════ */}
-      {kwData && kwData.topOpportunities.length > 0 && (
+      {kwData && (
         <section>
-          {activeTab === 'kwintel' && (
+          {/* Empty-state: tab persists even with no actionable opportunities (wiped/all-covered/
+              never-researched) instead of vanishing — so the seller always sees their keyword state. */}
+          {activeTab === 'kwintel' && kwData.topOpportunities.length === 0 && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center">
+              <p className="text-sm font-medium text-slate-700">No keyword opportunities to act on right now</p>
+              <p className="text-xs text-slate-500 mt-1.5 max-w-md mx-auto">
+                {kwData.totalKeywordsAnalyzed > 0
+                  ? `All ${kwData.totalKeywordsAnalyzed} researched keywords are currently covered or low-priority — there's nothing flagged to add. Re-research to refresh the opportunity set.`
+                  : 'This listing has no keyword intelligence yet. Run a keyword research (Sync) to populate it.'}
+              </p>
+            </div>
+          )}
+          {activeTab === 'kwintel' && kwData.topOpportunities.length > 0 && (
             <>
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
               {/* Summary badges + competitor-keyword import (the native sources only query OUR
