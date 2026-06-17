@@ -115,6 +115,12 @@ export interface RecRow {
   /** Per-child titles for capacity variation families. When present, the push uses each
    *  child's specific title instead of the broadcast recommended_title. */
   per_child_titles?: { sku: string; asin: string; title: string }[] | null
+  /** Per-design bullets for multi-design POD families (migration 033). When present, the push
+   *  uses each child's design-specific bullets instead of the broadcast recommended_bullets. */
+  per_child_bullets?: { sku: string; asin: string; bullets: string[] }[] | null
+  /** Per-design descriptions for multi-design POD families (migration 033). When present, the push
+   *  uses each child's design-specific description instead of the broadcast recommended_description. */
+  per_child_descriptions?: { sku: string; asin: string; description: string }[] | null
 }
 
 /**
@@ -144,11 +150,18 @@ export function resolveProposed(
       return t.length > 0 ? t : null
     }
     case 'description': {
-      const d = capForField('description', rec.recommended_description ?? '')
+      // Prefer the SKU-specific description when the pipeline emitted per-design descriptions
+      // (multi-design POD families). Single-design/non-apparel families fall back to the broadcast
+      // recommended_description.
+      const pcd = Array.isArray(rec.per_child_descriptions) ? rec.per_child_descriptions.find((p) => p.sku === sku) : null
+      const d = capForField('description', pcd?.description ?? rec.recommended_description ?? '')
       return d.length > 0 ? d : null
     }
     case 'bullets': {
-      const arr = Array.isArray(rec.recommended_bullets) ? rec.recommended_bullets : []
+      // Prefer the SKU-specific bullets when the pipeline emitted per-design bullets (multi-design
+      // POD families). Single-design/non-apparel families fall back to the broadcast recommended_bullets.
+      const pcb = Array.isArray(rec.per_child_bullets) ? rec.per_child_bullets.find((p) => p.sku === sku) : null
+      const arr = Array.isArray(pcb?.bullets) ? pcb.bullets : (Array.isArray(rec.recommended_bullets) ? rec.recommended_bullets : [])
       const bullets = arr
         .map((b) => (b ?? '').trim())
         .filter((b) => b.length > 0)

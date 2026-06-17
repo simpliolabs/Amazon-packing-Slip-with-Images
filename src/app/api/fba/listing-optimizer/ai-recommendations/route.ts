@@ -1142,6 +1142,12 @@ export async function GET(req: NextRequest) {
   const per_child_titles: { sku: string; asin: string; title: string }[] =
     Array.isArray(data.per_child_titles) ? data.per_child_titles : []
 
+  // per_child_bullets/per_child_descriptions (migration 033) are JSONB. Tolerate missing column / null / non-arrays.
+  const per_child_bullets: { sku: string; asin: string; bullets: string[] }[] =
+    Array.isArray(data.per_child_bullets) ? data.per_child_bullets : []
+  const per_child_descriptions: { sku: string; asin: string; description: string }[] =
+    Array.isArray(data.per_child_descriptions) ? data.per_child_descriptions : []
+
   // product_details_improvements is a blind-persisted LLM parse: values can be arrays
   // (["Water Proof","Shock Proof"]) or numbers on rows written before the pipeline
   // normalized at the write boundary. Every UI consumer .trim()s these — the B0GCF11RKL
@@ -1179,6 +1185,8 @@ export async function GET(req: NextRequest) {
       ...data,
       per_child_keywords,
       per_child_titles,
+      per_child_bullets,
+      per_child_descriptions,
       keyword_reconciliation,
       action_plan,
       product_details_improvements,
