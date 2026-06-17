@@ -55,14 +55,23 @@ interface LiveListing {
 }
 
 async function getListing(sellerId: string, token: string, sku: string): Promise<LiveListing | null> {
-  try {
-    const url =
-      `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}` +
-      `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes,summaries`
-    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
-    if (!resp.ok) return null
-    return (await resp.json()) as LiveListing
-  } catch { return null }
+  const url =
+    `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}` +
+    `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes,summaries`
+  // RETRY on throttle (429) / transient 5xx / network error with backoff. getListingsItem is 5 rps;
+  // a 97-SKU verify used to blow past that and get THROTTLED reads back empty → the optimizer then
+  // showed those SKUs as FALSE "stale" even though the title was live (2026-06-17, B0G884ZJ27). Up
+  // to 3 attempts; null only after all fail — the caller buckets that as "couldn't read", NOT stale.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+      if (resp.ok) return (await resp.json()) as LiveListing
+      // 4xx other than 429 (e.g. a genuine 404) won't fix on retry — give up now.
+      if (resp.status !== 429 && resp.status < 500) return null
+    } catch { /* network blip — fall through to backoff + retry */ }
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)))
+  }
+  return null
 }
 
 /** Extract the live value for a field (post-push expected representation). */
@@ -236,11 +245,18 @@ export async function GET(req: NextRequest) {
       targets.push({ sku: parentSku, asin: parentAsin, isParent: true })
     }
 
-    const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource: 'recommendation' | 'push_log' | 'none'; matches: boolean; inherited: boolean; lastUpdatedDate: string | null }[] = []
-    for (let i = 0; i < targets.length; i += 5) {
-      const batch = targets.slice(i, i + 5)
+    const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource: 'recommendation' | 'push_log' | 'none'; matches: boolean; inherited: boolean; readFailed: boolean; lastUpdatedDate: string | null }[] = []
+    // Pace the reads under getListingsItem's 5 rps cap. The old loop fired 5 simultaneous reads with
+    // only a 250ms gap (a burst well over the limit) → Amazon throttled many reads, getListing
+    // returned empty, and the optimizer showed them as FALSE "stale". Now: 4 concurrent + ~900ms per
+    // batch cycle (≈4-5 reads/s) + per-read retry (above) → reads succeed, so verify stops lying.
+    const BATCH = 4
+    for (let i = 0; i < targets.length; i += BATCH) {
+      const batchStart = Date.now()
+      const batch = targets.slice(i, i + BATCH)
       const settled = await Promise.all(batch.map(async (t) => {
         const listing = await getListing(sellerId, token, t.sku)
+        const readFailed = listing === null // null only AFTER retries exhausted = couldn't read
         const currentLive = extractLive(field, detailKey, listing)
         let expected = expectedFor(field, rec, t.sku, t.isParent, detailFriendly || null)
         let expectedSource: 'recommendation' | 'push_log' | 'none' = expected ? 'recommendation' : 'none'
@@ -249,15 +265,11 @@ export async function GET(req: NextRequest) {
           if (fb) { expected = fb; expectedSource = 'push_log' }
         }
         const lastUpdatedDate = listing?.summaries?.[0]?.lastUpdatedDate ?? null
-        // INHERITED (false-stale fix, 2026-06-17): a variation CHILD's own item_name is frequently
-        // EMPTY because the title is contributed at the PARENT and Amazon shows the child a catalog-
-        // MERGED title (parent + color theme, e.g. "...Pepper"). getListingsItem returns only the
-        // seller's child-level contribution, so currentLive='' even though the title IS live on the
-        // PDP. For the TITLE field on a NON-parent child with a LIVE listing (lastUpdatedDate present)
-        // and a non-empty expected, classify empty as INHERITED-from-parent — NOT stale. Scoped to
-        // title only (details/keywords are genuinely per-child and SHOULD be set), per the
-        // don't-over-generalize rule. Live: B0G884ZJ27 / AQS-TMB-L-PEP-FBA showed (empty)/stale.
-        const inherited = field === 'title' && !t.isParent && currentLive.length === 0 && expected.length > 0 && lastUpdatedDate !== null
+        // INHERITED (2026-06-17): a variation CHILD whose read SUCCEEDED but whose own item_name is
+        // empty inherits the parent's title — applied, not stale. Scoped to title only (details/
+        // keywords are genuinely per-child). Gated on a SUCCESSFUL read (!readFailed) so a throttled
+        // empty read is never mislabeled "inherited" — those go to the readFailed/"couldn't read" bucket.
+        const inherited = field === 'title' && !t.isParent && !readFailed && currentLive.length === 0 && expected.length > 0
         return {
           sku: t.sku, asin: t.asin, isParent: t.isParent,
           currentLive, expected, expectedSource,
@@ -270,12 +282,17 @@ export async function GET(req: NextRequest) {
             currentLive.toLowerCase().replace(/[^a-z0-9]/g, '') === expected.toLowerCase().replace(/[^a-z0-9]/g, '')
           ),
           inherited,
+          readFailed,
           lastUpdatedDate,
         }
       }))
       results.push(...settled)
-      // Brief inter-batch pause to stay well under 5 rps even on cold caches.
-      if (i + 5 < targets.length) await new Promise((r) => setTimeout(r, 250))
+      // Pace to ~900ms per batch cycle so the sustained rate stays under 5 rps (retries add a few
+      // backed-off requests on top — well within the cap).
+      if (i + BATCH < targets.length) {
+        const elapsed = Date.now() - batchStart
+        if (elapsed < 900) await new Promise((r) => setTimeout(r, 900 - elapsed))
+      }
     }
 
     // The variation PARENT is a non-buyable hub: #244/#245 skip it on PUSH (a content PATCH to the
@@ -286,13 +303,17 @@ export async function GET(req: NextRequest) {
     // out of the pass/fail counts so verify can actually reach 100%.
     const scored = results.filter((r) => !r.isParent)
     const matched = scored.filter((r) => r.matches).length
-    // Child titles inherited from the parent (empty child item_name on a live listing) — applied,
+    // Child titles inherited from the parent (empty child item_name on a SUCCESSFUL read) — applied,
     // not stale. Counted separately so the seller sees "✓ inherited" rather than a false failure.
     const inherited = scored.filter((r) => r.inherited).length
-    const stale   = scored.filter((r) => !r.matches && !r.inherited && r.expected.length > 0).length
+    // COULDN'T READ: the live read failed after retries (throttle/network). We genuinely don't know
+    // the live state, so this is its OWN bucket — NEVER "stale" (stale falsely implies the push was
+    // rejected). This is the core false-"stale" fix: a read we couldn't complete is not a failure to apply.
+    const unverifiable = scored.filter((r) => r.readFailed).length
+    const stale   = scored.filter((r) => !r.readFailed && !r.matches && !r.inherited && r.expected.length > 0).length
     // No expectation anywhere (not in the rec, never logged as pushed) — its own bucket so the UI
     // never paints these as "stale" (which implied a failed push when there was nothing to compare).
-    const unknown = scored.filter((r) => r.expected.length === 0).length
+    const unknown = scored.filter((r) => !r.readFailed && r.expected.length === 0).length
     const parentSkipped = results.length - scored.length
     return NextResponse.json({
       parent_asin: parentAsin,
@@ -308,6 +329,7 @@ export async function GET(req: NextRequest) {
       total: scored.length,
       matched,
       inherited,
+      unverifiable,
       stale,
       unknown,
       parentSkipped,
