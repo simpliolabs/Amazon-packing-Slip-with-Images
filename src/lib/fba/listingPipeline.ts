@@ -26,6 +26,11 @@ import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
+// Per-design name resolution (Commit 2 hot-fix): the seller stores the design name as Amazon's
+// Color attribute per variant; fetch via Listings Items API. Token + sellerId resolution mirrors
+// the SP-API call sites in pushExecutor.
+import { getAccessToken as getSpApiAccessToken } from '@/lib/amazon/auth'
+import { getSellerId as getSpApiSellerId } from '@/lib/fba/pushExecutor'
 
 // ─── Shared output types (structurally identical to the route's interfaces) ────
 
@@ -3208,12 +3213,23 @@ Rules:
 - Read like a human wrote it. Return ONLY the final title string.`
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress)
   let title = (judged || '').trim()
-  // Post-guards: capTitle75 + blank-brand dedup + brand-front. NO design-name backstop (intentional).
+  // Post-guards: capTitle75 + blank-brand dedup + brand-dedup + brand-front. NO design-name backstop (intentional).
   title = capTitle75(title)
   if (blankBrand && title) {
     const re = new RegExp(`\\b${blankBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
     let seen = 0
     title = title.replace(re, (m) => (++seen === 1 ? m : '')).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
+  }
+  // BRAND-DEDUP (Commit 2 hot-fix): the council judge can emit the brand TWICE — live regression
+  // 2026-06-17 on B0F6QZ34B1 produced "THE CEO the ceo fishing Funny Fishing T-Shirt for Men and
+  // Women" because the brief tells the judge "Brand FIRST" and the judge wrote the brand at the
+  // top AND echoed it lowercase mid-title. The brand-FRONT backstop below only fires when the
+  // brand is missing from position 0 — a lowercase mid-title doesn't qualify, so the dup survived.
+  // Strip later occurrences (case-insensitive), normalize the first to brandName's canonical form.
+  if (brandName && title) {
+    const re = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
+    let seen = 0
+    title = title.replace(re, () => (++seen === 1 ? brandName.trim() : '')).replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/[\s,]+$/g, '').trim()
   }
   if (brandName && title) {
     const brandRe = new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
@@ -3488,40 +3504,76 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // branch below populates it for single-design capacity families. Single-design apparel: stays undefined.
   let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
   if (apparelMultiDesign && (!only || only === 'title')) {
-    // PER-DESIGN TITLES (Phase 1 Commit 2). Each design group runs its own vision scan +
-    // extractDesignName + buildTitleFor (which internally invokes runTitleCouncil for apparel).
-    // Pressure-test mitigations applied:
+    // PER-DESIGN TITLES (Phase 1 Commit 2 + hot-fix). Each design group resolves its design name
+    // via this chain (PO 2026-06-17: "design name is stored as Amazon's Color attribute"):
+    //   1. PRIMARY — fetch rep child's Amazon attributes (color → style_name → color_name) via
+    //      Listings Items API. First non-empty wins.
+    //   2. BACKUP — per-group vision scan (gpt-4.1-mini reading the rep child's image).
+    //   3. LAST-RESORT — extractDesignName on the cloned groupInput.
+    // Pressure-test mitigations preserved:
     //   - groupInput.canonicalTitle = group's child stored title (NOT parent canonical →
     //     prevents cross-design fill-bigram leakage, finding #3)
     //   - searchKeyphrases reused from parent's filtered pool (finding #1a)
-    //   - designNameOverride = null per group (override is parent-scoped, breaks per-design)
-    //   - vision scans parallel via Promise.all (3 designs ≈ +5s, not +15s)
+    //   - vision scans + attribute fetches parallel via Promise.all
     onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
     perChildTitles = []
+    // Resolve SP-API creds ONCE for the whole loop. Best-effort: a failure here just means the
+    // per-design name resolution falls through to vision + extractDesignName (today's behavior).
+    let spToken: string | null = null
+    let spSellerId: string | null = null
+    try { spToken = await getSpApiAccessToken(); spSellerId = await getSpApiSellerId() } catch (e) { console.warn('[pipeline] SP-API creds unavailable for per-design color fetch — falling back to vision:', e instanceof Error ? e.message : e) }
+    const SP_ENDPOINT_URL = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
+    const SP_MP_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
+    const fetchDesignNameAttr = async (sku: string): Promise<string> => {
+      if (!spToken || !spSellerId || !sku) return ''
+      try {
+        const u = `${SP_ENDPOINT_URL}/listings/2021-08-01/items/${spSellerId}/${encodeURIComponent(sku)}?marketplaceIds=${SP_MP_ID}&includedData=attributes`
+        const resp = await fetch(u, { headers: { 'x-amz-access-token': spToken } })
+        if (!resp.ok) return ''
+        const json = await resp.json() as { attributes?: Record<string, unknown> }
+        const attrs = json.attributes ?? {}
+        for (const key of ['color', 'style_name', 'color_name']) {
+          const arr = attrs[key] as Array<{ value?: string }> | undefined
+          const v = arr?.[0]?.value
+          if (typeof v === 'string' && v.trim()) return v.trim()
+        }
+        return ''
+      } catch (e) { console.warn(`[pipeline] design-name attr fetch ${sku} failed:`, e instanceof Error ? e.message : e); return '' }
+    }
     const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
       const groupChildren = group.skus
         .map((s) => input.children.find((c) => c.sku === s.sku))
         .filter((c): c is NonNullable<typeof c> => Boolean(c))
+      const repSku = group.skus[0]?.sku ?? ''
       const repAsin = group.skus[0]?.asin ?? input.children[0]?.asin ?? ''
       const groupRepTitle = groupChildren[0]?.title ?? input.repTitle ?? null
+      // PRIMARY: Amazon Color attribute (the seller's design-name slot).
+      const colorAttrName = await fetchDesignNameAttr(repSku)
+      // BACKUP: per-group vision scan (only when color attribute is empty — saves the OpenAI call
+      // on the common case where every group has a real color attribute, ~1-2s per group).
       let groupVision = input.visionDesign
-      try {
-        const url = repAsin ? await getProductImageUrl(repAsin) : null
-        const identity = url && repAsin ? await scanProductImage(repAsin, url, { openai: input.openai }) : null
-        if (identity) {
-          groupVision = {
-            designTheme: identity.designTheme || '',
-            visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
-            seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
+      if (!colorAttrName) {
+        try {
+          const url = repAsin ? await getProductImageUrl(repAsin) : null
+          const identity = url && repAsin ? await scanProductImage(repAsin, url, { openai: input.openai }) : null
+          if (identity) {
+            groupVision = {
+              designTheme: identity.designTheme || '',
+              visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
+              seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
+            }
           }
-        }
-      } catch (e) { console.warn(`[pipeline] per-design vision ${repAsin} failed:`, e instanceof Error ? e.message : e) }
+        } catch (e) { console.warn(`[pipeline] per-design vision ${repAsin} failed:`, e instanceof Error ? e.message : e) }
+      }
       const groupInput: PipelineInput = {
         ...input,
         canonicalTitle: groupRepTitle,
         repTitle: groupRepTitle ?? input.repTitle,
         visionDesign: groupVision,
-        designNameOverride: null,
+        // Pass the Color-attribute value as the override so extractDesignName returns it verbatim.
+        // null (no color attribute) → extractDesignName runs its normal heuristic chain (vision +
+        // canonical + repTitle), giving us today's behavior as the last-resort fallback.
+        designNameOverride: colorAttrName || null,
         children: groupChildren,
       }
       const { name: groupDesignName } = await extractDesignName(groupInput)
