@@ -196,7 +196,7 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
 
   const { data: recRow } = await supabase
     .from('listing_seo_recommendations')
-    .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords, per_child_titles')
+    .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords, per_child_titles, per_child_bullets, per_child_descriptions')
     .eq('parent_asin', parentAsin)
     .single()
   const rec = (recRow ?? {}) as {
@@ -207,6 +207,10 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     /** Per-child titles for capacity families (migration 017). resolveProposed picks the
      *  SKU-specific title when present, otherwise falls back to recommended_title. */
     per_child_titles?: { sku: string; asin: string; title: string }[] | null
+    /** Per-design bullets/description for multi-design POD families (migration 033). resolveProposed
+     *  picks the SKU-specific value when present, otherwise falls back to the broadcast value. */
+    per_child_bullets?: { sku: string; asin: string; bullets: string[] }[] | null
+    per_child_descriptions?: { sku: string; asin: string; description: string }[] | null
   }
 
   // A manual title override broadcasts ONE typed string to every SKU. That is correct for broadcast-

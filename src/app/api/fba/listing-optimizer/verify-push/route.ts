@@ -106,6 +106,10 @@ interface RecRow {
   recommended_description?: string | null
   recommended_keywords?: string | null
   per_child_titles?: { sku: string; asin: string; title: string }[] | null
+  /** Per-design bullets/description for multi-design POD families (migration 033). resolveProposed
+   *  resolves the SKU-specific value (else broadcast), so the expected value matches what the push sends. */
+  per_child_bullets?: { sku: string; asin: string; bullets: string[] }[] | null
+  per_child_descriptions?: { sku: string; asin: string; description: string }[] | null
   product_details_improvements?: { field_name?: string; recommended_value?: string; sp_api_key?: string; pushable?: boolean }[] | null
 }
 
@@ -159,7 +163,7 @@ export async function GET(req: NextRequest) {
     const supabase = await createAdminClient()
     const { data: recRow } = await supabase
       .from('listing_seo_recommendations')
-      .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords, per_child_titles, product_details_improvements')
+      .select('recommended_title, recommended_bullets, recommended_description, recommended_keywords, per_child_titles, per_child_bullets, per_child_descriptions, product_details_improvements')
       .eq('parent_asin', parentAsin)
       .single()
     const rec = (recRow ?? {}) as RecRow
