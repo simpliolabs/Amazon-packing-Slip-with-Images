@@ -2195,6 +2195,41 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
     }
   }
 
+  // ── FINAL READABILITY PASS (PO 2026-06-17): the deterministic backstop above guarantees keyword
+  // COVERAGE but can leave clumsy raw-token appends (", costume.", ", womens.", ", 100 days.") and the
+  // council can over-jam keyphrases ("This gators shirt men and women love"). One LLM pass rewrites the
+  // 5 bullets to read naturally while KEEPING coverage. Accept the rewrite ONLY if it (a) returns the
+  // same bullet count, each <=200 chars, (b) covers the keyphrases AT LEAST as well (no scorer
+  // regression), and (c) adds no NEW unframed third-party brand. Else keep the deterministic bullets —
+  // so this can only ever IMPROVE readability, never regress coverage or safety. Best-effort.
+  if (bullets.length > 0) {
+    try {
+      const beforeMissing = missingBulletKeywords(bullets, oppPlusDesign).length
+      const ownBrandSet = ownBrandTokenSet(brandName || '')
+      const beforeBrands = findThirdPartyBrands(bullets.join(' '), ownBrandSet).length
+      const keyphraseList = oppPlusDesign.slice(0, 12).join(', ')
+      const polishResp = await openai.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        temperature: 0.4,
+        max_tokens: 900,
+        messages: [
+          { role: 'system', content: `You are an Amazon listing copywriter. Rewrite the 5 bullet points so they read naturally and grammatically: fix awkward keyword insertions, DELETE dangling trailing fragments (e.g. ", costume.", ", womens.", ", 100 days."), and fix obvious misspellings. HARD RULES: return EXACTLY 5 bullets; keep each bullet's "HOOK - body" shape (an ALL-CAPS hook, then " - ", then a clean sentence); each bullet 200 characters or fewer; add NO new brand names; invent NO product claims. KEEP these search keyphrases present somewhere across the 5 bullets, woven NATURALLY (rephrase around them — never just bolt a word onto the end): ${keyphraseList}. Return ONLY a JSON array of exactly 5 strings.` },
+          { role: 'user', content: JSON.stringify(bullets) },
+        ],
+      })
+      const rawPolish = (polishResp.choices[0]?.message?.content || '').replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim()
+      const parsedPolish = JSON.parse(rawPolish)
+      if (Array.isArray(parsedPolish) && parsedPolish.length === bullets.length &&
+          parsedPolish.every((b) => typeof b === 'string' && b.trim().length > 0 && b.trim().length <= 200)) {
+        const cleaned = parsedPolish.map((b) => b.trim())
+        const afterMissing = missingBulletKeywords(cleaned, oppPlusDesign).length
+        const afterBrands = findThirdPartyBrands(cleaned.join(' '), ownBrandSet).length
+        // Only adopt the rewrite if coverage did NOT get worse and no new unframed brand crept in.
+        if (afterMissing <= beforeMissing && afterBrands <= beforeBrands) bullets = cleaned
+      }
+    } catch { /* LLM/parse failure — keep the deterministic bullets (readability is best-effort) */ }
+  }
+
   return bullets
 }
 
@@ -2512,7 +2547,7 @@ Return ONLY the JSON object.`
 
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
-async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = []): Promise<string> {
+async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = [], topOpportunityKws: string[] = []): Promise<string> {
   const { openai, category, repTitle, children, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
   // Capacity-family detection (mirrors bullets): shared description must NOT hardcode a
@@ -2524,10 +2559,16 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
   const attrLine = attributes.length
     ? `\nNaturally mention these known product attributes (real facts from the listing${apparel ? ' — e.g. garment brand, material, fit' : ''}): ${attributes.join(', ')}.`
     : ''
+  // SEO: weave the top opportunity search phrases into the copy (PO 2026-06-17: the description was
+  // design-pretty but had ZERO of the high-volume keywords like "graphic tees for women"). Top few
+  // only, woven naturally — the 900-980 cap + "no stuffing" rule keep it readable, not a keyword list.
+  const kwLine = topOpportunityKws.length
+    ? `\n🟢 HIGH-VALUE SEARCH PHRASES — weave 3-5 of these in NATURALLY where they genuinely fit the copy (do NOT list them, do NOT stuff, skip any that would read awkwardly): ${topOpportunityKws.slice(0, 8).join(', ')}.`
+    : ''
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
   const user = `Write a CONCISE, keyword-rich HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. Be tight and punchy; lead with the strongest selling points and cover ${apparel ? 'the design, materials, fit, styling, and use cases' : "the product's features, specs, quality, and use cases"}. Do NOT exceed 980 visible characters.
 Title: ${finalTitle}
-Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
+Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}${kwLine}
 
 🚫 ACCURACY: describe ONLY what the title says this product is${apparel ? '' : ' — do NOT reframe it as apparel / a t-shirt / clothing unless it genuinely is one'}. Do NOT claim it is for a profession/role/occasion not named in the title — never write "teacher", "nurse", "mom", "educator", "coach", etc. unless that word is in the title. If a bullet theme above implies such a claim, ignore that theme and describe the actual product instead.
 
@@ -3906,7 +3947,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('keywords', { per_child_keywords: perChildOnly })
   }
   if (only === 'description') {
-    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands)
+    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets)
     if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
@@ -3919,7 +3960,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (proposers → adversary → judge) stay sequential because their order IS the quality.
   let [perChild, descriptionRaw] = await Promise.all([
     runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok),
-    runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands),
+    runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets),
   ])
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
   // "country western" — then leftover pool keywords), THEN the hard-lean gender strip
