@@ -239,33 +239,40 @@ export async function researchKeywords(
     await upsertSeedPool(seedKey, [...nicheKeywords, ...competitorKeywords], competitor, source, asin);
   }  // end FRESH RESEARCH
 
-  // ── GARMENT-BRAND universe (PO 2026-06-17): the blank/garment brand (Comfort Colors, Gildan...) is
-  // a high-volume keyword universe the Seed Agent never seeds — it seeds the DESIGN ("alligator
-  // shirt"), so "comfort colors" volumes were never captured. Research the brand as its OWN universe,
-  // stored in keyword_seed_pool keyed by the brand seed, so it's researched ONCE (1 credit) then
-  // REUSED (0 credits) across every product of that brand. The design pool above stays pure; these
-  // brand keywords are merged into THIS listing's pool only. Runs after the fresh/reuse branch so
-  // EVERY brand product gets it. The downstream relevance gate filters off-product brand terms;
-  // Phase 4b below overlays OUR organic rank onto these rows too.
-  const brandSeed = garmentBrandSeed(seed, listingTitle);
-  const brandKey = brandSeed ? normalizeSeedKey(brandSeed) : '';
-  if (brandSeed && brandKey && brandKey !== seedKey) {
-    let brandPool = forceRefresh ? null : await getSeedPool(brandKey);
-    if (!brandPool) {
-      const brandKws = await fetchKeywordsByKeyword(brandSeed, { pageSize: 100 });
+  // ── EXTRA UNIVERSES (PO 2026-06-17, HYBRID model): the Seed Agent seeds only the DESIGN niche
+  // ("alligator shirt"). Give each design 2-3 universes by adding up to two MORE angles — the broad
+  // apparel CATEGORY ("graphic tees for women", 456k/mo) and the garment BRAND ("comfort colors
+  // shirt") — neither of which the agent ever produces. Each angle is its OWN keyword_seed_pool entry
+  // (own seed_key): researched ONCE (1 credit) then REUSED (0 credits) across EVERY product sharing
+  // that angle (every graphic tee shares "graphic tees for women"; every Comfort Colors product shares
+  // "comfort colors shirt"). The design pool above stays pure; these are merged into THIS listing's
+  // pool only. Runs after the fresh/reuse branch so every product gets them. Relevance gate filters
+  // off-angle terms; Phase 4b overlays OUR organic rank. (Generalizes the #278 garment-only block.)
+  const extraUniverses = [
+    broadCategorySeed(seed, listingTitle), // U2 — broad category, e.g. "graphic tees for women"
+    garmentBrandSeed(seed, listingTitle),  // U3 — garment brand, e.g. "comfort colors shirt"
+  ].filter((s): s is string => !!s);
+  const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
+  const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
+  for (const us of extraUniverses) {
+    const uk = normalizeSeedKey(us);
+    if (!uk || universeSeen.has(uk)) continue;
+    universeSeen.add(uk);
+    let up = forceRefresh ? null : await getSeedPool(uk);
+    if (!up) {
+      const kws = await fetchKeywordsByKeyword(us, { pageSize: 100 });
       creditsUsed++;
-      await upsertSeedPool(brandKey, brandKws, null, 'garment_brand', asin);
-      brandPool = { keywords: brandKws, competitor: null };
-      console.log(`[keywordResearcher] Garment-brand universe "${brandKey}": researched ${brandKws.length} kws (1 credit) + stored for cross-product reuse.`);
+      await upsertSeedPool(uk, kws, null, 'universe', asin);
+      up = { keywords: kws, competitor: null };
+      console.log(`[keywordResearcher] Universe "${uk}": researched ${kws.length} kws (1 credit) + stored for cross-product reuse.`);
     } else {
       // Reused — record this ASIN as a contributor + refresh TTL (0 Jungle Scout credits).
-      await upsertSeedPool(brandKey, brandPool.keywords, brandPool.competitor, 'garment_brand', asin);
-      console.log(`[keywordResearcher] Garment-brand universe "${brandKey}": REUSED ${brandPool.keywords.length} kws (0 credits).`);
+      await upsertSeedPool(uk, up.keywords, up.competitor, 'universe', asin);
+      console.log(`[keywordResearcher] Universe "${uk}": REUSED ${up.keywords.length} kws (0 credits).`);
     }
-    const seenBrand = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
-    for (const r of brandPool.keywords) {
+    for (const r of up.keywords) {
       const k = (r.keyword || '').toLowerCase();
-      if (k && !seenBrand.has(k)) { nicheKeywords.push({ ...r, organicRank: undefined }); seenBrand.add(k); }
+      if (k && !mergedKw.has(k)) { nicheKeywords.push({ ...r, organicRank: undefined }); mergedKw.add(k); }
     }
   }
 
@@ -503,6 +510,19 @@ export function buildFallbackSeed(seed: string, listingTitle?: string | null): s
   if (!core) return null
   const fallback = `${core} ${productWord}`.replace(/\s{2,}/g, ' ').trim()
   return fallback === seed ? null : fallback
+}
+
+/**
+ * BROAD-CATEGORY universe seed (PO 2026-06-17, hybrid model): the broad apparel category shoppers
+ * browse — e.g. "graphic tees for women" (456k/mo) — which the design-niche seed never surfaces.
+ * Tees only; audience inferred from the title ("for Women"/"for Men"), default women (the larger
+ * graphic-tee market). Returns null for non-tees (non-apparel uses the PT-derived categorySeed).
+ */
+function broadCategorySeed(seed: string, listingTitle?: string | null): string | null {
+  const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
+  if (!/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
+  const aud = /\bwom[ae]n\b|\bladies\b/.test(src) ? 'women' : /\bmen\b/.test(src) ? 'men' : 'women'
+  return `graphic tees for ${aud}`
 }
 
 /**
