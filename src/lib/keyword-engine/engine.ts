@@ -54,6 +54,10 @@ export interface JungleScoutKeywordRow {
   monthlyTrend?: number;         // % change in search volume month-over-month
   organicRank?: number;          // our ASIN's organic rank for this keyword (0 = not ranking)
   primaryAsin?: string;          // which ASIN this keyword was returned for
+  fromUniverse?: boolean;        // merged from a deliberate broad-category/garment-brand universe (#280);
+                                 // EXEMPT from the relevance gate — these are rule-generated on-product
+                                 // angles (e.g. "graphic tees for women") the gate's token-overlap would
+                                 // wrongly strip as "generic". The niche path stays fully gated.
 }
 
 /** Union type for any keyword source */

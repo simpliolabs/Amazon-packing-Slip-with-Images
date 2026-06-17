@@ -272,7 +272,9 @@ export async function researchKeywords(
     }
     for (const r of up.keywords) {
       const k = (r.keyword || '').toLowerCase();
-      if (k && !mergedKw.has(k)) { nicheKeywords.push({ ...r, organicRank: undefined }); mergedKw.add(k); }
+      // fromUniverse: true exempts these from the downstream relevance gate (#280 universes are
+      // deliberate on-product angles the token-overlap gate would otherwise strip as "generic").
+      if (k && !mergedKw.has(k)) { nicheKeywords.push({ ...r, organicRank: undefined, fromUniverse: true }); mergedKw.add(k); }
     }
   }
 

@@ -252,7 +252,13 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       return keywords;
     }
     const before = keywords.length;
-    const kept = keywords.filter((k) => keywordIsRelevant(k.keyword, identity));
+    // EXEMPT universe keywords (#280): broad-category / garment-brand angles ("graphic tees for women",
+    // "comfort colors shirt") are made entirely of generic apparel/category tokens, so keywordIsRelevant's
+    // token-overlap would strip the whole universe — the gate and the universes structurally fight each
+    // other. These are deterministic, on-product, rule-generated angles (no AI seed → can't carry a
+    // hallucinated theme), so exempting them does NOT reopen the soccer-pollution trap, which flows
+    // through the design-NICHE query (still fully gated below). PO 2026-06-17 "RELAX, YES".
+    const kept = keywords.filter((k) => (k as { fromUniverse?: boolean }).fromUniverse || keywordIsRelevant(k.keyword, identity));
     if (kept.length === 0 && before > 0) {
       console.warn(`[syncKeywordIntelligence] relevance gate would drop ALL ${before} kw for ${asin} (identity too narrow: [${[...identity].slice(0, 8).join(', ')}]) — keeping pool UNFILTERED (never-collapse floor)`);
       return keywords;
