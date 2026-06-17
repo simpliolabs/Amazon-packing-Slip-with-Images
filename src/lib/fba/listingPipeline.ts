@@ -2525,7 +2525,7 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
     ? `\nNaturally mention these known product attributes (real facts from the listing${apparel ? ' — e.g. garment brand, material, fit' : ''}): ${attributes.join(', ')}.`
     : ''
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
-  const user = `Write a CONCISE, keyword-rich HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. Be tight and punchy; lead with the strongest selling points and cover ${apparel ? 'the design, materials, fit, styling, and use cases' : "the product's features, specs, quality, and use cases"}. Do NOT exceed 980 visible characters.
+  const user = `Write a SUBSTANTIAL 270-330 word HTML product description (generic for all variants) using <p>, <b>, <ul>, <li>. Use most of Amazon's ~2000-character budget — do NOT write a short blurb; expand on ${apparel ? 'the design, materials, fit, styling, and use cases' : "the product's features, specs, quality, and use cases"}.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}
 
@@ -2570,7 +2570,7 @@ Problems:
 - ${dProblems.join('\n- ')}
 
 Rules to honor on rewrite:
-- 900-980 visible characters (~150 words) HTML using <p>, <b>, <ul>, <li>. Do NOT exceed 980 visible characters.
+- 270-330 words HTML using <p>, <b>, <ul>, <li>.
 - Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capClause}
 - Return ONLY the HTML.` },
           ],
@@ -2615,7 +2615,7 @@ Rules to honor on rewrite:
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite the HTML description. ${instructions} The product is "${finalTitle}" — describe ONLY that. 900-980 visible characters (~150 words) HTML using <p>, <b>, <ul>, <li>; do NOT exceed 980 visible characters. Return ONLY the HTML.` },
+            { role: 'user', content: `Rewrite the HTML description. ${instructions} The product is "${finalTitle}" — describe ONLY that. 270-330 words HTML using <p>, <b>, <ul>, <li>. Return ONLY the HTML.` },
           ],
           temperature: 0.4,
           max_tokens: 1200,
@@ -2626,18 +2626,17 @@ Rules to honor on rewrite:
     } catch { /* fail-open */ }
   }
 
-  // ── LENGTH FLOOR: the agent targets 900-980 VISIBLE chars but can under-deliver a thin blurb.
-  // One expand pass when notably short (< 850). Threshold sits just under the 900-floor so an
-  // in-band (900-980) description is NEVER expanded back over the cap. Best-effort; the prompt
-  // forbids inventing facts/audiences. (Was < 1300 toward 270-330 words — that fought the new cap.)
+  // ── #1 LENGTH FLOOR: the agent targets 270-330 words but occasionally under-delivers a thin
+  // blurb (leaving Amazon's ~2000-char budget — and ranking — on the table). One expand pass when
+  // the plain text is well short. Best-effort; the prompt forbids inventing facts/audiences.
   const plainLen = (d: string) => d.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().length
-  if (description && plainLen(description) < 850) {
+  if (description && plainLen(description) < 1300) {
     try {
       const expand = await openai.chat.completions.create({
         model: 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: `Expand this product description to about 900-980 visible characters (~150 words; do NOT exceed 980 visible characters). Do NOT invent facts, audiences, professions, or uses not already implied. Same product ("${finalTitle}"); keep every third-party brand in "compatible with [Brand]" framing; keep clean HTML (<p>, <b>, <ul>, <li>).
+          { role: 'user', content: `Expand this product description to a SUBSTANTIAL 270-330 words using most of Amazon's ~2000-character budget. Do NOT invent facts, audiences, professions, or uses not already implied. Same product ("${finalTitle}"); keep every third-party brand in "compatible with [Brand]" framing; keep clean HTML (<p>, <b>, <ul>, <li>).
 
 Too-short description to expand:
 ${description}
@@ -2652,26 +2651,15 @@ Return ONLY the expanded HTML.` },
     } catch { /* keep best-so-far */ }
   }
 
-  // ── CAP at 980 VISIBLE chars (PO 2026-06-17: keep the description Amazon-compliant at 900-980
-  // visible chars — the deterministic guarantee, mirroring capTitle75). Measure tag-stripped length;
-  // if over, find the HTML offset where visible text reaches the cap, then trim at the last closing
-  // tag boundary at/before it so the live PDP never shows a cut mid-word / mid-tag.
-  const DESC_VISIBLE_CAP = 980
-  if (plainLen(description) > DESC_VISIBLE_CAP) {
-    let vis = 0
-    let off = description.length
-    for (let i = 0; i < description.length; i++) {
-      if (description[i] === '<') { const c = description.indexOf('>', i); if (c === -1) break; i = c; continue }
-      if (++vis >= DESC_VISIBLE_CAP) { off = i + 1; break }
-    }
+  // ── #1 CAP: Amazon truncates the Product Description near 2000 chars. Trim at the last closing
+  // tag boundary so the live PDP never shows a description cut mid-word / mid-tag.
+  if (description.length > 2000) {
     let bestEnd = -1
     for (const tag of ['</p>', '</li>', '</ul>']) {
-      const i = description.lastIndexOf(tag, off)
+      const i = description.lastIndexOf(tag, 2000)
       if (i >= 0 && i + tag.length > bestEnd) bestEnd = i + tag.length
     }
-    description = bestEnd > 0
-      ? description.slice(0, bestEnd).trim()
-      : description.slice(0, off).replace(/<[^>]*$/, '').replace(/\s+\S*$/, '').trim()
+    description = bestEnd > 0 ? description.slice(0, bestEnd) : description.slice(0, 2000).replace(/<[^>]*$/, '').trim()
   }
 
   return description
