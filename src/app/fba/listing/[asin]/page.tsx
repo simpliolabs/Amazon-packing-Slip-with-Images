@@ -296,8 +296,8 @@ export default function ListingDetailPage() {
   // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
   // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
   // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
-  interface VerifyResultRow { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource?: 'recommendation' | 'push_log' | 'none'; matches: boolean; inherited?: boolean; lastUpdatedDate: string | null }
-  interface VerifyPayload { total: number; matched: number; inherited?: number; stale: number; unknown?: number; results: VerifyResultRow[]; attribute_key?: string }
+  interface VerifyResultRow { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource?: 'recommendation' | 'push_log' | 'none'; matches: boolean; inherited?: boolean; readFailed?: boolean; lastUpdatedDate: string | null }
+  interface VerifyPayload { total: number; matched: number; inherited?: number; unverifiable?: number; stale: number; unknown?: number; results: VerifyResultRow[]; attribute_key?: string }
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyResults, setVerifyResults] = useState<VerifyPayload | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
@@ -3690,12 +3690,13 @@ export default function ListingDetailPage() {
                         <p className="text-xs text-slate-700 mb-1.5">
                           <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-green-500" /> <b>{verifyResults.matched}</b> applied</span>
                           {(verifyResults.inherited ?? 0) > 0 && <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-sky-500" /> <b>{verifyResults.inherited}</b> inherited</span>}
+                          {(verifyResults.unverifiable ?? 0) > 0 && <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-slate-400" /> <b>{verifyResults.unverifiable}</b> couldn&apos;t read</span>}
                       <span className="inline-flex items-center gap-1 mr-3"><span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> stale</span>
                           <span className="text-slate-500">· {verifyResults.total} SKUs checked</span>
                         </p>
                         {verifyResults.stale > 0 && pushField !== 'details' && (
                           <button
-                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches && !v.inherited && v.expected).map((v) => v.sku))}
+                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches && !v.inherited && !v.readFailed && v.expected).map((v) => v.sku))}
                             disabled={pushLoading}
                             className="mb-2 text-[11px] bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-md font-medium disabled:opacity-50"
                           >
@@ -3705,8 +3706,8 @@ export default function ListingDetailPage() {
                         <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-[25vh] overflow-y-auto bg-white">
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`px-2 py-1.5 text-[11px] flex items-center gap-2 ${v.isParent ? 'bg-violet-50' : ''}`}>
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.inherited ? 'bg-sky-100 text-sky-700' : v.isParent ? 'bg-violet-100 text-violet-700' : 'bg-amber-100 text-amber-700'}`}>
-                                {v.matches ? '✓ applied' : v.inherited ? '✓ inherited' : v.isParent ? 'skipped (hub)' : 'stale'}
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.inherited ? 'bg-sky-100 text-sky-700' : v.isParent ? 'bg-violet-100 text-violet-700' : v.readFailed ? 'bg-slate-100 text-slate-500' : 'bg-amber-100 text-amber-700'}`}>
+                                {v.matches ? '✓ applied' : v.inherited ? '✓ inherited' : v.isParent ? 'skipped (hub)' : v.readFailed ? "couldn't read" : 'stale'}
                               </span>
                               <span className="font-mono text-slate-700">{v.sku}</span>
                               {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
@@ -3791,6 +3792,11 @@ export default function ListingDetailPage() {
                               <span className="w-2 h-2 rounded-full bg-sky-500" /> <b>{verifyResults.inherited}</b> inherited (child uses the parent title)
                             </span>
                           )}
+                          {(verifyResults.unverifiable ?? 0) > 0 && (
+                            <span className="inline-flex items-center gap-1 mr-3">
+                              <span className="w-2 h-2 rounded-full bg-slate-400" /> <b>{verifyResults.unverifiable}</b> couldn&apos;t read (Amazon throttled the check — re-check live)
+                            </span>
+                          )}
                           <span className="inline-flex items-center gap-1 mr-3">
                             <span className="w-2 h-2 rounded-full bg-amber-500" /> <b>{verifyResults.stale}</b> still stale (Amazon processing or rejected)
                           </span>
@@ -3803,7 +3809,7 @@ export default function ListingDetailPage() {
                         </p>
                         {verifyResults.stale > 0 && pushField !== 'details' && (
                           <button
-                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches && !v.inherited && v.expected).map((v) => v.sku))}
+                            onClick={() => confirmPush(verifyResults.results.filter((v) => !v.matches && !v.inherited && !v.readFailed && v.expected).map((v) => v.sku))}
                             disabled={pushLoading}
                             className="mb-2 text-[11px] bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-md font-medium disabled:opacity-50"
                           >
@@ -3814,8 +3820,8 @@ export default function ListingDetailPage() {
                           {verifyResults.results.map((v) => (
                             <div key={v.sku} className={`p-2.5 text-xs ${v.isParent ? 'bg-violet-50' : ''}`}>
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.inherited ? 'bg-sky-100 text-sky-700' : v.isParent ? 'bg-violet-100 text-violet-700' : v.expected ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
-                                  {v.matches ? '✓ applied' : v.inherited ? '✓ inherited' : v.isParent ? 'skipped (hub)' : v.expected ? 'stale' : 'no expectation'}
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${v.matches ? 'bg-green-100 text-green-700' : v.inherited ? 'bg-sky-100 text-sky-700' : v.isParent ? 'bg-violet-100 text-violet-700' : v.readFailed ? 'bg-slate-100 text-slate-500' : v.expected ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
+                                  {v.matches ? '✓ applied' : v.inherited ? '✓ inherited' : v.isParent ? 'skipped (hub)' : v.readFailed ? "couldn't read" : v.expected ? 'stale' : 'no expectation'}
                                 </span>
                                 <span className="font-mono text-slate-700">{v.sku}</span>
                                 {v.isParent && <span className="text-[10px] px-1 rounded bg-violet-200 text-violet-800">PARENT</span>}
