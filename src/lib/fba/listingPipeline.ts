@@ -26,6 +26,10 @@ import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
+// Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
+// design name from the SKU designKey; isGarmentColor gates the literal shirt color OUT of the anchor
+// so per-design content is about the DESIGN ('Rude Potato'), not the color ('Blue Spruce').
+import { deriveDesignLabel, isGarmentColor } from '@/lib/fba/designName'
 // Per-design name resolution (Commit 2 hot-fix): the seller stores the design name as Amazon's
 // Color attribute per variant; fetch via Listings Items API. Token + sellerId resolution mirrors
 // the SP-API call sites in pushExecutor.
@@ -2982,6 +2986,9 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   // SELLER OVERRIDE — short-circuits the whole chain (LLM + vision + heuristic). The override is the
   // seller's deterministic answer to "what IS the design"; trust it verbatim (just normalize curly
   // apostrophes so downstream substring checks behave). Empty/whitespace-only string falls through.
+  // NOTE: in the multi-design group loop this `designNameOverride` is ALREADY anchor-gated upstream
+  // (fix/content-anchor-not-color): a garment color can never reach here as the override, so the
+  // verbatim short-circuit is safe to trust — no color test is needed at this point.
   if (designNameOverride && designNameOverride.trim()) {
     return { name: designNameOverride.trim().replace(/[’‘]/g, "'"), source: 'override' }
   }
@@ -3663,6 +3670,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     try { spToken = await getSpApiAccessToken(); spSellerId = await getSpApiSellerId() } catch (e) { console.warn('[pipeline] SP-API creds unavailable for per-design color fetch — falling back to vision:', e instanceof Error ? e.message : e) }
     const SP_ENDPOINT_URL = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
     const SP_MP_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
+    // All design keys in THIS family — fed to deriveDesignLabel so each key's common prefix is
+    // stripped against its siblings ('SOCCER-CUP-TS-ARGENTINA' → 'Argentina'). Gathered once.
+    const allGroupKeys = designGroupInfo.groups.map((g) => g.key)
     const fetchDesignNameAttr = async (sku: string): Promise<string> => {
       if (!spToken || !spSellerId || !sku) return ''
       try {
@@ -3686,37 +3696,53 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const repSku = group.skus[0]?.sku ?? ''
       const repAsin = group.skus[0]?.asin ?? input.children[0]?.asin ?? ''
       const groupRepTitle = groupChildren[0]?.title ?? input.repTitle ?? null
-      // PRIMARY: Amazon Color attribute (the seller's design-name slot).
+      // Amazon Color attribute (the seller's design-name slot — but for many products this is the
+      // literal SHIRT COLOR 'Blue Spruce', which must NOT anchor the content; gated below).
       const colorAttrName = await fetchDesignNameAttr(repSku)
-      // BACKUP: per-group vision scan (only when color attribute is empty — saves the OpenAI call
-      // on the common case where every group has a real color attribute, ~1-2s per group).
+      // VISION READ of the actual PRINTED artwork. ALWAYS runs for multi-design families now (the
+      // old `if (!colorAttrName)` gate skipped it whenever a Color attribute existed — but the
+      // color is exactly the wrong anchor, so vision must never be skipped on its account). Its
+      // designTheme is the vision's name-like read of what is drawn on the shirt ('Rude Potato').
       let groupVision = input.visionDesign
-      if (!colorAttrName) {
-        try {
-          const url = repAsin ? await getProductImageUrl(repAsin) : null
-          const identity = url && repAsin ? await scanProductImage(repAsin, url, { openai: input.openai }) : null
-          if (identity) {
-            groupVision = {
-              designTheme: identity.designTheme || '',
-              visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
-              seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
-            }
+      try {
+        const url = repAsin ? await getProductImageUrl(repAsin) : null
+        const identity = url && repAsin ? await scanProductImage(repAsin, url, { openai: input.openai }) : null
+        if (identity) {
+          // Feed the per-group vision read into groupInput.visionDesign so extractDesignName's LLM
+          // refine USES it (title + vision -> a clean design name). We do NOT pre-extract a name from
+          // designTheme here — letting extractDesignName refine yields 'Only Fins', not the verbose theme.
+          groupVision = {
+            designTheme: identity.designTheme || '',
+            visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
+            seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
           }
-        } catch (e) { console.warn(`[pipeline] per-design vision ${repAsin} failed:`, e instanceof Error ? e.message : e) }
-      }
+        }
+      } catch (e) { console.warn(`[pipeline] per-design vision ${repAsin} failed:`, e instanceof Error ? e.message : e) }
+      // SKU designKey-derived label ('LS-RUDEPOTATO' → 'Rude Potato'), prefix-stripped vs siblings.
+      const keyLabel = deriveDesignLabel(group.key, allGroupKeys)
       const groupInput: PipelineInput = {
         ...input,
         canonicalTitle: groupRepTitle,
         repTitle: groupRepTitle ?? input.repTitle,
         visionDesign: groupVision,
-        // Priority: per-design SELLER override > Amazon Color attribute > heuristic chain. The
-        // seller's name (migration 034, keyed by group.key) wins so extractDesignName returns it
-        // verbatim. Then the Color-attribute value; null (neither) → extractDesignName runs its
-        // normal heuristic chain (vision + canonical + repTitle) as the last-resort fallback.
-        designNameOverride: input.designNameOverridesByKey?.[group.key]?.trim() || colorAttrName || null,
+        // Anchor priority (the core fix). The anchor must be about the DESIGN, never the garment
+        // color. We stuff ONLY: seller override (verbatim) > a NON-color Amazon Color attribute.
+        // When both are absent we pass null, so extractDesignName runs its LLM refine on the title +
+        // vision (the proven resolver -> 'Only Fins'/'Rude Potato'); keyLabel is the fallback AFTER
+        // that (below). We deliberately do NOT stuff vision/keyLabel here — that would short-circuit
+        // the LLM refine and regress good names to a verbose theme or an opaque code.
+        // KEY INVARIANT: a value isGarmentColor() returns true for never anchors.
+        designNameOverride: input.designNameOverridesByKey?.[group.key]?.trim()
+          || (colorAttrName && !isGarmentColor(colorAttrName) ? colorAttrName : null)
+          || null,
         children: groupChildren,
       }
-      const { name: groupDesignName } = await extractDesignName(groupInput)
+      const extracted = await extractDesignName(groupInput)
+      // extractDesignName's LLM refine (title + vision) is the proven resolver. Fall back to the
+      // designKey-derived label ONLY if it returned empty OR (defensively) a garment color slipped
+      // through — per-design content must anchor on the design, never the shirt color.
+      let groupDesignName = extracted.name
+      if (!groupDesignName?.trim() || isGarmentColor(groupDesignName)) groupDesignName = keyLabel || groupDesignName || ''
       const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName)
       // groupInput is returned so the bullets/description stages can reuse the resolved per-group
       // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.

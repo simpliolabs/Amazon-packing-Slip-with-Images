@@ -1,3 +1,9 @@
+// Hoisted to src/lib/fba/designName.ts so the listingPipeline content-anchor loop and the
+// PerDesignCard share ONE garment-color test + designKey→label derivation. Re-exported here so
+// existing callers (#291) import them from this module unchanged.
+import { BASIC_COLOR_RE, commonDesignPrefix, titleCaseToken, deriveDesignLabel, isGarmentColor } from './designName'
+export { commonDesignPrefix, titleCaseToken, deriveDesignLabel, isGarmentColor }
+
 export interface PerDesignGroup {
   designKey: string; designName: string; skus: string[]
   title: string; bullets: string[]; description: string
@@ -6,43 +12,7 @@ type TitleE = { sku: string; asin: string; title: string; designName?: string | 
 type BulletE = { sku: string; asin: string; bullets: string[]; designKey?: string | null }
 type DescE  = { sku: string; asin: string; description: string; designKey?: string | null }
 
-// ── Per-design LABEL derivation (pure, no I/O) ─────────────────────────────
-// Basic single-word garment colors that are USELESS as a per-design label when Amazon's color attr
-// is the literal shirt color (the FIFA/soccer families: every child's color attr is 'Black'/'White').
-const BASIC_COLOR_RE = /^(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)$/i
-
-function titleCaseToken(tok: string): string {
-  return tok.split(/[-_]+/).filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ').trim()
-}
-
-/** Longest common prefix across the family's designKeys, SNAPPED back to the last '-'/'_' so we
- *  never cut mid-word (SOCCER-CUP-TS-ARGENTINA/AUSTRALIA share '...TS-A' -> snap to 'SOCCER-CUP-TS-'
- *  so we get 'Argentina'/'Australia', not 'Rgentina'/'Ustralia'). '' if nothing reaches a separator. */
-function commonDesignPrefix(keys: string[]): string {
-  if (keys.length < 2) return ''
-  let p = keys[0]
-  for (const k of keys.slice(1)) {
-    let i = 0
-    while (i < p.length && i < k.length && p[i] === k[i]) i++
-    p = p.slice(0, i)
-    if (!p) break
-  }
-  const lastSep = Math.max(p.lastIndexOf('-'), p.lastIndexOf('_'))
-  return lastSep >= 0 ? p.slice(0, lastSep + 1) : ''
-}
-
-/** Readable label for ONE designKey given the FULL set of family keys. Deterministic, no I/O. */
-export function deriveDesignLabel(designKey: string, allKeysInFamily: string[]): string {
-  const key = (designKey || '').trim()
-  if (!key) return ''
-  const prefix = commonDesignPrefix(allKeysInFamily)
-  let remainder = (prefix && key.startsWith(prefix)) ? key.slice(prefix.length) : key
-  if (!remainder) remainder = key // prefix == whole key (degenerate) -> keep key
-  return titleCaseToken(remainder) || titleCaseToken(key)
-}
-
+// ── Per-design LABEL derivation (pure, no I/O) — see ./designName ──────────
 /** Trust a resolved designName ONLY when it is a REAL resolution (not the key fallback), not a bare
  *  garment color, and distinct within the family — otherwise the designKey-derived label is better. */
 function resolvedUsable(name: string, key: string, familyResolved: string[]): boolean {
