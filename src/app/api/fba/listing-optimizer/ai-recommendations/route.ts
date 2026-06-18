@@ -1039,7 +1039,12 @@ export async function POST(req: NextRequest) {
             .from('listing_seo_recommendations')
             .upsert(dbPayload, { onConflict: 'parent_asin' })
           if (upsertErr) {
-            console.warn('[AI Recs] Full upsert failed, retrying minimal payload:', upsertErr.message)
+            // LOUD: the full upsert failed. The minimal retry below SAVES THE CORE recommendation, but
+            // per_child_* (per-design titles/bullets/descriptions) + keyword_plan are not in it. A MISSING
+            // COLUMN (usually migration 033's per_child_bullets/descriptions, or 022's keyword_plan) is the
+            // typical cause. This used to be a quiet console.warn and SILENTLY DROPPED per-design content,
+            // which hid the missing-033 gap for weeks — hence the loud error + the best-effort persists below.
+            console.error(`[AI Recs] FULL UPSERT FAILED for ${rec.parent_asin} — core saved via minimal retry, but PER-DESIGN content is at risk. Likely a MISSING COLUMN (run migration 033 / 022). Error:`, upsertErr.message)
             // The minimal payload intentionally OMITS the newer JSONB columns (incl. keyword_plan) so a
             // missing column can't break the core-recommendations save — that's the schema-missing safety net.
             await supabase.from('listing_seo_recommendations').upsert({
@@ -1060,6 +1065,20 @@ export async function POST(req: NextRequest) {
                 .update({ keyword_plan: result.keywordPlan ?? null })
                 .eq('parent_asin', rec.parent_asin)
             } catch { /* keyword_plan column absent (pre-migration) — handled by deploying migration 022 first */ }
+            // Best-effort persist the per-child arrays so a TRANSIENT full-upsert failure doesn't drop
+            // per-design content. Titles (mig 017) and bullets/descriptions (mig 033) update INDEPENDENTLY
+            // so a missing 033 column can't also drop the 017 titles. A missing column errors harmlessly
+            // (ignored) — the loud error above already surfaced the gap; applying the migration is the fix.
+            try {
+              await supabase.from('listing_seo_recommendations')
+                .update({ per_child_titles: rec.per_child_titles ?? null })
+                .eq('parent_asin', rec.parent_asin)
+            } catch { /* per_child_titles column absent — handled by migration 017 */ }
+            try {
+              await supabase.from('listing_seo_recommendations')
+                .update({ per_child_bullets: rec.per_child_bullets ?? null, per_child_descriptions: rec.per_child_descriptions ?? null })
+                .eq('parent_asin', rec.parent_asin)
+            } catch { /* per_child_bullets/descriptions column absent — handled by migration 033 */ }
           }
 
           // (Issues panel + scores were refreshed UP FRONT — see the LIVE SCORE block above.)
@@ -1232,7 +1251,14 @@ export async function PATCH(req: NextRequest) {
       .select('per_child_titles, per_child_bullets, per_child_descriptions')
       .eq('parent_asin', parent_asin)
       .single()
-    if (error || !data) {
+    if (error) {
+      // Don't mask a real query failure as "no row" — a MISSING COLUMN (e.g. pre-migration-033
+      // per_child_bullets/descriptions) errors here, and returning 404 hid exactly that gap. Surface
+      // the actual error (500) so it's diagnosable instead of looking like the parent simply has no row.
+      console.error(`[AI Recs PATCH] read failed for ${parent_asin} (a column may be missing — check migration 033):`, error.message)
+      return NextResponse.json({ error: `DB read failed (a column may be missing — check migration 033): ${error.message}` }, { status: 500 })
+    }
+    if (!data) {
       return NextResponse.json({ error: 'No recommendation row for this parent_asin' }, { status: 404 })
     }
 
