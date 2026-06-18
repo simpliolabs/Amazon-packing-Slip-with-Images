@@ -85,6 +85,11 @@ export interface PipelineInput {
    *  agent picked "Too Young to Retire Too Poor to Quit" from the keyword pool). Null = legacy
    *  LLM-and-heuristic extraction. */
   designNameOverride?: string | null
+  /** Per-DESIGN seller name overrides for multi-design families (listing_seo_scores.design_name_overrides,
+   *  migration 034). {designKey: name}. In the multi-design group loop, input.designNameOverridesByKey[group.key]
+   *  is fed into the group's designNameOverride ABOVE the Amazon Color attribute, so extractDesignName
+   *  returns it verbatim for that design. Absent/empty key → fall back to the Color attr → heuristic chain. */
+  designNameOverridesByKey?: Record<string, string>
   /** Seller-declared audience lean (PR #195, persisted in listing_seo_scores.audience_lean).
    *  The seller knows the design's audience better than keyword statistics ("Darlin'" reads
    *  female even when unisex keywords dominate). male/female narrow the title tail outright;
@@ -3704,10 +3709,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         canonicalTitle: groupRepTitle,
         repTitle: groupRepTitle ?? input.repTitle,
         visionDesign: groupVision,
-        // Pass the Color-attribute value as the override so extractDesignName returns it verbatim.
-        // null (no color attribute) → extractDesignName runs its normal heuristic chain (vision +
-        // canonical + repTitle), giving us today's behavior as the last-resort fallback.
-        designNameOverride: colorAttrName || null,
+        // Priority: per-design SELLER override > Amazon Color attribute > heuristic chain. The
+        // seller's name (migration 034, keyed by group.key) wins so extractDesignName returns it
+        // verbatim. Then the Color-attribute value; null (neither) → extractDesignName runs its
+        // normal heuristic chain (vision + canonical + repTitle) as the last-resort fallback.
+        designNameOverride: input.designNameOverridesByKey?.[group.key]?.trim() || colorAttrName || null,
         children: groupChildren,
       }
       const { name: groupDesignName } = await extractDesignName(groupInput)
