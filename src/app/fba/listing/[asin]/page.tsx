@@ -295,6 +295,14 @@ export default function ListingDetailPage() {
    *  buildPushBody so a per-design Ship targets only that design's SKUs. Reset to null on every
    *  openPushPreview call → all existing (full-listing) Ship buttons are unaffected. */
   const [pushPresetSkus, setPushPresetSkus] = useState<string[] | null>(null)
+  // Per-design groups (multi-design apparel). This useMemo MUST live ABOVE the early returns
+  // (loading / !score) further down — placing it below caused React #310 ("rendered more hooks
+  // than during the previous render": the loading render bailed before the hook, the loaded render
+  // ran it). designName-empty groups fall back to the designKey label inside the helper.
+  const designGroups = useMemo(
+    () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions),
+    [aiRecs],
+  )
   const [pushPreview, setPushPreview] = useState<PushPreview | null>(null)
   /** Part 2b — the value the seller picked from Amazon's accepted list for an uncoercible dropdown
    *  detail (e.g. Material "100% ring-spun cotton" → pick "Cotton"). Sent as detail_value_override. */
@@ -1463,13 +1471,8 @@ export default function ListingDetailPage() {
     : stripVariantSuffix(score.product_title)
 
   // ── Per-design editor cards (multi-design apparel families like FHOSH/FRAF/OF fishing tees) ──
-  // designGroups clusters the per-child entries by designKey; multiDesign (computed above) gates the
-  // new section AND suppresses the old capacity per-child title table (same per_child_titles array).
-  // designName-empty groups are handled in the helper (fall back to the designKey as the label).
-  const designGroups = useMemo(
-    () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions),
-    [aiRecs],
-  )
+  // designGroups is computed ABOVE the early returns (hook-order safety — defined with the other
+  // hooks). multiDesign (above) gates the new section AND suppresses the old capacity per-child table.
 
   // True iff the seller has begun editing this design (its entry exists in designEdits).
   const designDirty = (k: string) => !!designEdits[k]
