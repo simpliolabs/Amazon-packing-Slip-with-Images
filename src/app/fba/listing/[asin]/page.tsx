@@ -5,6 +5,8 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
+import { groupByDesign, isMultiDesign } from '@/lib/fba/perDesign'
+import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
@@ -248,6 +250,10 @@ export default function ListingDetailPage() {
   const [aiProgress, setAiProgress] = useState<string>('')
   const [copied, setCopied] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['apply']))
+  // Per-design editor cards (multi-design apparel families): in-place edits keyed by designKey.
+  // An entry exists only once the seller has touched that design (seeded from the group/fallback on
+  // first edit) — so `designEdits[k]` truthy == "this design is dirty". PR-C wires save/ship/verify.
+  const [designEdits, setDesignEdits] = useState<Record<string, { title?: string; bullets?: string[]; description?: string }>>({})
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
   // Seller-set DESIGN NAME override (migration 031). When set, the pipeline anchors every regen on
@@ -1431,12 +1437,50 @@ export default function ListingDetailPage() {
   // Capacity-family parents (e.g. SD cards by GB): the stored product_title is the best-seller
   // CHILD's title, so it carries that child's capacity ("...64GB..."). The parent / variation-hub
   // header must be capacity-AGNOSTIC — strip the GB token, mirroring the TITLES card's PARENT row.
+  // multiDesign (>=2 distinct designKeys) is computed FIRST because it suppresses the capacity
+  // per-child UI for multi-design apparel — which ALSO has per_child_titles.length > 1, so without
+  // this guard a multi-design family double-renders the (mislabeled) capacity title table + header.
+  const multiDesign = isMultiDesign(aiRecs?.per_child_titles)
   // Gated on per_child_titles.length > 1 (only built for non-apparel capacity families), so apparel
   // and single-capacity products are untouched.
-  const isCapacityFamily = Array.isArray(aiRecs?.per_child_titles) && (aiRecs?.per_child_titles?.length ?? 0) > 1
+  const isCapacityFamily = Array.isArray(aiRecs?.per_child_titles) && (aiRecs?.per_child_titles?.length ?? 0) > 1 && !multiDesign
   const headerTitle = isCapacityFamily
     ? stripCapacityToken(stripVariantSuffix(score.product_title))
     : stripVariantSuffix(score.product_title)
+
+  // ── Per-design editor cards (multi-design apparel families like FHOSH/FRAF/OF fishing tees) ──
+  // designGroups clusters the per-child entries by designKey; multiDesign (computed above) gates the
+  // new section AND suppresses the old capacity per-child title table (same per_child_titles array).
+  // designName-empty groups are handled in the helper (fall back to the designKey as the label).
+  const designGroups = useMemo(
+    () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions),
+    [aiRecs],
+  )
+
+  // True iff the seller has begun editing this design (its entry exists in designEdits).
+  const designDirty = (k: string) => !!designEdits[k]
+  // Immutable edit-state updaters — seed from the design's resolved content (group's own per-child
+  // set, else the broadcast recommended_* fallback) on the first touch so a partial edit doesn't
+  // wipe the untouched fields. Keyed by designKey.
+  const seedFromGroup = (k: string) => {
+    const g = designGroups.find((x) => x.designKey === k)
+    return {
+      title: g?.title ?? '',
+      bullets: g && g.bullets.length ? g.bullets : (aiRecs?.recommended_bullets ?? []),
+      description: g ? (g.description || (aiRecs?.recommended_description ?? '')) : (aiRecs?.recommended_description ?? ''),
+    }
+  }
+  const onEditDesignTitle = (k: string, v: string) =>
+    setDesignEdits((prev) => ({ ...prev, [k]: { ...(prev[k] ?? seedFromGroup(k)), title: v } }))
+  const onEditDesignBullet = (k: string, i: number, v: string) =>
+    setDesignEdits((prev) => {
+      const cur = prev[k] ?? seedFromGroup(k)
+      const bullets = [...(cur.bullets ?? [])]
+      bullets[i] = v
+      return { ...prev, [k]: { ...cur, bullets } }
+    })
+  const onEditDesignDescription = (k: string, v: string) =>
+    setDesignEdits((prev) => ({ ...prev, [k]: { ...(prev[k] ?? seedFromGroup(k)), description: v } }))
   // Tab definitions for the dashboard-style section nav (one section visible at a time).
   const TABS = [
     { id: 'apply', label: 'Apply Changes', count: (aiRecs?.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length },
@@ -1943,6 +1987,40 @@ export default function ListingDetailPage() {
         <section>
           {activeTab === 'apply' && (
             <div className="space-y-6">
+              {/* ── PER-DESIGN CONTENT — one editable, collapsible card per design for multi-design
+                  apparel families (each design has its own title/bullets/description, today stored
+                  but invisible). Gated on multiDesign (>=2 distinct designKeys); single-design /
+                  capacity / non-apparel families never render this and keep the old UI verbatim.
+                  Save/Ship/Verify are stubbed here — PR-C wires the persistence + pushes. ── */}
+              {multiDesign && designGroups.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Icon.Layers className="w-4 h-4 text-violet-600" />
+                    <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wide">Per-Design Content</h3>
+                    <span className="text-[10px] text-slate-500">{designGroups.length} designs in this family — each gets its own title, bullets &amp; description</span>
+                  </div>
+                  {designGroups.map((g) => (
+                    <PerDesignCard
+                      key={g.designKey}
+                      group={g}
+                      fallbackBullets={aiRecs?.recommended_bullets ?? []}
+                      fallbackDescription={aiRecs?.recommended_description ?? ''}
+                      expanded={expandedSections.has('design-' + g.designKey)}
+                      onToggle={() => toggle('design-' + g.designKey)}
+                      edit={designEdits[g.designKey]}
+                      dirty={designDirty(g.designKey)}
+                      busy={false}
+                      status={'unknown'}
+                      onEditTitle={(v) => onEditDesignTitle(g.designKey, v)}
+                      onEditBullet={(i, v) => onEditDesignBullet(g.designKey, i, v)}
+                      onEditDescription={(v) => onEditDesignDescription(g.designKey, v)}
+                      onSave={() => console.warn('wired in PR-C')}
+                      onShip={() => console.warn('wired in PR-C')}
+                      onVerify={() => console.warn('wired in PR-C')}
+                    />
+                  ))}
+                </div>
+              )}
               {/* ── RANK VERDICT — honest "what content can/can't do for rank" atop the suggestions.
                   Renders ONLY server-authored, validator-clamped strings from /api/fba/rank-analysis
                   (verdict.*). Full playbook + competitor analysis stays in the Intelligence tab. ── */}
@@ -2280,7 +2358,7 @@ export default function ListingDetailPage() {
                         Display is enriched with FBM TWINS from /family-skus so the seller sees
                         every SKU the push will hit (the audit pipeline only sees FBA in
                         listing_content, but the push discovers FBM twins live). */}
-                    {item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (() => {
+                    {item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (() => {
                       // Parent (variation hub) title = capacity-agnostic. Strip any GB/TB/MB
                       // capacity token from the broadcast recommended_title so the parent SKU
                       // (e.g. Memory-Card-P) carries a generic family title without any specific
@@ -2372,7 +2450,7 @@ export default function ListingDetailPage() {
 
                     {/* Row 5b: Replacement Content (the actual fix) — broadcast card. Hidden when
                         the per-child title table above is showing. */}
-                    {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && !(item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1) && (
+                    {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && !(item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign) && (
                       <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Copy & Paste This:</span>
@@ -2415,7 +2493,7 @@ export default function ListingDetailPage() {
                         : null
                       if (!shipField || item.verdict === 'DONE' || item.verdict === 'SKIP') return null
                       // Title is per-child for capacity families; everything else is broadcast.
-                      const perChildTitle = shipField === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1
+                      const perChildTitle = shipField === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign
                       return (
                         <div className="mt-2.5 flex items-center gap-2 flex-wrap border-t border-current/10 pt-2.5">
                           <button
