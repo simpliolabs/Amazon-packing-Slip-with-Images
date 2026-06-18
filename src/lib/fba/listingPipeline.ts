@@ -129,12 +129,13 @@ export interface PipelineResult {
   per_child_keywords: PipelinePerChildKeywords[]
   /** Per-child titles for capacity/size-spec variation families (e.g. SD cards by GB). Undefined
    *  for apparel and single-capacity products, which use the one shared recommended_title. */
-  per_child_titles?: { sku: string; asin: string; title: string }[]
+  per_child_titles?: { sku: string; asin: string; title: string; designName?: string; designKey?: string }[]
   /** Per-DESIGN bullets/description for multi-design POD apparel families. Each design group gets its
    *  own generated set, fanned out to every SKU in the group. Undefined for single-design and
-   *  non-apparel families, which use the one shared recommended_bullets/recommended_description. */
-  per_child_bullets?: { sku: string; asin: string; bullets: string[] }[]
-  per_child_descriptions?: { sku: string; asin: string; description: string }[]
+   *  non-apparel families, which use the one shared recommended_bullets/recommended_description.
+   *  designName/designKey label each entry's design group (for the per-design editor cards). */
+  per_child_bullets?: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[]
+  per_child_descriptions?: { sku: string; asin: string; description: string; designName?: string; designKey?: string }[]
   recommended_description: string
   variant_corrections: PipelineVariantCorrection[]
   cannibalization_warnings: PipelineCannibalizationWarning[]
@@ -3627,15 +3628,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   let retried = false
   // Hoisted: multi-design apparel populates this in the title branch; the non-apparel capacity
   // branch below populates it for single-design capacity families. Single-design apparel: stays undefined.
-  let perChildTitles: { sku: string; asin: string; title: string }[] | undefined
+  let perChildTitles: { sku: string; asin: string; title: string; designName?: string; designKey?: string }[] | undefined
   // Per-DESIGN bullets/description fan-out (multi-design apparel only). Populated in the bullets +
   // description stages below; stay undefined for single-design/non-apparel so the broadcast ships.
-  let perChildBullets: { sku: string; asin: string; bullets: string[] }[] | undefined
-  let perChildDescriptions: { sku: string; asin: string; description: string }[] | undefined
+  let perChildBullets: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[] | undefined
+  let perChildDescriptions: { sku: string; asin: string; description: string; designName?: string; designKey?: string }[] | undefined
   // Per-design contexts captured FROM the title loop so the bullets/description stages can reuse the
   // (costly) per-group design-name + vision resolution WITHOUT recomputing it. Populated only when the
   // multi-design title branch runs (full regen or a title-only partial); empty otherwise.
-  let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput }[] = []
+  let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput; key: string }[] = []
   if (apparelMultiDesign && (!only || only === 'title')) {
     // PER-DESIGN TITLES (Phase 1 Commit 2 + hot-fix). Each design group resolves its design name
     // via this chain (PO 2026-06-17: "design name is stored as Amazon's Color attribute"):
@@ -3718,13 +3719,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const allDesignNames: string[] = []
     for (const gr of groupResults) {
       allDesignNames.push(gr.groupDesignName)
-      for (const s of gr.group.skus) perChildTitles.push({ sku: s.sku, asin: s.asin, title: gr.title })
+      for (const s of gr.group.skus) perChildTitles.push({ sku: s.sku, asin: s.asin, title: gr.title, designName: gr.groupDesignName, designKey: gr.group.key })
       titleProblems.push(...gr.problems.map((p) => `[${gr.group.key}] ${p}`))
       retried = retried || gr.retried
     }
     // Capture per-group contexts (skus + resolved design name + title + groupInput) so the bullets +
     // description stages generate PER DESIGN reusing this work — no second design-name/vision pass.
-    designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput }))
+    designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput, key: gr.group.key }))
     finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
@@ -3888,11 +3889,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
           if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
           gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
-          return { skus: ctx.skus, bullets: gb }
+          return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
         }))
         perChildBullets = []
         for (const gs of groupBulletSets) {
-          for (const s of gs.skus) perChildBullets.push({ sku: s.sku, asin: s.asin, bullets: gs.bullets })
+          for (const s of gs.skus) perChildBullets.push({ sku: s.sku, asin: s.asin, bullets: gs.bullets, designName: gs.designName, designKey: gs.designKey })
         }
       } catch (e) {
         console.warn('[pipeline] per-design bullets failed — falling back to broadcast bullets:', e instanceof Error ? e.message : e)
@@ -4068,11 +4069,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
         if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
         gd = fixDoubledArticleBeforeBrand(gd, brandName)
-        return { skus: ctx.skus, description: gd }
+        return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
       }))
       perChildDescriptions = []
       for (const ds of groupDescSets) {
-        for (const s of ds.skus) perChildDescriptions.push({ sku: s.sku, asin: s.asin, description: ds.description })
+        for (const s of ds.skus) perChildDescriptions.push({ sku: s.sku, asin: s.asin, description: ds.description, designName: ds.designName, designKey: ds.designKey })
       }
     } catch (e) {
       console.warn('[pipeline] per-design description failed — falling back to broadcast description:', e instanceof Error ? e.message : e)
