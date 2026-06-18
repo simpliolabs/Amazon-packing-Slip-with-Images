@@ -53,15 +53,31 @@ interface PerDesignCardProps {
   onEditTitle: (v: string) => void
   onEditBullet: (i: number, v: string) => void
   onEditDescription: (v: string) => void
-  onSave: () => void; onShip: () => void; onVerify: () => void
+  onSave: () => void
+  /** Ship ONE field of this design to its SKUs. Opens the existing push preview modal scoped to the
+   *  design — the seller confirms there; this never fires a live push directly. */
+  onShipField: (field: 'title' | 'bullets' | 'description') => void
+  onVerify: () => void
 }
+
+// Small inline "Ship →" affordance shown next to each editable field's label.
+const ShipFieldButton = ({ onClick, disabled, label }: { onClick: () => void; disabled: boolean; label: string }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    title={`Ship this design's ${label.toLowerCase()} to its SKUs (opens a preview to confirm)`}
+    className="inline-flex items-center gap-1 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium disabled:opacity-40 transition-colors cursor-pointer disabled:cursor-not-allowed"
+  >
+    <SendIcon className="w-3 h-3" /> Ship →
+  </button>
+)
 
 const BULLET_SLOTS = 5
 
 export function PerDesignCard({
   group, fallbackBullets, fallbackDescription,
   expanded, onToggle, edit, dirty, busy, status,
-  onEditTitle, onEditBullet, onEditDescription, onSave, onShip, onVerify,
+  onEditTitle, onEditBullet, onEditDescription, onSave, onShipField, onVerify,
 }: PerDesignCardProps) {
   // Resolved display values: live edit > group's own per-child content > broadcast fallback.
   const title = edit?.title ?? group.title
@@ -95,9 +111,12 @@ export function PerDesignCard({
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Title</label>
-              <span className={`text-[10px] font-medium ${title.length > 200 ? 'text-red-600' : title.length > 75 || (title.length > 0 && title.length < 50) ? 'text-amber-600' : 'text-slate-400'}`}>
-                {title.length}/75 chars
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`text-[10px] font-medium ${title.length > 200 ? 'text-red-600' : title.length > 75 || (title.length > 0 && title.length < 50) ? 'text-amber-600' : 'text-slate-400'}`}>
+                  {title.length}/75 chars
+                </span>
+                <ShipFieldButton onClick={() => onShipField('title')} disabled={busy} label="Title" />
+              </div>
             </div>
             <textarea
               value={title}
@@ -111,7 +130,10 @@ export function PerDesignCard({
 
           {/* Bullets — exactly 5 slots */}
           <div>
-            <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-1 block">Bullets</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Bullets</label>
+              <ShipFieldButton onClick={() => onShipField('bullets')} disabled={busy} label="Bullets" />
+            </div>
             <div className="space-y-2">
               {Array.from({ length: BULLET_SLOTS }).map((_, i) => {
                 const val = bullets[i] ?? ''
@@ -139,7 +161,10 @@ export function PerDesignCard({
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Description</label>
-              <span className={`text-[10px] font-medium ${description.length > 2000 ? 'text-red-600' : 'text-slate-400'}`}>{description.length} chars</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-[10px] font-medium ${description.length > 2000 ? 'text-red-600' : 'text-slate-400'}`}>{description.length} chars</span>
+                <ShipFieldButton onClick={() => onShipField('description')} disabled={busy} label="Description" />
+              </div>
             </div>
             <textarea
               value={description}
@@ -159,14 +184,6 @@ export function PerDesignCard({
               className="inline-flex items-center gap-1.5 text-[11px] bg-slate-700 hover:bg-slate-800 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-40 transition-colors cursor-pointer disabled:cursor-not-allowed"
             >
               <SaveIcon className="w-3.5 h-3.5" /> Save
-            </button>
-            <button
-              onClick={onShip}
-              disabled={busy}
-              title="Ship this design's title, bullets, and description to its SKUs"
-              className="inline-flex items-center gap-1.5 text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-40 transition-colors cursor-pointer disabled:cursor-not-allowed"
-            >
-              <SendIcon className="w-3.5 h-3.5" /> Ship this design
             </button>
             <button
               onClick={onVerify}
