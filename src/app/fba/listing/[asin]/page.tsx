@@ -74,7 +74,9 @@ interface ActionPlanItem {
   notes?: string; aplus_modules?: AplusModuleAction[]
 }
 
-interface PerChildTitle { sku: string; asin: string; title: string }
+interface PerChildTitle { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }
+interface PerChildBullets { sku: string; asin: string; bullets: string[]; designName?: string | null; designKey?: string | null }
+interface PerChildDescription { sku: string; asin: string; description: string; designName?: string | null; designKey?: string | null }
 
 interface AiRecommendations {
   parent_asin: string; recommended_title: string; recommended_bullets: string[]
@@ -82,6 +84,8 @@ interface AiRecommendations {
   /** Per-child titles for capacity variation families (SD cards 64/128/256GB). When present,
    *  each child carries its own capacity instead of a single broadcast title. */
   per_child_titles?: PerChildTitle[]
+  per_child_bullets?: PerChildBullets[]
+  per_child_descriptions?: PerChildDescription[]
   recommended_description: string; variant_corrections: VariantCorrection[]
   cannibalization_warnings?: CannibalizationWarning[]
   product_details_improvements?: ProductDetailImprovement[]
