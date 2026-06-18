@@ -265,6 +265,9 @@ export default function ListingDetailPage() {
   // this verbatim — kills the "stuck design" trap where the extractor falls through and the LLM
   // promotes a high-volume keyword to slogan status (B0GQVL3K4B "Too Young to Retire").
   const [designNameOverride, setDesignNameOverride] = useState<string>('')
+  // Per-design seller name overrides (migration 034, {designKey: name}). Loaded on mount, fed as the
+  // 4th arg to groupByDesign so the cards relabel instantly, and POSTed by onRenameDesign. DB-only.
+  const [designNameOverrides, setDesignNameOverrides] = useState<Record<string, string>>({})
   const [designOverrideSaving, setDesignOverrideSaving] = useState(false)
   const [designOverrideSavedAt, setDesignOverrideSavedAt] = useState<number | null>(null)
   const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
@@ -300,8 +303,8 @@ export default function ListingDetailPage() {
   // than during the previous render": the loading render bailed before the hook, the loaded render
   // ran it). designName-empty groups fall back to the designKey label inside the helper.
   const designGroups = useMemo(
-    () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions),
-    [aiRecs],
+    () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions, designNameOverrides),
+    [aiRecs, designNameOverrides],
   )
   const [pushPreview, setPushPreview] = useState<PushPreview | null>(null)
   /** Part 2b — the value the seller picked from Amazon's accepted list for an uncoercible dropdown
@@ -751,8 +754,9 @@ export default function ListingDetailPage() {
       try {
         const resp = await fetch(`/api/fba/design-name-override?parentAsin=${asin}`)
         if (resp.ok) {
-          const data = await resp.json() as { designNameOverride?: string | null }
+          const data = await resp.json() as { designNameOverride?: string | null; designNameOverrides?: Record<string, string> | null }
           if (data.designNameOverride) setDesignNameOverride(data.designNameOverride)
+          if (data.designNameOverrides) setDesignNameOverrides(data.designNameOverrides)
         }
       } catch { /* ignore */ }
     })()
@@ -769,6 +773,26 @@ export default function ListingDetailPage() {
       setDesignOverrideSavedAt(Date.now())
     } catch { /* ignore */ }
     setDesignOverrideSaving(false)
+  }
+
+  // Per-design rename (migration 034). DB-only: POST the {designKey: name} override, then update the
+  // local map so groupByDesign relabels the card INSTANTLY (no regen). Blank value clears the key.
+  // The next regen reads design_name_overrides and anchors that design's title/bullets/desc on it.
+  const onRenameDesign = async (designKey: string, value: string) => {
+    const next = { ...designNameOverrides }
+    if (value.trim()) next[designKey] = value.trim()
+    else delete next[designKey]
+    setDesignNameOverrides(next) // optimistic instant relabel
+    try {
+      const resp = await fetch('/api/fba/design-name-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentAsin: asin, designKey, designNameOverride: value.trim() || null }),
+      })
+      if (!resp.ok) setDesignNameOverrides(designNameOverrides) // revert on failure
+    } catch {
+      setDesignNameOverrides(designNameOverrides) // revert on failure
+    }
   }
 
   const saveCompetitorAsin = async () => {
@@ -2105,6 +2129,7 @@ export default function ListingDetailPage() {
                       onSave={() => onSaveDesign(g)}
                       onShipField={(field) => onShipDesignField(g, field)}
                       onVerify={() => onVerifyDesign(g)}
+                      onRenameDesign={onRenameDesign}
                     />
                   ))}
                 </div>
