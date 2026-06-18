@@ -21,6 +21,7 @@ import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
+import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 
 function getAdminSupabase() {
   return createClient(
@@ -1197,4 +1198,87 @@ export async function GET(req: NextRequest) {
         : data.recommended_keywords || '',
     },
   })
+}
+
+// ─── PATCH Handler ────────────────────────────────────────────────────────────
+// Persist a single design's edited title / bullets / description for the per-design editor cards
+// (PR-C). DB-ONLY: this writes the edited content back to listing_seo_recommendations so the seller's
+// edits survive a reload — it NEVER touches Amazon. A live push only happens through the separate
+// push-content flow behind the Ship modal's explicit confirm.
+//
+// Body: { parent_asin: string, skus: string[], title?: string, bullets?: string[], description?: string }
+// Entries are matched by a SKU ALLOW-LIST (not designKey — empty/missing keys could corrupt-match):
+// only per-child entries whose `sku` is in `skus` are overwritten, and only with the provided fields;
+// sku/asin/designName/designKey and any unprovided field are preserved; non-matching entries pass
+// through untouched.
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = (await req.json()) as {
+      parent_asin?: string
+      skus?: string[]
+      title?: string
+      bullets?: string[]
+      description?: string
+    }
+    const parent_asin = (body.parent_asin ?? '').trim()
+    const skus = Array.isArray(body.skus) ? body.skus.filter((s) => typeof s === 'string' && s.trim()) : []
+    if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+    if (skus.length === 0) return NextResponse.json({ error: 'skus must be a non-empty array' }, { status: 400 })
+
+    const supabase = getAdminSupabase()
+    // Load the current per-child arrays (same JSONB shape the GET reads). Tolerate null/missing.
+    const { data, error } = await supabase
+      .from('listing_seo_recommendations')
+      .select('per_child_titles, per_child_bullets, per_child_descriptions')
+      .eq('parent_asin', parent_asin)
+      .single()
+    if (error || !data) {
+      return NextResponse.json({ error: 'No recommendation row for this parent_asin' }, { status: 404 })
+    }
+
+    const allow = new Set(skus)
+    const titles = (Array.isArray(data.per_child_titles) ? data.per_child_titles : []) as {
+      sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null
+    }[]
+    const bullets = (Array.isArray(data.per_child_bullets) ? data.per_child_bullets : []) as {
+      sku: string; asin: string; bullets: string[]; designName?: string | null; designKey?: string | null
+    }[]
+    const descriptions = (Array.isArray(data.per_child_descriptions) ? data.per_child_descriptions : []) as {
+      sku: string; asin: string; description: string; designName?: string | null; designKey?: string | null
+    }[]
+
+    const hasTitle = typeof body.title === 'string'
+    const hasBullets = Array.isArray(body.bullets)
+    const hasDescription = typeof body.description === 'string'
+    const newTitle = hasTitle ? scrubTrademarks(body.title as string) : ''
+    const newBullets = hasBullets ? (body.bullets as string[]).map((b) => scrubTrademarks(b ?? '')) : []
+    const newDescription = hasDescription ? scrubTrademarks(body.description as string) : ''
+
+    // Overwrite ONLY allow-listed entries, ONLY the provided fields; preserve everything else.
+    const per_child_titles = hasTitle
+      ? titles.map((e) => (allow.has(e.sku) ? { ...e, title: newTitle } : e))
+      : titles
+    const per_child_bullets = hasBullets
+      ? bullets.map((e) => (allow.has(e.sku) ? { ...e, bullets: newBullets } : e))
+      : bullets
+    const per_child_descriptions = hasDescription
+      ? descriptions.map((e) => (allow.has(e.sku) ? { ...e, description: newDescription } : e))
+      : descriptions
+
+    const { error: updErr } = await supabase
+      .from('listing_seo_recommendations')
+      .update({ per_child_titles, per_child_bullets, per_child_descriptions } as never)
+      .eq('parent_asin', parent_asin)
+    if (updErr) {
+      return NextResponse.json({ error: updErr.message }, { status: 500 })
+    }
+
+    // Return the updated arrays so the client can refresh in place without a full reload.
+    return NextResponse.json({ per_child_titles, per_child_bullets, per_child_descriptions })
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'PATCH failed' },
+      { status: 500 },
+    )
+  }
 }

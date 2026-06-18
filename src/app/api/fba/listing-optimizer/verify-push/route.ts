@@ -153,6 +153,9 @@ export async function GET(req: NextRequest) {
     const parentAsin = url.searchParams.get('parent_asin')
     const rawField = url.searchParams.get('field') ?? ''
     const detailFriendly = url.searchParams.get('detail_field') ?? ''
+    // Optional per-design scope: verify only this SKU subset (per-design cards PR-C). Null ⇒ verify all.
+    const skusParam = url.searchParams.get('skus')
+    const skuFilter = skusParam ? new Set(skusParam.split(',').map((s) => s.trim()).filter(Boolean)) : null
     if (!parentAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
     if (rawField !== 'details' && !isPushField(rawField)) {
       return NextResponse.json({ error: `unknown field "${rawField}"` }, { status: 400 })
@@ -218,8 +221,24 @@ export async function GET(req: NextRequest) {
       .select('sku, asin')
       .eq('parent_asin', parentAsin)
       .order('sku', { ascending: true })
-    const rows = (rowsRaw ?? []) as { sku: string; asin: string }[]
+    let rows = (rowsRaw ?? []) as { sku: string; asin: string }[]
     if (rows.length === 0) return NextResponse.json({ error: 'No children found for this parent. Run a Sync first.' }, { status: 404 })
+
+    // Per-design scope (PR-C): keep only SKUs in the requested subset. If the subset matches NONE of
+    // this parent's children, return an explicit "unverifiable" empty result — NEVER fall through to
+    // verifying all SKUs (that would silently widen a scoped verify back to the whole listing).
+    if (skuFilter) {
+      rows = rows.filter((r) => skuFilter.has(r.sku))
+      if (rows.length === 0) {
+        return NextResponse.json({
+          parent_asin: parentAsin,
+          field,
+          detail_field: field === 'details' ? detailFriendly : undefined,
+          total: 0, matched: 0, inherited: 0, unverifiable: 0, stale: 0, unknown: 0, parentSkipped: 0,
+          results: [],
+        })
+      }
+    }
 
     const token = await getAccessToken()
     const sellerId = await getSellerId()

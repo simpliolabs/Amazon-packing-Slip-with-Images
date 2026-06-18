@@ -5,7 +5,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
-import { groupByDesign, isMultiDesign } from '@/lib/fba/perDesign'
+import { groupByDesign, isMultiDesign, type PerDesignGroup } from '@/lib/fba/perDesign'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
@@ -254,6 +254,11 @@ export default function ListingDetailPage() {
   // An entry exists only once the seller has touched that design (seeded from the group/fallback on
   // first edit) — so `designEdits[k]` truthy == "this design is dirty". PR-C wires save/ship/verify.
   const [designEdits, setDesignEdits] = useState<Record<string, { title?: string; bullets?: string[]; description?: string }>>({})
+  // Per-design live-verify status (PR-C), keyed by designKey: 'matches' (every SKU live-matches),
+  // 'needs-update' (one or more differ), else 'unknown' (not yet verified). Drives the card's chip.
+  const [designVerifyStatus, setDesignVerifyStatus] = useState<Record<string, 'matches' | 'needs-update' | 'unknown'>>({})
+  // True while a per-design Save/Verify is in flight (disables that card's footer buttons).
+  const [designBusy, setDesignBusy] = useState<Record<string, boolean>>({})
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
   // Seller-set DESIGN NAME override (migration 031). When set, the pipeline anchors every regen on
@@ -286,6 +291,10 @@ export default function ListingDetailPage() {
   const [pushField, setPushField] = useState<PushField>('keywords')
   /** Only set when pushField='details': which detail attribute is being pushed (Material, etc.). */
   const [pushDetailField, setPushDetailField] = useState<string | null>(null)
+  /** Per-design SKU scope for the NEXT push (PR-C). Set by openPushPreview's 3rd arg and read by
+   *  buildPushBody so a per-design Ship targets only that design's SKUs. Reset to null on every
+   *  openPushPreview call → all existing (full-listing) Ship buttons are unaffected. */
+  const [pushPresetSkus, setPushPresetSkus] = useState<string[] | null>(null)
   const [pushPreview, setPushPreview] = useState<PushPreview | null>(null)
   /** Part 2b — the value the seller picked from Amazon's accepted list for an uncoercible dropdown
    *  detail (e.g. Material "100% ring-spun cotton" → pick "Cotton"). Sent as detail_value_override. */
@@ -879,7 +888,7 @@ export default function ListingDetailPage() {
 
   // ─── Ship a content section to Amazon (preview → confirm) ─────────────────
   // detailField is only used for field='details' (one detail per click).
-  const openPushPreview = useCallback(async (field: PushField, detailField?: string) => {
+  const openPushPreview = useCallback(async (field: PushField, detailField?: string, presetSkus?: string[]) => {
     // CONCURRENT-PUSH GUARD: this function RESETS all shared push state below. Opening a
     // second Ship modal while a push streams would clobber the running push's tracking
     // (PO lost the title push's pill mid-146-SKU send by clicking Push keywords — the
@@ -890,6 +899,9 @@ export default function ListingDetailPage() {
     }
     setPushField(field)
     setPushDetailField(field === 'details' ? (detailField ?? null) : null)
+    // Per-design scope for THIS push (PR-C): set when a per-design "Ship →" passes presetSkus, else
+    // null so every existing full-listing Ship button keeps its unscoped behavior.
+    setPushPresetSkus(presetSkus && presetSkus.length > 0 ? presetSkus : null)
     setPushError(null); setPushResults(null); setPushPreview(null); setDetailOverride(''); setVerifyResults(null); setVerifyError(null); setPushProgress([]); setPushPhase('idle'); setCancelRequested(false); pushCancelTokenRef.current = null; setShowPushModal(true); setPushLoading(true)
     try {
       const qs = field === 'details' && detailField
@@ -937,12 +949,14 @@ export default function ListingDetailPage() {
     if (pushField === 'details' && pushDetailField) body.detail_field = pushDetailField
     // Part 2b: the seller's pick for an uncoercible dropdown — push this exact accepted value.
     if (pushField === 'details' && (detailOverrideArg ?? '').trim()) body.detail_value_override = (detailOverrideArg ?? '').trim()
-    // Selective re-push: only the stale SKUs (fix stragglers without re-shipping all of them).
-    if (onlySkus && onlySkus.length > 0) body.skus = onlySkus
+    // SKU scope: an explicit re-push subset (onlySkus, e.g. "push just the stale ones") wins; else the
+    // per-design Ship preset (pushPresetSkus). Null/empty ⇒ full-listing push (every existing caller).
+    const skus = onlySkus ?? pushPresetSkus
+    if (skus && skus.length > 0) body.skus = skus
     // Manual title override: push the seller's TYPED title (from the editable box) instead of the AI's.
     if (pushField === 'title' && editTitle.trim()) body.title_override = editTitle.trim()
     return body
-  }, [asin, pushField, pushDetailField, editTitle])
+  }, [asin, pushField, pushDetailField, editTitle, pushPresetSkus])
 
   /** Ask the server to stop the running streaming push between SKUs (PO: "NO way to
    *  cancel when it starts"). Already-accepted SKUs stay pushed — Amazon has them. */
@@ -1481,6 +1495,77 @@ export default function ListingDetailPage() {
     })
   const onEditDesignDescription = (k: string, v: string) =>
     setDesignEdits((prev) => ({ ...prev, [k]: { ...(prev[k] ?? seedFromGroup(k)), description: v } }))
+
+  // ── Save: persist this design's edited title/bullets/description to OUR DB (PR-C). DB-only —
+  // never touches Amazon. On success, merge the server's updated arrays into aiRecs (so the card
+  // re-renders from saved content without a reload) and clear this design's pending edits.
+  const onSaveDesign = async (group: PerDesignGroup): Promise<boolean> => {
+    const edits = designEdits[group.designKey]
+    if (!edits) return true // nothing to save → treat as success (ship can proceed)
+    setDesignBusy((p) => ({ ...p, [group.designKey]: true }))
+    try {
+      const resp = await fetch('/api/fba/listing-optimizer/ai-recommendations', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: asin, skus: group.skus, ...edits }),
+      })
+      const data = await resp.json() as {
+        error?: string
+        per_child_titles?: AiRecommendations['per_child_titles']
+        per_child_bullets?: AiRecommendations['per_child_bullets']
+        per_child_descriptions?: AiRecommendations['per_child_descriptions']
+      }
+      if (!resp.ok) throw new Error(data.error || 'Save failed')
+      setAiRecs((prev) => prev ? {
+        ...prev,
+        per_child_titles: data.per_child_titles ?? prev.per_child_titles,
+        per_child_bullets: data.per_child_bullets ?? prev.per_child_bullets,
+        per_child_descriptions: data.per_child_descriptions ?? prev.per_child_descriptions,
+      } : prev)
+      setDesignEdits((prev) => { const n = { ...prev }; delete n[group.designKey]; return n })
+      // Saved content may now differ from live → drop any stale "matches" so the chip isn't misleading.
+      setDesignVerifyStatus((prev) => { const n = { ...prev }; delete n[group.designKey]; return n })
+      return true
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Save failed')
+      return false
+    } finally {
+      setDesignBusy((p) => ({ ...p, [group.designKey]: false }))
+    }
+  }
+
+  // ── Verify: read Amazon's LIVE content for THIS design's SKUs only (verify-push skus subset, PR-C).
+  // Title is the per-design discriminator (bullets/description are broadcast), so verify on the title
+  // field. 'matches' iff every scored SKU live-matches; otherwise 'needs-update'.
+  const onVerifyDesign = async (group: PerDesignGroup): Promise<void> => {
+    setDesignBusy((p) => ({ ...p, [group.designKey]: true }))
+    try {
+      const resp = await fetch(
+        `/api/fba/listing-optimizer/verify-push?parent_asin=${asin}&field=title&skus=${encodeURIComponent(group.skus.join(','))}`,
+      )
+      const data = await resp.json() as { error?: string; total?: number; matched?: number }
+      if (!resp.ok) throw new Error(data.error || 'Verify failed')
+      const total = data.total ?? 0
+      const matched = data.matched ?? 0
+      const status: 'matches' | 'needs-update' = total > 0 && matched === total ? 'matches' : 'needs-update'
+      setDesignVerifyStatus((prev) => ({ ...prev, [group.designKey]: status }))
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Verify failed')
+    } finally {
+      setDesignBusy((p) => ({ ...p, [group.designKey]: false }))
+    }
+  }
+
+  // ── Ship one field of one design (PR-C): save first if dirty, then OPEN the existing push preview
+  // modal scoped to this design's SKUs. SECURITY: this only OPENS the modal — the seller confirms the
+  // push there (confirmPush runs only from the modal's Confirm button). No live push is auto-fired.
+  const onShipDesignField = async (group: PerDesignGroup, field: 'title' | 'bullets' | 'description') => {
+    if (designDirty(group.designKey)) {
+      const ok = await onSaveDesign(group)
+      if (!ok) return // save failed — don't open a Ship preview over unsaved content
+    }
+    openPushPreview(field, undefined, group.skus)
+  }
   // Tab definitions for the dashboard-style section nav (one section visible at a time).
   const TABS = [
     { id: 'apply', label: 'Apply Changes', count: (aiRecs?.action_plan ?? []).filter(a => a.verdict !== 'DONE' && a.verdict !== 'SKIP').length },
@@ -2009,14 +2094,14 @@ export default function ListingDetailPage() {
                       onToggle={() => toggle('design-' + g.designKey)}
                       edit={designEdits[g.designKey]}
                       dirty={designDirty(g.designKey)}
-                      busy={false}
-                      status={'unknown'}
+                      busy={!!designBusy[g.designKey]}
+                      status={designVerifyStatus[g.designKey] ?? 'unknown'}
                       onEditTitle={(v) => onEditDesignTitle(g.designKey, v)}
                       onEditBullet={(i, v) => onEditDesignBullet(g.designKey, i, v)}
                       onEditDescription={(v) => onEditDesignDescription(g.designKey, v)}
-                      onSave={() => console.warn('wired in PR-C')}
-                      onShip={() => console.warn('wired in PR-C')}
-                      onVerify={() => console.warn('wired in PR-C')}
+                      onSave={() => onSaveDesign(g)}
+                      onShipField={(field) => onShipDesignField(g, field)}
+                      onVerify={() => onVerifyDesign(g)}
                     />
                   ))}
                 </div>
