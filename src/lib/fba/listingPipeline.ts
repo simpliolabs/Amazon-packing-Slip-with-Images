@@ -3635,6 +3635,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (possibly group-scoped) input, so per-design grounding is correct.
   const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
   const apparelMultiDesign = apparelProduct && designGroupInfo.isMultiDesign
+  // Phase 2 — UNIFIED-SET (couple / matching) detection. A multi-design apparel family whose own
+  // listing title says it is ONE concept split across halves ("Funny Couple Matching Tee" =
+  // "Rude Potato" + "Sweet Potato") must NOT get a separate per-design title/bullets/description.
+  // The PO wants ONE shared title that names BOTH designs + the couple concept, broadcast to every
+  // variant. STRICT detection (a couple is exactly TWO halves of ONE concept): require an explicit
+  // COUPLE/PAIR signal — NOT a bare "matching <garment>", which also appears on friend-group /
+  // bachelorette / family multi-design families that are INDEPENDENT designs and MUST keep their
+  // per-design titles (adversarial review: bare "matching" false-positived + collapsed them). Also
+  // cap to EXACTLY 2 design groups (3+ is definitionally not a couple), and read ONLY the listing-
+  // level title (canonical/rep) so one stray child phrase can't flip the whole family.
+  const COUPLE_RE = /couple[\s-]?(?:match|matching|tee|tees|shirt|shirts|set|goals|pair)|match(?:ing|ed)?\s+couple|his\s*(?:and|&|\/)?\s*hers|mr\.?\s*(?:and|&)\s*mrs|king\s*(?:and|&)\s*queen/i
+  const coupleTitleSource = [input.canonicalTitle ?? '', input.repTitle ?? ''].filter(Boolean).join(' ')
+  const unifiedSet = apparelMultiDesign && designGroupInfo.groups.length === 2 && COUPLE_RE.test(coupleTitleSource)
   let finalTitle: string
   let titleProblems: string[] = []
   let retried = false
@@ -3649,21 +3662,25 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (costly) per-group design-name + vision resolution WITHOUT recomputing it. Populated only when the
   // multi-design title branch runs (full regen or a title-only partial); empty otherwise.
   let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput; key: string }[] = []
+  // Phase 2: the unified-set couple anchor (e.g. "Rude Potato & Sweet Potato Couple Matching"),
+  // resolved in the unified-set branch and reused by the shared bullets + description stages below
+  // so they anchor on the SAME couple concept the title leads with. Empty unless unifiedSet ran.
+  let coupleConcept = ''
   if (apparelMultiDesign && (!only || only === 'title')) {
-    // PER-DESIGN TITLES (Phase 1 Commit 2 + hot-fix). Each design group resolves its design name
-    // via this chain (PO 2026-06-17: "design name is stored as Amazon's Color attribute"):
+    // PER-DESIGN TITLES (Phase 1 Commit 2 + hot-fix) AND Phase 2 unified-set share the SAME per-group
+    // design-name resolution. Each design group resolves its name via this chain (PO 2026-06-17:
+    // "design name is stored as Amazon's Color attribute"):
     //   1. PRIMARY — fetch rep child's Amazon attributes (color → style_name → color_name) via
-    //      Listings Items API. First non-empty wins.
+    //      Listings Items API. First non-empty wins (gated by isGarmentColor — a literal shirt color
+    //      is NEVER the anchor).
     //   2. BACKUP — per-group vision scan (gpt-4.1-mini reading the rep child's image).
-    //   3. LAST-RESORT — extractDesignName on the cloned groupInput.
+    //   3. LAST-RESORT — extractDesignName on the cloned groupInput, then the designKey-derived label.
     // Pressure-test mitigations preserved:
     //   - groupInput.canonicalTitle = group's child stored title (NOT parent canonical →
     //     prevents cross-design fill-bigram leakage, finding #3)
     //   - searchKeyphrases reused from parent's filtered pool (finding #1a)
     //   - vision scans + attribute fetches parallel via Promise.all
-    onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
-    perChildTitles = []
-    // Resolve SP-API creds ONCE for the whole loop. Best-effort: a failure here just means the
+    // Resolve SP-API creds ONCE for the whole family. Best-effort: a failure here just means the
     // per-design name resolution falls through to vision + extractDesignName (today's behavior).
     let spToken: string | null = null
     let spSellerId: string | null = null
@@ -3689,7 +3706,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         return ''
       } catch (e) { console.warn(`[pipeline] design-name attr fetch ${sku} failed:`, e instanceof Error ? e.message : e); return '' }
     }
-    const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
+    // SHARED Phase-1 anchor resolution for one design group → { groupInput, groupDesignName }. Used by
+    // BOTH the per-design title loop (multi-design, !unifiedSet) and the Phase-2 unified-set path so the
+    // couple concept names the SAME design names the per-design path would have produced. (Extracted
+    // verbatim from the Phase-1 loop body; buildTitleFor is the only part the unified path does NOT do.)
+    const resolveGroupDesignName = async (group: DesignGroup): Promise<{ group: DesignGroup; groupInput: PipelineInput; groupDesignName: string }> => {
       const groupChildren = group.skus
         .map((s) => input.children.find((c) => c.sku === s.sku))
         .filter((c): c is NonNullable<typeof c> => Boolean(c))
@@ -3743,22 +3764,53 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // through — per-design content must anchor on the design, never the shirt color.
       let groupDesignName = extracted.name
       if (!groupDesignName?.trim() || isGarmentColor(groupDesignName)) groupDesignName = keyLabel || groupDesignName || ''
-      const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName)
-      // groupInput is returned so the bullets/description stages can reuse the resolved per-group
-      // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
-      return { group, groupInput, groupDesignName, ...r }
-    }))
-    const allDesignNames: string[] = []
-    for (const gr of groupResults) {
-      allDesignNames.push(gr.groupDesignName)
-      for (const s of gr.group.skus) perChildTitles.push({ sku: s.sku, asin: s.asin, title: gr.title, designName: gr.groupDesignName, designKey: gr.group.key })
-      titleProblems.push(...gr.problems.map((p) => `[${gr.group.key}] ${p}`))
-      retried = retried || gr.retried
+      return { group, groupInput, groupDesignName }
     }
-    // Capture per-group contexts (skus + resolved design name + title + groupInput) so the bullets +
-    // description stages generate PER DESIGN reusing this work — no second design-name/vision pass.
-    designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput, key: gr.group.key }))
-    finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
+    if (unifiedSet) {
+      // UNIFIED-SET (couple / matching). The family is ONE concept split across halves — do NOT
+      // generate per-design titles/bullets/description. Resolve each half's design name with the
+      // SAME anchor logic, then build ONE shared title that LEADS with the couple concept ("Rude
+      // Potato & Sweet Potato Couple Matching"). Leaving per_child_* UNDEFINED broadcasts the one
+      // shared set to every variant (no per-design split) — exactly what the PO wants.
+      onProgress(`Writing one shared couple/matching title for ${designGroupInfo.groups.length} designs...`)
+      const resolved = await Promise.all(designGroupInfo.groups.map((g) => resolveGroupDesignName(g)))
+      // Preserve group order (detectDesignGroups order); drop empties so the concept reads clean.
+      const allDesignNames = resolved.map((r) => r.groupDesignName.trim()).filter(Boolean)
+      // The couple concept the title MUST lead with, e.g. "Rude Potato & Sweet Potato Couple Matching".
+      // Fall back to the family designName, then a bare "Couple Matching" — never a leading space.
+      const conceptBase = allDesignNames.length ? allDesignNames.join(' & ') : designName.trim()
+      coupleConcept = (conceptBase ? `${conceptBase} ` : '') + 'Couple Matching'
+      // ONE shared title — buildTitleFor with coupleConcept AS the designName, so it leads the title
+      // and the design-name backstop (guard 6) re-inserts it verbatim if the council drops it.
+      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName)
+      finalTitle = r.title
+      titleProblems = r.problems
+      retried = r.retried
+      // designGroupContexts stays EMPTY → the bullets/description stages skip their per-design fan-out
+      // and the broadcast (shared) bullets/description ship to every variant. perChildTitles stays
+      // undefined for the same reason.
+    } else {
+      onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
+      perChildTitles = []
+      const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
+        const { groupInput, groupDesignName } = await resolveGroupDesignName(group)
+        const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName)
+        // groupInput is returned so the bullets/description stages can reuse the resolved per-group
+        // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
+        return { group, groupInput, groupDesignName, ...r }
+      }))
+      const allDesignNames: string[] = []
+      for (const gr of groupResults) {
+        allDesignNames.push(gr.groupDesignName)
+        for (const s of gr.group.skus) perChildTitles.push({ sku: s.sku, asin: s.asin, title: gr.title, designName: gr.groupDesignName, designKey: gr.group.key })
+        titleProblems.push(...gr.problems.map((p) => `[${gr.group.key}] ${p}`))
+        retried = retried || gr.retried
+      }
+      // Capture per-group contexts (skus + resolved design name + title + groupInput) so the bullets +
+      // description stages generate PER DESIGN reusing this work — no second design-name/vision pass.
+      designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput, key: gr.group.key }))
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
+    }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
     const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName)
@@ -3889,15 +3941,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
+  // Phase 2 unified-set: the SHARED bullets/description anchor on the COUPLE CONCEPT (both design
+  // names + "Couple Matching"), not the family-level designName — so the one broadcast set names the
+  // whole set. Non-unified families keep designName (single-design) / '' (per-design path supplies its
+  // own anchor via designGroupContexts). coupleConcept is only populated by the title branch, so on a
+  // bullets/description-only partial regen (title branch skipped → empty) we fall back to designName,
+  // preserving today's partial behavior. motifTrust is widened with the couple concept so its design-
+  // name tokens (e.g. "Potato") survive the ungrounded-motif strip in the shared content.
+  const broadcastDesignAnchor = unifiedSet && coupleConcept ? coupleConcept : designName
+  const broadcastMotifTrust = unifiedSet && coupleConcept ? `${motifTrust} ${coupleConcept.toLowerCase()}` : motifTrust
   let bullets: string[]
   if (!only || only === 'bullets') {
     onProgress('Writing bullets...')
-    const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, designName)
+    const rawBullets = await runBulletsAgent(input, finalTitle, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, broadcastDesignAnchor)
     // Same vision-hallucination backstop as the title (motif words need seller corroboration),
     // plus the garment-type guard (no "fleece pullover" bullets on a t-shirt family) and the
     // hard-audience swap (no "this men's crew" on a Female-selected listing).
     bullets = apparelProduct
-      ? rawBullets.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
+      ? rawBullets.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
       : rawBullets
     if (apparelProduct && (lean === 'female' || lean === 'male')) {
       bullets = bullets.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
@@ -4076,9 +4137,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (problems.length > 0) console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
     }
   }
-  // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience).
+  // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience). Uses
+  // broadcastMotifTrust so a unified-set's couple-concept design names survive the ungrounded strip.
   let description = apparelProduct
-    ? stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
+    ? stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
     : descriptionRaw
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
   description = fixDoubledArticleBeforeBrand(description, brandName)
