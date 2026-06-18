@@ -642,6 +642,10 @@ export async function POST(req: NextRequest) {
             // it VERBATIM — kills the entire "stuck design" class of bugs (LLM + heuristic +
             // vision all bypassed). Deterministic.
             designNameOverride: pipelineScoreRow?.design_name_override ?? null,
+            // Per-design seller name overrides (migration 034, {designKey: name}). Rides the
+            // existing '*' select; the multi-design group loop applies the per-key value ABOVE the
+            // Amazon Color attribute. undefined (NULL/absent column) → no per-design seeding.
+            designNameOverridesByKey: (pipelineScoreRow as { design_name_overrides?: Record<string, string> | null })?.design_name_overrides || undefined,
             // Seller-declared audience lean (PR #195) — persisted on the score row by the
             // listing-page selector; re-weights gendered keywords + sets the title tail.
             audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')

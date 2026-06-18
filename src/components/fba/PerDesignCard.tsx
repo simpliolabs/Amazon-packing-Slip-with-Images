@@ -12,6 +12,7 @@
  * (per-design bullets/description only populate on a FULL regen).
  */
 
+import { useEffect, useState } from 'react'
 import type { PerDesignGroup } from '@/lib/fba/perDesign'
 
 // ── Inline SVG icons (no emoji — matches the app's Icon set in page.tsx) ──
@@ -27,6 +28,12 @@ const SaveIcon = (p: IconProps) => (
 )
 const CheckIcon = (p: IconProps) => (
   <svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+)
+const PencilIcon = (p: IconProps) => (
+  <svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>
+)
+const XIcon = (p: IconProps) => (
+  <svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
 )
 
 type DesignStatus = 'matches' | 'needs-update' | 'unknown'
@@ -58,6 +65,9 @@ interface PerDesignCardProps {
    *  design — the seller confirms there; this never fires a live push directly. */
   onShipField: (field: 'title' | 'bullets' | 'description') => void
   onVerify: () => void
+  /** Persist a per-design name override (migration 034). value='' clears it back to auto-detect.
+   *  DB-only — relabels the card + seeds the NEXT regen; nothing pushes to Amazon. */
+  onRenameDesign?: (designKey: string, value: string) => void
 }
 
 // Small inline "Ship →" affordance shown next to each editable field's label.
@@ -77,7 +87,7 @@ const BULLET_SLOTS = 5
 export function PerDesignCard({
   group, fallbackBullets, fallbackDescription,
   expanded, onToggle, edit, dirty, busy, status,
-  onEditTitle, onEditBullet, onEditDescription, onSave, onShipField, onVerify,
+  onEditTitle, onEditBullet, onEditDescription, onSave, onShipField, onVerify, onRenameDesign,
 }: PerDesignCardProps) {
   // Resolved display values: live edit > group's own per-child content > broadcast fallback.
   const title = edit?.title ?? group.title
@@ -85,24 +95,81 @@ export function PerDesignCard({
   const description = edit?.description ?? (group.description || fallbackDescription)
   const chip = STATUS_CHIP[status]
 
+  // ── Inline design-name editor (DB-only override, migration 034) ──
+  // Reset the draft whenever the resolved name changes (e.g. after a save/regen relabels the card).
+  const [editingName, setEditingName] = useState(false)
+  const [nameDraft, setNameDraft] = useState(group.designName)
+  useEffect(() => { setNameDraft(group.designName) }, [group.designName])
+  const submitName = () => {
+    setEditingName(false)
+    // Empty submit = clear back to auto-detect. Only POST when the value actually changed.
+    const next = nameDraft.trim()
+    if (next !== group.designName.trim()) onRenameDesign?.(group.designKey, next)
+  }
+  const cancelName = () => { setEditingName(false); setNameDraft(group.designName) }
+
   return (
     <div className={`bg-white border border-slate-200 rounded-2xl overflow-hidden border-l-4 ${ACCENT[status]}`}>
-      {/* ── Header (always visible) — design name + status chip + SKU count + chevron ── */}
-      <button
-        onClick={onToggle}
-        className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
-        aria-expanded={expanded}
-      >
+      {/* ── Header (always visible) — editable design name + status chip + SKU count + chevron ──
+          NOT a single <button>: the inline name editor needs its own input/buttons, and nesting
+          interactive controls inside a button is invalid HTML. The chevron region toggles expand. */}
+      <div className="w-full flex items-center gap-2 px-4 py-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-bold text-slate-800 truncate">{group.designName}</span>
+            {editingName ? (
+              <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                <input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitName(); else if (e.key === 'Escape') cancelName() }}
+                  maxLength={80}
+                  placeholder="Design name (blank = auto)"
+                  className="text-sm font-bold text-slate-800 border border-violet-400 rounded px-1.5 py-0.5 focus:outline-none focus:ring-2 focus:ring-violet-400 w-48"
+                />
+                <button
+                  onClick={submitName}
+                  title="Save design name (blank resets to auto-detect)"
+                  className="inline-flex items-center justify-center w-6 h-6 rounded bg-violet-600 hover:bg-violet-700 text-white transition-colors cursor-pointer"
+                >
+                  <CheckIcon className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={cancelName}
+                  title="Cancel"
+                  className="inline-flex items-center justify-center w-6 h-6 rounded bg-white border border-slate-300 hover:bg-slate-100 text-slate-500 transition-colors cursor-pointer"
+                >
+                  <XIcon className="w-3.5 h-3.5" />
+                </button>
+              </span>
+            ) : (
+              <>
+                <span className="text-sm font-bold text-slate-800 truncate">{group.designName}</span>
+                {onRenameDesign && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setNameDraft(group.designName); setEditingName(true) }}
+                    title="Rename this design (used as the anchor on the next regen)"
+                    className="inline-flex items-center justify-center w-5 h-5 rounded text-slate-400 hover:text-violet-600 hover:bg-slate-100 transition-colors cursor-pointer flex-shrink-0"
+                  >
+                    <PencilIcon className="w-3 h-3" />
+                  </button>
+                )}
+              </>
+            )}
             <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${chip.classes}`}>{chip.label}</span>
             <span className="text-[10px] text-slate-500">{group.skus.length} SKU{group.skus.length === 1 ? '' : 's'}</span>
             {dirty && <span className="text-[10px] font-semibold text-amber-600">• unsaved edits</span>}
           </div>
         </div>
-        <ChevronIcon className={`w-4 h-4 text-slate-400 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-      </button>
+        <button
+          onClick={onToggle}
+          aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse design' : 'Expand design'}
+          className="flex-shrink-0 p-1 rounded hover:bg-slate-100 transition-colors cursor-pointer"
+        >
+          <ChevronIcon className={`w-4 h-4 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
 
       {/* ── Body (when expanded) — editable Title / Bullets / Description ── */}
       {expanded && (

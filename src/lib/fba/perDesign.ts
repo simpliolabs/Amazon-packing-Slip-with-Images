@@ -64,7 +64,7 @@ export function isMultiDesign(titles?: TitleE[] | null): boolean {
  *  so the first entry is representative. designName falls back to designKey when empty so a
  *  name-resolution miss never hides a real design. bullets/description may be empty (absent set);
  *  the caller falls back to the broadcast recommended_* in that case. */
-export function groupByDesign(titles?: TitleE[] | null, bullets?: BulletE[] | null, descriptions?: DescE[] | null): PerDesignGroup[] {
+export function groupByDesign(titles?: TitleE[] | null, bullets?: BulletE[] | null, descriptions?: DescE[] | null, overridesByKey?: Record<string, string>): PerDesignGroup[] {
   const t = Array.isArray(titles) ? titles : []
   const bulletsBySku = new Map((Array.isArray(bullets) ? bullets : []).map((x) => [x.sku, x.bullets]))
   const descBySku = new Map((Array.isArray(descriptions) ? descriptions : []).map((x) => [x.sku, x.description]))
@@ -94,6 +94,15 @@ export function groupByDesign(titles?: TitleE[] | null, bullets?: BulletE[] | nu
     g.designName = allResolvedUsable
       ? g.designName
       : (deriveDesignLabel(g.designKey, allKeys) || g.designName || g.designKey)
+  }
+  // Per-design SELLER override (migration 034) is the HIGHEST-priority label — it wins over both the
+  // resolved name and the designKey-derived label, so the card relabels instantly with the seller's
+  // chosen name. Absent param / empty value → keep the derived label above (no behavior change).
+  if (overridesByKey) {
+    for (const g of built) {
+      const ov = overridesByKey[g.designKey]
+      if (ov && ov.trim()) g.designName = ov.trim()
+    }
   }
   return built
 }
