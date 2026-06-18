@@ -11,6 +11,7 @@
  */
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { byOpportunity, poolOpportunityScore } from '@/lib/keyword-engine/poolOpportunity'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -25,7 +26,9 @@ function getAdminSupabase() {
   )
 }
 
-type SeedKeyword = { keyword?: string; searchVolume?: number }
+// keyword_data stores the full Jungle Scout row (minus organicRank); the dashboard reads volume +
+// the fields the Opportunity Score needs (competition, ease-of-ranking). See poolOpportunity.ts.
+type SeedKeyword = { keyword?: string; searchVolume?: number; organicProductCount?: number; easeOfRankingScore?: number }
 type SeedPoolRow = {
   seed_key: string
   keyword_data: SeedKeyword[] | null
@@ -62,11 +65,17 @@ export async function GET() {
   const pools = ((data ?? []) as SeedPoolRow[]).map((row) => {
     const kws = Array.isArray(row.keyword_data) ? row.keyword_data : []
     const contributors = Array.isArray(row.contributor_asins) ? row.contributor_asins : []
-    const topKeywords = [...kws]
-      .filter((k) => k && typeof k.keyword === 'string')
-      .sort((a, b) => (b.searchVolume ?? 0) - (a.searchVolume ?? 0))
+    // Rank by the synthesized Opportunity Score (0–10, demand × winnability), not raw volume — the
+    // seller asked to arrange by "top keyword JS opportunity score". searchVolume is the tiebreak.
+    const valid = kws.filter((k) => k && typeof k.keyword === 'string')
+    const topKeywords = byOpportunity(valid)
       .slice(0, 5)
-      .map((k) => ({ keyword: k.keyword as string, searchVolume: k.searchVolume ?? 0 }))
+      .map((k) => ({
+        keyword: k.keyword as string,
+        searchVolume: k.searchVolume ?? 0,
+        opportunityScore: poolOpportunityScore(k),
+      }))
+    const topOpportunityScore = topKeywords[0]?.opportunityScore ?? 0
     const expiresMs = row.expires_at ? new Date(row.expires_at).getTime() : null
     const fresh = expiresMs ? expiresMs > now : false
     const daysLeft = expiresMs ? Math.max(0, Math.round((expiresMs - now) / 86_400_000)) : null
@@ -85,8 +94,17 @@ export async function GET() {
       fresh,
       daysLeft,
       topKeywords,
+      topOpportunityScore,
     }
   })
+
+  // Arrange the pool LIST by each pool's top-keyword Opportunity Score (desc); recency breaks ties.
+  // Replaces the previous fetched_at ordering so the highest-opportunity niches surface first.
+  pools.sort(
+    (a, b) =>
+      b.topOpportunityScore - a.topOpportunityScore ||
+      (a.fetchedAt < b.fetchedAt ? 1 : a.fetchedAt > b.fetchedAt ? -1 : 0),
+  )
 
   const totalReuses = pools.reduce((s, p) => s + p.reuseCount, 0)
   const totals = {

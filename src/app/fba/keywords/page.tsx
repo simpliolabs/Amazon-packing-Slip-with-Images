@@ -10,9 +10,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { KeyRound, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react'
 
-type TopKeyword = { keyword: string; searchVolume: number }
+type TopKeyword = { keyword: string; searchVolume: number; opportunityScore: number }
 type Pool = {
   seedKey: string
+  topOpportunityScore: number
   keywordCount: number
   contributorCount: number
   contributorAsins: string[]
@@ -126,6 +127,7 @@ export default function KeywordPoolPage() {
               <tr>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide w-8"></th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Niche seed</th>
+                <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Opportunity</th>
                 <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Keywords</th>
                 <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Listings</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Competitor</th>
@@ -136,7 +138,7 @@ export default function KeywordPoolPage() {
             <tbody className="divide-y divide-gray-100">
               {loading && pools.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-gray-400">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-gray-400">
                     Loading seed pool…
                   </td>
                 </tr>
@@ -144,7 +146,7 @@ export default function KeywordPoolPage() {
 
               {!loading && pools.length === 0 && !error && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center">
+                  <td colSpan={8} className="px-4 py-12 text-center">
                     <KeyRound className="w-8 h-8 text-gray-300 mx-auto mb-3" />
                     <p className="text-sm font-medium text-gray-700">No seed pools yet</p>
                     <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
@@ -174,10 +176,29 @@ export default function KeywordPoolPage() {
       </div>
 
       <p className="text-xs text-gray-400 mt-3">
-        Showing up to 500 pools, newest first. Credits-saved is an estimate (~3 niche-research credits skipped per reuse;
+        Showing up to 500 pools, highest Opportunity Score first (0–10: demand × winnability; ~7+ = strong). Credits-saved is an estimate (~3 niche-research credits skipped per reuse;
         each reusing listing still spends ~1 for its own organic-rank read).
       </p>
     </div>
+  )
+}
+
+// Opportunity-score color band (0–10 scale, JS niche-score model): ≥7 strong, 4–7 moderate, <4 weak.
+function oppBandCls(score: number): string {
+  if (score >= 7) return 'text-green-700 bg-green-50 border-green-200'
+  if (score >= 4) return 'text-amber-700 bg-amber-50 border-amber-200'
+  return 'text-gray-500 bg-gray-100 border-gray-200'
+}
+
+function OppBadge({ score }: { score: number }) {
+  const s = Number.isFinite(score) ? score : 0 // guard a partial/stale payload from white-screening the row
+  return (
+    <span
+      className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-semibold border tabular-nums ${oppBandCls(s)}`}
+      title="Opportunity Score (0–10): demand × winnability (ease-of-ranking + low competition). ~7+ = strong."
+    >
+      {s.toFixed(1)}
+    </span>
   )
 }
 
@@ -209,6 +230,9 @@ function FragmentRow({
           {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </td>
         <td className="px-4 py-3 font-medium text-gray-900">{p.seedKey}</td>
+        <td className="px-4 py-3 text-right">
+          <OppBadge score={p.topOpportunityScore} />
+        </td>
         <td className="px-4 py-3 text-right tabular-nums text-gray-700">{p.keywordCount}</td>
         <td className="px-4 py-3 text-right tabular-nums text-gray-700">
           {p.contributorCount}
@@ -250,18 +274,23 @@ function FragmentRow({
       {isOpen && (
         <tr className="bg-gray-50/60">
           <td />
-          <td colSpan={6} className="px-4 py-3">
+          <td colSpan={7} className="px-4 py-3">
             <div className="grid md:grid-cols-2 gap-4">
               <div>
                 <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                  Top keywords by volume
+                  Top keywords by opportunity
                 </div>
                 {p.topKeywords.length > 0 ? (
                   <ul className="space-y-1">
                     {p.topKeywords.map((k) => (
-                      <li key={k.keyword} className="flex items-center justify-between text-sm">
-                        <span className="text-gray-700">{k.keyword}</span>
-                        <span className="tabular-nums text-gray-400">{k.searchVolume.toLocaleString()}</span>
+                      <li key={k.keyword} className="flex items-center justify-between gap-2 text-sm">
+                        <span className="text-gray-700 truncate min-w-0">{k.keyword}</span>
+                        <span className="flex items-center gap-2 shrink-0">
+                          <span className="tabular-nums text-gray-400" title="Monthly search volume">
+                            {k.searchVolume.toLocaleString()}
+                          </span>
+                          <OppBadge score={k.opportunityScore} />
+                        </span>
                       </li>
                     ))}
                   </ul>
