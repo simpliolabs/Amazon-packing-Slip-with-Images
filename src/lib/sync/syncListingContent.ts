@@ -1254,10 +1254,14 @@ export async function ensureListingScored(
   supabase: SupabaseClient,
   parentAsin: string,
 ): Promise<Record<string, unknown> | null> {
+  // Standalone reach (Risk R5/R-MIG2): a true standalone (no variations) has a listing_content row
+  // whose parent_asin is NULL and whose `asin` IS the id the optimizer keys on. Match (parent_asin=id
+  // OR asin=id) — mirrors the GET route — so on-demand scoring reaches it. Dedup-by-asin below makes
+  // the self row harmless for normal families (a parent's own asin=id row just joins its children).
   const { data: rowsRaw } = await supabase
     .from('listing_content')
     .select('sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
-    .eq('parent_asin', parentAsin)
+    .or(`parent_asin.eq.${parentAsin},asin.eq.${parentAsin}`)
     .order('sku', { ascending: true })
   const rows = (rowsRaw ?? []) as ListingContentRow[]
   if (rows.length === 0) return null // never synced — nothing to score on demand
