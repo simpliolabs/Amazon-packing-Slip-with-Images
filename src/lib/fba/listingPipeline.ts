@@ -265,6 +265,16 @@ const GARMENT_TYPE_WORDS = new Set([
   'tank', 'tanks', 'polo', 'polos', 'onesie', 'romper', 'leggings',
 ])
 
+// HEAVY (warm-layer) garments — the subset of GARMENT_TYPE_WORDS a t-shirt/tee can NEVER also be.
+// When the seller's OWN text proves the product is a tee, these are stuffing/mis-categorization noise.
+const HEAVY_GARMENT_WORDS = new Set([
+  'sweatshirt', 'sweatshirts', 'hoodie', 'hoodies', 'pullover', 'pullovers',
+  'fleece', 'sweater', 'sweaters', 'jacket', 'jackets', 'coat', 'coats',
+])
+// A LIGHT base garment word in the SELLER'S OWN text (canonical/rep title, design) = the product is a
+// shirt/tee, so any heavy garment word is keyword-stuffing or a mis-categorized productType, not the item.
+const LIGHT_BASE_GARMENT_RE = /\b(?:t-?shirts?|tees?)\b/i
+
 // STYLE/CUT claims — sibling of GARMENT_TYPE_WORDS for the backend token gate. Jungle Scout's
 // top category phrases describe the whole "comfort colors" NICHE, not this product: "cropped
 // comfort colors", "pocket tee", "blank tshirts", "oversized boxy" — tokens that mis-describe a
@@ -295,10 +305,20 @@ function stripCompetitorBlanks(text: string, ownBlank: string): string {
     .replace(OTHER_BLANK_BRANDS_RE, (m) => (own && m.toLowerCase().replace(/[^a-z0-9]/g, '').startsWith(own.slice(0, 6)) ? m : ''))
     .replace(/\s{2,}/g, ' ').replace(/\s+([,.;])/g, '$1').replace(/,\s*,/g, ',').replace(/[,\s]+\.(?=\s|$)/g, '.').replace(/[,\s]+$/g, '').trim()
 }
-function stripContradictedGarments(text: string, trustedHaystack: string): string {
+function stripContradictedGarments(text: string, trustedHaystack: string, sellerGarmentText?: string): string {
   if (!text) return text
+  // When the SELLER'S OWN text (titles/design — NOT the unreliable SP-API productType) establishes a
+  // LIGHT base garment (t-shirt/tee), a HEAVY garment word (sweatshirt/pullover/hoodie/…) is keyword-
+  // stuffing or a mis-categorized productType, NOT the real product — strip it from the OUTPUT even when
+  // the haystack "corroborates" it. Live (B0GQ6PGR2N): a Comfort Colors LONG SLEEVE tee whose seller
+  // title stuffed "Pullover Top" AND whose SP-API productType was SWEATSHIRT got titled a "Sweatshirt".
+  const heavyIsStuffing = !!sellerGarmentText && LIGHT_BASE_GARMENT_RE.test(sellerGarmentText)
   const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
-  const bad = [...new Set(words.filter((w) => GARMENT_TYPE_WORDS.has(w) && !new RegExp(`\\b${w.replace(/s$/, '')}`, 'i').test(trustedHaystack)))]
+  const bad = [...new Set(words.filter((w) =>
+    GARMENT_TYPE_WORDS.has(w) && (
+      !new RegExp(`\\b${w.replace(/s$/, '')}`, 'i').test(trustedHaystack) ||
+      (heavyIsStuffing && HEAVY_GARMENT_WORDS.has(w))
+    )))]
   if (bad.length === 0) return text
   const re = new RegExp(`\\b(?:${bad.join('|')})\\b`, 'gi')
   return text.replace(re, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,!;:])/g, '$1').replace(/,\s*,/g, ',').trim()
@@ -3190,7 +3210,7 @@ async function buildTitleFor(
   const titleProblems = t.problems
   const retried = t.retried
   // 1. Vision-hallucination backstop.
-  let finalTitle = apparelProduct ? stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()) : t.title
+  let finalTitle = apparelProduct ? stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust) : t.title
   // 2. HARD audience.
   if (apparelProduct && (lean === 'female' || lean === 'male')) {
     const aud = lean === 'female' ? 'Women' as const : 'Men' as const
@@ -3222,7 +3242,7 @@ async function buildTitleFor(
       if (toks.length === 0 || toks.every((tt) => headToks.has(tt))) continue
       if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
       if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
-      const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase())
+      const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust)
       if (safe !== kw) continue
       const next = `${head}, ${titleCaseKw(safe)}`
       if ((next + tail).length > 75) continue
@@ -3958,7 +3978,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // plus the garment-type guard (no "fleece pullover" bullets on a t-shirt family) and the
     // hard-audience swap (no "this men's crew" on a Female-selected listing).
     bullets = apparelProduct
-      ? rawBullets.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
+      ? rawBullets.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? ''))
       : rawBullets
     if (apparelProduct && (lean === 'female' || lean === 'male')) {
       bullets = bullets.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
@@ -3979,7 +3999,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
           // design grounding.
           const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
-          let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? ''))
+          let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
           if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
           gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
           return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
