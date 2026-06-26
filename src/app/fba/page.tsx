@@ -84,8 +84,28 @@ interface SeoScoreRow {
   image_url:            string | null
   total_units_30d:      number
   scored_at:            string
+  created_at:           string | null
+  last_pushed_at:       string | null
   children:             ChildContentRow[]
 }
+// Phase A work-queue tab buckets + counts (spec §5 Phase A).
+type SeoStatusTab = 'needs_work' | 'in_progress' | 'optimized' | 'needs_attention' | 'all'
+interface SeoCounts {
+  needs_work:       number
+  in_progress:      number
+  optimized:        number
+  needs_attention:  number
+  all:              number
+}
+// Unscored search match — rendered as a click-to-score stub (never synchronously scored, Risk R-UX6).
+interface SeoStub {
+  asin:  string
+  title: string | null
+  stub:  true
+}
+// Phase A "Optimized" threshold — MUST mirror the backend (route.ts OPTIMIZED_THRESHOLD).
+// 90+ == ready/pushed/measuring (never "Done"); <90 == needs work.
+const OPTIMIZED_THRESHOLD = 90
 interface ChildContentRow {
   sku:                     string
   asin:                    string
@@ -377,9 +397,16 @@ export default function FBAIntelligencePage() {
 
   // Listing Optimizer state
   const [seoScores, setSeoScores] = useState<SeoScoreRow[]>([])
-  // How many best-selling parents to show (PO: "display + optimize more than 10 top sellers").
-  // "Show more" bumps this and refetches the same sales-ranked list, extended.
-  const [seoLimit, setSeoLimit] = useState(25)
+  // Phase A work-queue (spec §5): tab strip + count badges, server-side search, sort toggle,
+  // and a TRUE keyset cursor (replaces the old seoLimit+25 client headroom hack).
+  const [seoStatus, setSeoStatus] = useState<SeoStatusTab>('all')
+  const [seoCounts, setSeoCounts] = useState<SeoCounts | null>(null)
+  const [seoSort, setSeoSort] = useState<'sales' | 'recent'>('sales')
+  const [seoSearch, setSeoSearch] = useState('')              // raw input
+  const [seoSearchActive, setSeoSearchActive] = useState('')  // debounced value actually sent
+  const [seoStubs, setSeoStubs] = useState<SeoStub[]>([])
+  const [seoCursor, setSeoCursor] = useState<string | null>(null)  // nextCursor for "Show next"
+  const [seoLoadingMore, setSeoLoadingMore] = useState(false)
   const [seoHasMore, setSeoHasMore] = useState(false)
   const [seoLoading, setSeoLoading] = useState(false)
   const [seoSyncing, setSeoSyncing] = useState(false)
@@ -1055,12 +1082,35 @@ export default function FBAIntelligencePage() {
     finally { setListingsLoading(false) }
   }, [])
 
-  // Fetch SEO scores for the Listing Optimizer section. `limitArg` controls how many
-  // best-selling parents to return (the "Show more" control passes a larger value).
-  const fetchSeoScores = useCallback(async (triggerSync = false, limitArg = 25) => {
-    const scoresUrl = `/api/fba/listing-optimizer?limit=${limitArg}`
+  // Build the work-queue query string for the current tab/sort/search (Phase A, spec §5).
+  // When `search` is present the backend ignores cursor/sort and returns a single page + stubs[].
+  const buildSeoUrl = useCallback((opts: { status: SeoStatusTab; sort: 'sales' | 'recent'; search: string; cursor?: string | null }) => {
+    const p = new URLSearchParams({ status: opts.status, sort: opts.sort, limit: '25' })
+    if (opts.search) p.set('search', opts.search)
+    else if (opts.cursor) p.set('cursor', opts.cursor) // cursor only meaningful when NOT searching
+    return `/api/fba/listing-optimizer?${p.toString()}`
+  }, [])
+
+  // Fetch the FIRST page for the current tab/sort/search. `triggerSync` first kicks the Amazon
+  // scan (POST) then polls. Pagination is a TRUE keyset cursor (replaces the old seoLimit+25 hack).
+  const fetchSeoScores = useCallback(async (
+    triggerSync = false,
+    over?: { status?: SeoStatusTab; sort?: 'sales' | 'recent'; search?: string },
+  ) => {
+    const status = over?.status ?? seoStatus
+    const sort = over?.sort ?? seoSort
+    const search = over?.search ?? seoSearchActive
+    const scoresUrl = buildSeoUrl({ status, sort, search })
     setSeoLoading(true)
     setSeoError(null)
+    const applyPage = (json: { scores?: SeoScoreRow[]; counts?: SeoCounts; stubs?: SeoStub[]; nextCursor?: string | null; hasMore?: boolean; lastSyncedAt?: string | null }) => {
+      setSeoScores(json.scores || [])
+      setSeoCounts(json.counts || null)
+      setSeoStubs(json.stubs || [])
+      setSeoCursor(json.nextCursor || null)
+      setSeoHasMore(!!json.hasMore)
+      setSeoLastSynced(json.lastSyncedAt || null)
+    }
     try {
       if (triggerSync) {
         setSeoSyncing(true)
@@ -1082,9 +1132,7 @@ export default function FBAIntelligencePage() {
           // Sync completed within timeout — fetch scores immediately
           const resp = await fetch(scoresUrl)
           const json = await resp.json()
-          setSeoScores(json.scores || [])
-          setSeoHasMore(!!json.hasMore)
-          setSeoLastSynced(json.lastSyncedAt || null)
+          applyPage(json)
           setSeoSyncing(false)
           setSeoLoading(false)
           return
@@ -1098,9 +1146,7 @@ export default function FBAIntelligencePage() {
             const resp = await fetch(scoresUrl)
             const json = await resp.json()
             if (json.scores && json.scores.length > 0) {
-              setSeoScores(json.scores)
-              setSeoHasMore(!!json.hasMore)
-              setSeoLastSynced(json.lastSyncedAt)
+              applyPage(json)
               setSeoSyncing(false)
               clearInterval(pollInterval)
             } else if (attempts >= maxAttempts) {
@@ -1114,12 +1160,25 @@ export default function FBAIntelligencePage() {
       }
       const resp = await fetch(scoresUrl)
       const json = await resp.json()
-      setSeoScores(json.scores || [])
-      setSeoHasMore(!!json.hasMore)
-      setSeoLastSynced(json.lastSyncedAt || null)
+      applyPage(json)
     } catch (e) { console.error(e) }
     finally { setSeoLoading(false) }
-  }, [])
+  }, [seoStatus, seoSort, seoSearchActive, buildSeoUrl])
+
+  // "Show next 25" — genuinely fetch the next keyset page and APPEND (replaces seoLimit+25).
+  const fetchMoreSeoScores = useCallback(async () => {
+    if (!seoCursor || seoLoadingMore) return
+    setSeoLoadingMore(true)
+    try {
+      const resp = await fetch(buildSeoUrl({ status: seoStatus, sort: seoSort, search: seoSearchActive, cursor: seoCursor }))
+      const json = await resp.json()
+      setSeoScores(prev => [...prev, ...((json.scores || []) as SeoScoreRow[])])
+      setSeoCursor(json.nextCursor || null)
+      setSeoHasMore(!!json.hasMore)
+      if (json.counts) setSeoCounts(json.counts)
+    } catch (e) { console.error(e) }
+    finally { setSeoLoadingMore(false) }
+  }, [seoCursor, seoLoadingMore, seoStatus, seoSort, seoSearchActive, buildSeoUrl])
 
   // Load cached AI recommendations from DB (GET — no generation)
   const loadCachedRecs = useCallback(async (parentAsin: string) => {
@@ -1253,10 +1312,28 @@ export default function FBAIntelligencePage() {
     if (activeTab === 'ads' && !adsStatus) fetchAdsData()
   }, [activeTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load SEO scores when optimizer sub-tab is opened
+  // Load SEO scores when optimizer sub-tab is opened (only if we have nothing yet).
   useEffect(() => {
-    if (activeTab === 'listings' && listingSubTab === 'optimizer' && seoScores.length === 0) fetchSeoScores()
+    if (activeTab === 'listings' && listingSubTab === 'optimizer' && seoScores.length === 0 && !seoCounts) fetchSeoScores()
   }, [activeTab, listingSubTab]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Refetch the FIRST page whenever the active tab or sort changes (cursor resets implicitly).
+  // Skipped until the optimizer sub-tab has been opened at least once (seoCounts seeded).
+  useEffect(() => {
+    if (activeTab === 'listings' && listingSubTab === 'optimizer' && seoCounts) fetchSeoScores(false)
+  }, [seoStatus, seoSort]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Debounce the optimizer search box (mirrors the salesSearch debounce intent, but this one
+  // drives a SERVER fetch with ?search=). 350ms idle → commit to seoSearchActive.
+  useEffect(() => {
+    const t = setTimeout(() => setSeoSearchActive(seoSearch.trim()), 350)
+    return () => clearTimeout(t)
+  }, [seoSearch])
+
+  // When the debounced search value commits, refetch the first page (server-side search).
+  useEffect(() => {
+    if (activeTab === 'listings' && listingSubTab === 'optimizer' && seoCounts) fetchSeoScores(false, { search: seoSearchActive })
+  }, [seoSearchActive]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Data source labels for the loading overlay
   const DATA_SOURCES = [
@@ -2594,9 +2671,10 @@ export default function FBAIntelligencePage() {
           <div>
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h3 className="text-base font-semibold text-gray-900">Listing Optimizer</h3>
+                <h3 className="text-base font-semibold text-gray-900">Listing Work-Queue</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Best-selling parent ASINs with SEO gaps, ranked by 30-day sales — fix title, bullets, keywords, and A+ content
+                  A live queue of every scored listing — content quality is an input, not a finish line.
+                  A score of 90+ means the copy shipped and is being measured, never &quot;Done.&quot;
                   {seoScores.length > 0 && <span className="text-gray-400"> · showing {seoScores.length}</span>}
                 </p>
               </div>
@@ -2617,6 +2695,78 @@ export default function FBAIntelligencePage() {
                     'Scan Listings'
                   )}
                 </button>
+              </div>
+            </div>
+
+            {/* ── Work-queue tab strip (spec §5 Phase A) — count badges from `counts`. ── */}
+            {(() => {
+              const TABS: { key: SeoStatusTab; label: string }[] = [
+                { key: 'needs_work',      label: 'Needs Work' },
+                { key: 'in_progress',     label: 'In Progress' },
+                { key: 'optimized',       label: 'Optimized' },
+                { key: 'needs_attention', label: 'Needs Attention' },
+                { key: 'all',             label: 'All' },
+              ]
+              return (
+                <div className="flex flex-wrap items-center gap-1.5 mb-4 border-b border-gray-200 pb-3">
+                  {TABS.map(t => {
+                    const active = seoStatus === t.key
+                    const count = seoCounts ? seoCounts[t.key] : null
+                    return (
+                      <button
+                        key={t.key}
+                        onClick={() => { if (!active) { setSeoStatus(t.key); setSeoScores([]); setSeoStubs([]) } }}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                          active
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {t.label}
+                        {count != null && (
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                            active ? 'bg-violet-500 text-white' : 'bg-gray-200 text-gray-600'
+                          }`}>{count}</span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              )
+            })()}
+
+            {/* ── Search + sort row ── */}
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <div className="relative flex-1 min-w-[220px] max-w-md">
+                <input
+                  type="text"
+                  placeholder="Search by ASIN or product title…"
+                  value={seoSearch}
+                  onChange={e => setSeoSearch(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+                />
+                {seoSearch && (
+                  <button
+                    onClick={() => { setSeoSearch(''); setSeoSearchActive('') }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-lg leading-none"
+                    title="Clear search"
+                  >&times;</button>
+                )}
+              </div>
+              {/* Sort toggle — disabled during search (the backend ignores sort when ?search= is set). */}
+              <div className={`inline-flex rounded-lg border border-gray-300 overflow-hidden ${seoSearchActive ? 'opacity-40 pointer-events-none' : ''}`}>
+                {([
+                  { key: 'sales',  label: 'Best-selling' },
+                  { key: 'recent', label: 'Latest added' },
+                ] as const).map(o => (
+                  <button
+                    key={o.key}
+                    onClick={() => { if (seoSort !== o.key) { setSeoSort(o.key); setSeoScores([]) } }}
+                    className={`px-3 py-2 text-xs font-medium transition-colors ${
+                      seoSort === o.key ? 'bg-violet-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >{o.label}</button>
+                ))}
               </div>
             </div>
 
@@ -2643,14 +2793,45 @@ export default function FBAIntelligencePage() {
                 <p className="text-sm font-semibold text-red-800 mb-1">Scan Failed</p>
                 <p className="text-xs text-red-700">{seoError}</p>
               </div>
+            ) : seoStatus === 'in_progress' ? (
+              // In Progress is explicitly EMPTY in Phase A (spec R-UX3). It is NOT derived from
+              // recommendations rows — a real soft-lock claim arrives with the collaboration update.
+              <div className="text-center py-12 rounded-xl border border-dashed border-gray-300 bg-gray-50/50">
+                <svg viewBox="0 0 24 24" className="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+                <p className="text-sm font-medium text-gray-700">No one is on a listing right now</p>
+                <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">Live claims arrive in the collaboration update. Once the team can claim a listing, In Progress will show who is actively working on what.</p>
+              </div>
             ) : seoLoading && !seoSyncing ? (
               <div className="text-center py-8 text-gray-400 text-sm">Loading scores…</div>
-            ) : seoScores.length === 0 && !seoSyncing ? (
-              <div className="text-center py-8">
-                <div className="text-3xl mb-2">&#128269;</div>
-                <p className="text-sm font-medium text-gray-700">No scan data yet</p>
-                <p className="text-xs text-gray-500 mt-1">Click &quot;Scan Listings&quot; to analyse your top sellers for SEO gaps.</p>
-              </div>
+            ) : seoScores.length === 0 && seoStubs.length === 0 && !seoSyncing ? (
+              seoSearchActive ? (
+                <div className="text-center py-10">
+                  <div className="text-3xl mb-2">&#128269;</div>
+                  <p className="text-sm font-medium text-gray-700">No listings match &ldquo;{seoSearchActive}&rdquo;</p>
+                  <p className="text-xs text-gray-500 mt-1">Try a different ASIN or part of the product title.</p>
+                </div>
+              ) : seoCounts && seoCounts.all === 0 ? (
+                <div className="text-center py-8">
+                  <div className="text-3xl mb-2">&#128269;</div>
+                  <p className="text-sm font-medium text-gray-700">No scan data yet</p>
+                  <p className="text-xs text-gray-500 mt-1">Click &quot;Scan Listings&quot; to analyse your top sellers for SEO gaps.</p>
+                </div>
+              ) : (
+                <div className="text-center py-10 rounded-xl border border-dashed border-gray-300 bg-gray-50/50">
+                  <p className="text-sm font-medium text-gray-700">
+                    {seoStatus === 'needs_work'      ? 'Nothing needs work right now'
+                     : seoStatus === 'optimized'     ? 'No listings are optimized yet'
+                     : seoStatus === 'needs_attention' ? 'Nothing needs attention'
+                     : 'No listings here yet'}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {seoStatus === 'needs_work'      ? 'Every scored listing is at 90+ — they shipped and are being measured.'
+                     : seoStatus === 'optimized'     ? 'Once a listing reaches a 90+ score it lands here while its outcome is measured.'
+                     : seoStatus === 'needs_attention' ? 'Stale, regressed, or partially-pushed listings will surface here.'
+                     : 'Run a scan to populate the work-queue.'}
+                  </p>
+                </div>
+              )
             ) : (
               <>
               {/* ── Optimizer Modal ─────────────────────────────────────────────── */}
@@ -3178,6 +3359,44 @@ export default function FBAIntelligencePage() {
                 )
               })()}
 
+              {/* Optimized tab standing caption (spec R8): 90+ is shipped+measuring, never "Done". */}
+              {seoStatus === 'optimized' && seoScores.length > 0 && (
+                <div className="mb-4 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs text-emerald-800">
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 mt-0.5 shrink-0 text-emerald-600" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l2.5 1.5" /></svg>
+                  <span>
+                    <strong>Outcome pending.</strong> A 90+ score means the copy is well-formed and shipped —
+                    not that it won. We are measuring whether it actually moved keyword share, rank, and sales.
+                  </span>
+                </div>
+              )}
+
+              {/* ── Unscored search matches → click-to-score stubs (spec R-UX6) ────── */}
+              {seoStubs.length > 0 && (
+                <div className="mb-5">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                    Not scored yet · click to score on demand
+                  </p>
+                  <div className="space-y-2">
+                    {seoStubs.map(stub => (
+                      <button
+                        key={stub.asin}
+                        onClick={() => router.push(`/fba/listing/${stub.asin}`)}
+                        className="w-full flex items-center gap-3 text-left rounded-xl border border-dashed border-gray-300 bg-white hover:border-violet-400 hover:bg-violet-50/40 px-4 py-3 transition-colors"
+                      >
+                        <div className="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center text-gray-400 shrink-0">
+                          <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{stub.title || stub.asin}</p>
+                          <p className="text-xs text-gray-400 font-mono">{stub.asin}</p>
+                        </div>
+                        <span className="text-xs font-medium text-violet-600 whitespace-nowrap">Score this listing →</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* ── Compact Cards Grid ──────────────────────────────────────────── */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {seoScores.map(score => {
@@ -3192,12 +3411,18 @@ export default function FBAIntelligencePage() {
                   // (the mismatch that proves it's a stale ghost, not a not-yet-synced card).
                   if (stale && stale.totalChildren === 0 && (score.child_count ?? 0) > 0) return null
                   const isStale = stale?.isStale ?? false
+                  // Phase A threshold (spec §5): 90+ is OPTIMIZED (shipped, measuring) — a first-class
+                  // green treatment. A 90+ listing with a recorded push is "Pushed — measuring" (R8).
+                  const isOptimized = score.overall_score >= OPTIMIZED_THRESHOLD
+                  const isMeasuring = isOptimized && !!score.last_pushed_at
                   const scoreColor =
-                    score.overall_score >= 80 ? 'text-green-600'
+                    isOptimized ? 'text-emerald-600'
+                    : score.overall_score >= 80 ? 'text-green-600'
                     : score.overall_score >= 60 ? 'text-amber-600'
                     : 'text-red-600'
                   const scoreBg = isStale
                     ? 'bg-slate-50 border-slate-300 hover:border-slate-400 opacity-75'
+                    : isOptimized ? 'bg-emerald-50 border-emerald-300 hover:border-emerald-400'
                     : score.overall_score >= 80 ? 'bg-green-50 border-green-200 hover:border-green-400'
                     : score.overall_score >= 60 ? 'bg-amber-50 border-amber-200 hover:border-amber-400'
                     : 'bg-red-50 border-red-200 hover:border-red-400'
@@ -3252,9 +3477,31 @@ export default function FBAIntelligencePage() {
                             <p className="text-sm font-semibold text-gray-900 leading-tight line-clamp-2">{score.product_title || score.parent_asin}</p>
                             <p className="text-xs text-gray-400 mt-0.5 font-mono">{score.parent_asin}</p>
                             <p className="text-xs text-gray-400">{score.child_count} vars · {score.total_units_30d} units/30d</p>
+                            {/* Lifecycle chips (spec R8): 90+ is "Optimized"; a pushed 90+ is "Pushed — measuring",
+                                an OUTCOME-PENDING state — explicitly NOT "Done". */}
+                            {isOptimized && (
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                                {isMeasuring ? (
+                                  <span
+                                    className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700"
+                                    title={`Last pushed ${new Date(score.last_pushed_at as string).toLocaleDateString()} — measuring outcome (share / rank / sales)`}
+                                  >
+                                    <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
+                                    Pushed — measuring
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                                    <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                                    Optimized
+                                  </span>
+                                )}
+                                <span className="text-[10px] text-emerald-600/80 italic">outcome pending</span>
+                              </div>
+                            )}
                           </div>
                           <div className={`shrink-0 w-12 h-12 rounded-full border-2 flex flex-col items-center justify-center font-bold ${
-                            score.overall_score >= 80 ? 'text-green-600 border-green-400'
+                            isOptimized ? 'text-emerald-600 border-emerald-400'
+                            : score.overall_score >= 80 ? 'text-green-600 border-green-400'
                             : score.overall_score >= 60 ? 'text-amber-600 border-amber-400'
                             : 'text-red-600 border-red-400'
                           }`}>
@@ -3314,15 +3561,17 @@ export default function FBAIntelligencePage() {
                   )
                 })}
               </div>
-              {/* PO: "display + optimize more than 10 top sellers" — extend the sales-ranked list. */}
-              {seoHasMore && (
+              {/* TRUE keyset pagination (spec §5): fetch + APPEND the next page via ?cursor=.
+                  Replaces the old seoLimit+25 client headroom hack. Hidden while searching
+                  (the backend returns a single page with hasMore=false for ?search=). */}
+              {seoHasMore && !seoSearchActive && (
                 <div className="flex justify-center mt-5">
                   <button
-                    onClick={() => { const next = seoLimit + 25; setSeoLimit(next); fetchSeoScores(false, next) }}
-                    disabled={seoLoading}
+                    onClick={fetchMoreSeoScores}
+                    disabled={seoLoadingMore || seoLoading}
                     className="text-sm px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 font-medium"
                   >
-                    {seoLoading ? 'Loading…' : 'Show more sellers (next 25) →'}
+                    {seoLoadingMore ? 'Loading…' : 'Show next 25 →'}
                   </button>
                 </div>
               )}
