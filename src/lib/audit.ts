@@ -25,6 +25,10 @@ export type AuditAction =
   | 'user.invite'
   | 'user.delete'
   | 'user.update_role'
+  // Listing lifecycle (spec §5 Phase B) — narrow sensitive subset of the product-facing
+  // change-log routed to the compliance ledger: a write-to-Amazon push, and a claim override.
+  | 'listing.push'
+  | 'listing.takeover'
 
 export interface AuditLogEntry {
   userId: string | null

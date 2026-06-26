@@ -41,6 +41,7 @@ import {
 } from '@/lib/fba/productDetailAttrs'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
+import { logAudit } from '@/lib/audit'
 
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
 // validator. Process-lifetime: schemas are static, so the form that validates once keeps
@@ -65,6 +66,45 @@ function pushCancelled(token: string | undefined): boolean {
 export const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 export const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
 const PATCH_DELAY_MS = 200 // Amazon patchListingsItem limit is 5 rps; 200ms keeps us under it.
+
+// ── Attribution (spec §5 Phase B) ─────────────────────────────────────────────
+// WHO ran this push. A browser push resolves the actor from the Authorization: Bearer
+// JWT (work-log getAuthUser pattern); a cron/verify-initiated push has no user, so it uses
+// SYSTEM_ACTOR. `id` is written to keyword_push_log.pushed_by + listing_change_log.changed_by
+// (both `uuid REFERENCES auth.users(id)`), so it MUST be null (FK-safe) for the system actor —
+// a synthetic uuid would fail the FK and the best-effort insert would silently drop. `name` is
+// the denormalized display string the change-log timeline renders, so a system row still reads
+// "System (automated push)" instead of an unrenderable blank actor.
+export interface PushActor {
+  id: string | null      // auth.users.id for a real user; null for the system actor (FK-safe)
+  name: string           // denormalized display name for the change-log timeline
+}
+export const SYSTEM_ACTOR: PushActor = { id: null, name: 'System (automated push)' }
+
+/** Mirror a FULL-ACCEPT push into the product-facing change-log (spec §5 Phase B). Best-effort —
+ *  never blocks or fails a push that already wrote to Amazon. `db` is the admin (service-role)
+ *  supabase client already in scope. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function logPushChange(db: any, args: {
+  parent_asin: string; field: string; actor: PushActor; after_value?: string | null; submission_id?: string | null
+}): Promise<void> {
+  try {
+    await db.from('listing_change_log').insert({
+      parent_asin: args.parent_asin,
+      sku: null,
+      field: args.field,
+      action: 'push',
+      before_value: null,
+      after_value: args.after_value ?? null,
+      changed_by: args.actor.id,
+      changed_by_name: args.actor.name,
+      source: 'push_executor',
+      submission_id: args.submission_id ?? null,
+    })
+  } catch (e) {
+    console.warn('[push] change-log insert failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
+}
 
 export async function getSellerId(): Promise<string> {
   const supabase = await createAdminClient()
@@ -811,6 +851,11 @@ export interface PushParams {
    *  Keyed by friendly field name; each is re-validated/coerced by loadDetailContext, so a
    *  bad manual value is flagged enumInvalid → that field is skipped, never pushed. */
   detail_overrides?: Record<string, string>
+  /** WHO is running this push (spec §5 Phase B attribution). Resolved from the Bearer JWT at the
+   *  route, or SYSTEM_ACTOR for cron/verify. Threaded into keyword_push_log.pushed_by + (on a
+   *  full-accept push) listing_change_log + a narrow logAudit('listing.push'). Defaults to
+   *  SYSTEM_ACTOR when absent so a row never carries an unrenderable NULL actor name. */
+  actor?: PushActor
 }
 
 /** Which of `eligibleFields` differ from the SKU's live value (so the batch touches only what
@@ -859,6 +904,9 @@ function summarizePush(results: { status: string; isParent?: boolean }[]): {
 
 export async function executePush(params: PushParams, emit: PushEmit): Promise<void> {
   const { parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = params
+  // WHO ran this push — for keyword_push_log.pushed_by + the full-accept change-log mirror.
+  // Defaults to SYSTEM_ACTOR (cron/verify path) so a row never carries a NULL actor name.
+  const actor: PushActor = params.actor ?? SYSTEM_ACTOR
   try {
         // ── DETAILS branch ─────────────────────────────────────────────────────
         if (rawField === 'details') {
@@ -917,7 +965,8 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           const supabase = await createAdminClient()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const db = supabase as any
-          const logPush = async (row: Record<string, unknown>) => {
+          const logPush = async (rowIn: Record<string, unknown>) => {
+            const row: Record<string, unknown> = { ...rowIn, pushed_by: actor.id }  // attribution (spec §5 Phase B)
             try {
               const { error: insertErr } = await db.from('keyword_push_log').insert(row)
               if (!insertErr) return
@@ -1050,6 +1099,21 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             } catch (e) { console.warn('[push-content/details] verify enqueue failed (non-fatal):', e) }
           }
 
+          // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT push mirrors a product-facing change-log row
+          // (action='push', source='push_executor') + a NARROW compliance audit (listing.push as a
+          // write-to-Amazon event). Best-effort — never blocks a push that already wrote to Amazon.
+          if (failed === 0 && !cancelled && accepted > 0) {
+            await logPushChange(db, {
+              parent_asin, field: `details:${ctx.attribute.spApiKey}`, actor,
+              after_value: ctx.recommendedValue,
+              submission_id: results.find((r) => r.status === 'accepted')?.submissionId ?? null,
+            })
+            await logAudit({
+              userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
+              details: { field: `details:${ctx.attribute.spApiKey}`, detail_field: ctx.detailField, accepted, by: actor.name },
+            })
+          }
+
           emit({
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
@@ -1118,7 +1182,8 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         const supabase    = await createAdminClient()
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const db = supabase as any
-        const logPush = async (row: Record<string, unknown>) => {
+        const logPush = async (rowIn: Record<string, unknown>) => {
+          const row: Record<string, unknown> = { ...rowIn, pushed_by: actor.id }  // attribution (spec §5 Phase B)
           try {
             const { error } = await db.from('keyword_push_log').insert(row)
             if (!error) return
@@ -1265,6 +1330,21 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.warn('[push-content] verify enqueue failed (non-fatal):', e) }
         }
 
+        // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT push mirrors a product-facing change-log row
+        // (action='push', source='push_executor') + a NARROW compliance audit (listing.push). The
+        // exact pushed bytes live in keyword_push_log; this row is the WHO/WHEN/action timeline.
+        if (failed === 0 && !cancelled && accepted > 0) {
+          await logPushChange(db, {
+            parent_asin, field, actor,
+            after_value: field === 'title' ? (titleOv ?? null) : null,
+            submission_id: results.find((r) => r.status === 'accepted')?.submissionId ?? null,
+          })
+          await logAudit({
+            userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
+            details: { field, accepted, by: actor.name },
+          })
+        }
+
         const label = FIELD_CONFIG[field].label.toLowerCase()
         const skippedNote = skippedNotLive.length > 0
           ? ` ${skippedNotLive.length} skipped (not a live Amazon listing yet — Missing offer/incomplete; complete their offer in Seller Central, then re-push).`
@@ -1307,6 +1387,7 @@ interface BulkFieldPlan {
 
 export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit): Promise<void> {
   const { parent_asin, detail_fields, detail_overrides } = params
+  const actor: PushActor = params.actor ?? SYSTEM_ACTOR  // attribution (spec §5 Phase B)
   try {
     const fields = (detail_fields ?? []).filter((f) => typeof f === 'string' && f.trim())
     if (fields.length === 0) { emit({ type: 'error', error: 'No fields selected for Auto Push.' }); return }
@@ -1388,7 +1469,8 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     const supabase = await createAdminClient()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = supabase as any
-    const logPush = async (row: Record<string, unknown>) => {
+    const logPush = async (rowIn: Record<string, unknown>) => {
+      const row: Record<string, unknown> = { ...rowIn, pushed_by: actor.id }  // attribution (spec §5 Phase B)
       try { const { error } = await db.from('keyword_push_log').insert(row); if (!error) return
         const rest = { ...row }; delete rest.field; const { error: error2 } = await db.from('keyword_push_log').insert(rest)
         if (error2) console.error('[bulk-details] keyword_push_log insert FAILED both attempts — ship date will be missing. first:', error?.message ?? error, '| second:', error2?.message ?? error2)
@@ -1495,6 +1577,19 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     ]
     const totalAccepted = livePlans.reduce((n, p) => n + tally[p.field].accepted, 0)
     const totalFailed = livePlans.reduce((n, p) => n + tally[p.field].failed, 0)
+
+    // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT bulk push mirrors a change-log row per accepted
+    // field (action='push', source='push_executor') + ONE narrow logAudit('listing.push') for the
+    // batch. Best-effort — never blocks a push that already wrote to Amazon.
+    if (totalFailed === 0 && !cancelled && totalAccepted > 0) {
+      for (const p of acceptedFields) {
+        await logPushChange(db, { parent_asin, field: `details:${p.attribute.spApiKey}`, actor, after_value: p.value })
+      }
+      await logAudit({
+        userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
+        details: { mode: 'details_bulk', fields: acceptedFields.map((p) => p.field), accepted: totalAccepted, by: actor.name },
+      })
+    }
     emit({
       type: 'result', mode: 'details_bulk', parent_asin, perField,
       pushed: totalAccepted, failed: totalFailed, total: skusTouched, cancelled: cancelled || undefined,

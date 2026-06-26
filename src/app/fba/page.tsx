@@ -87,6 +87,34 @@ interface SeoScoreRow {
   created_at:           string | null
   last_pushed_at:       string | null
   children:             ChildContentRow[]
+  // Phase B collaboration chips (attached by the GET enrichWithCollab join; spec §5 Phase B):
+  //   claim        — ACTIVE (non-released) soft-lock, with `stale` computed at READ time
+  //                  (now()-last_heartbeat > CLAIM_TTL) so a dead tab renders amber, not "held".
+  //   last_touched — newest listing_change_log row → "last touched by NAME <relative-time>".
+  claim?:               { claimed_by_name: string | null; claimed_at: string | null; stale: boolean } | null
+  last_touched?:        { changed_by_name: string | null; changed_at: string; action: string | null } | null
+}
+
+// Plain-English verb for a last_touched action token (timeline-style chip on a card).
+const TOUCH_VERB: Record<string, string> = {
+  edit: 'edited', ai_generate: 'audited', ai_regenerate: 'regenerated',
+  push: 'pushed', claim: 'claimed', release: 'released', takeover: 'took over',
+}
+
+// Compact relative time for the claim/last-touched chips ("3m ago", "2h ago", "Jun 11"). Mirrors
+// the detail page's relDate so the two surfaces phrase ages identically.
+function relTime(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return ''
+  const mins = Math.round((Date.now() - t) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.round(hrs / 24)
+  if (days <= 7) return `${days}d ago`
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 // Phase A work-queue tab buckets + counts (spec §5 Phase A).
 type SeoStatusTab = 'needs_work' | 'in_progress' | 'optimized' | 'needs_attention' | 'all'
@@ -2793,13 +2821,13 @@ export default function FBAIntelligencePage() {
                 <p className="text-sm font-semibold text-red-800 mb-1">Scan Failed</p>
                 <p className="text-xs text-red-700">{seoError}</p>
               </div>
-            ) : seoStatus === 'in_progress' ? (
-              // In Progress is explicitly EMPTY in Phase A (spec R-UX3). It is NOT derived from
-              // recommendations rows — a real soft-lock claim arrives with the collaboration update.
+            ) : seoStatus === 'in_progress' && seoScores.length === 0 && !seoLoading ? (
+              // In Progress now lists CLAIMED listings (Phase B). It is empty only when nobody on the
+              // team currently holds a (non-stale) claim — it is NOT derived from recommendations rows.
               <div className="text-center py-12 rounded-xl border border-dashed border-gray-300 bg-gray-50/50">
                 <svg viewBox="0 0 24 24" className="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
                 <p className="text-sm font-medium text-gray-700">No one is on a listing right now</p>
-                <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">Live claims arrive in the collaboration update. Once the team can claim a listing, In Progress will show who is actively working on what.</p>
+                <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">When a teammate claims a listing on its detail page, it shows here so the team never double-works the same listing.</p>
               </div>
             ) : seoLoading && !seoSyncing ? (
               <div className="text-center py-8 text-gray-400 text-sm">Loading scores…</div>
@@ -3497,6 +3525,40 @@ export default function FBAIntelligencePage() {
                                 )}
                                 <span className="text-[10px] text-emerald-600/80 italic">outcome pending</span>
                               </div>
+                            )}
+                            {/* Phase B claim chip (spec §5): "🔒 NAME since <time>" when an ACTIVE
+                                claim is held. AMBER when stale (heartbeat older than CLAIM_TTL — a
+                                dead tab), so it reads as "free to take over", not a live lock. */}
+                            {score.claim && (
+                              <div className="mt-1.5">
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                                    score.claim.stale
+                                      ? 'bg-amber-100 text-amber-700'
+                                      : 'bg-violet-100 text-violet-700'
+                                  }`}
+                                  title={
+                                    score.claim.stale
+                                      ? `${score.claim.claimed_by_name || 'Someone'}'s claim went stale (no heartbeat) — it can be taken over`
+                                      : `Claimed by ${score.claim.claimed_by_name || 'someone'}${score.claim.claimed_at ? ` since ${new Date(score.claim.claimed_at).toLocaleString()}` : ''}`
+                                  }
+                                >
+                                  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+                                  {score.claim.claimed_by_name || 'Claimed'}
+                                  {score.claim.claimed_at && <span className="font-normal opacity-80"> · since {relTime(score.claim.claimed_at)}</span>}
+                                  {score.claim.stale && <span className="font-normal opacity-90"> · stale</span>}
+                                </span>
+                              </div>
+                            )}
+                            {/* "last touched by NAME <relative-time>" — subtle attribution line from
+                                the newest listing_change_log row (only when nobody currently holds it,
+                                to avoid stacking two near-identical lines). */}
+                            {!score.claim && score.last_touched?.changed_by_name && (
+                              <p className="text-[10px] text-gray-400 mt-1" title={new Date(score.last_touched.changed_at).toLocaleString()}>
+                                last {score.last_touched.action ? (TOUCH_VERB[score.last_touched.action] ?? 'touched') : 'touched'} by{' '}
+                                <span className="font-medium text-gray-500">{score.last_touched.changed_by_name}</span>{' '}
+                                {relTime(score.last_touched.changed_at)}
+                              </p>
                             )}
                           </div>
                           <div className={`shrink-0 w-12 h-12 rounded-full border-2 flex flex-col items-center justify-center font-bold ${

@@ -17,7 +17,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { enqueueJobRun, markStaleJobs, kickQueuedJobs, type PushJobRow } from '@/lib/fba/pushJobs'
 import { isPushField } from '@/lib/fba/pushFields'
-import type { PushParams } from '@/lib/fba/pushExecutor'
+import { SYSTEM_ACTOR, type PushParams, type PushActor } from '@/lib/fba/pushExecutor'
+import { getBearerUser, resolveUserName } from '@/lib/fba/claims'
 
 const MISSING_TABLE_HINT =
   'push_jobs table not found — run supabase/migrations/027_push_jobs.sql in the Supabase SQL editor (it is in the PR body), then retry.'
@@ -44,7 +45,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `unknown field "${field}"` }, { status: 400 })
   }
 
-  const payload: PushParams = { parent_asin, field, detail_field, skus, title_override, detail_value_override }
+  // Resolve WHO queued this from the Bearer JWT (spec §5 Phase B) and PERSIST it in the payload, so
+  // the in-process runner — which may replay job.payload in a fresh container after a deploy — keeps
+  // attribution. Falls back to SYSTEM_ACTOR when unauthenticated so a row never carries a NULL name.
+  const bearer = await getBearerUser(req)
+  const actor: PushActor = bearer
+    ? { id: bearer.id, name: await resolveUserName(bearer.id, bearer.email) }
+    : SYSTEM_ACTOR
+  const payload: PushParams = { parent_asin, field, detail_field, skus, title_override, detail_value_override, actor }
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from('push_jobs')

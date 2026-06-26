@@ -2,6 +2,7 @@
 
 import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { createClient } from '@/lib/supabase/client'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
@@ -199,6 +200,8 @@ const Icon = {
   Layers: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>),
   Tag: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z" /><circle cx="7" cy="7" r="1.4" fill="currentColor" stroke="none" /></svg>),
   Check: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>),
+  History: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v5h5" /><path d="M3.05 13A9 9 0 106 5.3L3 8" /><path d="M12 7v5l4 2" /></svg>),
+  Chevron: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>),
 }
 
 /** Animated SVG progress ring for the overall 0-100 listing score. */
@@ -227,6 +230,16 @@ export default function ListingDetailPage() {
   const params = useParams()
   const router = useRouter()
   const asin = params.asin as string
+
+  // Resolve the Supabase access token for MUTATING calls (AI-recs regen, push-content, claim).
+  // The server routes resolve the acting user from this Bearer JWT (work-log getAuthUser pattern)
+  // to stamp keyword_push_log.pushed_by + listing_change_log.changed_by — without it those rows
+  // carry a NULL actor. Mirrors the dashboard's getToken (src/app/fba/page.tsx).
+  const getToken = useCallback(async () => {
+    const supabase = createClient()
+    const { data: { session } } = await supabase.auth.getSession()
+    return session?.access_token
+  }, [])
 
   const [score, setScore] = useState<SeoScoreRow | null>(null)
   const [aiRecs, setAiRecs] = useState<AiRecommendations | null>(null)
@@ -369,6 +382,166 @@ export default function ListingDetailPage() {
   const [showPushModal, setShowPushModal] = useState(false)
   const [fetchedImage, setFetchedImage] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<string>('apply')
+
+  // ── Phase B collaboration (spec §5 Phase B + R-UX4/R-UX7) ─────────────────────────────────
+  // The acting user (from the Supabase session) — needed to tell "I hold this claim" from
+  // "someone else does", which drives Release vs Takeover.
+  const [myUserId, setMyUserId] = useState<string | null>(null)
+  // Live claim row for THIS parent ({claimed_by, claimed_by_name, last_heartbeat, stale}); null = free.
+  interface ClaimState { claimed_by: string | null; claimed_by_name: string | null; claimed_at: string | null; last_heartbeat: string | null; stale: boolean }
+  const [claim, setClaim] = useState<ClaimState | null>(null)
+  const [claimBusy, setClaimBusy] = useState(false)
+  const [claimError, setClaimError] = useState<string | null>(null)
+  // 2-step Takeover confirm (R-UX4): step 1 surfaces "<name> was active <Xm ago>" + unpushed-changes;
+  // step 2 force-reassigns. `takeoverInfo` holds what we surface before the seller commits.
+  const [takeoverOpen, setTakeoverOpen] = useState(false)
+  const [takeoverInfo, setTakeoverInfo] = useState<{ holderName: string | null; lastActiveIso: string | null; hasUnpushedChanges: boolean; loading: boolean } | null>(null)
+  // Merged human-readable change-history (R-UX7): change_log ∪ audit_logs ∪ score deltas, time-sorted.
+  interface HistoryRow { id: string; ts: string; actor: string | null; action: string | null; summary: string; source: string | null; kind: 'change_log' | 'audit' | 'score'; field?: string | null }
+  const [history, setHistory] = useState<HistoryRow[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(true)
+  // I hold the claim iff it exists, is mine, and is not stale.
+  const iHoldClaim = !!claim && !!myUserId && claim.claimed_by === myUserId && !claim.stale
+  // Claim TTL mirror (src/lib/fba/claims.ts CLAIM_TTL_MS) — read-time staleness on this page.
+  const CLAIM_TTL_MS = 15 * 60 * 1000
+
+  // Resolve my user id once (compare against claimed_by for Release vs Takeover).
+  useEffect(() => {
+    (async () => {
+      try {
+        const supabase = createClient()
+        const { data } = await supabase.auth.getUser()
+        setMyUserId(data.user?.id ?? null)
+      } catch { /* anonymous — controls degrade to read-only claim chip */ }
+    })()
+  }, [])
+
+  // Load the current claim for this parent (read-time staleness via last_heartbeat).
+  const refreshClaim = useCallback(async () => {
+    if (!asin) return
+    try {
+      const supabase = createClient()
+      const { data } = await supabase
+        .from('listing_claims')
+        .select('claimed_by, claimed_by_name, claimed_at, last_heartbeat, released_at')
+        .eq('parent_asin', asin)
+        .maybeSingle()
+      const row = data as { claimed_by: string | null; claimed_by_name: string | null; claimed_at: string | null; last_heartbeat: string | null; released_at: string | null } | null
+      if (!row || row.released_at || !row.claimed_by) { setClaim(null); return }
+      const stale = !row.last_heartbeat || (Date.now() - new Date(row.last_heartbeat).getTime() > CLAIM_TTL_MS)
+      setClaim({ claimed_by: row.claimed_by, claimed_by_name: row.claimed_by_name, claimed_at: row.claimed_at, last_heartbeat: row.last_heartbeat, stale })
+    } catch { /* best-effort; chip just won't render */ }
+  }, [asin, CLAIM_TTL_MS])
+  useEffect(() => { refreshClaim() }, [refreshClaim])
+
+  // POST a claim action (claim | release | heartbeat | takeover) with the Bearer token.
+  const postClaim = useCallback(async (action: 'claim' | 'release' | 'heartbeat' | 'takeover') => {
+    const token = await getToken()
+    const resp = await fetch('/api/fba/listing-optimizer/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ parent_asin: asin, action }),
+    })
+    return resp
+  }, [asin, getToken])
+
+  // Load the merged change-history feed (declared early so a mutation can refresh it).
+  const refreshHistory = useCallback(async () => {
+    if (!asin) return
+    setHistoryLoading(true)
+    try {
+      const resp = await fetch(`/api/fba/listing-optimizer/change-log?parent_asin=${encodeURIComponent(asin)}`)
+      if (resp.ok) { const d = await resp.json(); setHistory((d.entries || []) as HistoryRow[]) }
+    } catch { /* best-effort */ }
+    finally { setHistoryLoading(false) }
+  }, [asin])
+  useEffect(() => { refreshHistory() }, [refreshHistory])
+
+  // ── HEARTBEAT — fire on a FIXED interval while I hold the claim (spec §5 B "Watchdog-on-READ":
+  // heartbeat regardless of edits). 30s << CLAIM_TTL (15min) so 20+ beats elapse before a steal.
+  // If the server says I lost it (released/stolen), drop my local claim so the UI re-offers Claim.
+  const HEARTBEAT_MS = 30 * 1000
+  useEffect(() => {
+    if (!iHoldClaim) return
+    const id = setInterval(async () => {
+      try {
+        const resp = await postClaim('heartbeat')
+        if (resp.status === 409) { await refreshClaim() } // lost it — re-sync
+      } catch { /* transient; next beat retries */ }
+    }, HEARTBEAT_MS)
+    return () => clearInterval(id)
+  }, [iHoldClaim, postClaim, refreshClaim, HEARTBEAT_MS])
+
+  // bumpHeartbeat — every MUTATING action (AI regen, push) also refreshes the heartbeat so an
+  // actively-worked listing never goes stale mid-edit even if the interval is between beats.
+  const bumpHeartbeat = useCallback(async () => {
+    if (!iHoldClaim) return
+    try { await postClaim('heartbeat') } catch { /* best-effort */ }
+  }, [iHoldClaim, postClaim])
+
+  const doClaim = useCallback(async () => {
+    setClaimBusy(true); setClaimError(null)
+    try {
+      const resp = await postClaim('claim')
+      if (resp.status === 409) {
+        const d = await resp.json().catch(() => ({}))
+        setClaimError(`Held by ${d.held_by_name || 'someone else'}`)
+        await refreshClaim()
+        return
+      }
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Claim failed')
+      await refreshClaim(); await refreshHistory()
+    } catch (e) { setClaimError(e instanceof Error ? e.message : 'Claim failed') }
+    finally { setClaimBusy(false) }
+  }, [postClaim, refreshClaim, refreshHistory])
+
+  const doRelease = useCallback(async () => {
+    setClaimBusy(true); setClaimError(null)
+    try {
+      const resp = await postClaim('release')
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Release failed')
+      await refreshClaim(); await refreshHistory()
+    } catch (e) { setClaimError(e instanceof Error ? e.message : 'Release failed') }
+    finally { setClaimBusy(false) }
+  }, [postClaim, refreshClaim, refreshHistory])
+
+  // ── TAKEOVER step 1 — open the confirm and gather what we surface (R-UX4): the holder's name,
+  // when they were last active (last_heartbeat), and whether they have UNPUSHED changes (a live AI
+  // recommendation exists but the field hasn't been pushed since). We probe unpushed-state cheaply:
+  // an aiRecs draft exists AND there's no push log newer than its generated_at.
+  const openTakeover = useCallback(async () => {
+    setTakeoverOpen(true)
+    setTakeoverInfo({ holderName: claim?.claimed_by_name ?? null, lastActiveIso: claim?.last_heartbeat ?? null, hasUnpushedChanges: false, loading: true })
+    let hasUnpushed = false
+    try {
+      // Unpushed = a generated recommendation newer than the latest push for this parent.
+      const supabase = createClient()
+      const { data: pushRow } = await supabase
+        .from('keyword_push_log')
+        .select('pushed_at')
+        .eq('parent_asin', asin)
+        .order('pushed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const lastPush = (pushRow as { pushed_at: string } | null)?.pushed_at ?? null
+      const genAt = aiRecs?.generated_at ?? null
+      if (genAt && (!lastPush || Date.parse(genAt) > Date.parse(lastPush))) hasUnpushed = true
+    } catch { /* best-effort; default false */ }
+    setTakeoverInfo({ holderName: claim?.claimed_by_name ?? null, lastActiveIso: claim?.last_heartbeat ?? null, hasUnpushedChanges: hasUnpushed, loading: false })
+  }, [asin, claim, aiRecs])
+
+  // ── TAKEOVER step 2 — force-reassign. Logs BOTH ids server-side (claim route action='takeover').
+  const confirmTakeover = useCallback(async () => {
+    setClaimBusy(true); setClaimError(null)
+    try {
+      const resp = await postClaim('takeover')
+      if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Takeover failed')
+      setTakeoverOpen(false); setTakeoverInfo(null)
+      await refreshClaim(); await refreshHistory()
+    } catch (e) { setClaimError(e instanceof Error ? e.message : 'Takeover failed') }
+    finally { setClaimBusy(false) }
+  }, [postClaim, refreshClaim, refreshHistory])
 
   const copy = (text: string, label: string) => {
     copyToClipboard(text)
@@ -817,9 +990,10 @@ export default function ListingDetailPage() {
     setAiError(null)
     setAiProgress(regenerateSection ? `Regenerating ${regenerateSection}…` : 'Starting AI audit...')
     try {
+      const token = await getToken()
       const resp = await fetch('/api/fba/listing-optimizer/ai-recommendations', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ parent_asin: asin, ...(regenerateSection ? { regenerate_section: regenerateSection } : {}) }),
       })
       if (!resp.ok) throw new Error('AI generation failed')
@@ -884,6 +1058,10 @@ export default function ListingDetailPage() {
         // coverage, already-covered "gaps", and opposite-gender keywords the #210 lean filter now
         // excludes (PO: "after regen still showing gaps + mens + asking to weave in things already in bullets").
         refreshRankFree()
+        // Phase B: a regen is a mutation — bump my claim's heartbeat (so an actively-worked listing
+        // never goes stale mid-edit) and refresh the merged change-history so the AI-regen row shows.
+        bumpHeartbeat()
+        refreshHistory()
       } else {
         // Stream ended with no result AND no error event — almost always the request hit the
         // container mid-redeploy (a merge just deployed) or timed out. Nothing was changed.
@@ -895,7 +1073,7 @@ export default function ListingDetailPage() {
     setAiLoading(false)
     setRegenSection(null)
     setAiProgress('')
-  }, [asin, refreshRankFree])
+  }, [asin, refreshRankFree, getToken, bumpHeartbeat, refreshHistory])
 
   /** Read a JSON response defensively. Coolify/nginx returns plain-text '502 Bad Gateway'
    *  HTML when the upstream Next process times out, restarts, or OOMs mid-request — calling
@@ -1010,8 +1188,9 @@ export default function ListingDetailPage() {
   const queueBackgroundPush = useCallback(async (detailOverrideArg?: string) => {
     setPushError(null); setQueueLoading(true)
     try {
+      const token = await getToken()
       const resp = await fetch('/api/fba/push-jobs', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify(buildPushBody(undefined, detailOverrideArg)),
       })
       const data = await resp.json() as { id?: string; error?: string }
@@ -1025,7 +1204,7 @@ export default function ListingDetailPage() {
       setPushError(e instanceof Error ? e.message : 'Failed to queue the push')
     }
     setQueueLoading(false)
-  }, [buildPushBody])
+  }, [buildPushBody, getToken])
 
   /**
    * Stream-consume the NDJSON push response. Each emit() from the server arrives as a
@@ -1051,9 +1230,10 @@ export default function ListingDetailPage() {
     let serverTotal = 0                            // real diff size from the 'started' event (NOT just SKUs-seen-before-drop)
     try {
       const body = { ...buildPushBody(onlySkus, detailOverrideArg), cancel_token: cancelToken }
+      const token = await getToken()
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify(body),
       })
 
@@ -1200,6 +1380,12 @@ export default function ListingDetailPage() {
         })
         } // end if (fullyShipped)
       }
+      // Phase B: a push is a mutation that the server also mirrors into the change-log + may
+      // auto-release the claim (release_reason='push'). Bump the heartbeat (covers a partial push
+      // that KEEPS the claim) and re-sync both the claim chip and the merged change-history.
+      bumpHeartbeat()
+      refreshClaim()
+      refreshHistory()
     } catch (e) {
       // If we have any progress rows, the seller knows what landed (the stream told them
       // per-SKU). We do NOT clear them on error — they're the rollback evidence.
@@ -1207,7 +1393,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree])
+  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   const bulkEligibleDetails = useMemo(() => {
@@ -1260,8 +1446,9 @@ export default function ListingDetailPage() {
     bulkStreamInterruptedRef.current = false
     let anyPushed = false
     try {
+      const token = await getToken()
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         // Send each (possibly-edited) value as a per-field override — the server re-validates/
         // coerces it (a wrong manual value is flagged + skipped, never pushed). PO: edit before bulk.
         body: JSON.stringify({ parent_asin: asin, field: 'details_bulk', detail_fields: fields, detail_overrides: Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value])), confirm: true, cancel_token: cancelToken }),
@@ -1360,7 +1547,7 @@ export default function ListingDetailPage() {
     bulkCancelTokenRef.current = null
     setBulkRunning(false)
     setBulkFinished(true)
-  }, [asin, bulkItems, bulkRunning])
+  }, [asin, bulkItems, bulkRunning, getToken])
 
   /** Stop a running Auto Push between SKUs (same server cancel as the single-push Stop). */
   const stopBulkPush = useCallback(async () => {
@@ -1707,6 +1894,68 @@ export default function ListingDetailPage() {
             <Icon.Sparkles className="w-3.5 h-3.5" /> {aiLoading ? 'Generating…' : aiRecs ? 'Regenerate AI Audit' : 'Run AI Audit'}
           </button>
         </div>
+
+        {/* ══ COLLABORATION BAR (Phase B) — soft-lock claim so 5 people never double-work ══════
+            • Free → "Claim" (single atomic CAS server-side).
+            • Mine (live) → green "You're working on this" + "Release".
+            • Held by someone else (live) → their name + 2-step "Take over".
+            • Stale (their tab died, no heartbeat past CLAIM_TTL) → amber "claim went stale" + Take over.
+            Heartbeat fires on a 30s interval while I hold it AND on every mutation (regen/push). */}
+        <div className="flex flex-wrap items-center gap-2 mt-4 pt-4 border-t border-slate-100">
+          {claim && !claim.stale ? (
+            iHoldClaim ? (
+              <>
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+                  You&rsquo;re working on this{claim.claimed_at ? ` · since ${relDate(claim.claimed_at)}` : ''}
+                </span>
+                <button
+                  onClick={doRelease}
+                  disabled={claimBusy}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
+                  {claimBusy ? 'Releasing…' : 'Release'}
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+                  {claim.claimed_by_name || 'Someone'} is working on this{claim.last_heartbeat ? ` · active ${relDate(claim.last_heartbeat)}` : ''}
+                </span>
+                <button
+                  onClick={openTakeover}
+                  disabled={claimBusy}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 hover:bg-amber-100 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
+                  Take over
+                </button>
+              </>
+            )
+          ) : claim && claim.stale ? (
+            <>
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+                {claim.claimed_by_name || 'Someone'}&rsquo;s claim went stale{claim.last_heartbeat ? ` · last active ${relDate(claim.last_heartbeat)}` : ''}
+              </span>
+              <button
+                onClick={openTakeover}
+                disabled={claimBusy}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 hover:bg-amber-100 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
+                Take over
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={doClaim}
+              disabled={claimBusy}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer">
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+              {claimBusy ? 'Claiming…' : 'Claim this listing'}
+            </button>
+          )}
+          <span className="text-[11px] text-slate-400">Claiming tells the team you&rsquo;re on it, so no one duplicates your work.</span>
+        </div>
+        {claimError && <p className="text-xs text-red-600 mt-2">{claimError}</p>}
+
         {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
         {aiRecs?.generated_at && !aiLoading && (
           <p className="text-xs text-slate-600 mt-2 font-medium" title={new Date(aiRecs.generated_at).toLocaleString()}>
@@ -3256,6 +3505,105 @@ export default function ListingDetailPage() {
       )}
 
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          CHANGE HISTORY (Phase B / R-UX7) — ONE merged, human-readable timeline:
+          listing_change_log ∪ relevant audit_logs ∪ score deltas (when present), time-sorted.
+          Each row = actor + plain-English action + when. Legibility is the feature.
+          ══════════════════════════════════════════════════════════════════════ */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <button
+          onClick={() => setHistoryOpen((v) => !v)}
+          className="w-full flex items-center gap-2 px-5 py-3.5 text-left hover:bg-slate-50 transition-colors cursor-pointer">
+          <Icon.History className="w-4 h-4 text-slate-500" />
+          <span className="text-sm font-semibold text-slate-900">Change history</span>
+          {history.length > 0 && (
+            <span className="text-[10px] font-medium text-slate-500 bg-slate-100 rounded-full px-2 py-0.5">{history.length}</span>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); refreshHistory() }}
+            className="ml-auto text-[11px] font-medium text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+            title="Refresh">
+            Refresh
+          </button>
+          <Icon.Chevron className={`w-4 h-4 text-slate-400 transition-transform ${historyOpen ? '' : '-rotate-90'}`} />
+        </button>
+        {historyOpen && (
+          <div className="border-t border-slate-100">
+            {historyLoading && history.length === 0 ? (
+              <p className="px-5 py-6 text-center text-xs text-slate-400">Loading history…</p>
+            ) : history.length === 0 ? (
+              <p className="px-5 py-6 text-center text-xs text-slate-400">No activity yet. Claims, AI audits, edits, and pushes for this listing will appear here.</p>
+            ) : (
+              <ol className="divide-y divide-slate-50">
+                {history.map((h) => {
+                  // Tint the timeline dot by origin: collaboration/edit (violet), push-to-Amazon
+                  // (emerald), score delta (amber), compliance/audit (slate).
+                  const dot =
+                    h.kind === 'audit' ? 'bg-slate-400'
+                    : h.kind === 'score' ? 'bg-amber-400'
+                    : h.action === 'push' ? 'bg-emerald-500'
+                    : 'bg-violet-500'
+                  return (
+                    <li key={h.id} className="flex items-start gap-3 px-5 py-2.5">
+                      <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${dot}`} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs text-slate-700 leading-snug">{h.summary}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5" title={new Date(h.ts).toLocaleString()}>
+                          {relDate(h.ts)}
+                          <span className="text-slate-300"> · {new Date(h.ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+                          {h.kind === 'audit' && <span className="ml-1.5 text-slate-400">· compliance</span>}
+                        </p>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ol>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          TAKEOVER CONFIRM (Phase B / R-UX4) — 2-step, non-destructive. Step 1 surfaces who is
+          active, when, and whether they have UNPUSHED changes; step 2 force-reassigns + logs both ids.
+          ══════════════════════════════════════════════════════════════════════ */}
+      {takeoverOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !claimBusy && setTakeoverOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 px-5 py-3.5 border-b border-slate-200">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-600" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+              <h3 className="text-sm font-bold text-slate-900">Take over this listing?</h3>
+              <button onClick={() => !claimBusy && setTakeoverOpen(false)} className="ml-auto text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+            </div>
+            <div className="p-5 space-y-3">
+              <p className="text-xs text-slate-600">
+                <span className="font-semibold text-slate-800">{takeoverInfo?.holderName || 'Someone'}</span>
+                {takeoverInfo?.lastActiveIso
+                  ? <> was active <span className="font-semibold text-slate-800">{relDate(takeoverInfo.lastActiveIso)}</span>.</>
+                  : <> currently holds this claim.</>}
+              </p>
+              {takeoverInfo?.loading ? (
+                <p className="text-xs text-slate-400">Checking for unpushed changes…</p>
+              ) : takeoverInfo?.hasUnpushedChanges ? (
+                <div className="flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 9v4M12 17h.01" /><circle cx="12" cy="12" r="9" /></svg>
+                  <p className="text-xs text-amber-800">They have <span className="font-semibold">unpushed AI changes</span> (a draft generated since the last push). Taking over does not discard the draft, but coordinate so their work isn&rsquo;t lost.</p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">No unpushed AI changes detected since the last push.</p>
+              )}
+              <p className="text-[11px] text-slate-400">Taking over reassigns the claim to you and records both names in the change history.</p>
+            </div>
+            <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-slate-100">
+              <button onClick={() => setTakeoverOpen(false)} disabled={claimBusy} className="text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg px-3 py-2 disabled:opacity-50 cursor-pointer">Cancel</button>
+              <button onClick={confirmTakeover} disabled={claimBusy} className="text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-lg px-4 py-2 disabled:opacity-50 cursor-pointer">
+                {claimBusy ? 'Taking over…' : 'Take over'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           FIX CAPACITY ATTRIBUTE — preview → confirm → live PATCH (same chain as re-link)

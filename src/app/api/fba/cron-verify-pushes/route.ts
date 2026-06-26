@@ -17,7 +17,7 @@ import {
   claimDueTasks, completeTask, rescheduleTask, flagNeedsAttention, softFailTask,
   type PushVerificationTask,
 } from '@/lib/fba/verificationQueue'
-import { executePush } from '@/lib/fba/pushExecutor'
+import { executePush, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 600
@@ -75,6 +75,7 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
         detail_field: task.detail_field ?? '',
         detail_value_override: task.expected_value ?? undefined,
         skus: staleSkus,
+        actor: SYSTEM_ACTOR,  // cron/verify-initiated re-push (spec §5 Phase B attribution)
       }, (evt) => {
         if ((evt as { type?: string }).type === 'result') {
           const r = evt as { pushed?: number; failed?: number; message?: string }
@@ -89,6 +90,7 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
         parent_asin: task.parent_asin,
         field: task.field,
         skus: staleSkus,
+        actor: SYSTEM_ACTOR,  // cron/verify-initiated re-push (spec §5 Phase B attribution)
       }, (evt) => {
         if ((evt as { type?: string }).type === 'result') {
           const r = evt as { pushed?: number; failed?: number }
