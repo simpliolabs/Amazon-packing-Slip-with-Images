@@ -4115,7 +4115,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   if (only === 'description') {
     let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets)
-    if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
+    if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust), attributePinFinal ?? '')
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
     onProgress('Description regenerated.')
@@ -4160,7 +4160,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience). Uses
   // broadcastMotifTrust so a unified-set's couple-concept design names survive the ungrounded strip.
   let description = apparelProduct
-    ? stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
+    ? stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionRaw, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? '')
     : descriptionRaw
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
   description = fixDoubledArticleBeforeBrand(description, brandName)
