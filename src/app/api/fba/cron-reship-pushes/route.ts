@@ -174,6 +174,20 @@ export async function GET(request: NextRequest) {
       continue
     }
 
+    // 3b) SAFETY (d) HARD GATE — same-approved-content is only PROVABLE for `details` fields, where
+    //    expected_value pins the originally-approved value. Regular fields (title/bullets/description/
+    //    keywords) make the executor RE-READ the live listing_seo_recommendations, which a regen between
+    //    the user's approved push and this reship could have DRIFTED — so auto-reshipping them risks
+    //    delivering UN-approved copy under the "same content" label. Until origin_submission_id pins the
+    //    approved per-SKU values end-to-end, regular-field tasks are NOT auto-reshipped: flag for a human.
+    //    (Adversarial-review blocker; the loop is dormant today — not scheduled + env off + no opt-in writer.)
+    if (!task.field.startsWith('details:')) {
+      await flagNeedsAttention(task.id, verify.matched, verify.total, staleSkus, `Autonomous reship is details-only for now (same-content pinning pending for "${task.field}"). ${staleSkus.length} SKU(s) still stale — needs a manual re-push.`)
+      console.warn(`[RESHIP] SKIP-REGULAR-FIELD parent=${task.parent_asin} field=${task.field} — regular-field auto-reship disabled pending origin_submission_id same-content pinning (safety d)`)
+      processed.push({ id: task.id, parent_asin: task.parent_asin, field: task.field, result: 'needs_attention_regular_field_unpinned', matched: verify.matched, total: verify.total })
+      continue
+    }
+
     // 4) Under the bound — RE-PUSH the SAME approved content for the stale SKUs only (safety c/d), bump
     //    the per-child reship counter, and reschedule the next verify. LOUD logging (safety e).
     console.log(`[RESHIP] attempt ${currentReshipAttempts + 1}/${MAX_RESHIP_ATTEMPTS} parent=${task.parent_asin} field=${task.field} stale=[${staleSkus.join(', ')}] — re-pushing SAME approved content (actor=${SYSTEM_ACTOR.name})`)
