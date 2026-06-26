@@ -463,18 +463,26 @@ export function designKeyForSku(sku: string): string {
   k = k.replace(/-(?:FBA|FBM)$/i, '')        // drop the fulfillment suffix
   const sz = k.search(SKU_SIZE_RE)           // cut at a standalone "-2XL-" size token (DAR-CCG-2XL-BAY → DAR-CCG)
   if (sz >= 0) k = k.slice(0, sz)
-  // PREFIX / colour-family encoding: text BEFORE the base-number run is the design key
-  // (FHOSH64000L-BK → "FHOSH"; DAR-CCG-2XL-BAY → "DAR-CCG"; parent RA-8EU0-VP6R → unchanged).
-  const beforePrefix = k.replace(/\d{3,}.*$/, '').replace(/[-_\s]+$/, '')
-  if (beforePrefix) return beforePrefix
-  // SUFFIX encoding: the SKU STARTS with the base-number, design name is AFTER the colour
-  // (640002XL-BK-I'M-Retired-TS → "I'M-RETIRED"). Strip the leading base-number+embedded-size,
-  // then the leading colour code, then a trailing product-type token (-TS). This branch ONLY
-  // runs when there was no prefix, so it can't strip a real prefix like "DAR" from "DAR-CCG".
-  k = k.replace(/^\d{3,}(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S)?-?/i, '')   // 640002XL- → ''
-  k = k.replace(/^[A-Z]{2,4}-/, '')                                     // BK- / GR- (colour) → ''
-  k = k.replace(/-?TS$/i, '')                                          // trailing product-type token
-  return k.replace(/[-_\s]+$/, '').replace(/^[-_\s]+/, '')
+  // STYLE-CODE prefix? A leading optional brand-letter run + a 3+ digit base number (640002, BC30012,
+  // GIL64000). When present, the DESIGN lives in the SUFFIX after the colour — so the SAME design on
+  // DIFFERENT blanks unifies into ONE key (640002XL-BK-Custom-Cup-TS AND BC30012XL-SC-Custom-Cup-TS →
+  // "CUSTOM-CUP"). Without this, the blank-brand letters ("BC" = Bella Canvas 3001) were mis-read as a
+  // SEPARATE design key, splitting one design into a FALSE multi-design family (B0GVW83L1P soccer: a
+  // CUSTOM-CUP + a BC group → wrong per-design titles, dropped single override, leaked colour).
+  if (/^[A-Z]*\d{3,}/.test(k)) {
+    const suffix = k
+      .replace(/^[A-Z]*\d{3,}(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S)?-?/i, '')  // 640002XL- / BC30012XL- → ''
+      .replace(/^[A-Z]{2,4}(?:-|$)/, '')                                    // leading colour code (BK / SC) → ''
+      .replace(/-?TS$/i, '')                                               // trailing product-type token
+      .replace(/[-_\s]+$/, '').replace(/^[-_\s]+/, '')
+    if (suffix) return suffix
+    // Style code but NO suffix design token → the LETTER prefix before the number IS the design
+    // (FHOSH64000L-BK → "FHOSH"; OF64000S-BK → "OF").
+    return k.replace(/\d{3,}.*$/, '').replace(/[-_\s]+$/, '') || k
+  }
+  // No leading style number → PREFIX / colour-family-encoded design (DAR-CCG-2XL-BAY → "DAR-CCG";
+  // parent RA-8EU0-VP6R → unchanged).
+  return k.replace(/\d{3,}.*$/, '').replace(/[-_\s]+$/, '') || k.replace(/[-_\s]+$/, '')
 }
 export interface DesignGroup { key: string; skus: { sku: string; asin: string }[] }
 export function detectDesignGroups(children: { sku: string; asin: string }[]): { isMultiDesign: boolean; groups: DesignGroup[] } {
