@@ -882,12 +882,21 @@ export async function POST(req: NextRequest) {
             return children.every((c) => norm(getLive(c)) === recNorm)
           }
 
-          // ── 7-DAY COOLING LOCK (Convergence Stages 3-4) — a section the seller SHIPPED within the
-          // last 7 days stays DONE while Amazon applies it + the listing settles/ranks. It must NOT
-          // flip back to "Do Now" on a fresh score that dipped ("scores regress after I ship"). Source
-          // of truth: keyword_push_log (last ACCEPTED push per field). Overridden per section via
-          // regenerate_section so the seller can iterate before the window is up.
-          const COOLING_MS = 7 * 24 * 60 * 60 * 1000
+          // ── COOLING LOCK (Convergence Stages 3-4) — a section the seller SHIPPED stays DONE while
+          // Amazon applies it + the listing settles/ranks, so it does NOT flip back to "Do Now" on a
+          // fresh score that dipped ("scores regress after I ship"). Source of truth: keyword_push_log
+          // (last ACCEPTED push per field). Overridden per section via regenerate_section.
+          //
+          // RECONCILE (spec Risk R-UX2 / Phase C): the fixed 7-day constant is REPLACED by the SAME
+          // data-readiness gate the outcome cron uses — the lock holds while listing_outcome_state is
+          // still 'measuring' (the gate of >=2 post-epoch same-fingerprint SQP snapshots has not opened
+          // yet), and RELEASES once a terminal verdict exists. Critically, when the cron returns
+          // 'headroom_rewrite' (more copy CAN help) the lock must release so the triggering field is
+          // NOT shown cooling-DONE (the spec's acceptance test). This is detail-page-only; the
+          // parent-grain lifecycle owns the tab/queue truth. The 7-day value is kept ONLY as a hard
+          // FALLBACK cap for the pre-outcome window before any snapshot exists, so the two never use
+          // different clocks once measurement data lands.
+          const COOLING_FALLBACK_MS = 7 * 24 * 60 * 60 * 1000
           const lastPushMs: Record<string, number> = {}
           try {
             const { data: pl } = await supabase.from('keyword_push_log')
@@ -897,6 +906,16 @@ export async function POST(req: NextRequest) {
               if (r.field && !(r.field in lastPushMs)) lastPushMs[r.field] = new Date(r.pushed_at).getTime()
             }
           } catch { /* best-effort — no push log → no cooling lock */ }
+          // Read the outcome ledger ONCE — the readiness gate that replaces the fixed timer.
+          let outcomeVerdict: string | null = null
+          try {
+            const { data: os } = await supabase.from('listing_outcome_state')
+              .select('outcome_verdict').eq('listing_key', parent_asin).maybeSingle()
+            outcomeVerdict = (os as { outcome_verdict: string | null } | null)?.outcome_verdict ?? null
+          } catch { /* best-effort — ledger absent (pre-039) → fall back to the timer cap */ }
+          // The gate is OPEN (release the lock) once the cron has reached any TERMINAL verdict; it is
+          // CLOSED (hold the lock) while 'measuring' or while no ledger row exists yet (still settling).
+          const measurementOpen = outcomeVerdict != null && outcomeVerdict !== 'measuring'
           const coolFieldFor = (el: string): string =>
             el === 'title' ? 'title' : el === 'description' ? 'description'
             : el === 'backend_keywords' ? 'keywords' : /^bullet_\d+$/.test(el) ? 'bullets' : ''
@@ -904,18 +923,24 @@ export async function POST(req: NextRequest) {
 
           for (const item of result.action_plan as ActionPlanItem[]) {
             if (item.verdict !== 'REPLACE') continue
-            // (0) COOLING LOCK: shipped within 7 days → keep DONE (settling), unless the seller asked to
-            // regenerate THIS section now. This is what stops a just-pushed section from regressing to
-            // "Do Now" on a fresh score that dipped while Amazon is still applying + ranking it.
+            // (0) COOLING LOCK: shipped + still in the measuring window → keep DONE (settling), unless
+            // the seller asked to regenerate THIS section now OR the outcome gate has opened. This is
+            // what stops a just-pushed section from regressing to "Do Now" on a fresh score that dipped
+            // while Amazon is still applying + ranking it.
             const cf = coolFieldFor(item.element)
             const pushedMs = cf ? lastPushMs[cf] : undefined
             const overridden = regenerate_section === 'all' || (!!cf && regenerate_section === cf)
-            if (pushedMs && !overridden && (nowMs - pushedMs) < COOLING_MS) {
-              const daysAgo = Math.max(1, Math.round((nowMs - pushedMs) / (24 * 60 * 60 * 1000)))
-              const daysLeft = Math.max(1, Math.ceil((COOLING_MS - (nowMs - pushedMs)) / (24 * 60 * 60 * 1000)))
+            // Data-readiness gate: hold ONLY while measurement is still open (cron hasn't reached a
+            // terminal verdict) AND we're inside the fallback cap (covers the pre-snapshot window so
+            // a stuck/never-measured push doesn't lock the field forever). A terminal verdict —
+            // including headroom_rewrite — opens the gate and releases the lock.
+            const withinFallbackCap = pushedMs != null && (nowMs - pushedMs) < COOLING_FALLBACK_MS
+            const cooling = pushedMs != null && !overridden && !measurementOpen && withinFallbackCap
+            if (cooling) {
+              const daysAgo = Math.max(1, Math.round((nowMs - pushedMs!) / (24 * 60 * 60 * 1000)))
               item.verdict = 'DONE'
-              item.current_status = `✓ Shipped ${daysAgo}d ago — settling (Amazon applies + ranks over ~7 days). Locked ${daysLeft}d more; use Regenerate to override.`
-              item.instruction = 'No action — recently shipped. Let it settle, or click Regenerate to override the 7-day lock.'
+              item.current_status = `✓ Shipped ${daysAgo}d ago — measuring (we wait for ~2 SQP months of post-push data before judging the outcome). Locked until the measurement gate opens; use Regenerate to override.`
+              item.instruction = 'No action — recently shipped and still measuring. Let it settle, or click Regenerate to override the measurement lock.'
               item.priority = 'NONE'   // a DONE (cooling-locked) item is not actionable — never keep the HIGH pill
               continue
             }

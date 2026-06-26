@@ -33,6 +33,7 @@ import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'
 import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
+import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -1313,6 +1314,14 @@ export async function ensureListingScored(
   }
   const { error } = await supabase.from('listing_seo_scores').upsert([scoreRow], { onConflict: 'parent_asin' })
   if (error) { console.warn('[ensureListingScored] score upsert failed:', error.message); return null }
+
+  // Phase C §4-D: conditional score-history append (on-demand / user-opened path). Best-effort.
+  // Fingerprint the SAME copy that was scored (top-child row, else parent-own) so the row JOINs
+  // keyword_share_snapshots by content_fingerprint. scored_by=null (service-role sync, no JWT 'sub').
+  const fpRow = uniqueChildren.find((c) => c.asin === topChildAsin) || parentOwnContent || uniqueChildren[0] || null
+  await appendScoreHistory(supabase, { ...scoreRow, issues: Array.isArray(score.issues) ? (score.issues as unknown[]) : null }, {
+    trigger: 'on_demand', scoredBy: null, scoredByName: 'System (on-demand score)', content: fpRow,
+  })
   return scoreRow
 }
 
@@ -1475,6 +1484,21 @@ export async function syncListingContent(
         console.error(`[ListingContent] Score upsert error for ${parentAsin}:`, scoreErr.message)
       } else {
         parentsScored++
+        // Phase C §4-D: conditional score-history append (scheduled-sync path). CONDITIONAL so the
+        // top-50-per-sync re-scores only write a row on a real change-point (no identical-row bloat).
+        // Fingerprint the parent-own content (else top child) — the SAME copy that was scored.
+        const fpRow = parentOwnContent || topChildContent || contentRows[0] || null
+        await appendScoreHistory(supabase, {
+          parent_asin:        parentAsin,
+          title_score:        score.title_score,
+          bullet_score:       score.bullet_score,
+          keyword_score:      score.keyword_score,
+          aplus_score:        score.aplus_score,
+          description_score:  score.description_score,
+          features_score:     score.features_score,
+          overall_score:      score.overall_score,
+          issues:             Array.isArray(score.issues) ? (score.issues as unknown[]) : null,
+        }, { trigger: 'scheduled_sync', scoredBy: null, scoredByName: 'System (scheduled sync)', content: fpRow })
       }
     }
 

@@ -10,6 +10,8 @@ import { groupByDesign, isMultiDesign, type PerDesignGroup } from '@/lib/fba/per
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
+import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSparkline'
+import { presentOutcome, MEASURE_TARGET, type OutcomeChip } from '@/lib/fba/outcomePresentation'
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -202,6 +204,7 @@ const Icon = {
   Check: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>),
   History: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v5h5" /><path d="M3.05 13A9 9 0 106 5.3L3 8" /><path d="M12 7v5l4 2" /></svg>),
   Chevron: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>),
+  Activity: (p: IconProps) => (<svg viewBox="0 0 24 24" fill="none" className={p.className} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>),
 }
 
 /** Animated SVG progress ring for the overall 0-100 listing score. */
@@ -401,6 +404,10 @@ export default function ListingDetailPage() {
   const [history, setHistory] = useState<HistoryRow[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(true)
+  // Phase C OUTCOME (spec §5): the listing_outcome_state ledger row for this parent (verdict, baseline,
+  // snapshots-since-push, reason, non_copy_lever) + the 12-point score-history sparkline points.
+  const [outcome, setOutcome] = useState<OutcomeChip | null>(null)
+  const [sparkPoints, setSparkPoints] = useState<SparklinePoint[]>([])
   // I hold the claim iff it exists, is mine, and is not stale.
   const iHoldClaim = !!claim && !!myUserId && claim.claimed_by === myUserId && !claim.stale
   // Claim TTL mirror (src/lib/fba/claims.ts CLAIM_TTL_MS) — read-time staleness on this page.
@@ -456,6 +463,39 @@ export default function ListingDetailPage() {
     } catch { /* best-effort */ }
     finally { setHistoryLoading(false) }
   }, [asin])
+
+  // Phase C: load the OUTCOME ledger row (read-only via RLS auth SELECT) + the score-history sparkline.
+  // Both are best-effort: a missing 039/038 table just leaves the panel/sparkline empty (no error).
+  const refreshOutcome = useCallback(async () => {
+    if (!asin) return
+    try {
+      const supabase = createClient()
+      const { data } = await supabase
+        .from('listing_outcome_state')
+        .select('outcome_verdict, snapshots_since_push, verdict_reason, non_copy_lever, baseline_overall_score, push_epoch_at, last_evaluated_at')
+        .eq('listing_key', asin)
+        .maybeSingle()
+      if (data) {
+        const r = data as Record<string, unknown>
+        setOutcome({
+          verdict: (r.outcome_verdict as OutcomeChip['verdict']) ?? null,
+          snapshots_since_push: (r.snapshots_since_push as number | null) ?? null,
+          verdict_reason: (r.verdict_reason as string | null) ?? null,
+          non_copy_lever: (r.non_copy_lever as OutcomeChip['non_copy_lever']) ?? null,
+          baseline_overall_score: (r.baseline_overall_score as number | null) ?? null,
+          push_epoch_at: (r.push_epoch_at as string | null) ?? null,
+          last_evaluated_at: (r.last_evaluated_at as string | null) ?? null,
+        })
+      } else {
+        setOutcome(null)
+      }
+    } catch { /* 039 absent → no outcome panel */ }
+    try {
+      const resp = await fetch(`/api/fba/score-history?listing_key=${encodeURIComponent(asin)}&limit=12`)
+      if (resp.ok) { const d = await resp.json(); setSparkPoints((d.points || []) as SparklinePoint[]) }
+    } catch { /* 038 absent → no sparkline */ }
+  }, [asin])
+  useEffect(() => { refreshOutcome() }, [refreshOutcome])
   useEffect(() => { refreshHistory() }, [refreshHistory])
 
   // ── HEARTBEAT — fire on a FIXED interval while I hold the claim (spec §5 B "Watchdog-on-READ":
@@ -1386,6 +1426,9 @@ export default function ListingDetailPage() {
       bumpHeartbeat()
       refreshClaim()
       refreshHistory()
+      // Phase C: a full-accept push stamps the measuring epoch in listing_outcome_state — re-pull the
+      // ledger + sparkline so the Outcome panel flips to "Measuring 0/2" right away (best-effort).
+      refreshOutcome()
     } catch (e) {
       // If we have any progress rows, the seller knows what landed (the stream told them
       // per-SKU). We do NOT clear them on error — they're the rollback evidence.
@@ -1393,7 +1436,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory])
+  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory, refreshOutcome])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   const bulkEligibleDetails = useMemo(() => {
@@ -3505,6 +3548,121 @@ export default function ListingDetailPage() {
       )}
 
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          OUTCOME PANEL (Phase C / spec §5 item 3) — did the pushed copy actually move share?
+          Baseline vs current score, snapshots-since-push progress (n/2), the cron's verdict reason,
+          a 12-point score-history sparkline, and — for a non_copy_bottleneck — the explicit
+          "STOP rewriting — the lever is <reviews/price/ads>" message. Reads listing_outcome_state
+          (the single truth, never mirrored) via presentOutcome(). Renders only once there's an epoch.
+          ══════════════════════════════════════════════════════════════════════ */}
+      {(() => {
+        const pres = presentOutcome(outcome)
+        const hasTrend = sparkPoints.filter((p) => p.overall_score != null).length >= 2
+        if (!pres && !hasTrend) return null // never pushed and no trend → nothing to show
+        const baseline = outcome?.baseline_overall_score ?? null
+        const current = score?.overall_score ?? null
+        const n = Math.min(outcome?.snapshots_since_push ?? 0, MEASURE_TARGET)
+        return (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="flex items-center gap-2 px-5 py-3.5 border-b border-slate-100">
+              <Icon.Activity className="w-4 h-4 text-slate-500" />
+              <span className="text-sm font-semibold text-slate-900">Outcome</span>
+              {pres && (
+                <span className={`ml-1 inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full ${pres.chipClass}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${pres.accentClass}`} />
+                  {pres.label}
+                </span>
+              )}
+              {outcome?.last_evaluated_at && (
+                <span className="ml-auto text-[10px] text-slate-400" title={new Date(outcome.last_evaluated_at).toLocaleString()}>
+                  evaluated {relDate(outcome.last_evaluated_at)}
+                </span>
+              )}
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* Top row: baseline vs current + snapshots-since-push progress + sparkline */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {/* Baseline vs current */}
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Score since push</p>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-lg font-bold text-slate-700">{baseline ?? '—'}</span>
+                    <span className="text-slate-300">→</span>
+                    <span className={`text-lg font-bold ${
+                      baseline != null && current != null
+                        ? current > baseline ? 'text-emerald-600' : current < baseline ? 'text-red-600' : 'text-slate-700'
+                        : 'text-slate-700'
+                    }`}>{current ?? '—'}</span>
+                    {baseline != null && current != null && current !== baseline && (
+                      <span className={`text-[11px] font-semibold ${current > baseline ? 'text-emerald-600' : 'text-red-600'}`}>
+                        ({current > baseline ? '+' : ''}{current - baseline})
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-0.5">baseline at the epoch → current</p>
+                </div>
+
+                {/* Snapshots-since-push progress (n/2) */}
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Measurement progress</p>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    {Array.from({ length: MEASURE_TARGET }).map((_, i) => (
+                      <span key={i} className={`h-1.5 flex-1 rounded-full ${i < n ? 'bg-sky-500' : 'bg-slate-200'}`} />
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-slate-600 font-medium">{n}/{MEASURE_TARGET} post-push SQP snapshots</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">a new month materializes ~monthly (~2-3mo warm-up)</p>
+                </div>
+
+                {/* Sparkline */}
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Score trend</p>
+                  {hasTrend ? (
+                    <ScoreSparkline points={sparkPoints} width={180} height={40} showThreshold className="w-full" />
+                  ) : (
+                    <p className="text-[11px] text-slate-400 mt-2">Not enough history yet — the trend appears after the next score change.</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Verdict reason */}
+              {pres && (
+                <div className="rounded-xl border border-slate-200 bg-white px-3.5 py-3">
+                  <p className="text-xs text-slate-700 leading-relaxed">{pres.blurb}</p>
+                  {outcome?.verdict_reason && (
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      <span className="font-semibold text-slate-600">Why:</span> {outcome.verdict_reason}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* NON-COPY BOTTLENECK — explicit STOP-rewriting callout naming the lever (spec §5). */}
+              {pres?.isNonCopy && (
+                <div className="rounded-xl border-2 border-blue-300 bg-blue-50 px-4 py-3 flex items-start gap-3">
+                  <svg viewBox="0 0 24 24" className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M15 9l-6 6M9 9l6 6" /></svg>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-blue-900">
+                      STOP rewriting — the lever is <span className="uppercase">{outcome?.non_copy_lever || 'reviews'}</span>
+                    </p>
+                    <p className="text-xs text-blue-800 mt-1 leading-relaxed">
+                      The copy already shipped and keyword share didn&rsquo;t move. More title / bullet / keyword
+                      edits won&rsquo;t change the outcome — the bottleneck is{' '}
+                      <span className="font-semibold">{outcome?.non_copy_lever || 'reviews'}</span>. Work that lever instead
+                      {outcome?.non_copy_lever === 'price' ? ' (price/coupon)' :
+                       outcome?.non_copy_lever === 'ads' ? ' (PPC / placement)' :
+                       outcome?.non_copy_lever === 'velocity' ? ' (sales velocity / deals)' :
+                       ' (reviews / ratings)'}.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ══════════════════════════════════════════════════════════════════════
           CHANGE HISTORY (Phase B / R-UX7) — ONE merged, human-readable timeline:

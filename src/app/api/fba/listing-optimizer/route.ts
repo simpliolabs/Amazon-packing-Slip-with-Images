@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { syncListingContent, ensureListingScored } from '@/lib/sync/syncListingContent'
 import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
+import { NEEDS_ATTENTION_VERDICTS, type OutcomeChip, type OutcomeVerdict } from '@/lib/fba/outcomePresentation'
 
 // ── Shared shapes ───────────────────────────────────────────────────────────────────────
 
@@ -185,6 +186,48 @@ async function enrichWithCollab<T extends { parent_asin: string }>(
   return out
 }
 
+// ── Phase C OUTCOME enrichment (spec §5 Phase C / Risk R-MIG7) ──────────────────────────────────
+// ONE batched LEFT-JOIN of listing_outcome_state for the rows on THIS page → attaches { outcome } to
+// each (the verdict chip + sparkline read it). listing_key = COALESCE(parent_asin, asin); a parent
+// card joins on parent_asin (== its listing_key). Low-cardinality (~25 rows/page) — a single .in().
+// The ledger is the SINGLE truth; we do NOT mirror the verdict onto listing_seo_scores (the "cached
+// counts lie" ghost-card lesson). Best-effort: a missing 039 table degrades to outcome:null on every
+// row (no chip) — never a 500. Mutates rows in place; touches no Phase A/B field.
+async function enrichWithOutcome<T extends { parent_asin: string }>(
+  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  rows: T[],
+): Promise<(T & { outcome: OutcomeChip | null })[]> {
+  const out = rows as (T & { outcome: OutcomeChip | null })[]
+  if (rows.length === 0) return out
+  const ids = rows.map((r) => r.parent_asin)
+
+  const byKey: Record<string, OutcomeChip> = {}
+  try {
+    const { data } = await supabase
+      .from('listing_outcome_state')
+      .select('listing_key, outcome_verdict, snapshots_since_push, verdict_reason, non_copy_lever, baseline_overall_score, push_epoch_at, last_evaluated_at')
+      .in('listing_key', ids)
+    for (const r of (data || []) as Array<{
+      listing_key: string; outcome_verdict: string | null; snapshots_since_push: number | null
+      verdict_reason: string | null; non_copy_lever: string | null; baseline_overall_score: number | null
+      push_epoch_at: string | null; last_evaluated_at: string | null
+    }>) {
+      byKey[r.listing_key] = {
+        verdict: (r.outcome_verdict as OutcomeVerdict | null) ?? null,
+        snapshots_since_push: r.snapshots_since_push,
+        verdict_reason: r.verdict_reason,
+        non_copy_lever: (r.non_copy_lever as OutcomeChip['non_copy_lever']) ?? null,
+        baseline_overall_score: r.baseline_overall_score,
+        push_epoch_at: r.push_epoch_at,
+        last_evaluated_at: r.last_evaluated_at,
+      }
+    }
+  } catch { /* 039 not applied → no outcome chips, never fatal */ }
+
+  for (const row of out) row.outcome = byKey[row.parent_asin] ?? null
+  return out
+}
+
 // ── In Progress tab: ACTIVE (non-stale) CLAIMS → cards (Phase B) ───────────────────────────
 // Starts from the (tiny) set of un-released claim rows, drops stale ones at READ time
 // (Watchdog-on-READ), then reuses assembleSurvivors (ghost filter + children) and
@@ -230,6 +273,51 @@ async function fetchClaimedCards(
   return enrichWithCollab(supabase, survivors)
 }
 
+// ── Needs Attention tab: OUTCOME-driven verdicts → cards (Phase C, spec §5) ─────────────────
+// Starts from the (tiny) set of listing_outcome_state rows whose verdict is in
+// NEEDS_ATTENTION_VERDICTS (regressed + non_copy_bottleneck), fetches their score rows, then reuses
+// assembleSurvivors (ghost filter + children) + enrichWithCollab + enrichWithOutcome so each card
+// carries its verdict chip. The client orphan-check still layers drift/stale on top (page.tsx). The
+// pre-C coarse "whole live universe" bucket is replaced by this precise ledger-driven set. Best-
+// effort: a missing 039 table returns [] (the tab reads empty until the cron has written verdicts).
+async function fetchNeedsAttentionCards(
+  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  search: string,
+): Promise<(ScoreRow & { children: ChildRow[]; last_pushed_at: string | null; claim: ClaimChip; last_touched: LastTouched; outcome: OutcomeChip | null })[]> {
+  let attentionKeys: string[] = []
+  try {
+    const { data } = await supabase
+      .from('listing_outcome_state')
+      .select('listing_key, outcome_verdict')
+      .in('outcome_verdict', NEEDS_ATTENTION_VERDICTS as unknown as string[])
+    attentionKeys = ((data || []) as { listing_key: string }[]).map((r) => r.listing_key)
+  } catch { /* 039 absent → no verdicts yet */ }
+  if (attentionKeys.length === 0) return []
+
+  // Score rows for those listing_keys (the key equals parent_asin at parent grain).
+  const scoreRows: ScoreRow[] = []
+  const CHUNK = 100
+  for (let i = 0; i < attentionKeys.length; i += CHUNK) {
+    const slice = attentionKeys.slice(i, i + CHUNK)
+    const { data } = await supabase.from('listing_seo_scores').select('*').in('parent_asin', slice)
+    scoreRows.push(...((data || []) as ScoreRow[]))
+  }
+
+  let filtered = scoreRows
+  if (search) {
+    const isAsin = /^B0[A-Z0-9]{8}$/i.test(search)
+    const q = search.toLowerCase()
+    filtered = scoreRows.filter((s) =>
+      isAsin ? s.parent_asin === search || s.top_child_asin === search
+             : (s.product_title || '').toLowerCase().includes(q),
+    )
+  }
+
+  const survivors = await assembleSurvivors(supabase, filtered, new Set())
+  const withCollab = await enrichWithCollab(supabase, survivors)
+  return enrichWithOutcome(supabase, withCollab)
+}
+
 // ── GET ───────────────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
@@ -265,6 +353,22 @@ export async function GET(req: Request) {
       const inProgress = await fetchClaimedCards(supabase, search)
       return NextResponse.json({
         scores: inProgress,
+        counts,
+        nextCursor: null,
+        hasMore: false,
+        lastSyncedAt: latestSync,
+      })
+    }
+
+    // ── needs_attention: OUTCOME-driven (Phase C). The pre-C coarse "whole live universe" bucket is
+    // replaced by the precise set of listings the cron flagged regressed / non_copy_bottleneck. Like
+    // in_progress this is a tiny, ledger-keyed set, so it returns a single page (no keyset cursor).
+    if (status === 'needs_attention') {
+      const counts = await computeCounts(supabase, search)
+      const latestSync = await fetchLastSyncedAt(supabase)
+      const attention = await fetchNeedsAttentionCards(supabase, search)
+      return NextResponse.json({
+        scores: attention,
         counts,
         nextCursor: null,
         hasMore: false,
@@ -407,10 +511,12 @@ export async function GET(req: Request) {
 
     // Phase B: attach { claim, last_touched } chips to the final page (after ?ensure= may have
     // unshifted a row). One batched pair of lookups; Phase A fields are untouched.
+    // Phase C: attach the { outcome } verdict chip (LEFT-JOIN listing_outcome_state, Risk R-MIG7).
     const enrichedRows = await enrichWithCollab(supabase, pageRows)
+    const outcomeRows = await enrichWithOutcome(supabase, enrichedRows)
 
     return NextResponse.json({
-      scores: enrichedRows,
+      scores: outcomeRows,
       counts,
       nextCursor,
       hasMore,
@@ -485,11 +591,25 @@ async function computeCounts(
     .filter(c => !isClaimStale(c, now) && liveSet.has(c.parent_asin))
     .length
 
+  // needs_attention (Phase C): listings the outcome cron flagged regressed / non_copy_bottleneck that
+  // also survive the ghost filter. Matches fetchNeedsAttentionCards' predicate exactly so the badge
+  // agrees with the tab. Best-effort: a missing 039 table → 0 (the tab is empty until the cron runs).
+  let needs_attention = 0
+  try {
+    const { data: attnRows } = await supabase
+      .from('listing_outcome_state')
+      .select('listing_key, outcome_verdict')
+      .in('outcome_verdict', NEEDS_ATTENTION_VERDICTS as unknown as string[])
+    needs_attention = ((attnRows || []) as { listing_key: string }[])
+      .filter((r) => liveSet.has(r.listing_key))
+      .length
+  } catch { /* 039 absent → 0 */ }
+
   return {
     needs_work,
     optimized,
     in_progress,
-    needs_attention: live.length,
+    needs_attention,
     all: live.length,
   }
 }

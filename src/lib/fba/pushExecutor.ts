@@ -42,6 +42,8 @@ import {
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { logAudit } from '@/lib/audit'
+import { fingerprintOf } from '@/lib/keyword-engine/shareSnapshots'  // VERBATIM — outcome-epoch fingerprint
+import { appendScoreHistory } from '@/lib/fba/scoreHistory'
 
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
 // validator. Process-lifetime: schemas are static, so the form that validates once keeps
@@ -103,6 +105,71 @@ async function logPushChange(db: any, args: {
     })
   } catch (e) {
     console.warn('[push] change-log insert failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
+}
+
+/** Stamp the OUTCOME EPOCH at PUSH-COMPLETION (spec §4-E / Risk R3). Called from the SAME full-accept
+ *  hinge that mirrors attribution (failed===0 && !cancelled && accepted>0), where parent_asin + the
+ *  just-pushed content are in scope — NOT in verificationQueue.completeTask (no parent_asin, has
+ *  non-100% exit paths that would strand the listing forever). Upserts listing_outcome_state with the
+ *  epoch anchor so the Phase C cron's push-epoch-aware wrapper only measures the copy that just shipped.
+ *
+ *  `fingerprint` MUST be fingerprintOf() of the just-pushed content (same hash the snapshots store) so
+ *  the wrapper's same-fingerprint gate matches. baseline_overall_score is the score right after the
+ *  push re-score. A NEW full push RESETS the epoch (re-measure the new copy) — that's the upsert.
+ *  Best-effort: NEVER blocks the push (mirrors logPushChange). `listing_key = parent_asin` (the
+ *  parent/self-parent grain; standalones self-parent). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function stampOutcomeEpoch(db: any, args: {
+  parent_asin: string; fingerprint: string | null; baseline_overall_score: number | null
+}): Promise<void> {
+  try {
+    await db.from('listing_outcome_state').upsert({
+      listing_key:            args.parent_asin,
+      parent_asin:            args.parent_asin,
+      push_epoch_at:          new Date().toISOString(),
+      push_epoch_fingerprint: args.fingerprint,
+      baseline_overall_score: args.baseline_overall_score,
+      snapshots_since_push:   0,
+      outcome_verdict:        'measuring',
+      verdict_reason:         'measuring 0/2',
+      non_copy_lever:         null,
+      last_evaluated_at:      null,
+      next_evaluable_at:      null,
+      resurfaced_at:          null,
+    }, { onConflict: 'listing_key' })
+  } catch (e) {
+    console.warn('[push] outcome-epoch stamp failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
+}
+
+/** PUBLIC epoch stamp for the AUTONOMOUS RESHIP LOOP (PO H1 safety f): the outcome epoch is stamped
+ *  ONLY once the reship loop CONVERGES (all children confirmed live), NOT on every partial reship — so
+ *  the measured copy is the version that is actually 100% live. Reads the live top-child content,
+ *  computes fingerprintOf() (VERBATIM, same hash the snapshots store), reads the current overall_score
+ *  for the baseline, then upserts listing_outcome_state via the same best-effort path as the push hinge.
+ *  Never throws — convergence stamping must never break the cron. */
+export async function stampOutcomeEpochOnConvergence(parent_asin: string): Promise<boolean> {
+  if (!parent_asin) return false
+  try {
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    // Resolve the representative (top-child / self) ASIN — the snapshot key the wrapper measures on.
+    const { data: sc } = await db.from('listing_seo_scores')
+      .select('top_child_asin, overall_score').eq('parent_asin', parent_asin).maybeSingle()
+    const topChild = (sc as { top_child_asin: string | null } | null)?.top_child_asin || parent_asin
+    const overall = (sc as { overall_score: number | null } | null)?.overall_score ?? null
+    const { data: kid } = await db.from('listing_content')
+      .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+      .eq('asin', topChild).maybeSingle()
+    if (!kid) return false
+    const fingerprint = fingerprintOf(kid as never)
+    await stampOutcomeEpoch(db, { parent_asin, fingerprint, baseline_overall_score: overall })
+    return true
+  } catch (e) {
+    console.warn('[push] convergence epoch stamp failed (non-fatal):', e instanceof Error ? e.message : e)
+    return false
   }
 }
 
@@ -1080,6 +1147,19 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                   child_override_count: score.child_override_count,
                   scored_at: new Date().toISOString(),  // freshness stamp — was stuck at the last full Sync
                 }).eq('parent_asin', parent_asin)
+                // Phase C §4-D: append a push-trigger score-history change-point. NOTE: a DETAILS push
+                // (e.g. fabric_type) does NOT change the content COPY, so we do NOT stamp/reset the
+                // outcome epoch here (the copy under measurement is unchanged); we only record the score
+                // move. Fingerprint the current content so the row still JOINs the snapshots by value.
+                const topRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? parentOwn ?? rows[0]
+                await appendScoreHistory(db, {
+                  parent_asin,
+                  overall_score: score.overall_score,
+                  title_score: score.title_score, bullet_score: score.bullet_score,
+                  keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+                  description_score: score.description_score, features_score: score.features_score,
+                  issues: Array.isArray(score.issues) ? (score.issues as unknown[]) : null,
+                }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, content: topRow as never })
               }
             } catch (e) { console.warn('[push-content/details] re-score failed (non-fatal):', e) }
           }
@@ -1238,6 +1318,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         const { accepted, failed, childTotal, parentNote } = summarizePush(results)
 
         // Re-score so the page's score reflects the just-pushed values. Best-effort.
+        // Phase C: capture the just-pushed content fingerprint + post-push overall score here (where
+        // the fresh top-child content is in hand) so the full-accept hinge can stamp the OUTCOME EPOCH
+        // (§4-E) and the push-trigger score-history row (§4-D) both use this EXACT measured copy.
+        let pushedFingerprint: string | null = null
+        let pushedOverall: number | null = null
         if (accepted > 0) {
           emit({ type: 'rescore', message: 'Re-scoring listing…' })
           try {
@@ -1270,6 +1355,19 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                 product_title: newProductTitle,
                 scored_at: new Date().toISOString(),  // freshness stamp — was stuck at the last full Sync
               }).eq('parent_asin', parent_asin)
+
+              // Phase C: fingerprint the measured copy (fingerprintOf VERBATIM → JOINs the snapshots)
+              // and conditionally append a push-trigger score-history change-point row.
+              pushedFingerprint = fingerprintOf((topChildRow ?? parentOwn ?? rows[0]) as never)
+              pushedOverall = typeof score.overall_score === 'number' ? score.overall_score : null
+              await appendScoreHistory(db, {
+                parent_asin,
+                overall_score: score.overall_score,
+                title_score: score.title_score, bullet_score: score.bullet_score,
+                keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+                description_score: score.description_score, features_score: score.features_score,
+                issues: Array.isArray(score.issues) ? (score.issues as unknown[]) : null,
+              }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, fingerprint: pushedFingerprint })
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
 
@@ -1333,6 +1431,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT push mirrors a product-facing change-log row
         // (action='push', source='push_executor') + a NARROW compliance audit (listing.push). The
         // exact pushed bytes live in keyword_push_log; this row is the WHO/WHEN/action timeline.
+        // Phase C (§4-E / Risk R3): the SAME full-accept hinge stamps the OUTCOME EPOCH — push_epoch_at
+        // = now, push_epoch_fingerprint = fingerprintOf(just-pushed content) computed above during the
+        // re-score, baseline_overall_score = the post-push score, verdict='measuring'. A new full push
+        // RESETS the epoch (upsert) to re-measure the new copy. Best-effort, never blocks the push.
         if (failed === 0 && !cancelled && accepted > 0) {
           await logPushChange(db, {
             parent_asin, field, actor,
@@ -1343,6 +1445,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
             details: { field, accepted, by: actor.name },
           })
+          await stampOutcomeEpoch(db, { parent_asin, fingerprint: pushedFingerprint, baseline_overall_score: pushedOverall })
         }
 
         const label = FIELD_CONFIG[field].label.toLowerCase()
@@ -1554,6 +1657,18 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
             overall_score: score.overall_score, issues: score.issues, child_override_count: score.child_override_count,
             scored_at: new Date().toISOString(),
           }).eq('parent_asin', parent_asin)
+          // Phase C §4-D: append a push-trigger score-history change-point. A BULK-DETAILS push changes
+          // attributes, NOT content COPY, so (like the single-details branch) we do NOT stamp/reset the
+          // outcome epoch — only the score move is recorded. Fingerprint current content so it JOINs.
+          const topRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? parentOwn ?? rows[0]
+          await appendScoreHistory(db, {
+            parent_asin,
+            overall_score: score.overall_score,
+            title_score: score.title_score, bullet_score: score.bullet_score,
+            keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+            description_score: score.description_score, features_score: score.features_score,
+            issues: Array.isArray(score.issues) ? (score.issues as unknown[]) : null,
+          }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, content: topRow as never })
         }
       } catch (e) { console.warn('[bulk-details] re-score failed (non-fatal):', e) }
 
