@@ -19,6 +19,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { syncListingContent, ensureListingScored } from '@/lib/sync/syncListingContent'
+import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
 
 // ── Shared shapes ───────────────────────────────────────────────────────────────────────
 
@@ -40,6 +41,15 @@ type ChildRow = {
 
 const CHILD_COLS =
   'sku, asin, parent_asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt, content_synced_at'
+
+// Phase B collaboration chips attached per card by enrichWithCollab() (spec §5 Phase B):
+//   claim         — { claimed_by_name, claimed_at, stale } when an ACTIVE (non-released) claim row
+//                   exists; null otherwise. `stale` is computed at READ time (now()-last_heartbeat
+//                   > CLAIM_TTL) so a dead tab never shows as "held" (Watchdog-on-READ).
+//   last_touched  — newest listing_change_log row for the parent, surfaced as
+//                   { changed_by_name, changed_at, action } for the "last touched by NAME" chip.
+type ClaimChip = { claimed_by_name: string | null; claimed_at: string | null; stale: boolean } | null
+type LastTouched = { changed_by_name: string | null; changed_at: string; action: string | null } | null
 
 // Phase A "Optimized" threshold. Spec §5: >=90 is READY/PUSHED/MEASURING (never "Done"); <90 is
 // Needs Work. Replaces the legacy hard `.lt('overall_score', 100)`.
@@ -125,6 +135,101 @@ async function assembleSurvivors(
   return out
 }
 
+// ── Phase B collaboration enrichment (spec §5 Phase B) ────────────────────────────────────────
+// ONE batched lookup of listing_claims + the latest listing_change_log per parent for the rows on
+// THIS page → attaches { claim, last_touched } to each. Two `.in()` queries, no per-card fetch, so
+// it adds a fixed couple of round-trips regardless of page size. Does NOT touch any Phase A field.
+// Mutates rows in place (cheap) and returns the same array typed with the new fields.
+async function enrichWithCollab<T extends { parent_asin: string }>(
+  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  rows: T[],
+): Promise<(T & { claim: ClaimChip; last_touched: LastTouched })[]> {
+  const out = rows as (T & { claim: ClaimChip; last_touched: LastTouched })[]
+  if (rows.length === 0) return out
+  const ids = rows.map((r) => r.parent_asin)
+
+  // Active claims (not released) for the page. Stale is derived at read time via isClaimStale().
+  const claimByParent: Record<string, ClaimRow> = {}
+  const { data: claims } = await supabase
+    .from('listing_claims')
+    .select('parent_asin, claimed_by, claimed_by_name, claimed_at, last_heartbeat, released_at, release_reason, intent')
+    .in('parent_asin', ids)
+    .is('released_at', null)
+  for (const c of (claims || []) as ClaimRow[]) claimByParent[c.parent_asin] = c
+
+  // Latest change-log row per parent. PostgREST has no per-group LIMIT, so we pull the recent
+  // window for these parents (ordered DESC) and keep the FIRST seen per parent = the newest.
+  // Bounded so the scan never grows unbounded with the change-log table; the DESC window covers
+  // recently-active parents (a parent whose last activity is older than the window just shows no
+  // chip — acceptable degradation for an informational "last touched" label).
+  const lastTouchedByParent: Record<string, LastTouched> = {}
+  const { data: log } = await supabase
+    .from('listing_change_log')
+    .select('parent_asin, changed_by_name, changed_at, action')
+    .in('parent_asin', ids)
+    .order('changed_at', { ascending: false })
+    .limit(1000)
+  for (const r of (log || []) as { parent_asin: string; changed_by_name: string | null; changed_at: string; action: string | null }[]) {
+    if (lastTouchedByParent[r.parent_asin]) continue // first = newest (DESC)
+    lastTouchedByParent[r.parent_asin] = { changed_by_name: r.changed_by_name, changed_at: r.changed_at, action: r.action }
+  }
+
+  const now = Date.now()
+  for (const row of out) {
+    const c = claimByParent[row.parent_asin]
+    row.claim = c
+      ? { claimed_by_name: c.claimed_by_name, claimed_at: c.claimed_at, stale: isClaimStale(c, now) }
+      : null
+    row.last_touched = lastTouchedByParent[row.parent_asin] ?? null
+  }
+  return out
+}
+
+// ── In Progress tab: ACTIVE (non-stale) CLAIMS → cards (Phase B) ───────────────────────────
+// Starts from the (tiny) set of un-released claim rows, drops stale ones at READ time
+// (Watchdog-on-READ), then reuses assembleSurvivors (ghost filter + children) and
+// enrichWithCollab (so the card carries its own claim/last_touched chip like every other tab).
+async function fetchClaimedCards(
+  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  search: string,
+): Promise<(ScoreRow & { children: ChildRow[]; last_pushed_at: string | null; claim: ClaimChip; last_touched: LastTouched })[]> {
+  // Live (un-released) claims; staleness filtered in JS so the rule matches isClaimStale() exactly.
+  const { data: claimRows } = await supabase
+    .from('listing_claims')
+    .select('parent_asin, claimed_by, claimed_by_name, claimed_at, last_heartbeat, released_at, release_reason, intent')
+    .is('released_at', null)
+    .order('claimed_at', { ascending: false })
+  const now = Date.now()
+  const liveParents = ((claimRows || []) as ClaimRow[])
+    .filter((c) => !isClaimStale(c, now))
+    .map((c) => c.parent_asin)
+  if (liveParents.length === 0) return []
+
+  // Score rows for the claimed parents (chunk the .in() to keep it bounded).
+  const scoreRows: ScoreRow[] = []
+  const CHUNK = 100
+  for (let i = 0; i < liveParents.length; i += CHUNK) {
+    const slice = liveParents.slice(i, i + CHUNK)
+    const { data } = await supabase.from('listing_seo_scores').select('*').in('parent_asin', slice)
+    scoreRows.push(...((data || []) as ScoreRow[]))
+  }
+
+  // Optional search narrowing (ASIN exact or product_title contains) — mirror the other branches.
+  let filtered = scoreRows
+  if (search) {
+    const isAsin = /^B0[A-Z0-9]{8}$/i.test(search)
+    const q = search.toLowerCase()
+    filtered = scoreRows.filter((s) =>
+      isAsin
+        ? s.parent_asin === search || s.top_child_asin === search
+        : (s.product_title || '').toLowerCase().includes(q),
+    )
+  }
+
+  const survivors = await assembleSurvivors(supabase, filtered, new Set())
+  return enrichWithCollab(supabase, survivors)
+}
+
 // ── GET ───────────────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
@@ -148,13 +253,18 @@ export async function GET(req: Request) {
     const cursor = decodeCursor(params.get('cursor'))
     const ensureAsin = params.get('ensure')
 
-    // ── in_progress: explicitly empty in Phase A (Risk R-UX3) ────────────────────────────
-    // Still report counts so the tab badge renders honestly (it is genuinely 0 until claims land).
+    // ── in_progress: CLAIMED listings (Phase B). Phase A shipped this tab empty (Risk R-UX3) ──
+    // because no real soft-lock existed yet; now it lists the parents with an ACTIVE, non-stale
+    // claim. We start from the live claim rows (a tiny set — at most one per person on the team),
+    // fetch their score rows, run them through the SAME ghost filter + collab enrichment as the
+    // normal branch, then keep only the ones whose claim is still live at READ time (Watchdog-on-
+    // READ: a dead tab's stale claim must NOT keep a listing pinned to In Progress).
     if (status === 'in_progress') {
       const counts = await computeCounts(supabase, search)
       const latestSync = await fetchLastSyncedAt(supabase)
+      const inProgress = await fetchClaimedCards(supabase, search)
       return NextResponse.json({
-        scores: [],
+        scores: inProgress,
         counts,
         nextCursor: null,
         hasMore: false,
@@ -295,8 +405,12 @@ export async function GET(req: Request) {
 
     const latestSync = await fetchLastSyncedAt(supabase)
 
+    // Phase B: attach { claim, last_touched } chips to the final page (after ?ensure= may have
+    // unshifted a row). One batched pair of lookups; Phase A fields are untouched.
+    const enrichedRows = await enrichWithCollab(supabase, pageRows)
+
     return NextResponse.json({
-      scores: pageRows,
+      scores: enrichedRows,
       counts,
       nextCursor,
       hasMore,
@@ -355,13 +469,26 @@ async function computeCounts(
   const live = rows.filter(r => liveParents.has(r.parent_asin))
   const needs_work = live.filter(r => r.overall_score < OPTIMIZED_THRESHOLD).length
   const optimized  = live.filter(r => r.overall_score >= OPTIMIZED_THRESHOLD).length
-  // in_progress is genuinely 0 in Phase A (no claims yet). needs_attention is the coarse
-  // ghost/stale bucket — in Phase A we have no per-row verdict, so it surfaces the full live set
-  // as candidates (the rich client orphan-check still narrows it on the card). all = live total.
+
+  // in_progress (Phase B): parents with an ACTIVE, non-stale claim that also survive the ghost
+  // filter (>=1 live child). Read-time staleness uses isClaimStale() so this count agrees with the
+  // In Progress tab AND with the per-card chip. needs_attention is the coarse ghost/stale bucket —
+  // in Phase A we have no per-row verdict, so it surfaces the full live set as candidates (the rich
+  // client orphan-check still narrows it on the card). all = live total.
+  const liveSet = new Set(live.map(r => r.parent_asin))
+  const { data: claimRows } = await supabase
+    .from('listing_claims')
+    .select('parent_asin, claimed_by, last_heartbeat, released_at')
+    .is('released_at', null)
+  const now = Date.now()
+  const in_progress = ((claimRows || []) as Pick<ClaimRow, 'parent_asin' | 'claimed_by' | 'last_heartbeat' | 'released_at'>[])
+    .filter(c => !isClaimStale(c, now) && liveSet.has(c.parent_asin))
+    .length
+
   return {
     needs_work,
     optimized,
-    in_progress: 0,
+    in_progress,
     needs_attention: live.length,
     all: live.length,
   }

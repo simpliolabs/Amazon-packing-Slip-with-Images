@@ -24,8 +24,9 @@ import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueSh
 import { getProductType } from '@/lib/amazon/productType'
 import {
   executePush, executeBulkDetailsPush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff, requestPushCancel,
-  ENDPOINT, MARKETPLACE_ID, type PushEmit,
+  ENDPOINT, MARKETPLACE_ID, SYSTEM_ACTOR, type PushEmit, type PushActor,
 } from '@/lib/fba/pushExecutor'
+import { getBearerUser, resolveUserName } from '@/lib/fba/claims'
 
 // ─── GET — preview (no writes) ─────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
@@ -168,6 +169,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
   }
 
+  // Resolve WHO is pushing from the Authorization: Bearer JWT (spec §5 Phase B attribution) →
+  // stamped on keyword_push_log.pushed_by + the full-accept change-log row. An unauthenticated
+  // call (no/expired token) falls back to SYSTEM_ACTOR so attribution degrades, never blocks.
+  const bearer = await getBearerUser(req)
+  const actor: PushActor = bearer
+    ? { id: bearer.id, name: await resolveUserName(bearer.id, bearer.email) }
+    : SYSTEM_ACTOR
+
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     async start(controller) {
@@ -180,9 +189,9 @@ export async function POST(req: NextRequest) {
       }
       // Bulk Auto Push: all selected detail attributes, batched per SKU (separate executor).
       if (rawField === 'details_bulk') {
-        await executeBulkDetailsPush({ parent_asin, detail_fields: body.detail_fields, detail_overrides: body.detail_overrides, cancel_token: body.cancel_token }, emit)
+        await executeBulkDetailsPush({ parent_asin, detail_fields: body.detail_fields, detail_overrides: body.detail_overrides, cancel_token: body.cancel_token, actor }, emit)
       } else {
-        await executePush({ parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override, cancel_token: body.cancel_token }, emit)
+        await executePush({ parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override, cancel_token: body.cancel_token, actor }, emit)
       }
       try { controller.close() } catch { /* already closed by disconnect */ }
     },
