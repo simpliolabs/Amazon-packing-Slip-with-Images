@@ -11,8 +11,12 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AnalyzedKeyword } from './engine'
 import type { ListingContent } from './checkPresence'
 
-/** sha1 of the live copy — same format as rankAnalysis.contentFingerprint (lowercased, space-collapsed). */
-function fingerprintOf(listing: ListingContent): string {
+/** sha1 of the live copy — same format as rankAnalysis.contentFingerprint (lowercased, space-collapsed).
+ *  EXPORTED (was private) so Phase C reuses it VERBATIM — the score-history fingerprint
+ *  (scoreHistory.ts) + the push epoch stamp (pushExecutor) MUST hash identically to the snapshot
+ *  fingerprint so listing_score_history / listing_outcome_state JOIN keyword_share_snapshots by value
+ *  (spec §4-D / §4-E / Risk R1). Do NOT fork this function — one hash, one epoch. */
+export function fingerprintOf(listing: ListingContent): string {
   const hay = [
     listing.title, listing.bullet_1, listing.bullet_2, listing.bullet_3,
     listing.bullet_4, listing.bullet_5, listing.description, listing.backend_keywords,

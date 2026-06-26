@@ -6,6 +6,8 @@ import { createClient } from '@/lib/supabase/client'
 import type { ProductRecommendation, ReplenishmentStatus } from '@/lib/fba/replenishment'
 import { OptimizerView } from '@/components/fba/OptimizerView'
 import { ApiUsageMeter } from '@/components/fba/ApiUsageMeter'
+import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSparkline'
+import { presentOutcome, type OutcomeChip } from '@/lib/fba/outcomePresentation'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -93,6 +95,10 @@ interface SeoScoreRow {
   //   last_touched — newest listing_change_log row → "last touched by NAME <relative-time>".
   claim?:               { claimed_by_name: string | null; claimed_at: string | null; stale: boolean } | null
   last_touched?:        { changed_by_name: string | null; changed_at: string; action: string | null } | null
+  // Phase C outcome verdict (attached by the GET enrichWithOutcome LEFT-JOIN of listing_outcome_state;
+  // spec §5 Phase C). null until a push stamps the measuring epoch. Drives the verdict chip + the
+  // Needs-Attention tab membership; rendered via presentOutcome() (src/lib/fba/outcomePresentation.ts).
+  outcome?:             OutcomeChip | null
 }
 
 // Plain-English verb for a last_touched action token (timeline-style chip on a card).
@@ -442,6 +448,33 @@ export default function FBAIntelligencePage() {
   const [seoError, setSeoError] = useState<string | null>(null)
   const [expandedSeoCard, setExpandedSeoCard] = useState<string | null>(null)
   const [modalTab, setModalTab] = useState<'issues' | 'keywords'>('issues')
+  // Phase C (spec §5 item 1): per-parent 12-point score-history sparkline points, keyed by listing_key
+  // (= parent_asin at parent grain). Lazily fetched from GET /api/fba/score-history after scores load;
+  // cards render the sparkline progressively. Empty array = fetched-but-no-trend (hide); undefined =
+  // not yet fetched.
+  const [scoreSpark, setScoreSpark] = useState<Record<string, SparklinePoint[]>>({})
+  useEffect(() => {
+    if (seoScores.length === 0) return
+    let cancelled = false
+    ;(async () => {
+      // Only the rows we have NOT fetched yet — and cap concurrency so a big page never floods the API.
+      const todo = seoScores.map(s => s.parent_asin).filter(k => scoreSpark[k] === undefined)
+      const BATCH = 6
+      for (let i = 0; i < todo.length; i += BATCH) {
+        if (cancelled) return
+        const slice = todo.slice(i, i + BATCH)
+        await Promise.all(slice.map(async (key) => {
+          try {
+            const r = await fetch(`/api/fba/score-history?listing_key=${encodeURIComponent(key)}&limit=12`)
+            if (!r.ok) { if (!cancelled) setScoreSpark(prev => ({ ...prev, [key]: [] })); return }
+            const d = await r.json()
+            if (!cancelled) setScoreSpark(prev => ({ ...prev, [key]: (d.points || []) as SparklinePoint[] }))
+          } catch { if (!cancelled) setScoreSpark(prev => ({ ...prev, [key]: [] })) }
+        }))
+      }
+    })()
+    return () => { cancelled = true }
+  }, [seoScores, scoreSpark])
   /** Per-parent stale-status. Stale = at least one child re-parented elsewhere or orphaned, AND
    *  a single OTHER parent dominates (>=half) — meaning the real family lives there now. */
   const [staleStatus, setStaleStatus] = useState<Record<string, { isStale: boolean; dominantParent: string | null; orphanCount: number; reparentedCount: number; totalChildren: number }>>({})
@@ -3468,6 +3501,13 @@ export default function FBAIntelligencePage() {
                   ].filter(c => issueCounts[c.key])
                   const hasCritical = allIssues.some(i => i.severity === 'critical')
 
+                  // Phase C (spec §5): the OUTCOME verdict chip (from the GET LEFT-JOIN of
+                  // listing_outcome_state) + the 12-point score-history sparkline. presentOutcome()
+                  // returns null when there's nothing to show (never pushed / no epoch). When a real
+                  // verdict exists it SUPERSEDES the coarse "Pushed — measuring" R8 chip below.
+                  const outcomePres = presentOutcome(score.outcome)
+                  const sparkPoints = scoreSpark[score.parent_asin]
+
                   // PR #88: when this card is a STALE/ghost parent (its children have moved to
                   // a live twin, e.g. B0F8WYNVPJ → B0GCF11RKL), clicking the card must land on
                   // the LIVE parent — not the dead ASIN with 0 children and no recommendations.
@@ -3505,9 +3545,26 @@ export default function FBAIntelligencePage() {
                             <p className="text-sm font-semibold text-gray-900 leading-tight line-clamp-2">{score.product_title || score.parent_asin}</p>
                             <p className="text-xs text-gray-400 mt-0.5 font-mono">{score.parent_asin}</p>
                             <p className="text-xs text-gray-400">{score.child_count} vars · {score.total_units_30d} units/30d</p>
-                            {/* Lifecycle chips (spec R8): 90+ is "Optimized"; a pushed 90+ is "Pushed — measuring",
-                                an OUTCOME-PENDING state — explicitly NOT "Done". */}
-                            {isOptimized && (
+                            {/* Phase C OUTCOME verdict chip (spec §5): when the ledger has a verdict it
+                                SUPERSEDES the coarse R8 chips below — Measuring n/2 / Won / Regressed /
+                                Non-copy lever / Headroom / Measuring-stalled. The blue non-copy chip
+                                names the lever and says STOP rewriting (full message in the title). */}
+                            {outcomePres ? (
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full ${outcomePres.chipClass}`}
+                                  title={outcomePres.blurb}
+                                >
+                                  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
+                                  {outcomePres.label}
+                                </span>
+                                {outcomePres.isNonCopy && (
+                                  <span className="text-[10px] text-blue-600 font-medium">stop rewriting →</span>
+                                )}
+                              </div>
+                            ) : isOptimized ? (
+                              /* Lifecycle chips (spec R8): 90+ is "Optimized"; a pushed 90+ with no ledger
+                                 verdict yet is "Pushed — measuring", OUTCOME-PENDING — explicitly NOT "Done". */
                               <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
                                 {isMeasuring ? (
                                   <span
@@ -3524,6 +3581,13 @@ export default function FBAIntelligencePage() {
                                   </span>
                                 )}
                                 <span className="text-[10px] text-emerald-600/80 italic">outcome pending</span>
+                              </div>
+                            ) : null}
+                            {/* Phase C sparkline (spec §5 item 1): 12-point overall_score trend. SVG, not emoji.
+                                Renders only once >=2 change-points exist for this listing. */}
+                            {sparkPoints && sparkPoints.length >= 2 && (
+                              <div className="mt-1.5" title="Overall score trend (last 12 change-points)">
+                                <ScoreSparkline points={sparkPoints} width={104} height={26} showThreshold />
                               </div>
                             )}
                             {/* Phase B claim chip (spec §5): "🔒 NAME since <time>" when an ACTIVE
