@@ -646,6 +646,7 @@ export async function POST(req: NextRequest) {
             // existing '*' select; the multi-design group loop applies the per-key value ABOVE the
             // Amazon Color attribute. undefined (NULL/absent column) → no per-design seeding.
             designNameOverridesByKey: (pipelineScoreRow as { design_name_overrides?: Record<string, string> | null })?.design_name_overrides || undefined,
+            isMultiDesignOverride: (pipelineScoreRow as { is_multi_design_override?: boolean | null })?.is_multi_design_override ?? null,
             // Seller-declared audience lean (PR #195) — persisted on the score row by the
             // listing-page selector; re-weights gendered keywords + sets the title tail.
             audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')

@@ -94,6 +94,9 @@ export interface PipelineInput {
    *  is fed into the group's designNameOverride ABOVE the Amazon Color attribute, so extractDesignName
    *  returns it verbatim for that design. Absent/empty key → fall back to the Color attr → heuristic chain. */
   designNameOverridesByKey?: Record<string, string>
+  /** Manual multi-design classification override (migration 041). true = force multi-design,
+   *  false = force single-design, null/undefined = auto-detect via designKeyForSku. */
+  isMultiDesignOverride?: boolean | null
   /** Seller-declared audience lean (PR #195, persisted in listing_seo_scores.audience_lean).
    *  The seller knows the design's audience better than keyword statistics ("Darlin'" reads
    *  female even when unisex keywords dominate). male/female narrow the title tail outright;
@@ -843,6 +846,7 @@ function parseJsonLoose<T>(raw: string): T {
 // "for Men"/"for Women" fragment when the full title said "for Men and Women".
 export function capTitle75(title: string): string {
   let t = (title || '').replace(/\s{2,}/g, ' ').trim()
+  t = deduplicatePhrases(t)
   if (t.length <= 75) return t
   // Every inclusive-audience form the pipeline can emit: "for Men and Women", "Men's and
   // Women's" (the widen-guard's possessive swap), and "&" variants.
@@ -858,10 +862,27 @@ export function capTitle75(title: string): string {
     if (tidied === cut) break
     cut = tidied
   }
-  if (hadInclusiveAudience && /\s*\b(?:for\s+)?(?:Men|Women)['’]?s?(?:\s(?:and|&))?$/i.test(cut)) {
-    cut = cut.replace(/\s*\b(?:for\s+)?(?:Men|Women)['’]?s?(?:\s(?:and|&))?$/i, '').trim().replace(/[\s,;:&\-–—]+$/g, '')
+  if (hadInclusiveAudience && /\s*\b(?:for\s+)?(?:Men|Women)[‘’]?s?(?:\s(?:and|&))?$/i.test(cut)) {
+    cut = cut.replace(/\s*\b(?:for\s+)?(?:Men|Women)[‘’]?s?(?:\s(?:and|&))?$/i, '').trim().replace(/[\s,;:&\-–—]+$/g, '')
   }
+  // Strip dangling garment fragments from truncation
+  cut = cut.replace(/\s+(?:Men[‘’]?s?|Women[‘’]?s?)\s+(?:Short|Long)$/i, '').trim().replace(/[\s,;:&\-–—]+$/g, '')
   return cut
+}
+
+function deduplicatePhrases(title: string): string {
+  const words = title.split(/\s+/)
+  for (let len = 3; len >= 2; len--) {
+    for (let i = 0; i <= words.length - len * 2; i++) {
+      const phrase = words.slice(i, i + len).join(' ').toLowerCase()
+      const next = words.slice(i + len, i + len * 2).join(' ').toLowerCase()
+      if (phrase === next) {
+        words.splice(i + len, len)
+        return words.join(' ')
+      }
+    }
+  }
+  return title
 }
 
 // ─── ITEM HIGHLIGHTS (Amazon's companion to the 75-char title, July 27 2026) ────
@@ -3588,7 +3609,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // designs (SKU-prefix groups), the next commit branches title generation per design + per-design
   // vision; the parent keeps a general title. For now we only OBSERVE it (no behavior change) so the
   // detection can be verified live before the per-design title build engages.
-  const designGroupInfo = apparelProduct ? detectDesignGroups(input.children) : { isMultiDesign: false, groups: [] }
+  const autoDetected = apparelProduct ? detectDesignGroups(input.children) : { isMultiDesign: false, groups: [] }
+  const designGroupInfo = input.isMultiDesignOverride === true
+    ? { ...autoDetected, isMultiDesign: true }
+    : input.isMultiDesignOverride === false
+      ? { ...autoDetected, isMultiDesign: false }
+      : autoDetected
   // PRESSURE-TEST FINDING #9: scorer (syncListingContent.scoreListingContent) docks bullet score
   // when keyword_plan.designName is present but missing from a child's bullets. For multi-design,
   // there is NO SINGLE family design name — each design has its own (in per_child_titles). Setting

@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import type { ProductRecommendation, ReplenishmentStatus } from '@/lib/fba/replenishment'
 import { OptimizerView } from '@/components/fba/OptimizerView'
@@ -417,6 +417,7 @@ const EXCESS_STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 
 export default function FBAIntelligencePage() {
   const router = useRouter()
+  const viewParam = useSearchParams().get('view')
   const [activeTab, setActiveTab] = useState<'replenishment' | 'excess' | 'analytics' | 'listings' | 'missing' | 'ads'>('replenishment')
   const [salesAnalytics, setSalesAnalytics] = useState<SkuSalesRow[]>([])
   const [salesSearch, setSalesSearch] = useState('')
@@ -1364,6 +1365,14 @@ export default function FBAIntelligencePage() {
       }
     }
   }, [kwLoading])
+
+  // Deep-link: ?view=optimizer in the URL jumps straight to the Listing Optimizer tab.
+  useEffect(() => {
+    if (viewParam === 'optimizer') {
+      setActiveTab('listings')
+      setListingSubTab('optimizer')
+    }
+  }, [viewParam])
 
   // Load data when switching to analytics/listings tabs
   useEffect(() => {
