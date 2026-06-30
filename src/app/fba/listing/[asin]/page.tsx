@@ -284,6 +284,7 @@ export default function ListingDetailPage() {
   // Per-design seller name overrides (migration 034, {designKey: name}). Loaded on mount, fed as the
   // 4th arg to groupByDesign so the cards relabel instantly, and POSTed by onRenameDesign. DB-only.
   const [designNameOverrides, setDesignNameOverrides] = useState<Record<string, string>>({})
+  const [isMultiDesignOverride, setIsMultiDesignOverride] = useState<boolean | null>(null)
   const [designOverrideSaving, setDesignOverrideSaving] = useState(false)
   const [designOverrideSavedAt, setDesignOverrideSavedAt] = useState<number | null>(null)
   const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
@@ -518,6 +519,31 @@ export default function ListingDetailPage() {
   const bumpHeartbeat = useCallback(async () => {
     if (!iHoldClaim) return
     try { await postClaim('heartbeat') } catch { /* best-effort */ }
+  }, [iHoldClaim, postClaim])
+
+  // AUTO-CLAIM on page load: when the listing is free (or stale), auto-claim it for the current
+  // user. No manual "Claim" button needed — opening the page = working on it.
+  const [autoClaimDone, setAutoClaimDone] = useState(false)
+  useEffect(() => {
+    if (autoClaimDone || !myUserId || claimBusy) return
+    if (claim === undefined) return // still loading
+    if (iHoldClaim) { setAutoClaimDone(true); return }
+    if (claim && !claim.stale) return // someone else holds it, don't auto-claim
+    // Free or stale — auto-claim silently
+    setAutoClaimDone(true)
+    ;(async () => {
+      try {
+        const resp = await postClaim('claim')
+        if (resp.ok || resp.status === 409) await refreshClaim()
+        else setAutoClaimDone(false) // retry on next effect cycle
+      } catch { setAutoClaimDone(false) }
+    })()
+  }, [myUserId, claim, iHoldClaim, autoClaimDone, claimBusy, postClaim, refreshClaim])
+
+  // AUTO-RELEASE on unmount (tab close / navigate away).
+  useEffect(() => {
+    if (!iHoldClaim) return
+    return () => { postClaim('release').catch(() => {}) }
   }, [iHoldClaim, postClaim])
 
   const doClaim = useCallback(async () => {
@@ -879,26 +905,19 @@ export default function ListingDetailPage() {
     return () => { cancelled = true; clearInterval(id) }
   }, [asin])
 
-  // Fetch keyword intelligence on MOUNT, keyed on `asin` (the route param) — NOT on
-  // score.top_child_asin. Gating on the score made kwData load only AFTER the async score
-  // fetch resolved, so the Intelligence tab (gated on kwData) didn't appear until a manual
-  // refresh (PO). The endpoint resolves a parent ASIN to its top child internally
-  // (resolveToChildAsin), same pattern rank-analysis uses — so `asin` works directly and both
-  // fetches run in parallel on first load.
-  useEffect(() => {
+  // Fetch keyword intelligence, keyed on `asin` (the route param). Called on mount AND after
+  // an AI audit completes (the audit may score new keywords that populate the Intelligence tab).
+  const refreshKwData = useCallback(async () => {
     if (!asin) return
-    ;(async () => {
-      try {
-        const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`)
-        if (resp.ok) {
-          const data = await resp.json()
-          // Set kwData even when empty so the Intelligence tab PERSISTS (with an empty-state) rather
-          // than vanishing — a wiped/all-covered analysis previously hid the tab entirely (B0G884ZJ27).
-          setKwData(data)
-        }
-      } catch { /* ignore */ }
-    })()
+    try {
+      const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
+      if (resp.ok) {
+        const data = await resp.json()
+        setKwData(data)
+      }
+    } catch { /* ignore */ }
   }, [asin])
+  useEffect(() => { refreshKwData() }, [refreshKwData])
 
   // Fetch rank analysis (0-cost free core) for the Apply-tab verdict banner. Endpoint accepts the
   // PARENT asin and resolves to the top child internally; renders only server-authored, validated copy.
@@ -967,9 +986,10 @@ export default function ListingDetailPage() {
       try {
         const resp = await fetch(`/api/fba/design-name-override?parentAsin=${asin}`)
         if (resp.ok) {
-          const data = await resp.json() as { designNameOverride?: string | null; designNameOverrides?: Record<string, string> | null }
+          const data = await resp.json() as { designNameOverride?: string | null; designNameOverrides?: Record<string, string> | null; isMultiDesignOverride?: boolean | null }
           if (data.designNameOverride) setDesignNameOverride(data.designNameOverride)
           if (data.designNameOverrides) setDesignNameOverrides(data.designNameOverrides)
+          if (data.isMultiDesignOverride !== undefined) setIsMultiDesignOverride(data.isMultiDesignOverride)
         }
       } catch { /* ignore */ }
     })()
@@ -1098,6 +1118,7 @@ export default function ListingDetailPage() {
         // coverage, already-covered "gaps", and opposite-gender keywords the #210 lean filter now
         // excludes (PO: "after regen still showing gaps + mens + asking to weave in things already in bullets").
         refreshRankFree()
+        refreshKwData()
         // Phase B: a regen is a mutation — bump my claim's heartbeat (so an actively-worked listing
         // never goes stale mid-edit) and refresh the merged change-history so the AI-regen row shows.
         bumpHeartbeat()
@@ -1847,8 +1868,36 @@ export default function ListingDetailPage() {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
+  // Someone else holds the claim (not stale) — block editing with dark overlay.
+  const blockedByOther = !!claim && !claim.stale && !iHoldClaim
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-violet-100 via-slate-50 to-slate-50">
+    <div className="min-h-screen bg-gradient-to-b from-violet-100 via-slate-50 to-slate-50 relative">
+
+    {/* ══ LOCK OVERLAY — WooCommerce-style dark screen when someone else is editing ═══════ */}
+    {blockedByOther && (
+      <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] flex items-center justify-center">
+        <div className="bg-white rounded-2xl shadow-2xl p-8 text-center max-w-sm mx-4">
+          <div className="w-14 h-14 rounded-full bg-violet-100 flex items-center justify-center mx-auto mb-4">
+            <svg viewBox="0 0 24 24" className="w-7 h-7 text-violet-600" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+          </div>
+          <h2 className="text-lg font-bold text-slate-900 mb-1">
+            {claim?.claimed_by_name || 'Someone'} is editing this listing
+          </h2>
+          <p className="text-sm text-slate-500 mb-5">
+            Active {claim?.last_heartbeat ? relDate(claim.last_heartbeat) : 'recently'}. You can take over if they&rsquo;re done.
+          </p>
+          <button
+            onClick={openTakeover}
+            disabled={claimBusy}
+            className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-violet-600 hover:bg-violet-700 rounded-lg px-5 py-2.5 disabled:opacity-50 transition-colors cursor-pointer shadow-sm">
+            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7" /></svg>
+            {claimBusy ? 'Taking over…' : 'Take Over'}
+          </button>
+        </div>
+      </div>
+    )}
+
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
 
       {/* ── Back link ── */}
@@ -1938,64 +1987,30 @@ export default function ListingDetailPage() {
           </button>
         </div>
 
-        {/* ══ COLLABORATION BAR (Phase B) — soft-lock claim so 5 people never double-work ══════
-            • Free → "Claim" (single atomic CAS server-side).
-            • Mine (live) → green "You're working on this" + "Release".
-            • Held by someone else (live) → their name + 2-step "Take over".
-            • Stale (their tab died, no heartbeat past CLAIM_TTL) → amber "claim went stale" + Take over.
-            Heartbeat fires on a 30s interval while I hold it AND on every mutation (regen/push). */}
+        {/* ══ COLLABORATION BAR (Phase B → auto-lock) ════════════════════════════
+            Auto-claims on page load. Shows green "You're editing" when I hold it,
+            or a small amber chip when someone else has it (the dark overlay below
+            blocks interaction). No manual "Claim" button — opening = claiming. */}
         <div className="flex flex-wrap items-center gap-2 mt-4 pt-4 border-t border-slate-100">
-          {claim && !claim.stale ? (
-            iHoldClaim ? (
-              <>
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
-                  You&rsquo;re working on this{claim.claimed_at ? ` · since ${relDate(claim.claimed_at)}` : ''}
-                </span>
-                <button
-                  onClick={doRelease}
-                  disabled={claimBusy}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
-                  {claimBusy ? 'Releasing…' : 'Release'}
-                </button>
-              </>
-            ) : (
-              <>
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
-                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
-                  {claim.claimed_by_name || 'Someone'} is working on this{claim.last_heartbeat ? ` · active ${relDate(claim.last_heartbeat)}` : ''}
-                </span>
-                <button
-                  onClick={openTakeover}
-                  disabled={claimBusy}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 hover:bg-amber-100 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
-                  Take over
-                </button>
-              </>
-            )
-          ) : claim && claim.stale ? (
+          {iHoldClaim ? (
             <>
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-300 rounded-lg px-3 py-2">
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-                {claim.claimed_by_name || 'Someone'}&rsquo;s claim went stale{claim.last_heartbeat ? ` · last active ${relDate(claim.last_heartbeat)}` : ''}
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
+                You&rsquo;re editing{claim?.claimed_at ? ` · since ${relDate(claim.claimed_at)}` : ''}
               </span>
               <button
-                onClick={openTakeover}
+                onClick={doRelease}
                 disabled={claimBusy}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 hover:bg-amber-100 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
-                Take over
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 disabled:opacity-50 transition-colors cursor-pointer">
+                {claimBusy ? 'Releasing…' : 'Release'}
               </button>
             </>
-          ) : (
-            <button
-              onClick={doClaim}
-              disabled={claimBusy}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-lg px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer">
+          ) : claim && !claim.stale ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
               <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
-              {claimBusy ? 'Claiming…' : 'Claim this listing'}
-            </button>
-          )}
-          <span className="text-[11px] text-slate-400">Claiming tells the team you&rsquo;re on it, so no one duplicates your work.</span>
+              {claim.claimed_by_name || 'Someone'} is editing{claim.last_heartbeat ? ` · active ${relDate(claim.last_heartbeat)}` : ''}
+            </span>
+          ) : null}
         </div>
         {claimError && <p className="text-xs text-red-600 mt-2">{claimError}</p>}
 
@@ -2051,6 +2066,46 @@ export default function ListingDetailPage() {
             {designOverrideSavedAt && Date.now() - designOverrideSavedAt < 5000
               ? 'Saved — regenerate to use it'
               : 'Locks the design phrase so the title agent can\'t pick a slogan-like keyword from the pool'}
+          </span>
+        </div>
+
+        {/* MULTI-DESIGN CLASSIFICATION OVERRIDE (migration 041) — lets the seller force single or
+            multi-design when the auto-detection (SKU structure) gets it wrong (e.g. BC3001 Bella Canvas). */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="text-xs font-medium text-slate-500 whitespace-nowrap">Design Mode</label>
+          <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+            {([
+              { value: null, label: 'Auto' },
+              { value: false, label: 'Single Design' },
+              { value: true, label: 'Multi Design' },
+            ] as { value: boolean | null; label: string }[]).map((opt) => (
+              <button
+                key={String(opt.value)}
+                onClick={async () => {
+                  const prev = isMultiDesignOverride
+                  setIsMultiDesignOverride(opt.value)
+                  try {
+                    const resp = await fetch('/api/fba/design-name-override', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ parentAsin: asin, isMultiDesignOverride: opt.value }),
+                    })
+                    if (!resp.ok) setIsMultiDesignOverride(prev)
+                  } catch { setIsMultiDesignOverride(prev) }
+                }}
+                className={`text-xs font-medium px-3 py-1.5 transition-colors cursor-pointer ${
+                  isMultiDesignOverride === opt.value
+                    ? 'bg-violet-600 text-white'
+                    : 'bg-white text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-[11px] text-slate-400">
+            {isMultiDesignOverride === null ? 'Detected from SKU structure' : isMultiDesignOverride ? 'Forced: multiple designs per family' : 'Forced: one design for all variants'}
+            {' — regenerate to apply'}
           </span>
         </div>
       </div>

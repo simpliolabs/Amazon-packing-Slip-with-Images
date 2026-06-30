@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import Image from 'next/image'
 import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Package,
   KeyRound,
+  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -31,6 +32,7 @@ export default function DashboardLayout({
   userEmail = '',
 }: DashboardLayoutProps) {
   const pathname = usePathname()
+  const searchParams = useSearchParams()
   const router = useRouter()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -48,6 +50,12 @@ export default function DashboardLayout({
       href: '/fba',
       label: 'FBA Intel',
       icon: Package,
+      roles: ['admin', 'packer'],
+    },
+    {
+      href: '/fba?view=optimizer',
+      label: 'Listing Optimizer',
+      icon: Zap,
       roles: ['admin', 'packer'],
     },
     {
@@ -133,7 +141,9 @@ export default function DashboardLayout({
       <nav className="flex-1 px-3 py-4 space-y-1">
         {navItems.map((item) => {
           const Icon = item.icon
-          const isActive = pathname === item.href
+          const isActive = item.href.includes('?')
+            ? pathname === item.href.split('?')[0] && searchParams.get('view') === new URLSearchParams(item.href.split('?')[1]).get('view')
+            : pathname === item.href && !searchParams.get('view')
           return (
             <Link
               key={item.href}

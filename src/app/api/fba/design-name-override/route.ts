@@ -16,16 +16,17 @@ export async function GET(req: NextRequest) {
     const supabase = await createAdminClient()
     const { data, error } = await supabase
       .from('listing_seo_scores')
-      .select('design_name_override, design_name_overrides')
+      .select('design_name_override, design_name_overrides, is_multi_design_override')
       .eq('parent_asin', parentAsin)
       .single()
     // Either column may not exist pre-migration; a missing column errors the WHOLE select, so fall
     // back to safe defaults rather than 500-ing on a not-yet-migrated env.
-    if (error) return NextResponse.json({ designNameOverride: null, designNameOverrides: {} })
-    const row = data as { design_name_override: string | null; design_name_overrides: Record<string, string> | null }
+    if (error) return NextResponse.json({ designNameOverride: null, designNameOverrides: {}, isMultiDesignOverride: null })
+    const row = data as { design_name_override: string | null; design_name_overrides: Record<string, string> | null; is_multi_design_override: boolean | null }
     return NextResponse.json({
       designNameOverride: row?.design_name_override || null,
       designNameOverrides: row?.design_name_overrides || {},
+      isMultiDesignOverride: row?.is_multi_design_override ?? null,
     })
   } catch {
     return NextResponse.json({ designNameOverride: null, designNameOverrides: {} })
@@ -35,13 +36,26 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { parentAsin, designNameOverride, designKey } = body as { parentAsin?: string; designNameOverride?: string | null; designKey?: string }
+    const { parentAsin, designNameOverride, designKey, isMultiDesignOverride } = body as { parentAsin?: string; designNameOverride?: string | null; designKey?: string; isMultiDesignOverride?: boolean | null }
     if (!parentAsin) return NextResponse.json({ error: 'parentAsin required' }, { status: 400 })
     // Trim + length cap (a sane upper bound for a design slogan; longer values are almost
     // certainly the seller pasting the whole title by accident).
     const trimmed = typeof designNameOverride === 'string' ? designNameOverride.trim().slice(0, 80) : ''
     const value = trimmed || null
     const supabase = await createAdminClient()
+
+    // ── Multi-design classification override (migration 041) — true/false/null (auto).
+    if (typeof isMultiDesignOverride === 'boolean' || isMultiDesignOverride === null) {
+      const { error } = await supabase
+        .from('listing_seo_scores')
+        .update({ is_multi_design_override: isMultiDesignOverride } as never)
+        .eq('parent_asin', parentAsin)
+      if (error) {
+        console.error('[design-name-override] multi-design update error:', error.message)
+        return NextResponse.json({ error: error.message }, { status: 500 })
+      }
+      return NextResponse.json({ success: true, isMultiDesignOverride })
+    }
 
     // ── Per-design override (multi-design families) — keyed by designKey on the JSONB map column.
     // A blank/empty name DELETES that key (resets the design to auto-detect). The scalar
