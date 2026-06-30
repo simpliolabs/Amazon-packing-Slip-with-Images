@@ -905,16 +905,22 @@ export default function ListingDetailPage() {
     return () => { cancelled = true; clearInterval(id) }
   }, [asin])
 
-  // Fetch keyword intelligence, keyed on `asin` (the route param). Called on mount AND after
-  // an AI audit completes (the audit may score new keywords that populate the Intelligence tab).
-  const refreshKwData = useCallback(async () => {
+  const refreshKwData = useCallback(async (opts?: { triggerSync?: boolean }) => {
     if (!asin) return
     try {
-      const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
-      if (resp.ok) {
-        const data = await resp.json()
-        setKwData(data)
+      if (opts?.triggerSync) {
+        await fetch(`/api/fba/intelligence/${asin}`, { method: 'POST', cache: 'no-store' }).catch(() => {})
+        for (let attempt = 0; attempt < 10; attempt++) {
+          await new Promise(r => setTimeout(r, 3000))
+          const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
+          if (resp.ok) {
+            const data = await resp.json()
+            if (data.totalKeywordsAnalyzed > 0) { setKwData(data); return }
+          }
+        }
       }
+      const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
+      if (resp.ok) { setKwData(await resp.json()) }
     } catch { /* ignore */ }
   }, [asin])
   useEffect(() => { refreshKwData() }, [refreshKwData])
@@ -1118,7 +1124,7 @@ export default function ListingDetailPage() {
         // coverage, already-covered "gaps", and opposite-gender keywords the #210 lean filter now
         // excludes (PO: "after regen still showing gaps + mens + asking to weave in things already in bullets").
         refreshRankFree()
-        refreshKwData()
+        refreshKwData({ triggerSync: true })
         // Phase B: a regen is a mutation — bump my claim's heartbeat (so an actively-worked listing
         // never goes stale mid-edit) and refresh the merged change-history so the AI-regen row shows.
         bumpHeartbeat()
