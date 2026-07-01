@@ -1455,13 +1455,39 @@ function summarizePush(results: { status: string; isParent?: boolean }[]): {
  *  rejection names attributes that are NOT auto-healable (e.g. shirt_size — a composite/per-variant axis
  *  the auto-heal deliberately excludes), we write a DURABLE, VISIBLE needs_attention row via
  *  flagParentAttrsNeedAttention instead of the previous invisible silent abstain. */
+/** Derive the rejected attribute keys from a failed parent row. Amazon FREQUENTLY omits the structured
+ *  issues[].attributeNames array and names the attribute ONLY in the message text — e.g. "Based on the
+ *  data from '[shirt_size#?.size_system, shirt_size#?.size_class]' ... the attribute 'Shirt Size' does
+ *  not have enough values." Keying the heal solely off attributeNames therefore made the trigger a silent
+ *  NO-OP on exactly the Custom-apparel shirt_size case (verified live 2026-07-01: the verification queue
+ *  stayed empty right after a rejecting push). So combine BOTH sources: the structured attributeNames AND
+ *  a parse of the error + issue-message text (known healable keys that appear verbatim, plus any snake_case
+ *  base/leaf token inside a bracketed data-path so new attributes are picked up without a code change). */
+function rejectedAttrKeysFrom(parent: PushResultRow): string[] {
+  const structured = (parent.issues ?? []).flatMap((i) => i.attributeNames ?? [])
+  const text = `${parent.error ?? ''} ${(parent.issues ?? []).map((i) => i.message ?? '').join(' ')}`.toLowerCase()
+  const fromText = new Set<string>()
+  for (const key of [...BROADCAST_HEALABLE, ...COMPOSITE_HEAL_SPECS.flatMap((s) => [s.containerKey, ...s.subKeys])]) {
+    if (text.includes(key)) fromText.add(key)
+  }
+  const bracket = text.match(/\[([a-z0-9_#?.,\s]+)\]/)
+  if (bracket) {
+    for (const tok of bracket[1].split(/[,\s]+/).filter(Boolean)) {
+      const base = tok.split(/[#.]/)[0].trim()
+      const leaf = tok.includes('.') ? (tok.split('.').pop() ?? '').replace(/[#?]/g, '').trim() : ''
+      for (const t of [base, leaf]) if (/^[a-z][a-z0-9_]{2,}$/.test(t)) fromText.add(t)
+    }
+  }
+  return [...new Set([...structured, ...fromText])]
+}
+
 async function maybeEnqueueParentHeal(
   parent_asin: string, productType: string | null, results: PushResultRow[],
 ): Promise<void> {
   try {
     const parent = results.find((r) => r.isParent && r.status === 'failed')
-    if (!parent?.sku || !parent.issues?.length) return
-    const rejectedAttrs = [...new Set(parent.issues.flatMap((i) => i.attributeNames ?? []))]
+    if (!parent?.sku || (!parent.issues?.length && !parent.error)) return
+    const rejectedAttrs = rejectedAttrKeysFrom(parent)
     // Classify each rejected attr: flat-healable (department/age_range) vs composite-healable (shirt_size
     // container OR its size_system/size_class sub-fields → healParentComposite) vs genuinely not healable.
     const healable = rejectedAttrs.filter((k) => BROADCAST_HEALABLE.has(k))
