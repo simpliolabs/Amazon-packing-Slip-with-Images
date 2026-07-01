@@ -1323,7 +1323,15 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         // (§4-E) and the push-trigger score-history row (§4-D) both use this EXACT measured copy.
         let pushedFingerprint: string | null = null
         let pushedOverall: number | null = null
-        if (accepted > 0) {
+        // B-fix: re-score whenever the family's LIVE content is confirmed — including a re-push where the
+        // children were already current so only the variation parent was attempted (childTotal===0).
+        // Gating the re-score on accepted>0 froze the score on exactly that case (parent-only push whose
+        // parent Amazon rejects, PO-caught: "if it fails it does not update the score"). The DESTRUCTIVE
+        // side-effects (manual-title-as-rec, DONE verdict, auto-verify enqueue, outcome stamp) stay on the
+        // stricter accepted>0 / failed===0 gates below. The empty-diff early return upstream already
+        // prevents a re-score when the push wrote literally nothing, so this never runs on a no-op.
+        const shouldRescore = accepted > 0 || childTotal === 0
+        if (shouldRescore) {
           emit({ type: 'rescore', message: 'Re-scoring listing…' })
           try {
             const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
@@ -1370,7 +1378,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, fingerprint: pushedFingerprint })
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
+        }
 
+        // Below stays on the STRICT accepted>0 gate — these are destructive (rewrite the stored
+        // recommendation / flip the plan verdict to DONE) and must only fire when a child actually shipped.
+        if (accepted > 0) {
           // ── Persist a MANUAL title override AS the recommendation (broadcast-title products only) ──
           // When the seller pushes their OWN title, the live content becomes their title but the stored
           // recommendation is still the AI's. That leaves live != recommendation FOREVER: the cohesion row
