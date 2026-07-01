@@ -1422,7 +1422,7 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
   onProgress?.('Title council: drafts in, adversary reviewing...')          // keepalive (resets idle timer)
   const numbered = drafts.map((t, i) => `${i + 1}. ${t}`).join('\n')
   const critique = await ask(
-    'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from July 27, 2026), brand not first, and weak click appeal. Be specific.',
+    'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from July 27, 2026), brand not first, and weak click appeal. (a) REJECT any title that spends scarce 75-char budget on a GENERIC audience phrase ("for Men and Women", "for Men", "for Women") when a higher-value PRODUCT-SPECIFIC keyword from the brief is available but unused — the audience suffix is OPTIONAL and droppable; the product-specific keyword wins. (b) FLAG any trademarked phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") and REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or its removal. Be specific.',
     `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
     0.3, 400, COUNCIL_MODEL, 60_000,
   )
@@ -1488,7 +1488,7 @@ async function runBulletsCouncil(openai: OpenAI, baseSystem: string, baseUser: s
   onProgress?.('Bullets council: drafts in, adversary reviewing...')           // keepalive (resets idle timer)
   const numbered = drafts.map((d, i) => `Set ${i + 1}:\n${d.map((b, j) => `  ${j + 1}. ${b}`).join('\n')}`).join('\n\n')
   const critique = await askText(
-    'You are a ruthless Amazon listing critic. Attack each 5-bullet set for: (1) MISSING required keyphrases from the brief — name exactly which are absent from each set; (2) weak, duplicate, or non-CAPS benefit hooks; (3) any claim of a profession/role/occasion/audience NOT in the title (accuracy failure); (4) keyword stuffing or bullets under ~100 chars. Be specific per set.',
+    'You are a ruthless Amazon listing critic. Attack each 5-bullet set for: (1) MISSING required keyphrases from the brief — name exactly which are absent from each set; (2) weak, duplicate, or non-CAPS benefit hooks; (3) any claim of a profession/role/occasion/audience NOT in the title (accuracy failure); (4) keyword stuffing or bullets under ~100 chars; (5) any TRADEMARKED phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") — REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or removal; (6) budget spent on GENERIC audience/gift filler when a higher-value PRODUCT-SPECIFIC keyphrase from the brief is still uncovered — prefer covering the specific keyphrase. Be specific per set.',
     `Brief the bullets must satisfy:\n${baseUser}\n\nCandidate 5-bullet sets for the SAME product:\n${numbered}\n\nCritique EACH set, then name which set covers the required keyphrases best.`,
     COUNCIL_MODEL, 60_000,
   )
@@ -1595,6 +1595,27 @@ async function runTitleAgent(
     attributes = attributes.filter(isGrounded)
   }
 
+  // TRADEMARK PRE-FILTER (Approach B) — substitute protected marks to their safe phrasing
+  // (scrubTrademarks: "World Cup" -> "World Soccer Cup") and DROP any term that still trips the
+  // curated franchise/team list (findTrademarkPhrases, e.g. "Florida Gators") BEFORE it enters the
+  // council brief. Runs for apparel AND non-apparel (the design-grounding block above is apparel-gated,
+  // so this is deliberately separate). Belt-and-suspenders with the generation-time scrubPublished:
+  // scrubbing at OUTPUT still let the council spend scarce title budget PLACING a trademark keyword;
+  // filtering the brief stops that at the source. Dropped terms still rank via bullets/backend.
+  const tmDropped: string[] = []
+  const tmSafeKw = (kw: string): string | null => {
+    const s = scrubTrademarks(kw)
+    if (findTrademarkPhrases(s).length > 0) { tmDropped.push(kw); return null }
+    return s
+  }
+  candidates = candidates
+    .map((c) => { const s = tmSafeKw(c.keyword); return s ? { ...c, keyword: s } : null })
+    .filter((c): c is TitleCandidate => c !== null)
+  upgradeKws = upgradeKws.map(tmSafeKw).filter((s): s is string => s !== null)
+  attributes = attributes.map(tmSafeKw).filter((s): s is string => s !== null)
+  if (mustInclude) mustInclude = tmSafeKw(mustInclude) ?? undefined
+  if (tmDropped.length) console.warn(`[title-tm-filter] dropped ${tmDropped.length} residual-trademark term(s): ${tmDropped.slice(0, 6).join(' | ')}`)
+
   const candidateList = candidates
     .map((c) => {
       // Rank context for the writer/council: striking distance (#11-30) = a title spot moves
@@ -1652,7 +1673,7 @@ async function runTitleAgent(
         ? `\n🟡 MANDATORY #3 — these UPGRADE keywords already drive your bullets' search traffic but are MISSING from your live title. Amazon weights title keywords 3-5× more than bullets — folding them into the title is your single highest-leverage SEO move. Include AT LEAST ${Math.max(3, upgradeKws.length - 2)} of these (more is better, fit as many as the budget allows):\n  ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
         : `\nTry to include these UPGRADE keywords too (they drive bullet traffic but are missing from the title): ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
   const audienceLine = preferredAudience
-    ? `\nAUDIENCE: end with "for ${preferredAudience}" (this product is for ${preferredAudience} — do NOT narrow it to a single gender if it says Men and Women).\n`
+    ? `\nAUDIENCE (LOWEST-PRIORITY, OPTIONAL tail): you MAY end with "for ${preferredAudience}" if it fits — but it is the lowest-value part of the title. If including it would crowd out a higher-value PRODUCT-SPECIFIC keyphrase from the candidates, DROP the audience and use that keyphrase instead. If you keep it, never narrow "${preferredAudience}" to a single gender.\n`
     : ''
 
   const system = `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`
@@ -1664,8 +1685,8 @@ ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
 ${apparel
-  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier ONLY if it fits the 75-char cap. 🚫 GROUND THE SUBJECT — never fabricate artwork: the visual subject MUST be something that literally appears in the design name "${designName || '<design>'}" or the title. If this is a TEXT/SLOGAN design with NO concrete object (e.g. a Gen X saying, a funny quote), do NOT invent an object/prop/motif (cassette, guitar, skull, dog, etc.) — build the second phrase from the slogan's THEME or a TONE word instead (e.g. "Funny Gen X Tee", "Sarcastic Saying Shirt"). Then end with the audience. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — every char counts against 75. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words; it is exactly 75 chars): "THE CEO Later Gator T-Shirt, Comfort Colors Alligator Tee for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (drop it first if over 75)` : ''}, design subject from the image, audience "${preferredAudience || 'Men and Women'}".`
-  : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience.`} It should read like a human-written phrase.
+  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier ONLY if it fits the 75-char cap. 🚫 GROUND THE SUBJECT — never fabricate artwork: the visual subject MUST be something that literally appears in the design name "${designName || '<design>'}" or the title. If this is a TEXT/SLOGAN design with NO concrete object (e.g. a Gen X saying, a funny quote), do NOT invent an object/prop/motif (cassette, guitar, skull, dog, etc.) — build the second phrase from the slogan's THEME or a TONE word instead (e.g. "Funny Gen X Tee", "Sarcastic Saying Shirt"). Then, if it fits, you MAY end with the audience — but it is OPTIONAL and lowest-priority; a higher-value product-specific keyphrase outranks it, so drop the audience rather than the keyphrase. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — every char counts against 75. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words; it is exactly 75 chars): "THE CEO Later Gator T-Shirt, Comfort Colors Alligator Tee for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (drop it first if over 75)` : ''}, design subject from the image, audience "${preferredAudience || 'Men and Women'}".`
+  : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience only if budget remains (optional, lowest-priority).`} It should read like a human-written phrase.
 
 Rules:
 - ${apparel ? "LEAD with the brand, the design name, then the product type — design-led, NOT keyword-led. At ≤75 chars the WHOLE title shows on mobile." : 'FRONT-LOAD the mandatory keyword right after the brand — at ≤75 chars every word is prime real estate.'}
@@ -1706,7 +1727,7 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: `You are an Amazon SEO title editor${apparel ? ' for apparel' : ''}. Output ONLY the corrected title string.` },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then "for ${preferredAudience}"` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -1938,7 +1959,26 @@ async function runBulletsAgent(
   // title + backend already enforce it — #91/#92). Prepend it to the scored opportunity set so it LEADS the
   // council brief and is guaranteed by the deterministic backstop (parity with the title design-name lead).
   const dn = (designName || '').trim()
-  const oppPlusDesign = dn ? [dn, ...opportunityKws.filter((k) => k.toLowerCase() !== dn.toLowerCase())] : opportunityKws
+  // TRADEMARK PRE-FILTER (Approach B) — substitute protected marks to safe phrasing and drop residual
+  // franchise/team marks from the bullets opportunity pool AT CONSTRUCTION, so EVERY downstream consumer
+  // (the council brief, requiredKws, the missing-keyword retry, and validateBullets) reads the SAME safe
+  // pool. If only the brief were scrubbed, the retry/validator would endlessly demand a term ("World Cup")
+  // the scrubbed brief no longer contains. The design name LEADS and is substitute-only (never dropped —
+  // the identity mandate requires it in >=1 bullet).
+  const tmSafeBullet = (kw: string): string | null => {
+    const s = scrubTrademarks(kw)
+    return findTrademarkPhrases(s).length > 0 ? null : s
+  }
+  const oppPlusDesign = dn
+    ? [scrubTrademarks(dn), ...opportunityKws.filter((k) => k.toLowerCase() !== dn.toLowerCase()).map(tmSafeBullet).filter((s): s is string => s !== null)]
+    : opportunityKws.map(tmSafeBullet).filter((s): s is string => s !== null)
+  // The VALIDATOR + missing-keyword retry must read the SAME trademark-safe pool as the brief. Scrub-only
+  // marks (super bowl->big game, world cup->world soccer cup, olympics/fifa->dropped) are NOT in
+  // findTrademarkPhrases' curated list, so they survive the tmSafeBullet drop-gate and reach the raw
+  // opportunityKws; the brief writes the SAFE phrasing, so missingBulletKeywords(bullets, RAW) would flag
+  // those marks as permanently missing (the scrubbed bullets can never contain them), firing wasted
+  // corrective retries that pressure re-introducing the trademark. Validate against the safe pool instead.
+  const opportunityKwsSafe = opportunityKws.map(tmSafeBullet).filter((s): s is string => s !== null)
   // G4 — GIFT & OCCASION audience pool. Role/audience keywords are (correctly) excluded from
   // every other pool as product-identity claims, but they ARE legitimate gift framings
   // ("great gift for teachers") — the one compliant home for these search words in customer
@@ -1965,8 +2005,9 @@ async function runBulletsAgent(
   // HARD-REQUIRE the SCORED opportunity set (exactly what the scorer + validator check) — the old brief
   // only required 3 from a DIFFERENT list, which is why bullets stalled at 9/18. Lead the top 3; cover the
   // rest somewhere across the 5 bullets. The validate-retry loop + deterministic backstop drive it home.
-  const requiredKws = (oppPlusDesign.length ? oppPlusDesign : remaining.slice(0, 8).map((k) => k.keyword)).slice(0, 8)
-  const kwList = remaining.slice(0, 8).map((k) => `  - "${k.keyword}"`).join('\n')
+  const remainingSafe = remaining.slice(0, 8).map((k) => tmSafeBullet(k.keyword)).filter((s): s is string => s !== null)
+  const requiredKws = (oppPlusDesign.length ? oppPlusDesign : remainingSafe).slice(0, 8)
+  const kwList = remainingSafe.map((k) => `  - "${k}"`).join('\n')
   const topLine = requiredKws.length
     ? `\n🔴 REQUIRED SEARCH KEYPHRASES — these are EXACTLY what your bullet ranking is scored on. Coverage is by WORD, not by phrase: each phrase's key words must appear SOMEWHERE across the 5 bullets, but they can be SPREAD across different bullets and different sentences — the full phrase does NOT need to appear contiguously, and paraphrasing is fine. 🚫 NEVER cram a whole multi-word search string into one sentence (e.g. "channel the haitian soccer jersey world soccer cup 2026 aesthetic") — that reads as keyword soup and looks spammy. Instead let the words land where they fit naturally (e.g. "...haitian pride graphic tee..." in one bullet, "...ready for the 2026 world soccer cup..." in another). LEAD bullets 1, 2, 3 with the top three themes. Cover EVERY phrase that fits accurately:\n${requiredKws.map((k) => `  - "${k}"`).join('\n')}\n`
     : ''
@@ -1975,8 +2016,12 @@ async function runBulletsAgent(
   // = stronger bullet coverage moves rank fastest; top-10 = defend what's working.
   const rankedCtx = remaining
     .filter((k) => k.organicRank != null)
+    // Trademark-safe (Approach B): substitute marks + drop residual franchise marks so a scrub-only
+    // term ("world cup 2026 jersey") never surfaces into the council's context line unscrubbed.
+    .map((k) => ({ kw: scrubTrademarks(k.keyword), rank: k.organicRank as number }))
+    .filter((k) => findTrademarkPhrases(k.kw).length === 0)
     .slice(0, 8)
-    .map((k) => `"${k.keyword}" #${k.organicRank}${k.organicRank! >= 11 && k.organicRank! <= 30 ? ' (striking distance)' : k.organicRank! <= 10 ? ' (defend)' : ''}`)
+    .map((k) => `"${k.kw}" #${k.rank}${k.rank >= 11 && k.rank <= 30 ? ' (striking distance)' : k.rank <= 10 ? ' (defend)' : ''}`)
     .join(', ')
   const rankLine = rankedCtx
     ? `\nCURRENT ORGANIC RANKS (context, not extra requirements — prioritize natural, leading coverage for striking-distance terms): ${rankedCtx}\n`
@@ -2090,7 +2135,7 @@ Return ONLY the JSON object.`
   // role-leak guard above runs first because its check is cheap and deterministic; this
   // pass costs one more LLM call only when validateBullets actually finds problems.
   if (bullets.length > 0 && brandName) {
-    let bProblems = validateBullets(bullets, brandName, opportunityKws, capacityFamilyTokens)
+    let bProblems = validateBullets(bullets, brandName, opportunityKwsSafe, capacityFamilyTokens)
     for (let attempt = 0; attempt < 2 && bProblems.length > 0; attempt++) {
       try {
         const capacityClause = capacityFamilyTokens.length >= 2
@@ -2118,7 +2163,7 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         const fp = parseJsonLoose<{ bullets?: string[] }>(fix.choices[0]?.message?.content || '{}')
         const fb = Array.isArray(fp.bullets) ? fp.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
         if (fb.length === 0) break
-        const fbProblems = validateBullets(fb, brandName, opportunityKws, capacityFamilyTokens)
+        const fbProblems = validateBullets(fb, brandName, opportunityKwsSafe, capacityFamilyTokens)
         // Accept criteria (PR #79 strictened after live audit found the loose count-only
         // check kept original bullets when rewrite traded one issue type for another):
         //   - take the rewrite when total count drops, OR
@@ -2611,7 +2656,60 @@ Return ONLY the JSON object.`
 
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
-async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = [], topOpportunityKws: string[] = []): Promise<string> {
+/** Description COUNCIL (Approach B) — the description was previously the ONLY published field with no
+ *  council (a single gpt-4.1-mini call), yet it is an INDEXED search field. So it now gets the same
+ *  3-persona -> GPT-5 adversary -> GPT-5 judge debate as the title/bullets councils. Returns a single
+ *  HTML string; output still flows the caller's validateDescription + brand-safety judge + length cap,
+ *  so the council is additive. Fails open to a single agent. Description is HTML/prose (not JSON), so
+ *  this mirrors runTitleCouncil's prose ask() shape, NOT the bullets JSON shape. */
+async function runDescriptionCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string> {
+  // Proposers stay on fast gpt-4.1-mini; the adversary + judge run on GPT-5. GPT-5 reasoning models
+  // REJECT `temperature` and use `max_completion_tokens` — params branch by model (same as the title
+  // council). Per-call timeout + NO retries so a hung call can't stall past Cloudflare's ~100s idle
+  // window (a keepalive fires BETWEEN stages, not during a call). Strip any ```html fence off every draft.
+  const stripFence = (s: string): string => s.replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+  const ask = async (system: string, user: string, temperature: number, max_tokens = 1200, model = 'gpt-4.1-mini', timeoutMs = 20_000): Promise<string> => {
+    try {
+      const isGpt5 = /^(gpt-5|o\d)/.test(model)
+      const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+      const r = await openai.chat.completions.create(
+        isGpt5
+          ? { model, messages, max_completion_tokens: Math.max(max_tokens, 4000), reasoning_effort: 'low' }
+          : { model, messages, temperature, max_tokens },
+        { timeout: timeoutMs, maxRetries: 0 },
+      )
+      return stripFence(r.choices[0]?.message?.content || '')
+    } catch { return '' }
+  }
+  const COUNCIL_MODEL = process.env.DESCRIPTION_COUNCIL_MODEL || process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+  const personas: { sys: string; temp: number }[] = [
+    { sys: 'You are an award-winning apparel COPYWRITER. Write the most vivid, human, DESIGN-LED HTML description — evocative but tight. ', temp: 0.6 },
+    { sys: 'You are an Amazon SEO STRATEGIST. Weave the HIGH-VALUE search phrases from the brief in NATURALLY (no stuffing) while keeping the copy readable and within the length cap. ', temp: 0.3 },
+    { sys: 'You are a CONVERSION strategist. Lead with the strongest selling point, build trust, close with a clear reason to buy — clean, professional, no spam. ', temp: 0.4 },
+  ]
+  const drafts = (await Promise.all(personas.map((p) => ask(p.sys + baseSystem, baseUser, p.temp)))).filter(Boolean)
+  if (drafts.length === 0) return ask(baseSystem, baseUser, 0.5)              // fail open: single agent
+  if (drafts.length === 1) return drafts[0]
+  onProgress?.('Description council: drafts in, adversary reviewing...')       // keepalive (resets idle timer)
+  const numbered = drafts.map((t, i) => `Description ${i + 1}:\n${t}`).join('\n\n')
+  const critique = await ask(
+    'You are a ruthless Amazon listing critic. Attack each HTML description for: (1) MISSING high-value search phrases from the brief; (2) keyword stuffing or a keyword-list read; (3) any claim of a profession/role/occasion/audience NOT in the title (accuracy failure); (4) invented specs or a bare third-party brand not framed as "compatible with"; (5) any TRADEMARKED phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") — REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or removal; (6) exceeding the visible-character cap or weak structure (no hook, no <ul>). Be specific per description.',
+    `Brief the description must satisfy:\n${baseUser}\n\nCandidate HTML descriptions for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
+    0.3, 600, COUNCIL_MODEL, 60_000,
+  )
+  onProgress?.('Description council: judge synthesizing the winner...')        // keepalive
+  const judged = await ask(
+    baseSystem + ' You are the JUDGE: merge the strongest, ACCURATE elements into ONE final HTML description that satisfies every rule in the brief, weaves the high-value phrases in naturally, stays within the visible-character cap, and reads like a human wrote it. Return ONLY the HTML — no markdown, no JSON, no commentary.',
+    `${baseUser}\n\nCandidate descriptions:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final HTML description.`,
+    0.2, 1200, COUNCIL_MODEL, 60_000,
+  )
+  // Fail open to the SEO/coverage draft (persona #1), NOT the creative one (#0): if the judge errors or
+  // returns empty, the coverage-optimized draft is the safest fallback. Logged so it's visible.
+  if (!judged) console.warn('[description-council] judge returned empty — failing open to the SEO/coverage draft')
+  return judged || drafts[1] || drafts[0]
+}
+
+async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = [], topOpportunityKws: string[] = [], useCouncil = true): Promise<string> {
   const { openai, category, repTitle, children, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
   // Capacity-family detection (mirrors bullets): shared description must NOT hardcode a
@@ -2643,13 +2741,24 @@ Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}${k
 🚫 CAPACITY: this family has MULTIPLE capacities (${descFamilyCapList}). The description is SHARED across all variants — NEVER hardcode a specific GB number in any paragraph or bullet (no "128GB and 64GB capacities", no "this 128GB SD card", no "Available in 128GB and 64GB"). Use capacity-agnostic phrasing: "available in multiple capacities", "high-capacity storage", "ample space for your needs". The capacity-specific text already lives in each variant's TITLE.` : ''}
 
 Structure: hook -> <ul> of key features -> use cases/audience -> short closing line. Return ONLY the HTML.`
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4.1-mini',
-    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    temperature: 0.5,
-    max_tokens: 1200,
-  })
-  let description = (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+  // Description COUNCIL for apparel (Approach B — the description is an INDEXED search field, so it now
+  // gets the same debate as title/bullets). useCouncil is FALSE for the per-design multi-design loop (it
+  // fans out N descriptions via Promise.all — N GPT-5 councils in parallel would risk the Cloudflare
+  // idle window), so per-design descriptions keep the single fast agent; only the BROADCAST description
+  // gets the council. Output still flows validateDescription + the brand-safety judge + length cap below,
+  // so it is additive (fails open). Non-apparel keeps the single fast call.
+  let description: string
+  if (apparel && useCouncil) {
+    description = await runDescriptionCouncil(openai, system, user, input.onProgress)
+  } else {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0.5,
+      max_tokens: 1200,
+    })
+    description = (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+  }
 
   // ── Brand-safety + length retry (validateDescription) ─────────────────────────
   // Same shape as runTitleAgent / runBulletsAgent: up to 2 corrective passes. Closes the
@@ -3251,8 +3360,16 @@ async function buildTitleFor(
   // 3. FILL the 75-char budget.
   if (apparelProduct && finalTitle.length < 73) {
     const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
-    const tail = tailMatch ? tailMatch[0] : ''
+    let tail = tailMatch ? tailMatch[0] : ''
     let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
+    // Approach B: the audience suffix is an OPTIONAL, lowest-priority tail. Drop it only for a truly
+    // INCLUSIVE audience ("for Men and Women" — always contains "and"), NEVER a single-gender tail
+    // ("for Men"/"for Women"). A single-gender tail may be a seller hard-lean OR a keyword-derived
+    // gendered audience (preferredAudience can be single-gender even when lean===null), so the `and`
+    // test protects both — gating on `lean` alone would wrongly drop a keyword-derived "for Women".
+    // If a higher-value candidate does not fit WITH the inclusive tail but WOULD fit without it, drop
+    // the audience and take the keyphrase (PO directive: product-specific outranks "for Men and Women").
+    const audienceDroppable = !!tail && lean !== 'female' && lean !== 'male' && /\band\b/i.test(tail)
     const headToks = new Set(bulletTokens(head))
     const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
     const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
@@ -3274,7 +3391,11 @@ async function buildTitleFor(
       const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust)
       if (safe !== kw) continue
       const next = `${head}, ${titleCaseKw(safe)}`
-      if ((next + tail).length > 75) continue
+      if ((next + tail).length > 75) {
+        // Fits only if we drop an OPTIONAL inclusive audience tail? Prefer the product-specific keyphrase.
+        if (audienceDroppable && tail && next.length <= 75) tail = ''
+        else continue
+      }
       head = next
       for (const tt of toks) headToks.add(tt)
       if ((head + tail).length >= 73) break
@@ -4210,7 +4331,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const groupDescSets = await Promise.all(designGroupContexts.map(async (ctx) => {
         const repSku = ctx.skus[0]?.sku
         const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
-        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets)
+        // useCouncil:false — this runs once PER design group inside a Promise.all, so N GPT-5 councils
+        // would fire in parallel; per-design descriptions stay on the single fast agent (only the
+        // broadcast description above gets the council).
+        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets, false)
         // Mirror the broadcast description strip chain EXACTLY, but ground motif-stripping on THIS
         // group's own design (parity with per-design titles/bullets) — not the parent/other designs.
         const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
