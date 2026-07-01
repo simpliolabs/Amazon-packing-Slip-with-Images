@@ -230,6 +230,10 @@ interface DiffRow {
    *  offerless row. The push SKIPS these: PATCHing a SKU with no live offer makes Amazon CREATE a
    *  phantom "Missing offer" ASIN instead of updating (the 2026-06-16 B0GHH4MQ7N incident). */
   notLive?: boolean
+  /** TIER-2 proactive pre-fill (self-healing-push): the parent hub's known-missing broadcast attrs are
+   *  resolved (live SP-API GETs) + written LAZILY in the push loop (executePush), never on the modal-open
+   *  GET preview path (adversarial review 2026-06-28). loadDiff only flags the parent row via isParent;
+   *  no prefill data rides the DiffRow, so the GET path issues ZERO SP-API GETs for prefill. */
 }
 
 /** Strip any GB/TB/MB capacity token from a title so it's safe for the variation-parent SKU.
@@ -298,6 +302,52 @@ async function findParentSku(sellerId: string, token: string, parentAsin: string
  * SKU stale (the bug this fixes). Keywords are per-color, so we resolve them by ASIN and
  * apply the same string to both SKUs of a pair (per_child_keywords holds one SKU per ASIN).
  */
+/** TIER-2 PROACTIVE PRE-FILL (self-healing-push): look up learned heal rules for this productType and,
+ *  for each 'inherit_from_child' rule, pre-resolve the value from a live child so the caller can attach
+ *  it to the parent's payload and ship complete (never trip the rejection again). READ-ONLY (no Amazon
+ *  writes), but it DOES issue live SP-API GETs (productType + child attributes), so it is GATED:
+ *
+ *  `resolve=false` → return [] immediately with ZERO SP-API calls. loadDiff passes false because it is
+ *  ALSO the modal-open GET preview path — a preview must never fan out N live GETs + sleeps (adversarial
+ *  review 2026-06-28). `resolve=true` → do the full resolution; only executePush (the PUSH path) passes
+ *  true, lazily, right before the parent content PATCH. Best-effort: a missing table/row → []. */
+async function resolvePrefillAttrs(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any, parentAsin: string, parentSku: string, sellerId: string | null, token: string | null,
+  resolve: boolean,
+): Promise<{ spApiKey: string; value: string }[]> {
+  try {
+    if (!resolve) return []   // GET-path guard: no SP-API from the modal-open preview
+    if (!sellerId || !token) return []
+    const productType = await tryGetProductType(sellerId, token, parentSku)
+    if (!productType) return []
+    const { data: rules } = await db.from('push_heal_rules')
+      .select('attr_key, resolution')
+      .eq('product_type', productType)
+      .eq('resolution', 'inherit_from_child')
+    const keys = [...new Set(((rules ?? []) as { attr_key: string }[]).map((r) => r.attr_key))]
+      .filter((k) => BROADCAST_HEALABLE.has(k))
+    if (keys.length === 0) return []
+    // Live child SKUs to inherit from (>=2 for cross-check agreement — same guard as the heal path).
+    const { data: childRows } = await db.from('listing_content')
+      .select('sku').eq('parent_asin', parentAsin).neq('sku', parentSku)
+    const childSkus = [...new Set(((childRows ?? []) as { sku: string }[]).map((r) => r.sku).filter(Boolean))]
+    if (childSkus.length < 2) return []
+    // FAN-OUT FIX: fetch each SAMPLED child ONCE (capped at HEAL_SAMPLE_CAP) and resolve EVERY key from
+    // that single payload — not one GET per (child × key). Same single-fetch model as the heal path.
+    const childAttrs = await fetchChildAttributesMap(sellerId, token, childSkus)
+    const out: { spApiKey: string; value: string }[] = []
+    for (const spApiKey of keys) {
+      const v = inheritChildValue(childAttrs, spApiKey)
+      if (v) out.push({ spApiKey, value: v })
+    }
+    return out
+  } catch (e) {
+    console.warn('[push-heal] prefill resolution failed (non-fatal):', e instanceof Error ? e.message : e)
+    return []
+  }
+}
+
 export async function loadDiff(parentAsin: string, field: PushField, titleOverride?: string): Promise<DiffRow[]> {
   const supabase = await createAdminClient()
 
@@ -496,6 +546,10 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
         }
         const parentStr = asCompare(parentValue)
         if (parentValue && parentStr.length > 0) {
+          // TIER-2 pre-fill: the actual missing-broadcast-attr RESOLUTION (live SP-API GETs) is DEFERRED
+          // to the push path (executePush) — this GET preview issues ZERO SP-API calls for it (adversarial
+          // review 2026-06-28). The parent row is simply flagged isParent; the push loop resolves + writes
+          // the learned prefill attrs lazily, just before the parent content PATCH.
           baseDiff.push({
             sku: parentSku, asin: parentAsin,
             current: '', // we don't cache the parent's content; VALIDATION_PREVIEW is the safety net
@@ -763,11 +817,35 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
 }
 
 
+// A structured SP-API listings issue. Amazon returns code + attributeNames alongside message; the
+// auto-heal layer needs those to identify WHICH attribute was rejected (self-healing-push).
+export type AmazonIssue = { code?: string; message?: string; severity?: string; attributeNames?: string[] }
+type PatchResult = { ok: boolean; submissionId: string | null; error?: string; issues?: AmazonIssue[] }
+// One per-SKU push outcome. `issues` carries the STRUCTURED Amazon rejection (code + attributeNames)
+// so the auto-heal layer can act on a parent rejection without re-parsing the message string.
+type PushResultRow = { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean; issues?: AmazonIssue[] }
+
+/** Parse an SP-API PATCH response's issues[] ONCE, keeping the STRUCTURED error issues (code +
+ *  attributeNames), not just the joined message — so auto-heal can act on the specific missing
+ *  attribute. ok:true means the submission validated clean. */
+function parsePatchIssues(json: { status?: string; submissionId?: string; issues?: AmazonIssue[] }): PatchResult {
+  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
+  if (json.status === 'INVALID' || errorIssues.length > 0) {
+    return {
+      ok: false,
+      submissionId: json.submissionId ?? null,
+      error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID',
+      issues: errorIssues,
+    }
+  }
+  return { ok: true, submissionId: json.submissionId ?? null }
+}
+
 // ─── PATCH one SKU's attribute (validation-preview, then live) ──────────────────
 async function patchSku(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: string, value: string | string[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
-): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+): Promise<PatchResult> {
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute}`, value: buildPatchValue(value, MARKETPLACE_ID) }],
@@ -785,12 +863,7 @@ async function patchSku(
     const txt = await resp.text()
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
-  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
-  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
-  if (json.status === 'INVALID' || errorIssues.length > 0) {
-    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
-  }
-  return { ok: true, submissionId: json.submissionId ?? null }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
 }
 
 /** Read the productType once from the first child (variation families share one type). */
@@ -804,7 +877,7 @@ async function patchSkuDetail(
   valueShape?: DetailValueShape | null,
   /** Calibrated patch value (a specific write-form variant) — overrides the builders. */
   patchValue?: Record<string, unknown>[],
-): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+): Promise<PatchResult> {
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
@@ -827,12 +900,192 @@ async function patchSkuDetail(
     const txt = await resp.text()
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
-  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
-  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
-  if (json.status === 'INVALID' || errorIssues.length > 0) {
-    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
+}
+
+// ─── DETERMINISTIC AUTO-HEAL — inherit a missing BROADCAST attribute onto the parent hub ───────
+// The non-buyable variation PARENT (e.g. Custom-Cup-TS-Parent) gets rejected on EVERY content/detail
+// PATCH when a required BROADCAST attribute (shirt_size#?.size_system / size_class, department,
+// age_range_description) is missing on the hub while its CHILDREN carry valid values. We READ a live
+// child's value and PATCH it onto the parent (VALIDATION_PREVIEW → LIVE). GUARDRAILS: broadcast-scope
+// ONLY (never per-variant color/size/capacity); a passing VALIDATION_PREVIEW gates every LIVE write;
+// ABSTAIN when children DISAGREE or none carries the value; everything is best-effort/non-throwing.
+
+/** Broadcast-scoped attribute keys the auto-heal is allowed to inherit onto the parent hub. STRICTLY
+ *  FLAT, parent-shared SCALAR attributes whose absence rejects the hub — NEVER per-variant axes
+ *  (color/size/capacity) whose value differs per child, and NEVER a COMPOSITE container.
+ *
+ *  COMPOSITES ARE DELIBERATELY EXCLUDED (adversarial review 2026-06-28). `shirt_size` is a per-variant
+ *  COMPOSITE container: its ITEM carries the per-child size, and `size_system`/`size_class` are
+ *  SUB-fields nested inside that container, not top-level attributes. The generic read
+ *  (currentDetailValue) and write (buildShapedDetailValue) pick a sub-field by DIFFERENT ambiguous
+ *  preference orders, so healing a composite can write a value into the WRONG sub-field of the live
+ *  parent hub — and VALIDATION_PREVIEW does NOT catch a wrong-shaped composite (Amazon accepts it,
+ *  then silently drops it). Because the allowlist is now flat scalars only, the fix-#2 read-back
+ *  compare is a reliable exact string match. Composite healing must be a SEPARATE, purpose-built,
+ *  read-back-verified follow-up (per-sub-field resolve + shaped write + re-read each sub-field) — it
+ *  must NOT ride this generic flat-scalar path. */
+const BROADCAST_HEALABLE = new Set<string>([
+  'department', 'age_range_description',
+])
+
+/** The outcome of one heal pass over a parent hub. `healed` = attrs written live; `abstained` =
+ *  skipped on child disagreement / no child value / non-broadcast; `failed` = validation or write
+ *  rejected. Never thrown — the caller (cron/trigger) rides the queue's attempts/backoff on failures. */
+export interface HealResult { healed: string[]; abstained: string[]; failed: string[] }
+
+/** Max children sampled to detect broadcast-value agreement. A handful is enough to catch a
+ *  disagreeing child; walking all N would be O(N) live SP-API GETs for no extra safety. */
+const HEAL_SAMPLE_CAP = 5
+
+/** Fetch each SAMPLED child's listing ONCE and return a Map<sku, attributesObject>. Caps the sample
+ *  at HEAL_SAMPLE_CAP live children (enough to detect disagreement — we don't walk all N). One GET per
+ *  child (NOT one per child×attribute): the caller extracts every eligible key from this single payload.
+ *  Best-effort: a failed GET simply omits that sku from the map (treated as "no value"). */
+async function fetchChildAttributesMap(
+  sellerId: string, token: string, childSkus: string[],
+): Promise<Map<string, Record<string, unknown> | null>> {
+  const map = new Map<string, Record<string, unknown> | null>()
+  for (const sku of childSkus.slice(0, HEAL_SAMPLE_CAP)) {
+    try {
+      const url =
+        `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+        `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+      const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+      if (resp.ok) {
+        const json = (await resp.json()) as { attributes?: Record<string, unknown> }
+        map.set(sku, json.attributes ?? null)
+      } else {
+        map.set(sku, null)
+      }
+    } catch { map.set(sku, null) }
+    await sleep(PATCH_DELAY_MS)
   }
-  return { ok: true, submissionId: json.submissionId ?? null }
+  return map
+}
+
+/** From a PRE-FETCHED child-attributes map, return the agreed value for one broadcast attribute or
+ *  null. ABSTAIN (null) when NO sampled child carries it OR the children DISAGREE — never guess a hub
+ *  value. No SP-API calls here: the map was built once by fetchChildAttributesMap (fixes the fan-out
+ *  of one GET per child×attribute). */
+function inheritChildValue(
+  childAttrs: Map<string, Record<string, unknown> | null>, spApiKey: string,
+): string | null {
+  const seen = new Set<string>()
+  for (const attrs of childAttrs.values()) {
+    const v = currentDetailValue(attrs ?? null, spApiKey).trim()
+    if (v) seen.add(v)
+  }
+  if (seen.size !== 1) return null   // 0 = none carries it; >1 = children disagree → abstain
+  return [...seen][0]
+}
+
+/**
+ * Inherit missing BROADCAST attributes from live children onto the variation parent hub, so the
+ * hub stops rejecting every PATCH. Best-effort and NON-THROWING: any failure is captured in the
+ * returned buckets, never propagated. On a live-accepted heal it upserts a push_heal_rules row
+ * (resolution 'inherit_from_child') so the Tier-2 pre-fill ships the value on future pushes.
+ */
+export async function healParentAttributes(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  args: { parent_asin: string; parentSku: string; productType: string; missingAttrKeys: string[] },
+): Promise<HealResult> {
+  const { parent_asin, parentSku, productType, missingAttrKeys } = args
+  const out: HealResult = { healed: [], abstained: [], failed: [] }
+  // Only broadcast-scoped, schema-known keys are eligible — the guardrail against writing a
+  // per-variant axis (color/size) onto the shared hub.
+  const eligible = [...new Set(missingAttrKeys)].filter((k) => BROADCAST_HEALABLE.has(k))
+  const nonEligible = [...new Set(missingAttrKeys)].filter((k) => !BROADCAST_HEALABLE.has(k))
+  out.abstained.push(...nonEligible)
+  if (!parent_asin || !parentSku || !productType || eligible.length === 0) return out
+
+  try {
+    const token = await getAccessToken()
+    const sellerId = await getSellerId()
+    const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+
+    // Live child SKUs of the family (exclude the parent hub itself). Need >=2 to trust an inherited
+    // value (a single child can't be cross-checked for agreement) — abstain on the whole heal otherwise.
+    const { data: childRows } = await db.from('listing_content')
+      .select('sku')
+      .eq('parent_asin', parent_asin)
+      .neq('sku', parentSku)
+    const childSkus = [...new Set(((childRows ?? []) as { sku: string }[]).map((r) => r.sku).filter(Boolean))]
+    if (childSkus.length < 2) { out.abstained.push(...eligible); return out }
+
+    // FAN-OUT FIX (adversarial review 2026-06-28): fetch each SAMPLED child's listing ONCE and extract
+    // EVERY eligible key from that single attributes payload — instead of one full getListingsItem GET
+    // per (child × attribute). Capped at HEAL_SAMPLE_CAP live children (enough to detect disagreement).
+    const childAttrs = await fetchChildAttributesMap(sellerId, token, childSkus)
+
+    for (const spApiKey of eligible) {
+      try {
+        const inherited = inheritChildValue(childAttrs, spApiKey)
+        if (!inherited) { out.abstained.push(spApiKey); continue }   // disagreement / none carries it
+        const attribute: DetailAttribute = { spApiKey, scope: 'broadcast' }
+        // Allowlist is FLAT SCALARS only (composites are excluded — see BROADCAST_HEALABLE), so the
+        // legacy flat builder applies and valueShape stays null. We still probe defensively; a flat
+        // attr returns null and the read-back below is an exact string match.
+        let valueShape: DetailValueShape | null = null
+        try { valueShape = await getDetailValueShape(productType, spApiKey, ptOpts) } catch { /* flat */ }
+
+        const preview = await patchSkuDetail(sellerId, token, productType, parentSku, attribute, inherited, 'VALIDATION_PREVIEW', valueShape)
+        if (!preview.ok) { out.failed.push(spApiKey); await sleep(PATCH_DELAY_MS); continue }
+        const live = await patchSkuDetail(sellerId, token, productType, parentSku, attribute, inherited, 'LIVE', valueShape)
+        if (!live.ok) { out.failed.push(spApiKey); await sleep(PATCH_DELAY_MS); continue }
+
+        // READ-BACK VERIFICATION (adversarial review 2026-06-28): a LIVE patch that returns ok does NOT
+        // prove the value persisted — Amazon can accept then SILENTLY DROP a value (the composite failure
+        // mode; also possible for a flat attr under a schema quirk). Re-READ the parent's attribute and
+        // only count this healed IF the hub now actually reflects the inherited value (exact string match
+        // after .trim() — reliable because the allowlist is flat scalars). If it did NOT persist, push to
+        // out.failed (do NOT learn a rule, do NOT log accepted) so the queue's attempts/backoff/
+        // needs_attention surface it, rather than looping on a false 'converged'.
+        await sleep(PATCH_DELAY_MS)
+        const readBack = (await fetchCurrentDetail(sellerId, token, parentSku, spApiKey)).trim()
+        if (readBack !== inherited.trim()) {
+          console.warn(`[push-heal] read-back MISMATCH for ${spApiKey} on ${parentSku}: expected "${inherited.trim()}", hub reads "${readBack}" - Amazon accepted then dropped it; marking failed.`)
+          out.failed.push(spApiKey)
+          await sleep(PATCH_DELAY_MS)
+          continue
+        }
+
+        out.healed.push(spApiKey)
+        // Attribute write log (SYSTEM_ACTOR — pushed_by null, FK-safe). Best-effort.
+        try {
+          await db.from('keyword_push_log').insert({
+            parent_asin, sku: parentSku, field: `heal:${spApiKey}`,
+            previous_value: null, new_value: inherited,
+            submission_id: live.submissionId, status: 'accepted', error_message: null,
+            pushed_by: SYSTEM_ACTOR.id,
+          })
+        } catch (e) { console.warn('[push-heal] keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
+        // Learn the rule so the Tier-2 pre-fill ships it complete next time. hit_count increments on repeat.
+        try {
+          const { data: existing } = await db.from('push_heal_rules')
+            .select('hit_count').eq('product_type', productType).eq('attr_key', spApiKey).maybeSingle()
+          const prevHits = (existing as { hit_count?: number } | null)?.hit_count ?? 0
+          await db.from('push_heal_rules').upsert({
+            product_type: productType, attr_key: spApiKey,
+            sub_keys: valueShape ? valueShape.path : [],
+            resolution: 'inherit_from_child', resolved_value: null,
+            last_seen_at: new Date().toISOString(), hit_count: prevHits + 1,
+          }, { onConflict: 'product_type,attr_key' })
+        } catch (e) { console.warn('[push-heal] push_heal_rules upsert failed (non-fatal):', e instanceof Error ? e.message : e) }
+        await sleep(PATCH_DELAY_MS)
+      } catch (e) {
+        console.warn(`[push-heal] heal of ${spApiKey} threw (non-fatal):`, e instanceof Error ? e.message : e)
+        out.failed.push(spApiKey)
+      }
+    }
+  } catch (e) {
+    console.warn('[push-heal] healParentAttributes prep failed (non-fatal):', e instanceof Error ? e.message : e)
+    // Any eligible attr we didn't get to is neither healed nor failed deterministically — leave it
+    // for the next attempt by marking abstained (the queue's attempts/backoff decides retry vs stop).
+    for (const k of eligible) if (!out.healed.includes(k) && !out.failed.includes(k)) out.abstained.push(k)
+  }
+  return out
 }
 
 /** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
@@ -843,7 +1096,7 @@ async function patchSkuDetail(
 async function patchSkuMulti(
   sellerId: string, token: string, productType: string, sku: string,
   ops: { op: 'replace'; path: string; value: unknown }[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
-): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
   const body = { productType, patches: ops }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
@@ -859,12 +1112,7 @@ async function patchSkuMulti(
     const txt = await resp.text()
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
-  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
-  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
-  if (json.status === 'INVALID' || errorIssues.length > 0) {
-    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
-  }
-  return { ok: true, submissionId: json.submissionId ?? null }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
 }
 
 /** Read ONE SKU's listing once and extract the CURRENT value of many attributes from that
@@ -967,6 +1215,38 @@ function summarizePush(results: { status: string; isParent?: boolean }[]): {
         ? ' (The variation parent hub was rejected — usually an incomplete required attribute like its Shirt Size System/Class; complete it in Seller Central. The buyable variants shoppers see were updated.)'
         : ''
   return { accepted, failed, childTotal: children.length, parentNote }
+}
+
+/** If the variation PARENT row FAILED with a rejection naming a BROADCAST-healable attribute, enqueue
+ *  a self-heal task (migration 042 kind='heal'). Non-blocking and best-effort — it NEVER flips the
+ *  push outcome (the parentNote stays the seller-facing signal); it just schedules the cron to inherit
+ *  the missing attribute from a live child.
+ *
+ *  NON-ELIGIBLE ATTRS SURFACE, they do NOT silently vanish (adversarial review 2026-06-28): when the
+ *  rejection names attributes that are NOT auto-healable (e.g. shirt_size — a composite/per-variant axis
+ *  the auto-heal deliberately excludes), we write a DURABLE, VISIBLE needs_attention row via
+ *  flagParentAttrsNeedAttention instead of the previous invisible silent abstain. */
+async function maybeEnqueueParentHeal(
+  parent_asin: string, productType: string | null, results: PushResultRow[],
+): Promise<void> {
+  try {
+    const parent = results.find((r) => r.isParent && r.status === 'failed')
+    if (!parent?.sku || !parent.issues?.length) return
+    const rejectedAttrs = [...new Set(parent.issues.flatMap((i) => i.attributeNames ?? []))]
+    const healable = rejectedAttrs.filter((k) => BROADCAST_HEALABLE.has(k))
+    const nonHealable = rejectedAttrs.filter((k) => !BROADCAST_HEALABLE.has(k))
+    const { enqueueHeal, flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+    // Auto-heal the flat-scalar broadcast attrs (needs a resolved productType to schedule the heal).
+    if (productType && healable.length > 0) {
+      await enqueueHeal(parent_asin, { parentSku: parent.sku, productType, missingAttrKeys: healable })
+    }
+    // Surface the rest as a standing, seller-visible "not auto-healable" signal (durable, non-blocking).
+    if (nonHealable.length > 0) {
+      await flagParentAttrsNeedAttention(parent_asin, nonHealable)
+    }
+  } catch (e) {
+    console.warn('[push-heal] enqueue trigger failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
 }
 
 export async function executePush(params: PushParams, emit: PushEmit): Promise<void> {
@@ -1074,7 +1354,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             calibratedValueFor = (v: string) => buildShapedDetailValueVariants(shape, v, MARKETPLACE_ID)[winIdx]?.value
           }
 
-          const results: { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }[] = []
+          const results: PushResultRow[] = []
           let cancelled = false
           for (const item of diff) {
             if (pushCancelled(params.cancel_token)) { cancelled = true; break }
@@ -1089,7 +1369,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
                 ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
                 : preview.error
-              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr, isParent })
+              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr, isParent, issues: preview.issues })
               emit({ type: 'progress', sku: item.sku, status: 'failed', error: friendlyErr })
               await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: friendlyErr })
               await sleep(PATCH_DELAY_MS)
@@ -1097,7 +1377,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             }
             const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape, calibratedValueFor(newValueStr))
             const status = live.ok ? 'accepted' : 'failed'
-            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent })
+            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent, issues: live.issues })
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
             await sleep(PATCH_DELAY_MS)
@@ -1105,6 +1385,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
 
           // Pass/fail over the buyable CHILDREN; the parent hub's outcome is a non-blocking note.
           const { accepted, failed, childTotal, parentNote } = summarizePush(results)
+
+          // SELF-HEAL trigger (self-healing-push): a parent hub rejected on a missing BROADCAST
+          // attribute (the shirt_size#?.size_system/size_class case) schedules the cron to inherit it
+          // from a live child. Non-blocking; parentNote unchanged.
+          await maybeEnqueueParentHeal(parent_asin, productType, results)
 
           // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets ship→rise experience),
           // instead of staying RED until the next regen re-reads Amazon. On success, mark this detail's
@@ -1277,11 +1562,32 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.error('[push-content] keyword_push_log insert threw:', e) }
         }
 
-        const results: { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }[] = []
+        const results: PushResultRow[] = []
         let cancelled = false
         for (const item of diff) {
           if (pushCancelled(params.cancel_token)) { cancelled = true; break }
           const isParent = item.asin === parent_asin
+          // TIER-2 PRE-FILL: complete the parent hub's known-missing broadcast attributes (learned in
+          // push_heal_rules) BEFORE the content PATCH, so the hub's re-validation no longer trips the
+          // rejection. RESOLUTION IS LAZY HERE (adversarial review 2026-06-28): loadDiff (the GET preview)
+          // does ZERO SP-API for this — resolvePrefillAttrs(..., resolve=true) runs only on THIS push path,
+          // only for the parent row. Best-effort, VALIDATION_PREVIEW-gated; a failure here never blocks the
+          // content push (the heal cron is the backstop).
+          if (isParent) {
+            try {
+              const prefillAttrs = await resolvePrefillAttrs(db, parent_asin, item.sku, sellerId, token, true)
+              for (const pf of prefillAttrs) {
+                try {
+                  const attr: DetailAttribute = { spApiKey: pf.spApiKey, scope: 'broadcast' }
+                  const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
+                  let shape: DetailValueShape | null = null
+                  try { shape = await getDetailValueShape(productType, pf.spApiKey, ptOpts) } catch { /* flat */ }
+                  const pv = await patchSkuDetail(sellerId, token, productType, item.sku, attr, pf.value, 'VALIDATION_PREVIEW', shape)
+                  if (pv.ok) { await patchSkuDetail(sellerId, token, productType, item.sku, attr, pf.value, 'LIVE', shape); await sleep(PATCH_DELAY_MS) }
+                } catch (e) { console.warn('[push-heal] prefill patch failed (non-fatal):', e instanceof Error ? e.message : e) }
+              }
+            } catch (e) { console.warn('[push-heal] prefill resolution failed (non-fatal):', e instanceof Error ? e.message : e) }
+          }
           // SCRUB-AT-PUSH backstop (batch 2/6): trademark-scrub the value at the moment of publish,
           // so a MANUALLY-typed mark (the title-override box bypasses the generation-time scrub #240)
           // or any stale stored content can never be WRITTEN to Amazon as a protected term ("World
@@ -1293,7 +1599,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
           const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
           if (!preview.ok) {
-            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error, isParent })
+            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error, isParent, issues: preview.issues })
             emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
             await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
             await sleep(PATCH_DELAY_MS)
@@ -1301,7 +1607,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           }
           const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
           const status = live.ok ? 'accepted' : 'failed'
-          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent })
+          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent, issues: live.issues })
           emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
           await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
           if (live.ok) {
@@ -1317,13 +1623,25 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         // Pass/fail over the buyable CHILDREN; the parent hub's outcome is a non-blocking note.
         const { accepted, failed, childTotal, parentNote } = summarizePush(results)
 
+        // SELF-HEAL trigger (self-healing-push): if the parent hub was rejected on a missing BROADCAST
+        // attribute, schedule the cron to inherit it from a live child. Non-blocking; parentNote unchanged.
+        await maybeEnqueueParentHeal(parent_asin, productType, results)
+
         // Re-score so the page's score reflects the just-pushed values. Best-effort.
         // Phase C: capture the just-pushed content fingerprint + post-push overall score here (where
         // the fresh top-child content is in hand) so the full-accept hinge can stamp the OUTCOME EPOCH
         // (§4-E) and the push-trigger score-history row (§4-D) both use this EXACT measured copy.
         let pushedFingerprint: string | null = null
         let pushedOverall: number | null = null
-        if (accepted > 0) {
+        // B-fix: re-score whenever the family's LIVE content is confirmed — including a re-push where the
+        // children were already current so only the variation parent was attempted (childTotal===0).
+        // Gating the re-score on accepted>0 froze the score on exactly that case (parent-only push whose
+        // parent Amazon rejects, PO-caught: "if it fails it does not update the score"). The DESTRUCTIVE
+        // side-effects (manual-title-as-rec, DONE verdict, auto-verify enqueue, outcome stamp) stay on the
+        // stricter accepted>0 / failed===0 gates below. The empty-diff early return upstream already
+        // prevents a re-score when the push wrote literally nothing, so this never runs on a no-op.
+        const shouldRescore = accepted > 0 || childTotal === 0
+        if (shouldRescore) {
           emit({ type: 'rescore', message: 'Re-scoring listing…' })
           try {
             const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
@@ -1370,7 +1688,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, fingerprint: pushedFingerprint })
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
+        }
 
+        // Below stays on the STRICT accepted>0 gate — these are destructive (rewrite the stored
+        // recommendation / flip the plan verdict to DONE) and must only fire when a child actually shipped.
+        if (accepted > 0) {
           // ── Persist a MANUAL title override AS the recommendation (broadcast-title products only) ──
           // When the seller pushes their OWN title, the live content becomes their title but the stored
           // recommendation is still the AI's. That leaves live != recommendation FOREVER: the cohesion row

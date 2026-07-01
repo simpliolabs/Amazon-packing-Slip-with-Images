@@ -75,6 +75,86 @@ export async function enqueueVerification(args: EnqueueArgs): Promise<void> {
   }
 }
 
+/** Payload for a self-heal task (kind='heal'): the parent hub SKU, its productType, and the
+ *  broadcast attribute keys the parent is missing. The cron hands this to healParentAttributes. */
+export interface HealPayload {
+  parentSku: string
+  productType: string
+  missingAttrKeys: string[]
+}
+
+/** Register a SELF-HEAL task on the existing verify queue (migration 042 kind='heal'). Reuses the
+ *  claim/backoff/attempt machinery: field='heal' keeps ONE active heal task per parent (the partial
+ *  unique index on (parent_asin, field) + the abandon-then-insert below supersede a stale heal).
+ *  Best-effort — a missed enqueue just means no auto-heal for THAT rejection (the push still shipped
+ *  the buyable children); the migration not being applied is the common no-op cause. */
+export async function enqueueHeal(parent_asin: string, payload: HealPayload, maxAttempts = 3): Promise<void> {
+  if (!parent_asin || !payload?.parentSku || !(payload.missingAttrKeys?.length)) return
+  const field = 'heal'
+  const next = new Date(Date.now() + INITIAL_DELAY_MS).toISOString()
+  try {
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    await db.from('push_verification_tasks')
+      .update({ status: 'abandoned', updated_at: new Date().toISOString() })
+      .eq('parent_asin', parent_asin)
+      .eq('field', field)
+      .in('status', ['pending', 'running'])
+    await db.from('push_verification_tasks').insert({
+      parent_asin,
+      field,
+      kind: 'heal',
+      heal_payload: payload,
+      status: 'pending',
+      attempts: 0,
+      max_attempts: maxAttempts,
+      next_check_at: next,
+    })
+  } catch (e) {
+    console.warn('[verification-queue] enqueueHeal failed (migration 042 applied?):', e instanceof Error ? e.message : e)
+  }
+}
+
+/** Surface a parent rejection whose missing attributes are NOT auto-healable (e.g. shirt_size and other
+ *  composites/per-variant axes the auto-heal deliberately excludes). Instead of the auto-heal silently
+ *  abstaining (an invisible dead-end), write a DURABLE, VISIBLE needs_attention row so the seller gets a
+ *  standing "parent hub needs <attrs> — not auto-healable, complete it in Seller Central" signal.
+ *
+ *  Non-blocking and best-effort (the buyable children already shipped). Uses field='heal:manual' so it
+ *  does NOT collide with the active kind='heal' auto-heal task's (parent_asin, field) uniqueness, and it
+ *  is inserted DIRECTLY as needs_attention (a terminal state the cron never claims — status is neither
+ *  pending nor running). Supersedes any prior manual-attention row for this parent (newer rejection wins). */
+export async function flagParentAttrsNeedAttention(parent_asin: string, missingAttrKeys: string[]): Promise<void> {
+  const attrs = [...new Set((missingAttrKeys ?? []).filter(Boolean))]
+  if (!parent_asin || attrs.length === 0) return
+  const field = 'heal:manual'
+  try {
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    await db.from('push_verification_tasks')
+      .update({ status: 'abandoned', updated_at: new Date().toISOString() })
+      .eq('parent_asin', parent_asin)
+      .eq('field', field)
+      .in('status', ['pending', 'running', 'needs_attention'])
+    await db.from('push_verification_tasks').insert({
+      parent_asin,
+      field,
+      kind: 'heal',
+      heal_payload: { parentSku: '', productType: '', missingAttrKeys: attrs },
+      status: 'needs_attention',
+      attempts: 0,
+      max_attempts: 0,
+      next_check_at: new Date().toISOString(),
+      last_verified_at: new Date().toISOString(),
+      last_error: `Parent hub needs ${attrs.join(', ')} - not auto-healable (composite/per-variant attribute). Complete it in Seller Central, then re-push.`,
+    })
+  } catch (e) {
+    console.warn('[verification-queue] flagParentAttrsNeedAttention failed (migration 042 applied?):', e instanceof Error ? e.message : e)
+  }
+}
+
 /** Pick up to `limit` tasks that are DUE and atomically flip pending → running so two
  *  concurrent cron invocations never double-process the same task. Returns the claimed
  *  rows; an unclaimed row stays pending for the next cron tick. */
@@ -130,6 +210,11 @@ export interface PushVerificationTask {
   reship_attempts?: number | null
   /** The user's ORIGINAL approved push submission id (safety d: SAME-CONTENT provenance). */
   origin_submission_id?: string | null
+  // ── Self-heal tasks (migration 042). Default kind='verify' → existing behavior unchanged. ──
+  /** 'verify' (default) | 'heal' (cron runs healParentAttributes on heal_payload). */
+  kind?: string | null
+  /** For kind='heal': { parentSku, productType, missingAttrKeys } handed to healParentAttributes. */
+  heal_payload?: HealPayload | null
 }
 
 /** Mark a task as complete (100% applied on Amazon). */
