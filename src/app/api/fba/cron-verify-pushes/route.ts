@@ -17,7 +17,7 @@ import {
   claimDueTasks, completeTask, rescheduleTask, flagNeedsAttention, softFailTask,
   enqueueVerification, type PushVerificationTask, type HealPayload,
 } from '@/lib/fba/verificationQueue'
-import { executePush, healParentAttributes, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
+import { executePush, healParentAttributes, healParentComposite, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
 import { createAdminClient } from '@/lib/supabase/server'
 
 export const dynamic = 'force-dynamic'
@@ -117,12 +117,23 @@ async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean
   }
   try {
     const db = await createAdminClient()
-    const res = await healParentAttributes(db, {
-      parent_asin: task.parent_asin,
-      parentSku: payload.parentSku,
-      productType: payload.productType,
-      missingAttrKeys: payload.missingAttrKeys,
-    })
+    // COMPOSITE heal (self-healing composite): a rejection naming a composite container (shirt_size) rides
+    // the SAME queue/backoff but dispatches to the purpose-built verbatim-mirror + read-back path, NOT the
+    // flat healParentAttributes. Absent `composite` → the existing flat path, behavior unchanged.
+    const res = payload.composite
+      ? await healParentComposite(db, {
+          parent_asin: task.parent_asin,
+          parentSku: payload.parentSku,
+          productType: payload.productType,
+          containerKey: payload.composite.containerKey,
+          subKeys: payload.composite.subKeys,
+        })
+      : await healParentAttributes(db, {
+          parent_asin: task.parent_asin,
+          parentSku: payload.parentSku,
+          productType: payload.productType,
+          missingAttrKeys: payload.missingAttrKeys,
+        })
     return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed }
   } catch (e) {
     return { converged: false, healed: [], abstained: [], failed: payload.missingAttrKeys, error: e instanceof Error ? e.message : String(e) }

@@ -76,11 +76,17 @@ export async function enqueueVerification(args: EnqueueArgs): Promise<void> {
 }
 
 /** Payload for a self-heal task (kind='heal'): the parent hub SKU, its productType, and the
- *  broadcast attribute keys the parent is missing. The cron hands this to healParentAttributes. */
+ *  broadcast attribute keys the parent is missing. The cron hands this to healParentAttributes.
+ *
+ *  COMPOSITE variant (self-healing composite): when `composite` is present the rejection named a
+ *  COMPOSITE container (e.g. shirt_size, sub-fields size_system/size_class) which the flat auto-heal
+ *  deliberately excludes; the cron dispatches to the purpose-built healParentComposite instead. Absent
+ *  `composite` (the default) → the existing flat healParentAttributes path, behavior unchanged. */
 export interface HealPayload {
   parentSku: string
   productType: string
   missingAttrKeys: string[]
+  composite?: { containerKey: string; subKeys: string[] }
 }
 
 /** Register a SELF-HEAL task on the existing verify queue (migration 042 kind='heal'). Reuses the

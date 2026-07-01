@@ -311,11 +311,19 @@ async function findParentSku(sellerId: string, token: string, parentAsin: string
  *  ALSO the modal-open GET preview path — a preview must never fan out N live GETs + sleeps (adversarial
  *  review 2026-06-28). `resolve=true` → do the full resolution; only executePush (the PUSH path) passes
  *  true, lazily, right before the parent content PATCH. Best-effort: a missing table/row → []. */
+/** A resolved Tier-2 pre-fill entry. `flat` = a scalar broadcast attr (department/age_range) written via
+ *  the shaped detail builder. `composite` = a verbatim-mirrored composite container (shirt_size) whose
+ *  `value` is the ready-to-PATCH array — written raw via patchSkuMulti so NO shape builder reshapes the
+ *  child's own sub-objects (the same fail-safe payload the heal path builds). */
+type PrefillEntry =
+  | { kind: 'flat'; spApiKey: string; value: string }
+  | { kind: 'composite'; containerKey: string; value: unknown[] }
+
 async function resolvePrefillAttrs(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any, parentAsin: string, parentSku: string, sellerId: string | null, token: string | null,
   resolve: boolean,
-): Promise<{ spApiKey: string; value: string }[]> {
+): Promise<PrefillEntry[]> {
   try {
     if (!resolve) return []   // GET-path guard: no SP-API from the modal-open preview
     if (!sellerId || !token) return []
@@ -325,9 +333,13 @@ async function resolvePrefillAttrs(
       .select('attr_key, resolution')
       .eq('product_type', productType)
       .eq('resolution', 'inherit_from_child')
-    const keys = [...new Set(((rules ?? []) as { attr_key: string }[]).map((r) => r.attr_key))]
-      .filter((k) => BROADCAST_HEALABLE.has(k))
-    if (keys.length === 0) return []
+    const ruleKeys = [...new Set(((rules ?? []) as { attr_key: string }[]).map((r) => r.attr_key))]
+    const flatKeys = ruleKeys.filter((k) => BROADCAST_HEALABLE.has(k))
+    // Composite rules are keyed on the container name (shirt_size); resolve each learned container's spec.
+    const compositeSpecs = ruleKeys
+      .map((k) => COMPOSITE_HEAL_SPECS.find((s) => s.containerKey === k))
+      .filter((s): s is { containerKey: string; subKeys: string[] } => !!s)
+    if (flatKeys.length === 0 && compositeSpecs.length === 0) return []
     // Live child SKUs to inherit from (>=2 for cross-check agreement — same guard as the heal path).
     const { data: childRows } = await db.from('listing_content')
       .select('sku').eq('parent_asin', parentAsin).neq('sku', parentSku)
@@ -336,10 +348,15 @@ async function resolvePrefillAttrs(
     // FAN-OUT FIX: fetch each SAMPLED child ONCE (capped at HEAL_SAMPLE_CAP) and resolve EVERY key from
     // that single payload — not one GET per (child × key). Same single-fetch model as the heal path.
     const childAttrs = await fetchChildAttributesMap(sellerId, token, childSkus)
-    const out: { spApiKey: string; value: string }[] = []
-    for (const spApiKey of keys) {
+    const out: PrefillEntry[] = []
+    for (const spApiKey of flatKeys) {
       const v = inheritChildValue(childAttrs, spApiKey)
-      if (v) out.push({ spApiKey, value: v })
+      if (v) out.push({ kind: 'flat', spApiKey, value: v })
+    }
+    for (const spec of compositeSpecs) {
+      // Identical verbatim-mirror + agreement guard the heal path uses — pre-fill ships the SAME payload.
+      const built = buildCompositeMirrorItem(childAttrs, spec.containerKey, spec.subKeys)
+      if (built) out.push({ kind: 'composite', containerKey: spec.containerKey, value: [built.item] })
     }
     return out
   } catch (e) {
@@ -929,6 +946,22 @@ const BROADCAST_HEALABLE = new Set<string>([
   'department', 'age_range_description',
 ])
 
+/** COMPOSITE auto-heal registry (self-healing composite). A parent hub rejection can name a COMPOSITE
+ *  CONTAINER (`shirt_size`) OR its invariant SUB-fields (`size_system`/`size_class`) directly — Amazon's
+ *  issue.attributeNames varies. Both map to the same purpose-built healParentComposite (verbatim-mirror +
+ *  read-back), NOT the flat healParentAttributes path. `subKeys` are the parent-INVARIANT sub-objects to
+ *  mirror; the per-variant `size` is deliberately NOT listed (never inherited onto the shared hub). */
+const COMPOSITE_HEAL_SPECS: { containerKey: string; subKeys: string[] }[] = [
+  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'] },
+]
+/** Rejected-attribute name → the composite spec that heals it (container name OR any of its subKeys). */
+function compositeSpecForRejectedAttr(attr: string): { containerKey: string; subKeys: string[] } | null {
+  for (const spec of COMPOSITE_HEAL_SPECS) {
+    if (attr === spec.containerKey || spec.subKeys.includes(attr)) return spec
+  }
+  return null
+}
+
 /** The outcome of one heal pass over a parent hub. `healed` = attrs written live; `abstained` =
  *  skipped on child disagreement / no child value / non-broadcast; `failed` = validation or write
  *  rejected. Never thrown — the caller (cron/trigger) rides the queue's attempts/backoff on failures. */
@@ -1088,6 +1121,164 @@ export async function healParentAttributes(
   return out
 }
 
+// ─── COMPOSITE AUTO-HEAL — mirror a parent hub's missing COMPOSITE sub-fields from a live child ─────
+// PURPOSE-BUILT, FAIL-SAFE path for the `shirt_size` container (size_system/size_class). SEPARATE from
+// the flat healParentAttributes above BECAUSE the generic read/write path picks composite sub-fields by
+// ambiguous preference orders and VALIDATION_PREVIEW does NOT catch a wrong-shaped composite (Amazon
+// accepts then silently drops it — the 0/89 neck/closure incident). This path is safe because it
+//   (a) copies the child's OWN Amazon-validated sub-objects VERBATIM (no shape guessing / no builder), and
+//   (b) READS BACK the parent to confirm each sub-field actually persisted before it learns/logs.
+
+/** The shirt_size composite as Amazon returns it: an ARRAY of composite items; each item carries the
+ *  per-variant `size` plus the invariant sub-objects (size_system, size_class) + marketplace_id. We copy
+ *  the sub-objects verbatim, so their internal shape (array vs object) is never inspected — it's `unknown`. */
+type CompositeItem = Record<string, unknown>
+
+/** From a PRE-FETCHED child-attributes map, build ONE composite item for the parent hub that mirrors the
+ *  children's agreed invariant sub-objects VERBATIM — plus marketplace_id. AGREEMENT GUARD: every sampled
+ *  child must carry EVERY subKey and all children must agree (JSON-stringified compare) on each; otherwise
+ *  ABSTAIN (never inherit a per-variant / disagreeing value). Never includes the per-variant `size`. No
+ *  SP-API calls here — the map was built once by fetchChildAttributesMap. SHARED by heal + Tier-2 pre-fill
+ *  so both write the byte-identical payload. Returns null on abstain. */
+function buildCompositeMirrorItem(
+  childAttrs: Map<string, Record<string, unknown> | null>,
+  containerKey: string,
+  subKeys: string[],
+): { item: CompositeItem; agreedByKey: Record<string, string> } | null {
+  // Collect the FIRST composite item's verbatim sub-object for each subKey, per sampled child.
+  const perKeyValues: Record<string, unknown[]> = Object.fromEntries(subKeys.map((k) => [k, []]))
+  let samples = 0
+  for (const attrs of childAttrs.values()) {
+    const raw = attrs?.[containerKey]
+    if (!Array.isArray(raw) || raw.length === 0) continue
+    const first = raw[0]
+    if (first == null || typeof first !== 'object') continue
+    samples++
+    const firstObj = first as Record<string, unknown>
+    for (const k of subKeys) perKeyValues[k].push(firstObj[k])   // undefined if the child lacks this subKey
+  }
+  // Need >=2 sampled children carrying the container to cross-check agreement.
+  if (samples < 2) return null
+
+  const item: CompositeItem = {}
+  const agreedByKey: Record<string, string> = {}
+  for (const k of subKeys) {
+    const vals = perKeyValues[k]
+    // Every sampled child must carry this subKey (no undefined) AND agree on it (one distinct JSON).
+    if (vals.length !== samples) return null
+    const jsons = new Set<string>()
+    for (const v of vals) {
+      if (v === undefined || v === null) return null   // a child is missing this subKey → abstain whole heal
+      try { jsons.add(JSON.stringify(v)) } catch { return null }
+    }
+    if (jsons.size !== 1) return null                  // children disagree → abstain
+    item[k] = vals[0]                                  // VERBATIM copy of the child's own sub-object
+    agreedByKey[k] = [...jsons][0]
+  }
+  item.marketplace_id = MARKETPLACE_ID
+  return { item, agreedByKey }
+}
+
+/**
+ * Inherit a parent hub's missing COMPOSITE sub-fields (size_system/size_class of shirt_size) VERBATIM
+ * from live children, then READ BACK the parent to confirm they persisted. Purpose-built + fail-safe;
+ * NON-THROWING (any failure lands in the returned buckets). Learns a push_heal_rules row ONLY after a
+ * confirmed read-back so the Tier-2 pre-fill mirrors it on future pushes. If Amazon accepts but silently
+ * drops (read-back mismatch) it does NOT learn/log accepted — it returns failed and flags the parent for
+ * seller attention so the dead-end is visible rather than looping on a false "converged".
+ */
+export async function healParentComposite(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  args: { parent_asin: string; parentSku: string; productType: string; containerKey: string; subKeys: string[] },
+): Promise<HealResult> {
+  const { parent_asin, parentSku, productType, containerKey, subKeys } = args
+  const out: HealResult = { healed: [], abstained: [], failed: [] }
+  if (!parent_asin || !parentSku || !productType || !containerKey || !(subKeys?.length)) {
+    if (containerKey) out.abstained.push(containerKey)
+    return out
+  }
+
+  try {
+    const token = await getAccessToken()
+    const sellerId = await getSellerId()
+
+    // 1) Load >=2 live child SKUs (exclude the parent hub). <2 → cannot cross-check agreement → abstain.
+    const { data: childRows } = await db.from('listing_content')
+      .select('sku')
+      .eq('parent_asin', parent_asin)
+      .neq('sku', parentSku)
+    const childSkus = [...new Set(((childRows ?? []) as { sku: string }[]).map((r) => r.sku).filter(Boolean))]
+    if (childSkus.length < 2) { out.abstained.push(containerKey); return out }
+
+    // 2) Fetch each SAMPLED child ONCE (capped at HEAL_SAMPLE_CAP) — the raw attributes object per child.
+    const childAttrs = await fetchChildAttributesMap(sellerId, token, childSkus)
+
+    // 3) AGREEMENT GUARD + verbatim mirror (never reshaped). Abstains on any absent/disagreeing subKey.
+    const built = buildCompositeMirrorItem(childAttrs, containerKey, subKeys)
+    if (!built) { out.abstained.push(containerKey); return out }
+
+    // 4) Build the parent write — ONLY the agreed invariant sub-objects + marketplace_id (NO per-variant
+    //    `size`). Raw ops via patchSkuMulti so NO shape builder ever touches the child's verbatim objects.
+    const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [built.item] }]
+    const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
+    if (!preview.ok) { out.failed.push(containerKey); return out }
+    const live = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'LIVE')
+    if (!live.ok) { out.failed.push(containerKey); return out }
+
+    // 5) READ-BACK (critical fail-safe): re-fetch the parent's container and confirm EACH subKey now
+    //    reflects the agreed value VERBATIM (JSON-stringify compare of the parent's first composite item's
+    //    sub-object). Amazon can accept then SILENTLY DROP a composite — a LIVE ok does NOT prove persistence.
+    await sleep(PATCH_DELAY_MS)
+    const parentAttrs = await fetchChildAttributesMap(sellerId, token, [parentSku])
+    const parentRaw = parentAttrs.get(parentSku)?.[containerKey]
+    const parentFirst = Array.isArray(parentRaw) && parentRaw.length > 0 && typeof parentRaw[0] === 'object'
+      ? (parentRaw[0] as Record<string, unknown>)
+      : null
+    const persisted = parentFirst != null && subKeys.every((k) => {
+      const got = parentFirst[k]
+      if (got === undefined || got === null) return false
+      try { return JSON.stringify(got) === built.agreedByKey[k] } catch { return false }
+    })
+    if (!persisted) {
+      console.warn(`[push-heal] composite read-back MISMATCH for ${containerKey} on ${parentSku}: Amazon accepted then dropped one or more sub-fields; marking failed + flagging for attention.`)
+      out.failed.push(containerKey)
+      // Durable, seller-visible alert (the silent-drop dead-end must not be invisible).
+      try {
+        const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+        await flagParentAttrsNeedAttention(parent_asin, [containerKey])
+      } catch (e) { console.warn('[push-heal] composite flag-attention failed (non-fatal):', e instanceof Error ? e.message : e) }
+      return out
+    }
+
+    // 6) Confirmed persisted → mark healed, log accepted (SYSTEM_ACTOR), learn the rule for pre-fill.
+    out.healed.push(containerKey)
+    try {
+      await db.from('keyword_push_log').insert({
+        parent_asin, sku: parentSku, field: `heal:${containerKey}`,
+        previous_value: null, new_value: JSON.stringify(built.item),
+        submission_id: live.submissionId, status: 'accepted', error_message: null,
+        pushed_by: SYSTEM_ACTOR.id,
+      })
+    } catch (e) { console.warn('[push-heal] composite keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
+    try {
+      const { data: existing } = await db.from('push_heal_rules')
+        .select('hit_count').eq('product_type', productType).eq('attr_key', containerKey).maybeSingle()
+      const prevHits = (existing as { hit_count?: number } | null)?.hit_count ?? 0
+      await db.from('push_heal_rules').upsert({
+        product_type: productType, attr_key: containerKey,
+        sub_keys: subKeys,
+        resolution: 'inherit_from_child', resolved_value: null,
+        last_seen_at: new Date().toISOString(), hit_count: prevHits + 1,
+      }, { onConflict: 'product_type,attr_key' })
+    } catch (e) { console.warn('[push-heal] composite push_heal_rules upsert failed (non-fatal):', e instanceof Error ? e.message : e) }
+  } catch (e) {
+    console.warn('[push-heal] healParentComposite prep failed (non-fatal):', e instanceof Error ? e.message : e)
+    if (!out.healed.includes(containerKey) && !out.failed.includes(containerKey)) out.abstained.push(containerKey)
+  }
+  return out
+}
+
 /** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
  *  core — Amazon's patchListingsItem accepts many ops per call). Each op is a fully-built
  *  {op,path,value}. Amazon validates the submission ATOMICALLY: any ERROR-severity issue →
@@ -1233,12 +1424,33 @@ async function maybeEnqueueParentHeal(
     const parent = results.find((r) => r.isParent && r.status === 'failed')
     if (!parent?.sku || !parent.issues?.length) return
     const rejectedAttrs = [...new Set(parent.issues.flatMap((i) => i.attributeNames ?? []))]
+    // Classify each rejected attr: flat-healable (department/age_range) vs composite-healable (shirt_size
+    // container OR its size_system/size_class sub-fields → healParentComposite) vs genuinely not healable.
     const healable = rejectedAttrs.filter((k) => BROADCAST_HEALABLE.has(k))
-    const nonHealable = rejectedAttrs.filter((k) => !BROADCAST_HEALABLE.has(k))
+    // De-dupe composite hits to ONE spec per container (a rejection can name the container AND its subKeys).
+    const compositeContainers = new Map<string, { containerKey: string; subKeys: string[] }>()
+    for (const k of rejectedAttrs) {
+      const spec = compositeSpecForRejectedAttr(k)
+      if (spec) compositeContainers.set(spec.containerKey, spec)
+    }
+    const nonHealable = rejectedAttrs.filter(
+      (k) => !BROADCAST_HEALABLE.has(k) && !compositeSpecForRejectedAttr(k),
+    )
     const { enqueueHeal, flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
     // Auto-heal the flat-scalar broadcast attrs (needs a resolved productType to schedule the heal).
     if (productType && healable.length > 0) {
       await enqueueHeal(parent_asin, { parentSku: parent.sku, productType, missingAttrKeys: healable })
+    }
+    // COMPOSITE heal (self-healing composite): enqueue a purpose-built composite task per container. Needs
+    // a resolved productType; missingAttrKeys carries the container name so enqueueHeal's guard passes and
+    // the cron dispatches to healParentComposite via the `composite` discriminator.
+    if (productType) {
+      for (const spec of compositeContainers.values()) {
+        await enqueueHeal(parent_asin, {
+          parentSku: parent.sku, productType, missingAttrKeys: [spec.containerKey],
+          composite: { containerKey: spec.containerKey, subKeys: spec.subKeys },
+        })
+      }
     }
     // Surface the rest as a standing, seller-visible "not auto-healable" signal (durable, non-blocking).
     if (nonHealable.length > 0) {
@@ -1578,6 +1790,16 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const prefillAttrs = await resolvePrefillAttrs(db, parent_asin, item.sku, sellerId, token, true)
               for (const pf of prefillAttrs) {
                 try {
+                  if (pf.kind === 'composite') {
+                    // COMPOSITE pre-fill (self-healing composite): write the verbatim-mirrored container via
+                    // RAW ops (patchSkuMulti) — the SAME payload the heal path builds, so NO shape builder
+                    // ever reshapes the child's own sub-objects. Preview-gated; read-back is not required on
+                    // pre-fill (the content push's own outcome + the heal cron are the backstop).
+                    const ops = [{ op: 'replace' as const, path: `/attributes/${pf.containerKey}`, value: pf.value }]
+                    const pv = await patchSkuMulti(sellerId, token, productType, item.sku, ops, 'VALIDATION_PREVIEW')
+                    if (pv.ok) { await patchSkuMulti(sellerId, token, productType, item.sku, ops, 'LIVE'); await sleep(PATCH_DELAY_MS) }
+                    continue
+                  }
                   const attr: DetailAttribute = { spApiKey: pf.spApiKey, scope: 'broadcast' }
                   const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
                   let shape: DetailValueShape | null = null
