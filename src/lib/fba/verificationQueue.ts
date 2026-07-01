@@ -90,13 +90,21 @@ export interface HealPayload {
 }
 
 /** Register a SELF-HEAL task on the existing verify queue (migration 042 kind='heal'). Reuses the
- *  claim/backoff/attempt machinery: field='heal' keeps ONE active heal task per parent (the partial
- *  unique index on (parent_asin, field) + the abandon-then-insert below supersede a stale heal).
+ *  claim/backoff/attempt machinery: the partial unique index on (parent_asin, field) + the
+ *  abandon-then-insert below keep ONE active heal task per (parent, field) and supersede a stale one.
+ *
+ *  DISTINCT FIELD per heal shape (adversarial review): a single parent push can enqueue BOTH a flat
+ *  heal (department/age_range) AND a composite heal (shirt_size) — if they shared field='heal', the
+ *  second insert's abandon-then-insert would SILENTLY ABANDON the first on the shared queue slot and the
+ *  flat attrs would never heal. Callers pass field='heal:composite' for composite heals so the flat
+ *  ('heal') and composite ('heal:composite') tasks can BOTH be active for the same parent. The cron
+ *  (cron-verify-pushes) claims by due-time (not by a fixed field) and dispatches by payload.composite,
+ *  so both field values are picked up and routed correctly.
+ *
  *  Best-effort — a missed enqueue just means no auto-heal for THAT rejection (the push still shipped
  *  the buyable children); the migration not being applied is the common no-op cause. */
-export async function enqueueHeal(parent_asin: string, payload: HealPayload, maxAttempts = 3): Promise<void> {
+export async function enqueueHeal(parent_asin: string, payload: HealPayload, maxAttempts = 3, field = 'heal'): Promise<void> {
   if (!parent_asin || !payload?.parentSku || !(payload.missingAttrKeys?.length)) return
-  const field = 'heal'
   const next = new Date(Date.now() + INITIAL_DELAY_MS).toISOString()
   try {
     const supabase = await createAdminClient()
@@ -158,6 +166,31 @@ export async function flagParentAttrsNeedAttention(parent_asin: string, missingA
     })
   } catch (e) {
     console.warn('[verification-queue] flagParentAttrsNeedAttention failed (migration 042 applied?):', e instanceof Error ? e.message : e)
+  }
+}
+
+/** FIX 3 (adversarial review): has a prior composite read-back ALREADY GIVEN UP on this parent+container?
+ *  When healParentComposite's read-back mismatches it writes a DURABLE heal:manual needs_attention row
+ *  (via flagParentAttrsNeedAttention) carrying the container in heal_payload.missingAttrKeys. Every later
+ *  parent push would otherwise re-enqueue the composite heal and reset its 3-attempt budget — so the
+ *  caller checks this first and SKIPS re-enqueuing while that standing alert exists. Best-effort: on any
+ *  error return false (fall through to enqueue — the safe default that preserves prior behavior). */
+export async function hasActiveManualHealFlag(parent_asin: string, containerKey: string): Promise<boolean> {
+  if (!parent_asin || !containerKey) return false
+  try {
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    const { data } = await db.from('push_verification_tasks')
+      .select('heal_payload')
+      .eq('parent_asin', parent_asin)
+      .eq('field', 'heal:manual')
+      .eq('status', 'needs_attention')
+    const rows = (data ?? []) as { heal_payload?: HealPayload | null }[]
+    return rows.some((r) => (r.heal_payload?.missingAttrKeys ?? []).includes(containerKey))
+  } catch (e) {
+    console.warn('[verification-queue] hasActiveManualHealFlag check failed (non-fatal):', e instanceof Error ? e.message : e)
+    return false
   }
 }
 

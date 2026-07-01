@@ -1180,6 +1180,33 @@ function buildCompositeMirrorItem(
 }
 
 /**
+ * TOLERANT SUBSET deep-compare for the composite read-back (adversarial review): Amazon can NORMALIZE
+ * what we wrote (inject a default language_tag, add/omit marketplace_id, reorder keys) so a byte-exact
+ * JSON.stringify compare FALSE-FAILS a value that actually persisted. This returns true iff every LEAF
+ * present in `written` is present and equal in `got` — EXTRA keys `got` carries that `written` lacks are
+ * ignored (Amazon's own defaults don't count as a drop). A genuinely missing/dropped sub-key still fails
+ * (absent in `got`). Objects recurse key-by-key; arrays require same length + element-wise subset; strings
+ * compare trimmed; other primitives compare by ===.
+ */
+function subsetDeepEqual(written: unknown, got: unknown): boolean {
+  if (Array.isArray(written)) {
+    if (!Array.isArray(got) || got.length !== written.length) return false
+    return written.every((w, i) => subsetDeepEqual(w, got[i]))
+  }
+  if (written !== null && typeof written === 'object') {
+    if (got === null || typeof got !== 'object' || Array.isArray(got)) return false
+    const g = got as Record<string, unknown>
+    return Object.entries(written as Record<string, unknown>).every(
+      ([k, w]) => k in g && subsetDeepEqual(w, g[k]),
+    )
+  }
+  if (typeof written === 'string') {
+    return typeof got === 'string' && written.trim() === got.trim()
+  }
+  return written === got
+}
+
+/**
  * Inherit a parent hub's missing COMPOSITE sub-fields (size_system/size_class of shirt_size) VERBATIM
  * from live children, then READ BACK the parent to confirm they persisted. Purpose-built + fail-safe;
  * NON-THROWING (any failure lands in the returned buckets). Learns a push_heal_rules row ONLY after a
@@ -1235,14 +1262,25 @@ export async function healParentComposite(
     const parentFirst = Array.isArray(parentRaw) && parentRaw.length > 0 && typeof parentRaw[0] === 'object'
       ? (parentRaw[0] as Record<string, unknown>)
       : null
+    // TOLERANT SUBSET compare (not byte-exact JSON): Amazon may normalize what we wrote (default
+    // language_tag, marketplace_id, reordered keys) — a genuinely dropped sub-key is still absent in
+    // `got` and fails. `built.item[k]` is the verbatim sub-object we wrote for this subKey.
     const persisted = parentFirst != null && subKeys.every((k) => {
       const got = parentFirst[k]
       if (got === undefined || got === null) return false
-      try { return JSON.stringify(got) === built.agreedByKey[k] } catch { return false }
+      return subsetDeepEqual((built.item as Record<string, unknown>)[k], got)
     })
     if (!persisted) {
       console.warn(`[push-heal] composite read-back MISMATCH for ${containerKey} on ${parentSku}: Amazon accepted then dropped one or more sub-fields; marking failed + flagging for attention.`)
       out.failed.push(containerKey)
+      // UNLEARN (adversarial review): the value did NOT persist, so the Tier-2 pre-fill must STOP
+      // LIVE-writing it on every future parent push (it has no read-back of its own). Delete the learned
+      // push_heal_rules row for (product_type, containerKey) — leaving only the durable heal:manual
+      // needs_attention signal below. Best-effort / non-throwing.
+      try {
+        await db.from('push_heal_rules')
+          .delete().eq('product_type', productType).eq('attr_key', containerKey)
+      } catch (e) { console.warn('[push-heal] composite push_heal_rules unlearn (delete) failed (non-fatal):', e instanceof Error ? e.message : e) }
       // Durable, seller-visible alert (the silent-drop dead-end must not be invisible).
       try {
         const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
@@ -1436,7 +1474,7 @@ async function maybeEnqueueParentHeal(
     const nonHealable = rejectedAttrs.filter(
       (k) => !BROADCAST_HEALABLE.has(k) && !compositeSpecForRejectedAttr(k),
     )
-    const { enqueueHeal, flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+    const { enqueueHeal, flagParentAttrsNeedAttention, hasActiveManualHealFlag } = await import('@/lib/fba/verificationQueue')
     // Auto-heal the flat-scalar broadcast attrs (needs a resolved productType to schedule the heal).
     if (productType && healable.length > 0) {
       await enqueueHeal(parent_asin, { parentSku: parent.sku, productType, missingAttrKeys: healable })
@@ -1446,10 +1484,19 @@ async function maybeEnqueueParentHeal(
     // the cron dispatches to healParentComposite via the `composite` discriminator.
     if (productType) {
       for (const spec of compositeContainers.values()) {
+        // FIX 3: a prior read-back may have already GIVEN UP on this container (durable heal:manual
+        // needs_attention row). Re-enqueuing would reset the 3-attempt budget every push instead of
+        // letting the standing alert stand — SKIP if that durable signal already exists for this
+        // parent+container. Best-effort (a failed check falls through to enqueue — safe default).
+        try {
+          if (await hasActiveManualHealFlag(parent_asin, spec.containerKey)) continue
+        } catch { /* non-fatal — fall through to enqueue */ }
+        // FIX 4: composite heals use a DISTINCT field ('heal:composite') so a flat heal ('heal')
+        // enqueued in the SAME push is not silently abandoned on the shared (parent, field) queue slot.
         await enqueueHeal(parent_asin, {
           parentSku: parent.sku, productType, missingAttrKeys: [spec.containerKey],
           composite: { containerKey: spec.containerKey, subKeys: spec.subKeys },
-        })
+        }, 3, 'heal:composite')
       }
     }
     // Surface the rest as a standing, seller-visible "not auto-healable" signal (durable, non-blocking).
