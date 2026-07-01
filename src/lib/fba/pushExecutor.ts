@@ -763,11 +763,35 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
 }
 
 
+// A structured SP-API listings issue. Amazon returns code + attributeNames alongside message; the
+// auto-heal layer needs those to identify WHICH attribute was rejected (self-healing-push).
+export type AmazonIssue = { code?: string; message?: string; severity?: string; attributeNames?: string[] }
+type PatchResult = { ok: boolean; submissionId: string | null; error?: string; issues?: AmazonIssue[] }
+// One per-SKU push outcome. `issues` carries the STRUCTURED Amazon rejection (code + attributeNames)
+// so the auto-heal layer can act on a parent rejection without re-parsing the message string.
+type PushResultRow = { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean; issues?: AmazonIssue[] }
+
+/** Parse an SP-API PATCH response's issues[] ONCE, keeping the STRUCTURED error issues (code +
+ *  attributeNames), not just the joined message — so auto-heal can act on the specific missing
+ *  attribute. ok:true means the submission validated clean. */
+function parsePatchIssues(json: { status?: string; submissionId?: string; issues?: AmazonIssue[] }): PatchResult {
+  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
+  if (json.status === 'INVALID' || errorIssues.length > 0) {
+    return {
+      ok: false,
+      submissionId: json.submissionId ?? null,
+      error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID',
+      issues: errorIssues,
+    }
+  }
+  return { ok: true, submissionId: json.submissionId ?? null }
+}
+
 // ─── PATCH one SKU's attribute (validation-preview, then live) ──────────────────
 async function patchSku(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: string, value: string | string[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
-): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+): Promise<PatchResult> {
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute}`, value: buildPatchValue(value, MARKETPLACE_ID) }],
@@ -785,12 +809,7 @@ async function patchSku(
     const txt = await resp.text()
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
-  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
-  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
-  if (json.status === 'INVALID' || errorIssues.length > 0) {
-    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
-  }
-  return { ok: true, submissionId: json.submissionId ?? null }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
 }
 
 /** Read the productType once from the first child (variation families share one type). */
@@ -804,7 +823,7 @@ async function patchSkuDetail(
   valueShape?: DetailValueShape | null,
   /** Calibrated patch value (a specific write-form variant) — overrides the builders. */
   patchValue?: Record<string, unknown>[],
-): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+): Promise<PatchResult> {
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
@@ -827,12 +846,7 @@ async function patchSkuDetail(
     const txt = await resp.text()
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
-  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
-  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
-  if (json.status === 'INVALID' || errorIssues.length > 0) {
-    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
-  }
-  return { ok: true, submissionId: json.submissionId ?? null }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
 }
 
 /** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
@@ -843,7 +857,7 @@ async function patchSkuDetail(
 async function patchSkuMulti(
   sellerId: string, token: string, productType: string, sku: string,
   ops: { op: 'replace'; path: string; value: unknown }[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
-): Promise<{ ok: boolean; submissionId: string | null; error?: string }> {
+): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
   const body = { productType, patches: ops }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
@@ -859,12 +873,7 @@ async function patchSkuMulti(
     const txt = await resp.text()
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
-  const json = await resp.json() as { status?: string; submissionId?: string; issues?: { severity?: string; message?: string }[] }
-  const errorIssues = (json.issues ?? []).filter((i) => i.severity === 'ERROR')
-  if (json.status === 'INVALID' || errorIssues.length > 0) {
-    return { ok: false, submissionId: json.submissionId ?? null, error: errorIssues.map((i) => i.message).join('; ') || 'Validation INVALID' }
-  }
-  return { ok: true, submissionId: json.submissionId ?? null }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
 }
 
 /** Read ONE SKU's listing once and extract the CURRENT value of many attributes from that
@@ -1074,7 +1083,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             calibratedValueFor = (v: string) => buildShapedDetailValueVariants(shape, v, MARKETPLACE_ID)[winIdx]?.value
           }
 
-          const results: { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }[] = []
+          const results: PushResultRow[] = []
           let cancelled = false
           for (const item of diff) {
             if (pushCancelled(params.cancel_token)) { cancelled = true; break }
@@ -1089,7 +1098,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
                 ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
                 : preview.error
-              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr, isParent })
+              results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr, isParent, issues: preview.issues })
               emit({ type: 'progress', sku: item.sku, status: 'failed', error: friendlyErr })
               await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: friendlyErr })
               await sleep(PATCH_DELAY_MS)
@@ -1097,7 +1106,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             }
             const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape, calibratedValueFor(newValueStr))
             const status = live.ok ? 'accepted' : 'failed'
-            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent })
+            results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent, issues: live.issues })
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
             await sleep(PATCH_DELAY_MS)
@@ -1277,7 +1286,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.error('[push-content] keyword_push_log insert threw:', e) }
         }
 
-        const results: { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }[] = []
+        const results: PushResultRow[] = []
         let cancelled = false
         for (const item of diff) {
           if (pushCancelled(params.cancel_token)) { cancelled = true; break }
@@ -1293,7 +1302,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
           const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
           if (!preview.ok) {
-            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error, isParent })
+            results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error, isParent, issues: preview.issues })
             emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
             await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: preview.error })
             await sleep(PATCH_DELAY_MS)
@@ -1301,7 +1310,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           }
           const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
           const status = live.ok ? 'accepted' : 'failed'
-          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent })
+          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent, issues: live.issues })
           emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
           await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
           if (live.ok) {
