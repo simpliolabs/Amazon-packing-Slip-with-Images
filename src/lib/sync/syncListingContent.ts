@@ -1325,6 +1325,97 @@ export async function ensureListingScored(
   return scoreRow
 }
 
+/**
+ * ON-DEMAND single-ASIN content sync + score (feature C). For a listing that was never in the
+ * top-50-by-sales sync (0-unit → no listing_content, no score, page "not available"), fetch its
+ * SKUs from listing_health, pull each SKU's content via the SAME fetchListingContent the bulk sync
+ * uses (no duplication), upsert into listing_content, then score via ensureListingScored. BOUNDED to
+ * ONE ASIN and BEST-EFFORT: returns the scored card row or null (caller falls back to a stub). The
+ * `asin` may be a parent ASIN or a child ASIN — we match (parent_asin=asin OR asin=asin) and key the
+ * score on the resolved parent (or the asin itself for a standalone).
+ */
+export async function syncSingleAsinContent(
+  supabase: SupabaseClient,
+  asin: string,
+): Promise<Record<string, unknown> | null> {
+  if (!asin) return null
+  try {
+    const token    = await getAccessToken()
+    const sellerId = await getSellerId()
+
+    // 1) SKUs for this ASIN (parent or child) from listing_health — Active, non-system.
+    const { data: healthRows } = await supabase
+      .from('listing_health')
+      .select('sku, asin, parent_asin')
+      .or(`parent_asin.eq.${asin},asin.eq.${asin}`)
+      .eq('status', 'Active')
+      .not('sku', 'ilike', 'amzn.gr.%')
+    const health = (healthRows ?? []) as ChildSku[]
+    if (health.length === 0) return null  // no live SKUs — nothing to sync on demand
+
+    // Resolve the parent key: the shared parent_asin if present, else the asin itself (standalone).
+    const parentAsin = health.find((r) => r.parent_asin)?.parent_asin || asin
+
+    // Dedup by ASIN, prefer the FBA SKU (mirrors the bulk sync's representative set).
+    const asinMap = new Map<string, ChildSku>()
+    for (const child of health) {
+      const existing = asinMap.get(child.asin)
+      if (!existing || child.sku.endsWith('-FBA')) asinMap.set(child.asin, child)
+    }
+    const uniqueChildren = Array.from(asinMap.values())
+
+    // 2) Content per SKU — the SAME helper the bulk sync uses.
+    const contentRows: ListingContentRow[] = []
+    for (const child of uniqueChildren) {
+      try {
+        const content = await fetchListingContent(token, sellerId, child.sku, child.asin, child.parent_asin ?? parentAsin)
+        try {
+          const imgCount = await fetchImageCount(token, child.asin)
+          if (imgCount > 0) content.image_count = imgCount
+          await sleep(100)
+        } catch { /* keep summaries image_count */ }
+        contentRows.push(content)
+      } catch (err) {
+        console.warn(`[syncSingleAsinContent] SKU ${child.sku} fetch failed:`, err instanceof Error ? err.message : String(err))
+      }
+      await sleep(200)
+    }
+    if (contentRows.length === 0) return null
+
+    // 3) A+ status from a representative child (mirrors the bulk sync).
+    let aplusData: AplusStatus = { hasAplus: false, moduleCount: 0, missingAltCount: 0, hasBrandStory: false, hasHeadline: false }
+    const firstChildAsin = uniqueChildren[0]?.asin || parentAsin
+    try {
+      aplusData = await fetchAplusStatus(token, firstChildAsin)
+      if (!aplusData.hasAplus && firstChildAsin !== parentAsin) {
+        const fallback = await fetchAplusStatus(token, parentAsin)
+        if (fallback.hasAplus) aplusData = fallback
+      }
+      await sleep(100)
+    } catch (err) {
+      console.warn(`[syncSingleAsinContent] A+ fetch failed for ${parentAsin}:`, err instanceof Error ? err.message : String(err))
+    }
+    for (const row of contentRows) {
+      row.has_aplus                = aplusData.hasAplus
+      row.aplus_module_count       = aplusData.moduleCount
+      row.aplus_has_brand_story    = aplusData.hasBrandStory
+      row.aplus_has_headline       = aplusData.hasHeadline
+      row.aplus_images_missing_alt = aplusData.missingAltCount
+    }
+
+    // 4) Upsert into listing_content, then score via the shared on-demand scorer.
+    const { error: upsertErr } = await supabase
+      .from('listing_content')
+      .upsert(contentRows, { onConflict: 'sku' })
+    if (upsertErr) { console.warn(`[syncSingleAsinContent] upsert failed for ${parentAsin}:`, upsertErr.message); return null }
+
+    return await ensureListingScored(supabase, parentAsin)
+  } catch (err) {
+    console.warn('[syncSingleAsinContent] failed (non-fatal):', err instanceof Error ? err.message : String(err))
+    return null
+  }
+}
+
 export async function syncListingContent(
   topN = 50
 ): Promise<SyncListingContentResult> {

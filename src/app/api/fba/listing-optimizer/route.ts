@@ -18,7 +18,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
-import { syncListingContent, ensureListingScored } from '@/lib/sync/syncListingContent'
+import { syncListingContent, ensureListingScored, syncSingleAsinContent } from '@/lib/sync/syncListingContent'
 import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
 import { NEEDS_ATTENTION_VERDICTS, type OutcomeChip, type OutcomeVerdict } from '@/lib/fba/outcomePresentation'
 
@@ -422,6 +422,37 @@ export async function GET(req: Request) {
         if (stubs.length >= limit) break
       }
       pageRows = await assembleSurvivors(supabase, scoredRows, new Set())
+
+      // ── ON-DEMAND SCORING (feature C): a valid ASIN that has NEITHER a scored row NOR an unscored
+      // stub was never in the top-50-by-sales sync (0-unit listing → no listing_content at all →
+      // page "not available"). Do a BOUNDED single-ASIN content sync + score, then surface the fresh
+      // card. Best-effort: on failure we simply return the (empty) result as before.
+      if (isAsin && scoredRows.length === 0 && stubs.length === 0) {
+        try {
+          const scored = await syncSingleAsinContent(supabase, search)
+          const scoredParent = (scored as { parent_asin?: string } | null)?.parent_asin
+          if (scoredParent) {
+            const { data: sr } = await supabase
+              .from('listing_seo_scores').select('*').eq('parent_asin', scoredParent).single()
+            const { data: ek } = await supabase
+              .from('listing_content')
+              .select(CHILD_COLS)
+              .or(`parent_asin.eq.${scoredParent},asin.eq.${scoredParent}`)
+              .order('sku', { ascending: true })
+            const kids = (ek || []) as ChildRow[]
+            if (sr && kids.length > 0) {
+              const { data: epRows } = await supabase
+                .from('keyword_push_log')
+                .select('pushed_at')
+                .eq('parent_asin', scoredParent)
+                .order('pushed_at', { ascending: false })
+                .limit(1)
+              const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
+              pageRows = [{ ...(sr as ScoreRow), children: kids, last_pushed_at: lastPushed }]
+            }
+          }
+        } catch (e) { console.warn('[listing-optimizer] on-demand ASIN score failed:', e instanceof Error ? e.message : e) }
+      }
     } else {
       // ── NORMAL paged branch: BOUNDED KEYSET LOOP. The ghost filter drops 0-live-child rows, and
       // this data is ghost-heavy, so a single fixed over-fetch (the old limit+1) would shrink the

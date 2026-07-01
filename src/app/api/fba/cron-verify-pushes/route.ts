@@ -15,9 +15,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   claimDueTasks, completeTask, rescheduleTask, flagNeedsAttention, softFailTask,
-  type PushVerificationTask,
+  enqueueVerification, type PushVerificationTask, type HealPayload,
 } from '@/lib/fba/verificationQueue'
-import { executePush, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
+import { executePush, healParentAttributes, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
+import { createAdminClient } from '@/lib/supabase/server'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 600
@@ -104,6 +105,30 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
   return { pushed, failed, error }
 }
 
+/** Run a SELF-HEAL task (kind='heal'): inherit the parent hub's missing BROADCAST attributes from a
+ *  live child (VALIDATION_PREVIEW → LIVE inside healParentAttributes). "Converged" means everything
+ *  eligible either healed or was safely abstained (child disagreement / none carries it — nothing we
+ *  can deterministically do), with NOTHING left in the failed bucket. A `failed` entry rides the
+ *  queue's attempts/backoff and eventually needs_attention (the caller decides). Best-effort. */
+async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean; healed: string[]; abstained: string[]; failed: string[]; error?: string }> {
+  const payload = (task.heal_payload ?? null) as HealPayload | null
+  if (!payload?.parentSku || !payload.productType || !(payload.missingAttrKeys?.length)) {
+    return { converged: true, healed: [], abstained: [], failed: [] }  // nothing actionable → don't retry forever
+  }
+  try {
+    const db = await createAdminClient()
+    const res = await healParentAttributes(db, {
+      parent_asin: task.parent_asin,
+      parentSku: payload.parentSku,
+      productType: payload.productType,
+      missingAttrKeys: payload.missingAttrKeys,
+    })
+    return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed }
+  } catch (e) {
+    return { converged: false, healed: [], abstained: [], failed: payload.missingAttrKeys, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET
   const authed =
@@ -127,6 +152,28 @@ export async function GET(request: NextRequest) {
       // keeps them on the same attempt count (no penalty for OUR budget running out).
       await softFailTask(task.id, 'cron budget exceeded — picked up next tick')
       processed.push({ id: task.id, field: task.field, result: 'deferred_budget', matched: task.last_matched_count ?? 0, total: task.last_total_count ?? 0 })
+      continue
+    }
+
+    // 0) SELF-HEAL task (kind='heal') — inherit the parent hub's missing broadcast attributes from a
+    //    live child, riding the SAME attempts/backoff/max_attempts machinery as verify. On converge,
+    //    complete + enqueue a normal content verify so the family's re-push (now that the hub accepts
+    //    the PATCH) is confirmed. On residual failure, reschedule (backoff) until max_attempts → flag.
+    if (task.kind === 'heal') {
+      const heal = await runHeal(task)
+      if (heal.converged) {
+        await completeTask(task.id, heal.healed.length, heal.healed.length + heal.abstained.length)
+        // Now that the hub accepts the PATCH, re-verify the parent's title so the cron re-pushes/
+        // confirms it (best-effort; a missed enqueue just means the seller re-pushes manually).
+        try { await enqueueVerification({ parent_asin: task.parent_asin, field: 'title' }) } catch { /* non-fatal */ }
+        processed.push({ id: task.id, field: task.field, result: `healed:${heal.healed.join(',') || 'none'}`, matched: heal.healed.length, total: heal.healed.length + heal.abstained.length })
+      } else if (task.attempts + 1 >= task.max_attempts) {
+        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`)
+        processed.push({ id: task.id, field: task.field, result: 'heal_needs_attention', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
+      } else {
+        await rescheduleTask(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed)
+        processed.push({ id: task.id, field: task.field, result: 'heal_rescheduled', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
+      }
       continue
     }
 
