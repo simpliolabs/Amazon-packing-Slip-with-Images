@@ -21,7 +21,7 @@ import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
-import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
+import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
 
 function getAdminSupabase() {
   return createClient(
@@ -1230,21 +1230,45 @@ export async function GET(req: NextRequest) {
     }
   } catch { /* log table absent/unreadable — no ship dates, non-fatal */ }
 
+  // Trademark scrub-on-serve (heal-on-read): recommendations persisted BEFORE the trademark guard
+  // shipped (2026-06-15) keep raw marks like "World Cup" in stored fields. A per-section title-only
+  // regen re-scrubs the title but never re-touches recommended_bullets, so the DISPLAY diverged
+  // (title clean, bullets dirty). scrubTrademarks is idempotent, so re-scrubbing here is a no-op on
+  // clean post-guard rows and heals ALL stale historical rows at once -- no regen required. Push is
+  // already safe (pushExecutor scrubs on publish); this only fixes the read/display path. Mirrors the
+  // product_details_improvements heal-on-read above.
+  const recommended_title_scrubbed = typeof data.recommended_title === 'string'
+    ? scrubTrademarks(data.recommended_title)
+    : data.recommended_title
+  const recommended_bullets_scrubbed = Array.isArray(data.recommended_bullets)
+    ? scrubTrademarksArr(data.recommended_bullets)
+    : data.recommended_bullets
+  const recommended_description_scrubbed = typeof data.recommended_description === 'string'
+    ? scrubTrademarks(data.recommended_description)
+    : data.recommended_description
+  const per_child_keywords_scrubbed = per_child_keywords.map((c) => ({ ...c, keywords: scrubTrademarks(c.keywords || '') }))
+  const per_child_titles_scrubbed = per_child_titles.map((c) => ({ ...c, title: scrubTrademarks(c.title || '') }))
+  const per_child_bullets_scrubbed = per_child_bullets.map((c) => ({ ...c, bullets: scrubTrademarksArr(c.bullets || []) }))
+  const per_child_descriptions_scrubbed = per_child_descriptions.map((c) => ({ ...c, description: scrubTrademarks(c.description || '') }))
+
   return NextResponse.json({
     recommendations: {
       ...data,
-      per_child_keywords,
-      per_child_titles,
-      per_child_bullets,
-      per_child_descriptions,
+      recommended_title: recommended_title_scrubbed,
+      recommended_bullets: recommended_bullets_scrubbed,
+      recommended_description: recommended_description_scrubbed,
+      per_child_keywords: per_child_keywords_scrubbed,
+      per_child_titles: per_child_titles_scrubbed,
+      per_child_bullets: per_child_bullets_scrubbed,
+      per_child_descriptions: per_child_descriptions_scrubbed,
       keyword_reconciliation,
       action_plan,
       product_details_improvements,
       field_pushed_at,
       // Keep recommended_keywords as the first child's keywords for backward compat
-      recommended_keywords: per_child_keywords.length > 0
-        ? per_child_keywords[0].keywords
-        : data.recommended_keywords || '',
+      recommended_keywords: per_child_keywords_scrubbed.length > 0
+        ? per_child_keywords_scrubbed[0].keywords
+        : (typeof data.recommended_keywords === 'string' ? scrubTrademarks(data.recommended_keywords) : data.recommended_keywords || ''),
     },
   })
 }
