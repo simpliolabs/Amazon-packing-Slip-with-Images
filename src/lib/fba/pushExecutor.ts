@@ -329,6 +329,13 @@ async function resolvePrefillAttrs(
     if (!sellerId || !token) return []
     const productType = await tryGetProductType(sellerId, token, parentSku)
     if (!productType) return []
+    // PRE-FILL SAFETY (heal v2 delete-partial): this filter selects ONLY 'inherit_from_child' rules —
+    // rules with resolution 'delete_partial_container' are DELIBERATELY SKIPPED (ignored). Pre-fill runs
+    // on EVERY future parent push and must NEVER delete anything: the one-time delete is owned by the
+    // REACTIVE heal (healParentComposite strategy 2, read-back-verified). A learned delete rule means the
+    // hub's partial container was removed and the conditional rejection no longer fires — re-ADDING the
+    // container here would re-trip it, and issuing deletes from a pre-fill would be an unguarded
+    // destructive write on every push.
     const { data: rules } = await db.from('push_heal_rules')
       .select('attr_key, resolution')
       .eq('product_type', productType)
@@ -338,7 +345,7 @@ async function resolvePrefillAttrs(
     // Composite rules are keyed on the container name (shirt_size); resolve each learned container's spec.
     const compositeSpecs = ruleKeys
       .map((k) => COMPOSITE_HEAL_SPECS.find((s) => s.containerKey === k))
-      .filter((s): s is { containerKey: string; subKeys: string[] } => !!s)
+      .filter((s): s is CompositeHealSpec => !!s)
     if (flatKeys.length === 0 && compositeSpecs.length === 0) return []
     // Live child SKUs to inherit from (>=2 for cross-check agreement — same guard as the heal path).
     const { data: childRows } = await db.from('listing_content')
@@ -950,16 +957,33 @@ const BROADCAST_HEALABLE = new Set<string>([
  *  CONTAINER (`shirt_size`) OR its invariant SUB-fields (`size_system`/`size_class`) directly — Amazon's
  *  issue.attributeNames varies. Both map to the same purpose-built healParentComposite (verbatim-mirror +
  *  read-back), NOT the flat healParentAttributes path. `subKeys` are the parent-INVARIANT sub-objects to
- *  mirror; the per-variant `size` is deliberately NOT listed (never inherited onto the shared hub). */
-const COMPOSITE_HEAL_SPECS: { containerKey: string; subKeys: string[] }[] = [
-  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'] },
+ *  mirror; the per-variant `size` is deliberately NOT listed (never inherited onto the shared hub).
+ *  `perVariantField` names that per-variant field INSIDE the container ('size' for shirt_size) — it is
+ *  NEVER written to the hub; it exists ONLY to build the strategy-2 (delete-partial-container)
+ *  conditional-requirement signature regex (see conditionalRequirementRegex). */
+interface CompositeHealSpec { containerKey: string; subKeys: string[]; perVariantField: string }
+const COMPOSITE_HEAL_SPECS: CompositeHealSpec[] = [
+  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'], perVariantField: 'size' },
 ]
 /** Rejected-attribute name → the composite spec that heals it (container name OR any of its subKeys). */
-function compositeSpecForRejectedAttr(attr: string): { containerKey: string; subKeys: string[] } | null {
+function compositeSpecForRejectedAttr(attr: string): CompositeHealSpec | null {
   for (const spec of COMPOSITE_HEAL_SPECS) {
     if (attr === spec.containerKey || spec.subKeys.includes(attr)) return spec
   }
   return null
+}
+
+/** STRATEGY-2 TRIGGER SIGNATURE (heal v2, LIVE evidence 2026-07-02). Amazon's CONDITIONAL requirement
+ *  rejects the verbatim-mirror write with (shirt_size example, quoting the recorded task last_error):
+ *    "Based on the data from '[shirt_size#?.size_system, shirt_size#?.size_class]', the field '"size"'
+ *     for the attribute 'Shirt Size' does not have enough values. The required minimum is '1' value(s)."
+ *  i.e. "if size_system/size_class are present then the per-variant `size` is required" — and a parent
+ *  hub can never carry a per-variant `size`, so RE-writing system/class re-trips this rule forever.
+ *  Built generically from the spec's perVariantField so a future composite container only needs its own
+ *  registry entry. Tolerant of Amazon's mixed quoting ('"size"' / 'size' / "size" / size). */
+function conditionalRequirementRegex(perVariantField: string): RegExp {
+  const escaped = perVariantField.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`the field\\s+'?"?${escaped}"?'?\\s+for the attribute .* does not have enough values`, 'i')
 }
 
 /** The outcome of one heal pass over a parent hub. `healed` = attrs written live; `abstained` =
@@ -1257,7 +1281,21 @@ export async function healParentComposite(
     //    `size`). Raw ops via patchSkuMulti so NO shape builder ever touches the child's verbatim objects.
     const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [built.item] }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
-    if (!preview.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `preview: ${preview.error ?? 'rejected'}`; return out }
+    if (!preview.ok) {
+      // STRATEGY 2 — delete-partial-container (heal v2, LIVE evidence 2026-07-02). When the mirror
+      // write's preview fails with Amazon's CONDITIONAL-requirement signature ("if size_system/size_class
+      // present then the per-variant `size` is required" — a value the shared hub can NEVER carry),
+      // strategy 1 is a dead end FOREVER: re-writing system/class re-arms the very rule that rejects it.
+      // The correct heal is to DELETE the partial container from the parent hub — with the container
+      // absent the conditional rule never fires and parent PATCHes (title etc.) validate clean.
+      // Gated on the spec being registered in COMPOSITE_HEAL_SPECS (that lookup is also where the
+      // signature's perVariantField comes from) AND on the preview error matching the signature.
+      const spec = COMPOSITE_HEAL_SPECS.find((s) => s.containerKey === containerKey)
+      if (spec && conditionalRequirementRegex(spec.perVariantField).test(preview.error ?? '')) {
+        return await healCompositeDeletePartial(db, { parent_asin, parentSku, productType, spec, sellerId, token })
+      }
+      out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `preview: ${preview.error ?? 'rejected'}`; return out
+    }
     const live = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'LIVE')
     if (!live.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `live: ${live.error ?? 'rejected'}`; return out }
 
@@ -1326,14 +1364,126 @@ export async function healParentComposite(
   return out
 }
 
+/**
+ * STRATEGY 2 — delete the PARTIAL composite container from the parent hub (heal v2, LIVE evidence
+ * 2026-07-02). Reached ONLY from healParentComposite when strategy 1's (verbatim-mirror) preview fails
+ * with the conditional-requirement signature: the hub carries size_system/size_class but can never carry
+ * the per-variant `size`, so ANY write that keeps the container present re-trips Amazon's "if system/class
+ * present then size required" rule. Deleting the container makes the conditional rule unreachable and
+ * parent PATCHes validate clean.
+ *
+ * HARD GUARDRAILS (a delete is destructive — every one is enforced here, not just documented):
+ *  - PARENT HUB ONLY: the SKU being patched is ALWAYS args.parentSku (no other SKU variable exists in
+ *    this scope), and the caller guarantees parentSku IS the variation-parent hub (it came from the
+ *    failed push row with isParent=true). Defensively RE-CONFIRMED live below via findParentSku on the
+ *    parent ASIN — a mismatch (stale/malformed payload) or a failed lookup ABORTS: NEVER delete an
+ *    attribute from a child.
+ *  - REGISTRY-GATED: only containers listed in COMPOSITE_HEAL_SPECS can reach here (the caller resolves
+ *    `spec` from that registry; unregistered containers have no spec and fall to the failed bucket).
+ *  - PREVIEW-GATED: the delete op runs VALIDATION_PREVIEW first, like every write in this module.
+ *  - READ-BACK-VERIFIED: success is the container being ABSENT on a live re-read — a failed re-read is
+ *    a FAILURE (retry), never assumed success.
+ * NON-THROWING; failures land in the returned buckets with errors[] observability. Learns a
+ * push_heal_rules row (resolution 'delete_partial_container') ONLY after the confirmed read-back, which
+ * also OVERWRITES any stale 'inherit_from_child' rule for this container so the Tier-2 pre-fill stops
+ * re-adding the partial container on future pushes (pre-fill itself never deletes — see
+ * resolvePrefillAttrs).
+ */
+async function healCompositeDeletePartial(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  args: { parent_asin: string; parentSku: string; productType: string; spec: CompositeHealSpec; sellerId: string; token: string },
+): Promise<HealResult> {
+  const { parent_asin, parentSku, productType, spec, sellerId, token } = args
+  const containerKey = spec.containerKey
+  const out: HealResult = { healed: [], abstained: [], failed: [] }
+  try {
+    // GUARDRAIL: live re-confirmation that parentSku is THE variation-parent hub SKU of this ASIN.
+    // findParentSku resolves the parent ASIN's own listing SKU from Listings Items — if it disagrees
+    // (or cannot be resolved), abort to the failed bucket; the queue's backoff retries a transient
+    // lookup failure, and a genuine mismatch surfaces as needs_attention instead of a wrong-target delete.
+    const liveParentSku = await findParentSku(sellerId, token, parent_asin)
+    if (!liveParentSku || liveParentSku !== parentSku) {
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = liveParentSku
+        ? `delete guardrail: live parent-hub SKU "${liveParentSku}" does not match task parentSku "${parentSku}" - refusing to delete`
+        : 'delete guardrail: could not confirm the parent-hub SKU via live lookup - refusing to delete'
+      return out
+    }
+
+    // Value-less delete of the WHOLE container — preview first, exactly like every other write here.
+    const ops = [{ op: 'delete' as const, path: `/attributes/${containerKey}` }]
+    const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
+    if (!preview.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete preview: ${preview.error ?? 'rejected'}`; return out }
+    const live = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'LIVE')
+    if (!live.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete live: ${live.error ?? 'rejected'}`; return out }
+
+    // READ-BACK: success = the container is now ABSENT on the hub. NOTE the polarity trap: for a delete,
+    // a FAILED re-read would look identical to "absent" — so an unreadable attributes payload is treated
+    // as NOT CONFIRMED (failed bucket → queue retries), never as success.
+    await sleep(PATCH_DELAY_MS)
+    const parentAttrs = await fetchChildAttributesMap(sellerId, token, [parentSku])
+    const attrs = parentAttrs.get(parentSku)
+    if (!attrs) {
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = 'delete read-back fetch failed - cannot confirm the container was removed'
+      return out
+    }
+    const raw = attrs[containerKey]
+    const absent = raw === undefined || raw === null || (Array.isArray(raw) && raw.length === 0)
+    if (!absent) {
+      console.warn(`[push-heal] delete read-back for ${containerKey} on ${parentSku}: container still present; marking failed.`)
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = 'delete accepted but container still present on read-back'
+      return out
+    }
+
+    // Confirmed absent → healed. Log the attribute write (SYSTEM_ACTOR) + learn the delete rule so this
+    // (product_type, container) resolution is remembered; the upsert REPLACES a stale inherit_from_child
+    // rule, which also stops the Tier-2 pre-fill from re-adding the partial container.
+    out.healed.push(containerKey)
+    try {
+      await db.from('keyword_push_log').insert({
+        parent_asin, sku: parentSku, field: `heal:delete:${containerKey}`,
+        previous_value: null, new_value: JSON.stringify({ action: 'delete' }),
+        submission_id: live.submissionId, status: 'accepted', error_message: null,
+        pushed_by: SYSTEM_ACTOR.id,
+      })
+    } catch (e) { console.warn('[push-heal] delete keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
+    try {
+      const { data: existing } = await db.from('push_heal_rules')
+        .select('hit_count').eq('product_type', productType).eq('attr_key', containerKey).maybeSingle()
+      const prevHits = (existing as { hit_count?: number } | null)?.hit_count ?? 0
+      await db.from('push_heal_rules').upsert({
+        product_type: productType, attr_key: containerKey,
+        sub_keys: spec.subKeys,
+        resolution: 'delete_partial_container', resolved_value: { action: 'delete' },
+        last_seen_at: new Date().toISOString(), hit_count: prevHits + 1,
+      }, { onConflict: 'product_type,attr_key' })
+    } catch (e) { console.warn('[push-heal] delete push_heal_rules upsert failed (non-fatal):', e instanceof Error ? e.message : e) }
+  } catch (e) {
+    // A throw mid-delete is NOT a safe abstain (the parent is known-broken and this path is its only
+    // fix) — ride the failed bucket so the queue's attempts/backoff retry it.
+    console.warn('[push-heal] healCompositeDeletePartial threw (non-fatal):', e instanceof Error ? e.message : e)
+    if (!out.healed.includes(containerKey) && !out.failed.includes(containerKey)) {
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = `delete threw: ${e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)}`
+    }
+  }
+  return out
+}
+
 /** PATCH MULTIPLE attributes on one SKU in a SINGLE submission (the bulk Auto Push efficiency
  *  core — Amazon's patchListingsItem accepts many ops per call). Each op is a fully-built
- *  {op,path,value}. Amazon validates the submission ATOMICALLY: any ERROR-severity issue →
+ *  {op,path,value} — or a value-less {op:'delete',path} that removes the whole attribute (heal v2
+ *  delete-partial-container; the ONLY delete caller is the guardrailed healParentComposite strategy 2).
+ *  Amazon validates the submission ATOMICALLY: any ERROR-severity issue →
  *  status INVALID and NOTHING applies — so the caller previews first and falls back to
  *  per-attribute pushes when a batch preview fails, preserving failure isolation. */
 async function patchSkuMulti(
   sellerId: string, token: string, productType: string, sku: string,
-  ops: { op: 'replace'; path: string; value: unknown }[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
+  ops: ({ op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string })[],
+  mode: 'VALIDATION_PREVIEW' | 'LIVE',
 ): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
   const body = { productType, patches: ops }
@@ -1495,7 +1645,7 @@ function rejectedAttrKeysFrom(parent: PushResultRow): string[] {
  *  reset the in-flight heal. The Seller-Central wording stays ONLY for the no-heal case (non-healable
  *  attrs / enqueue failed) — summarizePush still produces it as the default. */
 const HEAL_SCHEDULED_PARENT_NOTE =
-  ' The variation parent hub was rejected (missing SHIRT SIZE data) - a SELF-HEAL is scheduled: the system will inherit the missing values from a live child automatically within ~25 minutes. No action needed - do not re-push.'
+  ' The variation parent hub was rejected (missing SHIRT SIZE data) - a SELF-HEAL is scheduled: the system will inherit the missing values from a live child automatically within ~5 minutes. No action needed - do not re-push.'
 
 /** What maybeEnqueueParentHeal reports back to the push's FINAL result emit (live-notice):
  *  healScheduled = a flat or composite heal task is genuinely in flight for this parent (freshly
