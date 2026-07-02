@@ -304,7 +304,7 @@ export async function completeTask(id: string, matched: number, total: number): 
 }
 
 /** Schedule another verify (still stale, but more attempts left) — linear backoff. */
-export async function rescheduleTask(id: string, matched: number, total: number, staleSkus: string[]): Promise<void> {
+export async function rescheduleTask(id: string, matched: number, total: number, staleSkus: string[], note?: string): Promise<void> {
   try {
     const supabase = await createAdminClient()
     const next = new Date(Date.now() + RETRY_DELAY_MS).toISOString()
@@ -321,6 +321,10 @@ export async function rescheduleTask(id: string, matched: number, total: number,
         last_verified_at: new Date().toISOString(),
         last_matched_count: matched, last_total_count: total,
         last_stale_skus: staleSkus, updated_at: new Date().toISOString(),
+        // Observability (heal E2E 2026-07-02): a rescheduled HEAL attempt left last_error NULL, so
+        // there was no persisted record of WHY it failed (the Amazon error only hit the console).
+        // Persist the attempt's outcome note so failures are diagnosable from the task row itself.
+        ...(note ? { last_error: note.slice(0, 2000) } : {}),
       }).eq('id', id)
   } catch (e) { console.warn('[verification-queue] reschedule failed:', e instanceof Error ? e.message : e) }
 }

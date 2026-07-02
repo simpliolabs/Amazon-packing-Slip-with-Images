@@ -110,7 +110,7 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
  *  eligible either healed or was safely abstained (child disagreement / none carries it — nothing we
  *  can deterministically do), with NOTHING left in the failed bucket. A `failed` entry rides the
  *  queue's attempts/backoff and eventually needs_attention (the caller decides). Best-effort. */
-async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean; healed: string[]; abstained: string[]; failed: string[]; error?: string }> {
+async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean; healed: string[]; abstained: string[]; failed: string[]; error?: string; errors?: Record<string, string> }> {
   const payload = (task.heal_payload ?? null) as HealPayload | null
   if (!payload?.parentSku || !payload.productType || !(payload.missingAttrKeys?.length)) {
     return { converged: true, healed: [], abstained: [], failed: [] }  // nothing actionable → don't retry forever
@@ -134,7 +134,7 @@ async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean
           productType: payload.productType,
           missingAttrKeys: payload.missingAttrKeys,
         })
-    return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed }
+    return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed, errors: res.errors }
   } catch (e) {
     return { converged: false, healed: [], abstained: [], failed: payload.missingAttrKeys, error: e instanceof Error ? e.message : String(e) }
   }
@@ -179,10 +179,18 @@ export async function GET(request: NextRequest) {
         try { await enqueueVerification({ parent_asin: task.parent_asin, field: 'title' }) } catch { /* non-fatal */ }
         processed.push({ id: task.id, field: task.field, result: `healed:${heal.healed.join(',') || 'none'}`, matched: heal.healed.length, total: heal.healed.length + heal.abstained.length })
       } else if (task.attempts + 1 >= task.max_attempts) {
-        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`)
+        // Observability: carry the per-key failure reasons (Amazon preview/live error, read-back detail)
+        // into the terminal message so the dead-end names its cause, not just "could not heal".
+        const why = heal.errors ? ' Reasons: ' + Object.entries(heal.errors).map(([k, v]) => `${k}: ${v}`).join(' | ') : ''
+        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, (heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`) + why)
         processed.push({ id: task.id, field: task.field, result: 'heal_needs_attention', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
       } else {
-        await rescheduleTask(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed)
+        // Observability (heal E2E 2026-07-02): persist WHY this attempt failed onto the task row —
+        // a rescheduled heal previously left last_error NULL, so the failure was invisible outside
+        // the server console and undiagnosable from the DB.
+        const note = `attempt ${task.attempts + 1} failed [${heal.failed.join(', ')}]` +
+          (heal.errors ? ' - ' + Object.entries(heal.errors).map(([k, v]) => `${k}: ${v}`).join(' | ') : (heal.error ? ` - ${heal.error}` : ''))
+        await rescheduleTask(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, note)
         processed.push({ id: task.id, field: task.field, result: 'heal_rescheduled', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
       }
       continue
