@@ -39,7 +39,8 @@ import {
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   type DetailAttribute,
 } from '@/lib/fba/productDetailAttrs'
-import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
+import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
+import { calibrateVariants } from '@/lib/fba/detailCalibration'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { logAudit } from '@/lib/audit'
 import { fingerprintOf } from '@/lib/keyword-engine/shareSnapshots'  // VERBATIM — outcome-epoch fingerprint
@@ -48,7 +49,10 @@ import { appendScoreHistory } from '@/lib/fba/scoreHistory'
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
 // validator. Process-lifetime: schemas are static, so the form that validates once keeps
 // validating; a deploy restart just re-calibrates on the next push (one extra preview call).
-const _detailFormCache = new Map<string, number>()
+// Keyed by the variant's stable ID (not its index): the variant LIST is value-dependent now —
+// each candidate sub-field only emits variants when the pushed value coerces into ITS
+// vocabulary — so an index cached under one value could point at a DIFFERENT form for another.
+const _detailFormCache = new Map<string, string>()
 import { getProductType, tryGetProductType } from '@/lib/amazon/productType'
 
 // ── Cancellation (streaming pushes) ──────────────────────────────────────────
@@ -745,6 +749,35 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   }
 
   return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape, productType: resolvedPt }, error: null }
+}
+
+/** Which of a composite's candidate sub-fields does the LIVE listing already populate?
+ *  A HINT, not proof (adversarial review fix 3): a derived sub-field (SHIRT sleeve
+ *  `length_description`) is populated by Amazon's OWN derivation without honoring writes, so
+ *  "populated" alone must not promote it — the caller gates this hint through
+ *  applyLiveDetailSubfieldHint (union-enum candidates only) before reordering the probes.
+ *  candidatePaths come in preference order — when several are populated the earlier one wins.
+ *  Best-effort: null on any failure / nothing populated (schema order then decides). */
+async function detectLiveDetailSubfield(
+  sellerId: string, token: string, sku: string, spApiKey: string, candidatePaths: string[][],
+): Promise<string | null> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+      `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return null
+    const json = (await resp.json()) as { attributes?: Record<string, unknown> }
+    const arr = (json.attributes ?? {})[spApiKey]
+    if (!Array.isArray(arr) || arr.length === 0) return null
+    const entry = arr[0] as Record<string, unknown>
+    for (const p of candidatePaths) {
+      const v = entry?.[p[0]]
+      if (v == null) continue
+      if (Array.isArray(v) ? v.length > 0 : true) return p[0]
+    }
+    return null
+  } catch { return null }
 }
 
 /** Fetch a SKU's CURRENT attribute value live from Listings Items. Best-effort: '' on failure. */
@@ -2008,29 +2041,91 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // enum string, or a oneOf union of both. VALIDATION_PREVIEW performs no write — so
           // probe the variants on the FIRST SKU, use the survivor for the whole family, and
           // refuse loudly if Amazon rejects them all (no more 82-row failure cascades).
+          // Variants now span every candidate SUB-FIELD too (SHIRT sleeve: `type` before
+          // `length_description`), each carrying its own coerced enum member.
           let calibratedValueFor: ((v: string) => Record<string, unknown>[] | undefined) = () => undefined
           if (ctx.valueShape) {
-            const shape = ctx.valueShape
+            let shape = ctx.valueShape
             const formKey = `${productType}|${ctx.attribute.spApiKey}`
-            const variants = buildShapedDetailValueVariants(shape, ctx.recommendedValue, MARKETPLACE_ID)
-            let winIdx = _detailFormCache.has(formKey) ? (_detailFormCache.get(formKey) as number) : -1
-            if (winIdx < 0 || winIdx >= variants.length) {
-              winIdx = -1
-              let lastErr: string | undefined
-              for (let i = 0; i < variants.length; i++) {
-                emit({ type: 'progress', sku: diff[0].sku, status: 'validating', current: diff[0].current, proposed: ctx.recommendedValue })
-                const probe = await patchSkuDetail(sellerId, token, productType, diff[0].sku, ctx.attribute, ctx.recommendedValue, 'VALIDATION_PREVIEW', shape, variants[i].value)
-                if (probe.ok) { winIdx = i; _detailFormCache.set(formKey, i); break }
-                lastErr = probe.error
-                await sleep(PATCH_DELAY_MS)
+            const cachedId = _detailFormCache.get(formKey) ?? null
+            // LIVE-SUB-FIELD HINT: when the container has several candidate sub-fields, the one
+            // the LIVE listing already populates is the one Amazon demonstrably honors for THIS
+            // listing — reorder so its variants are probed first. Best-effort; on any failure
+            // the schema order (union-enum sub-fields first) stands. Skipped on a cache hit —
+            // no probes happen then, so order doesn't matter.
+            // UNION-GATED (adversarial review fix 3): derived fields (length_description) are
+            // populated by Amazon's OWN derivation without honoring writes, so a populated
+            // NON-union sub-field is NOT write-evidence — applyLiveDetailSubfieldHint only
+            // promotes union-enum candidates; otherwise schema/band order stands untouched.
+            const candList = shape.candidates ?? []
+            if (!cachedId && candList.length > 1) {
+              const liveSub = await detectLiveDetailSubfield(sellerId, token, diff[0].sku, ctx.attribute.spApiKey, candList.map((c) => c.path))
+              const hinted = applyLiveDetailSubfieldHint(shape, liveSub)
+              if (hinted.reordered) {
+                shape = hinted.shape
+                console.log(`[push-content] live sub-field hint: ${ctx.attribute.spApiKey}.${liveSub} is populated on ${diff[0].sku} — probing it first`)
+              } else if (liveSub && candList[0].path[0] !== liveSub) {
+                console.log(`[push-content] live sub-field hint ignored: ${ctx.attribute.spApiKey}.${liveSub} is populated on ${diff[0].sku} but is not a union-enum candidate (likely Amazon-derived) — keeping schema band order`)
               }
-              if (winIdx < 0) {
-                emit({ type: 'error', error: `Amazon's validator rejected every known write form for "${ctx.detailField}" (${ctx.attribute.spApiKey}) — nothing was pushed to any SKU. Amazon's message: ${lastErr ?? '(none)'}` })
+            }
+            // FIX 1 (adversarial review): the calibration loop is now transport-aware
+            // (calibrateVariants). A 429/5xx or thrown fetch is retried on the SAME variant
+            // (1s/2s backoff); only a parsed VALIDATION rejection advances. Transport-exhausted
+            // -> ABORT this attribute's calibration without advancing — variants span DIFFERENT
+            // sub-fields, so advancing on transport noise could crown the derived sub-field
+            // (accepted-then-dropped) and cache it process-lifetime.
+            const calibrate = (probeVariants: { id: string; value: Record<string, unknown>[] }[], errs: string[]) =>
+              calibrateVariants(probeVariants,
+                (v) => patchSkuDetail(sellerId, token, productType, diff[0].sku, ctx.attribute, ctx.recommendedValue, 'VALIDATION_PREVIEW', shape, v.value),
+                {
+                  onProbe: () => emit({ type: 'progress', sku: diff[0].sku, status: 'validating', current: diff[0].current, proposed: ctx.recommendedValue }),
+                  interProbeDelayMs: PATCH_DELAY_MS,
+                }).then((res) => { errs.push(...res.errors); return res })
+            let variants = buildShapedDetailValueVariants(shape, ctx.recommendedValue, MARKETPLACE_ID)
+            let winId = cachedId && variants.some((v) => v.id === cachedId) ? cachedId : null
+            if (!winId) {
+              const errs: string[] = []
+              const first = await calibrate(variants, errs)
+              winId = first.winId
+              let transportAbort = first.transportAbort
+              if (!winId && !transportAbort) {
+                // SELF-HEAL: when EVERY form is rejected, the likeliest systemic cause is a STALE
+                // cached schema (Amazon revised the attribute's sub-fields). Bust both cache tiers
+                // ONCE, re-derive the shape from the fresh schema, and retry the calibration once.
+                // Deliberately NOT run on a transport abort — a 429/5xx burst is not a stale
+                // schema, and more probes mid-burst only feed the throttle.
+                try {
+                  await bustProductTypeSchemaCache(productType, MARKETPLACE_ID)
+                  const freshShape = await getDetailValueShape(productType, ctx.attribute.spApiKey, ptOpts)
+                  if (freshShape) {
+                    shape = freshShape
+                    variants = buildShapedDetailValueVariants(shape, ctx.recommendedValue, MARKETPLACE_ID)
+                    const retryErrs: string[] = []
+                    const retry = await calibrate(variants, retryErrs)
+                    winId = retry.winId
+                    transportAbort = retry.transportAbort
+                    errs.push(...retryErrs.map((e) => `fresh-schema ${e}`))
+                  }
+                } catch (e) {
+                  errs.push(`schema-refresh: ${e instanceof Error ? e.message : String(e)}`)
+                }
+              }
+              if (!winId) {
+                // Surface EVERY variant's rejection (capped) — a single lastErr hid which
+                // sub-fields/forms were tried and why each failed. A transport abort says so
+                // plainly: nothing was proven wrong with the variants; Amazon was unreachable.
+                const detail = errs.join(' | ').slice(0, 900)
+                emit({ type: 'error', error: transportAbort
+                  ? `Amazon throttled/errored while calibrating "${ctx.detailField}" (${ctx.attribute.spApiKey}) — calibration aborted after retries so a transport blip can't pick the wrong sub-field; nothing was pushed to any SKU. Try again in a minute. Probe errors: ${detail || '(none)'}`
+                  : `Amazon's validator rejected every known write form for "${ctx.detailField}" (${ctx.attribute.spApiKey}) — nothing was pushed to any SKU. Variant errors: ${detail || '(none)'}` })
                 return
               }
-              console.log(`[push-content] calibrated ${formKey} -> write form "${variants[winIdx].id}"`)
+              _detailFormCache.set(formKey, winId)
+              console.log(`[push-content] calibrated ${formKey} -> write form "${winId}"`)
             }
-            calibratedValueFor = (v: string) => buildShapedDetailValueVariants(shape, v, MARKETPLACE_ID)[winIdx]?.value
+            const finalShape = shape
+            const finalWinId = winId
+            calibratedValueFor = (v: string) => buildShapedDetailValueVariants(finalShape, v, MARKETPLACE_ID).find((x) => x.id === finalWinId)?.value
           }
 
           const results: PushResultRow[] = []
@@ -2562,17 +2657,28 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       if (!p.valueShape) { p.patchValue = buildDetailPatchValue(p.attribute, p.value, MARKETPLACE_ID) as unknown as Record<string, unknown>[]; continue }
       const formKey = `${productType}|${p.attribute.spApiKey}`
       const variants = buildShapedDetailValueVariants(p.valueShape, p.value, MARKETPLACE_ID)
-      let winIdx = _detailFormCache.has(formKey) ? (_detailFormCache.get(formKey) as number) : -1
-      if (winIdx < 0 || winIdx >= variants.length) {
-        winIdx = -1
-        for (let i = 0; i < variants.length; i++) {
-          const probe = await patchSkuMulti(sellerId, token, productType, skuSet[0].sku,
-            [{ op: 'replace', path: `/attributes/${p.attribute.spApiKey}`, value: variants[i].value }], 'VALIDATION_PREVIEW')
-          if (probe.ok) { winIdx = i; _detailFormCache.set(formKey, i); break }
-          await sleep(PATCH_DELAY_MS)
-        }
+      // Cache lookup is by variant ID (the list is value-dependent) — a stale/missing id recalibrates.
+      const cachedId = _detailFormCache.get(formKey) ?? null
+      let winIdx = cachedId ? variants.findIndex((v) => v.id === cachedId) : -1
+      let transportAbortErr: string | null = null
+      if (winIdx < 0) {
+        // FIX 1 (adversarial review): transport-aware probing (calibrateVariants) — a 429/5xx or
+        // thrown fetch retries the SAME variant; only a validation rejection advances. Transport-
+        // exhausted -> abort THIS field's calibration (skipped, loud) without advancing into a
+        // different sub-field's variants; the other fields proceed as before.
+        const res = await calibrateVariants(variants,
+          (v) => patchSkuMulti(sellerId, token, productType, skuSet[0].sku,
+            [{ op: 'replace', path: `/attributes/${p.attribute.spApiKey}`, value: v.value }], 'VALIDATION_PREVIEW'),
+          { interProbeDelayMs: PATCH_DELAY_MS })
+        if (res.winId) { winIdx = variants.findIndex((v) => v.id === res.winId); _detailFormCache.set(formKey, res.winId) }
+        else if (res.transportAbort) transportAbortErr = res.errors[res.errors.length - 1] ?? 'transport failure'
       }
-      if (winIdx < 0) { skipped.push({ field: p.field, reason: 'Amazon rejected every known write form (calibration failed)' }); p.patchValue = undefined; p.value = '__CALIBRATION_FAILED__' }
+      if (winIdx < 0) {
+        skipped.push({ field: p.field, reason: transportAbortErr
+          ? `Amazon throttled/errored during calibration (${transportAbortErr}) — field skipped this run so a transport blip can't pick the wrong sub-field; push again in a minute`
+          : 'Amazon rejected every known write form (calibration failed)' })
+        p.patchValue = undefined; p.value = '__CALIBRATION_FAILED__'
+      }
       else p.patchValue = variants[winIdx].value
     }
     const livePlans = checkedPlans.filter((p) => p.value !== '__CALIBRATION_FAILED__')

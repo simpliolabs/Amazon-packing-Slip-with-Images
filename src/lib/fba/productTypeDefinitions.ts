@@ -152,10 +152,60 @@ async function fetchProductTypeSchema(
   return schema
 }
 
+/** Evict a product type's schema from BOTH cache tiers (in-process map + pt_schema_cache row).
+ *  SELF-HEALING hook: when Amazon's validator rejects EVERY calibrated write form for an
+ *  attribute, the most likely systemic cause is a STALE cached schema (Amazon revised the
+ *  attribute's sub-fields). The caller busts once, re-derives the shape from a fresh live
+ *  fetch, and retries the calibration one time. Best-effort — a DB error only skips tier 2. */
+export async function bustProductTypeSchemaCache(productType: string, marketplaceId: string): Promise<void> {
+  const key = `${productType}|${marketplaceId}`
+  _schemaCache.delete(key)
+  try {
+    const { createAdminClient } = await import('@/lib/supabase/server')
+    const supabase = await createAdminClient()
+    await supabase.from('pt_schema_cache').delete().eq('cache_key', key)
+  } catch { /* best-effort — the live refetch is what matters */ }
+}
+
+/** The enum a property node carries: directly, OR inside an `anyOf`/`oneOf` member. The live
+ *  SHIRT schema hides the Seller-Central form vocabulary this way — `sleeve.type.value` is
+ *  anyOf:[{type:string},{enum:["Short Sleeve",...]}] — so an enum-blind read demoted the honored
+ *  `type` sub-field to "bare string" and the DERIVED token field (`length_description`, which
+ *  Amazon does NOT honor on writes) won every resolution: chips, coercion, and the write path all
+ *  consistently targeted the wrong sub-field (the sleeve hard-reject, 2026-07). `viaUnion` marks
+ *  the anyOf/oneOf case ("form field"-style: open string union with a recommended vocabulary). */
+function propertyEnum(s: unknown): { def: AttributeEnum; viaUnion: boolean } | null {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = s as Record<string, any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const read = (o: Record<string, any>, viaUnion: boolean): { def: AttributeEnum; viaUnion: boolean } => ({
+    def: {
+      values: o.enum.map((v: unknown) => String(v)),
+      names: Array.isArray(o.enumNames) ? o.enumNames.map((v: unknown) => String(v)) : [],
+      deprecated: Array.isArray(o.enumDeprecated) ? o.enumDeprecated.map((v: unknown) => String(v)) : [],
+    },
+    viaUnion,
+  })
+  if (Array.isArray(obj.enum) && obj.enum.length) return read(obj, false)
+  for (const unionKey of ['anyOf', 'oneOf'] as const) {
+    const members = obj[unionKey]
+    if (!Array.isArray(members)) continue
+    for (const m of members) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mm = m as Record<string, any> | null
+      if (mm && typeof mm === 'object' && Array.isArray(mm.enum) && mm.enum.length) return read(mm, true)
+    }
+  }
+  return null
+}
+
 /** Find the accepted-value enum inside an attribute subschema. Amazon nests this differently
  *  across product types (array→items→properties.value.enum, oneOf wrappers, $defs-inlined, …),
  *  so we do a bounded DFS for ANY `enum` array — preferring one whose property key is `value`
- *  (the SP-API value field), reading its sibling `enumNames` for display labels. */
+ *  (the SP-API value field), reading its sibling `enumNames` for display labels. An enum carried
+ *  by an anyOf/oneOf member counts as THIS property's enum (see propertyEnum), so `type.value`-
+ *  style sub-fields are first-class hits instead of losing to a derived token field. */
 function extractEnum(node: unknown): AttributeEnum | null {
   let best: AttributeEnum | null = null      // enum found on a `value` property — preferred
   let fallback: AttributeEnum | null = null  // any other enum encountered
@@ -163,14 +213,10 @@ function extractEnum(node: unknown): AttributeEnum | null {
     if (best || !n || typeof n !== 'object' || depth > 12) return
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const obj = n as Record<string, any>
-    if (Array.isArray(obj.enum) && obj.enum.length) {
-      const found: AttributeEnum = {
-        values: obj.enum.map((v: unknown) => String(v)),
-        names: Array.isArray(obj.enumNames) ? obj.enumNames.map((v: unknown) => String(v)) : [],
-        deprecated: Array.isArray(obj.enumDeprecated) ? obj.enumDeprecated.map((v: unknown) => String(v)) : [],
-      }
-      if (keyName === 'value') { best = found; return }
-      if (!fallback) fallback = found
+    const pe = propertyEnum(obj)
+    if (pe) {
+      if (keyName === 'value') { best = pe.def; return }
+      if (!fallback) fallback = pe.def
     }
     if (Array.isArray(n)) { for (const item of n) visit(item, keyName, depth + 1) }
     else { for (const k of Object.keys(obj)) { if (k !== 'enum' && k !== 'enumNames') visit(obj[k], k, depth + 1) } }
@@ -180,7 +226,11 @@ function extractEnum(node: unknown): AttributeEnum | null {
 }
 
 /** The accepted-value enum for one attribute of a product type, or null when the
- *  attribute is free-text / the schema is unavailable (caller pushes value as-is). */
+ *  attribute is free-text / the schema is unavailable (caller pushes value as-is).
+ *  UNIFIED SUB-FIELD RESOLUTION: the enum the chips/coercion see MUST be the enum of the SAME
+ *  sub-field the write path targets, so both read analyzeDetailValueShape's pick — resolving
+ *  them by two independent traversals is how they can drift (the sleeve wrong-sub-field bug).
+ *  extractEnum stays as the fallback for nodes without a properties map (top-level enums). */
 export async function getAttributeEnum(
   productType: string,
   spApiKey: string,
@@ -190,7 +240,10 @@ export async function getAttributeEnum(
   if (!schema) return null
   const props = (schema as { properties?: Record<string, unknown> }).properties
   if (!props) return null
-  return extractEnum(props[spApiKey])
+  const node = props[spApiKey]
+  const shape = analyzeDetailValueShape(node)
+  if (shape?.enumDef) return shape.enumDef
+  return extractEnum(node)
 }
 
 /** True if `spApiKey` is a real attribute in THIS product type's live schema. Apparel attrs
@@ -425,16 +478,37 @@ export interface DetailValueShape {
   isArrayAt: boolean[]
   /** The attribute's item root declares marketplace_id (attached to the entry). */
   hasMarketplaceId: boolean
+  /** This sub-field's OWN accepted vocabulary (a direct enum or an anyOf/oneOf member's — see
+   *  propertyEnum). Absent = free-text sub-field. The write path coerces into THIS enum, so the
+   *  value written always belongs to the sub-field it lands on. */
+  enumDef?: AttributeEnum
+  /** ALL value-bearing sub-field candidates of this attribute, THIS shape's sub-field first.
+   *  A container can carry several (SHIRT sleeve: `type` + `cuff_style` + `length_description`)
+   *  and Amazon honors only one on writes — the calibration probes them in this order. Present
+   *  only on the shape returned for the attribute root; candidates themselves don't nest. */
+  candidates?: DetailValueShape[]
+  /** This sub-field's enum is carried by an anyOf/oneOf UNION member ("form field"-style — the
+   *  kind Seller Central's editor reads and Amazon honors on writes). Direct token enums without
+   *  a union are the DERIVED-field signature (length_description). The live-listing hint may only
+   *  promote union candidates (applyLiveDetailSubfieldHint — adversarial review fix 3). */
+  viaUnion?: boolean
 }
 
 /** Walk one attribute subschema and locate the value leaf + its property path.
- *  Mirrors extractEnum's preference order so the path lands on the SAME field the
- *  enum coercion validated against: (1) first enum under a property named `value`,
- *  (2) first enum under any property, (3) first string property named `value`.
+ *  BAND-ORDERED preference (adversarial review fix 2 — declaration order must not beat the
+ *  band): (1) UNION-carried enum under a property named `value` (anyOf/oneOf member — see
+ *  propertyEnum; the Seller-Central "form field" style Amazon honors on writes), (2) direct
+ *  enum under a property named `value`, (3) first enum under any property, (4) first string
+ *  property named `value` — declaration order only WITHIN a band. Without band (1) first, a
+ *  derived direct-token field (sleeve `length_description`) declared earlier in the schema
+ *  would beat the honored union field (`type`). This pick IS the source of truth for the enum
+ *  lookup too —
+ *  getAttributeEnum returns the picked sub-field's enumDef, so the "AMAZON ACCEPTS" chips,
+ *  the coercion, and the write path can never disagree about which sub-field they target.
  *  Exported for the ?debug route and shape tests; production callers use
  *  getDetailValueShape (which also applies the flat-attribute bypass). */
 export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | null {
-  type Hit = { shape: DetailValueShape; kind: 'valueEnum' | 'anyEnum' | 'valueString' }
+  type Hit = { shape: DetailValueShape; kind: 'valueEnum' | 'anyEnum' | 'valueString'; viaUnion: boolean }
   const hits: Hit[] = []
   let rootHasMarketplaceId = false
   let sawRootProps = false
@@ -457,10 +531,14 @@ export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | n
         const nextPath = [...path, key]
         const nextLangs = [...langs, hasLang]
         const nextArrs = [...arrs, isArr]
-        if (s && typeof s === 'object' && Array.isArray(s.enum) && s.enum.length) {
-          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, isArrayAt: nextArrs, hasMarketplaceId: false }, kind: key === 'value' ? 'valueEnum' : 'anyEnum' })
+        // Direct enum OR union-carried (anyOf/oneOf member) enum — see propertyEnum. Without the
+        // union case, SHIRT sleeve's honored `type` sub-field read as a bare string and the
+        // derived `length_description` token enum won the path (writes Amazon now hard-rejects).
+        const pe = s && typeof s === 'object' ? propertyEnum(s) : null
+        if (pe) {
+          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, isArrayAt: nextArrs, hasMarketplaceId: false, enumDef: pe.def }, kind: key === 'value' ? 'valueEnum' : 'anyEnum', viaUnion: pe.viaUnion })
         } else if (s && typeof s === 'object' && key === 'value' && (s.type === 'string' || s.type == null)) {
-          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, isArrayAt: nextArrs, hasMarketplaceId: false }, kind: 'valueString' })
+          hits.push({ shape: { path: nextPath, languageTagAt: nextLangs, isArrayAt: nextArrs, hasMarketplaceId: false }, kind: 'valueString', viaUnion: false })
         }
         visit(sub, nextPath, nextLangs, nextArrs, depth + 1)
       }
@@ -473,9 +551,51 @@ export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | n
     }
   }
   visit(attrNode, [], [], [], 0)
-  const pick = hits.find((h) => h.kind === 'valueEnum') ?? hits.find((h) => h.kind === 'anyEnum') ?? hits.find((h) => h.kind === 'valueString')
+  // BAND-ORDERED pick (adversarial review fix 2): the first valueEnum in DECLARATION order let a
+  // derived direct-token field declared earlier beat the union-carried honored field — the band
+  // must outrank declaration order, exactly like the candidate sort below.
+  const pick =
+    hits.find((h) => h.kind === 'valueEnum' && h.viaUnion) ??
+    hits.find((h) => h.kind === 'valueEnum') ??
+    hits.find((h) => h.kind === 'anyEnum') ??
+    hits.find((h) => h.kind === 'valueString')
   if (!pick) return null
-  return { ...pick.shape, hasMarketplaceId: rootHasMarketplaceId }
+  // CANDIDATES: every distinct value-bearing sub-field, the pick first. After the pick, union-
+  // carried enums ("form field"-style — the kind Seller Central's editor reads) go before direct
+  // token enums, schema declaration order within each band (Array.prototype.sort is stable).
+  const seenPaths = new Set<string>([pick.shape.path.join(' ')])
+  const rest = hits.filter((h) => {
+    const k = h.shape.path.join(' ')
+    if (seenPaths.has(k)) return false
+    seenPaths.add(k)
+    return true
+  })
+  rest.sort((a, b) => Number(b.viaUnion) - Number(a.viaUnion))
+  // viaUnion rides along as candidate metadata — the live-listing hint's union gate (fix 3).
+  const withMkt = (h: Hit): DetailValueShape => ({ ...h.shape, hasMarketplaceId: rootHasMarketplaceId, viaUnion: h.viaUnion })
+  const candidates = [pick, ...rest].map(withMkt)
+  return { ...withMkt(pick), candidates }
+}
+
+/** LIVE-SUB-FIELD HINT, union-gated (adversarial review fix 3). The push calibration prefers to
+ *  probe the sub-field the LIVE listing already populates — but "populated" is only write-evidence
+ *  for a UNION-enum ("form field") candidate: derived fields (SHIRT sleeve `length_description`)
+ *  are populated by Amazon's OWN derivation without honoring writes, so promoting one re-crowns
+ *  exactly the wrong sub-field this resolver exists to avoid. Reorders candidates (stable
+ *  move-to-front) ONLY toward candidates that are BOTH the hinted sub-field AND viaUnion — a
+ *  direct-token-enum candidate is never moved ahead of a union-enum candidate. `reordered` false
+ *  = order untouched (no hint / hinted candidate already first / hinted candidate not union). */
+export function applyLiveDetailSubfieldHint(
+  shape: DetailValueShape,
+  liveSub: string | null,
+): { shape: DetailValueShape; reordered: boolean } {
+  const cands = shape.candidates ?? []
+  if (!liveSub || cands.length < 2) return { shape, reordered: false }
+  const hinted = (c: DetailValueShape) => c.path[0] === liveSub && c.viaUnion === true
+  if (!cands.some(hinted)) return { shape, reordered: false }
+  const sorted = [...cands].sort((a, b) => Number(hinted(b)) - Number(hinted(a)))
+  if (sorted[0] === cands[0]) return { shape, reordered: false }   // already first — nothing moved
+  return { shape: { ...sorted[0], candidates: sorted }, reordered: true }
 }
 
 /** The schema-derived value shape for one attribute — or null when it's a plain
@@ -533,27 +653,53 @@ export function buildShapedDetailValueVariants(
   languageTag = 'en_US',
 ): { id: string; value: Record<string, unknown>[] }[] {
   const out: { id: string; value: Record<string, unknown>[] }[] = []
-  out.push({ id: 'shaped', value: buildShapedDetailValue(shape, rawValue, marketplaceId, languageTag) })
-  if (shape.languageTagAt.some(Boolean)) {
-    const noLang: DetailValueShape = { ...shape, languageTagAt: shape.languageTagAt.map(() => false) }
-    out.push({ id: 'shaped-no-lang', value: buildShapedDetailValue(noLang, rawValue, marketplaceId, languageTag) })
-  }
-  if (shape.path.length > 1 && shape.path[shape.path.length - 1] === 'value') {
-    // The sub-field carrying the BARE value (array-aware): [{ neck_style: ["Crew Neck"], marketplace_id }]
-    const direct: DetailValueShape = {
-      path: shape.path.slice(0, -1),
-      languageTagAt: shape.languageTagAt.slice(0, -1).map(() => false),
-      isArrayAt: shape.isArrayAt.slice(0, -1),
-      hasMarketplaceId: shape.hasMarketplaceId,
+  // PER-SUB-FIELD candidates (the sleeve fix): each candidate sub-field emits its own variant
+  // set carrying ITS OWN coerced enum member — display "Short Sleeve" into `type`, token
+  // "short_sleeve" into `length_description` (coerceToEnum maps display->token via enumNames;
+  // when values==names it degenerates to an exact match). A candidate whose vocabulary can't
+  // host the value is SKIPPED (never write a non-member); when none can host it (free-text
+  // sub-fields, or a placeholder like the ?debug probe), the primary shape passes the raw
+  // value through exactly as before.
+  const candidates = shape.candidates?.length ? shape.candidates : [shape]
+  const targets: { cand: DetailValueShape; value: string; sub: string }[] = []
+  for (const cand of candidates) {
+    const sub = cand.path.join('.')
+    if (cand.enumDef && cand.enumDef.values.length) {
+      const c = coerceToEnum(rawValue, cand.enumDef)
+      if (c.valid) targets.push({ cand, value: c.value, sub })
+    } else {
+      targets.push({ cand, value: rawValue, sub })
     }
-    out.push({ id: 'direct-leaf', value: buildShapedDetailValue(direct, rawValue, marketplaceId, languageTag) })
   }
-  // OBJECT fallback: the same path WITHOUT array-wrapping any segment — for product types
-  // whose composite sub-field is a plain object, not an array. Cheap insurance; calibration
-  // picks whichever Amazon validates.
-  if (shape.isArrayAt.some(Boolean)) {
-    const noArr: DetailValueShape = { ...shape, isArrayAt: shape.isArrayAt.map(() => false) }
-    out.push({ id: 'no-array', value: buildShapedDetailValue(noArr, rawValue, marketplaceId, languageTag) })
+  if (targets.length === 0) targets.push({ cand: candidates[0], value: rawValue, sub: candidates[0].path.join('.') })
+
+  for (const { cand, value, sub } of targets) {
+    // Every id is SUB-FIELD-QUALIFIED (e.g. "type.value:shaped") so a cached winning id stays
+    // unambiguous regardless of candidate ORDER — the live-listing hint can reorder candidates
+    // between calibrations, and an order-relative id would silently cross to another sub-field.
+    const idFor = (base: string) => `${sub}:${base}`
+    out.push({ id: idFor('shaped'), value: buildShapedDetailValue(cand, value, marketplaceId, languageTag) })
+    if (cand.languageTagAt.some(Boolean)) {
+      const noLang: DetailValueShape = { ...cand, languageTagAt: cand.languageTagAt.map(() => false) }
+      out.push({ id: idFor('shaped-no-lang'), value: buildShapedDetailValue(noLang, value, marketplaceId, languageTag) })
+    }
+    if (cand.path.length > 1 && cand.path[cand.path.length - 1] === 'value') {
+      // The sub-field carrying the BARE value (array-aware): [{ neck_style: ["Crew Neck"], marketplace_id }]
+      const direct: DetailValueShape = {
+        path: cand.path.slice(0, -1),
+        languageTagAt: cand.languageTagAt.slice(0, -1).map(() => false),
+        isArrayAt: cand.isArrayAt.slice(0, -1),
+        hasMarketplaceId: cand.hasMarketplaceId,
+      }
+      out.push({ id: idFor('direct-leaf'), value: buildShapedDetailValue(direct, value, marketplaceId, languageTag) })
+    }
+    // OBJECT fallback: the same path WITHOUT array-wrapping any segment — for product types
+    // whose composite sub-field is a plain object, not an array. Cheap insurance; calibration
+    // picks whichever Amazon validates.
+    if (cand.isArrayAt.some(Boolean)) {
+      const noArr: DetailValueShape = { ...cand, isArrayAt: cand.isArrayAt.map(() => false) }
+      out.push({ id: idFor('no-array'), value: buildShapedDetailValue(noArr, value, marketplaceId, languageTag) })
+    }
   }
   const seen = new Set<string>()
   return out.filter((v) => { const k = JSON.stringify(v.value); if (seen.has(k)) return false; seen.add(k); return true })
