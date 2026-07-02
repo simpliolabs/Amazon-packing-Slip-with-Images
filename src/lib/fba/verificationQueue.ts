@@ -13,6 +13,7 @@
  * supersedes), so we never retry against a stale expected_value.
  */
 import { createAdminClient } from '@/lib/supabase/server'
+import { buildFamilyIntegrityTaskRow, FAMILY_CHECK_FIELD } from '@/lib/fba/healEvidence'
 
 /** ~20 min — sits inside Amazon's 15-30 min window so the first verify isn't too early
  *  (everything looks stale) or too late (the seller has been staring at "Pushed" with no
@@ -88,12 +89,18 @@ export async function enqueueVerification(args: EnqueueArgs): Promise<void> {
  *  COMPOSITE variant (self-healing composite): when `composite` is present the rejection named a
  *  COMPOSITE container (e.g. shirt_size, sub-fields size_system/size_class) which the flat auto-heal
  *  deliberately excludes; the cron dispatches to the purpose-built healParentComposite instead. Absent
- *  `composite` (the default) → the existing flat healParentAttributes path, behavior unchanged. */
+ *  `composite` (the default) → the existing flat healParentAttributes path, behavior unchanged.
+ *
+ *  FAMILY-CHECK variant (adversarial review 2026-07-02, fix 3): when `familyCheck` is present the task
+ *  is the ONE-SHOT delayed family-integrity check a confirmed strategy-3 complete write enqueues (field
+ *  'heal:family-check', now+6h, max_attempts 1) — the cron dispatches to checkHealFamilyIntegrity, NOT
+ *  to a heal. `missingAttrKeys` is absent on this variant (hence optional). */
 export interface HealPayload {
   parentSku: string
   productType: string
-  missingAttrKeys: string[]
+  missingAttrKeys?: string[]
   composite?: { containerKey: string; subKeys: string[] }
+  familyCheck?: { childCount: number; containerKey: string }
 }
 
 /** Register a SELF-HEAL task on the existing verify queue (migration 042 kind='heal'). Reuses the
@@ -183,6 +190,36 @@ export async function flagParentAttrsNeedAttention(parent_asin: string, missingA
     })
   } catch (e) {
     console.warn('[verification-queue] flagParentAttrsNeedAttention failed (migration 042 applied?):', e instanceof Error ? e.message : e)
+  }
+}
+
+/** ONE-SHOT delayed family-integrity check (adversarial review 2026-07-02, fix 3). Enqueued by a
+ *  CONFIRMED strategy-3 complete write: the feared harm of a per-variant `size` on the hub is variation
+ *  DE-LINKING, which manifests on Amazon's 15min-6hr catalog lag — invisible to the heal's own
+ *  preview/read-back. The row (field 'heal:family-check', kind 'heal', max_attempts 1, next_check_at
+ *  now+6h, heal_payload.familyCheck = { childCount, containerKey }) is built by the PURE
+ *  buildFamilyIntegrityTaskRow (healEvidence.ts) so its shape is smokeable standalone. Supersedes any
+ *  prior active family-check for this parent (newest heal wins the single queue slot). Best-effort +
+ *  non-throwing — a missed enqueue only means no delayed check for THIS heal. */
+export async function enqueueFamilyIntegrityCheck(
+  parent_asin: string,
+  args: { parentSku: string; productType: string; childCount: number; containerKey: string },
+): Promise<void> {
+  if (!parent_asin || !args?.parentSku || !args.productType || !args.containerKey) return
+  try {
+    const row = buildFamilyIntegrityTaskRow(parent_asin, args)
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    await db.from('push_verification_tasks')
+      .update({ status: 'abandoned', updated_at: new Date().toISOString() })
+      .eq('parent_asin', parent_asin)
+      .eq('field', FAMILY_CHECK_FIELD)
+      .in('status', ['pending', 'running'])
+    const { error } = await db.from('push_verification_tasks').insert(row)
+    if (error) console.warn('[verification-queue] enqueueFamilyIntegrityCheck insert failed (non-fatal):', error?.message ?? error)
+  } catch (e) {
+    console.warn('[verification-queue] enqueueFamilyIntegrityCheck failed (non-fatal):', e instanceof Error ? e.message : e)
   }
 }
 

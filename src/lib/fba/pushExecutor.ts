@@ -45,6 +45,13 @@ import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { logAudit } from '@/lib/audit'
 import { fingerprintOf } from '@/lib/keyword-engine/shareSnapshots'  // VERBATIM — outcome-epoch fingerprint
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'
+// PURE heal-decision helpers (adversarial review 2026-07-02): dependency-free so the sandbox can
+// smoke the destructive/escalation gates standalone — see healEvidence.ts's module doc.
+import {
+  compositeItemCarries, subsetDeepEqual, classifyDeletePreviewFailure,
+  findCompleteWriteEvidence, HEAL_EVIDENCE_WINDOW_MS, HEAL_EVIDENCE_MAX_ROWS,
+  type CompositeItem,
+} from '@/lib/fba/healEvidence'
 
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
 // validator. Process-lifetime: schemas are static, so the form that validates once keeps
@@ -1204,10 +1211,9 @@ export async function healParentAttributes(
 //   (a) copies the child's OWN Amazon-validated sub-objects VERBATIM (no shape guessing / no builder), and
 //   (b) READS BACK the parent to confirm each sub-field actually persisted before it learns/logs.
 
-/** The shirt_size composite as Amazon returns it: an ARRAY of composite items; each item carries the
- *  per-variant `size` plus the invariant sub-objects (size_system, size_class) + marketplace_id. We copy
- *  the sub-objects verbatim, so their internal shape (array vs object) is never inspected — it's `unknown`. */
-type CompositeItem = Record<string, unknown>
+// The CompositeItem type (the shirt_size composite as Amazon returns it: an ARRAY of composite items,
+// each carrying the per-variant `size` plus the invariant sub-objects + marketplace_id) now lives in
+// healEvidence.ts and is imported above — the pure evidence helpers share it.
 
 /** From a PRE-FETCHED child-attributes map, build ONE composite item for the parent hub that mirrors the
  *  children's agreed invariant sub-objects VERBATIM — plus marketplace_id. AGREEMENT GUARD: every sampled
@@ -1254,32 +1260,9 @@ function buildCompositeMirrorItem(
   return { item, agreedByKey }
 }
 
-/**
- * TOLERANT SUBSET deep-compare for the composite read-back (adversarial review): Amazon can NORMALIZE
- * what we wrote (inject a default language_tag, add/omit marketplace_id, reorder keys) so a byte-exact
- * JSON.stringify compare FALSE-FAILS a value that actually persisted. This returns true iff every LEAF
- * present in `written` is present and equal in `got` — EXTRA keys `got` carries that `written` lacks are
- * ignored (Amazon's own defaults don't count as a drop). A genuinely missing/dropped sub-key still fails
- * (absent in `got`). Objects recurse key-by-key; arrays require same length + element-wise subset; strings
- * compare trimmed; other primitives compare by ===.
- */
-function subsetDeepEqual(written: unknown, got: unknown): boolean {
-  if (Array.isArray(written)) {
-    if (!Array.isArray(got) || got.length !== written.length) return false
-    return written.every((w, i) => subsetDeepEqual(w, got[i]))
-  }
-  if (written !== null && typeof written === 'object') {
-    if (got === null || typeof got !== 'object' || Array.isArray(got)) return false
-    const g = got as Record<string, unknown>
-    return Object.entries(written as Record<string, unknown>).every(
-      ([k, w]) => k in g && subsetDeepEqual(w, g[k]),
-    )
-  }
-  if (typeof written === 'string') {
-    return typeof got === 'string' && written.trim() === got.trim()
-  }
-  return written === got
-}
+// compositeItemCarries + subsetDeepEqual moved VERBATIM to healEvidence.ts (adversarial review
+// 2026-07-02): the bounded-convergence evidence check (fix 2) needs them inside the pure,
+// dependency-free module so the whole decision path is smokeable standalone. Imported above.
 
 /**
  * Inherit a parent hub's missing COMPOSITE sub-fields (size_system/size_class of shirt_size) VERBATIM
@@ -1292,9 +1275,17 @@ function subsetDeepEqual(written: unknown, got: unknown): boolean {
 export async function healParentComposite(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
-  args: { parent_asin: string; parentSku: string; productType: string; containerKey: string; subKeys: string[] },
+  args: {
+    parent_asin: string; parentSku: string; productType: string; containerKey: string; subKeys: string[]
+    /** The queue task's `attempts` counter (0 on the first heal attempt). FIX 1 (adversarial review
+     *  2026-07-02): the strategy-3 escalation requires a PERSISTENT internal-error verdict, so the
+     *  cron threads this through — strategy 3 is only reachable on the 2nd+ attempt. Defaults to 0
+     *  (the conservative polarity: an unthreaded caller can never escalate on its first attempt). */
+    attemptNumber?: number
+  },
 ): Promise<HealResult> {
   const { parent_asin, parentSku, productType, containerKey, subKeys } = args
+  const attemptNumber = args.attemptNumber ?? 0
   const out: HealResult = { healed: [], abstained: [], failed: [] }
   if (!parent_asin || !parentSku || !productType || !containerKey || !(subKeys?.length)) {
     if (containerKey) out.abstained.push(containerKey)
@@ -1351,7 +1342,10 @@ export async function healParentComposite(
           ? issues.filter((i) => sigRe.test(i.message ?? '') && nameRe.test(i.message ?? '')).length === 1
           : sigRe.test(preview.error ?? '') && nameRe.test(preview.error ?? '')
         if (triggered) {
-          return await healCompositeDeletePartial(db, { parent_asin, parentSku, productType, spec, sellerId, token })
+          // childAttrs rides along so the strategy-3 complete-write fallback can reuse the already-
+          // fetched sampled-child map instead of re-issuing HEAL_SAMPLE_CAP live GETs; attemptNumber
+          // rides along so the strategy-3 escalation can require persistence (fix 1).
+          return await healCompositeDeletePartial(db, { parent_asin, parentSku, productType, spec, sellerId, token, childAttrs, attemptNumber })
         }
       }
       out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `preview: ${preview.error ?? 'rejected'}`; return out
@@ -1436,37 +1430,78 @@ export async function healParentComposite(
  *  uncertainty). `fetchFailed` distinguishes a dead GET (transient — failed bucket only, the queue
  *  retries) from a positive "this does not look like a variation parent" (failed bucket + a durable
  *  needs_attention flag so a human decides). Response shapes are handled defensively — any field can
- *  be absent/malformed without throwing. */
+ *  be absent/malformed without throwing.
+ *  `childCount` (fix 3, adversarial review 2026-07-02): the LARGEST child count any VARIATION
+ *  parent-direction relationship reports (0 when none) — recorded at heal time as the shrink baseline
+ *  for the delayed family-integrity check, and read again by that check 6h later. */
 async function confirmNonBuyableVariationParent(
   sellerId: string, token: string, sku: string,
-): Promise<{ confirmed: boolean; fetchFailed: boolean; reason: string }> {
+): Promise<{ confirmed: boolean; fetchFailed: boolean; reason: string; childCount: number }> {
   try {
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
       `?marketplaceIds=${MARKETPLACE_ID}&includedData=summaries,relationships`
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
-    if (!resp.ok) return { confirmed: false, fetchFailed: true, reason: `parentage GET HTTP ${resp.status}` }
+    if (!resp.ok) return { confirmed: false, fetchFailed: true, reason: `parentage GET HTTP ${resp.status}`, childCount: 0 }
     const json = (await resp.json()) as {
       summaries?: { status?: string[] }[]
       relationships?: { relationships?: { type?: string; childSkus?: string[]; childAsins?: string[] }[] }[]
     }
     const relGroups = Array.isArray(json.relationships) ? json.relationships : []
-    const isVariationParent = relGroups.some((g) =>
-      (Array.isArray(g?.relationships) ? g.relationships : []).some(
-        (r) => r?.type === 'VARIATION' &&
-          ((Array.isArray(r.childSkus) && r.childSkus.length > 0) || (Array.isArray(r.childAsins) && r.childAsins.length > 0)),
-      ))
-    if (isVariationParent) return { confirmed: true, fetchFailed: false, reason: 'VARIATION parent relationship with children' }
+    let childCount = 0
+    for (const g of relGroups) {
+      for (const r of (Array.isArray(g?.relationships) ? g.relationships : [])) {
+        if (r?.type !== 'VARIATION') continue
+        const n = Math.max(
+          Array.isArray(r.childSkus) ? r.childSkus.length : 0,
+          Array.isArray(r.childAsins) ? r.childAsins.length : 0,
+        )
+        if (n > childCount) childCount = n
+      }
+    }
+    const isVariationParent = childCount > 0
+    if (isVariationParent) return { confirmed: true, fetchFailed: false, reason: 'VARIATION parent relationship with children', childCount }
     const summaries = Array.isArray(json.summaries) ? json.summaries : []
     const nonBuyable = summaries.length > 0 &&
       summaries.every((s) => !(Array.isArray(s?.status) && s.status.includes('BUYABLE')))
-    if (nonBuyable) return { confirmed: true, fetchFailed: false, reason: 'summaries present with no BUYABLE status' }
+    if (nonBuyable) return { confirmed: true, fetchFailed: false, reason: 'summaries present with no BUYABLE status', childCount: 0 }
     return {
       confirmed: false, fetchFailed: false,
       reason: 'no VARIATION parent relationship with children and summaries do not show non-buyable - cannot positively confirm this SKU is the variation-parent hub',
+      childCount: 0,
     }
   } catch (e) {
-    return { confirmed: false, fetchFailed: true, reason: `parentage GET threw: ${e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120)}` }
+    return { confirmed: false, fetchFailed: true, reason: `parentage GET threw: ${e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120)}`, childCount: 0 }
+  }
+}
+
+/**
+ * FIX 3 (adversarial review 2026-07-02) — the DELAYED family-integrity check the cron runs ~6h after a
+ * confirmed strategy-3 complete write. The feared harm of writing a per-variant `size` onto the hub is
+ * variation DE-LINKING, which manifests on Amazon's 15min-6hr catalog lag — invisible to the heal's own
+ * preview/read-back. Re-reads the live relationships via confirmNonBuyableVariationParent:
+ *  - VARIATION parent relationship GONE (childCount 0) → NOT intact (flag: verify in Seller Central);
+ *  - live child count SHRANK vs the count recorded at heal time → NOT intact;
+ *  - otherwise intact. `fetchFailed` = OUR read failed (soft-fail + re-check next tick, no verdict).
+ * NON-THROWING — every failure lands in the returned shape.
+ */
+export async function checkHealFamilyIntegrity(
+  args: { parentSku: string; recordedChildCount: number },
+): Promise<{ intact: boolean; fetchFailed: boolean; detail: string }> {
+  try {
+    const token = await getAccessToken()
+    const sellerId = await getSellerId()
+    const parentage = await confirmNonBuyableVariationParent(sellerId, token, args.parentSku)
+    if (parentage.fetchFailed) return { intact: false, fetchFailed: true, detail: parentage.reason }
+    if (parentage.childCount === 0) {
+      return { intact: false, fetchFailed: false, detail: 'the VARIATION parent relationship is gone - the live record reports no variation children' }
+    }
+    if (args.recordedChildCount > 0 && parentage.childCount < args.recordedChildCount) {
+      return { intact: false, fetchFailed: false, detail: `the live variation child count shrank to ${parentage.childCount} (was ${args.recordedChildCount} at heal time)` }
+    }
+    return { intact: true, fetchFailed: false, detail: `VARIATION family intact: ${parentage.childCount} live children (recorded ${args.recordedChildCount} at heal time)` }
+  } catch (e) {
+    return { intact: false, fetchFailed: true, detail: `family-integrity check threw: ${e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160)}` }
   }
 }
 
@@ -1502,6 +1537,14 @@ async function confirmNonBuyableVariationParent(
  *    evidence a delete was issued; the row flips to 'accepted' on confirmed read-back.
  *  - READ-BACK-VERIFIED: success is the container being ABSENT on a live re-read — a failed re-read is
  *    a FAILURE (retry), never assumed success.
+ *  - STRATEGY-3 FALLBACK (heal v3, LIVE evidence 2026-07-02; TIGHTENED by adversarial review fix 1):
+ *    when the DELETE's VALIDATION_PREVIEW fails with Amazon's STRUCTURED "An internal error has
+ *    occurred" issues[] verdict (NOT an HTTP-prefixed transport body) — an Amazon-side PROCESSING
+ *    failure, not a validation verdict (observed 3 consecutive times over 40 min on the recorded task
+ *    rows) — AND this is already the 2nd+ queue attempt (persistence, matching that evidence), fall
+ *    through IN THE SAME ATTEMPT to healCompositeCompleteWrite (write ONE COMPLETE container item
+ *    instead). The FIRST structured internal error rides the failed bucket so the queue retries the
+ *    cleaner delete once. A NON-internal preview error keeps the existing failed-bucket path.
  * NON-THROWING; failures land in the returned buckets with errors[] observability. Learns a
  * push_heal_rules row (resolution 'delete_partial_container') ONLY after the confirmed read-back, which
  * also OVERWRITES any stale 'inherit_from_child' rule for this container so the Tier-2 pre-fill stops
@@ -1511,9 +1554,18 @@ async function confirmNonBuyableVariationParent(
 async function healCompositeDeletePartial(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
-  args: { parent_asin: string; parentSku: string; productType: string; spec: CompositeHealSpec; sellerId: string; token: string },
+  args: {
+    parent_asin: string; parentSku: string; productType: string; spec: CompositeHealSpec
+    sellerId: string; token: string
+    /** Strategy 1's already-fetched sampled-child attributes map — passed through so the strategy-3
+     *  complete-write fallback can REUSE it instead of re-issuing HEAL_SAMPLE_CAP live GETs. */
+    childAttrs: Map<string, Record<string, unknown> | null>
+    /** The queue task's `attempts` counter (fix 1): strategy-3 escalation requires attemptNumber >= 1
+     *  — the FIRST structured internal error only earns one more clean delete retry. */
+    attemptNumber: number
+  },
 ): Promise<HealResult> {
-  const { parent_asin, parentSku, productType, spec, sellerId, token } = args
+  const { parent_asin, parentSku, productType, spec, sellerId, token, childAttrs, attemptNumber } = args
   const containerKey = spec.containerKey
   const out: HealResult = { healed: [], abstained: [], failed: [] }
   try {
@@ -1593,18 +1645,54 @@ async function healCompositeDeletePartial(
     const preItems = Array.isArray(preRaw)
       ? preRaw.filter((it): it is Record<string, unknown> => it != null && typeof it === 'object' && !Array.isArray(it))
       : []
-    const perVariantPresent = (it: Record<string, unknown>): boolean => {
-      const v = it[spec.perVariantField]
-      if (v === undefined || v === null) return false
-      if (typeof v === 'string') return v.trim() !== ''
-      if (Array.isArray(v)) return v.length > 0
-      return true
-    }
     // GENUINELY PARTIAL = the per-variant field ('size') absent/empty on EVERY item of the container.
     // If ANY item carries it the live container is COMPLETE — this is NOT the partial-container disease
     // and the delete would destroy a real value: refuse + flag so a human decides. A present-but-
     // uninspectable shape (not an array of item objects) is UNCERTAINTY and refuses the same way.
-    if (preItems.length === 0 || preItems.some(perVariantPresent)) {
+    if (preItems.length === 0 || preItems.some((it) => compositeItemCarries(it, spec.perVariantField))) {
+      // COMPLETE-container convergence (heal v3): a complete container IS the GOAL STATE of the
+      // strategy-3 complete-write fallback. If WE issued a complete-write for this parent+container
+      // (a retry after a successful strategy-3 write whose read-back confirmation was lost) AND the
+      // live first item still subset-matches what that intent row says we wrote, the disease is cured —
+      // report healed instead of a false-alarm needs_attention. Same our-own-evidence pattern as the
+      // absent-branch's weDeletedIt above; anything weaker (no row, unparseable/vacuous payload, live
+      // state diverged, evidence too old) falls through to refuse+flag so a human decides.
+      // BOUNDED EVIDENCE (adversarial review 2026-07-02, fix 2): the old query was unbounded in time,
+      // unordered, .limit(1) — one eternal accepted row would mask every FUTURE different rejection as
+      // healed forever. Now: newest-first, only rows within HEAL_EVIDENCE_WINDOW_MS, ANY matching row
+      // wins, the written payload must COVER subKeys + perVariantField (no vacuous convergence), and a
+      // matched row still sitting at 'attempted' is flipped to 'accepted' so the audit trail stops
+      // reading as a crash. The evaluation itself is the pure findCompleteWriteEvidence (healEvidence.ts).
+      if (preItems.length > 0) {
+        let evidence: { id?: string; status?: string } | null = null
+        try {
+          const sinceIso = new Date(Date.now() - HEAL_EVIDENCE_WINDOW_MS).toISOString()
+          const { data: ev } = await db.from('keyword_push_log')
+            .select('id, new_value, status, pushed_at')
+            .eq('parent_asin', parent_asin).eq('sku', parentSku)
+            .eq('field', `heal:complete:${containerKey}`).in('status', ['attempted', 'accepted'])
+            .gte('pushed_at', sinceIso)
+            .order('pushed_at', { ascending: false })
+            .limit(HEAL_EVIDENCE_MAX_ROWS)
+          evidence = findCompleteWriteEvidence(
+            (ev ?? []) as { id?: string; new_value?: string | null; status?: string; pushed_at?: string | null }[],
+            preItems[0],
+            spec,
+          )
+        } catch { /* evidence unreadable/unparseable -> treat as NOT ours (surface, don't converge) */ }
+        if (evidence) {
+          // (fix 2d) Flip a still-'attempted' intent row to 'accepted': convergence IS the lost
+          // read-back confirmation, and the audit trail must say so. Best-effort — the heal verdict
+          // stands either way; pushed_at is deliberately NOT touched (it is the evidence timestamp).
+          if (evidence.status === 'attempted' && evidence.id) {
+            try {
+              await db.from('keyword_push_log').update({ status: 'accepted' }).eq('id', evidence.id)
+            } catch (e) { console.warn('[push-heal] convergence intent-row accept-flip failed (non-fatal):', e instanceof Error ? e.message : e) }
+          }
+          out.healed.push(containerKey)
+          return out
+        }
+      }
       out.failed.push(containerKey)
       ;(out.errors ??= {})[containerKey] = preItems.length === 0
         ? 'live container has an uninspectable shape - cannot prove it is partial; refusing to delete'
@@ -1624,7 +1712,37 @@ async function healCompositeDeletePartial(
     // for this marketplace (the documented delete pattern; SP-API partially-update-a-listing).
     const ops = [{ op: 'delete' as const, path: `/attributes/${containerKey}`, value: [{ marketplace_id: MARKETPLACE_ID }] }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
-    if (!preview.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete preview: ${preview.error ?? 'rejected'}`; return out }
+    if (!preview.ok) {
+      // STRATEGY-3 TRIGGER (heal v3, LIVE evidence 2026-07-02): "An internal error has occurred.
+      // Please try again." on the delete preview is an AMAZON-SIDE PROCESSING failure, not a
+      // validation verdict — recorded 3 consecutive times over 40 min (19:41 / 19:49 / 20:17) on the
+      // task rows: Amazon's validator cannot process this delete, so more delete-only retries burn
+      // queue attempts for nothing. Escalate to the complete-write fallback (SP-API semantics: the
+      // conditional rule is only "size must have >=1 value WHEN size_system/size_class are present",
+      // so ONE COMPLETE item satisfies it). All the guardrails above (parent identity + parentage
+      // proof + proven-partial pre-read) have already passed in this very attempt.
+      // TIGHTENED TRIGGER (adversarial review 2026-07-02, fix 1): the old bare `/internal error/i`
+      // on preview.error (a) also matched HTTP-prefixed TRANSPORT bodies (patchSkuMulti returns
+      // 'HTTP 500: {...}' for a non-ok response — a proxy blip must never trigger a LIVE composite
+      // write), and (b) fired on the FIRST occurrence while the recorded evidence was a PERSISTENT
+      // verdict. classifyDeletePreviewFailure (pure, healEvidence.ts) now requires a STRUCTURED
+      // issues[] internal-error message with no HTTP prefix, AND attemptNumber >= 1 — the first
+      // structured internal error rides the failed bucket so the queue retries the cleaner delete
+      // once before any escalation. A NON-internal preview error is a real validation verdict and
+      // keeps the existing failed-bucket path unchanged.
+      const action = classifyDeletePreviewFailure(preview, attemptNumber)
+      if (action === 'escalate-complete-write') {
+        console.warn(`[push-heal] delete preview for ${containerKey} on ${parentSku} failed with a PERSISTENT Amazon INTERNAL error (attempt ${attemptNumber + 1}, "${(preview.error ?? '').slice(0, 120)}") - falling through to the complete-write fallback in the same attempt.`)
+        return await healCompositeCompleteWrite(db, { parent_asin, parentSku, productType, spec, sellerId, token, childAttrs, provenPartialItems: preItems, liveChildCount: parentage.childCount })
+      }
+      if (action === 'retry-delete') {
+        console.warn(`[push-heal] delete preview for ${containerKey} on ${parentSku} hit an Amazon INTERNAL error on the FIRST attempt - recording failed so the queue retries the cleaner delete once before escalating.`)
+        out.failed.push(containerKey)
+        ;(out.errors ??= {})[containerKey] = `delete preview: Amazon internal error on attempt ${attemptNumber + 1} - the queue will retry the delete once before escalating to the complete-write strategy: ${preview.error ?? 'internal error'}`
+        return out
+      }
+      out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete preview: ${preview.error ?? 'rejected'}`; return out
+    }
 
     // INTENT AUDIT ROW (adversarial review 2026-07-02, fix 4a): record that a LIVE delete is about to
     // be issued BEFORE issuing it, so a crash between the PATCH and the read-back still leaves durable
@@ -1705,6 +1823,223 @@ async function healCompositeDeletePartial(
     if (!out.healed.includes(containerKey) && !out.failed.includes(containerKey)) {
       out.failed.push(containerKey)
       ;(out.errors ??= {})[containerKey] = `delete threw: ${e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)}`
+    }
+  }
+  return out
+}
+
+/**
+ * STRATEGY 3 — write ONE COMPLETE composite item to the parent hub (heal v3, LIVE evidence 2026-07-02).
+ * Reached ONLY from healCompositeDeletePartial when the DELETE's VALIDATION_PREVIEW fails with Amazon's
+ * "An internal error has occurred" — an Amazon-side PROCESSING failure, not a validation verdict, so
+ * strategy 2 is unprocessable no matter how often the queue retries it. SP-API semantics research
+ * blessed the alternative: the conditional rule is only "size must have >=1 value WHEN
+ * size_system/size_class are present" — so ONE COMPLETE shirt_size item (size_system + size_class +
+ * size) satisfies the validator. The live children carry complete items and PATCH fine; a per-variant
+ * `size` on a NON-BUYABLE variation hub is display-inert.
+ *
+ * GUARDRAILS (the ONLY call site sits BEHIND all of these in the SAME attempt):
+ *  - the parent-identity guard (findParentSku equality), the confirmNonBuyableVariationParent
+ *    parentage proof, AND the live pre-read that proved the container GENUINELY PARTIAL have all
+ *    already passed. Strategy 3 only makes sense when the live container is partial (a complete
+ *    container has nothing to complete); `provenPartialItems` is that exact pre-read state and is
+ *    RE-ASSERTED here before any write.
+ *  - DONOR REUSE: the donor item comes from strategy 1's already-fetched sampled-child map (no
+ *    re-fetch); the FIRST sampled child whose first container item carries EVERY invariant subKey AND
+ *    a non-empty per-variant field wins. Its item is copied VERBATIM — only marketplace_id is
+ *    normalized to OUR marketplace.
+ *  - PREVIEW-GATED; INTENT-LOGGED (keyword_push_log 'attempted' row, field 'heal:complete:<container>',
+ *    written BEFORE the LIVE write — same pattern as strategy 2's DELETE-INTENT); READ-BACK-VERIFIED
+ *    (tolerant subsetDeepEqual on EVERY written sub-key INCLUDING the per-variant `size`).
+ *  - NO RULE LEARNING: deliberately does NOT learn a push_heal_rules pre-fill rule — this is a
+ *    ONE-TIME fix for THIS hub. The Tier-2 pre-fill runs on EVERY future parent push and must NEVER
+ *    re-write the per-variant `size` onto shared hubs (that is exactly the per-variant-on-shared-hub
+ *    mistake the composite registry exists to prevent).
+ *  - STALE-RULE UNLEARN (adversarial review fix 4): on confirmed success, DELETE any product-type-wide
+ *    'inherit_from_child' push_heal_rules row for this container — left standing it would keep
+ *    pre-filling PARTIAL (subKeys-only) replaces OVER the completed container on every future push,
+ *    re-arming the very disease this write just cured. Best-effort, logged.
+ *  - DELAYED FAMILY-INTEGRITY CHECK (adversarial review fix 3): the feared harm of a per-variant
+ *    `size` on the hub is variation DE-LINKING, which manifests on Amazon's 15min-6hr catalog lag —
+ *    invisible to this attempt's preview/read-back. On confirmed success a ONE-SHOT queue task
+ *    (field 'heal:family-check', next_check_at now+6h, max_attempts 1) is enqueued; the cron re-reads
+ *    the live relationships and flags needs_attention if the VARIATION family is gone or shrank.
+ * NON-THROWING; every failure lands in the failed bucket with an errors[] string prefixed
+ * 'delete preview internal error -> complete-write fallback: <stage>: <reason>' so the task rows
+ * distinguish this path from a plain strategy-2 failure. A read-back mismatch additionally flags
+ * durable needs_attention (Amazon accepted then silently dropped — a dead-end a human must see).
+ */
+async function healCompositeCompleteWrite(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  args: {
+    parent_asin: string; parentSku: string; productType: string; spec: CompositeHealSpec
+    sellerId: string; token: string
+    childAttrs: Map<string, Record<string, unknown> | null>
+    /** The delete gate's pre-read container items — the PROVEN-PARTIAL live state this fallback
+     *  requires; re-asserted below so a future caller cannot skip the gate. */
+    provenPartialItems: CompositeItem[]
+    /** The live VARIATION child count from the caller's parentage confirmation (fix 3): recorded on
+     *  the delayed family-integrity task as the shrink baseline. 0 = the parentage was confirmed via
+     *  non-buyable summaries only; the sampled-child count is used as the fallback baseline then. */
+    liveChildCount: number
+  },
+): Promise<HealResult> {
+  const { parent_asin, parentSku, productType, spec, sellerId, token, childAttrs, provenPartialItems, liveChildCount } = args
+  const containerKey = spec.containerKey
+  const out: HealResult = { healed: [], abstained: [], failed: [] }
+  const fail = (stage: string, reason: string) => {
+    out.failed.push(containerKey)
+    ;(out.errors ??= {})[containerKey] = `delete preview internal error -> complete-write fallback: ${stage}: ${reason}`
+  }
+  try {
+    // ASSERT the state in hand: the caller's pre-read must have proven a PRESENT, GENUINELY PARTIAL
+    // container (per-variant field empty on every item). Anything else means the gate was bypassed or
+    // the state was misread — refuse to write.
+    if (provenPartialItems.length === 0 || provenPartialItems.some((it) => compositeItemCarries(it, spec.perVariantField))) {
+      fail('partial-assert', 'pre-read state is not a present, genuinely partial container - strategy 3 only applies to a proven-partial live container')
+      return out
+    }
+
+    // DONOR SELECTION: first sampled live child whose FIRST container item is COMPLETE — every
+    // invariant subKey present AND the per-variant field non-empty. Reuses strategy 1's map; no GETs.
+    let donor: CompositeItem | null = null
+    let donorSku: string | null = null
+    for (const [sku, attrs] of childAttrs) {
+      const raw = attrs?.[containerKey]
+      if (!Array.isArray(raw) || raw.length === 0) continue
+      const first = raw[0]
+      if (first == null || typeof first !== 'object' || Array.isArray(first)) continue
+      const firstObj = first as CompositeItem
+      if ([...spec.subKeys, spec.perVariantField].every((k) => compositeItemCarries(firstObj, k))) {
+        donor = firstObj; donorSku = sku; break
+      }
+    }
+    if (!donor) {
+      fail('child-selection', `no sampled live child carries a COMPLETE ${containerKey} item (every sub-key + non-empty ${spec.perVariantField})`)
+      return out
+    }
+    console.warn(`[push-heal] complete-write fallback for ${containerKey} on ${parentSku}: donor child ${donorSku}`)
+
+    // Copy the donor's FIRST container item VERBATIM (all sub-objects: size_system, size_class, size,
+    // plus anything else it carries) — only marketplace_id is normalized to OUR marketplace.
+    const item: CompositeItem = { ...donor, marketplace_id: MARKETPLACE_ID }
+    const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
+    const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
+    if (!preview.ok) { fail('preview', preview.error ?? 'rejected'); return out }
+
+    // INTENT AUDIT ROW — same pattern as strategy 2's DELETE-INTENT: durable evidence BEFORE the LIVE
+    // write so a crash between the PATCH and the read-back is still visible (and the pre-read's
+    // COMPLETE-container convergence can recognize our own write on retry). new_value carries the
+    // exact item written. Best-effort: a failed insert proceeds but warns loudly; the row flips to
+    // 'accepted' only on confirmed read-back.
+    let intentRowId: string | null = null
+    try {
+      const { data: intentData, error: intentErr } = await db.from('keyword_push_log').insert({
+        parent_asin, sku: parentSku, field: `heal:complete:${containerKey}`,
+        previous_value: null, new_value: JSON.stringify(item),
+        submission_id: null, status: 'attempted', error_message: null,
+        pushed_by: SYSTEM_ACTOR.id,
+      }).select('id')
+      if (intentErr) console.warn('[push-heal] complete-write INTENT log insert failed (best-effort, proceeding):', intentErr?.message ?? intentErr)
+      else intentRowId = (intentData as { id?: string }[] | null)?.[0]?.id ?? null
+    } catch (e) { console.warn('[push-heal] complete-write INTENT log insert threw (best-effort, proceeding):', e instanceof Error ? e.message : e) }
+
+    const live = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'LIVE')
+    if (!live.ok) { fail('live', live.error ?? 'rejected'); return out }
+
+    // READ-BACK: EVERY sub-key we wrote (INCLUDING the per-variant `size`) must persist on the hub's
+    // first container item — tolerant subset compare (Amazon may normalize/enrich what we wrote);
+    // marketplace_id excluded (Amazon returns its own). A failed re-read is a FAILURE (queue retries),
+    // never assumed success.
+    await sleep(PATCH_DELAY_MS)
+    const parentAttrs = await fetchChildAttributesMap(sellerId, token, [parentSku])
+    const attrs = parentAttrs.get(parentSku)
+    if (!attrs) {
+      fail('read-back', 'read-back fetch failed - cannot confirm the complete container persisted')
+      return out
+    }
+    const raw = attrs[containerKey]
+    const parentFirst = Array.isArray(raw) && raw.length > 0 && raw[0] != null && typeof raw[0] === 'object' && !Array.isArray(raw[0])
+      ? (raw[0] as CompositeItem)
+      : null
+    const writtenKeys = Object.keys(item).filter((k) => k !== 'marketplace_id')
+    const persisted = parentFirst != null && writtenKeys.every((k) => {
+      const got = parentFirst[k]
+      if (got === undefined || got === null) return false
+      return subsetDeepEqual(item[k], got)
+    })
+    if (!persisted) {
+      console.warn(`[push-heal] complete-write read-back MISMATCH for ${containerKey} on ${parentSku}: Amazon accepted then dropped one or more sub-fields; marking failed + flagging for attention.`)
+      fail('read-back mismatch', 'Amazon accepted the complete-container PATCH then silently dropped one or more sub-fields')
+      try {
+        const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+        await flagParentAttrsNeedAttention(parent_asin, [containerKey])
+      } catch (e) { console.warn('[push-heal] complete-write flag-attention failed (non-fatal):', e instanceof Error ? e.message : e) }
+      return out
+    }
+
+    // Confirmed persisted -> healed. Flip the INTENT row to 'accepted' (or insert the accepted row
+    // directly if the intent write failed). Deliberately NO push_heal_rules learning here — see the
+    // NO RULE LEARNING guardrail in the doc comment: the pre-fill must never re-write `size`.
+    out.healed.push(containerKey)
+    try {
+      if (intentRowId) {
+        await db.from('keyword_push_log').update({
+          submission_id: live.submissionId, status: 'accepted',
+          pushed_at: new Date().toISOString(),
+        }).eq('id', intentRowId)
+      } else {
+        await db.from('keyword_push_log').insert({
+          parent_asin, sku: parentSku, field: `heal:complete:${containerKey}`,
+          previous_value: null, new_value: JSON.stringify(item),
+          submission_id: live.submissionId, status: 'accepted', error_message: null,
+          pushed_by: SYSTEM_ACTOR.id,
+        })
+      }
+    } catch (e) { console.warn('[push-heal] complete-write keyword_push_log accept-log failed (non-fatal):', e instanceof Error ? e.message : e) }
+
+    // FIX 4 (adversarial review 2026-07-02, stale inherit rule re-arms the disease): a product-type-
+    // wide 'inherit_from_child' push_heal_rules row for this container would keep the Tier-2 pre-fill
+    // writing PARTIAL (subKeys-only, no `size`) replaces OVER the completed container on every future
+    // push — silently re-creating the exact partial-container state this write just cured. Scoped
+    // delete: ONLY resolution='inherit_from_child' (a learned 'delete_partial_container' rule is a
+    // DIFFERENT, still-valid lesson and stays). Best-effort, logged either way.
+    try {
+      const { data: unlearned, error: unlearnErr } = await db.from('push_heal_rules')
+        .delete()
+        .eq('product_type', productType)
+        .eq('attr_key', containerKey)
+        .eq('resolution', 'inherit_from_child')
+        .select('attr_key')
+      if (unlearnErr) {
+        console.warn('[push-heal] complete-write inherit-rule unlearn failed (non-fatal):', unlearnErr?.message ?? unlearnErr)
+      } else {
+        const n = ((unlearned ?? []) as { attr_key: string }[]).length
+        if (n > 0) console.warn(`[push-heal] complete-write: unlearned ${n} stale inherit_from_child push_heal_rules row(s) for (${productType}, ${containerKey}) - the pre-fill must not re-arm the partial container over the completed one.`)
+      }
+    } catch (e) { console.warn('[push-heal] complete-write inherit-rule unlearn threw (non-fatal):', e instanceof Error ? e.message : e) }
+
+    // FIX 3 (adversarial review 2026-07-02, async family-integrity blind spot): variation de-linking
+    // caused by a per-variant `size` on the hub would only manifest on Amazon's 15min-6hr catalog lag
+    // — invisible to the read-back above. Enqueue the ONE-SHOT delayed family-integrity check
+    // (now + 6h, max_attempts 1); the cron re-reads the live relationships and flags needs_attention
+    // if the VARIATION family is gone or shrank vs the count recorded here. Baseline: the parentage
+    // confirmation's live child count; if that path confirmed via summaries only (count 0), fall back
+    // to the sampled-child map size (a floor, never an overcount). Best-effort, non-throwing.
+    try {
+      const recordedChildCount = liveChildCount > 0 ? liveChildCount : childAttrs.size
+      const { enqueueFamilyIntegrityCheck } = await import('@/lib/fba/verificationQueue')
+      await enqueueFamilyIntegrityCheck(parent_asin, {
+        parentSku, productType, childCount: recordedChildCount, containerKey,
+      })
+    } catch (e) { console.warn('[push-heal] complete-write family-check enqueue failed (non-fatal):', e instanceof Error ? e.message : e) }
+  } catch (e) {
+    // A throw mid-write is NOT a safe abstain (the parent is known-broken and this fallback is its
+    // last automated fix) — ride the failed bucket so the queue's attempts/backoff retry it.
+    console.warn('[push-heal] healCompositeCompleteWrite threw (non-fatal):', e instanceof Error ? e.message : e)
+    if (!out.healed.includes(containerKey) && !out.failed.includes(containerKey)) {
+      fail('threw', e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200))
     }
   }
   return out

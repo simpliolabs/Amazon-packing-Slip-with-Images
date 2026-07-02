@@ -17,7 +17,7 @@ import {
   claimDueTasks, completeTask, rescheduleTask, flagNeedsAttention, softFailTask,
   enqueueVerification, type PushVerificationTask, type HealPayload,
 } from '@/lib/fba/verificationQueue'
-import { executePush, healParentAttributes, healParentComposite, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
+import { executePush, healParentAttributes, healParentComposite, checkHealFamilyIntegrity, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
 import { createAdminClient } from '@/lib/supabase/server'
 
 export const dynamic = 'force-dynamic'
@@ -132,16 +132,20 @@ async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean
           productType: payload.productType,
           containerKey: payload.composite.containerKey,
           subKeys: payload.composite.subKeys,
+          // FIX 1 (adversarial review 2026-07-02): thread the queue task's attempts counter through so
+          // the strategy-3 complete-write escalation can require PERSISTENCE (2nd+ attempt) — the
+          // recorded evidence for it was a persistent internal-error verdict, never a single occurrence.
+          attemptNumber: task.attempts,
         })
       : await healParentAttributes(db, {
           parent_asin: task.parent_asin,
           parentSku: payload.parentSku,
           productType: payload.productType,
-          missingAttrKeys: payload.missingAttrKeys,
+          missingAttrKeys: payload.missingAttrKeys ?? [],
         })
     return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed, errors: res.errors }
   } catch (e) {
-    return { converged: false, healed: [], abstained: [], failed: payload.missingAttrKeys, error: e instanceof Error ? e.message : String(e) }
+    return { converged: false, healed: [], abstained: [], failed: payload.missingAttrKeys ?? [], error: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -198,6 +202,33 @@ export async function GET(request: NextRequest) {
     //    complete + enqueue a normal content verify so the family's re-push (now that the hub accepts
     //    the PATCH) is confirmed. On residual failure, reschedule (backoff) until max_attempts → flag.
     if (task.kind === 'heal') {
+      // 0a) DELAYED FAMILY-INTEGRITY CHECK (adversarial review 2026-07-02, fix 3): a confirmed
+      //     strategy-3 complete write enqueues this ONE-SHOT task (field 'heal:family-check',
+      //     now+6h, max_attempts 1) because variation DE-LINKING caused by a per-variant `size` on
+      //     the hub only manifests on Amazon's 15min-6hr catalog lag — invisible to the heal's own
+      //     read-back. Re-read the live relationships: family gone/shrunk → needs_attention with a
+      //     clear seller message; intact → complete. A failed GET soft-fails (OUR read, not a
+      //     verdict) so the next tick re-checks without consuming the single attempt. This branch
+      //     runs BEFORE runHeal — a familyCheck payload has no missingAttrKeys and must never fall
+      //     into the heal dispatch. Best-effort, non-throwing (checkHealFamilyIntegrity never throws).
+      const healPayload = (task.heal_payload ?? null) as HealPayload | null
+      if (healPayload?.familyCheck) {
+        const fc = await checkHealFamilyIntegrity({
+          parentSku: healPayload.parentSku,
+          recordedChildCount: healPayload.familyCheck.childCount,
+        })
+        if (fc.fetchFailed) {
+          await softFailTask(task.id, `family-integrity check could not read the live record: ${fc.detail}`)
+          processed.push({ id: task.id, field: task.field, result: 'family_check_soft_fail', matched: 0, total: 0 })
+        } else if (!fc.intact) {
+          await flagNeedsAttention(task.id, 0, 1, [], `family integrity changed after complete-write heal - verify variation family in Seller Central (${healPayload.familyCheck.containerKey}: ${fc.detail})`)
+          processed.push({ id: task.id, field: task.field, result: 'family_check_needs_attention', matched: 0, total: 1 })
+        } else {
+          await completeTask(task.id, 1, 1)
+          processed.push({ id: task.id, field: task.field, result: 'family_check_ok', matched: 1, total: 1 })
+        }
+        continue
+      }
       const heal = await runHeal(task)
       if (heal.converged) {
         await completeTask(task.id, heal.healed.length, heal.healed.length + heal.abstained.length)
@@ -209,7 +240,12 @@ export async function GET(request: NextRequest) {
         // Observability: carry the per-key failure reasons (Amazon preview/live error, read-back detail)
         // into the terminal message so the dead-end names its cause, not just "could not heal".
         const why = heal.errors ? ' Reasons: ' + Object.entries(heal.errors).map(([k, v]) => `${k}: ${v}`).join(' | ') : ''
-        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, (heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`) + why)
+        // COMPOSITE heal terminal copy (heal v3): when the strategy-3 complete-write fallback ran (its
+        // error strings carry the 'complete-write fallback' marker set by pushExecutor), say BOTH
+        // automated strategies were tried so the dead-end doesn't read like a single-path give-up.
+        const triedBoth = Object.values(heal.errors ?? {}).some((v) => v.includes('complete-write fallback'))
+        const strategiesNote = triedBoth ? ' Both automated strategies (delete-partial-container and complete-write) were tried.' : ''
+        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, (heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`) + strategiesNote + why)
         processed.push({ id: task.id, field: task.field, result: 'heal_needs_attention', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
       } else {
         // Observability (heal E2E 2026-07-02): persist WHY this attempt failed onto the task row —
