@@ -487,12 +487,22 @@ export interface DetailValueShape {
    *  and Amazon honors only one on writes — the calibration probes them in this order. Present
    *  only on the shape returned for the attribute root; candidates themselves don't nest. */
   candidates?: DetailValueShape[]
+  /** This sub-field's enum is carried by an anyOf/oneOf UNION member ("form field"-style — the
+   *  kind Seller Central's editor reads and Amazon honors on writes). Direct token enums without
+   *  a union are the DERIVED-field signature (length_description). The live-listing hint may only
+   *  promote union candidates (applyLiveDetailSubfieldHint — adversarial review fix 3). */
+  viaUnion?: boolean
 }
 
 /** Walk one attribute subschema and locate the value leaf + its property path.
- *  Preference order: (1) first enum under a property named `value` — direct OR carried by an
- *  anyOf/oneOf member (propertyEnum), (2) first enum under any property, (3) first string
- *  property named `value`. This pick IS the source of truth for the enum lookup too —
+ *  BAND-ORDERED preference (adversarial review fix 2 — declaration order must not beat the
+ *  band): (1) UNION-carried enum under a property named `value` (anyOf/oneOf member — see
+ *  propertyEnum; the Seller-Central "form field" style Amazon honors on writes), (2) direct
+ *  enum under a property named `value`, (3) first enum under any property, (4) first string
+ *  property named `value` — declaration order only WITHIN a band. Without band (1) first, a
+ *  derived direct-token field (sleeve `length_description`) declared earlier in the schema
+ *  would beat the honored union field (`type`). This pick IS the source of truth for the enum
+ *  lookup too —
  *  getAttributeEnum returns the picked sub-field's enumDef, so the "AMAZON ACCEPTS" chips,
  *  the coercion, and the write path can never disagree about which sub-field they target.
  *  Exported for the ?debug route and shape tests; production callers use
@@ -541,7 +551,14 @@ export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | n
     }
   }
   visit(attrNode, [], [], [], 0)
-  const pick = hits.find((h) => h.kind === 'valueEnum') ?? hits.find((h) => h.kind === 'anyEnum') ?? hits.find((h) => h.kind === 'valueString')
+  // BAND-ORDERED pick (adversarial review fix 2): the first valueEnum in DECLARATION order let a
+  // derived direct-token field declared earlier beat the union-carried honored field — the band
+  // must outrank declaration order, exactly like the candidate sort below.
+  const pick =
+    hits.find((h) => h.kind === 'valueEnum' && h.viaUnion) ??
+    hits.find((h) => h.kind === 'valueEnum') ??
+    hits.find((h) => h.kind === 'anyEnum') ??
+    hits.find((h) => h.kind === 'valueString')
   if (!pick) return null
   // CANDIDATES: every distinct value-bearing sub-field, the pick first. After the pick, union-
   // carried enums ("form field"-style — the kind Seller Central's editor reads) go before direct
@@ -554,9 +571,31 @@ export function analyzeDetailValueShape(attrNode: unknown): DetailValueShape | n
     return true
   })
   rest.sort((a, b) => Number(b.viaUnion) - Number(a.viaUnion))
-  const withMkt = (s: DetailValueShape): DetailValueShape => ({ ...s, hasMarketplaceId: rootHasMarketplaceId })
-  const candidates = [pick, ...rest].map((h) => withMkt(h.shape))
-  return { ...withMkt(pick.shape), candidates }
+  // viaUnion rides along as candidate metadata — the live-listing hint's union gate (fix 3).
+  const withMkt = (h: Hit): DetailValueShape => ({ ...h.shape, hasMarketplaceId: rootHasMarketplaceId, viaUnion: h.viaUnion })
+  const candidates = [pick, ...rest].map(withMkt)
+  return { ...withMkt(pick), candidates }
+}
+
+/** LIVE-SUB-FIELD HINT, union-gated (adversarial review fix 3). The push calibration prefers to
+ *  probe the sub-field the LIVE listing already populates — but "populated" is only write-evidence
+ *  for a UNION-enum ("form field") candidate: derived fields (SHIRT sleeve `length_description`)
+ *  are populated by Amazon's OWN derivation without honoring writes, so promoting one re-crowns
+ *  exactly the wrong sub-field this resolver exists to avoid. Reorders candidates (stable
+ *  move-to-front) ONLY toward candidates that are BOTH the hinted sub-field AND viaUnion — a
+ *  direct-token-enum candidate is never moved ahead of a union-enum candidate. `reordered` false
+ *  = order untouched (no hint / hinted candidate already first / hinted candidate not union). */
+export function applyLiveDetailSubfieldHint(
+  shape: DetailValueShape,
+  liveSub: string | null,
+): { shape: DetailValueShape; reordered: boolean } {
+  const cands = shape.candidates ?? []
+  if (!liveSub || cands.length < 2) return { shape, reordered: false }
+  const hinted = (c: DetailValueShape) => c.path[0] === liveSub && c.viaUnion === true
+  if (!cands.some(hinted)) return { shape, reordered: false }
+  const sorted = [...cands].sort((a, b) => Number(hinted(b)) - Number(hinted(a)))
+  if (sorted[0] === cands[0]) return { shape, reordered: false }   // already first — nothing moved
+  return { shape: { ...sorted[0], candidates: sorted }, reordered: true }
 }
 
 /** The schema-derived value shape for one attribute — or null when it's a plain
