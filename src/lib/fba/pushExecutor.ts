@@ -1481,12 +1481,26 @@ function rejectedAttrKeysFrom(parent: PushResultRow): string[] {
   return [...new Set([...structured, ...fromText])]
 }
 
+/** Parent-rejected note used INSTEAD of the "complete it in Seller Central" wording when a self-heal
+ *  was actually scheduled (live-notice): the system fixes this one itself, and a re-push would only
+ *  reset the in-flight heal. The Seller-Central wording stays ONLY for the no-heal case (non-healable
+ *  attrs / enqueue failed) — summarizePush still produces it as the default. */
+const HEAL_SCHEDULED_PARENT_NOTE =
+  ' The variation parent hub was rejected (missing SHIRT SIZE data) - a SELF-HEAL is scheduled: the system will inherit the missing values from a live child automatically within ~25 minutes. No action needed - do not re-push.'
+
+/** What maybeEnqueueParentHeal reports back to the push's FINAL result emit (live-notice):
+ *  healScheduled = a flat or composite heal task is genuinely in flight for this parent (freshly
+ *  inserted OR already active from a prior push — either way the seller must NOT re-push);
+ *  healAttrs = the attribute/container names the heal will inherit. */
+interface ParentHealOutcome { healScheduled: boolean; healAttrs: string[] }
+
 async function maybeEnqueueParentHeal(
   parent_asin: string, productType: string | null, results: PushResultRow[],
-): Promise<void> {
+): Promise<ParentHealOutcome> {
+  const none: ParentHealOutcome = { healScheduled: false, healAttrs: [] }
   try {
     const parent = results.find((r) => r.isParent && r.status === 'failed')
-    if (!parent?.sku || (!parent.issues?.length && !parent.error)) return
+    if (!parent?.sku || (!parent.issues?.length && !parent.error)) return none
     const rejectedAttrs = rejectedAttrKeysFrom(parent)
     // Classify each rejected attr: flat-healable (department/age_range) vs composite-healable (shirt_size
     // container OR its size_system/size_class sub-fields → healParentComposite) vs genuinely not healable.
@@ -1500,10 +1514,19 @@ async function maybeEnqueueParentHeal(
     const nonHealable = rejectedAttrs.filter(
       (k) => !BROADCAST_HEALABLE.has(k) && !compositeSpecForRejectedAttr(k),
     )
-    const { enqueueHeal, flagParentAttrsNeedAttention, hasActiveManualHealFlag } = await import('@/lib/fba/verificationQueue')
+    const { enqueueHeal, flagParentAttrsNeedAttention, hasActiveManualHealFlag, hasActiveHealTask } = await import('@/lib/fba/verificationQueue')
+    let healScheduled = false
+    const healAttrs: string[] = []
     // Auto-heal the flat-scalar broadcast attrs (needs a resolved productType to schedule the heal).
     if (productType && healable.length > 0) {
-      await enqueueHeal(parent_asin, { parentSku: parent.sku, productType, missingAttrKeys: healable })
+      // RE-PUSH GUARD (live-notice): an ACTIVE flat heal is already in flight — re-enqueuing would
+      // abandon-and-reinsert it, resetting its attempt budget on every user re-push. Skip the enqueue
+      // but STILL report it (the heal IS scheduled — that is exactly what the seller must hear).
+      let scheduled = await hasActiveHealTask(parent_asin, 'heal')
+      if (!scheduled) {
+        scheduled = await enqueueHeal(parent_asin, { parentSku: parent.sku, productType, missingAttrKeys: healable })
+      }
+      if (scheduled) { healScheduled = true; healAttrs.push(...healable) }
     }
     // COMPOSITE heal (self-healing composite): enqueue a purpose-built composite task per container. Needs
     // a resolved productType; missingAttrKeys carries the container name so enqueueHeal's guard passes and
@@ -1517,20 +1540,28 @@ async function maybeEnqueueParentHeal(
         try {
           if (await hasActiveManualHealFlag(parent_asin, spec.containerKey)) continue
         } catch { /* non-fatal — fall through to enqueue */ }
-        // FIX 4: composite heals use a DISTINCT field ('heal:composite') so a flat heal ('heal')
-        // enqueued in the SAME push is not silently abandoned on the shared (parent, field) queue slot.
-        await enqueueHeal(parent_asin, {
-          parentSku: parent.sku, productType, missingAttrKeys: [spec.containerKey],
-          composite: { containerKey: spec.containerKey, subKeys: spec.subKeys },
-        }, 3, 'heal:composite')
+        // RE-PUSH GUARD (live-notice): same as the flat path — protect an in-flight composite heal's
+        // attempts/next_check_at from being reset by a user re-push, but still count it as scheduled.
+        let scheduled = await hasActiveHealTask(parent_asin, 'heal:composite')
+        if (!scheduled) {
+          // FIX 4: composite heals use a DISTINCT field ('heal:composite') so a flat heal ('heal')
+          // enqueued in the SAME push is not silently abandoned on the shared (parent, field) queue slot.
+          scheduled = await enqueueHeal(parent_asin, {
+            parentSku: parent.sku, productType, missingAttrKeys: [spec.containerKey],
+            composite: { containerKey: spec.containerKey, subKeys: spec.subKeys },
+          }, 3, 'heal:composite')
+        }
+        if (scheduled) { healScheduled = true; healAttrs.push(spec.containerKey) }
       }
     }
     // Surface the rest as a standing, seller-visible "not auto-healable" signal (durable, non-blocking).
     if (nonHealable.length > 0) {
       await flagParentAttrsNeedAttention(parent_asin, nonHealable)
     }
+    return { healScheduled, healAttrs: [...new Set(healAttrs)] }
   } catch (e) {
     console.warn('[push-heal] enqueue trigger failed (non-fatal):', e instanceof Error ? e.message : e)
+    return none
   }
 }
 
@@ -1673,8 +1704,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
 
           // SELF-HEAL trigger (self-healing-push): a parent hub rejected on a missing BROADCAST
           // attribute (the shirt_size#?.size_system/size_class case) schedules the cron to inherit it
-          // from a live child. Non-blocking; parentNote unchanged.
-          await maybeEnqueueParentHeal(parent_asin, productType, results)
+          // from a live child. Non-blocking. Live-notice: when a heal really is in flight, the
+          // parent-rejected note must say SO — not "complete it in Seller Central" (which invites the
+          // re-push that would abandon the heal). The Seller-Central wording stays for the no-heal case.
+          const heal = await maybeEnqueueParentHeal(parent_asin, productType, results)
+          const parentNoteFinal = heal.healScheduled ? HEAL_SCHEDULED_PARENT_NOTE : parentNote
 
           // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets ship→rise experience),
           // instead of staying RED until the next regen re-reads Amazon. On success, mark this detail's
@@ -1768,9 +1802,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
             pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
+            healScheduled: heal.healScheduled, healAttrs: heal.healAttrs,
             message: cancelled
               ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-              : `Pushed ${ctx.detailField} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNote} Changes typically reflect in 15-30 minutes.`,
+              : `Pushed ${ctx.detailField} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNoteFinal} Changes typically reflect in 15-30 minutes.`,
             results,
           })
           return
@@ -1919,8 +1954,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         const { accepted, failed, childTotal, parentNote } = summarizePush(results)
 
         // SELF-HEAL trigger (self-healing-push): if the parent hub was rejected on a missing BROADCAST
-        // attribute, schedule the cron to inherit it from a live child. Non-blocking; parentNote unchanged.
-        await maybeEnqueueParentHeal(parent_asin, productType, results)
+        // attribute, schedule the cron to inherit it from a live child. Non-blocking. Live-notice: a
+        // scheduled heal REPLACES the "complete it in Seller Central" parent note (that wording invites
+        // the re-push that would abandon the heal); it stays only when NO heal could be scheduled.
+        const heal = await maybeEnqueueParentHeal(parent_asin, productType, results)
+        const parentNoteFinal = heal.healScheduled ? HEAL_SCHEDULED_PARENT_NOTE : parentNote
 
         // Re-score so the page's score reflects the just-pushed values. Best-effort.
         // Phase C: capture the just-pushed content fingerprint + post-push overall score here (where
@@ -2074,9 +2112,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           type: 'result',
           parent_asin, field,
           pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
+          healScheduled: heal.healScheduled, healAttrs: heal.healAttrs,
           message: cancelled
             ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
-            : `Pushed ${label} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNote}${skippedNote} Changes typically reflect in 15-30 minutes.`,
+            : `Pushed ${label} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNoteFinal}${skippedNote} Changes typically reflect in 15-30 minutes.`,
           results: [...results, ...skippedResults],
         })
       } catch (err) {

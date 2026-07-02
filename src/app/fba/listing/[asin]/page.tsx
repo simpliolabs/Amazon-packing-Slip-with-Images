@@ -296,7 +296,7 @@ export default function ListingDetailPage() {
   type PushField = 'title' | 'bullets' | 'description' | 'keywords' | 'details'
   const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords', details: 'Product Detail' }
   interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string }
-  interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string }
+  interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }
   interface PushPreview {
     field: PushField; label: string; broadcast: boolean; count: number; changed: number;
     proposedValue: string | string[] | null; diff: PushDiffRow[]
@@ -333,13 +333,16 @@ export default function ListingDetailPage() {
   // True when the stream ended without a clean result (interrupted/timeout) — the modal header
   // shows "Interrupted" instead of "Complete" so the seller isn't told the push finished when it didn't.
   const bulkStreamInterruptedRef = useRef(false)
-  // Auto-verify queue state — shows pending + needs_attention counts in a banner so the seller
-  // knows the system is watching their pushes and which (if any) need their attention.
-  const [verifyQueue, setVerifyQueue] = useState<{ pending: number; needs_attention: number }>({ pending: 0, needs_attention: 0 })
+  // Auto-verify queue state — shows pending + healing + needs_attention counts in a banner so the
+  // seller knows the system is watching their pushes and which (if any) need their attention.
+  // `healing` (kind='heal' pending/running) drives the violet "self-heal in progress - do not
+  // re-push" banner; `tasks` carries heal_payload.missingAttrKeys + next_check_at for its copy.
+  interface VerifyQueueTask { id?: string; field?: string; kind?: string | null; status?: string; next_check_at?: string | null; last_error?: string | null; heal_payload?: { missingAttrKeys?: string[] } | null }
+  const [verifyQueue, setVerifyQueue] = useState<{ pending: number; healing: number; needs_attention: number; tasks: VerifyQueueTask[] }>({ pending: 0, healing: 0, needs_attention: 0, tasks: [] })
   const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
-  const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[] } | null>(null)
+  const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; healScheduled?: boolean; healAttrs?: string[] } | null>(null)
   // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
   // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
   // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
@@ -884,26 +887,28 @@ export default function ListingDetailPage() {
     return () => { cancelled = true }
   }, [asin, router])
 
-  // Verification-queue status: pending + needs_attention for THIS parent. Polled every 60s so
-  // a freshly-enqueued push appears in the banner and a cron flip from pending → completed →
+  // Verification-queue status: pending + healing + needs_attention for THIS parent. Polled every
+  // 60s so a freshly-enqueued push appears in the banner and a cron flip from pending → completed →
   // needs_attention reflects without a manual refresh. Best-effort: a missing migration 030
-  // returns 0/0 (the endpoint handles it), so this never errors.
+  // returns 0/0 (the endpoint handles it), so this never errors. Exposed as a callback (not
+  // effect-local) so confirmPush can refresh the banner IMMEDIATELY when a push finishes — a
+  // just-scheduled self-heal must be visible before the seller can re-push, not up to 60s later.
+  const refreshVerifyQueue = useCallback(async () => {
+    if (!asin) return
+    try {
+      const resp = await fetch(`/api/fba/verification-status?parent_asin=${asin}`, { cache: 'no-store' })
+      if (resp.ok) {
+        const j = await resp.json() as { pending?: number; healing?: number; needs_attention?: number; tasks?: VerifyQueueTask[] }
+        setVerifyQueue({ pending: j.pending ?? 0, healing: j.healing ?? 0, needs_attention: j.needs_attention ?? 0, tasks: j.tasks ?? [] })
+      }
+    } catch { /* silent — the banner just shows 0 */ }
+  }, [asin])
   useEffect(() => {
     if (!asin) return
-    let cancelled = false
-    const fetchStatus = async () => {
-      try {
-        const resp = await fetch(`/api/fba/verification-status?parent_asin=${asin}`, { cache: 'no-store' })
-        if (resp.ok) {
-          const j = await resp.json() as { pending?: number; needs_attention?: number }
-          if (!cancelled) setVerifyQueue({ pending: j.pending ?? 0, needs_attention: j.needs_attention ?? 0 })
-        }
-      } catch { /* silent — the banner just shows 0 */ }
-    }
-    fetchStatus()
-    const id = setInterval(fetchStatus, 60_000)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [asin])
+    refreshVerifyQueue()
+    const id = setInterval(refreshVerifyQueue, 60_000)
+    return () => clearInterval(id)
+  }, [asin, refreshVerifyQueue])
 
   const refreshKwData = useCallback(async (opts?: { triggerSync?: boolean }) => {
     if (!asin) return
@@ -1291,7 +1296,7 @@ export default function ListingDetailPage() {
     const cancelToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `p${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
     pushCancelTokenRef.current = cancelToken
     setCancelRequested(false)
-    let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField } | null = null
+    let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[] } | null = null
     let streamError: string | null = null
     const skuStatus = new Map<string, string>()   // latest status per SKU — rebuilds a partial result if the stream drops
     let serverTotal = 0                            // real diff size from the 'started' event (NOT just SKUs-seen-before-drop)
@@ -1318,7 +1323,7 @@ export default function ListingDetailPage() {
       let buffer = ''
       const handleLine = (line: string) => {
         if (!line.trim()) return
-        let msg: { type?: string; sku?: string; status?: string; error?: string; submissionId?: string | null; pushed?: number; failed?: number; total?: number; message?: string; results?: PushResultRow[]; field?: PushField }
+        let msg: { type?: string; sku?: string; status?: string; error?: string; submissionId?: string | null; pushed?: number; failed?: number; total?: number; message?: string; results?: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[] }
         try { msg = JSON.parse(line) } catch { return }
         if (msg.type === 'started') {
           setPushPhase('pushing')
@@ -1343,6 +1348,8 @@ export default function ListingDetailPage() {
             total: msg.total ?? 0,
             message: msg.message ?? 'Push completed.',
             results: msg.results ?? [],
+            healScheduled: msg.healScheduled,
+            healAttrs: msg.healAttrs,
           }
         } else if (msg.type === 'error') {
           streamError = msg.error || 'Push failed mid-stream.'
@@ -1364,7 +1371,7 @@ export default function ListingDetailPage() {
 
       if (streamError) throw new Error(streamError)
       // TS loses narrowing across the closure-mutated `finalResult` — re-assert the shape.
-      let data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField }
+      let data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[] }
       if (finalResult) {
         data = finalResult
       } else {
@@ -1456,6 +1463,10 @@ export default function ListingDetailPage() {
       // Phase C: a full-accept push stamps the measuring epoch in listing_outcome_state — re-pull the
       // ledger + sparkline so the Outcome panel flips to "Measuring 0/2" right away (best-effort).
       refreshOutcome()
+      // Live-notice: the push may have just enqueued a verify AND/OR a self-heal task — refresh the
+      // verification banner NOW so a scheduled heal is visible before the seller can re-push,
+      // instead of waiting up to 60s for the next poll tick.
+      refreshVerifyQueue()
     } catch (e) {
       // If we have any progress rows, the seller knows what landed (the stream told them
       // per-SKU). We do NOT clear them on error — they're the rollback evidence.
@@ -1463,7 +1474,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory, refreshOutcome])
+  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory, refreshOutcome, refreshVerifyQueue])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   const bulkEligibleDetails = useMemo(() => {
@@ -2603,16 +2614,45 @@ export default function ListingDetailPage() {
                   )}
                 </div>
               )}
+              {/* SELF-HEAL banner (live-notice): a kind='heal' task is pending/running — the system is
+                  auto-inheriting the parent hub's missing values from a live child. Rendered as its OWN
+                  banner (not folded into the verify banner below) so an actionable needs_attention is
+                  never hidden behind it; its whole point is "do not re-push while this runs" (a re-push
+                  can't speed it up — the active-task guard just skips the re-enqueue). */}
+              {verifyQueue.healing > 0 && (() => {
+                const healTask = verifyQueue.tasks.find((t) => t.kind === 'heal' && (t.status === 'pending' || t.status === 'running'))
+                const attrs = (healTask?.heal_payload?.missingAttrKeys ?? []).join(', ')
+                const eta = healTask?.next_check_at ? new Date(healTask.next_check_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null
+                return (
+                  <div className="rounded-lg p-2.5 mb-3 text-[11px] flex items-center gap-2 bg-violet-50 border border-violet-200 text-violet-900">
+                    <span className="font-semibold">🩹 Self-heal in progress</span>
+                    <span>- the variation parent hub is missing {attrs || 'required attribute values'}; the system will inherit the values from a live child automatically.{eta ? <> Next attempt ~<b>{eta}</b>.</> : null} No action needed - re-pushing won&apos;t speed it up.</span>
+                  </div>
+                )
+              })()}
               {/* AUTO-VERIFY banner: shows when the cron is watching pushes for this listing
                   (PO directive 2026-06-13: "shipping verification should be an automatic cron").
-                  Pending = a verify is scheduled; needs_attention = the cron tried max_attempts
-                  and SKUs are still stale — the seller should look. */}
+                  Pending = a verify is scheduled (heal tasks are counted separately above);
+                  needs_attention = the cron tried max_attempts and SKUs are still stale — the
+                  seller should look (a heal:manual task carries its own seller-facing last_error). */}
               {(verifyQueue.pending > 0 || verifyQueue.needs_attention > 0) && (
                 <div className={`rounded-lg p-2.5 mb-3 text-[11px] flex items-center gap-2 ${verifyQueue.needs_attention > 0 ? 'bg-amber-50 border border-amber-200 text-amber-900' : 'bg-emerald-50 border border-emerald-200 text-emerald-900'}`}>
                   {verifyQueue.needs_attention > 0 ? (
                     <>
                       <span className="font-semibold">⚠ {verifyQueue.needs_attention} push{verifyQueue.needs_attention === 1 ? '' : 'es'} need your attention</span>
-                      <span>— the auto-verify cron tried multiple times and some SKUs are still stale on Amazon. Click <b>Verify live</b> on the affected field to see which SKUs and re-push manually.</span>
+                      {(() => {
+                        // A heal:manual row carries its own seller-facing message ("Parent hub needs
+                        // ... Complete it in Seller Central") — show it verbatim. The generic stale-SKU
+                        // guidance still renders when any NON-heal task also needs attention.
+                        const manualHeal = verifyQueue.tasks.find((t) => t.field === 'heal:manual' && t.status === 'needs_attention' && t.last_error)
+                        const hasVerifyAttention = verifyQueue.tasks.some((t) => t.status === 'needs_attention' && t.field !== 'heal:manual')
+                        return (
+                          <>
+                            {manualHeal && <span>— {manualHeal.last_error}</span>}
+                            {(hasVerifyAttention || !manualHeal) && <span>— the auto-verify cron tried multiple times and some SKUs are still stale on Amazon. Click <b>Verify live</b> on the affected field to see which SKUs and re-push manually.</span>}
+                          </>
+                        )
+                      })()}
                     </>
                   ) : (
                     <>
@@ -4515,13 +4555,27 @@ export default function ListingDetailPage() {
                 <>
                   <p className="text-sm text-slate-800 mb-3">{pushResults.message}</p>
                   <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[40vh] overflow-y-auto">
-                    {pushResults.results.map((r) => (
-                      <div key={r.sku} className="p-2.5 text-xs flex items-center gap-2">
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${r.status === 'accepted' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{r.status}</span>
-                        <span className="font-mono text-slate-700">{r.sku}</span>
-                        {r.error && <span className="text-red-600 truncate">{r.error}</span>}
-                      </div>
-                    ))}
+                    {pushResults.results.map((r) => {
+                      // Live-notice: the parent hub's rejection is NOT a red dead-end when a self-heal
+                      // was scheduled — render it as an informational violet row (the system fixes it;
+                      // re-pushing won't help) and demote the technical Amazon error to a secondary line.
+                      const healRow = !!pushResults.healScheduled && !!r.isParent && r.status === 'failed'
+                      return (
+                        <div key={r.sku} className={`p-2.5 text-xs ${healRow ? 'bg-violet-50' : ''}`}>
+                          <div className="flex items-center gap-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${r.status === 'accepted' ? 'bg-green-100 text-green-700' : healRow ? 'bg-violet-100 text-violet-700' : 'bg-red-100 text-red-700'}`}>{healRow ? 'self-heal scheduled' : r.status}</span>
+                            <span className="font-mono text-slate-700">{r.sku}</span>
+                            {!healRow && r.error && <span className="text-red-600 truncate">{r.error}</span>}
+                          </div>
+                          {healRow && (
+                            <>
+                              <p className="text-[11px] text-violet-900 mt-1">Self-heal scheduled - {(pushResults.healAttrs ?? []).join(', ') || 'the missing parent values'} will be inherited from a live child within ~25 min. No action needed.</p>
+                              {r.error && <p className="text-[10px] text-slate-500 mt-0.5 break-words" title={r.error}>Amazon: {r.error}</p>}
+                            </>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
 
                   {/* ── Verify on Amazon (live getListingsItem per SKU) ─────────────────
