@@ -1532,10 +1532,29 @@ async function healCompositeDeletePartial(
     }
     const preRaw = preAttrs[containerKey]
     if (preRaw === undefined || preRaw === null || (Array.isArray(preRaw) && preRaw.length === 0)) {
-      // Container ALREADY ABSENT — the heal's goal state already holds (e.g. a retry after a successful
-      // delete whose confirmation was lost, or the seller removed it themselves). Converge as a no-op:
-      // no write, no learned-rule change — report healed so the task completes.
-      out.healed.push(containerKey)
+      // Container ALREADY ABSENT. This is a legitimate "goal state already holds" ONLY when WE issued a
+      // delete for this parent+container (a retry after a successful delete whose read-back confirmation
+      // was lost). Absent WITHOUT our own delete evidence means the record was REJECTING while the
+      // container was absent — deletion cannot be the cure (a schema-level requirement, not the
+      // partial-container disease) — and silently reporting healed would false-converge in a polite
+      // infinite loop with no alert (verification workflow 2026-07-02, convergence-hole audit).
+      let weDeletedIt = false
+      try {
+        const { data: ev } = await db.from('keyword_push_log')
+          .select('id').eq('parent_asin', parent_asin).eq('sku', parentSku)
+          .eq('field', `heal:delete:${containerKey}`).in('status', ['attempted', 'accepted']).limit(1)
+        weDeletedIt = Array.isArray(ev) && ev.length > 0
+      } catch { /* evidence unreadable -> treat as NOT ours (the safe polarity: surface, don't converge) */ }
+      if (weDeletedIt) {
+        out.healed.push(containerKey)
+        return out
+      }
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = 'container is absent on the live record yet the record still rejects - deletion cannot be the cure (schema-level requirement); needs human review'
+      try {
+        const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+        await flagParentAttrsNeedAttention(parent_asin, [containerKey])
+      } catch (e) { console.warn('[push-heal] absent-branch flag-attention failed (non-fatal):', e instanceof Error ? e.message : e) }
       return out
     }
     const preItems = Array.isArray(preRaw)
@@ -1564,8 +1583,13 @@ async function healCompositeDeletePartial(
       return out
     }
 
-    // Value-less delete of the WHOLE container — preview first, exactly like every other write here.
-    const ops = [{ op: 'delete' as const, path: `/attributes/${containerKey}` }]
+    // Delete the container for THIS marketplace — preview first, exactly like every other write here.
+    // Amazon's patchListingsItem is NOT plain RFC-6902: a delete op REQUIRES a `value` acting as a
+    // SELECTOR for which attribute instances to remove (a value-less delete op is rejected with
+    // HTTP 400 InvalidInput "Invalid empty value provided in patch at index of 0" — recorded live
+    // 2026-07-02 on attempt 2). The marketplace_id selector matches the container instances written
+    // for this marketplace (the documented delete pattern; SP-API partially-update-a-listing).
+    const ops = [{ op: 'delete' as const, path: `/attributes/${containerKey}`, value: [{ marketplace_id: MARKETPLACE_ID }] }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
     if (!preview.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete preview: ${preview.error ?? 'rejected'}`; return out }
 
@@ -1662,7 +1686,7 @@ async function healCompositeDeletePartial(
  *  per-attribute pushes when a batch preview fails, preserving failure isolation. */
 async function patchSkuMulti(
   sellerId: string, token: string, productType: string, sku: string,
-  ops: ({ op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string })[],
+  ops: ({ op: 'replace'; path: string; value: unknown } | { op: 'delete'; path: string; value?: unknown })[],
   mode: 'VALIDATION_PREVIEW' | 'LIVE',
 ): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
