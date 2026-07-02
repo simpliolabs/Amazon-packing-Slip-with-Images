@@ -209,7 +209,12 @@ export async function GET(request: NextRequest) {
         // Observability: carry the per-key failure reasons (Amazon preview/live error, read-back detail)
         // into the terminal message so the dead-end names its cause, not just "could not heal".
         const why = heal.errors ? ' Reasons: ' + Object.entries(heal.errors).map(([k, v]) => `${k}: ${v}`).join(' | ') : ''
-        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, (heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`) + why)
+        // COMPOSITE heal terminal copy (heal v3): when the strategy-3 complete-write fallback ran (its
+        // error strings carry the 'complete-write fallback' marker set by pushExecutor), say BOTH
+        // automated strategies were tried so the dead-end doesn't read like a single-path give-up.
+        const triedBoth = Object.values(heal.errors ?? {}).some((v) => v.includes('complete-write fallback'))
+        const strategiesNote = triedBoth ? ' Both automated strategies (delete-partial-container and complete-write) were tried.' : ''
+        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, (heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`) + strategiesNote + why)
         processed.push({ id: task.id, field: task.field, result: 'heal_needs_attention', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
       } else {
         // Observability (heal E2E 2026-07-02): persist WHY this attempt failed onto the task row —
