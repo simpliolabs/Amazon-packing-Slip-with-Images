@@ -21,7 +21,7 @@ import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
-import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
+import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 
 function getAdminSupabase() {
   return createClient(
@@ -1261,9 +1261,13 @@ export async function GET(req: NextRequest) {
       per_child_titles: per_child_titles_scrubbed,
       per_child_bullets: per_child_bullets_scrubbed,
       per_child_descriptions: per_child_descriptions_scrubbed,
-      keyword_reconciliation,
-      action_plan,
-      product_details_improvements,
+      // Deep-scrub the structured audit blobs too (PO-caught 2026-07-02: "france world cup tee" in an
+      // action_plan copy block — the field-level scrubs above never reached these). Identifier keys
+      // (sku/asin/element/...) are skipped inside scrubTrademarksDeep, so SKU codes like
+      // "France-World-Cup-TS-Parent" are never rewritten. Idempotent heal-on-read, same as the rest.
+      keyword_reconciliation: scrubTrademarksDeep(keyword_reconciliation),
+      action_plan: scrubTrademarksDeep(action_plan),
+      product_details_improvements: scrubTrademarksDeep(product_details_improvements),
       field_pushed_at,
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords_scrubbed.length > 0
