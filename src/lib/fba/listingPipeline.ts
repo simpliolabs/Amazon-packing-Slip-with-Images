@@ -886,35 +886,187 @@ function deduplicatePhrases(title: string): string {
 }
 
 // ─── ITEM HIGHLIGHTS (Amazon's companion to the 75-char title, July 27 2026) ────
-// ~125 chars of comma-separated search phrases shown near the title and indexed for search —
-// the home for the keyphrases a ≤75-char title can no longer carry. DETERMINISTIC (no LLM):
-// highest-opportunity keywords from the gated pool, with the same hygiene the bullets enforce —
-// no seasonal terms, no audience-narrowing role words, no third-party brands, no capacity tokens
-// on capacity families, and nothing the title already fully indexes (net-new index only).
-function buildItemHighlights(finalTitle: string, pool: AnalyzedKeyword[], brandName: string, capacityFamily: boolean): string {
+// Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
+// material/fit/feature/use-case phrases, no word repeated, <=125 chars. The old deterministic
+// builder joined top-opportunity KEYWORDS ("canada tee shirt for men, canada t shirt, the ceo
+// soccer tee, ...") — word repetition + near-duplicate keyword soup that violates Amazon's
+// Item Highlights rules (PO caught it on the live output). Rebuilt on the pipeline's
+// established idiom: LLM draft (gpt-4.1-mini) → deterministic validator → ONE corrective
+// retry → deterministic attribute-built fallback. Every path runs scrubTrademarks before its
+// output can reach the pushable rails ("world cup shirts" → "world soccer cup").
+
+// Trivial connectors the repetition gate ignores. men/women/cotton/etc. are deliberately NOT
+// here — they count as real words and are allowed only once.
+const HIGHLIGHT_STOPWORDS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'in', 'to', 'great', 'her', 'his'])
+// Pricing/promo language never belongs in a customer-facing highlight. "% off" and "$" match
+// anywhere (a \b next to "$" could never fire — it is not a word char); the words need boundaries.
+const HIGHLIGHT_PROMO_RE = /\b(?:sale|discount|cheap|free|deal)\b|% ?off|\$/i
+
+const highlightTokens = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+// Same word-unification the title validator uses (its lines above): singular/plural and
+// tshirt/shirt are the SAME word — the PO's live case was "tee shirt / t shirt / shirts" x6.
+const normHighlightToken = (t: string): string => {
+  const n = t.replace(/s$/, '')
+  return n === 'tshirt' ? 'shirt' : n
+}
+
+/** Deterministic Item Highlights gates — ALL must pass. Returns the violations (empty = compliant).
+ *  Callers scrub trademarks BEFORE validating (the scrubbed string is what ships), so the
+ *  trademark gate only fires if a mark somehow survives the scrub. */
+export function validateItemHighlights(s: string, brandName: string, capacityFamily: boolean): string[] {
+  const problems: string[] = []
+  if (s.length > 125) problems.push(`${s.length} characters — the hard limit is 125`)
+  const counts = new Map<string, number>()
+  for (const t of highlightTokens(s)) {
+    if (HIGHLIGHT_STOPWORDS.has(t)) continue
+    const norm = normHighlightToken(t)
+    counts.set(norm, (counts.get(norm) ?? 0) + 1)
+  }
+  const repeated = [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
+  if (repeated.length) problems.push(`these words appear more than once: ${repeated.join(', ')} — no non-trivial word may repeat`)
+  if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Soccer Cup")')
+  const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
+  if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
+  const lc = s.toLowerCase()
+  const season = SEASONAL_TERMS.find((t) => lc.includes(t))
+  if (season) problems.push(`contains the seasonal term "${season}" — this is an evergreen field`)
+  if (HIGHLIGHT_PROMO_RE.test(s)) problems.push('contains pricing/promotional language (sale/discount/cheap/free/deal/$/% off)')
+  if (capacityFamily && CAPACITY_RE.test(s)) problems.push('hardcodes a storage capacity — the field is shared across all capacity variants')
+  if (s.split(',').map((p) => p.trim()).filter(Boolean).length < 2) problems.push('must be at least 2 comma-separated phrases')
+  return problems
+}
+
+/** Deterministic FALLBACK — compliant by construction: assemble short phrases ONLY from the
+ *  attribute values actually present (material/fit/neck/sleeve/department) + the design + a
+ *  personalization phrase when the title claims it, pass each candidate through the SAME gates,
+ *  drop any later phrase that would repeat an earlier phrase's word, and stop at a phrase
+ *  boundary <=125. A generic two-phrase tail keeps it from ever falling under 2 phrases. */
+export function buildHighlightsFallback(
+  finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
+  brandName: string, apparelProduct: boolean, capacityFamily: boolean,
+): string {
+  const val = (re: RegExp): string => {
+    const row = details.find((d) => re.test(d.field_name) && (d.recommended_value || '').trim().length > 0 && d.recommended_value.trim().length <= 40)
+    return row ? row.recommended_value.trim() : ''
+  }
+  const material = val(/^(?:material|fabric)/i)
+  const fit = val(/\bfit\b/i)
+  const neck = val(/neck|collar/i)
+  const sleeve = val(/sleeve/i)
+  const dept = val(/^department$/i).toLowerCase()
+  const garment = apparelProduct
+    ? (finalTitle.match(/\bt[-\s]?shirts?\b|\btees?\b|\bhoodies?\b|\bsweatshirts?\b|\btank tops?\b|\bshirts?\b/i)?.[0] ?? 'shirt').toLowerCase().replace(/\s{2,}/g, ' ').replace(/s$/, '')
+    : ''
+  const candidates: string[] = []
+  if (material) candidates.push(garment ? `${material} ${garment}` : material)
+  if (designName) candidates.push(garment && !material ? `${designName} ${garment}` : `${designName} design`)
+  if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('custom personalization')
+  if (fit) candidates.push(/\bfit\b/i.test(fit) ? fit : `${fit} fit`)
+  if (neck) candidates.push(neck)
+  if (sleeve) candidates.push(sleeve)
+  if (dept.startsWith('women')) candidates.push('for women')
+  else if (dept.startsWith('men')) candidates.push('for men')
+  // Guaranteed generic tail so the field always carries >= 2 phrases even with zero attribute rows.
+  candidates.push(apparelProduct ? 'comfortable everyday wear' : 'made for everyday use', 'great for gifting')
+
   const ownBrands = ownBrandTokenSet(brandName)
-  const titleToks = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
-  const seen = new Set<string>()
+  const used = new Set<string>()
   const phrases: string[] = []
   let len = 0
-  for (const k of [...pool].sort((a, b) => b.opportunityScore - a.opportunityScore)) {
-    const kw = (k.keyword || '').trim().toLowerCase()
-    if (!kw || seen.has(kw)) continue
-    const words = kw.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
-    if (words.length === 0 || words.length > 6) continue
-    if (SEASONAL_TERMS.some((s) => kw.includes(s))) continue                  // evergreen field
-    if (words.every((w) => titleToks.has(w))) continue                        // title already indexes it
-    if (words.some((w) => ROLE_WORDS.has(w) && !titleToks.has(w))) continue   // no audience-narrowing
-    if (capacityFamily && CAPACITY_RE.test(kw)) continue                      // shared field — never one capacity
-    if (findThirdPartyBrands(kw, ownBrands).length > 0) continue              // no third-party brands
-    const next = phrases.length ? len + 2 + kw.length : kw.length
+  for (const raw of candidates) {
+    const p = scrubTrademarks(raw).replace(/\s{2,}/g, ' ').trim()
+    if (!p) continue
+    const lc = p.toLowerCase()
+    if (findThirdPartyBrands(p, ownBrands).length > 0) continue
+    if (SEASONAL_TERMS.some((t) => lc.includes(t))) continue
+    if (HIGHLIGHT_PROMO_RE.test(p)) continue
+    if (capacityFamily && CAPACITY_RE.test(p)) continue
+    const toks = highlightTokens(p).filter((t) => !HIGHLIGHT_STOPWORDS.has(t)).map(normHighlightToken)
+    if (new Set(toks).size !== toks.length) continue          // repeats a word within itself
+    if (toks.some((t) => used.has(t))) continue               // would repeat an earlier phrase's word — drop it
+    const next = phrases.length ? len + 2 + p.length : p.length
     if (next > 125) continue
-    phrases.push(kw)
-    seen.add(kw)
+    toks.forEach((t) => used.add(t))
+    phrases.push(p)
     len = next
-    if (len >= 115) break                                                     // close enough — stop scanning
   }
   return phrases.join(', ')
+}
+
+// Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
+// material/fit/feature/use-case phrases, no word repeated, <=125 chars.
+async function buildItemHighlights(
+  openai: OpenAI, finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
+  pool: AnalyzedKeyword[], brandName: string, apparelProduct: boolean, capacityFamily: boolean,
+): Promise<string> {
+  // Product FACTS for the brief: the attribute rows the pipeline already computed (Material /
+  // Fit Type / Neck / Sleeve / Department / Style / Target Gender). Keywords are CONTEXT only.
+  const factRows = details
+    .filter((d) => /material|fabric|\bfit\b|neck|collar|sleeve|department|style|pattern|closure|gender/i.test(d.field_name) && (d.recommended_value || '').trim())
+    .slice(0, 6)
+    .map((d) => `- ${d.field_name}: ${d.recommended_value.trim()}`)
+  const ownBrands = ownBrandTokenSet(brandName)
+  const contextKws = [...pool]
+    .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    .map((k) => scrubTrademarks((k.keyword || '').trim()).toLowerCase())
+    .filter((kw) => kw
+      && !SEASONAL_TERMS.some((t) => kw.includes(t))
+      && findThirdPartyBrands(kw, ownBrands).length === 0
+      && !(capacityFamily && CAPACITY_RE.test(kw)))
+    .slice(0, 3)
+
+  // The PO's rules, verbatim, as the brief's spine.
+  const system = 'You write the Amazon "Item Highlights" field — a short CUSTOMER-FACING line shown near the title. It is NOT backend keywords. '
+    + 'Item Highlights must read like human-friendly phrases highlighting MATERIAL, FIT, FEATURES, USE-CASES. Format: short comma-separated phrases. '
+    + 'Rules: do not repeat words, no pricing/promotions, maximum 125 characters. '
+    + 'Good example: "100% breathable cotton, custom name & number printing, tailored athletic fit for men. Great for World Soccer Cup matches." '
+    + 'HARD RULES: express the product\'s real material/fit/features plus at most ONE use-case phrase; NEVER output a list of search keywords; '
+    + 'no word may appear twice (trivial connectors like for/and/the/a/of/with/in/to are fine); 125 characters maximum; no prices, promotions or discount language; '
+    + 'no third-party brand names, sports teams, leagues or franchises; at least 2 comma-separated phrases. '
+    + 'Return ONLY the Item Highlights string — no quotes, no explanation.'
+  const user = [
+    'Product facts:',
+    `- Title: ${finalTitle}`,
+    designName ? `- Design name: ${designName}` : '',
+    ...factRows,
+    `- Product type: ${apparelProduct ? 'apparel (garment)' : 'non-apparel'}`,
+    capacityFamily ? '- This family spans MULTIPLE storage capacities — never mention a specific GB/TB.' : '',
+    contextKws.length ? `Top search phrases (CONTEXT for what shoppers want and the ONE use-case — do NOT copy them as a keyword list):\n${contextKws.map((k) => `- ${k}`).join('\n')}` : '',
+    'Write the Item Highlights string now.',
+  ].filter(Boolean).join('\n')
+
+  // Same single-call client pattern as the other agents: short timeout, NO retries (a hung call
+  // must not stall the keepalive-less tail of the pipeline), fail open to '' on any error.
+  const ask = async (corrective: string): Promise<string> => {
+    try {
+      const r = await openai.chat.completions.create(
+        {
+          model: 'gpt-4.1-mini',
+          messages: [
+            { role: 'system' as const, content: system },
+            { role: 'user' as const, content: corrective ? `${user}\n\n${corrective}` : user },
+          ],
+          temperature: 0.4,
+          max_tokens: 120,
+        },
+        { timeout: 15_000, maxRetries: 0 },
+      )
+      return (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+    } catch { return '' }
+  }
+
+  // Draft → validate → ONE corrective retry → deterministic fallback. scrubTrademarks runs
+  // BEFORE validation on every LLM output (the scrubbed string is what ships), so a scrub that
+  // introduces a repeat (e.g. a second "soccer") is still caught by the repetition gate.
+  let out = scrubTrademarks(await ask('')).trim()
+  let problems = out ? validateItemHighlights(out, brandName, capacityFamily) : ['empty response']
+  if (problems.length > 0) {
+    const correction = `Your previous attempt was rejected:\n"${out}"\nViolations:\n${problems.map((p) => `- ${p}`).join('\n')}\nRewrite the Item Highlights string fixing EVERY violation. Return ONLY the string.`
+    out = scrubTrademarks(await ask(correction)).trim()
+    problems = out ? validateItemHighlights(out, brandName, capacityFamily) : ['empty response']
+  }
+  if (problems.length === 0) return out
+  return buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily)
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
@@ -4428,7 +4580,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (menu-gated): recommending it before Amazon ships the field would create an unfillable
   // Features gap. field_name = the schema's OWN display title, so the route's resolver maps it
   // 1:1 to sp_api_key and the row rides the schema-details rails (Push button, verify, write-
-  // through) with ZERO new endpoints. Deterministic value replaces any audit-guessed duplicate.
+  // through) with ZERO new endpoints. The generated value (LLM draft → deterministic gates →
+  // attribute fallback, see buildItemHighlights) replaces any audit-guessed duplicate.
   let pdiFinal: PipelineProductDetailImprovement[] = Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : []
   // The audit rows are a blind-cast LLM parse: recommended_value can arrive as an ARRAY
   // (Additional Features: ["Water Proof","Shock Proof"]) or a bare number — every consumer
@@ -4495,13 +4648,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const s = squash(p.field_name)
       return s !== squash(highlightsAttr.title) && s !== 'itemhighlights' && s !== 'itemhighlight' && s !== 'titledifferentiation'
     })
-    const hl = buildItemHighlights(finalTitle, analysis, input.brandName, !!perChildTitles)
+    // Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
+    // material/fit/feature/use-case phrases, no word repeated, <=125 chars. pdiFinal at this point
+    // carries the Material/Fit/Neck/Sleeve/Department facts (highlight duplicates already filtered
+    // out above); capacityFamilyTokens is the pipeline's real capacity-family signal.
+    onProgress('Composing Item Highlights...')   // keepalive before the LLM call
+    const hl = await buildItemHighlights(input.openai, finalTitle, effectiveDesignName, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
     if (hl) {
       pdiFinal.push({
         field_name: highlightsAttr.title,
         current_value: null,
         recommended_value: hl,
-        reason: 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of comma-separated phrases shown near the title and indexed for search — carries the keyphrases the shorter title no longer can.',
+        reason: 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of short customer-facing phrases — material, fit, features, use-case — shown near the title. Human-readable phrases, not a keyword list.',
       })
     }
   }
