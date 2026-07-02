@@ -440,6 +440,11 @@ export default function FBAIntelligencePage() {
   const [seoSearch, setSeoSearch] = useState('')              // raw input
   const [seoSearchActive, setSeoSearchActive] = useState('')  // debounced value actually sent
   const [seoStubs, setSeoStubs] = useState<SeoStub[]>([])
+  // Search miss on a valid ASIN the server flagged as never-synced (response carried unknownAsin) —
+  // drives the honest "Pull from Amazon" empty state instead of a bare "No listings match".
+  const [seoUnknownAsin, setSeoUnknownAsin] = useState(false)
+  const [seoPulling, setSeoPulling] = useState(false)
+  const [seoPullError, setSeoPullError] = useState<string | null>(null)
   const [seoCursor, setSeoCursor] = useState<string | null>(null)  // nextCursor for "Show next"
   const [seoLoadingMore, setSeoLoadingMore] = useState(false)
   const [seoHasMore, setSeoHasMore] = useState(false)
@@ -1165,13 +1170,15 @@ export default function FBAIntelligencePage() {
     const scoresUrl = buildSeoUrl({ status, sort, search })
     setSeoLoading(true)
     setSeoError(null)
-    const applyPage = (json: { scores?: SeoScoreRow[]; counts?: SeoCounts; stubs?: SeoStub[]; nextCursor?: string | null; hasMore?: boolean; lastSyncedAt?: string | null }) => {
+    setSeoPullError(null)
+    const applyPage = (json: { scores?: SeoScoreRow[]; counts?: SeoCounts; stubs?: SeoStub[]; nextCursor?: string | null; hasMore?: boolean; lastSyncedAt?: string | null; unknownAsin?: boolean }) => {
       setSeoScores(json.scores || [])
       setSeoCounts(json.counts || null)
       setSeoStubs(json.stubs || [])
       setSeoCursor(json.nextCursor || null)
       setSeoHasMore(!!json.hasMore)
       setSeoLastSynced(json.lastSyncedAt || null)
+      setSeoUnknownAsin(!!json.unknownAsin)
     }
     try {
       if (triggerSync) {
@@ -1241,6 +1248,30 @@ export default function FBAIntelligencePage() {
     } catch (e) { console.error(e) }
     finally { setSeoLoadingMore(false) }
   }, [seoCursor, seoLoadingMore, seoStatus, seoSort, seoSearchActive, buildSeoUrl])
+
+  // Explicit "Pull from Amazon" (self-healing search dead-end): the searched ASIN was flagged
+  // unknownAsin by the server (never synced — no listing_health/listing_content rows). ?pull= runs
+  // the SP-API discovery → sync → score pipeline for that ONE ASIN; on success re-run the same
+  // search so the fresh card appears. Failures render honestly ('not-in-account' vs 'sync-failed').
+  const pullAsinFromAmazon = useCallback(async (asin: string) => {
+    setSeoPulling(true)
+    setSeoPullError(null)
+    try {
+      const resp = await fetch(`/api/fba/listing-optimizer?pull=${encodeURIComponent(asin)}`, { cache: 'no-store' })
+      const json = await resp.json()
+      if (json.pulled) {
+        await fetchSeoScores(false, { search: asin })
+      } else if (json.reason === 'not-in-account') {
+        setSeoPullError(`Amazon has no listing for ${asin} in this account.`)
+      } else {
+        setSeoPullError('Pull failed - try again or run a full Sync FBA Data.')
+      }
+    } catch {
+      setSeoPullError('Pull failed - try again or run a full Sync FBA Data.')
+    } finally {
+      setSeoPulling(false)
+    }
+  }, [fetchSeoScores])
 
   // Load cached AI recommendations from DB (GET — no generation)
   const loadCachedRecs = useCallback(async (parentAsin: string) => {
@@ -2875,11 +2906,35 @@ export default function FBAIntelligencePage() {
               <div className="text-center py-8 text-gray-400 text-sm">Loading scores…</div>
             ) : seoScores.length === 0 && seoStubs.length === 0 && !seoSyncing ? (
               seoSearchActive ? (
-                <div className="text-center py-10">
-                  <div className="text-3xl mb-2">&#128269;</div>
-                  <p className="text-sm font-medium text-gray-700">No listings match &ldquo;{seoSearchActive}&rdquo;</p>
-                  <p className="text-xs text-gray-500 mt-1">Try a different ASIN or part of the product title.</p>
-                </div>
+                /^B0[A-Z0-9]{8}$/i.test(seoSearchActive) && seoUnknownAsin ? (
+                  // Valid ASIN the server flagged as never-synced (unknownAsin) — honest, actionable
+                  // empty state: pull it from Amazon on demand instead of a bare dead-end.
+                  <div className="text-center py-10">
+                    <div className="text-3xl mb-2">&#128269;</div>
+                    <p className="text-sm font-medium text-gray-700">{seoSearchActive.toUpperCase()} isn&apos;t in your synced FBA data yet.</p>
+                    {seoPullError && (
+                      <p className="text-xs text-red-600 mt-2">{seoPullError}</p>
+                    )}
+                    <button
+                      onClick={() => pullAsinFromAmazon(seoSearchActive.toUpperCase())}
+                      disabled={seoPulling}
+                      className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      {seoPulling ? (
+                        <><span className="animate-spin">&#8635;</span> Pulling from Amazon…</>
+                      ) : (
+                        'Pull from Amazon'
+                      )}
+                    </button>
+                    <p className="text-xs text-gray-500 mt-3">Or try a different ASIN or part of the product title.</p>
+                  </div>
+                ) : (
+                  <div className="text-center py-10">
+                    <div className="text-3xl mb-2">&#128269;</div>
+                    <p className="text-sm font-medium text-gray-700">No listings match &ldquo;{seoSearchActive}&rdquo;</p>
+                    <p className="text-xs text-gray-500 mt-1">Try a different ASIN or part of the product title.</p>
+                  </div>
+                )
               ) : seoCounts && seoCounts.all === 0 ? (
                 <div className="text-center py-8">
                   <div className="text-3xl mb-2">&#128269;</div>

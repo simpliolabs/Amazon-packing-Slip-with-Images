@@ -18,7 +18,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
-import { syncListingContent, ensureListingScored, syncSingleAsinContent } from '@/lib/sync/syncListingContent'
+import { syncListingContent, ensureListingScored, syncSingleAsinContent, type SingleAsinSyncOutcome } from '@/lib/sync/syncListingContent'
 import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
 import { NEEDS_ATTENTION_VERDICTS, type OutcomeChip, type OutcomeVerdict } from '@/lib/fba/outcomePresentation'
 
@@ -341,6 +341,28 @@ export async function GET(req: Request) {
     const cursor = decodeCursor(params.get('cursor'))
     const ensureAsin = params.get('ensure')
 
+    // ── ?pull= : EXPLICIT "Pull from Amazon" on-demand ingestion (self-healing search dead-end) ──
+    // A NEVER-synced ASIN has no listing_health rows, so the search-miss auto-attempt below used to
+    // return null silently. This param runs the full discover-from-SP-API → sync → score pipeline for
+    // ONE ASIN and reports WHY nothing appeared: 'not-in-account' (Amazon has no listing for it in
+    // this account) vs 'sync-failed' (transient — worth a retry or a full sync).
+    const pullAsin = (params.get('pull') || '').trim()
+    if (pullAsin) {
+      if (!/^B0[A-Z0-9]{8}$/i.test(pullAsin)) {
+        return NextResponse.json({ pulled: false, reason: 'sync-failed', error: 'Invalid ASIN format' }, { status: 400 })
+      }
+      const outcome: SingleAsinSyncOutcome = {}
+      const scored = await syncSingleAsinContent(supabase, pullAsin.toUpperCase(), outcome)
+      if (scored) {
+        return NextResponse.json({
+          pulled: true,
+          parent_asin: (scored as { parent_asin?: string }).parent_asin ?? null,
+          score: (scored as { overall_score?: number }).overall_score ?? null,
+        })
+      }
+      return NextResponse.json({ pulled: false, reason: outcome.reason ?? 'sync-failed' })
+    }
+
     // ── in_progress: CLAIMED listings (Phase B). Phase A shipped this tab empty (Risk R-UX3) ──
     // because no real soft-lock existed yet; now it lists the parents with an ACTIVE, non-stale
     // claim. We start from the live claim rows (a tiny set — at most one per person on the team),
@@ -383,6 +405,9 @@ export async function GET(req: Request) {
     let stubs: { asin: string; title: string | null; stub: true }[] | undefined
     let pageRows: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null })[] = []
     let nextCursor: string | null = null
+    // Search miss on a valid ASIN where even the on-demand attempt (incl. SP-API discovery) found
+    // nothing — lets the frontend render the "Pull from Amazon" empty state instead of a dead-end.
+    let unknownAsin = false
 
     if (search) {
       const isAsin = /^B0[A-Z0-9]{8}$/i.test(search)
@@ -430,6 +455,7 @@ export async function GET(req: Request) {
       if (isAsin && scoredRows.length === 0 && stubs.length === 0) {
         try {
           const scored = await syncSingleAsinContent(supabase, search)
+          if (!scored) unknownAsin = true
           const scoredParent = (scored as { parent_asin?: string } | null)?.parent_asin
           if (scoredParent) {
             const { data: sr } = await supabase
@@ -553,6 +579,7 @@ export async function GET(req: Request) {
       hasMore,
       lastSyncedAt: latestSync,
       ...(stubs ? { stubs } : {}),
+      ...(unknownAsin ? { unknownAsin: true } : {}),
     })
 
   } catch (err) {
