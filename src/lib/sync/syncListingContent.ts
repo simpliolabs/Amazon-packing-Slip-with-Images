@@ -1326,17 +1326,68 @@ export async function ensureListingScored(
 }
 
 /**
+ * DISCOVERY fallback for syncSingleAsinContent: an ASIN that was NEVER synced has no listing_health
+ * rows at all, so ask Amazon directly which of the seller's SKUs carry it via the Listings Items
+ * search endpoint (identifiersType=ASIN). Each returned item carries `sku` plus summaries with the
+ * resolved asin. BOUNDED to one page and BEST-EFFORT: any failure returns [] (caller treats the
+ * ASIN as not in the account).
+ */
+async function discoverSkusForAsin(token: string, sellerId: string, asin: string): Promise<ChildSku[]> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}` +
+      `?marketplaceIds=${MARKETPLACE_ID}` +
+      `&identifiers=${encodeURIComponent(asin)}` +
+      `&identifiersType=ASIN` +
+      `&pageSize=20` +
+      `&includedData=summaries`
+    const resp = await fetch(url, {
+      headers: { 'x-amz-access-token': token },
+    })
+    if (!resp.ok) return []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const json: any = await resp.json()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const items: any[] = Array.isArray(json.items) ? json.items : []
+    const discovered: ChildSku[] = []
+    for (const item of items) {
+      const sku: string | null = typeof item?.sku === 'string' ? item.sku : null
+      if (!sku || sku.toLowerCase().startsWith('amzn.gr.')) continue // system SKUs — mirrors the DB filter
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const summaries: any[] = Array.isArray(item?.summaries) ? item.summaries : []
+      const summary = summaries.find((s: { marketplaceId?: string }) => s?.marketplaceId === MARKETPLACE_ID) || summaries[0] || {}
+      discovered.push({
+        sku,
+        asin: typeof summary?.asin === 'string' ? summary.asin : asin,
+        parent_asin: typeof summary?.parentAsin === 'string' ? summary.parentAsin : null,
+      })
+    }
+    return discovered
+  } catch (err) {
+    console.warn(`[discoverSkusForAsin] discovery failed for ${asin}:`, err instanceof Error ? err.message : String(err))
+    return []
+  }
+}
+
+/** Why syncSingleAsinContent returned null — filled into the optional out-param so the route can
+ *  tell "Amazon has no listing for this ASIN in this account" from a transient sync failure. */
+export type SingleAsinSyncOutcome = { reason?: 'not-in-account' | 'sync-failed' }
+
+/**
  * ON-DEMAND single-ASIN content sync + score (feature C). For a listing that was never in the
  * top-50-by-sales sync (0-unit → no listing_content, no score, page "not available"), fetch its
  * SKUs from listing_health, pull each SKU's content via the SAME fetchListingContent the bulk sync
  * uses (no duplication), upsert into listing_content, then score via ensureListingScored. BOUNDED to
  * ONE ASIN and BEST-EFFORT: returns the scored card row or null (caller falls back to a stub). The
  * `asin` may be a parent ASIN or a child ASIN — we match (parent_asin=asin OR asin=asin) and key the
- * score on the resolved parent (or the asin itself for a standalone).
+ * score on the resolved parent (or the asin itself for a standalone). When listing_health has no rows
+ * (NEVER-synced ASIN) we fall back to SP-API discovery (discoverSkusForAsin) so an explicit
+ * "Pull from Amazon" can self-heal the gap; `outcome.reason` distinguishes the null cases.
  */
 export async function syncSingleAsinContent(
   supabase: SupabaseClient,
   asin: string,
+  outcome?: SingleAsinSyncOutcome,
 ): Promise<Record<string, unknown> | null> {
   if (!asin) return null
   try {
@@ -1350,8 +1401,17 @@ export async function syncSingleAsinContent(
       .or(`parent_asin.eq.${asin},asin.eq.${asin}`)
       .eq('status', 'Active')
       .not('sku', 'ilike', 'amzn.gr.%')
-    const health = (healthRows ?? []) as ChildSku[]
-    if (health.length === 0) return null  // no live SKUs — nothing to sync on demand
+    let health = (healthRows ?? []) as ChildSku[]
+    if (health.length === 0) {
+      // DISCOVERY fallback: never-synced ASIN — ask Amazon which SKUs carry it, then run the
+      // SAME pipeline below (content fetch, image count, A+, upsert, score). Only the SKU
+      // source differs.
+      health = await discoverSkusForAsin(token, sellerId, asin)
+      if (health.length === 0) {
+        if (outcome) outcome.reason = 'not-in-account'
+        return null  // no live SKUs locally AND Amazon has nothing for this ASIN in the account
+      }
+    }
 
     // Resolve the parent key: the shared parent_asin if present, else the asin itself (standalone).
     const parentAsin = health.find((r) => r.parent_asin)?.parent_asin || asin
@@ -1380,7 +1440,10 @@ export async function syncSingleAsinContent(
       }
       await sleep(200)
     }
-    if (contentRows.length === 0) return null
+    if (contentRows.length === 0) {
+      if (outcome) outcome.reason = 'sync-failed'
+      return null
+    }
 
     // 3) A+ status from a representative child (mirrors the bulk sync).
     let aplusData: AplusStatus = { hasAplus: false, moduleCount: 0, missingAltCount: 0, hasBrandStory: false, hasHeadline: false }
@@ -1407,11 +1470,18 @@ export async function syncSingleAsinContent(
     const { error: upsertErr } = await supabase
       .from('listing_content')
       .upsert(contentRows, { onConflict: 'sku' })
-    if (upsertErr) { console.warn(`[syncSingleAsinContent] upsert failed for ${parentAsin}:`, upsertErr.message); return null }
+    if (upsertErr) {
+      console.warn(`[syncSingleAsinContent] upsert failed for ${parentAsin}:`, upsertErr.message)
+      if (outcome) outcome.reason = 'sync-failed'
+      return null
+    }
 
-    return await ensureListingScored(supabase, parentAsin)
+    const scored = await ensureListingScored(supabase, parentAsin)
+    if (!scored && outcome) outcome.reason = 'sync-failed'
+    return scored
   } catch (err) {
     console.warn('[syncSingleAsinContent] failed (non-fatal):', err instanceof Error ? err.message : String(err))
+    if (outcome) outcome.reason = 'sync-failed'
     return null
   }
 }
