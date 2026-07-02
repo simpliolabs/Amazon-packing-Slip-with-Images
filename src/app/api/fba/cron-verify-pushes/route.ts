@@ -179,10 +179,18 @@ export async function GET(request: NextRequest) {
         try { await enqueueVerification({ parent_asin: task.parent_asin, field: 'title' }) } catch { /* non-fatal */ }
         processed.push({ id: task.id, field: task.field, result: `healed:${heal.healed.join(',') || 'none'}`, matched: heal.healed.length, total: heal.healed.length + heal.abstained.length })
       } else if (task.attempts + 1 >= task.max_attempts) {
-        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`)
+        // Observability: carry the per-key failure reasons (Amazon preview/live error, read-back detail)
+        // into the terminal message so the dead-end names its cause, not just "could not heal".
+        const why = heal.errors ? ' Reasons: ' + Object.entries(heal.errors).map(([k, v]) => `${k}: ${v}`).join(' | ') : ''
+        await flagNeedsAttention(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, (heal.error || `Could not heal ${heal.failed.join(', ')} after ${task.attempts + 1} attempts — complete it in Seller Central.`) + why)
         processed.push({ id: task.id, field: task.field, result: 'heal_needs_attention', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
       } else {
-        await rescheduleTask(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed)
+        // Observability (heal E2E 2026-07-02): persist WHY this attempt failed onto the task row —
+        // a rescheduled heal previously left last_error NULL, so the failure was invisible outside
+        // the server console and undiagnosable from the DB.
+        const note = `attempt ${task.attempts + 1} failed [${heal.failed.join(', ')}]` +
+          (heal.errors ? ' - ' + Object.entries(heal.errors).map(([k, v]) => `${k}: ${v}`).join(' | ') : (heal.error ? ` - ${heal.error}` : ''))
+        await rescheduleTask(task.id, heal.healed.length, heal.healed.length + heal.failed.length, heal.failed, note)
         processed.push({ id: task.id, field: task.field, result: 'heal_rescheduled', matched: heal.healed.length, total: heal.healed.length + heal.failed.length })
       }
       continue

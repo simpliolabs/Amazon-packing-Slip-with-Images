@@ -965,7 +965,13 @@ function compositeSpecForRejectedAttr(attr: string): { containerKey: string; sub
 /** The outcome of one heal pass over a parent hub. `healed` = attrs written live; `abstained` =
  *  skipped on child disagreement / no child value / non-broadcast; `failed` = validation or write
  *  rejected. Never thrown — the caller (cron/trigger) rides the queue's attempts/backoff on failures. */
-export interface HealResult { healed: string[]; abstained: string[]; failed: string[] }
+export interface HealResult {
+  healed: string[]; abstained: string[]; failed: string[]
+  /** Observability (heal E2E 2026-07-02): WHY each failed key failed — the Amazon preview/live error,
+   *  read-back mismatch detail, or thrown message. Persisted onto the queue task row by the cron so a
+   *  failed heal attempt is diagnosable from the DB instead of only the server console. */
+  errors?: Record<string, string>
+}
 
 /** Max children sampled to detect broadcast-value agreement. A handful is enough to catch a
  *  disagreeing child; walking all N would be O(N) live SP-API GETs for no extra safety. */
@@ -1064,9 +1070,9 @@ export async function healParentAttributes(
         try { valueShape = await getDetailValueShape(productType, spApiKey, ptOpts) } catch { /* flat */ }
 
         const preview = await patchSkuDetail(sellerId, token, productType, parentSku, attribute, inherited, 'VALIDATION_PREVIEW', valueShape)
-        if (!preview.ok) { out.failed.push(spApiKey); await sleep(PATCH_DELAY_MS); continue }
+        if (!preview.ok) { out.failed.push(spApiKey); (out.errors ??= {})[spApiKey] = `preview: ${preview.error ?? 'rejected'}`; await sleep(PATCH_DELAY_MS); continue }
         const live = await patchSkuDetail(sellerId, token, productType, parentSku, attribute, inherited, 'LIVE', valueShape)
-        if (!live.ok) { out.failed.push(spApiKey); await sleep(PATCH_DELAY_MS); continue }
+        if (!live.ok) { out.failed.push(spApiKey); (out.errors ??= {})[spApiKey] = `live: ${live.error ?? 'rejected'}`; await sleep(PATCH_DELAY_MS); continue }
 
         // READ-BACK VERIFICATION (adversarial review 2026-06-28): a LIVE patch that returns ok does NOT
         // prove the value persisted — Amazon can accept then SILENTLY DROP a value (the composite failure
@@ -1080,6 +1086,7 @@ export async function healParentAttributes(
         if (readBack !== inherited.trim()) {
           console.warn(`[push-heal] read-back MISMATCH for ${spApiKey} on ${parentSku}: expected "${inherited.trim()}", hub reads "${readBack}" - Amazon accepted then dropped it; marking failed.`)
           out.failed.push(spApiKey)
+          ;(out.errors ??= {})[spApiKey] = `read-back mismatch: wrote "${inherited.trim().slice(0, 120)}", hub reads "${readBack.slice(0, 120)}"`
           await sleep(PATCH_DELAY_MS)
           continue
         }
@@ -1110,6 +1117,7 @@ export async function healParentAttributes(
       } catch (e) {
         console.warn(`[push-heal] heal of ${spApiKey} threw (non-fatal):`, e instanceof Error ? e.message : e)
         out.failed.push(spApiKey)
+        ;(out.errors ??= {})[spApiKey] = `threw: ${e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)}`
       }
     }
   } catch (e) {
@@ -1249,9 +1257,9 @@ export async function healParentComposite(
     //    `size`). Raw ops via patchSkuMulti so NO shape builder ever touches the child's verbatim objects.
     const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [built.item] }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
-    if (!preview.ok) { out.failed.push(containerKey); return out }
+    if (!preview.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `preview: ${preview.error ?? 'rejected'}`; return out }
     const live = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'LIVE')
-    if (!live.ok) { out.failed.push(containerKey); return out }
+    if (!live.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `live: ${live.error ?? 'rejected'}`; return out }
 
     // 5) READ-BACK (critical fail-safe): re-fetch the parent's container and confirm EACH subKey now
     //    reflects the agreed value VERBATIM (JSON-stringify compare of the parent's first composite item's
@@ -1273,6 +1281,7 @@ export async function healParentComposite(
     if (!persisted) {
       console.warn(`[push-heal] composite read-back MISMATCH for ${containerKey} on ${parentSku}: Amazon accepted then dropped one or more sub-fields; marking failed + flagging for attention.`)
       out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = 'read-back mismatch: Amazon accepted the PATCH then silently dropped one or more sub-fields'
       // UNLEARN (adversarial review): the value did NOT persist, so the Tier-2 pre-fill must STOP
       // LIVE-writing it on every future parent push (it has no read-back of its own). Delete the learned
       // push_heal_rules row for (product_type, containerKey) — leaving only the durable heal:manual
