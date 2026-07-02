@@ -3549,7 +3549,16 @@ export default function FBAIntelligencePage() {
                   // then sees ONLY the live parent (e.g. B0GCF11RKL). Guarded: only hide once
                   // orphan-check has CONFIRMED 0 total children AND the rollup claimed some
                   // (the mismatch that proves it's a stale ghost, not a not-yet-synced card).
-                  if (stale && stale.totalChildren === 0 && (score.child_count ?? 0) > 0) return null
+                  //
+                  // PLUS (PO-caught flicker, 2026-07-02): the row must ALSO ship ZERO live
+                  // listing_content children. orphan-check counts VARIATION children, so a
+                  // STANDALONE listing (B0H7CMPZR3, on-demand-pulled) reads totalChildren=0
+                  // while its child_count=1 (its own row) -- the ghost-hide then nulled the
+                  // card AFTER first paint (search result flickered on -> orphan-check landed
+                  // -> off). A row carrying live content rows in the SAME response is
+                  // definitionally not a ghost (the #93 lesson: live listing_content is
+                  // ground truth; cached counts and catalog-lagged checks lie).
+                  if (stale && stale.totalChildren === 0 && (score.child_count ?? 0) > 0 && (score.children?.length ?? 0) === 0) return null
                   const isStale = stale?.isStale ?? false
                   // Phase A threshold (spec §5): 90+ is OPTIMIZED (shipped, measuring) — a first-class
                   // green treatment. A 90+ listing with a recorded push is "Pushed — measuring" (R8).
