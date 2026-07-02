@@ -2642,10 +2642,12 @@ export default function ListingDetailPage() {
                       <span className="font-semibold">⚠ {verifyQueue.needs_attention} push{verifyQueue.needs_attention === 1 ? '' : 'es'} need your attention</span>
                       {(() => {
                         // A heal:manual row carries its own seller-facing message ("Parent hub needs
-                        // ... Complete it in Seller Central") — show it verbatim. The generic stale-SKU
+                        // ... Complete it in Seller Central") — show it verbatim; same for a
+                        // heal:family-check row ("family integrity changed after complete-write heal
+                        // ..." — adversarial review 2026-07-02, fix 3). The generic stale-SKU
                         // guidance still renders when any NON-heal task also needs attention.
-                        const manualHeal = verifyQueue.tasks.find((t) => t.field === 'heal:manual' && t.status === 'needs_attention' && t.last_error)
-                        const hasVerifyAttention = verifyQueue.tasks.some((t) => t.status === 'needs_attention' && t.field !== 'heal:manual')
+                        const manualHeal = verifyQueue.tasks.find((t) => (t.field === 'heal:manual' || t.field === 'heal:family-check') && t.status === 'needs_attention' && t.last_error)
+                        const hasVerifyAttention = verifyQueue.tasks.some((t) => t.status === 'needs_attention' && t.field !== 'heal:manual' && t.field !== 'heal:family-check')
                         return (
                           <>
                             {manualHeal && <span>— {manualHeal.last_error}</span>}

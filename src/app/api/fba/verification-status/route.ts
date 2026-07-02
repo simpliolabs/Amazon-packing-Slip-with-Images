@@ -32,9 +32,13 @@ export async function GET(req: NextRequest) {
       .eq('parent_asin', parent)
       .in('status', ['pending', 'running', 'needs_attention'])
       .order('next_check_at', { ascending: true })
-    const tasks = (data ?? []) as { status: string; kind?: string | null }[]
+    const tasks = (data ?? []) as { status: string; kind?: string | null; field?: string | null }[]
     const isActive = (t: { status: string }) => t.status === 'pending' || t.status === 'running'
-    const healing = tasks.filter((t) => t.kind === 'heal' && isActive(t)).length
+    // 'heal:family-check' (adversarial review 2026-07-02, fix 3) is a PASSIVE 6h-delayed integrity
+    // WATCH after a successful complete-write heal, not an active heal — counting it as `healing`
+    // would show the violet "self-heal in progress / do not re-push" banner for 6 hours AFTER the
+    // heal already succeeded. Excluded from both counts; its needs_attention outcome still surfaces.
+    const healing = tasks.filter((t) => t.kind === 'heal' && t.field !== 'heal:family-check' && isActive(t)).length
     const pending = tasks.filter((t) => t.kind !== 'heal' && isActive(t)).length
     const needs_attention = tasks.filter((t) => t.status === 'needs_attention').length
     return NextResponse.json({ pending, healing, needs_attention, tasks: data ?? [] })
