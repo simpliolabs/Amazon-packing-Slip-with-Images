@@ -110,7 +110,7 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
  *  eligible either healed or was safely abstained (child disagreement / none carries it — nothing we
  *  can deterministically do), with NOTHING left in the failed bucket. A `failed` entry rides the
  *  queue's attempts/backoff and eventually needs_attention (the caller decides). Best-effort. */
-async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean; healed: string[]; abstained: string[]; failed: string[]; error?: string }> {
+async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean; healed: string[]; abstained: string[]; failed: string[]; error?: string; errors?: Record<string, string> }> {
   const payload = (task.heal_payload ?? null) as HealPayload | null
   if (!payload?.parentSku || !payload.productType || !(payload.missingAttrKeys?.length)) {
     return { converged: true, healed: [], abstained: [], failed: [] }  // nothing actionable → don't retry forever
@@ -134,7 +134,7 @@ async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean
           productType: payload.productType,
           missingAttrKeys: payload.missingAttrKeys,
         })
-    return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed }
+    return { converged: res.failed.length === 0, healed: res.healed, abstained: res.abstained, failed: res.failed, errors: res.errors }
   } catch (e) {
     return { converged: false, healed: [], abstained: [], failed: payload.missingAttrKeys, error: e instanceof Error ? e.message : String(e) }
   }
