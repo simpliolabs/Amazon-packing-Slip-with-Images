@@ -102,9 +102,13 @@ export interface HealPayload {
  *  so both field values are picked up and routed correctly.
  *
  *  Best-effort — a missed enqueue just means no auto-heal for THAT rejection (the push still shipped
- *  the buyable children); the migration not being applied is the common no-op cause. */
-export async function enqueueHeal(parent_asin: string, payload: HealPayload, maxAttempts = 3, field = 'heal'): Promise<void> {
-  if (!parent_asin || !payload?.parentSku || !(payload.missingAttrKeys?.length)) return
+ *  the buyable children); the migration not being applied is the common no-op cause.
+ *
+ *  Returns TRUE only when the task row was actually inserted (live-notice: the caller reports
+ *  "a self-heal is scheduled" to the seller, so the claim must rest on the insert succeeding —
+ *  never on a swallowed failure). */
+export async function enqueueHeal(parent_asin: string, payload: HealPayload, maxAttempts = 3, field = 'heal'): Promise<boolean> {
+  if (!parent_asin || !payload?.parentSku || !(payload.missingAttrKeys?.length)) return false
   const next = new Date(Date.now() + INITIAL_DELAY_MS).toISOString()
   try {
     const supabase = await createAdminClient()
@@ -115,7 +119,7 @@ export async function enqueueHeal(parent_asin: string, payload: HealPayload, max
       .eq('parent_asin', parent_asin)
       .eq('field', field)
       .in('status', ['pending', 'running'])
-    await db.from('push_verification_tasks').insert({
+    const { error } = await db.from('push_verification_tasks').insert({
       parent_asin,
       field,
       kind: 'heal',
@@ -125,8 +129,14 @@ export async function enqueueHeal(parent_asin: string, payload: HealPayload, max
       max_attempts: maxAttempts,
       next_check_at: next,
     })
+    if (error) {
+      console.warn('[verification-queue] enqueueHeal insert failed (migration 042 applied?):', error?.message ?? error)
+      return false
+    }
+    return true
   } catch (e) {
     console.warn('[verification-queue] enqueueHeal failed (migration 042 applied?):', e instanceof Error ? e.message : e)
+    return false
   }
 }
 
@@ -190,6 +200,30 @@ export async function hasActiveManualHealFlag(parent_asin: string, containerKey:
     return rows.some((r) => (r.heal_payload?.missingAttrKeys ?? []).includes(containerKey))
   } catch (e) {
     console.warn('[verification-queue] hasActiveManualHealFlag check failed (non-fatal):', e instanceof Error ? e.message : e)
+    return false
+  }
+}
+
+/** RE-PUSH GUARD (live-notice): is an ACTIVE (pending/running) heal task already in flight for this
+ *  (parent, field)? A user re-push while a heal is mid-budget would otherwise abandon-and-reinsert the
+ *  task — resetting its attempts + next_check_at every push (a known review finding). The caller SKIPS
+ *  the re-enqueue when this returns true (the heal IS still scheduled, so it still reports it to the
+ *  seller). Best-effort: on any error return false — fall through to enqueue, the safe default. */
+export async function hasActiveHealTask(parent_asin: string, field: string): Promise<boolean> {
+  if (!parent_asin || !field) return false
+  try {
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    const { data } = await db.from('push_verification_tasks')
+      .select('id')
+      .eq('parent_asin', parent_asin)
+      .eq('field', field)
+      .in('status', ['pending', 'running'])
+      .limit(1)
+    return ((data ?? []) as { id: string }[]).length > 0
+  } catch (e) {
+    console.warn('[verification-queue] hasActiveHealTask check failed (non-fatal):', e instanceof Error ? e.message : e)
     return false
   }
 }
