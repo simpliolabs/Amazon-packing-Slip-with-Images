@@ -1517,6 +1517,55 @@ function collapseProductPhrases(title: string): string {
  *  other gender mention (standalone "for Men"/"for Women", possessive "Mens"/"Men's", and any
  *  duplicate inclusive). Amazon indexes the title as a bag of words, so dropping a redundant repeat
  *  loses no ranking. Verified live on B0G884ZJ27 where the validator-driven retry couldn't clear it. */
+/** Gender-variant token normalizer for the title FILL dedup sets: "mens"/"womens" must count as
+ *  the same token as "men"/"women", or a gendered keyphrase gets appended on top of the audience
+ *  tail (live B0DMXMH266 parent: "Mens Tees for Men" — "men" three times). bulletTokens already
+ *  splits "men's" down to "men", so only the fused plurals need mapping. */
+const genderNormTok = (t: string): string => (t === 'mens' ? 'men' : t === 'womens' ? 'women' : t)
+
+/** Fill-dedup normalizer: gender variants + a light plural fold ("tees"≈"tee", "shirts"≈"shirt")
+ *  so the fill never appends a near-duplicate of a word already in the title. Set-membership only —
+ *  the folded form is never rendered. */
+const fillNormTok = (t: string): string => {
+  const g = genderNormTok(t)
+  return g.length > 3 ? g.replace(/s$/, '') : g
+}
+
+/** Garment/cut modifiers that must never ship as a bare FILL FRAGMENT: torn from their phrase they
+ *  read as an ATTRIBUTE CLAIM (", Long Sleeve" on a short-sleeve tee — review finding 2026-07-02).
+ *  Whole keyphrases still pass through the full truthfulness rails; only fragments are gated here. */
+const FRAG_ATTR_WORDS = new Set([
+  'long', 'short', 'shorts', 'sleeve', 'sleeves', 'sleeveless', 'hoodie', 'hoodies', 'sweatshirt',
+  'sweatshirts', 'pullover', 'tank', 'crewneck', 'vneck', 'neck', 'collar', 'pocket', 'zip', 'zipper', 'button',
+])
+
+/** Longest CONTIGUOUS run of novel significant words in `kw` (original order). Connectors (words
+ *  with no significant tokens: "for", "of") ride along inside a run but never lead or trail it.
+ *  A covered word, a word repeated within the run, or a blocked word BREAKS the run — fragments
+ *  must be verbatim sub-phrases of the source keyword so they cannot recombine distant words into
+ *  a new false composite ("leather boots" out of "leather-look print, boots graphic" — review
+ *  finding 2026-07-02). */
+function contiguousNovelRun(kw: string, covered: Set<string>, wordBlocked: (w: string) => boolean): string[] {
+  const runs: string[][] = []
+  let cur: string[] = []
+  let curToks = new Set<string>()
+  const flush = () => {
+    while (cur.length && bulletTokens(cur[cur.length - 1]).length === 0) cur.pop()
+    if (cur.length) runs.push(cur)
+    cur = []
+    curToks = new Set()
+  }
+  for (const w of kw.split(/\s+/).filter(Boolean)) {
+    const ts = bulletTokens(w).map(fillNormTok)
+    if (ts.length === 0) { if (cur.length) cur.push(w); continue }
+    const ok = !wordBlocked(w) && ts.every((tt) => !covered.has(tt) && !curToks.has(tt))
+    if (ok) { cur.push(w); for (const tt of ts) curToks.add(tt) } else flush()
+  }
+  flush()
+  runs.sort((a, b) => b.join(' ').length - a.join(' ').length)
+  return runs[0] ?? []
+}
+
 function dedupeAudiencePhrases(title: string): string {
   const incl = title.match(/\bfor (?:men and women|women and men)\b/i)
   if (!incl) return title
@@ -2070,6 +2119,15 @@ Rules:
       .replace(/\b(\d+)\s?[Gg][Bb]\b/g, '$1GB')
       .replace(/\b(\d+)\s?[Tt][Bb]\b/g, '$1TB')
       .replace(/\bSd\b/g, 'SD').replace(/\bUsb\b/g, 'USB').replace(/\bUhs\b/g, 'UHS').replace(/\bHd\b/g, 'HD')
+    // Re-snap the design name's canonical casing (B0DMXMH266 fix): the minor-word rule above
+    // lowercases a design name's leading article mid-title — "A Day Without Fishing" rendered as
+    // "a Day Without Fishing". The seller's design name must show verbatim; same apostrophe-tolerant
+    // match as the design-name lead block, replacement via callback so "$" in a name stays literal.
+    if (designName && designName.trim()) {
+      const dn = designName.trim()
+      const re = (() => { try { return new RegExp(dn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/['’]/g, "['’]?"), 'i') } catch { return null } })()
+      if (re) title = title.replace(re, () => dn)
+    }
   }
 
   // ── HARD CAP 75 — the last gate before the title leaves the agent (Amazon auto-rewrites longer
@@ -3522,7 +3580,18 @@ async function buildTitleFor(
     // If a higher-value candidate does not fit WITH the inclusive tail but WOULD fit without it, drop
     // the audience and take the keyphrase (PO directive: product-specific outranks "for Men and Women").
     const audienceDroppable = !!tail && lean !== 'female' && lean !== 'male' && /\band\b/i.test(tail)
-    const headToks = new Set(bulletTokens(head))
+    // Dedup set spans head AND the audience tail, gender-normalized — the tail's tokens were
+    // previously invisible here, letting "Mens Tees" stack on top of "for Men" (B0DMXMH266).
+    const headOwnToks = new Set(bulletTokens(head).map(fillNormTok))
+    // Tokens contributed ONLY by the tail — must be released from the dedup set if the inclusive
+    // tail is dropped mid-fill, or gendered keywords stay blocked on a genderless title (review).
+    const tailOnlyToks = bulletTokens(tail).map(fillNormTok).filter((t) => !headOwnToks.has(t))
+    const headToks = new Set([...headOwnToks, ...bulletTokens(tail).map(fillNormTok)])
+    // A KEYWORD-DERIVED single-gender tail (lean=null but preferredAudience gendered) must gate
+    // opposite-gender appends the same way a hard lean does (review: fragments fit where whole
+    // phrases didn't, landing "Mens" on a "for Women" title). Single-gender tails are never
+    // droppable (audienceDroppable requires "and"), so this cannot go stale.
+    const tailGender = /\bfor\s+men\s*$/i.test(tail) ? 'men' : /\bfor\s+women\s*$/i.test(tail) ? 'women' : null
     const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
     const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
     const MASC_T = /\bm[ae]ns?\b/i
@@ -3536,21 +3605,68 @@ async function buildTitleFor(
       }
     }
     for (const kw of [...candidates.map((c) => c.keyword), ...topUpgradeKws, ...canonPhrases]) {
-      const toks = bulletTokens(kw)
-      if (toks.length === 0 || toks.every((tt) => headToks.has(tt))) continue
+      const toks = bulletTokens(kw).map(fillNormTok)
+      // ALL-NOVEL rule (sim-caught 2026-07-02): a partially-covered phrase appended verbatim
+      // re-prints its covered words ("Fishing Shirts For Men" onto a "for Men" tail). The
+      // no-repeated-word rule outranks exact-phrase coverage; the second pass below still
+      // harvests such a phrase's novel remainder.
+      if (toks.length === 0 || toks.some((tt) => headToks.has(tt))) continue
+      if (new Set(toks).size !== toks.length) continue // intra-phrase repeat would ship twice (review)
       if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
       if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
+      if (tailGender === 'women' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
+      if (tailGender === 'men' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
       const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust)
       if (safe !== kw) continue
       const next = `${head}, ${titleCaseKw(safe)}`
       if ((next + tail).length > 75) {
         // Fits only if we drop an OPTIONAL inclusive audience tail? Prefer the product-specific keyphrase.
-        if (audienceDroppable && tail && next.length <= 75) tail = ''
-        else continue
+        if (audienceDroppable && tail && next.length <= 75) {
+          tail = ''
+          for (const t of tailOnlyToks) headToks.delete(t) // release the dropped tail's tokens (review)
+        } else continue
       }
       head = next
       for (const tt of toks) headToks.add(tt)
       if ((head + tail).length >= 73) break
+    }
+    // SECOND PASS (fill-starvation fix, B0DMXMH266): whole keyphrases rarely fit the last ~10-15
+    // chars, stalling child titles at ~62/75. Retry each candidate as ONLY its novel significant
+    // words (original order, every token new — so no stutter and no gender dup by construction);
+    // bag-of-words indexing means the trimmed remainder still ranks. Same lean/motif rails.
+    if ((head + tail).length < 73) {
+      for (const kw of [...candidates.map((c) => c.keyword), ...topUpgradeKws, ...canonPhrases]) {
+        if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
+        if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
+        const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust)
+        if (safe !== kw) continue
+        // Contiguous novel run only (review): a fragment must be a verbatim sub-phrase — no
+        // recombining distant words into new claims, no bare attribute modifiers, no cross-gender
+        // words over a single-gender tail.
+        let novel = contiguousNovelRun(kw, headToks, (w) => {
+          if (FRAG_ATTR_WORDS.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))) return true
+          if (tailGender === 'women' && MASC_T.test(w) && !FEM_T.test(w)) return true
+          if (tailGender === 'men' && FEM_T.test(w) && !MASC_T.test(w)) return true
+          if (lean === 'female' && MASC_T.test(w) && !FEM_T.test(w)) return true
+          if (lean === 'male' && FEM_T.test(w) && !MASC_T.test(w)) return true
+          return false
+        })
+        // Progressive end-trim (sim-caught): with only ~7-10 chars left, the full novel fragment
+        // rarely fits — drop trailing words until it does (never below one non-junk word).
+        while (novel.length > 0) {
+          const frag = novel.join(' ')
+          if (isAllJunk(frag)) break
+          const next = `${head}, ${titleCaseKw(frag)}`
+          if ((next + tail).length <= 75) {
+            head = next
+            for (const tt of bulletTokens(frag).map(fillNormTok)) headToks.add(tt)
+            break
+          }
+          novel = novel.slice(0, -1)
+          while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+        }
+        if ((head + tail).length >= 73) break
+      }
     }
     finalTitle = `${head}${tail}`
   }
@@ -3666,6 +3782,55 @@ Rules:
     })
     title = head + rest
   }
+  // AUDIENCE DE-DUP (B0DMXMH266 fix): the council emitted "Mens Tees for Men" — a possessive
+  // gender word stacked on the same-gender tail, and this path bypassed the child pipeline's
+  // dedupeAudiencePhrases entirely. Inclusive tails reuse that helper; a single-gender tail strips
+  // possessive/standalone repeats of the SAME gender from the head (bag-of-words: no rank loss).
+  if (title) {
+    // Brand-prefix exemption (sim-caught): a brand like "Mens Club Co" must never lose its gender
+    // word to the audience strips — every dedup below runs on the post-brand remainder only.
+    const bLen = brandName && title.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
+    const brandPre = title.slice(0, bLen)
+    const restIn = title.slice(bLen).trim()
+    const sgAud = /^men$/i.test(aud.trim()) ? 'Men' : /^women$/i.test(aud.trim()) ? 'Women' : null
+    let deduped: string
+    if (sgAud) {
+      // HARD single-gender audience (review-caught MAJOR): dedupeAudiencePhrases PROTECTS an
+      // inclusive phrase — but on a single-gender family an inclusive phrase is a council
+      // hallucination, and the helper would strip the mandated tail instead. Strip every audience
+      // mention ("for X" as a UNIT first, so no dangling "for"), then guarantee the one trailing
+      // "for {aud}" — mirroring buildTitleFor's hard-audience guard, which the parent path lacked.
+      const g = sgAud.toLowerCase()
+      deduped = restIn
+        .replace(/\bfor (?:men and women|women and men)\b/gi, ' ')
+        .replace(new RegExp(`\\bfor\\s+${g}['’]?s?\\b`, 'gi'), ' ')
+        .replace(new RegExp(`\\b${g}['’]?s?\\b`, 'gi'), ' ')
+        .replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').trim()
+      // The tail must survive the 75 cap — trim the head at a word boundary, never the tail.
+      const tailStr = ` for ${sgAud}`
+      const headRoom = 75 - brandPre.length - (brandPre ? 1 : 0) - tailStr.length
+      if (deduped.length > headRoom) deduped = deduped.slice(0, headRoom).replace(/[\s,]+\S*$/, '').replace(/[,\s]+$/, '')
+      deduped = `${deduped}${tailStr}`
+    } else {
+      deduped = dedupeAudiencePhrases(restIn)
+    }
+    // Explicit-space rejoin (sim-caught): dedupeAudiencePhrases trims its result, which swallowed
+    // the brand/remainder boundary space ("THE CEOFishing Tees").
+    title = `${brandPre} ${deduped}`.replace(/\s{2,}/g, ' ').trim()
+    const rest = title.slice(brandPre.length)
+    const sg = rest.match(/\bfor (men|women)\s*$/i)
+    if (!sgAud && sg && !/\bfor (?:men and women|women and men)\s*$/i.test(rest)) {
+      // Inclusive-audience family whose council chose a single-gender tail — keep the council's
+      // tail, strip same-gender repeats from the head ("for X" as a unit FIRST: stripping only the
+      // gender word orphans its "for" — review-caught).
+      const g = sg[1].toLowerCase()
+      const head = rest.slice(0, sg.index ?? rest.length)
+        .replace(new RegExp(`\\bfor\\s+${g}['’]?s?\\b`, 'gi'), ' ')
+        .replace(new RegExp(`\\b${g}['’]?s?\\b`, 'gi'), ' ')
+        .replace(/\bfor\s*(?=,|$)/gi, ' ')
+      title = `${brandPre}${head} ${sg[0].trim()}`.replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').trim()
+    }
+  }
   // FILL the 75-char budget (polish 2026-06-17): the council often lands well under 75 (live:
   // 55/75), wasting niche-keyword real estate. Append niche-wide upgrade keyphrases (Title-Cased,
   // comma-joined) toward ~73 chars, preserving the trailing "for {audience}". Source is
@@ -3677,13 +3842,30 @@ Rules:
     const tailMatch = title.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
     const tail = tailMatch ? tailMatch[0] : ''
     let fillHead = tail ? title.slice(0, title.length - tail.length) : title
-    const headToks = new Set(bulletTokens(fillHead))
-    const designTokSets = designNames.filter(Boolean).map((d) => new Set(bulletTokens(d)))
+    // Dedup set spans head AND the audience tail, gender-normalized (same B0DMXMH266 fix as the
+    // child fill) — otherwise "Mens Tees" is appended on top of "for Men".
+    const headToks = new Set([...bulletTokens(fillHead), ...bulletTokens(tail)].map(fillNormTok))
+    // Design sets share the fill normalization (review-caught: raw "mens" in a design name dodged
+    // the >=2-token overlap guard once the kw side was normalized).
+    const designTokSets = designNames.filter(Boolean).map((d) => new Set(bulletTokens(d).map(fillNormTok)))
     const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    // Garment-truthfulness rail (review-caught BLOCKER): the child fill vets keywords against the
+    // seller's own text; the parent fill had NO rail, so a stray "hoodie" keyword in the family
+    // pool would ship a product-identity misclaim. Parent trust = product type + design names.
+    const parentHay = `${ptWord} ${productType ?? ''} ${designNames.join(' ')}`.toLowerCase()
+    const tailGender = /\bfor\s+men\s*$/i.test(tail) ? 'men' : /\bfor\s+women\s*$/i.test(tail) ? 'women' : null
+    const PAR_MASC = /\bm[ae]ns?\b/i
+    const PAR_FEM = /\bwom[ae]ns?\b|\bladies\b/i
     for (const kw of topUpgradeKws) {
-      const toks = bulletTokens(kw)
-      if (toks.length === 0 || toks.every((tt) => headToks.has(tt))) continue
+      const toks = bulletTokens(kw).map(fillNormTok)
+      // ALL-NOVEL rule (sim-caught): a partially-covered phrase appended verbatim re-prints its
+      // covered words — pass 2 harvests the novel remainder instead.
+      if (toks.length === 0 || toks.some((tt) => headToks.has(tt))) continue
+      if (new Set(toks).size !== toks.length) continue // intra-phrase repeat would ship twice (review)
       if (isAllJunk(kw)) continue
+      if (tailGender === 'women' && PAR_MASC.test(kw) && !PAR_FEM.test(kw)) continue
+      if (tailGender === 'men' && PAR_FEM.test(kw) && !PAR_MASC.test(kw)) continue
+      if (stripContradictedGarments(kw, parentHay, parentHay) !== kw) continue
       if (designTokSets.some((ds) => toks.filter((tt) => ds.has(tt)).length >= 2)) continue
       const next = `${fillHead}, ${titleCaseKw(kw)}`
       if ((next + tail).length > 75) continue
@@ -3691,7 +3873,48 @@ Rules:
       for (const tt of toks) headToks.add(tt)
       if ((fillHead + tail).length >= 73) break
     }
+    // SECOND PASS (fill-starvation fix, B0DMXMH266: parent stalled far under 75 because whole
+    // keyphrases no longer fit and the design-motif guard blocks many niche phrases outright).
+    // Retry each keyword as ONLY its novel significant words — every token new, so no stutter and
+    // no gender dup by construction. Same design-motif + junk rails as the whole-phrase pass.
+    if ((fillHead + tail).length < 73) {
+      for (const kw of topUpgradeKws) {
+        // Contiguous novel run only (review): verbatim sub-phrases, no bare attribute modifiers,
+        // no ungrounded garment words, no cross-gender words over a single-gender tail.
+        let novel = contiguousNovelRun(kw, headToks, (w) => {
+          if (FRAG_ATTR_WORDS.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))) return true
+          if (tailGender === 'women' && PAR_MASC.test(w) && !PAR_FEM.test(w)) return true
+          if (tailGender === 'men' && PAR_FEM.test(w) && !PAR_MASC.test(w)) return true
+          return stripContradictedGarments(w, parentHay, parentHay) !== w
+        })
+        // Progressive end-trim (sim-caught): drop trailing words until the fragment fits the
+        // remaining budget (never below one non-junk word). Same design-motif rail per width.
+        while (novel.length > 0) {
+          const frag = novel.join(' ')
+          if (isAllJunk(frag)) break
+          const fragToks = bulletTokens(frag).map(fillNormTok)
+          if (designTokSets.some((ds) => fragToks.filter((tt) => ds.has(tt)).length >= 2)) { novel = novel.slice(0, -1); continue }
+          const next = `${fillHead}, ${titleCaseKw(frag)}`
+          if ((next + tail).length <= 75) {
+            fillHead = next
+            for (const tt of fragToks) headToks.add(tt)
+            break
+          }
+          novel = novel.slice(0, -1)
+          while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+        }
+        if ((fillHead + tail).length >= 73) break
+      }
+    }
     title = `${fillHead}${tail}`
+  }
+  // Final ADJACENT-stutter cleanup (review-tightened): brand-prefix exempt so a legitimately
+  // doubled brand ("Mahi Mahi Co") survives, and stutter-collapse only — the parent already
+  // deduped brand occurrences above, and dedupeBrandAndStutter's keep-first logic would KEEP a
+  // mid-title duplicate once the leading brand is sliced off.
+  {
+    const bLen = brandName && title.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
+    title = (title.slice(0, bLen) + title.slice(bLen).replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')).replace(/\s{2,}/g, ' ').trim()
   }
   return title
 }
