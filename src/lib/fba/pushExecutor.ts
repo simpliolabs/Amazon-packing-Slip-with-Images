@@ -2213,12 +2213,18 @@ async function negotiateParentRecordFix(
 
     // INTENT AUDIT ROW — same pattern as strategies 2/3: durable evidence of EVERY op BEFORE the
     // LIVE write (a crash between the PATCH and the read-back must still be visible). new_value
-    // carries the FULL final ops list as JSON. Best-effort: a failed insert proceeds but warns.
+    // carries the FULL final ops list as JSON. previous_value snapshots the DELETED attributes'
+    // prior live values (delete-safety review 2026-07-02: a converged delete must have a restore
+    // path — liveParentAttrs holds the values in memory right now, so record them durably).
+    // Best-effort: a failed insert proceeds but warns.
+    const deletedPrior: Record<string, unknown> = {}
+    for (const k of loop.deletedKeys) deletedPrior[k] = liveParentAttrs[k] ?? null
+    const deletedPriorJson = loop.deletedKeys.length ? JSON.stringify(deletedPrior).slice(0, 4000) : null
     let intentRowId: string | null = null
     try {
       const { data: intentData, error: intentErr } = await db.from('keyword_push_log').insert({
         parent_asin, sku: parentSku, field: `heal:negotiate:${containerKey}`,
-        previous_value: null, new_value: JSON.stringify(loop.finalOps),
+        previous_value: deletedPriorJson, new_value: JSON.stringify(loop.finalOps),
         submission_id: null, status: 'attempted', error_message: null,
         pushed_by: SYSTEM_ACTOR.id,
       }).select('id')
@@ -2261,7 +2267,7 @@ async function negotiateParentRecordFix(
       } else {
         await db.from('keyword_push_log').insert({
           parent_asin, sku: parentSku, field: `heal:negotiate:${containerKey}`,
-          previous_value: null, new_value: JSON.stringify(loop.finalOps),
+          previous_value: deletedPriorJson, new_value: JSON.stringify(loop.finalOps),
           submission_id: live.submissionId, status: 'accepted', error_message: null,
           pushed_by: SYSTEM_ACTOR.id,
         })

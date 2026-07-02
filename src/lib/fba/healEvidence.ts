@@ -182,6 +182,9 @@ export const NEGOTIATION_PROTECTED_ATTRS = new Set<string>([
   'item_name', 'brand', 'bullet_point', 'product_description', 'generic_keyword',
   'child_parent_sku_relationship', 'parentage_level', 'variation_theme',
   'externally_assigned_product_identifier', 'merchant_suggested_asin',
+  // Category anchors for the whole family (delete-safety review 2026-07-02): reachable only via a
+  // mis-mapping, but a wrong delete here re-classifies every child — belt and suspenders.
+  'recommended_browse_nodes', 'item_type_keyword',
 ])
 
 /** Is `key` off-limits for a negotiation delete op? Set membership OR the child_/parent prefixes
