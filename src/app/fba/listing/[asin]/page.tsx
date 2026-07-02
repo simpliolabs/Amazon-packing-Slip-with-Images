@@ -4569,7 +4569,7 @@ export default function ListingDetailPage() {
                           </div>
                           {healRow && (
                             <>
-                              <p className="text-[11px] text-violet-900 mt-1">Self-heal scheduled - {(pushResults.healAttrs ?? []).join(', ') || 'the missing parent values'} will be inherited from a live child within ~25 min. No action needed.</p>
+                              <p className="text-[11px] text-violet-900 mt-1">Self-heal scheduled - {(pushResults.healAttrs ?? []).join(', ') || 'the missing parent values'} will be inherited from a live child within ~5 min. No action needed.</p>
                               {r.error && <p className="text-[10px] text-slate-500 mt-0.5 break-words" title={r.error}>Amazon: {r.error}</p>}
                             </>
                           )}

@@ -20,6 +20,13 @@ import { createAdminClient } from '@/lib/supabase/server'
 const INITIAL_DELAY_MS = 20 * 60 * 1000
 const RETRY_DELAY_MS = 30 * 60 * 1000
 
+/** ~2 min — HEAL tasks only (heal v2). The 20-min INITIAL_DELAY_MS above exists to sit inside Amazon's
+ *  content-APPLICATION window (a verify must wait for the pushed content to propagate). A heal has
+ *  NOTHING to wait for: the parent hub's state is already wrong the moment the rejection is recorded.
+ *  2 min + the 5-min cron tick means the self-heal lands ~2-7 min after the push instead of 20-25.
+ *  RETRY backoff (RETRY_DELAY_MS) is deliberately unchanged. */
+const HEAL_INITIAL_DELAY_MS = 2 * 60 * 1000
+
 /** Standard field id used everywhere in this module:
  *  - 'title' | 'bullets' | 'description' | 'keywords' (the four push-content fields), or
  *  - `details:<spApiKey>` for product-detail attributes (matches keyword_push_log.field). */
@@ -109,7 +116,7 @@ export interface HealPayload {
  *  never on a swallowed failure). */
 export async function enqueueHeal(parent_asin: string, payload: HealPayload, maxAttempts = 3, field = 'heal'): Promise<boolean> {
   if (!parent_asin || !payload?.parentSku || !(payload.missingAttrKeys?.length)) return false
-  const next = new Date(Date.now() + INITIAL_DELAY_MS).toISOString()
+  const next = new Date(Date.now() + HEAL_INITIAL_DELAY_MS).toISOString()
   try {
     const supabase = await createAdminClient()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -25,6 +25,11 @@ export const maxDuration = 600
 
 const MAX_PER_RUN = 10
 const BUDGET_MS = 4 * 60 * 1000
+/** STUCK-RUNNING WATCHDOG threshold (adversarial review 2026-07-02, fix 4b): a task claimed
+ *  pending→running by a cron invocation that died mid-task (deploy, OOM, serverless kill) is stranded
+ *  at 'running' FOREVER — nothing else ever touches running rows. 15 min comfortably exceeds the
+ *  route's own lifetime (maxDuration 600s), so anything older is provably orphaned. */
+const STUCK_RUNNING_MS = 15 * 60 * 1000
 
 interface VerifyResult {
   matched: number
@@ -150,6 +155,28 @@ export async function GET(request: NextRequest) {
   const start = Date.now()
   const origin = new URL(request.url).origin
   const processed: { id: string; field: string; result: string; matched: number; total: number }[] = []
+
+  // STUCK-RUNNING WATCHDOG (fix 4b): before claiming, flip tasks stranded at status='running' for
+  // longer than STUCK_RUNNING_MS back to 'pending' so the queue self-heals from a killed invocation
+  // (the Cloud-Run/serverless void-async lesson: the watchdog lives on the READ path, not just the
+  // trigger). Bounded by the status + age filters; race-safe because claimDueTasks' pending→running
+  // flip is atomic; best-effort + logged — a watchdog failure never blocks the normal claim.
+  try {
+    const wdDb = await createAdminClient()
+    const cutoff = new Date(Date.now() - STUCK_RUNNING_MS).toISOString()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: revived } = await (wdDb as any).from('push_verification_tasks')
+      .update({ status: 'pending', updated_at: new Date().toISOString() })
+      .eq('status', 'running')
+      .lt('updated_at', cutoff)
+      .select('id')
+    const revivedCount = ((revived ?? []) as { id: string }[]).length
+    if (revivedCount > 0) {
+      console.warn(`[cron-verify-pushes] watchdog: reset ${revivedCount} stuck-running task(s) (updated_at < ${cutoff}) back to pending`)
+    }
+  } catch (e) {
+    console.warn('[cron-verify-pushes] stuck-running watchdog failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
 
   // Claim up to MAX_PER_RUN due tasks atomically.
   const claimed = await claimDueTasks(MAX_PER_RUN)
