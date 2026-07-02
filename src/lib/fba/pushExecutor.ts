@@ -50,7 +50,8 @@ import { appendScoreHistory } from '@/lib/fba/scoreHistory'
 import {
   compositeItemCarries, subsetDeepEqual, classifyDeletePreviewFailure,
   findCompleteWriteEvidence, HEAL_EVIDENCE_WINDOW_MS, HEAL_EVIDENCE_MAX_ROWS,
-  type CompositeItem,
+  runNegotiationLoop, verifyNegotiationReadBack,
+  type CompositeItem, type NegotiationOp,
 } from '@/lib/fba/healEvidence'
 
 // Winning write-form per (productType|attribute), discovered by calibration against Amazon's
@@ -1864,11 +1865,80 @@ async function healCompositeDeletePartial(
  *    invisible to this attempt's preview/read-back. On confirmed success a ONE-SHOT queue task
  *    (field 'heal:family-check', next_check_at now+6h, max_attempts 1) is enqueued; the cron re-reads
  *    the live relationships and flags needs_attention if the VARIATION family is gone or shrank.
+ *  - STRATEGY-4 NEGOTIATION (heal v4, LIVE evidence 2026-07-02): when THIS write's preview fails
+ *    WITH STRUCTURED ISSUES (a real validation verdict, not transport), the fail-out is replaced by
+ *    negotiateParentRecordFix — the record can be a CONDITIONAL WEB (the complete shirt_size
+ *    satisfied the size rule, which then DISALLOWED shirt_body_type/shirt_height_type "at most 0")
+ *    where fixing one rule arms another, so the preview is iterated as a negotiation instead of
+ *    giving up. Issue-free (transport-level) preview failures keep the plain failed bucket.
  * NON-THROWING; every failure lands in the failed bucket with an errors[] string prefixed
  * 'delete preview internal error -> complete-write fallback: <stage>: <reason>' so the task rows
  * distinguish this path from a plain strategy-2 failure. A read-back mismatch additionally flags
  * durable needs_attention (Amazon accepted then silently dropped — a dead-end a human must see).
  */
+
+/** DONOR SELECTION shared by strategy 3 (complete-write) and strategy 4's other-composite extension:
+ *  the FIRST sampled live child whose FIRST container item is COMPLETE — every invariant subKey
+ *  present AND the per-variant field non-empty. Reuses strategy 1's already-fetched map; no GETs. */
+function selectCompleteDonorItem(
+  childAttrs: Map<string, Record<string, unknown> | null>, spec: CompositeHealSpec,
+): { donor: CompositeItem; donorSku: string } | null {
+  for (const [sku, attrs] of childAttrs) {
+    const raw = attrs?.[spec.containerKey]
+    if (!Array.isArray(raw) || raw.length === 0) continue
+    const first = raw[0]
+    if (first == null || typeof first !== 'object' || Array.isArray(first)) continue
+    const firstObj = first as CompositeItem
+    if ([...spec.subKeys, spec.perVariantField].every((k) => compositeItemCarries(firstObj, k))) {
+      return { donor: firstObj, donorSku: sku }
+    }
+  }
+  return null
+}
+
+/** CONFIRMED-success side-effects shared by strategy 3 (complete-write) and strategy 4 (negotiation)
+ *  — both end with the SAME live state (a complete container on the hub), so both need:
+ *  (a) FIX 4 (adversarial review 2026-07-02): unlearn a stale product-type-wide 'inherit_from_child'
+ *      push_heal_rules row for this container — left standing it would keep pre-filling PARTIAL
+ *      (subKeys-only) replaces OVER the completed container on every future push, re-arming the very
+ *      disease this write just cured. Scoped: ONLY resolution='inherit_from_child' (a learned
+ *      'delete_partial_container' rule is a DIFFERENT, still-valid lesson and stays).
+ *  (b) FIX 3 (adversarial review 2026-07-02): enqueue the ONE-SHOT delayed family-integrity check
+ *      (now + 6h, max_attempts 1) — variation de-linking caused by a per-variant `size` on the hub
+ *      only manifests on Amazon's 15min-6hr catalog lag, invisible to the heal's own read-back.
+ *      Baseline: the parentage confirmation's live child count; when that path confirmed via
+ *      summaries only (count 0), the sampled-child map size (a floor, never an overcount).
+ *  Best-effort, non-throwing, logged either way. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function completeWriteSuccessSideEffects(db: any, args: {
+  parent_asin: string; parentSku: string; productType: string; containerKey: string
+  liveChildCount: number; sampledChildCount: number
+}): Promise<void> {
+  const { parent_asin, parentSku, productType, containerKey, liveChildCount, sampledChildCount } = args
+  try {
+    const { data: unlearned, error: unlearnErr } = await db.from('push_heal_rules')
+      .delete()
+      .eq('product_type', productType)
+      .eq('attr_key', containerKey)
+      .eq('resolution', 'inherit_from_child')
+      .select('attr_key')
+    if (unlearnErr) {
+      console.warn('[push-heal] complete-write inherit-rule unlearn failed (non-fatal):', unlearnErr?.message ?? unlearnErr)
+    } else {
+      const n = ((unlearned ?? []) as { attr_key: string }[]).length
+      if (n > 0) console.warn(`[push-heal] complete-write: unlearned ${n} stale inherit_from_child push_heal_rules row(s) for (${productType}, ${containerKey}) - the pre-fill must not re-arm the partial container over the completed one.`)
+    }
+  } catch (e) { console.warn('[push-heal] complete-write inherit-rule unlearn threw (non-fatal):', e instanceof Error ? e.message : e) }
+
+  try {
+    const recordedChildCount = liveChildCount > 0 ? liveChildCount : sampledChildCount
+    const { enqueueFamilyIntegrityCheck } = await import('@/lib/fba/verificationQueue')
+    await enqueueFamilyIntegrityCheck(parent_asin, {
+      parentSku, productType, childCount: recordedChildCount, containerKey,
+    })
+  } catch (e) { console.warn('[push-heal] complete-write family-check enqueue failed (non-fatal):', e instanceof Error ? e.message : e) }
+}
+
 async function healCompositeCompleteWrite(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
@@ -1903,30 +1973,35 @@ async function healCompositeCompleteWrite(
 
     // DONOR SELECTION: first sampled live child whose FIRST container item is COMPLETE — every
     // invariant subKey present AND the per-variant field non-empty. Reuses strategy 1's map; no GETs.
-    let donor: CompositeItem | null = null
-    let donorSku: string | null = null
-    for (const [sku, attrs] of childAttrs) {
-      const raw = attrs?.[containerKey]
-      if (!Array.isArray(raw) || raw.length === 0) continue
-      const first = raw[0]
-      if (first == null || typeof first !== 'object' || Array.isArray(first)) continue
-      const firstObj = first as CompositeItem
-      if ([...spec.subKeys, spec.perVariantField].every((k) => compositeItemCarries(firstObj, k))) {
-        donor = firstObj; donorSku = sku; break
-      }
-    }
-    if (!donor) {
+    const selected = selectCompleteDonorItem(childAttrs, spec)
+    if (!selected) {
       fail('child-selection', `no sampled live child carries a COMPLETE ${containerKey} item (every sub-key + non-empty ${spec.perVariantField})`)
       return out
     }
-    console.warn(`[push-heal] complete-write fallback for ${containerKey} on ${parentSku}: donor child ${donorSku}`)
+    console.warn(`[push-heal] complete-write fallback for ${containerKey} on ${parentSku}: donor child ${selected.donorSku}`)
 
     // Copy the donor's FIRST container item VERBATIM (all sub-objects: size_system, size_class, size,
     // plus anything else it carries) — only marketplace_id is normalized to OUR marketplace.
-    const item: CompositeItem = { ...donor, marketplace_id: MARKETPLACE_ID }
+    const item: CompositeItem = { ...selected.donor, marketplace_id: MARKETPLACE_ID }
     const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
-    if (!preview.ok) { fail('preview', preview.error ?? 'rejected'); return out }
+    if (!preview.ok) {
+      // STRATEGY 4 — iterative preview negotiation (heal v4, LIVE evidence 2026-07-02): a STRUCTURED
+      // rejection of the complete write means the record is a CONDITIONAL WEB (completing shirt_size
+      // ARMED the "shirt_body_type/shirt_height_type not allowed - at most 0" rules on the recorded
+      // Custom-Cup-TS-Parent case). Replace the fail-out with the negotiation loop — it starts from
+      // THIS op set and THIS failed preview (no duplicate SP-API call), so the negotiation runs behind
+      // the exact same gate chain that admitted strategy 3 (parent identity, parentage proof, proven-
+      // partial pre-read, attemptNumber >= 1 persistence). An issue-free failure is transport-level
+      // (HTTP wrapper) — transient, plain failed bucket, the queue's backoff retries it.
+      if ((preview.issues ?? []).length > 0) {
+        return await negotiateParentRecordFix(db, {
+          parent_asin, parentSku, productType, spec, sellerId, token, childAttrs,
+          donorItem: item, initialOps: ops, initialPreview: preview, liveChildCount,
+        })
+      }
+      fail('preview', preview.error ?? 'rejected'); return out
+    }
 
     // INTENT AUDIT ROW — same pattern as strategy 2's DELETE-INTENT: durable evidence BEFORE the LIVE
     // write so a crash between the PATCH and the read-back is still visible (and the pre-read's
@@ -1999,47 +2074,207 @@ async function healCompositeCompleteWrite(
       }
     } catch (e) { console.warn('[push-heal] complete-write keyword_push_log accept-log failed (non-fatal):', e instanceof Error ? e.message : e) }
 
-    // FIX 4 (adversarial review 2026-07-02, stale inherit rule re-arms the disease): a product-type-
-    // wide 'inherit_from_child' push_heal_rules row for this container would keep the Tier-2 pre-fill
-    // writing PARTIAL (subKeys-only, no `size`) replaces OVER the completed container on every future
-    // push — silently re-creating the exact partial-container state this write just cured. Scoped
-    // delete: ONLY resolution='inherit_from_child' (a learned 'delete_partial_container' rule is a
-    // DIFFERENT, still-valid lesson and stays). Best-effort, logged either way.
-    try {
-      const { data: unlearned, error: unlearnErr } = await db.from('push_heal_rules')
-        .delete()
-        .eq('product_type', productType)
-        .eq('attr_key', containerKey)
-        .eq('resolution', 'inherit_from_child')
-        .select('attr_key')
-      if (unlearnErr) {
-        console.warn('[push-heal] complete-write inherit-rule unlearn failed (non-fatal):', unlearnErr?.message ?? unlearnErr)
-      } else {
-        const n = ((unlearned ?? []) as { attr_key: string }[]).length
-        if (n > 0) console.warn(`[push-heal] complete-write: unlearned ${n} stale inherit_from_child push_heal_rules row(s) for (${productType}, ${containerKey}) - the pre-fill must not re-arm the partial container over the completed one.`)
-      }
-    } catch (e) { console.warn('[push-heal] complete-write inherit-rule unlearn threw (non-fatal):', e instanceof Error ? e.message : e) }
-
-    // FIX 3 (adversarial review 2026-07-02, async family-integrity blind spot): variation de-linking
-    // caused by a per-variant `size` on the hub would only manifest on Amazon's 15min-6hr catalog lag
-    // — invisible to the read-back above. Enqueue the ONE-SHOT delayed family-integrity check
-    // (now + 6h, max_attempts 1); the cron re-reads the live relationships and flags needs_attention
-    // if the VARIATION family is gone or shrank vs the count recorded here. Baseline: the parentage
-    // confirmation's live child count; if that path confirmed via summaries only (count 0), fall back
-    // to the sampled-child map size (a floor, never an overcount). Best-effort, non-throwing.
-    try {
-      const recordedChildCount = liveChildCount > 0 ? liveChildCount : childAttrs.size
-      const { enqueueFamilyIntegrityCheck } = await import('@/lib/fba/verificationQueue')
-      await enqueueFamilyIntegrityCheck(parent_asin, {
-        parentSku, productType, childCount: recordedChildCount, containerKey,
-      })
-    } catch (e) { console.warn('[push-heal] complete-write family-check enqueue failed (non-fatal):', e instanceof Error ? e.message : e) }
+    // Shared confirmed-success side-effects (FIX 4 stale inherit-rule unlearn + FIX 3 delayed
+    // family-integrity check) — extracted to completeWriteSuccessSideEffects so strategy 4's
+    // negotiation success runs the identical pair. Best-effort, non-throwing.
+    await completeWriteSuccessSideEffects(db, { parent_asin, parentSku, productType, containerKey, liveChildCount, sampledChildCount: childAttrs.size })
   } catch (e) {
     // A throw mid-write is NOT a safe abstain (the parent is known-broken and this fallback is its
     // last automated fix) — ride the failed bucket so the queue's attempts/backoff retry it.
     console.warn('[push-heal] healCompositeCompleteWrite threw (non-fatal):', e instanceof Error ? e.message : e)
     if (!out.healed.includes(containerKey) && !out.failed.includes(containerKey)) {
       fail('threw', e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200))
+    }
+  }
+  return out
+}
+
+/**
+ * STRATEGY 4 — ITERATIVE PREVIEW NEGOTIATION (heal v4, LIVE evidence 2026-07-02). Reached ONLY from
+ * healCompositeCompleteWrite when strategy 3's complete-write preview fails WITH STRUCTURED ISSUES —
+ * so the entire strategy-3 gate chain (parent-identity guard, non-buyable parentage proof, live
+ * pre-read proving the container GENUINELY PARTIAL, and the attemptNumber >= 1 persistence gate that
+ * admits strategy 3 at all) has ALREADY passed in this same attempt. The negotiation replaces the
+ * plain complete-write's preview fail-out EVERYWHERE strategy 3 runs; strategy 3's trigger is
+ * unchanged.
+ *
+ * WHY (recorded on Custom-Cup-TS-Parent, SHIRT): "Based on the data from '[shirt_size#?.size_system,
+ * age_range_description.value, shirt_size#?.size_class]', the field '"body_type"' for the attribute
+ * 'Shirt Body Type' is not allowed. Expected at most '0' of field '"body_type"' ..." (identically
+ * 'Shirt Height Type'). The complete shirt_size SATISFIED the size rule — which then DISALLOWED the
+ * shirt_body_type/shirt_height_type attributes the record also carries. The record is a CONDITIONAL
+ * WEB: fixing one rule arms another, so fixed per-error strategies cannot converge. Amazon's
+ * VALIDATION_PREVIEW is free/synchronous, so we NEGOTIATE (runNegotiationLoop, healEvidence.ts):
+ * preview -> parse the issues -> add the narrowest safe op per issue -> preview again (max
+ * NEGOTIATION_MAX_ITERATIONS, ~200ms apart); ONLY a fully green preview earns the ONE live write.
+ *
+ * GUARDRAILS:
+ *  - DELETES are triple-gated (planNotAllowedDeletes): the disallowed attribute must EXIST on the
+ *    parent's LIVE attributes map (fetched ONCE here via the single-GET pattern), must NOT be
+ *    protected (item_name/brand/bullet_point/product_description/generic_keyword/identifiers/
+ *    variation_theme + anything with a child_ or parent prefix — the variation-family plumbing),
+ *    and must NOT be
+ *    the container being written. An iteration that adds NO new op (unrecognized/protected/absent
+ *    issues) ABORTS to the failed bucket with ALL issue texts recorded + flagParentAttrsNeedAttention.
+ *  - EXTRA REPLACES are limited to OTHER registered COMPOSITE_HEAL_SPECS containers whose
+ *    conditional-requirement signature names them (complete-donor item, same selection as strategy 3).
+ *  - INTENT-LOGGED: ONE keyword_push_log row (field 'heal:negotiate:<container>', new_value = the
+ *    FULL final ops list as JSON, status 'attempted') BEFORE the LIVE write; flipped to 'accepted'
+ *    only after the read-back confirms.
+ *  - READ-BACK-VERIFIED (verifyNegotiationReadBack): the container's written sub-keys persisted
+ *    (tolerant subsetDeepEqual) AND every deleted attribute is ABSENT. Any miss -> failed + errors +
+ *    flag; no rule learning.
+ *  - NO RULE LEARNING (same as strategy 3): a one-time fix for THIS hub. On confirmed success the
+ *    shared strategy-3 side-effects run (stale inherit-rule unlearn + delayed family-integrity check).
+ * NON-THROWING; every failure records errors[containerKey] with stage prefixes
+ * 'negotiation iter N: ...' inside the 'complete-write fallback ->' wrapper, so the cron's terminal
+ * copy can tell that BOTH the complete write AND the negotiation ran.
+ */
+async function negotiateParentRecordFix(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  args: {
+    parent_asin: string; parentSku: string; productType: string; spec: CompositeHealSpec
+    sellerId: string; token: string
+    childAttrs: Map<string, Record<string, unknown> | null>
+    /** The complete donor item strategy 3 is writing (initialOps' replace value) — the read-back
+     *  re-verifies its sub-keys persisted. */
+    donorItem: CompositeItem
+    /** Strategy 3's op set (replace containerKey with the donor's complete item) — the loop's start. */
+    initialOps: NegotiationOp[]
+    /** Strategy 3's ALREADY-FAILED structured preview — iteration 1's verdict (no duplicate call). */
+    initialPreview: PatchResult
+    liveChildCount: number
+  },
+): Promise<HealResult> {
+  const { parent_asin, parentSku, productType, spec, sellerId, token, childAttrs, donorItem, initialOps, initialPreview, liveChildCount } = args
+  const containerKey = spec.containerKey
+  const out: HealResult = { healed: [], abstained: [], failed: [] }
+  const fail = (detail: string) => {
+    out.failed.push(containerKey)
+    ;(out.errors ??= {})[containerKey] = `complete-write fallback -> ${detail}`
+  }
+  const flagAttention = async () => {
+    try {
+      const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+      await flagParentAttrsNeedAttention(parent_asin, [containerKey])
+    } catch (e) { console.warn('[push-heal] negotiation flag-attention failed (non-fatal):', e instanceof Error ? e.message : e) }
+  }
+  let stageIter = 1   // last known preview iteration, for stage-prefixing failures outside the loop
+  try {
+    // The parent's LIVE attributes map, fetched ONCE (the existing single-GET pattern): the delete
+    // planner's existence gate. A dead GET must never look like "safe to plan deletes" — failed
+    // bucket (transient; the queue's backoff retries), never a guessed delete.
+    const liveRead = await fetchChildAttributesMap(sellerId, token, [parentSku])
+    const liveParentAttrs = liveRead.get(parentSku) ?? null
+    if (!liveParentAttrs) {
+      fail('negotiation iter 1: live parent attributes fetch failed - cannot verify delete safety; aborting negotiation')
+      return out
+    }
+
+    const loop = await runNegotiationLoop({
+      initialOps,
+      initialPreview,
+      containerKey,
+      marketplaceId: MARKETPLACE_ID,
+      liveParentAttrs,
+      preview: async (ops) => {
+        await sleep(PATCH_DELAY_MS)   // ~200ms between previews (Amazon patchListingsItem 5 rps)
+        return await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
+      },
+      // TIGHT-SCOPE extension: an issue the delete planner skipped may be ANOTHER registered
+      // composite's conditional-requirement ("the field '<perVariantField>' ... does not have enough
+      // values" naming that container) — add ITS complete-donor replace, exactly strategy 3's own op
+      // shape. ONLY COMPOSITE_HEAL_SPECS containers; anything else contributes no op (and an
+      // op-less iteration trips the abort above).
+      extraOpsForSkippedIssue: (message) => {
+        for (const other of COMPOSITE_HEAL_SPECS) {
+          if (other.containerKey === containerKey) continue
+          if (!conditionalRequirementRegex(other.perVariantField).test(message)) continue
+          if (!containerNameRegex(other.containerKey).test(message)) continue
+          const sel = selectCompleteDonorItem(childAttrs, other)
+          if (!sel) return null
+          return [{ op: 'replace' as const, path: `/attributes/${other.containerKey}`, value: [{ ...sel.donor, marketplace_id: MARKETPLACE_ID }] }]
+        }
+        return null
+      },
+    })
+    stageIter = loop.iterations
+
+    if (loop.kind !== 'converged') {
+      fail(loop.failureDetail ?? `negotiation iter ${loop.iterations}: preview did not converge`)
+      // 'no-progress' / 'exhausted' are durable dead-ends a human must see (observability: the
+      // failureDetail above carries every blocking issue text). 'transport' is a transient preview
+      // failure — the queue's backoff retries it; no false-alarm flag.
+      if (loop.kind === 'no-progress' || loop.kind === 'exhausted') await flagAttention()
+      return out
+    }
+    console.warn(`[push-heal] negotiation for ${containerKey} on ${parentSku} converged in ${loop.iterations} preview iteration(s): ${loop.finalOps.length} op(s), deleting [${loop.deletedKeys.join(', ') || 'none'}]`)
+
+    // INTENT AUDIT ROW — same pattern as strategies 2/3: durable evidence of EVERY op BEFORE the
+    // LIVE write (a crash between the PATCH and the read-back must still be visible). new_value
+    // carries the FULL final ops list as JSON. Best-effort: a failed insert proceeds but warns.
+    let intentRowId: string | null = null
+    try {
+      const { data: intentData, error: intentErr } = await db.from('keyword_push_log').insert({
+        parent_asin, sku: parentSku, field: `heal:negotiate:${containerKey}`,
+        previous_value: null, new_value: JSON.stringify(loop.finalOps),
+        submission_id: null, status: 'attempted', error_message: null,
+        pushed_by: SYSTEM_ACTOR.id,
+      }).select('id')
+      if (intentErr) console.warn('[push-heal] negotiation INTENT log insert failed (best-effort, proceeding):', intentErr?.message ?? intentErr)
+      else intentRowId = (intentData as { id?: string }[] | null)?.[0]?.id ?? null
+    } catch (e) { console.warn('[push-heal] negotiation INTENT log insert threw (best-effort, proceeding):', e instanceof Error ? e.message : e) }
+
+    const live = await patchSkuMulti(sellerId, token, productType, parentSku, loop.finalOps, 'LIVE')
+    if (!live.ok) { fail(`negotiation iter ${loop.iterations}: live: ${live.error ?? 'rejected'}`); return out }
+
+    // READ-BACK: (i) the container's written sub-keys persisted (tolerant subsetDeepEqual) AND
+    // (ii) every deleted attribute is ABSENT. A failed re-read is a FAILURE (queue retries), never
+    // assumed success; a mismatch fails + flags (no rule learning) — Amazon accepted then diverged.
+    await sleep(PATCH_DELAY_MS)
+    const postRead = await fetchChildAttributesMap(sellerId, token, [parentSku])
+    const postAttrs = postRead.get(parentSku)
+    if (!postAttrs) {
+      fail(`negotiation iter ${loop.iterations}: read-back: fetch failed - cannot confirm the negotiated ops persisted`)
+      return out
+    }
+    const verdict = verifyNegotiationReadBack(postAttrs, containerKey, donorItem, loop.deletedKeys)
+    if (!verdict.ok) {
+      console.warn(`[push-heal] negotiation read-back MISMATCH for ${containerKey} on ${parentSku}: ${verdict.detail}; marking failed + flagging for attention.`)
+      fail(`negotiation iter ${loop.iterations}: read-back mismatch: ${verdict.detail}`)
+      await flagAttention()
+      return out
+    }
+
+    // Confirmed -> healed. Flip the INTENT row to 'accepted' (or insert the accepted row directly if
+    // the intent write failed), then the SHARED strategy-3 success side-effects (stale inherit-rule
+    // unlearn + delayed family-integrity check). Deliberately NO push_heal_rules learning — the
+    // negotiated ops are a one-time fix for THIS hub's conditional web.
+    out.healed.push(containerKey)
+    try {
+      if (intentRowId) {
+        await db.from('keyword_push_log').update({
+          submission_id: live.submissionId, status: 'accepted',
+          pushed_at: new Date().toISOString(),
+        }).eq('id', intentRowId)
+      } else {
+        await db.from('keyword_push_log').insert({
+          parent_asin, sku: parentSku, field: `heal:negotiate:${containerKey}`,
+          previous_value: null, new_value: JSON.stringify(loop.finalOps),
+          submission_id: live.submissionId, status: 'accepted', error_message: null,
+          pushed_by: SYSTEM_ACTOR.id,
+        })
+      }
+    } catch (e) { console.warn('[push-heal] negotiation keyword_push_log accept-log failed (non-fatal):', e instanceof Error ? e.message : e) }
+
+    await completeWriteSuccessSideEffects(db, { parent_asin, parentSku, productType, containerKey, liveChildCount, sampledChildCount: childAttrs.size })
+  } catch (e) {
+    // A throw mid-negotiation is NOT a safe abstain (the parent is known-broken and this is its last
+    // automated fix) — ride the failed bucket so the queue's attempts/backoff retry it.
+    console.warn('[push-heal] negotiateParentRecordFix threw (non-fatal):', e instanceof Error ? e.message : e)
+    if (!out.healed.includes(containerKey) && !out.failed.includes(containerKey)) {
+      fail(`negotiation iter ${stageIter}: threw: ${e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)}`)
     }
   }
   return out
