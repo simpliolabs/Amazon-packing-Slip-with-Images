@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import type { ProductRecommendation, ReplenishmentStatus } from '@/lib/fba/replenishment'
@@ -443,6 +443,9 @@ export default function FBAIntelligencePage() {
   // Search miss on a valid ASIN the server flagged as never-synced (response carried unknownAsin) —
   // drives the honest "Pull from Amazon" empty state instead of a bare "No listings match".
   const [seoUnknownAsin, setSeoUnknownAsin] = useState(false)
+  // Monotonic fetch sequence for the Work-Queue: only the LATEST fetchSeoScores invocation may write
+  // results (stale slow responses — e.g. a search doing inline SP-API discovery — are dropped).
+  const seoFetchSeqRef = useRef(0)
   const [seoPulling, setSeoPulling] = useState(false)
   const [seoPullError, setSeoPullError] = useState<string | null>(null)
   const [seoCursor, setSeoCursor] = useState<string | null>(null)  // nextCursor for "Show next"
@@ -1168,10 +1171,19 @@ export default function FBAIntelligencePage() {
     const sort = over?.sort ?? seoSort
     const search = over?.search ?? seoSearchActive
     const scoresUrl = buildSeoUrl({ status, sort, search })
+    // STALE-RESPONSE GUARD (PO-caught flicker, 2026-07-02): fetchSeoScores has several triggers
+    // (mount, status/sort effect, debounced search commit, pull-refresh) and a SEARCH request can
+    // now take seconds (the server does inline SP-API discovery for an unsynced ASIN). Without
+    // sequencing, a SLOW stale response lands after a newer fast one and overwrites it — and since
+    // every response also rewrites seoUnknownAsin, the UI alternated card <-> empty ("flickering
+    // in and out"). Only the LATEST invocation may apply results; stale responses are dropped.
+    const seq = ++seoFetchSeqRef.current
+    const isCurrent = () => seq === seoFetchSeqRef.current
     setSeoLoading(true)
     setSeoError(null)
     setSeoPullError(null)
     const applyPage = (json: { scores?: SeoScoreRow[]; counts?: SeoCounts; stubs?: SeoStub[]; nextCursor?: string | null; hasMore?: boolean; lastSyncedAt?: string | null; unknownAsin?: boolean }) => {
+      if (!isCurrent()) return   // a newer fetch superseded this one — drop the stale page
       setSeoScores(json.scores || [])
       setSeoCounts(json.counts || null)
       setSeoStubs(json.stubs || [])
@@ -1211,6 +1223,9 @@ export default function FBAIntelligencePage() {
         const maxAttempts = 10
         const pollInterval = setInterval(async () => {
           attempts++
+          // A newer fetch superseded this sync's poll — stop polling entirely (its applyPage
+          // would no-op anyway, but a dead poll shouldn't keep hitting the server for 5 min).
+          if (!isCurrent()) { clearInterval(pollInterval); return }
           try {
             const resp = await fetch(scoresUrl)
             const json = await resp.json()
@@ -1224,14 +1239,14 @@ export default function FBAIntelligencePage() {
             }
           } catch { /* ignore */ }
         }, 30_000)
-        setSeoLoading(false)
+        if (isCurrent()) setSeoLoading(false)
         return
       }
       const resp = await fetch(scoresUrl)
       const json = await resp.json()
       applyPage(json)
     } catch (e) { console.error(e) }
-    finally { setSeoLoading(false) }
+    finally { if (isCurrent()) setSeoLoading(false) }
   }, [seoStatus, seoSort, seoSearchActive, buildSeoUrl])
 
   // "Show next 25" — genuinely fetch the next keyset page and APPEND (replaces seoLimit+25).
