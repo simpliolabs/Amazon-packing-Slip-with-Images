@@ -65,3 +65,26 @@ export function hasTrademark(text: string): boolean {
   if (!text) return false
   return TRADEMARK_RULES.some(({ mark }) => new RegExp(`\\b${mark}\\b`, 'i').test(text))
 }
+
+/** Identifier fields a deep scrub must NEVER rewrite: SKU codes and IDs may legitimately embed
+ *  mark-like tokens (a family literally named "France-World-Cup-TS-Parent"); rewriting them would
+ *  corrupt references. (The whitespace-based rules can't match hyphenated codes anyway — this is
+ *  defense in depth.) */
+const DEEP_SCRUB_SKIP_KEYS = new Set(['sku', 'asin', 'parent_asin', 'top_child_asin', 'seller_central_path', 'element', 'key', 'designKey', 'field_name', 'spApiKey'])
+
+/** Recursively scrub every STRING VALUE in a JSON-ish structure (arrays/objects/strings), skipping
+ *  identifier keys. For seller-facing structured blobs the field-level scrubs don't reach — the
+ *  audit's action_plan / keyword_reconciliation (PO-caught leak 2026-07-02: "france world cup tee"
+ *  in an action-plan copy block). Idempotent like scrubTrademarks itself. */
+export function scrubTrademarksDeep<T>(value: T): T {
+  if (typeof value === 'string') return scrubTrademarks(value) as unknown as T
+  if (Array.isArray(value)) return value.map((v) => scrubTrademarksDeep(v)) as unknown as T
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = DEEP_SCRUB_SKIP_KEYS.has(k) ? v : scrubTrademarksDeep(v)
+    }
+    return out as unknown as T
+  }
+  return value
+}

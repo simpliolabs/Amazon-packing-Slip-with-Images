@@ -23,7 +23,7 @@ import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
-import { scrubTrademarks, scrubTrademarksArr } from '@/lib/fba/trademarkGuard'
+import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -3929,6 +3929,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // these are generated + stored for the UI/push to read; nothing per-design reaches Amazon.
     per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map(scrubTrademarks) })),
     per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubTrademarks(c.description) })),
+    // Audit blobs are seller-facing copy too (PO-caught 2026-07-02: raw mark in an action_plan copy
+    // block). Deep-scrub every string value; identifier keys (sku/asin/element/...) are skipped
+    // inside scrubTrademarksDeep so SKU codes are never rewritten.
+    action_plan: scrubTrademarksDeep(r.action_plan),
+    keyword_reconciliation: scrubTrademarksDeep(r.keyword_reconciliation),
+    product_details_improvements: scrubTrademarksDeep(r.product_details_improvements),
   })
   const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => scrubPublished({
     recommended_title: input.priorTitle ?? '',
