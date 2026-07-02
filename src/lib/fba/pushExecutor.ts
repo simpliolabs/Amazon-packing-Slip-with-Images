@@ -986,6 +986,16 @@ function conditionalRequirementRegex(perVariantField: string): RegExp {
   return new RegExp(`the field\\s+'?"?${escaped}"?'?\\s+for the attribute .* does not have enough values`, 'i')
 }
 
+/** CONTAINER-NAME test (adversarial review 2026-07-02, fix 3): the conditional-requirement signature
+ *  alone does not prove the rejection is about THIS container — Amazon words the message around the
+ *  per-variant field ('size'), which several containers could share. Built from the containerKey with
+ *  each underscore loosened to [\s_-]? so it matches Amazon's prose forms of the same name
+ *  ("Shirt Size" in the attribute label, "shirt_size" in the data path, "shirt-size" defensively). */
+function containerNameRegex(containerKey: string): RegExp {
+  const escaped = containerKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(escaped.replace(/_/g, '[\\s_-]?'), 'i')
+}
+
 /** The outcome of one heal pass over a parent hub. `healed` = attrs written live; `abstained` =
  *  skipped on child disagreement / no child value / non-broadcast; `failed` = validation or write
  *  rejected. Never thrown — the caller (cron/trigger) rides the queue's attempts/backoff on failures. */
@@ -1290,9 +1300,26 @@ export async function healParentComposite(
       // absent the conditional rule never fires and parent PATCHes (title etc.) validate clean.
       // Gated on the spec being registered in COMPOSITE_HEAL_SPECS (that lookup is also where the
       // signature's perVariantField comes from) AND on the preview error matching the signature.
+      //
+      // PER-ISSUE SIGNATURE TEST (adversarial review 2026-07-02, fix 3): preview.error is the
+      // '; '-JOINED all-issues string, and the signature regex carries a greedy .* — tested against
+      // the joined string it can SPLICE across issue boundaries ("the field 'size' for the attribute
+      // <issue A>...<issue B> does not have enough values") or match a DIFFERENT attribute's message.
+      // So test each STRUCTURED issue individually and require EXACTLY ONE issue whose message BOTH
+      // matches the conditional-requirement signature AND names THIS container (containerNameRegex).
+      // Only when issues[] is empty (HTTP-level failure path returns no structured issues) fall back
+      // to the joined string — and then the container-name test must ALSO pass on that same string.
       const spec = COMPOSITE_HEAL_SPECS.find((s) => s.containerKey === containerKey)
-      if (spec && conditionalRequirementRegex(spec.perVariantField).test(preview.error ?? '')) {
-        return await healCompositeDeletePartial(db, { parent_asin, parentSku, productType, spec, sellerId, token })
+      if (spec) {
+        const sigRe = conditionalRequirementRegex(spec.perVariantField)
+        const nameRe = containerNameRegex(containerKey)
+        const issues = preview.issues ?? []
+        const triggered = issues.length > 0
+          ? issues.filter((i) => sigRe.test(i.message ?? '') && nameRe.test(i.message ?? '')).length === 1
+          : sigRe.test(preview.error ?? '') && nameRe.test(preview.error ?? '')
+        if (triggered) {
+          return await healCompositeDeletePartial(db, { parent_asin, parentSku, productType, spec, sellerId, token })
+        }
       }
       out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `preview: ${preview.error ?? 'rejected'}`; return out
     }
@@ -1364,6 +1391,52 @@ export async function healParentComposite(
   return out
 }
 
+/** PARENTAGE CONFIRMATION for the delete-partial heal (adversarial review 2026-07-02, fix 2).
+ *  findParentSku equality only proves LOOKUP CONSISTENCY (both sides resolved the same row for the
+ *  ASIN) — it does NOT prove the SKU is a variation-parent hub. Positively confirm via a live GET with
+ *  includedData=summaries,relationships that the SKU is a NON-BUYABLE VARIATION PARENT — EITHER:
+ *   (a) a VARIATION relationship in the PARENT direction: type='VARIATION' carrying non-empty
+ *       childSkus/childAsins (a CHILD's VARIATION entry carries parentSkus/parentAsins instead and
+ *       must NOT confirm), OR
+ *   (b) summaries present and NONE carrying a BUYABLE status (a variation hub is never buyable).
+ *  Neither confirmable → { confirmed:false } and the caller REFUSES the delete (never delete on
+ *  uncertainty). `fetchFailed` distinguishes a dead GET (transient — failed bucket only, the queue
+ *  retries) from a positive "this does not look like a variation parent" (failed bucket + a durable
+ *  needs_attention flag so a human decides). Response shapes are handled defensively — any field can
+ *  be absent/malformed without throwing. */
+async function confirmNonBuyableVariationParent(
+  sellerId: string, token: string, sku: string,
+): Promise<{ confirmed: boolean; fetchFailed: boolean; reason: string }> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+      `?marketplaceIds=${MARKETPLACE_ID}&includedData=summaries,relationships`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return { confirmed: false, fetchFailed: true, reason: `parentage GET HTTP ${resp.status}` }
+    const json = (await resp.json()) as {
+      summaries?: { status?: string[] }[]
+      relationships?: { relationships?: { type?: string; childSkus?: string[]; childAsins?: string[] }[] }[]
+    }
+    const relGroups = Array.isArray(json.relationships) ? json.relationships : []
+    const isVariationParent = relGroups.some((g) =>
+      (Array.isArray(g?.relationships) ? g.relationships : []).some(
+        (r) => r?.type === 'VARIATION' &&
+          ((Array.isArray(r.childSkus) && r.childSkus.length > 0) || (Array.isArray(r.childAsins) && r.childAsins.length > 0)),
+      ))
+    if (isVariationParent) return { confirmed: true, fetchFailed: false, reason: 'VARIATION parent relationship with children' }
+    const summaries = Array.isArray(json.summaries) ? json.summaries : []
+    const nonBuyable = summaries.length > 0 &&
+      summaries.every((s) => !(Array.isArray(s?.status) && s.status.includes('BUYABLE')))
+    if (nonBuyable) return { confirmed: true, fetchFailed: false, reason: 'summaries present with no BUYABLE status' }
+    return {
+      confirmed: false, fetchFailed: false,
+      reason: 'no VARIATION parent relationship with children and summaries do not show non-buyable - cannot positively confirm this SKU is the variation-parent hub',
+    }
+  } catch (e) {
+    return { confirmed: false, fetchFailed: true, reason: `parentage GET threw: ${e instanceof Error ? e.message.slice(0, 120) : String(e).slice(0, 120)}` }
+  }
+}
+
 /**
  * STRATEGY 2 — delete the PARTIAL composite container from the parent hub (heal v2, LIVE evidence
  * 2026-07-02). Reached ONLY from healParentComposite when strategy 1's (verbatim-mirror) preview fails
@@ -1378,9 +1451,22 @@ export async function healParentComposite(
  *    failed push row with isParent=true). Defensively RE-CONFIRMED live below via findParentSku on the
  *    parent ASIN — a mismatch (stale/malformed payload) or a failed lookup ABORTS: NEVER delete an
  *    attribute from a child.
+ *  - PARENTAGE-CONFIRMED (fix 2): equality alone proves lookup consistency, not parentage — the SKU
+ *    must ALSO be positively confirmed as a non-buyable variation parent via
+ *    confirmNonBuyableVariationParent (VARIATION-with-children relationship OR non-buyable summaries);
+ *    anything unconfirmable REFUSES the delete.
+ *  - LIVE-STATE-GATED (fix 1, TOCTOU): the trigger only proved the SUBMITTED mirror payload was
+ *    partial (it always is — strategy 1 writes subKeys only), NOT that the LIVE container is. The
+ *    container is re-READ here first: already ABSENT → healed as a no-op (no write); GENUINELY PARTIAL
+ *    (perVariantField empty on every item) → proceed; COMPLETE (any item carries it — e.g. the seller
+ *    just fixed it in Seller Central while the task was pending) → REFUSE + flag for a human; a dead
+ *    pre-read GET → failure (retry), never "safe to proceed".
  *  - REGISTRY-GATED: only containers listed in COMPOSITE_HEAL_SPECS can reach here (the caller resolves
  *    `spec` from that registry; unregistered containers have no spec and fall to the failed bucket).
  *  - PREVIEW-GATED: the delete op runs VALIDATION_PREVIEW first, like every write in this module.
+ *  - INTENT-LOGGED (fix 4a): a keyword_push_log row (status 'attempted', new_value 'DELETE-INTENT') is
+ *    written BEFORE the LIVE delete so a crash between the PATCH and the read-back still leaves durable
+ *    evidence a delete was issued; the row flips to 'accepted' on confirmed read-back.
  *  - READ-BACK-VERIFIED: success is the container being ABSENT on a live re-read — a failed re-read is
  *    a FAILURE (retry), never assumed success.
  * NON-THROWING; failures land in the returned buckets with errors[] observability. Learns a
@@ -1411,10 +1497,95 @@ async function healCompositeDeletePartial(
       return out
     }
 
+    // PARENTAGE CONFIRMATION (adversarial review 2026-07-02, fix 2): the equality above proves both
+    // lookups resolved the SAME row — not that the row is a variation-parent hub. Positively confirm
+    // (VARIATION-with-children relationship OR non-buyable summaries) before any delete. Unconfirmable
+    // → REFUSE: a dead GET rides the failed bucket (queue retries); a positive "does not look like a
+    // variation parent" additionally flags durable needs_attention so a human decides.
+    const parentage = await confirmNonBuyableVariationParent(sellerId, token, parentSku)
+    if (!parentage.confirmed) {
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = `delete parentage guardrail: ${parentage.reason} - refusing to delete`
+      if (!parentage.fetchFailed) {
+        try {
+          const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+          await flagParentAttrsNeedAttention(parent_asin, [containerKey])
+        } catch (e) { console.warn('[push-heal] delete parentage flag-attention failed (non-fatal):', e instanceof Error ? e.message : e) }
+      }
+      return out
+    }
+
+    // LIVE-STATE GATE (adversarial review 2026-07-02, fix 1 — TOCTOU): the strategy-2 trigger only
+    // proved the SUBMITTED mirror payload was partial — strategy 1 always writes subKeys only, so that
+    // is ALWAYS true — NOT that the LIVE container is partial. A seller may have just completed Shirt
+    // Size manually in Seller Central while this heal task was pending; deleting then would destroy
+    // their fix. Re-read the LIVE parent container and gate the delete on its ACTUAL state.
+    await sleep(PATCH_DELAY_MS)
+    const preRead = await fetchChildAttributesMap(sellerId, token, [parentSku])
+    const preAttrs = preRead.get(parentSku)
+    if (!preAttrs) {
+      // A dead pre-read GET must never look like "safe to proceed" (same polarity rule as the
+      // read-back below) — failed bucket, the queue's backoff retries it.
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = 'delete pre-read fetch failed - cannot confirm the live container state; refusing to delete'
+      return out
+    }
+    const preRaw = preAttrs[containerKey]
+    if (preRaw === undefined || preRaw === null || (Array.isArray(preRaw) && preRaw.length === 0)) {
+      // Container ALREADY ABSENT — the heal's goal state already holds (e.g. a retry after a successful
+      // delete whose confirmation was lost, or the seller removed it themselves). Converge as a no-op:
+      // no write, no learned-rule change — report healed so the task completes.
+      out.healed.push(containerKey)
+      return out
+    }
+    const preItems = Array.isArray(preRaw)
+      ? preRaw.filter((it): it is Record<string, unknown> => it != null && typeof it === 'object' && !Array.isArray(it))
+      : []
+    const perVariantPresent = (it: Record<string, unknown>): boolean => {
+      const v = it[spec.perVariantField]
+      if (v === undefined || v === null) return false
+      if (typeof v === 'string') return v.trim() !== ''
+      if (Array.isArray(v)) return v.length > 0
+      return true
+    }
+    // GENUINELY PARTIAL = the per-variant field ('size') absent/empty on EVERY item of the container.
+    // If ANY item carries it the live container is COMPLETE — this is NOT the partial-container disease
+    // and the delete would destroy a real value: refuse + flag so a human decides. A present-but-
+    // uninspectable shape (not an array of item objects) is UNCERTAINTY and refuses the same way.
+    if (preItems.length === 0 || preItems.some(perVariantPresent)) {
+      out.failed.push(containerKey)
+      ;(out.errors ??= {})[containerKey] = preItems.length === 0
+        ? 'live container has an uninspectable shape - cannot prove it is partial; refusing to delete'
+        : `live container carries ${spec.perVariantField} - not the partial-container disease; refusing to delete`
+      try {
+        const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+        await flagParentAttrsNeedAttention(parent_asin, [containerKey])
+      } catch (e) { console.warn('[push-heal] delete live-state flag-attention failed (non-fatal):', e instanceof Error ? e.message : e) }
+      return out
+    }
+
     // Value-less delete of the WHOLE container — preview first, exactly like every other write here.
     const ops = [{ op: 'delete' as const, path: `/attributes/${containerKey}` }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
     if (!preview.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete preview: ${preview.error ?? 'rejected'}`; return out }
+
+    // INTENT AUDIT ROW (adversarial review 2026-07-02, fix 4a): record that a LIVE delete is about to
+    // be issued BEFORE issuing it, so a crash between the PATCH and the read-back still leaves durable
+    // evidence. Best-effort: a failed intent insert PROCEEDS (the audit trail must not block the heal)
+    // but warns loudly. On confirmed read-back the row is flipped to 'accepted' below; a delete that
+    // fails read-back deliberately leaves it at 'attempted' — that IS the audit signal.
+    let intentRowId: string | null = null
+    try {
+      const { data: intentData, error: intentErr } = await db.from('keyword_push_log').insert({
+        parent_asin, sku: parentSku, field: `heal:delete:${containerKey}`,
+        previous_value: null, new_value: 'DELETE-INTENT',
+        submission_id: null, status: 'attempted', error_message: null,
+        pushed_by: SYSTEM_ACTOR.id,
+      }).select('id')
+      if (intentErr) console.warn('[push-heal] delete INTENT log insert failed (best-effort, proceeding):', intentErr?.message ?? intentErr)
+      else intentRowId = (intentData as { id?: string }[] | null)?.[0]?.id ?? null
+    } catch (e) { console.warn('[push-heal] delete INTENT log insert threw (best-effort, proceeding):', e instanceof Error ? e.message : e) }
+
     const live = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'LIVE')
     if (!live.ok) { out.failed.push(containerKey); (out.errors ??= {})[containerKey] = `delete live: ${live.error ?? 'rejected'}`; return out }
 
@@ -1438,18 +1609,27 @@ async function healCompositeDeletePartial(
       return out
     }
 
-    // Confirmed absent → healed. Log the attribute write (SYSTEM_ACTOR) + learn the delete rule so this
-    // (product_type, container) resolution is remembered; the upsert REPLACES a stale inherit_from_child
-    // rule, which also stops the Tier-2 pre-fill from re-adding the partial container.
+    // Confirmed absent → healed. Flip the INTENT row to 'accepted' (fix 4a — or insert the accepted
+    // row directly if the intent write failed) + learn the delete rule so this (product_type,
+    // container) resolution is remembered; the upsert REPLACES a stale inherit_from_child rule, which
+    // also stops the Tier-2 pre-fill from re-adding the partial container.
     out.healed.push(containerKey)
     try {
-      await db.from('keyword_push_log').insert({
-        parent_asin, sku: parentSku, field: `heal:delete:${containerKey}`,
-        previous_value: null, new_value: JSON.stringify({ action: 'delete' }),
-        submission_id: live.submissionId, status: 'accepted', error_message: null,
-        pushed_by: SYSTEM_ACTOR.id,
-      })
-    } catch (e) { console.warn('[push-heal] delete keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
+      if (intentRowId) {
+        await db.from('keyword_push_log').update({
+          new_value: JSON.stringify({ action: 'delete' }),
+          submission_id: live.submissionId, status: 'accepted',
+          pushed_at: new Date().toISOString(),
+        }).eq('id', intentRowId)
+      } else {
+        await db.from('keyword_push_log').insert({
+          parent_asin, sku: parentSku, field: `heal:delete:${containerKey}`,
+          previous_value: null, new_value: JSON.stringify({ action: 'delete' }),
+          submission_id: live.submissionId, status: 'accepted', error_message: null,
+          pushed_by: SYSTEM_ACTOR.id,
+        })
+      }
+    } catch (e) { console.warn('[push-heal] delete keyword_push_log accept-log failed (non-fatal):', e instanceof Error ? e.message : e) }
     try {
       const { data: existing } = await db.from('push_heal_rules')
         .select('hit_count').eq('product_type', productType).eq('attr_key', containerKey).maybeSingle()
