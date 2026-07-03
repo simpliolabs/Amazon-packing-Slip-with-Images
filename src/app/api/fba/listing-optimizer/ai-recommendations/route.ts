@@ -664,6 +664,12 @@ export async function POST(req: NextRequest) {
             onlySection,
             priorTitle: onlySection ? String(storedRec?.recommended_title ?? '') : null,
             priorBullets: onlySection && Array.isArray(storedRec?.recommended_bullets) ? (storedRec?.recommended_bullets as string[]) : null,
+            // Multi-design partial coherence (parity-audit): stored per-child titles let the pipeline
+            // rebuild the design groups cheaply, so per-design fan-outs run on partial regens too.
+            priorPerChildTitles: onlySection && Array.isArray(storedRec?.per_child_titles)
+              ? (storedRec?.per_child_titles as { sku: string; asin: string; title: string; designName?: string; designKey?: string }[])
+              : null,
+            priorCoupleConcept: onlySection ? ((storedRec?.keyword_plan as { coupleConcept?: string } | null)?.coupleConcept ?? null) : null,
             onProgress: (message) => emit({ type: 'progress', message }),
           })
 
@@ -674,7 +680,7 @@ export async function POST(req: NextRequest) {
           if (result.regeneratedSection && storedRec) {
             emit({ type: 'progress', message: 'Saving the regenerated section…' })
             const sec = result.regeneratedSection
-            const storedPlan = (storedRec.keyword_plan as { bullets?: string[]; designName?: string } | null) ?? {}
+            const storedPlan = (storedRec.keyword_plan as { bullets?: string[]; designName?: string; coupleConcept?: string } | null) ?? {}
             let actionPlan = Array.isArray(storedRec.action_plan) ? [...(storedRec.action_plan as Record<string, unknown>[])] : []
             const patchItem = (match: (el: string) => boolean, content: string | string[]) => {
               actionPlan = actionPlan.map((it) => match(String(it.element ?? ''))
@@ -685,24 +691,40 @@ export async function POST(req: NextRequest) {
             if (sec === 'title') {
               upd.recommended_title = result.recommended_title
               if (result.per_child_titles) upd.per_child_titles = result.per_child_titles
-              upd.keyword_plan = { bullets: storedPlan.bullets ?? [], designName: result.keywordPlan.designName }
+              upd.keyword_plan = { bullets: storedPlan.bullets ?? [], designName: result.keywordPlan.designName, coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept }
               patchItem((el) => el === 'title', result.recommended_title)
             } else if (sec === 'bullets') {
               upd.recommended_bullets = result.recommended_bullets
-              upd.keyword_plan = { bullets: result.keywordPlan.bullets, designName: result.keywordPlan.designName || storedPlan.designName || '' }
+              // Multi-design coherence (parity-audit #3/#23): the per-design sets regenerate on
+              // partials now — persist them, or the push keeps preferring the stale stored ones.
+              if (result.per_child_bullets) upd.per_child_bullets = result.per_child_bullets
+              upd.keyword_plan = { bullets: result.keywordPlan.bullets, designName: result.keywordPlan.designName || storedPlan.designName || '', coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept, perDesign: result.keywordPlan.perDesign }
               result.recommended_bullets.forEach((b, i) => patchItem((el) => el === `bullet_${i + 1}`, b))
             } else if (sec === 'description') {
               upd.recommended_description = result.recommended_description
+              if (result.per_child_descriptions) upd.per_child_descriptions = result.per_child_descriptions
               patchItem((el) => el === 'description', result.recommended_description)
             } else {
               upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
               patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
             }
             upd.action_plan = actionPlan
-            const { error: updErr } = await supabase
+            let { error: updErr } = await supabase
               .from('listing_seo_recommendations')
               .update(upd as never)
               .eq('parent_asin', parent_asin)
+            if (updErr && ('per_child_bullets' in upd || 'per_child_descriptions' in upd)) {
+              // Missing-column degradation (review; mirrors the full path): a pre-migration-033 DB
+              // must not lose the whole regenerated section over the per-design columns — retry
+              // without them and log loudly (the broadcast section + keyword_plan still save).
+              console.error(`[ai-recommendations] partial ${sec} save failed (${updErr.message}) — retrying without per-design columns`)
+              delete (upd as Record<string, unknown>).per_child_bullets
+              delete (upd as Record<string, unknown>).per_child_descriptions
+              ;({ error: updErr } = await supabase
+                .from('listing_seo_recommendations')
+                .update(upd as never)
+                .eq('parent_asin', parent_asin))
+            }
             if (updErr) {
               emit({ type: 'error', error: `Failed to save the regenerated ${sec}: ${updErr.message}` })
               controller.close()
