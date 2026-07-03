@@ -112,6 +112,15 @@ export interface PipelineInput {
   priorTitle?: string | null
   /** Stored recommended_bullets — REQUIRED context when onlySection ∈ description/keywords. */
   priorBullets?: string[] | null
+  /** Stored per_child_titles (multi-design families) — lets a partial regen rebuild the design
+   *  groups CHEAPLY (sku/designName/designKey were resolved at full-regen time; no vision/LLM),
+   *  so per-design bullets/description/backend fan-outs run on partials too (parity-audit). */
+  priorPerChildTitles?: { sku: string; asin: string; title: string; designName?: string; designKey?: string }[] | null
+  /** Stored couple concept (unified-set families) — restores the broadcast anchor on partials. */
+  priorCoupleConcept?: string | null
+  /** Stored per_child_bullets — on keywords/description-only partials the per-design fan-outs
+   *  dedupe/ground against each group's REAL bullets instead of the broadcast prior (review). */
+  priorPerChildBullets?: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[] | null
   /** Per-variant content block (for the audit's variant-health check) */
   variantDetails: string
   /** Keyword intelligence context block (reused for the audit agent) */
@@ -162,7 +171,7 @@ export interface PipelineResult {
    *  targeted (killing the source/relevance-gate/title-exclusion divergence the shared predicate alone
    *  couldn't close) and can enforce cross-section design-name cohesion off the REAL design name — not a
    *  capacity-unsafe title heuristic. */
-  keywordPlan: { bullets: string[]; designName: string }
+  keywordPlan: { bullets: string[]; designName: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[] }
   debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
@@ -4183,7 +4192,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     keyword_reconciliation: [],
     action_plan: [],
     irrelevant_keywords: irrelevantKeywords,
-    keywordPlan: { bullets: [], designName: effectiveDesignName },
+    keywordPlan: { bullets: [], designName: effectiveDesignName, coupleConcept: coupleConcept || undefined },
     debug: { titleProblems: [], candidatesUsed: [], titleRetried: false, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
     regeneratedSection: section,
     ...fields,
@@ -4509,14 +4518,118 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .slice(0, 10)
     .map((k) => k.keyword)
+  // ── Multi-design group scoping (parity-audit structural build 2026-07-03) ─────────────────────
+  // PARTIAL-REGEN COHERENCE (#3/#9/#23): bullets/description/keywords-only regens skip the title
+  // branch, so designGroupContexts stayed empty, every per-design fan-out was inert, and the push
+  // then PREFERRED the untouched stale per_child_* sets over the freshly regenerated broadcast —
+  // regenerated copy silently never reached the children. Rebuild the contexts CHEAPLY from the
+  // STORED per-child titles (sku/designName/designKey were resolved and persisted at full-regen
+  // time): no vision, no SP-API, no LLM re-resolution.
+  // (only === 'title' already returned above, so `only` here means a bullets/description/keywords partial.)
+  // !unifiedSet (review-caught): a couple/matching family deliberately keeps per_child_* UNDEFINED
+  // (one shared set broadcast to both halves) — stale stored per_child_titles from a pre-unified-set
+  // rec must not re-enable the per-design fan-outs; the coupleConcept restore below is its path.
+  if (apparelMultiDesign && !unifiedSet && designGroupContexts.length === 0 && only && (input.priorPerChildTitles?.length ?? 0) > 0) {
+    const byKey = new Map<string, { skus: { sku: string; asin: string }[]; title: string; designName: string }>()
+    for (const r of input.priorPerChildTitles!) {
+      const key = r.designKey || r.designName || ''
+      if (!key) continue
+      const g = byKey.get(key) ?? { skus: [], title: r.title, designName: r.designName ?? '' }
+      g.skus.push({ sku: r.sku, asin: r.asin })
+      byKey.set(key, g)
+    }
+    if (byKey.size >= 2) {
+      designGroupContexts = [...byKey.entries()].map(([key, g]) => {
+        const groupChildren = g.skus
+          .map((s) => input.children.find((c) => c.sku === s.sku))
+          .filter((c): c is NonNullable<typeof c> => Boolean(c))
+        const groupRepTitle = groupChildren[0]?.title ?? input.repTitle ?? null
+        return {
+          skus: g.skus, designName: g.designName, title: g.title, key,
+          groupInput: {
+            ...input,
+            canonicalTitle: groupRepTitle,
+            repTitle: groupRepTitle ?? input.repTitle,
+            designNameOverride: g.designName || null,
+            children: groupChildren,
+          },
+        }
+      })
+      onProgress(`Rebuilt ${designGroupContexts.length} design groups from stored per-child titles...`)
+      // Seed the stored per-design bullets so keywords/description partials ground each group on
+      // its REAL bullets, not the broadcast prior (review). A bullets-only partial regenerates and
+      // overwrites this seed via its own fan-out.
+      if ((only === 'keywords' || only === 'description') && (input.priorPerChildBullets?.length ?? 0) > 0) {
+        perChildBullets = input.priorPerChildBullets!
+      }
+    }
+  }
+  // A unified-set's couple concept is resolved only by the title branch — restore it from the
+  // stored plan on partials so the broadcast anchor keeps naming the couple, not '' (audit #4).
+  if (!coupleConcept && unifiedSet && input.priorCoupleConcept?.trim()) coupleConcept = input.priorCoupleConcept.trim()
+  // CROSS-DESIGN POOL PARTITION (#2): a token unique to ANOTHER design's name is FOREIGN to this
+  // group — a family-pool keyword carrying one must never be force-woven into this group's content
+  // (the deterministic bullet backstop appended "argentina" into a Haiti child's bullet). Tokens
+  // shared by >=2 design names are NICHE words ("fishing") and never foreign. Group scoping also
+  // drops keywords the group's OWN title already covers — the family pools deduped against the
+  // PARENT title, which the children don't carry.
+  const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(bulletTokens(c.designName).map(fillNormTok))]))
+  const nameTokCounts = new Map<string, number>()
+  for (const s of groupNameToks.values()) for (const t of s) nameTokCounts.set(t, (nameTokCounts.get(t) ?? 0) + 1)
+  // NICHE-VOCABULARY EXEMPTIONS (review-caught, both directions):
+  // - A token unique to ONE design's name can still be the family's niche word ("Fishing Trip" on
+  //   a fishing family) — gutting the siblings' pools of it starves them. Tokens frequent in the
+  //   FAMILY KEYWORD POOL (>=10% of keywords, min 3) or present in the family's title are niche.
+  // - The old ">=2 design names ⇒ niche" rule resurrected the original bug the other way: two
+  //   Argentina-variant designs among 12 made "argentina" free for the other 10. Now a token must
+  //   appear in >=50% of the design names (min 2) to count as niche BY NAME-SHARING alone.
+  const nicheExemptToks = new Set<string>()
+  for (const t of bulletTokens(`${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`).map(fillNormTok)) nicheExemptToks.add(t)
+  {
+    const tokKwCount = new Map<string, number>()
+    for (const k of analysis) for (const t of new Set(bulletTokens(k.keyword).map(fillNormTok))) tokKwCount.set(t, (tokKwCount.get(t) ?? 0) + 1)
+    const poolThresh = Math.max(3, Math.ceil(analysis.length * 0.1))
+    for (const [t, c] of tokKwCount) if (c >= poolThresh) nicheExemptToks.add(t)
+  }
+  const nameShareThresh = Math.max(2, Math.ceil(groupNameToks.size * 0.5))
+  const foreignToksFor = (key: string): Set<string> => {
+    const own = groupNameToks.get(key) ?? new Set<string>()
+    const foreign = new Set<string>()
+    for (const [k2, s] of groupNameToks) {
+      if (k2 === key) continue
+      for (const t of s) {
+        if (own.has(t) || nicheExemptToks.has(t)) continue
+        if ((nameTokCounts.get(t) ?? 0) >= nameShareThresh) continue
+        foreign.add(t)
+      }
+    }
+    return foreign
+  }
+  // dropTitleCovered: bullets/description pools dedupe against the group's OWN title (token
+  // coverage, not raw substring — "gator" inside "alligator" is NOT coverage; review-caught).
+  // The BACKEND pool must NOT drop title-covered keywords: the PO-chosen hybrid deliberately
+  // keeps the best title keyphrases in the backend core (review-caught).
+  const scopeKwsToGroup = <T>(ctx: { key: string; title: string }, kws: T[], kwOf: (k: T) => string, dropTitleCovered = true): T[] => {
+    const foreign = foreignToksFor(ctx.key)
+    const titleToks = new Set(bulletTokens(ctx.title || '').map(fillNormTok))
+    return kws.filter((k) => {
+      const kw = kwOf(k)
+      const ts = bulletTokens(kw).map(fillNormTok)
+      if (dropTitleCovered && ts.length > 0 && ts.every((t) => titleToks.has(t))) return false
+      return !ts.some((t) => foreign.has(t))
+    })
+  }
+
   // Phase 2 unified-set: the SHARED bullets/description anchor on the COUPLE CONCEPT (both design
   // names + "Couple Matching"), not the family-level designName — so the one broadcast set names the
-  // whole set. Non-unified families keep designName (single-design) / '' (per-design path supplies its
-  // own anchor via designGroupContexts). coupleConcept is only populated by the title branch, so on a
-  // bullets/description-only partial regen (title branch skipped → empty) we fall back to designName,
-  // preserving today's partial behavior. motifTrust is widened with the couple concept so its design-
-  // name tokens (e.g. "Potato") survive the ungrounded-motif strip in the shared content.
-  const broadcastDesignAnchor = unifiedSet && coupleConcept ? coupleConcept : designName
+  // whole set. Single-design families keep designName.
+  // MULTI-DESIGN (parity-audit BLOCKER 2026-07-03): the broadcast set is what the PARENT HUB is
+  // pushed and what any child falls back to — anchoring it on the family-level designName (resolved
+  // from ONE rep child, e.g. "Argentina" on a 12-country family) forced one design's name into the
+  // hub's bullets while buildNicheParentTitle deliberately bans design names from the hub's title.
+  // Anchor on effectiveDesignName ('' for multi-design) so the broadcast stays niche-generic; the
+  // per-design fan-out below supplies each group's own anchor via designGroupContexts.
+  const broadcastDesignAnchor = unifiedSet && coupleConcept ? coupleConcept : (apparelMultiDesign ? effectiveDesignName : designName)
   const broadcastMotifTrust = unifiedSet && coupleConcept ? `${motifTrust} ${coupleConcept.toLowerCase()}` : motifTrust
   let bullets: string[]
   if (!only || only === 'bullets') {
@@ -4541,16 +4654,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (apparelMultiDesign && designGroupContexts.length) {
       try {
         const groupBulletSets = await Promise.all(designGroupContexts.map(async (ctx) => {
-          const raw = await runBulletsAgent(ctx.groupInput, ctx.title, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, ctx.designName)
-          // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
-          // design (parity with per-design titles, which recompute a group-scoped motifTrust in
-          // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
-          // design grounding.
-          const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
-          let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
-          if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
-          gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
-          return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
+          // PER-GROUP resilience (parity-audit): one group's transient LLM failure must not discard
+          // every OTHER group's per-design bullets — fail only this group back to the broadcast.
+          try {
+            // Group-scoped pools (#2): foreign-design keywords out, own-title-covered keywords out.
+            const groupRemaining = scopeKwsToGroup(ctx, remainingForBullets, (k) => k.keyword)
+            const groupTopOpp = scopeKwsToGroup(ctx, topOpportunityKwsForBullets, (k) => k)
+            const raw = await runBulletsAgent(ctx.groupInput, ctx.title, groupRemaining, bulletAttrs, groupTopOpp, capacityFamilyTokens, compatibilityBrands, ctx.designName)
+            // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
+            // design (parity with per-design titles, which recompute a group-scoped motifTrust in
+            // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
+            // design grounding.
+            const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+            let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
+            if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
+            gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
+            return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
+          } catch (e) {
+            console.warn(`[pipeline] per-design bullets failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
+            return { skus: ctx.skus, bullets, designName: ctx.designName, designKey: ctx.key }
+          }
         }))
         perChildBullets = []
         for (const gs of groupBulletSets) {
@@ -4568,7 +4691,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     onProgress('Bullets regenerated.')
     return partialResult('bullets', {
       recommended_bullets: bullets,
-      keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName },
+      // Partial coherence (#3/#23): the per-design fan-out now runs on bullets-only regens (contexts
+      // rebuilt from stored per-child titles above), so ship the fresh per-child sets too — the push
+      // prefers them, and leaving them stale silently discarded the regen for every child.
+      per_child_bullets: perChildBullets,
+      keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined },
     })
   }
 
@@ -4631,6 +4758,97 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
     return false
   }
+  // ── PER-DESIGN BACKEND (parity-audit BLOCKER #12, + #13/#14) ──────────────────────────────────
+  // One family-level backend core was biased to the rep design's keyword pool and shipped to EVERY
+  // design's children. Fan out per design group: group-scoped pool (foreign design tokens dropped),
+  // group-grounded truth hay for the style/garment ban (#14: design A's "Distressed" no longer
+  // licenses the claim for design B), the group's OWN title/bullets for the dedupe (#13), and
+  // per-group byte-fill. Returns null when the family is not per-design (caller falls back to the
+  // family-level agent). throwOnGroupFailure: keywords-only regen has exactly one job (honest
+  // failure); the full regen degrades per-group (failed group's SKUs keep previous keywords).
+  const runBackendPerDesign = async (throwOnGroupFailure: boolean): Promise<PipelinePerChildKeywords[] | null> => {
+    if (!(apparelMultiDesign && designGroupContexts.length)) return null
+    const ownB = ownBrandTokenSet(brandName)
+    const sets = await Promise.all(designGroupContexts.map(async (ctx) => {
+      try {
+        // dropTitleCovered=false — the PO-chosen backend HYBRID keeps title keyphrases in the core.
+        const groupPool = scopeKwsToGroup(ctx, backendPool, (k) => k.keyword, false)
+        const groupHay = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
+        const groupBrandToks = ownBrandTokenSet(brandName)
+        ;(ctx.designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => groupBrandToks.delete(w))
+        const groupBan = (w: string): boolean => {
+          if (w.length === 1 && !/\d/.test(w)) return true
+          if (AMZ_BACKEND_STOPWORDS.has(w)) return true
+          if (groupBrandToks.has(w)) return true
+          if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
+          if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
+          if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
+          if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
+          return false
+        }
+        const repSku = ctx.skus[0]?.sku
+        const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
+        let rows = await runBackendAgent(ctx.groupInput, ctx.title, groupBullets, groupPool, ctx.designName, groupBan)
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan) }))
+        if (lean === 'female' || lean === 'male') rows = rows.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+        return rows
+      } catch (e) {
+        if (throwOnGroupFailure) throw e
+        console.warn(`[pipeline] per-design backend failed for "${ctx.designName}" — its SKUs keep their previous keywords:`, e instanceof Error ? e.message : e)
+        return [] as PipelinePerChildKeywords[]
+      }
+    }))
+    const rows = sets.flat()
+    // COVERAGE GUARANTEE (review-caught BLOCKER): children in NO design group (added after the
+    // last full regen, keyless stored rows, group-resolution drift) previously vanished from the
+    // per-child keyword set — and keywords has NO broadcast fallback, so those SKUs would never
+    // get keywords pushed again. Generate the remainder via the family-level agent.
+    const covered = new Set(rows.map((r) => r.sku))
+    const uncovered = input.children.filter((c) => !covered.has(c.sku))
+    if (uncovered.length > 0) {
+      onProgress(`Covering ${uncovered.length} ungrouped SKU(s) via the family-level backend...`)
+      try {
+        const restInput: PipelineInput = { ...input, children: uncovered }
+        let rest = await runBackendAgent(restInput, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok)
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok) }))
+        if (lean === 'female' || lean === 'male') rest = rest.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+        rows.push(...rest)
+      } catch (e) {
+        if (throwOnGroupFailure) throw e
+        console.warn(`[pipeline] family-level remainder backend failed — ${uncovered.length} SKU(s) keep their previous keywords:`, e instanceof Error ? e.message : e)
+      }
+    }
+    return rows
+  }
+  // ── PER-DESIGN DESCRIPTION fan-out — shared by the full regen AND description-only partials
+  // (#9: description-only never refreshed per-design descriptions while the push preferred them).
+  // Per-group resilience: a failed group falls back to the broadcast description alone.
+  const fanOutPerDesignDescriptions = async (broadcastDesc: string): Promise<typeof perChildDescriptions> => {
+    if (!(apparelMultiDesign && designGroupContexts.length)) return undefined
+    const sets = await Promise.all(designGroupContexts.map(async (ctx) => {
+      try {
+        const repSku = ctx.skus[0]?.sku
+        const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
+        const groupTopOpp = scopeKwsToGroup(ctx, topOpportunityKwsForBullets, (k) => k)
+        // useCouncil:false — runs once PER design group inside a Promise.all; N parallel GPT-5
+        // councils would be cost/latency-prohibitive. Only the broadcast description gets the council.
+        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, groupTopOpp, false)
+        const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+        // 3rd arg = sellerGarmentText (parity-audit #8: it was missing, so the heavy-garment-
+        // stuffing guard never fired for per-design descriptions).
+        let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? '')
+        if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
+        gd = fixDoubledArticleBeforeBrand(gd, brandName)
+        return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
+      } catch (e) {
+        console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
+        return { skus: ctx.skus, description: broadcastDesc, designName: ctx.designName, designKey: ctx.key }
+      }
+    }))
+    const out: NonNullable<typeof perChildDescriptions> = []
+    for (const ds of sets) for (const s of ds.skus) out.push({ sku: s.sku, asin: s.asin, description: ds.description, designName: ds.designName, designKey: ds.designKey })
+    return out
+  }
   // #79 partial runs: exactly one of the pair, anchored on the stored title+bullets.
   if (only === 'keywords') {
     const ownB = ownBrandTokenSet(brandName)
@@ -4644,12 +4862,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       return out
     }
-    let perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
+    // Per-design first (#12): contexts exist on keywords-only regens too now (rebuilt from stored
+    // per-child titles). Rows arrive group-filled — do NOT re-run the family-level byte-fill on
+    // them (it would re-introduce cross-design pool terms). One retry on BOTH paths (review: the
+    // per-design path previously threw with zero retries — a reliability regression vs family).
+    const runBackendOnce = async (): Promise<PipelinePerChildKeywords[]> =>
+      (await runBackendPerDesign(true)) ?? finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok))
+    let perChildOnly: PipelinePerChildKeywords[]
+    try {
+      perChildOnly = await runBackendOnce()
+    } catch {
+      onProgress('Backend regen hiccuped — retrying…')
+      perChildOnly = await runBackendOnce()
+    }
     let problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
     if (problems.length > 0) {
       // One retry — the failures here are transient LLM truncations/hiccups, not logic.
       onProgress('Backend output looked degraded — retrying…')
-      perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
+      perChildOnly = await runBackendOnce()
       problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
     }
     if (problems.length > 0) {
@@ -4663,18 +4893,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   if (only === 'description') {
     let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets)
-    if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust), attributePinFinal ?? '')
+    // broadcastMotifTrust (review-caught): the plain motifTrust stripped a unified-set's couple
+    // design names on description-only partials, where the full regen deliberately preserves them.
+    if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? '')
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
+    // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
+    // previously only the broadcast updated and the regenerated copy never reached the children.
+    perChildDescriptions = await fanOutPerDesignDescriptions(descriptionOnly)
     onProgress('Description regenerated.')
-    return partialResult('description', { recommended_description: descriptionOnly })
+    return partialResult('description', { recommended_description: descriptionOnly, per_child_descriptions: perChildDescriptions })
   }
   // Backend and description BOTH depend on (title, bullets) but NOT on each other —
   // identical prompts and inputs as before, just issued concurrently. Quality-neutral
   // speed-up (PO gate): only genuinely independent calls overlap; the council stages
   // (proposers → adversary → judge) stay sequential because their order IS the quality.
+  // Per-design backend first (#12) — inside the SAME concurrent pair so single-design keeps the
+  // backend/description overlap (runBackendPerDesign returns null instantly for single-design).
+  let usedPerDesignBackend = false
   let [perChild, descriptionRaw] = await Promise.all([
-    runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok),
+    (async () => {
+      const pd = await runBackendPerDesign(false)
+      if (pd) { usedPerDesignBackend = true; return pd }
+      return await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok)
+    })(),
     runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets),
   ])
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
@@ -4693,17 +4935,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     return out
   }
-  perChild = finishBackendFull(perChild)
-  // Same degraded-output gate as the keywords-only path, but a FULL regen carries five other
-  // sections — retry the backend once, then proceed with a loud log rather than nuking the run.
-  {
+  // Per-design rows arrive group-filled — the family-level byte-fill would re-introduce the
+  // cross-design pool terms the group scoping just removed, so it is family-path only.
+  if (!usedPerDesignBackend) {
+    perChild = finishBackendFull(perChild)
+    // Same degraded-output gate as the keywords-only path, but a FULL regen carries five other
+    // sections — retry the backend once, then proceed with a loud log rather than nuking the run.
     let problems = backendOutputProblems(perChild, input.children, apparelProduct)
     if (problems.length > 0) {
       onProgress('Backend output looked degraded — retrying…')
-      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
+      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok))
       problems = backendOutputProblems(perChild, input.children, apparelProduct)
       if (problems.length > 0) console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
     }
+  } else {
+    const problems = backendOutputProblems(perChild, input.children, apparelProduct)
+    if (problems.length > 0) console.warn(`[listingPipeline] per-design backend degraded (failed groups keep previous keywords): ${problems.join('; ')}`)
   }
   // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience). Uses
   // broadcastMotifTrust so a unified-set's couple-concept design names survive the ungrounded strip.
@@ -4713,38 +4960,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
   description = fixDoubledArticleBeforeBrand(description, brandName)
 
-  // PER-DESIGN DESCRIPTION (additive): for a multi-design POD apparel family, generate a SEPARATE
-  // description per design group (reusing the title loop's resolved group context) and fan it out to
-  // every SKU in the group. Each group's description is grounded on THAT group's bullets (the
-  // per-design bullets from above when available, else the broadcast bullets). The broadcast
-  // `description` above is UNCHANGED — it stays the parent/fallback. Any failure leaves
-  // perChildDescriptions undefined so the broadcast description still ships. (Full-regen only.)
-  if (apparelMultiDesign && designGroupContexts.length) {
-    try {
-      const groupDescSets = await Promise.all(designGroupContexts.map(async (ctx) => {
-        const repSku = ctx.skus[0]?.sku
-        const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
-        // useCouncil:false — this runs once PER design group inside a Promise.all, so N GPT-5 councils
-        // would fire in parallel; per-design descriptions stay on the single fast agent (only the
-        // broadcast description above gets the council).
-        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets, false)
-        // Mirror the broadcast description strip chain EXACTLY, but ground motif-stripping on THIS
-        // group's own design (parity with per-design titles/bullets) — not the parent/other designs.
-        const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
-        let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
-        if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
-        gd = fixDoubledArticleBeforeBrand(gd, brandName)
-        return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
-      }))
-      perChildDescriptions = []
-      for (const ds of groupDescSets) {
-        for (const s of ds.skus) perChildDescriptions.push({ sku: s.sku, asin: s.asin, description: ds.description, designName: ds.designName, designKey: ds.designKey })
-      }
-    } catch (e) {
-      console.warn('[pipeline] per-design description failed — falling back to broadcast description:', e instanceof Error ? e.message : e)
-      perChildDescriptions = undefined
-    }
-  }
+  // PER-DESIGN DESCRIPTION: shared fan-out (also used by description-only partials). Grounded on
+  // each group's own bullets/motifs; per-group failures fall back to this broadcast description.
+  perChildDescriptions = await fanOutPerDesignDescriptions(description)
 
   // Stage 4 — Audit (reasoning model)
   onProgress('Auditing & building action plan...')
@@ -4894,7 +5112,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // carries the Material/Fit/Neck/Sleeve/Department facts (highlight duplicates already filtered
     // out above); capacityFamilyTokens is the pipeline's real capacity-family signal.
     onProgress('Composing Item Highlights...')   // keepalive before the LLM call
-    const hl = await buildItemHighlights(input.openai, finalTitle, effectiveDesignName, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
+    // broadcastDesignAnchor (parity-audit): identical to effectiveDesignName for single-design ('')
+    // and per-design multi-design families, but a unified-set (couple) family keeps its shared
+    // concept in the highlight instead of losing it to the zeroed multi-design name.
+    const hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
     if (hl) {
       pdiFinal.push({
         field_name: highlightsAttr.title,
@@ -4920,7 +5141,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
-    keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName },
+    keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined },
     debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
   })
 }
