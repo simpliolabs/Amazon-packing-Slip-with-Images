@@ -45,6 +45,7 @@ import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { logAudit } from '@/lib/audit'
 import { fingerprintOf } from '@/lib/keyword-engine/shareSnapshots'  // VERBATIM — outcome-epoch fingerprint
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'
+import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'
 // PURE heal-decision helpers (adversarial review 2026-07-02): dependency-free so the sandbox can
 // smoke the destructive/escalation gates standalone — see healEvidence.ts's module doc.
 import {
@@ -2775,8 +2776,8 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               if (rows.length > 0) {
                 const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
                 const ctxS = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
-                const parentOwn = rows.find((r) => r.asin === parent_asin) || null
-                const score = scoreListingContent(parentOwn as never, rows as never, ctxS)
+                const { representative, scoredRows } = pickRescoreRepresentative(rows as never[], parent_asin, (sc?.top_child_asin as string) ?? null)
+                const score = scoreListingContent(representative as never, scoredRows as never, ctxS)
                 await db.from('listing_seo_scores').update({
                   title_score: score.title_score, bullet_score: score.bullet_score,
                   keyword_score: score.keyword_score, aplus_score: score.aplus_score,
@@ -2789,7 +2790,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                 // (e.g. fabric_type) does NOT change the content COPY, so we do NOT stamp/reset the
                 // outcome epoch here (the copy under measurement is unchanged); we only record the score
                 // move. Fingerprint the current content so the row still JOINs the snapshots by value.
-                const topRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? parentOwn ?? rows[0]
+                const topRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? representative ?? rows[0]
                 await appendScoreHistory(db, {
                   parent_asin,
                   overall_score: score.overall_score,
@@ -3019,8 +3020,8 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             if (rows.length > 0) {
               const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
               const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
-              const parentOwn = rows.find((r) => r.asin === parent_asin) || null
-              const score = scoreListingContent(parentOwn as never, rows as never, ctx)
+              const { representative, scoredRows } = pickRescoreRepresentative(rows as never[], parent_asin, (sc?.top_child_asin as string) ?? null)
+              const score = scoreListingContent(representative as never, scoredRows as never, ctx)
               // Refresh the cached display title alongside the scores. syncListingContent
               // populates listing_seo_scores.product_title from the top child's title at
               // sync time; without this same update on push, the page header + dashboard
@@ -3043,7 +3044,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
 
               // Phase C: fingerprint the measured copy (fingerprintOf VERBATIM → JOINs the snapshots)
               // and conditionally append a push-trigger score-history change-point row.
-              pushedFingerprint = fingerprintOf((topChildRow ?? parentOwn ?? rows[0]) as never)
+              pushedFingerprint = fingerprintOf((topChildRow ?? representative ?? rows[0]) as never)
               pushedOverall = typeof score.overall_score === 'number' ? score.overall_score : null
               await appendScoreHistory(db, {
                 parent_asin,
@@ -3350,8 +3351,8 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
         if (rows.length > 0) {
           const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
           const ctxS = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
-          const parentOwn = rows.find((r) => r.asin === parent_asin) || null
-          const score = scoreListingContent(parentOwn as never, rows as never, ctxS)
+          const { representative, scoredRows } = pickRescoreRepresentative(rows as never[], parent_asin, (sc?.top_child_asin as string) ?? null)
+          const score = scoreListingContent(representative as never, scoredRows as never, ctxS)
           await db.from('listing_seo_scores').update({
             title_score: score.title_score, bullet_score: score.bullet_score, keyword_score: score.keyword_score,
             aplus_score: score.aplus_score, description_score: score.description_score, features_score: score.features_score,
@@ -3361,7 +3362,7 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
           // Phase C §4-D: append a push-trigger score-history change-point. A BULK-DETAILS push changes
           // attributes, NOT content COPY, so (like the single-details branch) we do NOT stamp/reset the
           // outcome epoch — only the score move is recorded. Fingerprint current content so it JOINs.
-          const topRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? parentOwn ?? rows[0]
+          const topRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? representative ?? rows[0]
           await appendScoreHistory(db, {
             parent_asin,
             overall_score: score.overall_score,
