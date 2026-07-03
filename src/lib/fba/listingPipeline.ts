@@ -1620,24 +1620,35 @@ function dedupeBulletVariants(phrases: string[]): string[] {
 }
 
 /** Secondary DESIGN PHRASE capture (PO 2026-07-03, B0GR1K3TXF). A POD design title often carries a
- *  SECONDARY phrase after a separator — "Floral Book Lover T-Shirt – Too Many Books Graphic Tee".
- *  The design-name resolver keeps ONE ("Floral Book Lover") and drops the rest, but "Too Many Books"
- *  is a real search phrase printed on the shirt that the PO wants ON THE PAGE ("just a keyword that
- *  needs to be added"). Pull the clause(s) after the first separator, strip garment/audience/brand
- *  boilerplate, and return distinctive ≥2-significant-token phrases to inject as covered keywords. */
-const SECONDARY_STRIP_RE = /\b(?:t[- ]?shirts?|tees?|tshirts?|shirts?|graphic|apparel|clothing|tops?|for\s+(?:men|women|him|her|kids|adults)|m[ae]n'?s|wom[ae]n'?s|unisex|gifts?|novelty|vintage|retro|funny|cute)\b/gi
+ *  SECONDARY phrase after a SUBTITLE separator — "Floral Book Lover T-Shirt – Too Many Books Graphic
+ *  Tee". The design-name resolver keeps ONE ("Floral Book Lover") and drops the rest, but "Too Many
+ *  Books" is a real search phrase printed on the shirt that the PO wants ON THE PAGE ("just a keyword
+ *  that needs to be added"). Split ONLY on genuine subtitle separators (– — | · : or a SPACED hyphen)
+ *  — NOT commas/semicolons: POD titles are overwhelmingly comma-delimited keyword LISTS, and treating
+ *  every comma-clause as a design phrase force-injected junk (review). Trailing ", adjective" noise is
+ *  trimmed by taking each subtitle clause up to its first comma. */
 function secondaryDesignPhrases(canonicalTitle: string | null | undefined, brandName: string): string[] {
   const t = (canonicalTitle || '').trim()
   if (!t) return []
-  const parts = t.split(/\s*[–—|/·:,;]\s*|\s+-\s+/).map((s) => s.trim()).filter(Boolean)
-  if (parts.length < 2) return []   // no separator → no distinct secondary clause
+  const parts = t.split(/\s*[–—|·:]\s*|\s+-\s+/).map((s) => s.trim()).filter(Boolean)
+  if (parts.length < 2) return []   // no SUBTITLE separator → no distinct secondary clause
   const brandRe = brandName ? new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi') : null
   const out: string[] = []
   const seen = new Set<string>()
   for (const clause of parts.slice(1)) {   // clauses AFTER the primary design clause
-    let p = clause
+    let p = (clause.split(',')[0] || '').trim()   // up to the first comma — drop trailing ", Trendy" noise
     if (brandRe) p = p.replace(brandRe, ' ')
-    p = p.replace(SECONDARY_STRIP_RE, ' ').replace(/[^A-Za-z0-9'\s]/g, ' ').replace(/\s{2,}/g, ' ').trim()
+    // Reject any clause carrying a third-party brand or a protected trademark (review: the injection
+    // otherwise bypassed the tmSafe gate every other keyword passes); scrub marks that have a safe form.
+    if (findThirdPartyBrands(p, ownBrandTokenSet(brandName || '')).length > 0) continue
+    p = scrubTrademarks(p)
+    if (findTrademarkPhrases(p).length > 0) continue
+    // Strip ONLY trailing garment/audience/structural tokens (review: mid-phrase stripping gutted a
+    // legit "Vintage Sunset"/"Funny Cat" design). Loop-trim from the end while the last token is boilerplate.
+    p = p.replace(/[^A-Za-z0-9'\s]/g, ' ').replace(/\s{2,}/g, ' ').trim()
+    const TRAIL_STRIP = /\s+(?:t[- ]?shirts?|tees?|tshirts?|shirts?|graphic|apparel|clothing|tops?|design|for|men|women|him|her|kids|adults|m[ae]n'?s|wom[ae]n'?s|unisex|gifts?)\s*$/i
+    let prev = ''
+    while (p && p !== prev) { prev = p; p = p.replace(TRAIL_STRIP, '').trim() }
     if (bulletTokens(p).length < 2) continue   // need ≥2 significant tokens to be a real phrase
     const sig = p.toLowerCase()
     if (seen.has(sig)) continue
@@ -4286,28 +4297,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     attrs.specs = attrs.specs.filter(clean)
   }
   const cleanGated = apparelProduct ? gated : gated.filter((k) => !APPAREL_CONTAMINANTS.test(k.keyword))
+  // Secondary design-phrase capture (PO 2026-07-03): fold seller-title subtitle phrases like "Too
+  // Many Books" in as a covered keyword ("a keyword that needs to be on the page"). Inject into
+  // cleanGated (review: this is the pool that feeds topOppGated → topOpportunityKwsForBullets →
+  // oppPlusDesign, so the phrase is COVERAGE-PROTECTED by the bullet coherence gate and the scorer;
+  // injecting only into `analysis` bypassed all of that). Score 35, the attributeAsKeyword ceiling —
+  // above filler, below the genuine money keywords, so it never crowds one out of the 75-char title
+  // (review). Only when NOT already present at a real score.
+  if (apparelProduct) {
+    for (const p of secondaryDesignPhrases(input.canonicalTitle ?? repTitle, brandName)) {
+      const pl = p.toLowerCase()
+      if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
+    }
+  }
   // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
   // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
   // must NOT enter the title — they go to bullets/description/structured fields only.
   const analysis = [...attrs.searchKeyphrases.map(attributeAsKeyword), ...cleanGated]
   const bulletAttrs = [...attrs.searchKeyphrases, ...attrs.specs]
-  // Secondary design-phrase capture (PO 2026-07-03): fold seller-title subtitle phrases like "Too
-  // Many Books" in as a high-priority CRITICAL keyword so the title/bullets/backend actually use it
-  // ("a keyword that needs to be on the page"). Boost an existing pool entry rather than duplicate.
-  if (apparelProduct) {
-    for (const p of secondaryDesignPhrases(input.canonicalTitle ?? repTitle, brandName)) {
-      const pl = p.toLowerCase()
-      const idx = analysis.findIndex((k) => k.keyword.toLowerCase() === pl)
-      const boosted: AnalyzedKeyword = {
-        ...(idx >= 0 ? analysis[idx] : attributeAsKeyword(p)),
-        opportunityScore: Math.max(idx >= 0 ? analysis[idx].opportunityScore : 0, 200),
-        actionType: 'CRITICAL',
-      }
-      if (idx >= 0) analysis.splice(idx, 1)
-      analysis.unshift(boosted)
-      if (!bulletAttrs.some((b) => b.toLowerCase() === pl)) bulletAttrs.push(p)
-    }
-  }
 
   // PIN the single highest SEARCH-VOLUME real keyword (not a synthetic attribute, not
   // seasonal — seasonal belongs in backend) so the title agent can never drop the money

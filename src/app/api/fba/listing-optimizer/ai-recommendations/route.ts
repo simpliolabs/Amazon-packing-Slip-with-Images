@@ -858,8 +858,12 @@ export async function POST(req: NextRequest) {
           let secScore: { title: number; bullet: number; keyword: number; aplus: number; description: number; features: number } | null = null
           try {
             const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+            const { pickRescoreRepresentative } = await import('@/lib/fba/rescoreRepresentative')
             const scoreRows = children as unknown as Parameters<typeof scoreListingContent>[1]
-            const parentOwn = scoreRows.find((r) => r.asin === parent_asin) || null
+            // 6th re-score site (review): route through the single representative helper for parity
+            // with the 3 push + 2 sync sites, or a regen scored off the stale self-parented row would
+            // overwrite (revert) the fresh post-push score in the same listing_seo_scores row.
+            const { representative, scoredRows } = pickRescoreRepresentative(scoreRows as { asin?: unknown }[], parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
             const ctx = await fetchScoringContext(supabase, parent_asin, pipelineScoreRow?.top_child_asin || children[0]?.asin || null)
             // This regen's recommendations (incl. product_details_improvements) are persisted to
             // listing_seo_recommendations AFTER this block — so fetchScoringContext just read the
@@ -886,7 +890,7 @@ export async function POST(req: NextRequest) {
               ctx.bulletPlanKeywords = result.keywordPlan.bullets
               ctx.planDesignName = result.keywordPlan.designName
             }
-            const sc = scoreListingContent(parentOwn, scoreRows, ctx)
+            const sc = scoreListingContent(representative as never, scoredRows as never, ctx)
             secScore = { title: sc.title_score, bullet: sc.bullet_score, keyword: sc.keyword_score, aplus: sc.aplus_score, description: sc.description_score, features: sc.features_score }
             await supabase.from('listing_seo_scores').update({
               title_score: sc.title_score,
