@@ -3100,6 +3100,15 @@ export default function ListingDetailPage() {
                                     ✓ On Amazon
                                   </span>
                                 )}
+                                {/* Pushed-but-processing (PO: "pushed with a change, why not marked done?"): the badge
+                                    above reads the LIVE Amazon value, which lags a push by 15min–6hr — and a re-sync in
+                                    that window reverts the optimistic flip. The pending auto-verify task is the truth
+                                    that a push IS in flight, so surface it and stop the card reading as never-pushed. */}
+                                {!upToDate && verifyQueue.tasks.some((t) => (t.status === 'pending' || t.status === 'running') && t.field === `details:${pd.sp_api_key ?? ''}`) && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium whitespace-nowrap" title="Pushed — Amazon is processing (typically 15min–6hr). Auto-verify will flip this to ✓ On Amazon when it lands, or alert you if it fails. No need to push again.">
+                                    ⏳ Verifying
+                                  </span>
+                                )}
                               </span>
                               <div className="flex items-center gap-2 shrink-0">
                                 <button onClick={() => copy(prettyDetailValue(pd.recommended_value, pd.enum_accepted), `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
