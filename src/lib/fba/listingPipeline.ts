@@ -1583,6 +1583,21 @@ function contiguousNovelRun(kw: string, covered: Set<string>, wordBlocked: (w: s
   return runs[0] ?? []
 }
 
+/** Fragment PROVENANCE gate (architecture council 2026-07-03, Layer 1 of A+B): a pass-2 fill
+ *  fragment may ship ONLY if its normalized token sequence equals a phrase a human actually
+ *  searches or wrote (the family keyword pool / canonical bigrams). contiguousNovelRun guarantees
+ *  a fragment is a verbatim SUB-PHRASE — it cannot guarantee the sub-phrase MEANS anything once
+ *  its head noun is covered: live B0GR1K3TXF, pool phrase "too many books" with "books" already
+ *  covered shipped ", Too Many for Women". Allowlist-by-provenance replaces the four blocklist
+ *  patches before it (an open generative class can't be enumerated). Same normalization stack as
+ *  the dedup sets (bulletTokens + fillNormTok) — that symmetry is load-bearing. */
+const fragPoolKey = (s: string): string => bulletTokens(s).map(fillNormTok).join(' ')
+function buildFragPool(sources: string[][]): Set<string> {
+  const set = new Set<string>()
+  for (const arr of sources) for (const kw of arr) { const k = fragPoolKey(kw); if (k) set.add(k) }
+  return set
+}
+
 function dedupeAudiencePhrases(title: string): string {
   const incl = title.match(/\bfor (?:men and women|women and men)\b/i)
   if (!incl) return title
@@ -3544,6 +3559,114 @@ function attributeAsKeyword(attr: string): AnalyzedKeyword {
  *  "Fishing"). The brand-FRONT guard only fixes a brand MISSING from index 0 — it leaves a second
  *  mid-title brand intact (live on B0F6QZ34B1/OF: "THE CEO Only Fins T-Shirt the Ceo Fishing Fishing
  *  Tee"). No-op on already-clean titles, so single-design output stays byte-identical. */
+/** Layer 2 of the A+B architecture (council 2026-07-03): ONE batched LLM read of the FINAL
+ *  assembled titles — the review surface the pipeline lacked (a council writes the draft, but
+ *  deterministic string surgery assembles what ships and no intelligence ever re-read it).
+ *  DROP-ONLY VETO: the model may flag comma-segments as broken; it never authors text, so shipped
+ *  bytes stay deterministic. A PROTECT-MASK makes the brand/design lead, mustInclude/attributePin
+ *  carriers, and the audience tail untouchable. Modes via TITLE_COHERENCE_GATE env:
+ *  'shadow' (default — log would-drops + titleProblems note, never mutate), 'enforce' (drop
+ *  flagged segments), 'off'. Promotion to enforce is a PO decision from measured shadow precision.
+ *  FAIL-OPEN LOUD: any LLM/parse failure returns titles unchanged with a visible note (this
+ *  codebase has been burned by silent best-effort catches — cookies()-client incident). */
+async function coherenceGateTitles(
+  openai: OpenAI,
+  items: { id: string; title: string; designName?: string; mustInclude?: string; attributePin?: string }[],
+  onProgress?: (m: string) => void,
+): Promise<Map<string, { title: string; droppedNotes: string[] }>> {
+  const mode = (process.env.TITLE_COHERENCE_GATE || 'shadow').toLowerCase()
+  const out = new Map<string, { title: string; droppedNotes: string[] }>()
+  for (const it of items) out.set(it.id, { title: it.title, droppedNotes: [] })
+  if (mode === 'off' || items.length === 0) return out
+  type Seg = { text: string; protectedSeg: boolean }
+  const parsed = new Map<string, { segs: Seg[]; tail: string }>()
+  const qualifying: { id: string; segs: Seg[] }[] = []
+  for (const it of items) {
+    const tailMatch = it.title.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+    const tail = tailMatch ? tailMatch[0] : ''
+    let head = tail ? it.title.slice(0, it.title.length - tail.length) : it.title
+    // A COMMA-BEARING protected needle ("Fish, Fear Me") must survive the split as one segment
+    // (adversarial review: splitting first orphaned the name's tail into an unprotected segment).
+    for (const needle of [it.designName, it.mustInclude, it.attributePin]) {
+      if (!needle?.trim() || !needle.includes(',')) continue
+      try {
+        const esc = needle.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        head = head.replace(new RegExp(esc, 'gi'), (m) => m.replace(/,/g, '\u0001'))
+      } catch { /* unparseable needle - fall through to plain split */ }
+    }
+    const parts = head.split(/,\s*/).map((t) => t.replace(/\u0001/g, ','))
+    const protHas = (s: string, needle?: string | null) => !!needle?.trim() && s.toLowerCase().includes(needle.trim().toLowerCase())
+    const segs: Seg[] = parts.map((text, i) => ({
+      text,
+      protectedSeg: i === 0 || protHas(text, it.designName) || protHas(text, it.mustInclude) || protHas(text, it.attributePin),
+    }))
+    parsed.set(it.id, { segs, tail })
+    if (segs.length >= 2 && segs.some((s) => !s.protectedSeg)) qualifying.push({ id: it.id, segs })
+  }
+  if (qualifying.length === 0) return out   // nothing droppable anywhere — zero LLM cost
+  onProgress?.('Coherence review: reading final titles...')
+  try {
+    const lines = qualifying.map((q) => `${q.id}: ${q.segs.map((s, i) => `[${i}${s.protectedSeg ? '*' : ''}] ${s.text}`).join(' | ')}`).join('\n')
+    const r = await openai.chat.completions.create({
+      model: process.env.TITLE_COHERENCE_MODEL || 'gpt-4.1-mini',
+      temperature: 0,
+      max_tokens: 200,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'You review FINISHED Amazon product titles, each split into numbered comma-segments. Flag ONLY clearly broken segments: a phrase torn from its noun ("Too Many", "Plus"), a dangling modifier, word salad. Valid search keyphrases, niche jargon, and audience phrases are NOT broken. Segments marked * are locked - never flag them. Return JSON {"drops":{"<id>":[segmentNumbers]}} listing ONLY genuinely broken segment numbers; return {"drops":{}} when nothing is broken.' },
+        { role: 'user', content: lines },
+      ],
+    }, { timeout: 20_000, maxRetries: 0 })
+    const drops = (parseJsonLoose<{ drops?: Record<string, unknown> }>(r.choices[0]?.message?.content || '{}').drops ?? {}) as Record<string, unknown>
+    for (const q of qualifying) {
+      const flagged = drops[q.id]
+      if (!Array.isArray(flagged) || flagged.length === 0) continue
+      const idxs = flagged.filter((n): n is number => Number.isInteger(n) && n >= 0 && n < q.segs.length && !q.segs[n].protectedSeg)
+      if (idxs.length === 0) continue
+      const p = parsed.get(q.id)!
+      const dropped = idxs.map((i) => q.segs[i].text)
+      const entry = out.get(q.id)!
+      if (mode === 'enforce') {
+        const keptHead = q.segs.filter((_, i) => !idxs.includes(i)).map((s) => s.text).join(', ')
+        entry.title = `${keptHead}${p.tail}`.replace(/\s{2,}/g, ' ').replace(/\s+,/g, ',').replace(/,\s*,/g, ',').trim()
+        entry.droppedNotes.push(`coherence gate dropped: ${dropped.map((d) => `"${d}"`).join(', ')}`)
+      } else {
+        console.warn(`[coherence-gate][shadow] would drop from ${q.id}:`, dropped.join(' | '))
+        entry.droppedNotes.push(`coherence gate (shadow) would drop: ${dropped.map((d) => `"${d}"`).join(', ')}`)
+      }
+    }
+  } catch (e) {
+    console.warn('[coherence-gate] skipped (LLM error/timeout):', e instanceof Error ? e.message : e)
+    for (const it of items) out.get(it.id)!.droppedNotes.push('coherence gate skipped (LLM error/timeout)')
+  }
+  return out
+}
+
+/** Deterministic description polish (live regen 2026-07-03): headings shipped "THE CEO a Day
+ *  Without Fishing T-Shirt" (Title-Case-style article loss upstream) and "Funny Fishing Fishing
+ *  Novelty" (adjacent stutter) — the same two repairs titles already get, applied to the
+ *  description text. Adversarial-review hardening: names are PLACEHOLDER-PROTECTED before the
+ *  stutter collapse (it ate "Mahi Mahi"/"Boo Boo Crew"), the re-snap is word-bounded and
+ *  MULTI-WORD-only (a single common-word name like "Fishing" or "Cat" would case-flip prose and
+ *  "Boo" would corrupt "bamboo"), and the brand is protected verbatim. */
+function polishDescription(desc: string, designName?: string | null, brandName?: string | null): string {
+  let d = desc || ''
+  const prot: string[] = []
+  const stash = (m: string): string => { prot.push(m); return `\u0000${prot.length - 1}\u0000` }
+  const dn = designName?.trim()
+  if (dn && dn.split(/\s+/).length >= 2) {
+    const re = (() => { try { return new RegExp(`\\b${dn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/['’]/g, "['’]?")}\\b`, 'gi') } catch { return null } })()
+    if (re) d = d.replace(re, () => stash(dn))   // canonical casing + protection in one move
+  }
+  const bn = brandName?.trim()
+  if (bn) {
+    const re = (() => { try { return new RegExp(`\\b${bn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi') } catch { return null } })()
+    if (re) d = d.replace(re, (m) => stash(m))   // brand kept verbatim, protected
+  }
+  d = d.replace(/\b([A-Za-z][\w'’-]*)(\s+\1\b)+/gi, '$1')
+  return d.replace(/\u0000(\d+)\u0000/g, (_, i) => prot[Number(i)] ?? '')
+}
+
 function dedupeBrandAndStutter(title: string, brandName: string): string {
   let t = (title || '').trim()
   if (brandName && t) {
@@ -3653,6 +3776,9 @@ async function buildTitleFor(
     // words (original order, every token new — so no stutter and no gender dup by construction);
     // bag-of-words indexing means the trimmed remainder still ranks. Same lean/motif rails.
     if ((head + tail).length < 73) {
+      // PROVENANCE POOL (council Layer 1): every phrase a fragment is allowed to BE — the same
+      // sources this loop already iterates, so the gate authorizes nothing new.
+      const fragPool = buildFragPool([candidates.map((c) => c.keyword), topUpgradeKws, searchKeyphrases, canonPhrases])
       for (const kw of [...candidates.map((c) => c.keyword), ...topUpgradeKws, ...canonPhrases]) {
         if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
         if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
@@ -3675,6 +3801,14 @@ async function buildTitleFor(
           const frag = novel.join(' ')
           if (isAllJunk(frag)) break
           if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) break // ", Mens" is not content
+          // PROVENANCE GATE (council Layer 1): a fragment ships only if it IS a pooled phrase —
+          // "Too Many" (headless remainder of "too many books") dies here; a narrower trim that
+          // is itself a real pooled phrase may still pass on the next iteration.
+          if (!fragPool.has(fragPoolKey(frag))) {
+            novel = novel.slice(0, -1)
+            while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+            continue
+          }
           const next = `${head}, ${titleCaseKw(frag)}`
           if ((next + tail).length <= 75) {
             head = next
@@ -3898,6 +4032,8 @@ Rules:
     // Retry each keyword as ONLY its novel significant words — every token new, so no stutter and
     // no gender dup by construction. Same design-motif + junk rails as the whole-phrase pass.
     if ((fillHead + tail).length < 73) {
+      // PROVENANCE POOL (council Layer 1): topUpgradeKws is the parent's only authorized source.
+      const fragPool = buildFragPool([topUpgradeKws])
       for (const kw of topUpgradeKws) {
         // Contiguous novel run only (review): verbatim sub-phrases, no bare attribute modifiers,
         // no ungrounded garment words, no cross-gender words over a single-gender tail.
@@ -3914,7 +4050,18 @@ Rules:
           if (isAllJunk(frag)) break
           if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) break // ", Mens" is not content
           const fragToks = bulletTokens(frag).map(fillNormTok)
-          if (designTokSets.some((ds) => fragToks.filter((tt) => ds.has(tt)).length >= 2)) { novel = novel.slice(0, -1); continue }
+          if (designTokSets.some((ds) => fragToks.filter((tt) => ds.has(tt)).length >= 2)) {
+            novel = novel.slice(0, -1)
+            while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop() // review: an un-popped connector let ", Gifts For" reach the gate
+            continue
+          }
+          // PROVENANCE GATE (council Layer 1): fragments must BE pooled phrases — no headless
+          // remainders ("Too Many", ", Plus" — both live-caught).
+          if (!fragPool.has(fragPoolKey(frag))) {
+            novel = novel.slice(0, -1)
+            while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+            continue
+          }
           const next = `${fillHead}, ${titleCaseKw(frag)}`
           if ((next + tail).length <= 75) {
             fillHead = next
@@ -4398,6 +4545,39 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     finalTitle = (input.priorTitle || repTitle || '').trim()
   }
 
+  // ── COHERENCE GATE (council 2026-07-03, Layer 2 of A+B) — ONE batched call per regen over ALL
+  // final assembled titles (parent + per-child + single/couple), at the orchestrator level so the
+  // per-design fan-out never multiplies LLM calls. Shadow by default: logs what it WOULD drop;
+  // TITLE_COHERENCE_GATE=enforce promotes the veto once the PO has measured shadow precision.
+  if ((!only || only === 'title') && finalTitle) {
+    const gateItems: { id: string; title: string; designName?: string; mustInclude?: string; attributePin?: string }[] = [
+      { id: '__parent', title: finalTitle, designName: unifiedSet && coupleConcept ? coupleConcept : (apparelMultiDesign ? undefined : designName), mustInclude: titleMustInclude, attributePin: attributePinFinal },
+    ]
+    if (perChildTitles?.length) {
+      const seenTitles = new Set<string>()
+      for (const pc of perChildTitles) {
+        if (seenTitles.has(pc.title)) continue   // one entry per distinct title (a design group shares one)
+        seenTitles.add(pc.title)
+        gateItems.push({ id: `t${gateItems.length}`, title: pc.title, designName: pc.designName, mustInclude: titleMustInclude, attributePin: attributePinFinal })
+      }
+    }
+    const gated = await coherenceGateTitles(input.openai, gateItems, onProgress)
+    const parentGate = gated.get('__parent')
+    if (parentGate) {
+      if (parentGate.title !== finalTitle) finalTitle = parentGate.title
+      titleProblems.push(...parentGate.droppedNotes)
+    }
+    for (const gi of gateItems) {
+      if (gi.id === '__parent') continue
+      const g = gated.get(gi.id)
+      if (!g) continue
+      titleProblems.push(...g.droppedNotes)
+      if (g.title !== gi.title && perChildTitles) {
+        for (const pc of perChildTitles) if (pc.title === gi.title) pc.title = g.title
+      }
+    }
+  }
+
   // Per-child capacity titles — ONLY for non-apparel families whose children span >=2 distinct
   // capacities (e.g. SD cards 64/128/256GB). Researched Amazon best practice: each child must
   // carry its OWN capacity in the title; broadcasting one capacity to the others risks search
@@ -4839,6 +5019,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? '')
         if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
         gd = fixDoubledArticleBeforeBrand(gd, brandName)
+        gd = polishDescription(gd, ctx.designName, brandName)
         return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
       } catch (e) {
         console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
@@ -4898,6 +5079,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? '')
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
+    descriptionOnly = polishDescription(descriptionOnly, broadcastDesignAnchor, brandName)
     // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
     // previously only the broadcast updated and the regenerated copy never reached the children.
     perChildDescriptions = await fanOutPerDesignDescriptions(descriptionOnly)
@@ -4959,6 +5141,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     : descriptionRaw
   if (apparelProduct && (lean === 'female' || lean === 'male')) description = enforceHardAudience(description, lean === 'female' ? 'Women' : 'Men')
   description = fixDoubledArticleBeforeBrand(description, brandName)
+  description = polishDescription(description, broadcastDesignAnchor, brandName)
 
   // PER-DESIGN DESCRIPTION: shared fan-out (also used by description-only partials). Grounded on
   // each group's own bullets/motifs; per-group failures fall back to this broadcast description.
