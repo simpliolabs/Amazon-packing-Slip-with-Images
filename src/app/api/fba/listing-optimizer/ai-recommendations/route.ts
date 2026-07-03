@@ -775,6 +775,13 @@ export async function POST(req: NextRequest) {
               const { coerceDetailValue, attributeExistsInSchema, containerKeyFallback, resolveSpApiKeyFromTitle } = await import('@/lib/fba/productTypeDefinitions')
               const { resolveDetailAttribute } = await import('@/lib/fba/productDetailAttrs')
               const invalidDetailFields = new Set<string>()
+              // MULTI-DESIGN name-slot guard (parity-audit 2026-07-03): on a multi-design family,
+              // style_name/color_name IS the per-design name storage (the pipeline's own design-name
+              // resolver reads color → style_name → color_name). A broadcast push of "Style Name"
+              // would clobber EVERY design's stored name with one value and poison the next regen's
+              // per-design anchors — force those attrs per-variant/unpushable for these families.
+              const familyMultiDesign = (result.debug as { multiDesign?: boolean } | undefined)?.multiDesign === true
+              const DESIGN_NAME_SLOT_KEYS = new Set(['style_name', 'color_name', 'style', 'color'])
               for (const pd of pds) {
                 const row = pd as unknown as Record<string, unknown>
                 const staticAttr = resolveDetailAttribute(pd.field_name)
@@ -794,6 +801,12 @@ export async function POST(req: NextRequest) {
                   const container = await containerKeyFallback(ptType, spApiKey, ptOpts)
                   if (container) { spApiKey = container }
                   else { invalidDetailFields.add(pd.field_name); continue }
+                }
+                if (familyMultiDesign && DESIGN_NAME_SLOT_KEYS.has(spApiKey)) {
+                  row.sp_api_key = spApiKey
+                  row.attr_scope = 'per-variant'
+                  row.pushable = false
+                  continue
                 }
                 row.sp_api_key = spApiKey
                 row.attr_scope = 'broadcast'

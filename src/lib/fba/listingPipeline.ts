@@ -4511,12 +4511,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .map((k) => k.keyword)
   // Phase 2 unified-set: the SHARED bullets/description anchor on the COUPLE CONCEPT (both design
   // names + "Couple Matching"), not the family-level designName — so the one broadcast set names the
-  // whole set. Non-unified families keep designName (single-design) / '' (per-design path supplies its
-  // own anchor via designGroupContexts). coupleConcept is only populated by the title branch, so on a
-  // bullets/description-only partial regen (title branch skipped → empty) we fall back to designName,
-  // preserving today's partial behavior. motifTrust is widened with the couple concept so its design-
-  // name tokens (e.g. "Potato") survive the ungrounded-motif strip in the shared content.
-  const broadcastDesignAnchor = unifiedSet && coupleConcept ? coupleConcept : designName
+  // whole set. Single-design families keep designName.
+  // MULTI-DESIGN (parity-audit BLOCKER 2026-07-03): the broadcast set is what the PARENT HUB is
+  // pushed and what any child falls back to — anchoring it on the family-level designName (resolved
+  // from ONE rep child, e.g. "Argentina" on a 12-country family) forced one design's name into the
+  // hub's bullets while buildNicheParentTitle deliberately bans design names from the hub's title.
+  // Anchor on effectiveDesignName ('' for multi-design) so the broadcast stays niche-generic; the
+  // per-design fan-out below supplies each group's own anchor via designGroupContexts.
+  const broadcastDesignAnchor = unifiedSet && coupleConcept ? coupleConcept : (apparelMultiDesign ? effectiveDesignName : designName)
   const broadcastMotifTrust = unifiedSet && coupleConcept ? `${motifTrust} ${coupleConcept.toLowerCase()}` : motifTrust
   let bullets: string[]
   if (!only || only === 'bullets') {
@@ -4541,16 +4543,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (apparelMultiDesign && designGroupContexts.length) {
       try {
         const groupBulletSets = await Promise.all(designGroupContexts.map(async (ctx) => {
-          const raw = await runBulletsAgent(ctx.groupInput, ctx.title, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, ctx.designName)
-          // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
-          // design (parity with per-design titles, which recompute a group-scoped motifTrust in
-          // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
-          // design grounding.
-          const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
-          let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
-          if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
-          gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
-          return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
+          // PER-GROUP resilience (parity-audit): one group's transient LLM failure must not discard
+          // every OTHER group's per-design bullets — fail only this group back to the broadcast.
+          try {
+            const raw = await runBulletsAgent(ctx.groupInput, ctx.title, remainingForBullets, bulletAttrs, topOpportunityKwsForBullets, capacityFamilyTokens, compatibilityBrands, ctx.designName)
+            // Mirror the broadcast strip chain EXACTLY, but ground motif-stripping on THIS group's own
+            // design (parity with per-design titles, which recompute a group-scoped motifTrust in
+            // buildTitleFor) — so a motif legit for THIS design isn't judged against the parent/other-
+            // design grounding.
+            const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+            let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
+            if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
+            gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
+            return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
+          } catch (e) {
+            console.warn(`[pipeline] per-design bullets failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
+            return { skus: ctx.skus, bullets, designName: ctx.designName, designKey: ctx.key }
+          }
         }))
         perChildBullets = []
         for (const gs of groupBulletSets) {
@@ -4644,12 +4653,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       return out
     }
-    let perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
+    let perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok))
     let problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
     if (problems.length > 0) {
       // One retry — the failures here are transient LLM truncations/hiccups, not logic.
       onProgress('Backend output looked degraded — retrying…')
-      perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
+      perChildOnly = finishBackend(await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok))
       problems = backendOutputProblems(perChildOnly, input.children, apparelProduct)
     }
     if (problems.length > 0) {
@@ -4674,7 +4683,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // speed-up (PO gate): only genuinely independent calls overlap; the council stages
   // (proposers → adversary → judge) stay sequential because their order IS the quality.
   let [perChild, descriptionRaw] = await Promise.all([
-    runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok),
+    runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok),
     runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets),
   ])
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
@@ -4700,7 +4709,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     let problems = backendOutputProblems(perChild, input.children, apparelProduct)
     if (problems.length > 0) {
       onProgress('Backend output looked degraded — retrying…')
-      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, designName, banBackendTok))
+      perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok))
       problems = backendOutputProblems(perChild, input.children, apparelProduct)
       if (problems.length > 0) console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
     }
@@ -4722,19 +4731,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (apparelMultiDesign && designGroupContexts.length) {
     try {
       const groupDescSets = await Promise.all(designGroupContexts.map(async (ctx) => {
-        const repSku = ctx.skus[0]?.sku
-        const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
-        // useCouncil:false — this runs once PER design group inside a Promise.all, so N GPT-5 councils
-        // would fire in parallel; per-design descriptions stay on the single fast agent (only the
-        // broadcast description above gets the council).
-        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets, false)
-        // Mirror the broadcast description strip chain EXACTLY, but ground motif-stripping on THIS
-        // group's own design (parity with per-design titles/bullets) — not the parent/other designs.
-        const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
-        let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase()), attributePinFinal ?? '')
-        if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
-        gd = fixDoubledArticleBeforeBrand(gd, brandName)
-        return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
+        // PER-GROUP resilience (parity-audit): one group's transient LLM failure must not discard
+        // every OTHER group's per-design description — fail only this group back to the broadcast.
+        try {
+          const repSku = ctx.skus[0]?.sku
+          const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
+          // useCouncil:false — this runs once PER design group inside a Promise.all, so N GPT-5 councils
+          // would fire in parallel; per-design descriptions stay on the single fast agent (only the
+          // broadcast description above gets the council).
+          const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets, false)
+          // Mirror the broadcast description strip chain EXACTLY, but ground motif-stripping on THIS
+          // group's own design (parity with per-design titles/bullets) — not the parent/other designs.
+          const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
+          // 3rd arg = sellerGarmentText (parity-audit: it was MISSING here, so the heavy-garment-
+          // stuffing guard never fired for per-design descriptions).
+          let gd = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(raw, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? '')
+          if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
+          gd = fixDoubledArticleBeforeBrand(gd, brandName)
+          return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
+        } catch (e) {
+          console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
+          return { skus: ctx.skus, description, designName: ctx.designName, designKey: ctx.key }
+        }
       }))
       perChildDescriptions = []
       for (const ds of groupDescSets) {
@@ -4894,7 +4912,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // carries the Material/Fit/Neck/Sleeve/Department facts (highlight duplicates already filtered
     // out above); capacityFamilyTokens is the pipeline's real capacity-family signal.
     onProgress('Composing Item Highlights...')   // keepalive before the LLM call
-    const hl = await buildItemHighlights(input.openai, finalTitle, effectiveDesignName, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
+    // broadcastDesignAnchor (parity-audit): identical to effectiveDesignName for single-design ('')
+    // and per-design multi-design families, but a unified-set (couple) family keeps its shared
+    // concept in the highlight instead of losing it to the zeroed multi-design name.
+    const hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
     if (hl) {
       pdiFinal.push({
         field_name: highlightsAttr.title,
