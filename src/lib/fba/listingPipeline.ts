@@ -1598,6 +1598,65 @@ function buildFragPool(sources: string[][]): Set<string> {
   return set
 }
 
+/** BULLET-VARIANT DEDUPE (Layer 1 of the bullet coherence fix, council 2026-07-03). The keyword pool
+ *  routinely holds the SAME product concept as permuted phrasings ("womens t shirts graphic" /
+ *  "womens graphic t shirts" / "women graphic tees"). Amazon indexes the bag of words ONCE, so
+ *  covering all three is zero ranking benefit AND reads as stuffing (live B0GQXSNQ6R). Collapse
+ *  phrases that share the same significant-token SET (order-independent) with the garment noun
+ *  unified (tee≈tshirt≈shirt≈t-shirt) — keep the first (highest-opportunity) phrasing. Stops the
+ *  council from ever being ASKED to cover three phrasings of one noun. */
+const bulletSigTok = (t: string): string => { const f = fillNormTok(t); return f === 'tee' ? 'shirt' : f }
+const bulletVariantSig = (phrase: string): string => [...new Set(bulletTokens(phrase).map(bulletSigTok))].sort().join(' ')
+function dedupeBulletVariants(phrases: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const p of phrases) {
+    const sig = bulletVariantSig(p)
+    if (sig && seen.has(sig)) continue   // a permuted/garment-synonym variant of a kept phrase — drop
+    if (sig) seen.add(sig)
+    out.push(p)
+  }
+  return out
+}
+
+/** Secondary DESIGN PHRASE capture (PO 2026-07-03, B0GR1K3TXF). A POD design title often carries a
+ *  SECONDARY phrase after a SUBTITLE separator — "Floral Book Lover T-Shirt – Too Many Books Graphic
+ *  Tee". The design-name resolver keeps ONE ("Floral Book Lover") and drops the rest, but "Too Many
+ *  Books" is a real search phrase printed on the shirt that the PO wants ON THE PAGE ("just a keyword
+ *  that needs to be added"). Split ONLY on genuine subtitle separators (– — | · : or a SPACED hyphen)
+ *  — NOT commas/semicolons: POD titles are overwhelmingly comma-delimited keyword LISTS, and treating
+ *  every comma-clause as a design phrase force-injected junk (review). Trailing ", adjective" noise is
+ *  trimmed by taking each subtitle clause up to its first comma. */
+function secondaryDesignPhrases(canonicalTitle: string | null | undefined, brandName: string): string[] {
+  const t = (canonicalTitle || '').trim()
+  if (!t) return []
+  const parts = t.split(/\s*[–—|·:]\s*|\s+-\s+/).map((s) => s.trim()).filter(Boolean)
+  if (parts.length < 2) return []   // no SUBTITLE separator → no distinct secondary clause
+  const brandRe = brandName ? new RegExp(`\\b${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi') : null
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const clause of parts.slice(1)) {   // clauses AFTER the primary design clause
+    let p = (clause.split(',')[0] || '').trim()   // up to the first comma — drop trailing ", Trendy" noise
+    if (brandRe) p = p.replace(brandRe, ' ')
+    // Reject any clause carrying a third-party brand or a protected trademark (review: the injection
+    // otherwise bypassed the tmSafe gate every other keyword passes); scrub marks that have a safe form.
+    if (findThirdPartyBrands(p, ownBrandTokenSet(brandName || '')).length > 0) continue
+    p = scrubTrademarks(p)
+    if (findTrademarkPhrases(p).length > 0) continue
+    // Strip ONLY trailing garment/audience/structural tokens (review: mid-phrase stripping gutted a
+    // legit "Vintage Sunset"/"Funny Cat" design). Loop-trim from the end while the last token is boilerplate.
+    p = p.replace(/[^A-Za-z0-9'\s]/g, ' ').replace(/\s{2,}/g, ' ').trim()
+    const TRAIL_STRIP = /\s+(?:t[- ]?shirts?|tees?|tshirts?|shirts?|graphic|apparel|clothing|tops?|design|for|men|women|him|her|kids|adults|m[ae]n'?s|wom[ae]n'?s|unisex|gifts?)\s*$/i
+    let prev = ''
+    while (p && p !== prev) { prev = p; p = p.replace(TRAIL_STRIP, '').trim() }
+    if (bulletTokens(p).length < 2) continue   // need ≥2 significant tokens to be a real phrase
+    const sig = p.toLowerCase()
+    if (seen.has(sig)) continue
+    seen.add(sig); out.push(p)
+  }
+  return out.slice(0, 2)   // the page has finite room — at most 2 secondary phrases
+}
+
 function dedupeAudiencePhrases(title: string): string {
   const incl = title.match(/\bfor (?:men and women|women and men)\b/i)
   if (!incl) return title
@@ -2211,9 +2270,12 @@ async function runBulletsAgent(
     const s = scrubTrademarks(kw)
     return findTrademarkPhrases(s).length > 0 ? null : s
   }
-  const oppPlusDesign = dn
+  // Layer-1 variant dedupe (council 2026-07-03): collapse permuted/garment-synonym duplicates so the
+  // brief, requiredKws, and the deterministic backstop never see three phrasings of one noun. The
+  // design name LEADS and is index 0, so keeping-first preserves the identity mandate.
+  const oppPlusDesign = dedupeBulletVariants(dn
     ? [scrubTrademarks(dn), ...opportunityKws.filter((k) => k.toLowerCase() !== dn.toLowerCase()).map(tmSafeBullet).filter((s): s is string => s !== null)]
-    : opportunityKws.map(tmSafeBullet).filter((s): s is string => s !== null)
+    : opportunityKws.map(tmSafeBullet).filter((s): s is string => s !== null))
   // The VALIDATOR + missing-keyword retry must read the SAME trademark-safe pool as the brief. Scrub-only
   // marks (super bowl->big game, world cup->world soccer cup, olympics/fifa->dropped) are NOT in
   // findTrademarkPhrases' curated list, so they survive the tmSafeBullet drop-gate and reach the raw
@@ -2580,6 +2642,12 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
       }
     } catch { /* LLM/parse failure — keep the deterministic bullets (readability is best-effort) */ }
   }
+
+  // Layer 2 — final assembled coherence re-read (the twin of coherenceGateTitles the bullet path
+  // never had). Runs LAST, after the coverage backstop + readability polish, at the true assembly
+  // point. Shadow by default (logs would-repairs); BULLET_COHERENCE_GATE=enforce applies them.
+  const gated = await coherenceGateBullets(openai, bullets, oppPlusDesign, brandName, input.onProgress)
+  bullets = gated.bullets
 
   return bullets
 }
@@ -3667,6 +3735,94 @@ function polishDescription(desc: string, designName?: string | null, brandName?:
   return d.replace(/\u0000(\d+)\u0000/g, (_, i) => prot[Number(i)] ?? '')
 }
 
+/** Layer 2 of the bullet coherence fix (council 2026-07-03): the twin of coherenceGateTitles for
+ *  bullets — the FINAL assembled re-read that the bullet path never had (the deterministic coverage
+ *  backstop's own comment admits "nothing re-validates after it"). Unlike titles, bullets are prose,
+ *  so this is a REPAIR gate: it re-weaves dangling raw-token appends (", oversized tshirts.") into
+ *  the sentence and collapses residual same-noun variant crams — it never bolts or deletes. Accept
+ *  guard is coverage-SAFE under the garment-folded token set (bulletSigTok), so a variant collapse
+ *  (tee≈shirt) passes while losing a UNIQUE keyword concept is rejected. Modes via BULLET_COHERENCE_GATE:
+ *  'shadow' (default: log would-repairs, never mutate) / 'enforce' / 'off'. Fail-open LOUD. */
+async function coherenceGateBullets(
+  openai: OpenAI,
+  bullets: string[],
+  keyphrases: string[],
+  brandName: string,
+  onProgress?: (m: string) => void,
+): Promise<{ bullets: string[]; notes: string[] }> {
+  const mode = (process.env.BULLET_COHERENCE_GATE || 'shadow').toLowerCase()
+  if (mode === 'off' || bullets.length === 0) return { bullets, notes: [] }
+  // ZERO-COST PRE-FILTER (review: the title gate has one; this had an unconditional LLM call every
+  // regen). Only spend the call when a bullet shows a plausible defect: a raw lowercase comma-tail
+  // (the backstop's ", oversized tshirts." append shape — Title-Cased prose never looks like that),
+  // or an intra-bullet concept repeated 3+ times (a variant cram). No signal → no call.
+  const danglingTail = (b: string): boolean => {
+    const seg = (b.split(',').pop() || '').trim().replace(/\.$/, '')
+    if (!seg || /[A-Z]/.test(seg)) return false
+    const w = seg.split(/\s+/)
+    return w.length >= 1 && w.length <= 5 && !w.some((x) => /^(?:and|or|the|with|for|to|a|an)$/.test(x))
+  }
+  const hasDefect = bullets.some((b) => {
+    if (danglingTail(b)) return true
+    const counts = new Map<string, number>()
+    for (const t of bulletTokens(b).map(bulletSigTok)) counts.set(t, (counts.get(t) ?? 0) + 1)
+    return [...counts.values()].some((c) => c >= 3)
+  })
+  if (!hasDefect) return { bullets, notes: [] }
+  const notes: string[] = []
+  onProgress?.('Coherence review: reading final bullets...')
+  try {
+    const keyphraseList = keyphrases.slice(0, 12).join(', ')
+    const r = await openai.chat.completions.create({
+      model: process.env.BULLET_COHERENCE_MODEL || 'gpt-4.1-mini',
+      temperature: 0,
+      max_tokens: 900,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: `You do a FINAL coherence pass on 5 Amazon bullet points. Fix ONLY these two defects, changing nothing else:
+1. VARIANT STUFFING — a bullet repeats the same product concept as 2+ permuted phrasings (e.g. "womens graphic t shirts ... women graphic tees ... womens t shirts graphic"): collapse to ONE natural phrasing.
+2. DANGLING RAW-TOKEN FRAGMENT — a bullet contains a bolted-on token pile that is not a sentence (", oversized tshirts." / "this tshirts shirt for women graphic offers"): WEAVE those words into the sentence grammatically. Do NOT delete them, do NOT merely relocate them.
+Keep each bullet's "ALL-CAPS HOOK - sentence" shape, each <=200 chars, add NO new brand names, invent NO claims. Preserve every distinct keyword concept from this list somewhere across the 5 (weave, never bolt): ${keyphraseList}.
+Return JSON {"bullets":[5 strings]}. Return a bullet verbatim if it is already clean.` },
+        { role: 'user', content: JSON.stringify(bullets) },
+      ],
+    }, { timeout: 25_000, maxRetries: 0 })
+    const parsed = parseJsonLoose<{ bullets?: unknown }>(r.choices[0]?.message?.content || '{}').bullets
+    if (!Array.isArray(parsed) || parsed.length !== bullets.length) { notes.push('bullet coherence gate: bad shape, kept originals'); return { bullets, notes } }
+    const repaired = parsed.map((b) => (typeof b === 'string' ? b.trim() : ''))
+    // Validate: caps-hook shape, length, no NEW third-party brand, and no LOST keyword concept
+    // (garment-folded tokens, so a tee↔shirt variant collapse is coverage-safe; losing a unique
+    // concept like "oversized" — i.e. deletion instead of weaving — is rejected).
+    const ownBrandSet = ownBrandTokenSet(brandName || '')
+    // Set-based, not count-based (review): a brand SWAP keeps the count equal but introduces a new
+    // brand — reject if the repaired text carries any brand token absent from the original.
+    const beforeBrands = new Set(findThirdPartyBrands(bullets.join(' '), ownBrandSet).map((b) => b.toLowerCase()))
+    const newBrand = findThirdPartyBrands(repaired.join(' '), ownBrandSet).some((b) => !beforeBrands.has(b.toLowerCase()))
+    const shapeOk = repaired.every((b) => b.length > 0 && b.length <= 200 && /^[A-Z0-9][A-Z0-9 '&/-]*\s[-–—]\s/.test(b))
+    const beforeToks = new Set(bulletTokens(bullets.join(' ')).map(bulletSigTok))
+    const afterToks = new Set(bulletTokens(repaired.join(' ')).map(bulletSigTok))
+    const keyToks = new Set(keyphrases.flatMap((k) => bulletTokens(k).map(bulletSigTok)))
+    let lostKey = false
+    for (const t of keyToks) if (beforeToks.has(t) && !afterToks.has(t)) { lostKey = true; break }
+    if (!shapeOk || newBrand || lostKey) {
+      notes.push(`bullet coherence gate: repair rejected (${!shapeOk ? 'shape' : newBrand ? 'new-brand' : 'lost-keyword'})`)
+      return { bullets, notes }
+    }
+    const changed = repaired.map((b, i) => (b !== bullets[i] ? i : -1)).filter((i) => i >= 0)
+    if (changed.length === 0) return { bullets, notes }
+    if (mode === 'enforce') {
+      notes.push(`bullet coherence gate repaired ${changed.length} bullet(s)`)
+      return { bullets: repaired, notes }
+    }
+    for (const i of changed) console.warn(`[bullet-coherence][shadow] would repair bullet ${i + 1}:`, bullets[i], '=>', repaired[i])
+    notes.push(`bullet coherence gate (shadow) would repair ${changed.length} bullet(s)`)
+    return { bullets, notes }
+  } catch (e) {
+    console.warn('[bullet-coherence] skipped (LLM error/timeout):', e instanceof Error ? e.message : e)
+    return { bullets, notes: ['bullet coherence gate skipped (LLM error/timeout)'] }
+  }
+}
+
 function dedupeBrandAndStutter(title: string, brandName: string): string {
   let t = (title || '').trim()
   if (brandName && t) {
@@ -4141,6 +4297,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     attrs.specs = attrs.specs.filter(clean)
   }
   const cleanGated = apparelProduct ? gated : gated.filter((k) => !APPAREL_CONTAMINANTS.test(k.keyword))
+  // Secondary design-phrase capture (PO 2026-07-03): fold seller-title subtitle phrases like "Too
+  // Many Books" in as a covered keyword ("a keyword that needs to be on the page"). Inject into
+  // cleanGated (review: this is the pool that feeds topOppGated → topOpportunityKwsForBullets →
+  // oppPlusDesign, so the phrase is COVERAGE-PROTECTED by the bullet coherence gate and the scorer;
+  // injecting only into `analysis` bypassed all of that). Score 35, the attributeAsKeyword ceiling —
+  // above filler, below the genuine money keywords, so it never crowds one out of the 75-char title
+  // (review). Only when NOT already present at a real score.
+  if (apparelProduct) {
+    for (const p of secondaryDesignPhrases(input.canonicalTitle ?? repTitle, brandName)) {
+      const pl = p.toLowerCase()
+      if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
+    }
+  }
   // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
   // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
   // must NOT enter the title — they go to bullets/description/structured fields only.
@@ -4694,10 +4863,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (at == null) { blendIdx.set(base, topOppDeduped.length); topOppDeduped.push(k) }
     else if (k.keyword.length < topOppDeduped[at].keyword.length) topOppDeduped[at] = k
   }
-  const topOpportunityKwsForBullets = topOppDeduped
+  // dedupeBulletVariants at the SINGLE SOURCE (review blocker): this pool feeds BOTH the generator
+  // (runBulletsAgent → oppPlusDesign/opportunityKwsSafe/backstop/validateBullets) AND the persisted
+  // keywordPlan.bullets the SCORER reads. Deduping only inside runBulletsAgent desynced them — the
+  // scorer would dock coverage for a garment/plural variant Layer-1 deleted from the generator. Dedup
+  // BEFORE slice so we keep 10 DISTINCT concepts, and every consumer reads the identical universe.
+  const topOpportunityKwsForBullets = dedupeBulletVariants(topOppDeduped
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
-    .slice(0, 10)
-    .map((k) => k.keyword)
+    .map((k) => k.keyword)).slice(0, 10)
   // ── Multi-design group scoping (parity-audit structural build 2026-07-03) ─────────────────────
   // PARTIAL-REGEN COHERENCE (#3/#9/#23): bullets/description/keywords-only regens skip the title
   // branch, so designGroupContexts stayed empty, every per-design fan-out was inert, and the push

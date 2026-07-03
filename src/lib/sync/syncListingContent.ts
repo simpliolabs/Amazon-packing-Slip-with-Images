@@ -34,6 +34,7 @@ import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'
 import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
+import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -1287,10 +1288,13 @@ export async function ensureListingScored(
   const totalUnits = rollup?.total_units_30d ?? 0
 
   const scoringCtx = await fetchScoringContext(supabase, parentAsin, topChildAsin)
-  const parentOwnContent = uniqueChildren.find((c) => c.asin === parentAsin) || null
-  const score = scoreListingContent(parentOwnContent, uniqueChildren, scoringCtx)
+  // Single representative-selection path (review: push re-score and this on-demand path must AGREE,
+  // or a push improvement scored off the fresh child reverts on the next open scored off the stale
+  // parent hub). Prefer the fresh top-child; drop the (possibly stale) parent-own row.
+  const { representative, scoredRows } = pickRescoreRepresentative(uniqueChildren, parentAsin, topChildAsin)
+  const score = scoreListingContent(representative, scoredRows, scoringCtx)
 
-  const productTitle = parentOwnContent?.title || uniqueChildren[0]?.title || null
+  const productTitle = representative?.title || uniqueChildren[0]?.title || null
   const { data: catalogRow } = await supabase
     .from('catalog_products').select('image_url').eq('parent_asin', parentAsin).limit(1).maybeSingle()
 
@@ -1318,7 +1322,7 @@ export async function ensureListingScored(
   // Phase C §4-D: conditional score-history append (on-demand / user-opened path). Best-effort.
   // Fingerprint the SAME copy that was scored (top-child row, else parent-own) so the row JOINs
   // keyword_share_snapshots by content_fingerprint. scored_by=null (service-role sync, no JWT 'sub').
-  const fpRow = uniqueChildren.find((c) => c.asin === topChildAsin) || parentOwnContent || uniqueChildren[0] || null
+  const fpRow = uniqueChildren.find((c) => c.asin === topChildAsin) || representative || uniqueChildren[0] || null
   await appendScoreHistory(supabase, { ...scoreRow, issues: Array.isArray(score.issues) ? (score.issues as unknown[]) : null }, {
     trigger: 'on_demand', scoredBy: null, scoredByName: 'System (on-demand score)', content: fpRow,
   })
@@ -1605,8 +1609,10 @@ export async function syncListingContent(
       // ── Step 6: Score this parent ─────────────────────────────────────────
       // Fetch keyword intelligence + product details data for holistic scoring
       const scoringCtx = await fetchScoringContext(supabase, parentAsin, parent.top_child_asin)
-      const parentOwnContent = contentRows.find(r => r.asin === parentAsin) || null
-      const score = scoreListingContent(parentOwnContent, contentRows, scoringCtx)
+      // Single representative-selection path (review: agree with the push + on-demand re-scores;
+      // prefer the fresh top-child, drop the possibly-stale parent hub row).
+      const { representative, scoredRows } = pickRescoreRepresentative(contentRows, parentAsin, parent.top_child_asin)
+      const score = scoreListingContent(representative, scoredRows, scoringCtx)
 
       // Get product title and image from the top child
       const topChildContent = contentRows[0]
@@ -1648,7 +1654,7 @@ export async function syncListingContent(
         // Phase C §4-D: conditional score-history append (scheduled-sync path). CONDITIONAL so the
         // top-50-per-sync re-scores only write a row on a real change-point (no identical-row bloat).
         // Fingerprint the parent-own content (else top child) — the SAME copy that was scored.
-        const fpRow = parentOwnContent || topChildContent || contentRows[0] || null
+        const fpRow = representative || topChildContent || contentRows[0] || null
         await appendScoreHistory(supabase, {
           parent_asin:        parentAsin,
           title_score:        score.title_score,
