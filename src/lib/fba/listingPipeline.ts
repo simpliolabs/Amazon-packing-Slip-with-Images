@@ -1528,8 +1528,16 @@ const genderNormTok = (t: string): string => (t === 'mens' ? 'men' : t === 'wome
  *  the folded form is never rendered. */
 const fillNormTok = (t: string): string => {
   const g = genderNormTok(t)
-  return g.length > 3 ? g.replace(/s$/, '') : g
+  const p = g.length > 3 ? g.replace(/s$/, '') : g
+  // "t-shirt" tokenizes to "shirt" (the 1-char "t" is dropped) but the fused "tshirt" survives
+  // whole — fold them together or the fill ships "Graphic T-Shirts, Tshirt" (live B0DMXMH266).
+  return p === 'tshirt' ? 'shirt' : p
 }
+
+/** A BARE gender word must never ship as fill content — it reads as a dangling fragment
+ *  (live B0DMXMH266 child: "...Funny Fishing Humor Tee, Mens"). Audience belongs in the
+ *  "for X" tail; gendered PHRASES ("Mens Fishing Gifts") remain fine. */
+const BARE_GENDER_RE = /^(?:m[ae]ns?|wom[ae]ns?|ladies)$/i
 
 /** Garment/cut modifiers that must never ship as a bare FILL FRAGMENT: torn from their phrase they
  *  read as an ATTRIBUTE CLAIM (", Long Sleeve" on a short-sleeve tee — review finding 2026-07-02).
@@ -3612,6 +3620,7 @@ async function buildTitleFor(
       // harvests such a phrase's novel remainder.
       if (toks.length === 0 || toks.some((tt) => headToks.has(tt))) continue
       if (new Set(toks).size !== toks.length) continue // intra-phrase repeat would ship twice (review)
+      if (BARE_GENDER_RE.test(kw.trim())) continue // a lone "Mens" is a fragment, not a keyphrase
       if (lean === 'female' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
       if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
       if (tailGender === 'women' && MASC_T.test(kw) && !FEM_T.test(kw)) continue
@@ -3656,6 +3665,7 @@ async function buildTitleFor(
         while (novel.length > 0) {
           const frag = novel.join(' ')
           if (isAllJunk(frag)) break
+          if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) break // ", Mens" is not content
           const next = `${head}, ${titleCaseKw(frag)}`
           if ((next + tail).length <= 75) {
             head = next
@@ -3863,6 +3873,7 @@ Rules:
       if (toks.length === 0 || toks.some((tt) => headToks.has(tt))) continue
       if (new Set(toks).size !== toks.length) continue // intra-phrase repeat would ship twice (review)
       if (isAllJunk(kw)) continue
+      if (BARE_GENDER_RE.test(kw.trim())) continue // a lone "Mens" is a fragment, not a keyphrase
       if (tailGender === 'women' && PAR_MASC.test(kw) && !PAR_FEM.test(kw)) continue
       if (tailGender === 'men' && PAR_FEM.test(kw) && !PAR_MASC.test(kw)) continue
       if (stripContradictedGarments(kw, parentHay, parentHay) !== kw) continue
@@ -3892,6 +3903,7 @@ Rules:
         while (novel.length > 0) {
           const frag = novel.join(' ')
           if (isAllJunk(frag)) break
+          if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) break // ", Mens" is not content
           const fragToks = bulletTokens(frag).map(fillNormTok)
           if (designTokSets.some((ds) => fragToks.filter((tt) => ds.has(tt)).length >= 2)) { novel = novel.slice(0, -1); continue }
           const next = `${fillHead}, ${titleCaseKw(frag)}`
