@@ -121,6 +121,12 @@ export interface PipelineInput {
   /** Stored per_child_bullets — on keywords/description-only partials the per-design fan-outs
    *  dedupe/ground against each group's REAL bullets instead of the broadcast prior (review). */
   priorPerChildBullets?: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[] | null
+  /** Design-grounded NICHE keyword seeds (PO 2026-07-03). The keyword research is self-referential
+   *  (what the listing already ranks for = generic "graphic tees for women"), so a niche design
+   *  (book-lover) gets a generic pool and the design-grounding filter strips it → a stub title.
+   *  These are LLM-expanded from the design name + secondary phrase, GROUNDED (added to the title's
+   *  ground vocab) so the council can fill a full, relevant, on-niche title. */
+  nicheSeeds?: string[] | null
   /** Per-variant content block (for the audit's variant-health check) */
   variantDetails: string
   /** Keyword intelligence context block (reused for the audit agent) */
@@ -1084,7 +1090,7 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   const problems: string[] = []
   const len = title.length
   if (len > 75) problems.push(`Title is ${len} characters; Amazon's NEW limit is 75 (effective July 27, 2026 — longer titles get AUTO-REWRITTEN by Amazon). Cut supporting keyphrases (they belong in backend keywords / Item Highlights), keep brand + design/product name + the money keyword.`)
-  else if (len < 50) problems.push(`Title is only ${len} characters; aim 50-75 — there's room for the top keyword without breaking the 75-char limit.`)
+  else if (len < 50) problems.push(`Title is only ${len} characters; use more of the 75-char budget — weave in a design-grounded / niche keyphrase (a short title wastes search real estate). Keep it under the 75-char cap.`)
 
   const counts = new Map<string, number>()
   title.toLowerCase().split(/\s+/).forEach((w) => {
@@ -1657,6 +1663,82 @@ function secondaryDesignPhrases(canonicalTitle: string | null | undefined, brand
   return out.slice(0, 2)   // the page has finite room — at most 2 secondary phrases
 }
 
+/** Design-NICHE expansion (PO 2026-07-03, council-approved). The keyword research is self-referential
+ *  — a niche design (book-lover) gets a generic "graphic tees for women" pool, and the title's
+ *  design-grounding filter then strips it, leaving a stub title. This LLM call expands the ACTUAL
+ *  design identity (design name + on-shirt secondary phrase + vision read) into the niche search
+ *  phrases a shopper for THIS design types — "book lover shirt", "reading gift for women", "bookworm
+ *  tee", "too many books shirt", "book nerd gift". Conservative + design-anchored so it grounds only
+ *  real niche terms, not vibe-guesses. Returns [] on any failure (the title just stays as-is). */
+async function expandDesignNiche(
+  openai: OpenAI,
+  designName: string,
+  secondaryPhrases: string[],
+  visionDesign: PipelineInput['visionDesign'],
+  productType: string | null,
+): Promise<string[]> {
+  const anchor = [designName, ...secondaryPhrases, visionDesign?.designTheme, ...(visionDesign?.visualElements || [])].filter(Boolean).join(' | ')
+  if (!anchor.trim()) return []
+  const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 't-shirt' : 'shirt'
+  try {
+    const r = await openai.chat.completions.create({
+      model: process.env.NICHE_SEED_MODEL || 'gpt-4.1-mini',
+      temperature: 0.3,
+      max_tokens: 220,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: `You expand an Amazon apparel DESIGN into the real search keyphrases a shopper for THAT design would type. STRICT: every phrase must be about THIS design's theme/subject — never generic apparel ("graphic tees for women"), never a theme the design does not clearly express. 2-4 words each, lowercase, include a garment word (${ptWord}/tee/gift) where natural. Return JSON {"keywords":[...]} with 6-10 phrases.` },
+        { role: 'user', content: `Design: ${anchor}\nProduct: ${ptWord}` },
+      ],
+    }, { timeout: 20_000, maxRetries: 0 })
+    const kws = parseJsonLoose<{ keywords?: unknown }>(r.choices[0]?.message?.content || '{}').keywords
+    if (!Array.isArray(kws)) return []
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const k of kws) {
+      if (typeof k !== 'string') continue
+      const s = scrubTrademarks(k.trim().toLowerCase())
+      if (!s || findTrademarkPhrases(s).length > 0) continue
+      if (bulletTokens(s).length < 2 || s.length > 40) continue
+      if (seen.has(s)) continue
+      seen.add(s); out.push(s)
+    }
+    return out.slice(0, 10)
+  } catch (e) {
+    console.warn('[niche-seed] design-niche expansion failed:', e instanceof Error ? e.message : e)
+    return []
+  }
+}
+
+/** Independent RELEVANCE JUDGE for niche seeds (review 2026-07-03). Deterministic token-overlap
+ *  grounding is safe but too strict — it rejects legit expansion ("reading gift"/"bookworm tee" for a
+ *  book design, which introduce new words by design). A separate judge (fresh context, filter-only
+ *  task — NOT the generator grading itself) keeps on-theme expansions and rejects a hallucinated pivot
+ *  ("wine lover shirt" for a book design). Returns null on any failure so the caller falls back to the
+ *  conservative overlap floor — an unverified seed is never trusted. */
+async function judgeNicheRelevance(openai: OpenAI, anchor: string, seeds: string[]): Promise<string[] | null> {
+  if (seeds.length === 0) return []
+  try {
+    const r = await openai.chat.completions.create({
+      model: process.env.NICHE_SEED_MODEL || 'gpt-4.1-mini',
+      temperature: 0,
+      max_tokens: 220,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: `You are a STRICT relevance judge for Amazon apparel keywords. Given a DESIGN and candidate keyphrases, return ONLY the phrases a shopper for THAT SPECIFIC design would search. REJECT any phrase whose theme the design does not clearly express (e.g. "wine lover shirt" or "coffee tee" for a BOOK design). Return JSON {"keep":[...]} using the EXACT input strings — no additions, no rewrites.` },
+        { role: 'user', content: `Design: ${anchor}\nCandidates: ${JSON.stringify(seeds)}` },
+      ],
+    }, { timeout: 15_000, maxRetries: 0 })
+    const keep = parseJsonLoose<{ keep?: unknown }>(r.choices[0]?.message?.content || '{}').keep
+    if (!Array.isArray(keep)) return null
+    const valid = new Set(seeds.map((s) => s.toLowerCase()))
+    return keep.filter((k): k is string => typeof k === 'string' && valid.has(k.toLowerCase()))
+  } catch (e) {
+    console.warn('[niche-seed] relevance judge failed:', e instanceof Error ? e.message : e)
+    return null
+  }
+}
+
 function dedupeAudiencePhrases(title: string): string {
   const incl = title.match(/\bfor (?:men and women|women and men)\b/i)
   if (!incl) return title
@@ -1848,6 +1930,10 @@ async function runTitleAgent(
     // hallucination ("heart") sailed through — backwards trust (B0FKLGWZ4C).
     addWords(input.canonicalTitle)
     addWords(input.repTitle)
+    // Design-NICHE seeds (council 2026-07-03) are GROUNDING sources: they were LLM-expanded from
+    // THIS design's identity, so their words ("reading", "bookworm", "librarian") count as grounded
+    // and survive the candidate filter below — giving a niche design real material to fill the title.
+    for (const sk of input.nicheSeeds || []) addWords(sk)
     // TRUSTED tier for VISUAL MOTIF claims: seller text only — vision is a witness, not
     // a source, for what's printed on the artwork (it read a heart into a script font).
     const motifVocab = new Set<string>()
@@ -1967,11 +2053,18 @@ async function runTitleAgent(
   const audienceLine = preferredAudience
     ? `\nAUDIENCE (LOWEST-PRIORITY, OPTIONAL tail): you MAY end with "for ${preferredAudience}" if it fits — but it is the lowest-value part of the title. If including it would crowd out a higher-value PRODUCT-SPECIFIC keyphrase from the candidates, DROP the audience and use that keyphrase instead. If you keep it, never narrow "${preferredAudience}" to a single gender.\n`
     : ''
+  // NICHE line (council 2026-07-03): design-grounded niche keyphrases the council SHOULD use to fill
+  // the budget. Unlike generic keywords (deliberately kept minimal above), these ARE about the
+  // design, so filling with them is on-brand, not stuffing. The secondary design phrase leads.
+  const nicheSeedList = apparel ? [...new Set((input.nicheSeeds || []).map((s) => s.trim()).filter(Boolean))] : []
+  const nicheLine = nicheSeedList.length
+    ? `\n🟢 DESIGN-NICHE KEYPHRASES — these ARE about your design (not generic filler). USE THEM to fill the title toward the full 68-75 char budget, woven as natural language after the design phrase. A short title wastes half your search real estate; keep adding these until you are near 72 chars:\n  ${nicheSeedList.map((s) => `"${s}"`).join(', ')}\n`
+    : ''
 
   const system = `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`
   const user = `Brand: ${brandName}
 Category: ${category}
-${designLine}${mustLine}${attrPinLine}${upgradeLine}
+${designLine}${mustLine}${attrPinLine}${nicheLine}${upgradeLine}
 Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — the title is capped at 75 chars, so ${apparel ? 'at most ONE beyond the mandatory keyword' : 'only 1-2 of these fit alongside the mandatory keyword; the rest rank via bullets/backend'}):
 ${candidateList}
 ${attrLine}${audienceLine}
@@ -4304,12 +4397,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // injecting only into `analysis` bypassed all of that). Score 35, the attributeAsKeyword ceiling —
   // above filler, below the genuine money keywords, so it never crowds one out of the 75-char title
   // (review). Only when NOT already present at a real score.
+  const secondaryPhrases = apparelProduct ? secondaryDesignPhrases(input.canonicalTitle ?? repTitle, brandName) : []
   if (apparelProduct) {
-    for (const p of secondaryDesignPhrases(input.canonicalTitle ?? repTitle, brandName)) {
+    for (const p of secondaryPhrases) {
       const pl = p.toLowerCase()
       if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
     }
   }
+  // (Design-NICHE seed moved BELOW designGroupInfo — it must be single-design-gated and grounded
+  // against the design vocab, both of which are only known after design resolution.)
   // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
   // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
   // must NOT enter the title — they go to bullets/description/structured fields only.
@@ -4454,6 +4550,36 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // effectiveDesignName='' for multi-design prevents the false-negative bullet cohesion dock.
   // Declared HERE (before partialResult) so partialResult's closure captures it.
   const effectiveDesignName: string = apparelProduct && designGroupInfo.isMultiDesign ? '' : designName
+
+  // Design-NICHE seed (council 2026-07-03, review-hardened). The keyword research is self-referential
+  // (a niche design gets a generic pool), and the title's design-grounding filter then strips it to a
+  // stub. Expand the design into niche keyphrases and GROUND them against the pre-existing design vocab
+  // so an LLM hallucination ("wine lover shirt" for a book design) can't self-ground and stuff the
+  // title. SINGLE-DESIGN + TITLE-section only (review: parent seeds would ground every design group; a
+  // partial regen never consumes them). Seeds go ONLY to input.nicheSeeds (title groundVocab + brief),
+  // never the shared bullet/scorer pool. Best-effort — any failure leaves the title unchanged.
+  if (apparelProduct && !designGroupInfo.isMultiDesign && (!input.onlySection || input.onlySection === 'title')) {
+    const nicheAnchor = ((input.canonicalTitle ?? repTitle ?? '').split(/\s*[–—|·:]\s*|\s+-\s+/)[0] || '').trim()
+    if (nicheAnchor || input.visionDesign) {
+      const anchor = [designName || nicheAnchor, ...secondaryPhrases].filter(Boolean).join(' | ')
+      const raw = await expandDesignNiche(input.openai, designName || nicheAnchor, secondaryPhrases, input.visionDesign, input.productType ?? null)
+      // SAFETY FLOOR — a seed sharing a DISTINCTIVE (non-generic) token with the design identity is
+      // literally grounded and always safe ("book lover shirt" ← "book"). NICHE_FREE = the generic
+      // words the title grounding filter also ignores.
+      const NICHE_FREE = new Set(['cool', 'funny', 'cute', 'awesome', 'best', 'great', 'perfect', 'novelty', 'graphic', 'gift', 'lover', 'fan', 'apparel', 'clothing', 'outfit', 'wear', 'design', 'tee', 'shirt', 'tshirt', 'sweatshirt', 'hoodie', 'tank', 'top', 'women', 'men'])
+      const distinctToks = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).map((w) => w.replace(/s$/, '')).filter((w) => w.length > 1 && !MINOR_WORDS.has(w) && !NICHE_FREE.has(w))
+      const designVocab = new Set<string>()
+      for (const src of [designName, nicheAnchor, ...secondaryPhrases, input.visionDesign?.designTheme ?? '', ...(input.visionDesign?.visualElements ?? [])]) for (const t of distinctToks(src)) designVocab.add(t)
+      const overlapOk = raw.filter((s) => distinctToks(s).some((t) => designVocab.has(t)))
+      // Independent judge admits the on-theme EXPANSION terms overlap can't ("reading gift"/"bookworm
+      // tee" for a book design) while rejecting a hallucinated pivot. A non-overlap term ships ONLY if
+      // the judge verifies it; on judge failure we keep just the overlap floor (never an unverified term).
+      const judged = await judgeNicheRelevance(input.openai, anchor, raw)
+      const extra = (judged ?? []).filter((s) => !overlapOk.includes(s))
+      const grounded = [...new Set([...overlapOk, ...extra])].slice(0, 8)
+      if (grounded.length) { input.nicheSeeds = grounded; onProgress(`Seeded ${grounded.length} design-niche keyword(s).`) }
+    }
+  }
 
   // Apparel with a clear DESIGN NAME: the design name anchors the title, so do NOT also FORCE a long
   // slogan keyword (e.g. "see you later alligator shirt") into it. Forcing both jams the same design
