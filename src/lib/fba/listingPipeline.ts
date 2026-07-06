@@ -1090,7 +1090,7 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   const problems: string[] = []
   const len = title.length
   if (len > 75) problems.push(`Title is ${len} characters; Amazon's NEW limit is 75 (effective July 27, 2026 — longer titles get AUTO-REWRITTEN by Amazon). Cut supporting keyphrases (they belong in backend keywords / Item Highlights), keep brand + design/product name + the money keyword.`)
-  else if (len < 60) problems.push(`Title is only ${len} characters; use the full 68-75 budget — weave in more design-grounded / niche keyphrases (a short title wastes half your search real estate). Keep it under the 75-char cap.`)
+  else if (len < 50) problems.push(`Title is only ${len} characters; use more of the 75-char budget — weave in a design-grounded / niche keyphrase (a short title wastes search real estate). Keep it under the 75-char cap.`)
 
   const counts = new Map<string, number>()
   title.toLowerCase().split(/\s+/).forEach((w) => {
@@ -1707,6 +1707,35 @@ async function expandDesignNiche(
   } catch (e) {
     console.warn('[niche-seed] design-niche expansion failed:', e instanceof Error ? e.message : e)
     return []
+  }
+}
+
+/** Independent RELEVANCE JUDGE for niche seeds (review 2026-07-03). Deterministic token-overlap
+ *  grounding is safe but too strict — it rejects legit expansion ("reading gift"/"bookworm tee" for a
+ *  book design, which introduce new words by design). A separate judge (fresh context, filter-only
+ *  task — NOT the generator grading itself) keeps on-theme expansions and rejects a hallucinated pivot
+ *  ("wine lover shirt" for a book design). Returns null on any failure so the caller falls back to the
+ *  conservative overlap floor — an unverified seed is never trusted. */
+async function judgeNicheRelevance(openai: OpenAI, anchor: string, seeds: string[]): Promise<string[] | null> {
+  if (seeds.length === 0) return []
+  try {
+    const r = await openai.chat.completions.create({
+      model: process.env.NICHE_SEED_MODEL || 'gpt-4.1-mini',
+      temperature: 0,
+      max_tokens: 220,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: `You are a STRICT relevance judge for Amazon apparel keywords. Given a DESIGN and candidate keyphrases, return ONLY the phrases a shopper for THAT SPECIFIC design would search. REJECT any phrase whose theme the design does not clearly express (e.g. "wine lover shirt" or "coffee tee" for a BOOK design). Return JSON {"keep":[...]} using the EXACT input strings — no additions, no rewrites.` },
+        { role: 'user', content: `Design: ${anchor}\nCandidates: ${JSON.stringify(seeds)}` },
+      ],
+    }, { timeout: 15_000, maxRetries: 0 })
+    const keep = parseJsonLoose<{ keep?: unknown }>(r.choices[0]?.message?.content || '{}').keep
+    if (!Array.isArray(keep)) return null
+    const valid = new Set(seeds.map((s) => s.toLowerCase()))
+    return keep.filter((k): k is string => typeof k === 'string' && valid.has(k.toLowerCase()))
+  } catch (e) {
+    console.warn('[niche-seed] relevance judge failed:', e instanceof Error ? e.message : e)
+    return null
   }
 }
 
@@ -4375,23 +4404,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
     }
   }
-  // Design-NICHE seed (council 2026-07-03): the research pool is self-referential/generic, so a niche
-  // design gets a generic pool and the title grounding-filter strips it to a stub. Expand the design
-  // into grounded niche keyphrases and seed them into the pool + input.nicheSeeds (which the title
-  // agent adds to its ground vocab). Anchor on the seller's own title's leading design clause (the
-  // full designName isn't resolved until later — the title clause is a faithful stand-in). Best-effort.
-  const nicheAnchor = ((input.canonicalTitle ?? repTitle ?? '').split(/\s*[–—|·:]\s*|\s+-\s+/)[0] || '').trim()
-  if (apparelProduct && (nicheAnchor || input.visionDesign)) {
-    const niche = await expandDesignNiche(input.openai, nicheAnchor, secondaryPhrases, input.visionDesign, input.productType ?? null)
-    if (niche.length) {
-      input.nicheSeeds = [...(input.nicheSeeds || []), ...niche]
-      for (const p of niche) {
-        const pl = p.toLowerCase()
-        if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
-      }
-      onProgress(`Seeded ${niche.length} design-niche keyword(s).`)
-    }
-  }
+  // (Design-NICHE seed moved BELOW designGroupInfo — it must be single-design-gated and grounded
+  // against the design vocab, both of which are only known after design resolution.)
   // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
   // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
   // must NOT enter the title — they go to bullets/description/structured fields only.
@@ -4536,6 +4550,36 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // effectiveDesignName='' for multi-design prevents the false-negative bullet cohesion dock.
   // Declared HERE (before partialResult) so partialResult's closure captures it.
   const effectiveDesignName: string = apparelProduct && designGroupInfo.isMultiDesign ? '' : designName
+
+  // Design-NICHE seed (council 2026-07-03, review-hardened). The keyword research is self-referential
+  // (a niche design gets a generic pool), and the title's design-grounding filter then strips it to a
+  // stub. Expand the design into niche keyphrases and GROUND them against the pre-existing design vocab
+  // so an LLM hallucination ("wine lover shirt" for a book design) can't self-ground and stuff the
+  // title. SINGLE-DESIGN + TITLE-section only (review: parent seeds would ground every design group; a
+  // partial regen never consumes them). Seeds go ONLY to input.nicheSeeds (title groundVocab + brief),
+  // never the shared bullet/scorer pool. Best-effort — any failure leaves the title unchanged.
+  if (apparelProduct && !designGroupInfo.isMultiDesign && (!input.onlySection || input.onlySection === 'title')) {
+    const nicheAnchor = ((input.canonicalTitle ?? repTitle ?? '').split(/\s*[–—|·:]\s*|\s+-\s+/)[0] || '').trim()
+    if (nicheAnchor || input.visionDesign) {
+      const anchor = [designName || nicheAnchor, ...secondaryPhrases].filter(Boolean).join(' | ')
+      const raw = await expandDesignNiche(input.openai, designName || nicheAnchor, secondaryPhrases, input.visionDesign, input.productType ?? null)
+      // SAFETY FLOOR — a seed sharing a DISTINCTIVE (non-generic) token with the design identity is
+      // literally grounded and always safe ("book lover shirt" ← "book"). NICHE_FREE = the generic
+      // words the title grounding filter also ignores.
+      const NICHE_FREE = new Set(['cool', 'funny', 'cute', 'awesome', 'best', 'great', 'perfect', 'novelty', 'graphic', 'gift', 'lover', 'fan', 'apparel', 'clothing', 'outfit', 'wear', 'design', 'tee', 'shirt', 'tshirt', 'sweatshirt', 'hoodie', 'tank', 'top', 'women', 'men'])
+      const distinctToks = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).map((w) => w.replace(/s$/, '')).filter((w) => w.length > 1 && !MINOR_WORDS.has(w) && !NICHE_FREE.has(w))
+      const designVocab = new Set<string>()
+      for (const src of [designName, nicheAnchor, ...secondaryPhrases, input.visionDesign?.designTheme ?? '', ...(input.visionDesign?.visualElements ?? [])]) for (const t of distinctToks(src)) designVocab.add(t)
+      const overlapOk = raw.filter((s) => distinctToks(s).some((t) => designVocab.has(t)))
+      // Independent judge admits the on-theme EXPANSION terms overlap can't ("reading gift"/"bookworm
+      // tee" for a book design) while rejecting a hallucinated pivot. A non-overlap term ships ONLY if
+      // the judge verifies it; on judge failure we keep just the overlap floor (never an unverified term).
+      const judged = await judgeNicheRelevance(input.openai, anchor, raw)
+      const extra = (judged ?? []).filter((s) => !overlapOk.includes(s))
+      const grounded = [...new Set([...overlapOk, ...extra])].slice(0, 8)
+      if (grounded.length) { input.nicheSeeds = grounded; onProgress(`Seeded ${grounded.length} design-niche keyword(s).`) }
+    }
+  }
 
   // Apparel with a clear DESIGN NAME: the design name anchors the title, so do NOT also FORCE a long
   // slogan keyword (e.g. "see you later alligator shirt") into it. Forcing both jams the same design
