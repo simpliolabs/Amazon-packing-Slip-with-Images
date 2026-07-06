@@ -28,6 +28,11 @@ export interface FamilyReconcileResult {
   backfilled: number
   /** childAsins that had no row before backfill (>= backfilled; some may resolve to no SKU). */
   missingAsins: number
+  /** Diagnostics (2026-07-06): why missing children were NOT backfilled. */
+  offerlessSkipped?: number   // had a SKU but no live SP-API offer → skipped
+  fetchFailed?: number        // listings fetch for the missing ASIN failed
+  amznSkuSkipped?: number     // Amazon-managed system SKU (amzn.*)
+  capHit?: boolean            // more missing than the backfill cap
 }
 
 export async function reconcileFamilyChildren(
@@ -35,7 +40,7 @@ export async function reconcileFamilyChildren(
   supabase: SupabaseClient,
   opts: { placeholderTitle?: string; backfillCap?: number } = {},
 ): Promise<FamilyReconcileResult> {
-  const result: FamilyReconcileResult = { childAsins: 0, reattached: 0, backfilled: 0, missingAsins: 0 }
+  const result: FamilyReconcileResult = { childAsins: 0, reattached: 0, backfilled: 0, missingAsins: 0, offerlessSkipped: 0, fetchFailed: 0, amznSkuSkipped: 0, capHit: false }
 
   const { getAccessToken } = await import('@/lib/amazon/auth')
   const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
@@ -82,21 +87,23 @@ export async function reconcileFamilyChildren(
       const nowIso = new Date().toISOString()
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const newRows: any[] = []
+      const cap = opts.backfillCap ?? 60
+      result.capHit = missingAsins.length > cap
       if (sellerId) {
-        for (const childAsin of missingAsins.slice(0, opts.backfillCap ?? 60)) { // cap: a runaway family can't stall the run
+        for (const childAsin of missingAsins.slice(0, cap)) { // cap: a runaway family can't stall the run
           // includedData=offers too — we backfill a child ONLY if it has a live offer (gate below).
           const lurl = `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}?identifiers=${encodeURIComponent(childAsin)}&identifiersType=ASIN&marketplaceIds=${MP}&includedData=summaries,offers`
           const lresp = await fetch(lurl, { headers: { 'x-amz-access-token': tok } })
-          if (!lresp.ok) continue
+          if (!lresp.ok) { result.fetchFailed = (result.fetchFailed ?? 0) + 1; continue }
           const ljson = await lresp.json() as { items?: { sku?: string; offers?: unknown[] }[] }
           for (const it of ljson.items ?? []) {
-            if (!it.sku || /^amzn\./i.test(it.sku)) continue // skip Amazon-managed system SKUs
+            if (!it.sku || /^amzn\./i.test(it.sku)) { result.amznSkuSkipped = (result.amznSkuSkipped ?? 0) + 1; continue } // skip Amazon-managed system SKUs
             // OFFER GATE: only backfill children that have a LIVE offer. An offerless SKU ("Missing
             // offer") would, when later PATCHed by a push, make Amazon CREATE a phantom incomplete
             // ASIN. Skip — never seed an offerless/unpushable row. Scoped to the offerless case: a
             // zero-sales / no-inventory child that DOES carry an offer still backfills (the reconcile's
             // legitimate purpose). The push update-only gate is the backstop if a bad row slips in.
-            if (!Array.isArray(it.offers) || it.offers.length === 0) continue
+            if (!Array.isArray(it.offers) || it.offers.length === 0) { result.offerlessSkipped = (result.offerlessSkipped ?? 0) + 1; continue }
             newRows.push({
               sku: it.sku, asin: childAsin, parent_asin: parentAsin, title: placeholderTitle,
               bullet_1: '', bullet_2: '', bullet_3: '', bullet_4: '', bullet_5: '',
