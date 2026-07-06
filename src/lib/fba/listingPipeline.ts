@@ -178,7 +178,7 @@ export interface PipelineResult {
    *  couldn't close) and can enforce cross-section design-name cohesion off the REAL design name — not a
    *  capacity-unsafe title heuristic. */
   keywordPlan: { bullets: string[]; designName: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[] }
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[] }
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; nicheDebug?: Record<string, unknown> }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
@@ -4558,11 +4558,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // title. SINGLE-DESIGN + TITLE-section only (review: parent seeds would ground every design group; a
   // partial regen never consumes them). Seeds go ONLY to input.nicheSeeds (title groundVocab + brief),
   // never the shared bullet/scorer pool. Best-effort — any failure leaves the title unchanged.
+  const nicheDebug: Record<string, unknown> = { gateOk: false }
   if (apparelProduct && !designGroupInfo.isMultiDesign && (!input.onlySection || input.onlySection === 'title')) {
+    nicheDebug.gateOk = true
     const nicheAnchor = ((input.canonicalTitle ?? repTitle ?? '').split(/\s*[–—|·:]\s*|\s+-\s+/)[0] || '').trim()
+    nicheDebug.anchor = designName || nicheAnchor
     if (nicheAnchor || input.visionDesign) {
       const anchor = [designName || nicheAnchor, ...secondaryPhrases].filter(Boolean).join(' | ')
       const raw = await expandDesignNiche(input.openai, designName || nicheAnchor, secondaryPhrases, input.visionDesign, input.productType ?? null)
+      nicheDebug.raw = raw
       // SAFETY FLOOR — a seed sharing a DISTINCTIVE (non-generic) token with the design identity is
       // literally grounded and always safe ("book lover shirt" ← "book"). NICHE_FREE = the generic
       // words the title grounding filter also ignores.
@@ -4577,6 +4581,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const judged = await judgeNicheRelevance(input.openai, anchor, raw)
       const extra = (judged ?? []).filter((s) => !overlapOk.includes(s))
       const grounded = [...new Set([...overlapOk, ...extra])].slice(0, 8)
+      nicheDebug.overlapOk = overlapOk; nicheDebug.judgedNull = judged === null; nicheDebug.judged = judged ?? []; nicheDebug.grounded = grounded
       if (grounded.length) { input.nicheSeeds = grounded; onProgress(`Seeded ${grounded.length} design-niche keyword(s).`) }
     }
   }
@@ -4911,7 +4916,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('title', {
       recommended_title: finalTitle,
       per_child_titles: perChildTitles,
-      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
+      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [], nicheDebug },
     })
   }
 
@@ -5624,6 +5629,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
     keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined },
-    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
+    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [], nicheDebug },
   })
 }

@@ -347,6 +347,7 @@ export async function POST(req: NextRequest) {
 
     const supabase = getAdminSupabase()
 
+    let reconcileDebug: Record<string, unknown> | null = null   // diagnostics 2026-07-06 — exposed in the regen response
     // Fetch all child content rows for this parent.
     const contentCols = 'sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt'
     let { data: childrenRaw, error } = await supabase
@@ -371,6 +372,7 @@ export async function POST(req: NextRequest) {
         const { reconcileFamilyChildren } = await import('@/lib/fba/familyReconcile')
         const placeholderTitle = (childrenRaw?.[0] as { title?: string } | undefined)?.title ?? ''
         const rec = await reconcileFamilyChildren(parent_asin, supabase, { placeholderTitle })
+        reconcileDebug = { ...rec, storedBefore: childrenRaw?.length ?? 0 }   // diagnostics 2026-07-06
         if (rec.reattached > 0) console.log(`[ai-recommendations] self-heal: re-attached ${rec.reattached} child SKU(s) to parent ${parent_asin}`)
         if (rec.backfilled > 0) console.log(`[ai-recommendations] child backfill: created ${rec.backfilled} missing variation row(s) for parent ${parent_asin} (${rec.missingAsins} childAsins had no row)`)
         // Re-query once if EITHER re-attach or backfill changed the family.
@@ -746,6 +748,7 @@ export async function POST(req: NextRequest) {
               keywordIntelligenceUsed: true,
               regenerated_section: sec,
               titleDebug: result.debug,
+              reconcileDebug,
             })
             controller.close()
             return
@@ -1156,6 +1159,7 @@ export async function POST(req: NextRequest) {
             recommendations: rec,
             keywordIntelligenceUsed: opportunitiesUsed > 0,
             titleDebug: result.debug,
+            reconcileDebug,
           })
           controller.close()
         } catch (err) {
