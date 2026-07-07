@@ -4406,6 +4406,51 @@ Rules:
 
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
 
+/**
+ * FINAL EDITORIAL AUDIT — the "council-approved" gate over the FULLY-ASSEMBLED customer-facing copy
+ * (content-quality foundational, PO-approved 2026-07-07). One senior-editor LLM pass reads the final
+ * bullets + description + a representative backend string AGAINST the real product (design/joke, garment,
+ * audience) and fixes what no deterministic rule reliably catches: truncated bullets ("…with jeans or."),
+ * generic OFF-THEME bullets, awkward description phrasing, and a polluted backend (unrelated holidays/
+ * countries, competitor/other blank brands, standalone colors, junk fragment tokens like "he s"/"hes").
+ * Returns fixed bullets + description and a set of backend TERMS TO DROP (applied to EVERY child so all
+ * per-color strings get cleaned). FAIL-OPEN: any LLM/parse failure returns everything unchanged, so it
+ * can only ever IMPROVE. The title is NOT rewritten here (its 75-char/brand/manual-lock guards are upstream).
+ */
+async function runFinalEditorialAudit(
+  openai: OpenAI,
+  bullets: string[],
+  description: string,
+  backendSample: string,
+  ctx: { design: string; designPhrases: string[]; garment: string; audience: string },
+): Promise<{ bullets: string[]; description: string; backendDrop: Set<string> }> {
+  const unchanged = { bullets, description, backendDrop: new Set<string>() }
+  try {
+    const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"bullets":[5 strings],"description":"...","backend_drop":[lowercase terms to remove]}.
+
+PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.
+
+RULES:
+- BULLETS: return EXACTLY 5. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence — NEVER truncated (fix "…with jeans or." into a finished sentence). WEAVE the design's real theme/joke through the bullets; do not leave them generic. Natural human copy, no keyword-stuffing, no competitor brands, <=200 chars each.
+- DESCRIPTION: keep it accurate to the product; fix awkward/incomplete phrasing; invent no specs.
+- BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
+
+BACKEND STRING: ${backendSample}`
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4.1', temperature: 0.3, max_tokens: 1500, response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ bullets, description }) }],
+    })
+    const p = JSON.parse(resp.choices[0]?.message?.content || '{}') as { bullets?: unknown; description?: unknown; backend_drop?: unknown }
+    const okBullets = Array.isArray(p.bullets) && p.bullets.length === 5 && p.bullets.every((b) => typeof b === 'string' && b.trim().length > 0 && b.trim().length <= 200)
+    const outBullets = okBullets ? (p.bullets as string[]).map((b) => b.trim()) : bullets
+    const outDesc = typeof p.description === 'string' && p.description.trim().length > 20 ? p.description.trim() : description
+    const drop = new Set<string>(Array.isArray(p.backend_drop)
+      ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
+      : [])
+    return { bullets: outBullets, description: outDesc, backendDrop: drop }
+  } catch { return unchanged }
+}
+
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
   const { brandName, repTitle, onProgress } = input
 
@@ -5681,6 +5726,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         reason: 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of short customer-facing phrases — material, fit, features, use-case — shown near the title. Human-readable phrases, not a keyword list.',
       })
     }
+  }
+
+  // FINAL EDITORIAL AUDIT (council-approved gate, 2026-07-07). Best-effort, FAIL-OPEN. Single-design
+  // apparel only (multi-design fans out per group; onlySection partials return earlier). Fixes truncated/
+  // off-theme bullets + awkward description, and drops backend junk (holidays/countries/competitor blanks/
+  // colors/fragments) from EVERY child. Skipped when not enough context or on any error (keeps originals).
+  if (apparelProduct && !designGroupInfo.isMultiDesign && !input.onlySection && bullets.length === 5) {
+    const auditRes = await runFinalEditorialAudit(input.openai, bullets, description, perChild[0]?.keywords ?? '', {
+      design: effectiveDesignName || designName || repTitle || '',
+      designPhrases: secondaryPhrases,
+      garment: input.productType ?? '',
+      audience: preferredAudience || lean || '',
+    })
+    bullets = auditRes.bullets
+    description = auditRes.description
+    if (auditRes.backendDrop.size > 0) {
+      perChild = perChild.map((c) => ({
+        ...c,
+        keywords: c.keywords.split(/\s+/).filter((t) => t && !auditRes.backendDrop.has(t.toLowerCase())).join(' '),
+      }))
+    }
+    onProgress('Final editorial audit applied.')
   }
 
   return scrubPublished({
