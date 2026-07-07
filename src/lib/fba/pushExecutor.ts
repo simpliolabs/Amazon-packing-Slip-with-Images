@@ -28,6 +28,7 @@
  */
 
 import { createAdminClient } from '@/lib/supabase/server'
+import { reconcileFamilyChildren } from '@/lib/fba/familyReconcile'
 import { getAccessToken } from '@/lib/amazon/auth'
 import {
   FIELD_CONFIG, isPushField, type PushField,
@@ -2849,6 +2850,24 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         // ── REGULAR FIELDS branch (title / bullets / description / keywords) ──
         const field: PushField = isPushField(rawField) ? rawField : 'keywords'
         const titleOv = field === 'title' && typeof title_override === 'string' && title_override.trim() ? title_override.trim() : undefined
+        // COVERAGE (2026-07-06): before a FULL family push, reconcile the live family so any newly-
+        // linked / never-ingested VARIATION children get a listing_content row FIRST. loadDiff reads
+        // listing_content, so a child with no row is invisible to the push — the B0GQXSNQ6R 73/133 case
+        // where 60 variations were pushed "a few times" but never covered because we'd never ingested
+        // their rows. reconcileFamilyChildren is the SAME offer-gated, additive fn the on-open regen
+        // uses (#242): it only materializes children that have a LIVE offer, so every backfilled row
+        // then passes loadDiff's ground-truth gate and the full push covers it. Skipped for SELECTIVE
+        // pushes (explicit skus) — the seller scoped those deliberately. One catalog call when the
+        // family is already complete; the up-to-60 listings fetches fire only when there's a real gap.
+        if (!Array.isArray(skus)) {
+          try {
+            const supaRec = await createAdminClient()
+            const reconcileRes = await reconcileFamilyChildren(parent_asin, supaRec)
+            if (reconcileRes.backfilled > 0 || reconcileRes.reattached > 0) {
+              console.log(`[push-content] pre-push reconcile: +${reconcileRes.backfilled} backfilled, ${reconcileRes.reattached} reattached of ${reconcileRes.childAsins} live children`)
+            }
+          } catch (e) { console.warn('[push-content] pre-push reconcile skipped (non-fatal):', e instanceof Error ? e.message : e) }
+        }
         const rawDiff = (await loadDiff(parent_asin, field, titleOv)).filter((d) => d.raw != null)
         let diff: DiffRow[]
         // Selective re-push ("push just the stale ones"): FORCE the requested SKUs (+ their FBA/FBM twins

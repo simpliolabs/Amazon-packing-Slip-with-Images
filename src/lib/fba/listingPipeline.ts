@@ -178,7 +178,7 @@ export interface PipelineResult {
    *  couldn't close) and can enforce cross-section design-name cohesion off the REAL design name — not a
    *  capacity-unsafe title heuristic. */
   keywordPlan: { bullets: string[]; designName: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[] }
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; nicheDebug?: Record<string, unknown> }
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
@@ -4098,6 +4098,37 @@ async function buildTitleFor(
     const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
     finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
   }
+  // 6b. DETERMINISTIC NICHE FILL (2026-07-06, instrumented root cause). The LLM council reliably
+  //     IGNORES the niche brief line — live proof: 8 grounded seeds handed over, title still a
+  //     47-char stub with no "Too Many Books". Since input.nicheSeeds are grounded + judge-verified
+  //     whole phrases (a TRUSTED source), append them deterministically to fill the budget. Unlike
+  //     the pool fill, this ALLOWS a word to repeat up to Amazon's 2x limit (the seller's own title
+  //     does: "Book Lover ... Too Many Books") rather than the strict all-novel rule that blocked
+  //     the shared "book". Trailing garment/gift words are trimmed (the title already names the type).
+  if (apparelProduct && (input.nicheSeeds?.length ?? 0) > 0 && finalTitle.length < 68) {
+    const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
+    const tail = tailMatch ? tailMatch[0] : ''
+    let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
+    const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    const counts = new Map<string, number>()
+    for (const t of bulletTokens(head).map(fillNormTok)) counts.set(t, (counts.get(t) ?? 0) + 1)
+    const trimTail = (s: string) => { let p = s, prev = ''; while (p && p !== prev) { prev = p; p = p.replace(/\s+(?:tees?|t-?shirts?|shirts?|gifts?|graphic|apparel|clothing|tops?)\s*$/i, '').trim() } return p }
+    for (const seed of input.nicheSeeds!) {
+      if ((head + tail).length >= 70) break
+      const clean = trimTail(seed.trim())
+      if (bulletTokens(clean).length < 2) continue
+      if (stripContradictedGarments(stripUngroundedMotifs(clean, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust) !== clean) continue
+      const seedToks = bulletTokens(clean).map(fillNormTok)
+      if (seedToks.every((t) => (counts.get(t) ?? 0) > 0)) continue                 // adds nothing novel
+      const add = new Map<string, number>(); for (const t of seedToks) add.set(t, (add.get(t) ?? 0) + 1)
+      if ([...add].some(([t, n]) => (counts.get(t) ?? 0) + n > 2)) continue          // would push a word past Amazon's 2x
+      const next = `${head}, ${titleCaseKw(clean)}`
+      if ((next + tail).length > 75) continue
+      head = next
+      for (const [t, n] of add) counts.set(t, (counts.get(t) ?? 0) + n)
+    }
+    finalTitle = `${head}${tail}`
+  }
   // 7. Brand-dedup + adjacent-stutter cleanup (PR #272) — final pass. Guard 5 only fixes a brand
   //    missing from the front; this removes a SECOND mid-title brand and collapses repeated words.
   finalTitle = dedupeBrandAndStutter(finalTitle, brandName)
@@ -4558,15 +4589,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // title. SINGLE-DESIGN + TITLE-section only (review: parent seeds would ground every design group; a
   // partial regen never consumes them). Seeds go ONLY to input.nicheSeeds (title groundVocab + brief),
   // never the shared bullet/scorer pool. Best-effort — any failure leaves the title unchanged.
-  const nicheDebug: Record<string, unknown> = { gateOk: false }
   if (apparelProduct && !designGroupInfo.isMultiDesign && (!input.onlySection || input.onlySection === 'title')) {
-    nicheDebug.gateOk = true
     const nicheAnchor = ((input.canonicalTitle ?? repTitle ?? '').split(/\s*[–—|·:]\s*|\s+-\s+/)[0] || '').trim()
-    nicheDebug.anchor = designName || nicheAnchor
     if (nicheAnchor || input.visionDesign) {
       const anchor = [designName || nicheAnchor, ...secondaryPhrases].filter(Boolean).join(' | ')
       const raw = await expandDesignNiche(input.openai, designName || nicheAnchor, secondaryPhrases, input.visionDesign, input.productType ?? null)
-      nicheDebug.raw = raw
       // SAFETY FLOOR — a seed sharing a DISTINCTIVE (non-generic) token with the design identity is
       // literally grounded and always safe ("book lover shirt" ← "book"). NICHE_FREE = the generic
       // words the title grounding filter also ignores.
@@ -4581,8 +4608,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const judged = await judgeNicheRelevance(input.openai, anchor, raw)
       const extra = (judged ?? []).filter((s) => !overlapOk.includes(s))
       const grounded = [...new Set([...overlapOk, ...extra])].slice(0, 8)
-      nicheDebug.overlapOk = overlapOk; nicheDebug.judgedNull = judged === null; nicheDebug.judged = judged ?? []; nicheDebug.grounded = grounded
-      if (grounded.length) { input.nicheSeeds = grounded; onProgress(`Seeded ${grounded.length} design-niche keyword(s).`) }
+      // LEAD the fill with the design's OWN secondary phrases (subtitle-split, trademark-gated — the
+      // highest-signal, literally-grounded wording). They already sit in the keyword pool at the low
+      // attributeAsKeyword score (35, line ~4433) so the council leaves them OUT of the title — that's
+      // exactly the "Too Many Books" the PO wanted, absent from the 47-char stub. The deterministic
+      // fill below is the path that actually seats them into spare title budget; LLM niche expansions
+      // follow as secondary candidates. Deduped; the fill's novelty + 2x + 75 guards bound the result.
+      const fillSeeds = [...new Set([...secondaryPhrases, ...grounded])]
+      if (fillSeeds.length) { input.nicheSeeds = fillSeeds; onProgress(`Seeded ${fillSeeds.length} design-niche keyword(s).`) }
     }
   }
 
@@ -4916,7 +4949,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('title', {
       recommended_title: finalTitle,
       per_child_titles: perChildTitles,
-      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [], nicheDebug },
+      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [] },
     })
   }
 
@@ -5629,6 +5662,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
     keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined },
-    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [], nicheDebug },
+    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [] },
   })
 }
