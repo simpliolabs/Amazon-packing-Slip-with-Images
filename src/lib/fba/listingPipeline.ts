@@ -580,11 +580,23 @@ const THIRD_PARTY_BRANDS = new Set([
   'nintendo', 'playstation', 'xbox', 'switch',
   // Audio
   'bose', 'beats', 'jbl', 'sennheiser',
+  // Apparel / athletic competitor RETAIL brands (2026-07-07, B0FRYMM56C: "why do we have NIKE"). The
+  // keyword research pulls the #1 competitor's ranking terms ("nike shirts women") into the pool as
+  // proven converters, and — until now — no filter knew Nike was a brand, so the bullet coverage
+  // backstop wove it straight into customer copy. A graphic tee is NOT "compatible with" Nike, so these
+  // are DROPPED (like trademark phrases), never framed "for [Brand]". OMITTED pending a context-guard
+  // because they double as legit design words: champion / gap / columbia / express (common words),
+  // puma (animal), wrangler (cowboy/Jeep), levis / hollister (names).
+  'nike', 'adidas', 'reebok', 'lululemon', 'athleta', 'underarmour', 'vuori', 'gymshark',
+  'fabletics', 'aeropostale', 'abercrombie', 'nautica',
 ])
 
 /** Multi-word brand phrases (checked verbatim, not per-word). */
 const THIRD_PARTY_BRAND_PHRASES = [
   'western digital', 'audio technica', 'sea gate', 'go pro',
+  // Apparel/athletic competitor brands whose name is multi-word (per-word checks would false-positive
+  // on 'under'/'new'/'north'/'face'). See the apparel block in THIRD_PARTY_BRANDS above.
+  'under armour', 'new balance', 'north face',
 ]
 
 /**
@@ -3413,9 +3425,14 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
   //      after live B0G884ZJ27 audit leaked "Florida Gators" into a recommended title.
   //      Generic team-mascot words ("alligator", "gators", "lions") still pass through
   //      — only the multi-word REGISTERED phrases are dropped.
+  const ownBrandsForGate = ownBrandTokenSet(brandName)
   const dropJunkAndTrademarks = (kws: AnalyzedKeyword[]) => kws.filter((k) => {
     if (isAllJunk(k.keyword)) return false
     if (findTrademarkPhrases(k.keyword).length > 0) return false
+    // Competitor brands (Nike, Adidas, …) — DROP at the pool SOURCE so no agent or coverage backstop
+    // ever sees "nike shirts women" as a required keyphrase (B0FRYMM56C). Mirrors the trademark backstop
+    // above; the seller's OWN brand is exempt via ownBrandTokenSet. A tee is not "compatible with" Nike.
+    if (findThirdPartyBrands(k.keyword, ownBrandsForGate).length > 0) return false
     return true
   })
   try {
