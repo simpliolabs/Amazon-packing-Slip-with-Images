@@ -148,6 +148,8 @@ export interface ActionPlanItem {
 export interface AiRecommendations {
   parent_asin: string
   recommended_title: string
+  /** 'manual' = seller's own pushed title, LOCKED against whole-listing regens (migration 044). */
+  title_source?: string
   recommended_bullets: string[]
   recommended_keywords: string
   per_child_keywords: PerChildKeywords[]
@@ -730,6 +732,16 @@ export async function POST(req: NextRequest) {
               controller.close()
               return
             }
+            // MANUAL-TITLE LOCK (044): an explicit "Regenerate title" is the seller ASKING for a fresh AI
+            // title, so it must CLEAR the lock — otherwise the next whole-audit would preserve this AI
+            // title as if the seller had typed it, and the "✏️ locked" badge would stick forever. This is
+            // the ONLY unlock path (a locked listing always has a stored row, so a title regen always
+            // routes through THIS partial branch, never the full-path guard). Best-effort separate write
+            // so a lagging migration 044 can't fail the section save; reflected in the merged emit below.
+            if (sec === 'title' && (storedRec as { title_source?: string }).title_source === 'manual') {
+              const { error: tsErr } = await supabase.from('listing_seo_recommendations').update({ title_source: 'ai' }).eq('parent_asin', parent_asin)
+              if (!tsErr) (storedRec as Record<string, unknown>).title_source = 'ai'
+            }
             // Emit the MERGED recommendation (stored row + the new section) in the exact shape
             // the page already consumes — the client code needs zero changes.
             const merged = { ...storedRec, ...upd } as Record<string, unknown>
@@ -1082,9 +1094,39 @@ export async function POST(req: NextRequest) {
             keyword_opportunities_used: opportunitiesUsed,
           }
 
+          // MANUAL-TITLE LOCK (2026-07-07, B0FRYMM56C): if the seller manually pushed their own title,
+          // the manual push stamped title_source='manual' (pushExecutor). A WHOLE-listing AI Audit /
+          // Regenerate must NOT silently overwrite it — read the flag fresh (storedRec is only loaded on
+          // a partial regen) and, when locked AND this isn't an explicit "Regenerate title", KEEP the
+          // seller's title + its per_child_titles and HOLD the lock (so a bullets/description regen can't
+          // clear it either). An explicit title regen (regenerate_section==='title') is the seller asking
+          // for a fresh one → replace it and reset the lock to 'ai'.
+          let titleSourceOut: 'ai' | 'manual' = 'ai'
+          try {
+            const { data: lockRow } = await supabase
+              .from('listing_seo_recommendations')
+              .select('title_source, recommended_title, per_child_titles')
+              .eq('parent_asin', parent_asin)
+              .maybeSingle()
+            const locked = (lockRow as { title_source?: string } | null)?.title_source === 'manual'
+            if (locked && regenerate_section !== 'title') {
+              const kept = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
+              if (kept) rec.recommended_title = kept
+              const keptPct = (lockRow as { per_child_titles?: unknown }).per_child_titles
+              if (Array.isArray(keptPct) && keptPct.length) rec.per_child_titles = keptPct as typeof rec.per_child_titles
+              titleSourceOut = 'manual'
+              console.log(`[ai-recommendations] manual-title lock HELD for ${parent_asin} — kept the seller's title through a ${regenerate_section ?? 'full'} regen`)
+            }
+          } catch (e) { console.warn('[ai-recommendations] manual-title lock check failed (non-fatal):', e instanceof Error ? e.message : e) }
+          rec.title_source = titleSourceOut   // carry the lock state into the streamed result so the "✏️ locked" badge survives a whole-audit
+
           // DB write. recommended_bullets + the *_warnings/improvements/reconciliation/action_plan
           // columns are JSONB (arrays written directly); recommended_keywords is TEXT (JSON string).
           // per_child_titles is JSONB (migration 017) — only present for capacity variation families.
+          // title_source is DELIBERATELY OMITTED here: this whole (full) path NEVER transitions the lock
+          // (a locked listing stays 'manual' by omission — the upsert doesn't touch the column; the only
+          // clear is the explicit-title partial path). Keeping it out of dbPayload means a lagging
+          // migration 044 can't fail this upsert and trip the loud "FULL UPSERT FAILED" path every audit.
           const dbPayload: Record<string, unknown> = {
             parent_asin: rec.parent_asin,
             recommended_title: rec.recommended_title,
