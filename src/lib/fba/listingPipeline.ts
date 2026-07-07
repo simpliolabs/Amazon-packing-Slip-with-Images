@@ -4419,18 +4419,20 @@ Rules:
  */
 async function runFinalEditorialAudit(
   openai: OpenAI,
+  title: string,
   bullets: string[],
   description: string,
   backendSample: string,
-  ctx: { design: string; designPhrases: string[]; garment: string; audience: string },
-): Promise<{ bullets: string[]; description: string; backendDrop: Set<string> }> {
-  const unchanged = { bullets, description, backendDrop: new Set<string>() }
+  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string },
+): Promise<{ title: string; bullets: string[]; description: string; backendDrop: Set<string> }> {
+  const unchanged = { title, bullets, description, backendDrop: new Set<string>() }
   try {
-    const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"bullets":[5 strings],"description":"...","backend_drop":[lowercase terms to remove]}.
+    const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"title":"...","bullets":[5 strings],"description":"...","backend_drop":[lowercase terms to remove]}.
 
 PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.
 
 RULES:
+- TITLE: rewrite the CURRENT TITLE into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "Comfort Colors"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); do NOT claim a fabric weight you can't confirm — this is a MIDWEIGHT garment, so NEVER write "Heavyweight"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
 - BULLETS: return EXACTLY 5. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence — NEVER truncated (fix "…with jeans or." into a finished sentence). WEAVE the design's real theme/joke through the bullets; do not leave them generic. Natural human copy, no keyword-stuffing, no competitor brands, <=200 chars each.
 - DESCRIPTION: keep it accurate to the product; fix awkward/incomplete phrasing; invent no specs.
 - BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
@@ -4440,14 +4442,18 @@ BACKEND STRING: ${backendSample}`
       model: 'gpt-4.1', temperature: 0.3, max_tokens: 1500, response_format: { type: 'json_object' },
       messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ bullets, description }) }],
     })
-    const p = JSON.parse(resp.choices[0]?.message?.content || '{}') as { bullets?: unknown; description?: unknown; backend_drop?: unknown }
+    const p = JSON.parse(resp.choices[0]?.message?.content || '{}') as { title?: unknown; bullets?: unknown; description?: unknown; backend_drop?: unknown }
+    // Title accepted only if it's a plausible rewrite (>=10 chars, still starts with the brand front) — the
+    // caller re-applies capTitle75 + dedupeBrandAndStutter so it stays Amazon-legal + brand-front + de-duped.
+    const outTitle = typeof p.title === 'string' && p.title.trim().length >= 10 && p.title.toLowerCase().includes(ctx.brandFront.toLowerCase().split(' ')[0] || '')
+      ? p.title.trim() : title
     const okBullets = Array.isArray(p.bullets) && p.bullets.length === 5 && p.bullets.every((b) => typeof b === 'string' && b.trim().length > 0 && b.trim().length <= 200)
     const outBullets = okBullets ? (p.bullets as string[]).map((b) => b.trim()) : bullets
     const outDesc = typeof p.description === 'string' && p.description.trim().length > 20 ? p.description.trim() : description
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
-    return { bullets: outBullets, description: outDesc, backendDrop: drop }
+    return { title: outTitle, bullets: outBullets, description: outDesc, backendDrop: drop }
   } catch { return unchanged }
 }
 
@@ -5733,12 +5739,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // off-theme bullets + awkward description, and drops backend junk (holidays/countries/competitor blanks/
   // colors/fragments) from EVERY child. Skipped when not enough context or on any error (keeps originals).
   if (apparelProduct && !designGroupInfo.isMultiDesign && !input.onlySection && bullets.length === 5) {
-    const auditRes = await runFinalEditorialAudit(input.openai, bullets, description, perChild[0]?.keywords ?? '', {
+    const auditRes = await runFinalEditorialAudit(input.openai, finalTitle, bullets, description, perChild[0]?.keywords ?? '', {
       design: effectiveDesignName || designName || repTitle || '',
       designPhrases: secondaryPhrases,
       garment: input.productType ?? '',
       audience: preferredAudience || lean || '',
+      referenceTitle: input.canonicalTitle ?? repTitle ?? '',
+      brandFront: brandName || 'THE CEO',
     })
+    // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped
+    // (kills "T-Shirt … T-Shirt"). If the audit returned the title unchanged, these are idempotent no-ops.
+    if (auditRes.title && auditRes.title !== finalTitle) finalTitle = capTitle75(dedupeBrandAndStutter(auditRes.title, brandName))
     bullets = auditRes.bullets
     description = auditRes.description
     if (auditRes.backendDrop.size > 0) {
