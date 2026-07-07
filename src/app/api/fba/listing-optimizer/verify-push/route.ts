@@ -190,82 +190,120 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // "EXPECTED (PUSHED)" must mean what we actually PUSHED. The recommendation row a push came
-    // from can VANISH on the next regen (the audit picks a fresh 5-10 menu attributes), which made
-    // verify show stale-with-empty-expected on a fully-APPLIED push (live had "Relaxed" on 80/83
-    // SKUs, expected was blank). Fall back to the last ACCEPTED push per SKU from keyword_push_log
-    // when the rec no longer carries the field. Details only: the other fields' rec columns are
-    // replaced on regen, never removed. Best-effort: no log rows → no fallback (legacy behavior).
-    const pushedFallback = new Map<string, string>()
-    if (field === 'details' && detailKey) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data: pl } = await (supabase as any)
-          .from('keyword_push_log')
-          .select('sku, new_value, pushed_at')
-          .eq('parent_asin', parentAsin)
-          .eq('field', `details:${detailKey}`)
-          .eq('status', 'accepted')
-          .order('pushed_at', { ascending: false })
-        for (const r of (pl ?? []) as { sku: string | null; new_value: string | null }[]) {
-          if (r.sku && r.new_value && !pushedFallback.has(r.sku)) pushedFallback.set(r.sku, r.new_value)
-        }
-      } catch { /* best-effort — log table missing/unreadable just means no fallback */ }
-    }
+    // TARGET SET = what was ACTUALLY pushed, read from keyword_push_log (ground truth). The push logs
+    // one row per attempted SKU per field — INCLUDING the live-discovered FBM twins that are never
+    // persisted to listing_content, and the parent. So reading the log gives EXACT coverage parity with
+    // the push for EVERY field, with zero re-derivation of loadDiff's gates (raw!=null / changed /
+    // per-ASIN notLive / twin-name-match) that a family reconstruction would have to keep perpetually in
+    // sync (B0FRYMM56C: the push logged 176 title rows → verify targets 176; reading listing_content only
+    // gave 107). new_value is also the BETTER expected value — the exact string written, and unlike the
+    // recommendation row it doesn't vanish on the next regen (this subsumes the old details-only
+    // fallback). Scoped to the LATEST push SESSION (10 min from the newest row) so a SKU that left the
+    // family in an OLD push — or a later cron re-push of just the stale subset — can't skew the count.
+    const logField: string = field === 'details' ? `details:${detailKey}` : field
+    const pushedBySku = new Map<string, { new_value: string; status: string }>()
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: pl } = await (supabase as any)
+        .from('keyword_push_log')
+        .select('sku, new_value, status, pushed_at, rolled_back_at')
+        .eq('parent_asin', parentAsin)
+        .eq('field', logField)
+        .order('pushed_at', { ascending: false })
+      const logRows = (pl ?? []) as { sku: string | null; new_value: string | null; status: string | null; pushed_at: string | null; rolled_back_at: string | null }[]
+      // Anchor the window on the LATEST push and look back 30 DAYS (not a tight wall-clock gap). A cron
+      // re-push of just the stale subset, an interrupted+resumed push, and a multi-design family's
+      // per-design pushes all land within days of each other — a short gap would SPLIT them and collapse
+      // the count to the last cluster (verify's job is "did the push of N apply?", so N must not silently
+      // shrink to the last-retried subset). 30 days back keeps every related push while still dropping
+      // truly-ancient rows for SKUs that have since left the family.
+      const latestAt = logRows.find((r) => r.pushed_at)?.pushed_at
+      const windowStart = latestAt ? Date.parse(latestAt) - 30 * 24 * 60 * 60 * 1000 : null
+      const seen = new Set<string>()
+      for (const r of logRows) {
+        if (!r.sku || !r.pushed_at) continue
+        if (windowStart != null && Date.parse(r.pushed_at) < windowStart) break // ordered DESC → the rest are older
+        if (seen.has(r.sku)) continue                 // only the NEWEST (in-window) row per SKU counts
+        seen.add(r.sku)
+        // A SKU whose most-recent action was a ROLLBACK had its live value intentionally reverted — nothing
+        // to verify (comparing to new_value would falsely read "stale"). Rollback is modelled as an UPDATE
+        // that stamps rolled_back_at (leaving status='accepted'), so gate on rolled_back_at, not status.
+        if (r.rolled_back_at || r.status === 'rolled_back') continue
+        pushedBySku.set(r.sku, { new_value: r.new_value ?? '', status: r.status ?? '' })
+      }
+    } catch { /* log unreadable — fall back to the listing_content family below (legacy behaviour) */ }
 
-    // Collect every SKU we would have pushed to (children from listing_content + the parent
-    // SKU we discover via Listings Items). The parent is included for broadcast fields and
-    // for details, because the verify endpoint should mirror what push-content covers.
+    // listing_content gives each SKU's ASIN (for display, isParent, and the title-inherited bucket) and
+    // is the FALLBACK target set when there's no push log yet (legacy pushes predating the log). A pushed
+    // twin/parent may be absent from it → asin '' (verify reads by SKU, not ASIN, so that's harmless).
     const { data: rowsRaw } = await supabase
       .from('listing_content')
       .select('sku, asin')
       .eq('parent_asin', parentAsin)
       .order('sku', { ascending: true })
-    let rows = (rowsRaw ?? []) as { sku: string; asin: string }[]
-    if (rows.length === 0) return NextResponse.json({ error: 'No children found for this parent. Run a Sync first.' }, { status: 404 })
-
-    // Per-design scope (PR-C): keep only SKUs in the requested subset. If the subset matches NONE of
-    // this parent's children, return an explicit "unverifiable" empty result — NEVER fall through to
-    // verifying all SKUs (that would silently widen a scoped verify back to the whole listing).
-    if (skuFilter) {
-      rows = rows.filter((r) => skuFilter.has(r.sku))
-      if (rows.length === 0) {
-        return NextResponse.json({
-          parent_asin: parentAsin,
-          field,
-          detail_field: field === 'details' ? detailFriendly : undefined,
-          total: 0, matched: 0, inherited: 0, unverifiable: 0, stale: 0, unknown: 0, parentSkipped: 0,
-          results: [],
-        })
-      }
+    const rows = (rowsRaw ?? []) as { sku: string; asin: string }[]
+    const skuToAsin = new Map(rows.map((r) => [r.sku, r.asin]))
+    if (pushedBySku.size === 0 && rows.length === 0) {
+      return NextResponse.json({ error: 'Nothing to verify — no push history and no synced children for this parent. Push or Sync first.' }, { status: 404 })
     }
 
     const token = await getAccessToken()
     const sellerId = await getSellerId()
 
-    // Discover the variation parent SKU and include it for broadcast / details fields.
+    // Discover the variation parent SKU. CRITICAL now that targets come from the push LOG: the parent SKU
+    // is ALWAYS logged for broadcast fields, so if this lookup returns null the parent's log row would be
+    // scored as a buyable child that can NEVER match (the hub rejects content PATCHes) → "1 stale" forever
+    // → the cron re-push loop the #244/#245 comment below forbids. So RETRY (3×, on throttle/5xx/network)
+    // — whenever the push itself found the parent, verify will too.
     const isBroadcastField = field === 'title' || field === 'bullets' || field === 'description' || field === 'details'
     let parentSku: string | null = null
     if (isBroadcastField) {
-      try {
-        const urlP =
-          `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
-          `?identifiers=${encodeURIComponent(parentAsin)}&identifiersType=ASIN` +
-          `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
-        const resp = await fetch(urlP, { headers: { 'x-amz-access-token': token } })
-        if (resp.ok) {
-          const j = (await resp.json()) as { items?: { sku?: string }[] }
-          parentSku = j.items?.[0]?.sku ?? null
-        }
-      } catch { /* best-effort */ }
+      const urlP =
+        `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
+        `?identifiers=${encodeURIComponent(parentAsin)}&identifiersType=ASIN` +
+        `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const resp = await fetch(urlP, { headers: { 'x-amz-access-token': token } })
+          if (resp.ok) {
+            const j = (await resp.json()) as { items?: { sku?: string }[] }
+            parentSku = j.items?.[0]?.sku ?? null
+            break // a successful read is authoritative (found the parent SKU or confirmed none)
+          }
+          if (resp.status !== 429 && resp.status < 500) break // genuine 4xx — won't fix on retry
+        } catch { /* network blip — fall through to backoff + retry */ }
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1)))
+      }
     }
 
-    // Walk every (sku, isParent) and fetch its live listing in parallel batches of 5
-    // (Amazon getListingsItem limit is 5 rps, same as patch).
-    const targets: { sku: string; asin: string; isParent: boolean }[] = []
-    for (const r of rows) targets.push({ sku: r.sku, asin: r.asin, isParent: false })
+    // Walk every (sku, isParent) and fetch its live listing in parallel batches of 5 (5 rps cap).
+    // Targets = the pushed SKUs (ground truth) when the log has any; else the listing_content family
+    // (legacy pushes predating the log). We NEVER twin-discover here — the log already holds the twins.
+    let targets: { sku: string; asin: string; isParent: boolean }[]
+    if (pushedBySku.size > 0) {
+      targets = [...pushedBySku.keys()].map((sku) => {
+        const isParent = parentSku != null && sku === parentSku
+        return { sku, asin: isParent ? parentAsin : (skuToAsin.get(sku) ?? ''), isParent }
+      })
+    } else {
+      targets = rows.map((r) => ({ sku: r.sku, asin: r.asin, isParent: false }))
+    }
+    // Include the variation parent SKU for broadcast/details even if it wasn't in the log/rows.
     if (parentSku && !targets.some((t) => t.sku === parentSku)) {
       targets.push({ sku: parentSku, asin: parentAsin, isParent: true })
+    }
+    // Per-design scope (PR-C): keep only the requested subset (plus the parent hub). An empty CHILD
+    // intersection → explicit "unverifiable" empty result, never widen back to the whole listing.
+    if (skuFilter) {
+      targets = targets.filter((t) => t.isParent || skuFilter.has(t.sku))
+      if (targets.every((t) => t.isParent)) {
+        return NextResponse.json({
+          parent_asin: parentAsin, field,
+          detail_field: field === 'details' ? detailFriendly : undefined,
+          total: 0, matched: 0, inherited: 0, unverifiable: 0, stale: 0, unknown: 0, parentSkipped: targets.length,
+          results: [],
+        })
+      }
     }
 
     const results: { sku: string; asin: string; isParent: boolean; currentLive: string; expected: string; expectedSource: 'recommendation' | 'push_log' | 'none'; matches: boolean; inherited: boolean; readFailed: boolean; lastUpdatedDate: string | null }[] = []
@@ -281,11 +319,20 @@ export async function GET(req: NextRequest) {
         const listing = await getListing(sellerId, token, t.sku)
         const readFailed = listing === null // null only AFTER retries exhausted = couldn't read
         const currentLive = extractLive(field, detailKey, listing)
-        let expected = expectedFor(field, rec, t.sku, t.isParent, detailFriendly || null)
-        let expectedSource: 'recommendation' | 'push_log' | 'none' = expected ? 'recommendation' : 'none'
-        if (!expected) {
-          const fb = pushedFallback.get(t.sku)
-          if (fb) { expected = fb; expectedSource = 'push_log' }
+        // EXPECTED = the exact string we PUSHED (keyword_push_log.new_value) — ground truth for what
+        // Amazon should now show, for EVERY field. It doesn't vanish on the next regen (unlike the rec).
+        // Fall back to the live recommendation only when a target isn't in the log (the parent-add, or
+        // the legacy no-log path). new_value is already asCompare()-normalized (same shape extractLive
+        // and expectedFor produce), so the match test below is unchanged.
+        const logged = pushedBySku.get(t.sku)
+        let expected: string
+        let expectedSource: 'recommendation' | 'push_log' | 'none'
+        if (logged && logged.new_value) {
+          expected = logged.new_value
+          expectedSource = 'push_log'
+        } else {
+          expected = expectedFor(field, rec, t.sku, t.isParent, detailFriendly || null)
+          expectedSource = expected ? 'recommendation' : 'none'
         }
         const lastUpdatedDate = listing?.summaries?.[0]?.lastUpdatedDate ?? null
         // INHERITED (2026-06-17): a variation CHILD whose read SUCCEEDED but whose own item_name is
