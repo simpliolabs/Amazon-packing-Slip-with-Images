@@ -103,20 +103,30 @@ export const SYSTEM_ACTOR: PushActor = { id: null, name: 'System (automated push
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function logPushChange(db: any, args: {
   parent_asin: string; field: string; actor: PushActor; after_value?: string | null; submission_id?: string | null
+  accepted?: number; failed?: number   // counts so a PARTIAL push reads "…to 133/148 variants" (migration 044)
 }): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const base: Record<string, any> = {
+    parent_asin: args.parent_asin,
+    sku: null,
+    field: args.field,
+    action: 'push',
+    before_value: null,
+    after_value: args.after_value ?? null,
+    changed_by: args.actor.id,
+    changed_by_name: args.actor.name,
+    source: 'push_executor',
+    submission_id: args.submission_id ?? null,
+  }
   try {
-    await db.from('listing_change_log').insert({
-      parent_asin: args.parent_asin,
-      sku: null,
-      field: args.field,
-      action: 'push',
-      before_value: null,
-      after_value: args.after_value ?? null,
-      changed_by: args.actor.id,
-      changed_by_name: args.actor.name,
-      source: 'push_executor',
-      submission_id: args.submission_id ?? null,
-    })
+    // supabase-js returns { error } (does NOT throw) on an unknown column, so a lagging migration 044
+    // would SILENTLY drop the push row — the exact "history didn't show my push" bug. On any insert
+    // error, retry WITHOUT the count columns so the push STILL appears (counts are a nice-to-have).
+    const { error } = await db.from('listing_change_log').insert({ ...base, accepted_count: args.accepted ?? null, failed_count: args.failed ?? null })
+    if (error) {
+      const { error: e2 } = await db.from('listing_change_log').insert(base)
+      if (e2) console.warn('[push] change-log insert failed (non-fatal):', e2.message)
+    }
   } catch (e) {
     console.warn('[push] change-log insert failed (non-fatal):', e instanceof Error ? e.message : e)
   }
@@ -2819,18 +2829,20 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             } catch (e) { console.warn('[push-content/details] verify enqueue failed (non-fatal):', e) }
           }
 
-          // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT push mirrors a product-facing change-log row
-          // (action='push', source='push_executor') + a NARROW compliance audit (listing.push as a
-          // write-to-Amazon event). Best-effort — never blocks a push that already wrote to Amazon.
-          if (failed === 0 && !cancelled && accepted > 0) {
+          // ATTRIBUTION (spec §5 Phase B): a push mirrors a product-facing change-log row (action='push',
+          // source='push_executor') + a NARROW compliance audit (listing.push as a write-to-Amazon event).
+          // Fires on accepted>0 (PARTIAL pushes included, so they still appear in Change History — the
+          // B0FRYMM56C fix); counts ride along. Best-effort — never blocks a push that wrote to Amazon.
+          // !cancelled: a STOPPED push's counts cover only attempted SKUs, so it'd mislabel as complete.
+          if (accepted > 0 && !cancelled) {
             await logPushChange(db, {
-              parent_asin, field: `details:${ctx.attribute.spApiKey}`, actor,
+              parent_asin, field: `details:${ctx.attribute.spApiKey}`, actor, accepted, failed,
               after_value: ctx.recommendedValue,
               submission_id: results.find((r) => r.status === 'accepted')?.submissionId ?? null,
             })
             await logAudit({
               userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
-              details: { field: `details:${ctx.attribute.spApiKey}`, detail_field: ctx.detailField, accepted, by: actor.name },
+              details: { field: `details:${ctx.attribute.spApiKey}`, detail_field: ctx.detailField, accepted, failed, by: actor.name },
             })
           }
 
@@ -3086,12 +3098,20 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // shows "needs update", and the NEXT ship would push the AI title over the seller's. So we make
           // their pushed title the recommendation — it sticks, cohesion goes green, re-ship is a no-op.
           // Capacity families are excluded (their per-GB titles must not collapse to one string).
+          // title_source='manual' LOCKS it: a whole-listing AI Audit/Regenerate then PRESERVES the
+          // seller's title instead of silently overwriting it (B0FRYMM56C) — only an explicit
+          // "Regenerate title" clears the lock. See the regen guard in ai-recommendations POST.
           if (!cancelled && field === 'title' && typeof title_override === 'string' && title_override.trim()) {
             try {
               const { data: rt } = await db.from('listing_seo_recommendations').select('per_child_titles').eq('parent_asin', parent_asin).single()
               const isCapFam = Array.isArray(rt?.per_child_titles) && rt.per_child_titles.length > 1
               if (!isCapFam) {
-                await db.from('listing_seo_recommendations').update({ recommended_title: title_override.trim().slice(0, 200) }).eq('parent_asin', parent_asin)
+                const manualTitle = title_override.trim().slice(0, 200)
+                // WITH the lock flag; if migration 044 (title_source) isn't applied yet, supabase-js
+                // returns { error } — retry with just recommended_title so the seller's title STILL
+                // persists (never regress the existing behaviour just because the lock column lags).
+                const { error: upErr } = await db.from('listing_seo_recommendations').update({ recommended_title: manualTitle, title_source: 'manual' }).eq('parent_asin', parent_asin)
+                if (upErr) await db.from('listing_seo_recommendations').update({ recommended_title: manualTitle }).eq('parent_asin', parent_asin)
               }
             } catch (e) { console.warn('[push-content] persist manual title as recommendation failed (non-fatal):', e) }
           }
@@ -3137,23 +3157,30 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.warn('[push-content] verify enqueue failed (non-fatal):', e) }
         }
 
-        // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT push mirrors a product-facing change-log row
-        // (action='push', source='push_executor') + a NARROW compliance audit (listing.push). The
-        // exact pushed bytes live in keyword_push_log; this row is the WHO/WHEN/action timeline.
-        // Phase C (§4-E / Risk R3): the SAME full-accept hinge stamps the OUTCOME EPOCH — push_epoch_at
-        // = now, push_epoch_fingerprint = fingerprintOf(just-pushed content) computed above during the
-        // re-score, baseline_overall_score = the post-push score, verdict='measuring'. A new full push
-        // RESETS the epoch (upsert) to re-measure the new copy. Best-effort, never blocks the push.
-        if (failed === 0 && !cancelled && accepted > 0) {
+        // ATTRIBUTION (spec §5 Phase B): a push mirrors a product-facing change-log row (action='push',
+        // source='push_executor') + a NARROW compliance audit (listing.push). The exact pushed bytes
+        // live in keyword_push_log; this row is the WHO/WHEN/action timeline. Fires whenever SOMETHING
+        // shipped (accepted>0) so a PARTIAL push STILL appears in Change History — it used to require
+        // failed===0, so a big family's partial push (any SKU failing) wrote NO row and vanished from
+        // the timeline (the B0FRYMM56C "history doesn't show my push" report). The counts ride along so
+        // the row reads "pushed the title to 133/148 variants". !cancelled: a STOPPED push's counts cover
+        // only attempted SKUs, so it'd mislabel as complete (adversarial review #7).
+        if (accepted > 0 && !cancelled) {
           await logPushChange(db, {
-            parent_asin, field, actor,
+            parent_asin, field, actor, accepted, failed,
             after_value: field === 'title' ? (titleOv ?? null) : null,
             submission_id: results.find((r) => r.status === 'accepted')?.submissionId ?? null,
           })
           await logAudit({
             userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
-            details: { field, accepted, by: actor.name },
+            details: { field, accepted, failed, by: actor.name },
           })
+        }
+        // Phase C (§4-E / Risk R3): the OUTCOME EPOCH stays on the STRICT full-accept gate — it anchors
+        // the measurement to a FULLY-shipped copy (push_epoch_at=now, fingerprint=just-pushed content,
+        // baseline=post-push score). A partial push is not the final content, so it must NOT reset the
+        // epoch. A new full push RESETS it (upsert) to re-measure. Best-effort, never blocks the push.
+        if (failed === 0 && !cancelled && accepted > 0) {
           await stampOutcomeEpoch(db, { parent_asin, fingerprint: pushedFingerprint, baseline_overall_score: pushedOverall })
         }
 
@@ -3414,16 +3441,18 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     const totalAccepted = livePlans.reduce((n, p) => n + tally[p.field].accepted, 0)
     const totalFailed = livePlans.reduce((n, p) => n + tally[p.field].failed, 0)
 
-    // ATTRIBUTION (spec §5 Phase B): a FULL-ACCEPT bulk push mirrors a change-log row per accepted
-    // field (action='push', source='push_executor') + ONE narrow logAudit('listing.push') for the
-    // batch. Best-effort — never blocks a push that already wrote to Amazon.
-    if (totalFailed === 0 && !cancelled && totalAccepted > 0) {
+    // ATTRIBUTION (spec §5 Phase B): a bulk push mirrors a change-log row per accepted field
+    // (action='push', source='push_executor') + ONE narrow logAudit('listing.push') for the batch.
+    // Fires on totalAccepted>0 (PARTIAL bulk pushes included, so they still appear in Change History —
+    // the B0FRYMM56C fix); per-field counts ride along. Best-effort — never blocks a written push.
+    // !cancelled: a STOPPED bulk push's counts cover only attempted SKUs, so it'd mislabel as complete.
+    if (totalAccepted > 0 && !cancelled) {
       for (const p of acceptedFields) {
-        await logPushChange(db, { parent_asin, field: `details:${p.attribute.spApiKey}`, actor, after_value: p.value })
+        await logPushChange(db, { parent_asin, field: `details:${p.attribute.spApiKey}`, actor, after_value: p.value, accepted: tally[p.field].accepted, failed: tally[p.field].failed })
       }
       await logAudit({
         userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
-        details: { mode: 'details_bulk', fields: acceptedFields.map((p) => p.field), accepted: totalAccepted, by: actor.name },
+        details: { mode: 'details_bulk', fields: acceptedFields.map((p) => p.field), accepted: totalAccepted, failed: totalFailed, by: actor.name },
       })
     }
     emit({

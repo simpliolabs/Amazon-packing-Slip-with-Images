@@ -85,6 +85,8 @@ interface PerChildDescription { sku: string; asin: string; description: string; 
 
 interface AiRecommendations {
   parent_asin: string; recommended_title: string; recommended_bullets: string[]
+  /** 'manual' = the seller pushed their own title; it's LOCKED against whole-listing regens (044). */
+  title_source?: string
   recommended_keywords: string; per_child_keywords?: PerChildKeywords[]
   /** Per-child titles for capacity variation families (SD cards 64/128/256GB). When present,
    *  each child carries its own capacity instead of a single broadcast title. */
@@ -4335,10 +4337,16 @@ export default function ListingDetailPage() {
                     /* Broadcast: show the single new value once, then which children currently differ */
                     <>
                       <div className="bg-white rounded-md border-2 border-emerald-300 p-3 mb-3">
-                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">
+                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5 flex items-center gap-1.5 flex-wrap">
                           {pushPreview.field === 'details' && pushPreview.detail_field
                             ? <>New {pushPreview.detail_field} → all {pushPreview.count} SKUs</>
                             : <>New {pushPreview.label.toLowerCase()} → all {pushPreview.count} SKUs</>}
+                          {pushPreview.field === 'title' && aiRecs?.title_source === 'manual' && (
+                            <span className="inline-flex items-center gap-1 normal-case bg-violet-100 text-violet-700 border border-violet-200 rounded px-1.5 py-0.5 text-[9px] font-semibold"
+                                  title="This is your manually pushed title. It's locked — an AI Audit or Regenerate won't overwrite it. Use 'Regenerate title' to replace it.">
+                              ✏️ Your title (locked)
+                            </span>
+                          )}
                         </p>
                         {pushPreview.field === 'bullets' && Array.isArray(pushPreview.proposedValue) ? (
                           <ul className="list-disc pl-5 space-y-1">

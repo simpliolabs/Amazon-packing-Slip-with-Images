@@ -73,6 +73,8 @@ type ChangeRow = {
   changed_at: string
   source: string | null
   submission_id: string | null
+  accepted_count?: number | null   // migration 044 — present on push rows so a partial push is legible
+  failed_count?: number | null
 }
 
 type AuditRow = {
@@ -120,9 +122,12 @@ export async function GET(req: NextRequest) {
   const db = admin()
 
   // ── 1. listing_change_log (product-facing feed) ───────────────────────────────────────────
+  // select('*') (not an explicit column list) so a lagging migration 044 — the accepted_count/
+  // failed_count columns not yet applied — can't 500 the whole history panel: absent columns are
+  // simply omitted from the row rather than erroring the query.
   const { data: clData, error: clErr } = await db
     .from('listing_change_log')
-    .select('id, parent_asin, sku, field, action, before_value, after_value, changed_by, changed_by_name, changed_at, source, submission_id')
+    .select('*')
     .eq('parent_asin', parentAsin)
     .order('changed_at', { ascending: false })
     .limit(limit)
@@ -157,7 +162,15 @@ export async function GET(req: NextRequest) {
     } else if (e.action === 'release') {
       summary = `${actor} released the listing`
     } else if (e.action === 'push') {
-      summary = `${actor} pushed${fieldPhrase(e.field)} to Amazon${e.sku ? ` (${e.sku})` : ''}`
+      // Counts (migration 044) make a PARTIAL push legible: "pushed the title to 133/148 variants".
+      // Absent (older rows / migration not yet applied) → falls back to the plain "to Amazon" form.
+      const total = (e.accepted_count ?? 0) + (e.failed_count ?? 0)
+      const scope = e.accepted_count != null && total > 0
+        ? ` to ${e.accepted_count}/${total} variant${total === 1 ? '' : 's'}${e.failed_count ? ` (${e.failed_count} failed)` : ''}`
+        : ' to Amazon'
+      // Show the pushed value for the title (short + high-signal) so the seller sees WHAT shipped.
+      const val = e.field === 'title' && e.after_value ? `: "${e.after_value}"` : ''
+      summary = `${actor} pushed${fieldPhrase(e.field)}${scope}${e.sku ? ` (${e.sku})` : ''}${val}`
     } else {
       summary = `${actor} ${verb}${fieldPhrase(e.field)}`
     }
