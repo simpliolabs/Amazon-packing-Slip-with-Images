@@ -2676,7 +2676,15 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
   //     (this is the exact check validateBullets enforces; the backstop runs after it, so it must repeat it).
   // It appends at most ONE short clause per bullet (no keyword-soup), to the shortest bullet with room under
   // the 200-char cap. SOFT SPOT (not an absolute guarantee): if every bullet is maxed, a keyword is dropped.
-  if (bullets.length > 0 && oppPlusDesign.length > 0) {
+  // STEP 2 (content-quality foundational, PO-approved 2026-07-07): the deterministic backstop now weaves
+  // ONLY the DESIGN-NAME floor (the identity mandate — the design must appear in >=1 bullet), NOT the
+  // opportunity keywords. Bolting raw opportunity tokens onto finished bullets was the keyword-stuffing +
+  // bad-grammar source ("…complements vintage graphic tees for women and vintage tshirts for women…").
+  // Opportunity coverage belongs in the BACKEND keyword field (shopper-invisible), where those keywords
+  // already live — moving it out of prose loses no ranking. The council + the now-enforcing coherence gate
+  // own the bullets. (Design name is oppPlusDesign[0]; it LEADS after dedupeBulletVariants.)
+  const bulletCoverageFloor = dn ? oppPlusDesign.slice(0, 1) : []
+  if (bullets.length > 0 && bulletCoverageFloor.length > 0) {
     const capFamily = capacityFamilyTokens.length >= 2
     const capRe = /\b\d{1,4}\s?(?:GB|TB|MB)\b/i
     const ownBrand = ownBrandTokenSet(brandName || '')
@@ -2690,7 +2698,7 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
       return true
     }
     const usedBullet = new Set<number>()   // at most one appended clause per bullet — prevents keyword-soup
-    for (const kw of missingBulletKeywords(bullets, oppPlusDesign)) {
+    for (const kw of missingBulletKeywords(bullets, bulletCoverageFloor)) {
       if (!safeKw(kw)) continue
       // Weave only the STILL-MISSING significant tokens, not the whole phrase. Coverage is token-based,
       // so appending the literal long-tail string verbatim ("…, haitian soccer jersey world cup 2026.")
@@ -2720,18 +2728,22 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
   // same bullet count, each <=200 chars, (b) covers the keyphrases AT LEAST as well (no scorer
   // regression), and (c) adds no NEW unframed third-party brand. Else keep the deterministic bullets —
   // so this can only ever IMPROVE readability, never regress coverage or safety. Best-effort.
+  // STEP 2 (content-quality foundational): this pass is now QUALITY-FIRST, not coverage-preserving. It
+  // AGGRESSIVELY strips keyword-stuffing (bolted-on comma-clauses of raw search terms, near-duplicate
+  // keyword lists, dangling fragments) and is ALLOWED to drop opportunity keywords to do it — clean prose
+  // wins, because those keywords already live in the shopper-invisible BACKEND field. It only protects the
+  // DESIGN identity (floor) and brand-safety (adds no third-party brand). Best-effort.
   if (bullets.length > 0) {
     try {
-      const beforeMissing = missingBulletKeywords(bullets, oppPlusDesign).length
+      const beforeFloorMissing = missingBulletKeywords(bullets, bulletCoverageFloor).length
       const ownBrandSet = ownBrandTokenSet(brandName || '')
       const beforeBrands = findThirdPartyBrands(bullets.join(' '), ownBrandSet).length
-      const keyphraseList = oppPlusDesign.slice(0, 12).join(', ')
       const polishResp = await openai.chat.completions.create({
         model: 'gpt-4.1-mini',
         temperature: 0.4,
         max_tokens: 900,
         messages: [
-          { role: 'system', content: `You are an Amazon listing copywriter. Rewrite the 5 bullet points so they read naturally and grammatically: fix awkward keyword insertions, DELETE dangling trailing fragments (e.g. ", costume.", ", womens.", ", 100 days."), and fix obvious misspellings. HARD RULES: return EXACTLY 5 bullets; keep each bullet's "HOOK - body" shape (an ALL-CAPS hook, then " - ", then a clean sentence); each bullet 200 characters or fewer; add NO new brand names; invent NO product claims. KEEP these search keyphrases present somewhere across the 5 bullets, woven NATURALLY (rephrase around them — never just bolt a word onto the end): ${keyphraseList}. Return ONLY a JSON array of exactly 5 strings.` },
+          { role: 'system', content: `You are an Amazon listing copywriter. Rewrite the 5 bullet points so they read naturally and grammatically. AGGRESSIVELY DELETE keyword-stuffing: bolted-on comma-clauses of raw search terms (e.g. ", vintage graphic tees for women and vintage tshirts for women.", ", womens.", ", costume."), lists of near-duplicate keyword phrases, and dangling trailing fragments; fix obvious misspellings. You MAY DROP search keywords that do not fit naturally — clean, human prose matters MORE than keyword coverage (keywords are handled in a separate backend field, so removing them here costs nothing).${dn ? ` KEEP the product identity "${dn}" present in at least one bullet.` : ''} HARD RULES: return EXACTLY 5 bullets; keep each bullet's "HOOK - body" shape (an ALL-CAPS hook, then " - ", then a clean sentence); each bullet 200 characters or fewer; add NO brand names; invent NO product claims. Return ONLY a JSON array of exactly 5 strings.` },
           { role: 'user', content: JSON.stringify(bullets) },
         ],
       })
@@ -2740,10 +2752,12 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
       if (Array.isArray(parsedPolish) && parsedPolish.length === bullets.length &&
           parsedPolish.every((b) => typeof b === 'string' && b.trim().length > 0 && b.trim().length <= 200)) {
         const cleaned = parsedPolish.map((b) => b.trim())
-        const afterMissing = missingBulletKeywords(cleaned, oppPlusDesign).length
+        const afterFloorMissing = missingBulletKeywords(cleaned, bulletCoverageFloor).length
         const afterBrands = findThirdPartyBrands(cleaned.join(' '), ownBrandSet).length
-        // Only adopt the rewrite if coverage did NOT get worse and no new unframed brand crept in.
-        if (afterMissing <= beforeMissing && afterBrands <= beforeBrands) bullets = cleaned
+        // Adopt the cleaner rewrite as long as it (a) still carries the DESIGN identity (floor) and (b)
+        // introduces no new third-party brand. Opportunity-keyword coverage is INTENTIONALLY allowed to
+        // drop — the whole point of STEP 2 is that clean prose beats bullet keyword-coverage.
+        if (afterFloorMissing <= beforeFloorMissing && afterBrands <= beforeBrands) bullets = cleaned
       }
     } catch { /* LLM/parse failure — keep the deterministic bullets (readability is best-effort) */ }
   }
@@ -2751,7 +2765,9 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
   // Layer 2 — final assembled coherence re-read (the twin of coherenceGateTitles the bullet path
   // never had). Runs LAST, after the coverage backstop + readability polish, at the true assembly
   // point. Shadow by default (logs would-repairs); BULLET_COHERENCE_GATE=enforce applies them.
-  const gated = await coherenceGateBullets(openai, bullets, oppPlusDesign, brandName, input.onProgress)
+  // Pass only the DESIGN floor (not the opportunity pool): the gate's keyword-loss veto must protect the
+  // identity, but must NOT force it to keep opportunity stuffing (STEP 2 — those live in backend).
+  const gated = await coherenceGateBullets(openai, bullets, bulletCoverageFloor, brandName, input.onProgress)
   bullets = gated.bullets
 
   return bullets
@@ -3752,7 +3768,9 @@ async function coherenceGateTitles(
   items: { id: string; title: string; designName?: string; mustInclude?: string; attributePin?: string }[],
   onProgress?: (m: string) => void,
 ): Promise<Map<string, { title: string; droppedNotes: string[] }>> {
-  const mode = (process.env.TITLE_COHERENCE_GATE || 'shadow').toLowerCase()
+  // STEP 3 (content-quality foundational, PO-approved 2026-07-07 "enforce now"): default ENFORCE. The gate
+  // was inert in shadow the whole time bad copy shipped. Set TITLE_COHERENCE_GATE=shadow/off to override.
+  const mode = (process.env.TITLE_COHERENCE_GATE || 'enforce').toLowerCase()
   const out = new Map<string, { title: string; droppedNotes: string[] }>()
   for (const it of items) out.set(it.id, { title: it.title, droppedNotes: [] })
   if (mode === 'off' || items.length === 0) return out
@@ -3860,7 +3878,9 @@ async function coherenceGateBullets(
   brandName: string,
   onProgress?: (m: string) => void,
 ): Promise<{ bullets: string[]; notes: string[] }> {
-  const mode = (process.env.BULLET_COHERENCE_GATE || 'shadow').toLowerCase()
+  // STEP 3 (content-quality foundational, PO-approved 2026-07-07 "enforce now"): default ENFORCE. Set
+  // BULLET_COHERENCE_GATE=shadow/off to override.
+  const mode = (process.env.BULLET_COHERENCE_GATE || 'enforce').toLowerCase()
   if (mode === 'off' || bullets.length === 0) return { bullets, notes: [] }
   // ZERO-COST PRE-FILTER (review: the title gate has one; this had an unconditional LLM call every
   // regen). Only spend the call when a bullet shows a plausible defect: a raw lowercase comma-tail
