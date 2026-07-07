@@ -4417,39 +4417,93 @@ Rules:
  * per-color strings get cleaned). FAIL-OPEN: any LLM/parse failure returns everything unchanged, so it
  * can only ever IMPROVE. The title is NOT rewritten here (its 75-char/brand/manual-lock guards are upstream).
  */
+// Deterministic dangle repair — trims a phrase that ends on a stray CONJUNCTION/ARTICLE. A sentence never
+// legitimately ends on "and/or/plus/the/a/an", so stripping those is safe; "for/to/of/with" are DELIBERATELY
+// excluded (they are valid stranded prepositions — "the tee every golf widow's been waiting for."). Kills a
+// cut bullet "...styling with jeans or." without corrupting grammatical copy (B0FRYMM56C).
+const DANGLE_TAIL = /[\s,]+(?:and|or|plus|the|a|an|&)\s*[.,;:]*\s*$/i
+function deDangle(s: string): string {
+  let out = (s || '').trim()
+  let prev = ''
+  while (out && out !== prev) { prev = out; out = out.replace(DANGLE_TAIL, '').trim() }
+  if (out && !/[.!?]["')\]]?$/.test(out) && !/>$/.test(out)) out += '.'   // restore terminal punctuation (allow a trailing quote/paren)
+  return out
+}
+// Hard-cap a bullet at maxLen on a WORD boundary (then de-dangle) instead of discarding it — the audit's
+// old all-or-nothing "every bullet <=200" gate silently threw away ALL its fixes on one overlong bullet.
+function capBulletLen(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s
+  const cut = s.slice(0, maxLen)
+  const lastSpace = cut.lastIndexOf(' ')
+  const out = deDangle(lastSpace > maxLen * 0.6 ? cut.slice(0, lastSpace) : cut)
+  return out.length > maxLen ? out.slice(0, maxLen).trimEnd() : out
+}
+// Repair the "...for Comfort Colors and for, it features" dangling-connector artifact: a PREPOSITION (with an
+// optional leading conjunction) stranded right before a comma is a cut, not an aside — collapse it. A bare
+// "or,"/"and," aside ("Dress it up or, if you prefer,...") is LEFT ALONE. Looped so "and for," fully clears.
+function tidyDescription(html: string): string {
+  let out = (html || '')
+  let prev = ''
+  while (out !== prev) { prev = out; out = out.replace(/\s+(?:(?:and|or|plus)\s+)?(?:for|to|of|with|in|on|at)\s*,/gi, ',') }
+  return out.replace(/\s{2,}/g, ' ').trim()
+}
+// Fit truthfulness backstop: when the REAL fit is known and is NOT oversized, replace a fabricated
+// "oversized"/"boxy" claim with the true fit word (case-preserved) so a fail-open audit or a raw council
+// bullet can't ship "oversized" on a relaxed garment (B0FRYMM56C: CC1717 is a relaxed fit). No-op if unknown.
+function scrubFitClaims(s: string, fit: string): string {
+  if (!s || !fit || /oversized/i.test(fit)) return s
+  const word = fit.split(/\s+/)[0] || fit
+  return s.replace(/\b(?:oversized|boxy)\b/gi, (m) =>
+    m === m.toUpperCase() ? word.toUpperCase()
+      : m[0] === m[0].toUpperCase() ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+        : word.toLowerCase())
+}
+
 async function runFinalEditorialAudit(
   openai: OpenAI,
   title: string,
   bullets: string[],
   description: string,
   backendSample: string,
-  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string },
+  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string },
 ): Promise<{ title: string; bullets: string[]; description: string; backendDrop: Set<string> }> {
   const unchanged = { title, bullets, description, backendDrop: new Set<string>() }
   try {
+    const brandNote = ctx.garmentBrand ? ` The blank/garment brand is "${ctx.garmentBrand}" — this is the SELLER'S OWN garment brand, NOT a competitor; it MAY and SHOULD appear in the customer-facing copy.` : ''
+    const fitClause = ctx.fit ? `the fit is ${ctx.fit} — NEVER call it "oversized", "boxy", or "roomy oversized"; ` : ''
     const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"title":"...","bullets":[5 strings],"description":"...","backend_drop":[lowercase terms to remove]}.
 
-PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.
+PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.${brandNote}
+
+GARMENT TRUTH (never contradict): ${fitClause}this is a MIDWEIGHT garment — NEVER write "Heavyweight"; only claim a fabric weight you can confirm.
 
 RULES:
-- TITLE: rewrite the CURRENT TITLE into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "Comfort Colors"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); do NOT claim a fabric weight you can't confirm — this is a MIDWEIGHT garment, so NEVER write "Heavyweight"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
-- BULLETS: return EXACTLY 5. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence — NEVER truncated (fix "…with jeans or." into a finished sentence). WEAVE the design's real theme/joke through the bullets; do not leave them generic. Natural human copy, no keyword-stuffing, no competitor brands, <=200 chars each.
-- DESCRIPTION: keep it accurate to the product; fix awkward/incomplete phrasing; invent no specs.
+- TITLE: rewrite the CURRENT TITLE (provided in the user message) into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "${ctx.garmentBrand || 'Comfort Colors'}"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); no unconfirmed weight ("Heavyweight"); no "oversized"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
+- BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Mention "${ctx.garmentBrand}" in ONE bullet (it is the seller's own blank, not a competitor). ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
+- DESCRIPTION: keep it accurate; fix awkward/incomplete/dangling phrasing (e.g. "...for Comfort Colors and for, it features" is broken English — repair it); ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
 - BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
 
 BACKEND STRING: ${backendSample}`
     const resp = await openai.chat.completions.create({
       model: 'gpt-4.1', temperature: 0.3, max_tokens: 1500, response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ bullets, description }) }],
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ title, bullets, description }) }],
     })
     const p = JSON.parse(resp.choices[0]?.message?.content || '{}') as { title?: unknown; bullets?: unknown; description?: unknown; backend_drop?: unknown }
     // Title accepted only if it's a plausible rewrite (>=10 chars, still starts with the brand front) — the
     // caller re-applies capTitle75 + dedupeBrandAndStutter so it stays Amazon-legal + brand-front + de-duped.
     const outTitle = typeof p.title === 'string' && p.title.trim().length >= 10 && p.title.toLowerCase().includes(ctx.brandFront.toLowerCase().split(' ')[0] || '')
       ? p.title.trim() : title
-    const okBullets = Array.isArray(p.bullets) && p.bullets.length === 5 && p.bullets.every((b) => typeof b === 'string' && b.trim().length > 0 && b.trim().length <= 200)
-    const outBullets = okBullets ? (p.bullets as string[]).map((b) => b.trim()) : bullets
-    const outDesc = typeof p.description === 'string' && p.description.trim().length > 20 ? p.description.trim() : description
+    // Accept the audit's bullets when it returned 5 non-empty strings, then REPAIR each deterministically
+    // (de-dangle + hard-cap 200 at a word boundary). The OLD gate discarded ALL fixes if any one bullet
+    // ran >200 chars, silently shipping the raw council bullets (dangling "…with jeans or." + "oversized"
+    // survived — B0FRYMM56C). Even on the fallback we de-dangle so a bad tail never ships.
+    const okBullets = Array.isArray(p.bullets) && p.bullets.length === 5 && p.bullets.every((b) => typeof b === 'string' && b.trim().length > 0)
+    const outBullets = okBullets
+      ? (p.bullets as string[]).map((b) => capBulletLen(scrubFitClaims(deDangle(b.trim()), ctx.fit), 200))
+      : bullets.map((b) => scrubFitClaims(deDangle(b), ctx.fit))
+    const outDesc = typeof p.description === 'string' && p.description.trim().length > 20
+      ? scrubFitClaims(tidyDescription(p.description.trim()), ctx.fit)
+      : scrubFitClaims(tidyDescription(description), ctx.fit)
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
@@ -5746,6 +5800,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       audience: preferredAudience || lean || '',
       referenceTitle: input.canonicalTitle ?? repTitle ?? '',
       brandFront: brandName || 'THE CEO',
+      // Garment truth so the audit can enforce it: the seller's own blank brand (keep it in customer copy,
+      // don't drop it as a "competitor") and the real fit (relaxed → forbid the fabricated "oversized").
+      garmentBrand: attributePinFinal || '',
+      fit: pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
     })
     // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped
     // (kills "T-Shirt … T-Shirt"). If the audit returned the title unchanged, these are idempotent no-ops.
