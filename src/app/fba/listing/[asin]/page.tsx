@@ -3232,7 +3232,7 @@ export default function ListingDetailPage() {
                             <span className="text-xs font-mono text-slate-600">{vc.sku}</span>
                             <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{vc.field}</span>
                           </div>
-                          <p className="text-[10px] text-slate-400 line-through">{vc.current.length > 100 ? vc.current.slice(0, 100) + '...' : vc.current}</p>
+                          {vc.current && <p className="text-[10px] text-slate-400 line-through">{vc.current.length > 100 ? vc.current.slice(0, 100) + '...' : vc.current}</p>}
                           <p className="text-xs text-slate-800 mt-0.5">{vc.replace_with}</p>
                         </div>
                       ))}
