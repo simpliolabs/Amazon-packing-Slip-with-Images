@@ -4459,6 +4459,22 @@ function scrubFitClaims(s: string, fit: string): string {
         : word.toLowerCase())
 }
 
+// GROUND-TRUTH blank specs — authoritative garment facts per blank brand/style, so the pipeline stops
+// GUESSING fit/sleeve/neck from the SEARCH keyword pool (which is full of "oversized tshirt" search DEMAND,
+// not product facts) and mislabelling a relaxed Comfort Colors tee as "Oversized"/"Cap Sleeve". These
+// OUTRANK the features-audit's keyword-derived guess. Bootstrapped with Comfort Colors (PO-confirmed:
+// CC1717 = relaxed / midweight 6.1oz / garment-dyed / crew / short-sleeve). Extend as the seller confirms
+// each blank; an UNLISTED blank simply falls back to the current guess (no regression).
+interface BlankSpec { fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string }
+const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
+  { match: /\bcomfort\s*colors?\b/i, spec: { fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed' } },
+]
+function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec | null {
+  const hay = sources.filter(Boolean).join(' ')
+  for (const b of BLANK_SPECS) if (b.match.test(hay)) return b.spec
+  return null
+}
+
 async function runFinalEditorialAudit(
   openai: OpenAI,
   title: string,
@@ -4480,7 +4496,7 @@ GARMENT TRUTH (never contradict): ${fitClause}this is a MIDWEIGHT garment — NE
 RULES:
 - TITLE: rewrite the CURRENT TITLE (provided in the user message) into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "${ctx.garmentBrand || 'Comfort Colors'}"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); no unconfirmed weight ("Heavyweight"); no "oversized"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
 - BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Mention "${ctx.garmentBrand}" in ONE bullet (it is the seller's own blank, not a competitor). ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
-- DESCRIPTION: keep it accurate; fix awkward/incomplete/dangling phrasing (e.g. "...for Comfort Colors and for, it features" is broken English — repair it); ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
+- DESCRIPTION: keep it accurate; write REAL sentences — NEVER keyword-list fragments like "For Comfort Colors shirt and for Comfort Colors tshirt construction, plus for tshirt availability" (that is stuffing, not English). Fix awkward/incomplete/dangling phrasing; mention the garment brand at most TWICE total; ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
 - BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
 
 BACKEND STRING: ${backendSample}`
@@ -5730,6 +5746,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       return p
     })
   }
+  // GROUND-TRUTH override: the features audit GUESSES Fit/Sleeve/Neck from the SEARCH keyword pool (full of
+  // "oversized tshirt" demand), so it mislabels a relaxed Comfort Colors tee as "Oversized"/"Cap Sleeve" — a
+  // WRONG pushable attribute AND poison for the downstream editorial audit + highlight. When we know the
+  // blank, its real spec OUTRANKS the guess (B0FRYMM56C: unstable — "Relaxed" one regen, "Oversized" the next).
+  // The bootstrapped Comfort Colors spec is TEE-specific (6.1oz short-sleeve). Comfort Colors also makes
+  // sweatshirts, so gate on the garment actually being a short-sleeve tee — a CC sweatshirt falls back to
+  // the guess rather than getting "Short Sleeve" force-pushed onto it (no regression on non-tees).
+  const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
+  const looksTee = /\bt[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover|long[\s-]?sleeve/i.test(garmentHay)
+  const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType) : null
+  if (blankSpec) {
+    const overrideField = (re: RegExp, val: string | undefined) => {
+      if (!val) return
+      pdiFinal = pdiFinal.map((p) => re.test(p.field_name)
+        ? { ...p, recommended_value: val, reason: `Ground-truth spec for the ${attributePinFinal || 'Comfort Colors'} blank — overrides a value the optimizer inferred from the search-keyword pool.` }
+        : p)
+    }
+    // Override only the REPORTED-wrong attributes (Fit + Sleeve). Neck is left to the guess: it was already
+    // right ("Crew Neck") and force-setting it would mislabel a rare Comfort Colors V-neck the title omits.
+    overrideField(/\bfit\b/i, blankSpec.fit)
+    overrideField(/sleeve/i, blankSpec.sleeve)
+  }
   // FLAG-AND-FIX rows for catalog blank-boilerplate (PO: "our system needs to FLAG and
   // recommend a FIX — that's why we have the product features optimizer"). Each garment-
   // contradicting attribute string the input scrub caught becomes a Features row with the
@@ -5777,7 +5815,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // broadcastDesignAnchor (parity-audit): identical to effectiveDesignName for single-design ('')
     // and per-design multi-design families, but a unified-set (couple) family keeps its shared
     // concept in the highlight instead of losing it to the zeroed multi-design name.
-    const hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
+    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
+    // The highlight LLM can still echo "oversized" from its context keywords even with the corrected Fit
+    // factRow; scrub it to the true fit and collapse any duplicate word it creates ("oversized relaxed" →
+    // "relaxed relaxed" → "relaxed") so the pushable Item Highlight can't ship a fit contradiction.
+    if (hl && blankSpec?.fit) hl = scrubFitClaims(hl, blankSpec.fit).replace(/\b(\w+)(\s+\1)\b/gi, '$1')
     if (hl) {
       pdiFinal.push({
         field_name: highlightsAttr.title,
@@ -5803,7 +5845,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // Garment truth so the audit can enforce it: the seller's own blank brand (keep it in customer copy,
       // don't drop it as a "competitor") and the real fit (relaxed → forbid the fabricated "oversized").
       garmentBrand: attributePinFinal || '',
-      fit: pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
+      fit: blankSpec?.fit || pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
     })
     // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped
     // (kills "T-Shirt … T-Shirt"). If the audit returned the title unchanged, these are idempotent no-ops.
