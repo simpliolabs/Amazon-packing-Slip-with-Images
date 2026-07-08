@@ -264,7 +264,11 @@ export default function ListingDetailPage() {
   // or null for a full audit — so ONLY the regenerating section shows "Regenerating… hold on",
   // not every section's button (PO: "pressing regenerate title also activates bullets/description").
   const [regenSection, setRegenSection] = useState<string | null>(null)
-  const [aiError, setAiError] = useState<string | null>(null)
+  // aiError carries a KIND (2026-07-08): 'quota'/'auth' render a red actionable banner (check
+  // billing / fix the key — no Retry, it can't help); 'degraded'/'transient' render amber WITH
+  // Retry. aiWarning = the run succeeded but something inside degraded (non-blocking, amber).
+  const [aiError, setAiError] = useState<{ kind: string; message: string; section?: string } | null>(null)
+  const [aiWarning, setAiWarning] = useState<{ kind: string; message: string } | null>(null)
   const [aiProgress, setAiProgress] = useState<string>('')
   const [copied, setCopied] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['apply']))
@@ -1093,6 +1097,7 @@ export default function ListingDetailPage() {
     setAiLoading(true)
     setRegenSection(regenerateSection ?? null)
     setAiError(null)
+    setAiWarning(null)
     setAiProgress(regenerateSection ? `Regenerating ${regenerateSection}…` : 'Starting AI audit...')
     try {
       const token = await getToken()
@@ -1127,13 +1132,24 @@ export default function ListingDetailPage() {
               setAiProgress(msg.message || 'Processing...')
             } else if (msg.type === 'result') {
               finalResult = msg
+            } else if (msg.type === 'warning') {
+              // Non-blocking degradation notice (2026-07-08): the run succeeded but something inside
+              // degraded (e.g. backend keywords preserved, or a quota hit on an enrichment call).
+              setAiWarning({ kind: msg.kind || 'degraded', message: msg.message || 'Part of this AI run degraded.' })
             } else if (msg.type === 'error') {
-              throw new Error(msg.error || 'AI generation failed')
+              // TAG the stream error (2026-07-08): the parse-catch below used to filter rethrows by
+              // MESSAGE TEXT — any server message that didn't literally equal 'AI generation failed'
+              // (e.g. the new "AI credit exhausted…" ) was SWALLOWED as a malformed line and the quota
+              // outage rendered as a generic timeout. The tag makes the filter exact.
+              const e = new Error(msg.error || 'AI generation failed') as Error & { aiKind?: string; fromStream?: boolean }
+              e.aiKind = msg.kind || 'transient'
+              e.fromStream = true
+              throw e
             }
           } catch (parseErr) {
-            // Skip malformed lines
-            if (parseErr instanceof Error && parseErr.message !== 'AI generation failed' && !parseErr.message.includes('AI returned')) continue
-            throw parseErr
+            // Skip malformed lines — but ALWAYS rethrow a tagged stream error.
+            if ((parseErr as { fromStream?: boolean })?.fromStream) throw parseErr
+            continue
           }
         }
       }
@@ -1143,11 +1159,36 @@ export default function ListingDetailPage() {
         try {
           const msg = JSON.parse(buffer)
           if (msg.type === 'result') finalResult = msg
-          else if (msg.type === 'error') throw new Error(msg.error)
-        } catch { /* ignore */ }
+          else if (msg.type === 'error') {
+            const e = new Error(msg.error || 'AI generation failed') as Error & { aiKind?: string; fromStream?: boolean }
+            e.aiKind = msg.kind || 'transient'
+            e.fromStream = true
+            throw e
+          }
+        } catch (tailErr) {
+          // Same tag rule as the loop: a JSON-parse miss on a truncated tail is ignorable,
+          // a decoded stream error is NOT (the old bare catch swallowed it).
+          if ((tailErr as { fromStream?: boolean })?.fromStream) throw tailErr
+        }
       }
 
       if (finalResult?.recommendations) {
+        // Defense-in-depth (2026-07-08): the server now gates degraded content before persisting,
+        // but if a result somehow arrives with EVERY core field empty (legacy row, mid-deploy skew),
+        // treat it as a degraded failure instead of rendering an empty page as success.
+        const rr = finalResult.recommendations as { recommended_title?: string; recommended_bullets?: string[]; recommended_description?: string }
+        const coreAllEmpty = !String(rr.recommended_title ?? '').trim()
+          && !(Array.isArray(rr.recommended_bullets) && rr.recommended_bullets.some((b) => b && b.trim()))
+          && !String(rr.recommended_description ?? '').trim()
+        // FULL audits only (adversarial): a partial regen's merged result can legitimately carry an
+        // all-empty core when the STORED row was wiped pre-fix — e.g. a successful keywords-only
+        // regen on a wiped row DID persist its keywords; failing it here would be factually false
+        // and block the exact recovery flow. The pipeline gates each partial's own section.
+        if (coreAllEmpty && !(finalResult as { regenerated_section?: string }).regenerated_section) {
+          const e = new Error('The AI result came back empty (no title, bullets, or description). Nothing usable was generated — your stored content is unchanged. Retry in a minute.') as Error & { aiKind?: string }
+          e.aiKind = 'degraded'
+          throw e
+        }
         setAiRecs(finalResult.recommendations)
         // The regen route just re-scored server-side (LIVE SCORE block) — refetch so the
         // score cards update in place. Without this the PO saw the PRE-audit scores until
@@ -1174,7 +1215,11 @@ export default function ListingDetailPage() {
         throw new Error('The audit didn’t come back — the server may have been redeploying or the request timed out. Nothing was changed; wait ~1 minute and Regenerate again.')
       }
     } catch (e: unknown) {
-      setAiError(e instanceof Error ? e.message : 'Failed')
+      // `section` remembers WHICH regen failed so Retry repeats exactly that (adversarial: a
+      // failed bullets-only regen must not retry as a full audit that rewrites title/keywords).
+      setAiError(e instanceof Error
+        ? { kind: (e as { aiKind?: string }).aiKind ?? 'transient', message: e.message, section: regenerateSection }
+        : { kind: 'transient', message: 'Failed', section: regenerateSection })
     }
     setAiLoading(false)
     setRegenSection(null)
@@ -2018,7 +2063,7 @@ export default function ListingDetailPage() {
                 if (!resp.ok) throw new Error(data.error || 'Save failed')
               } catch (err) {
                 setScore((s) => (s ? { ...s, audience_lean: prev } : s))
-                setAiError(err instanceof Error ? err.message : 'Failed to save audience')
+                setAiError({ kind: 'transient', message: err instanceof Error ? err.message : 'Failed to save audience' })
               }
             }}
             title="Who is this design for? Influences the ENTIRE next audit: gendered keywords are boosted/demoted across title, bullets, description and backend, and the title ends with the matching audience. Lean = unisex listing weighted toward that audience; Male/Female = narrow the title outright."
@@ -2065,7 +2110,39 @@ export default function ListingDetailPage() {
         </div>
         {claimError && <p className="text-xs text-red-600 mt-2">{claimError}</p>}
 
-        {aiError && <p className="text-xs text-red-600 mt-2">{aiError}</p>}
+        {/* Kind-keyed AI failure banner (2026-07-08): quota/auth = red + actionable (no Retry — it
+            can't help until billing/key is fixed); degraded/transient = amber WITH Retry. Replaces
+            the one-line red text the PO could miss ("why doesn't the system let me know?"). */}
+        {aiError && (
+          <div className={`mt-3 rounded-xl border-l-4 p-3 ${aiError.kind === 'quota' || aiError.kind === 'auth' ? 'border-red-500 bg-red-50' : 'border-amber-500 bg-amber-50'}`}>
+            <div className="flex items-start gap-2.5">
+              <svg viewBox="0 0 24 24" className={`w-4 h-4 mt-0.5 shrink-0 ${aiError.kind === 'quota' || aiError.kind === 'auth' ? 'text-red-600' : 'text-amber-600'}`} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              <div className="min-w-0">
+                <p className={`text-xs font-bold ${aiError.kind === 'quota' || aiError.kind === 'auth' ? 'text-red-800' : 'text-amber-800'}`}>
+                  {aiError.kind === 'quota' ? 'AI credit exhausted' : aiError.kind === 'auth' ? 'AI key rejected' : aiError.kind === 'degraded' ? 'AI output degraded — content preserved' : 'AI generation failed'}
+                </p>
+                <p className={`text-xs mt-0.5 ${aiError.kind === 'quota' || aiError.kind === 'auth' ? 'text-red-700' : 'text-amber-700'}`}>{aiError.message}</p>
+                {aiError.kind !== 'quota' && aiError.kind !== 'auth' && (
+                  <button onClick={() => generateAiRecs(aiError.section)} disabled={aiLoading}
+                    className="mt-1.5 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg px-3 py-1 transition-colors cursor-pointer disabled:opacity-50">
+                    Retry
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        {aiWarning && !aiError && (
+          <div className="mt-3 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-3">
+            <div className="flex items-start gap-2.5">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 mt-0.5 shrink-0 text-amber-600" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-amber-800">{aiWarning.kind === 'quota' ? 'OpenAI credit warning' : 'Partial AI degradation'}</p>
+                <p className="text-xs mt-0.5 text-amber-700">{aiWarning.message}</p>
+              </div>
+            </div>
+          </div>
+        )}
         {aiRecs?.generated_at && !aiLoading && (
           <p className="text-xs text-slate-600 mt-2 font-medium" title={new Date(aiRecs.generated_at).toLocaleString()}>
             Last AI audit: <span className="font-semibold text-slate-800">{relDate(aiRecs.generated_at)}</span>

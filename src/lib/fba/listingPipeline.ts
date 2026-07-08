@@ -182,6 +182,12 @@ export interface PipelineResult {
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
+  /** Degradation flags (2026-07-08): sections whose output failed post-conditions on a FULL regen
+   *  after retry (currently only backend_keywords — core sections THROW instead via
+   *  assertCoreHealthy). The route must NOT persist a flagged section — it keeps the stored value
+   *  and surfaces a warning, instead of the old console.warn-and-persist that shipped an 86-char
+   *  title-echo string over 245-byte approved keywords. */
+  degradedSections?: ('backend_keywords')[]
 }
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
@@ -438,6 +444,38 @@ function backendOutputProblems(
     problems.push(`all ${perChild.length} children share one identical string across ${distinctColors} colors — the per-color tail failed`)
   }
   return problems
+}
+
+/** Post-conditions for the CORE customer-facing content (title/bullets/description) — the same
+ *  silent-degradation class backendOutputProblems catches for keywords. Every council call is
+ *  fail-open (`catch { return '' }`), so a hard OpenAI outage (2026-07-08: quota exhausted)
+ *  produced empty bullets + description that PERSISTED over the seller's approved copy while
+ *  reporting success. EMPTY-ONLY gates (never a length/count floor) so a legitimately short
+ *  non-apparel result can never false-abort; pass null to skip a field a partial didn't touch. */
+function coreContentProblems(title: string | null, bullets: string[] | null, description: string | null): string[] {
+  const problems: string[] = []
+  if (title !== null && !title.trim()) problems.push('title came back empty')
+  if (bullets !== null && !bullets.some((b) => b && b.trim())) problems.push('bullets came back empty')
+  if (description !== null && !description.trim()) problems.push('description came back empty')
+  return problems
+}
+
+/** Throw-and-preserve for degraded core content — mirrors the keywords-only gate below ("Your
+ *  previous keywords are untouched"). Throwing aborts BEFORE any persist step, so the stored
+ *  recommendation stays exactly as approved. The error is tagged with the recovered cause
+ *  (client.__aiHardError from instrumentAiHealth) so the route/UI can say "credit exhausted —
+ *  check billing" instead of a generic failure. */
+function assertCoreHealthy(openai: unknown, title: string | null, bullets: string[] | null, description: string | null): void {
+  const problems = coreContentProblems(title, bullets, description)
+  if (problems.length === 0) return
+  const hard = (openai as { __aiHardError?: 'quota' | 'auth' })?.__aiHardError
+  const e = new Error(hard === 'quota'
+    ? 'AI generation failed: the OpenAI account is out of credit (insufficient_quota). Your previous content is untouched — add credit and regenerate.'
+    : hard === 'auth'
+      ? 'AI generation failed: the OpenAI API key was rejected (401). Your previous content is untouched — check the key in Settings.'
+      : `AI content came back degraded (${problems.join('; ')}). Your previous content is untouched — retry in a minute.`) as Error & { aiKind?: string }
+  e.aiKind = hard ?? 'degraded'
+  throw e
 }
 
 /** Drop repeated tokens from a backend search-term string, keeping the FIRST occurrence
@@ -5106,6 +5144,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
 
   if (only === 'title') {
+    // Degradation gate (2026-07-08): a quota-swallowed '' title must not overwrite the approved
+    // one via the partial persist — highest-traffic partial, was the one unguarded path.
+    assertCoreHealthy(input.openai, finalTitle, null, null)
     onProgress('Title regenerated.')
     return partialResult('title', {
       recommended_title: finalTitle,
@@ -5347,6 +5388,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             let gb = raw.map((b) => stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(b, groupMotif), `${groupMotif} ${input.productType ?? ''}`.toLowerCase(), groupMotif), attributePinFinal ?? ''))
             if (lean === 'female' || lean === 'male') gb = gb.map((b) => enforceHardAudience(b, lean === 'female' ? 'Women' : 'Men'))
             gb = gb.map((b) => fixDoubledArticleBeforeBrand(b, brandName))
+            // EMPTY = FAILED (adversarial 2026-07-08): the bullets council fails OPEN — a quota
+            // outage returns [] without throwing, so the catch below never fires and an empty
+            // per-design set would persist over the approved one (the same persist-empty class the
+            // broadcast gate closes, one level down). Treat empty exactly like a thrown failure.
+            if (!gb.some((b) => b && b.trim())) {
+              console.warn(`[pipeline] per-design bullets came back EMPTY for "${ctx.designName}" — this group falls back to broadcast`)
+              return { skus: ctx.skus, bullets, designName: ctx.designName, designKey: ctx.key }
+            }
             return { skus: ctx.skus, bullets: gb, designName: ctx.designName, designKey: ctx.key }
           } catch (e) {
             console.warn(`[pipeline] per-design bullets failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
@@ -5366,6 +5415,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     bullets = input.priorBullets ?? []
   }
   if (only === 'bullets') {
+    // Degradation gate (2026-07-08): empty council output must abort, not overwrite (this exact
+    // path persisted [] over B0FRYMM56C's approved bullets during the quota outage).
+    assertCoreHealthy(input.openai, null, bullets, null)
     onProgress('Bullets regenerated.')
     return partialResult('bullets', {
       recommended_bullets: bullets,
@@ -5518,6 +5570,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         if (lean === 'female' || lean === 'male') gd = enforceHardAudience(gd, lean === 'female' ? 'Women' : 'Men')
         gd = fixDoubledArticleBeforeBrand(gd, brandName)
         gd = polishDescription(gd, ctx.designName, brandName)
+        // EMPTY = FAILED (adversarial 2026-07-08): symmetric with the per-design bullets guard.
+        // This leg throws on a hard error today (useCouncil:false), but an empty string slipping
+        // through post-processing must fall back to broadcast, never persist.
+        if (!gd.trim()) {
+          console.warn(`[pipeline] per-design description came back EMPTY for "${ctx.designName}" — this group falls back to broadcast`)
+          return { skus: ctx.skus, description: broadcastDesc, designName: ctx.designName, designKey: ctx.key }
+        }
         return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
       } catch (e) {
         console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
@@ -5564,8 +5623,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (problems.length > 0) {
       // HONEST FAILURE (a keywords-only regen has exactly one job): refuse to persist
       // degraded strings. Throwing aborts before the partial-persist step, so the seller's
-      // previous keywords stay exactly as approved.
-      throw new Error(`Backend keyword regen came back degraded (${problems.join('; ')}). Your previous keywords are untouched — run Regenerate backend again in a minute.`)
+      // previous keywords stay exactly as approved. aiKind tag → the UI shows the amber
+      // "content preserved" banner (or names quota if the client recorded a hard error).
+      const hard = (input.openai as { __aiHardError?: string }).__aiHardError
+      const e = new Error(`Backend keyword regen came back degraded (${problems.join('; ')}). Your previous keywords are untouched — run Regenerate backend again in a minute.`) as Error & { aiKind?: string }
+      e.aiKind = hard ?? 'degraded'
+      throw e
     }
     onProgress('Backend keywords regenerated.')
     return partialResult('keywords', { per_child_keywords: perChildOnly })
@@ -5578,6 +5641,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (apparelProduct && (lean === 'female' || lean === 'male')) descriptionOnly = enforceHardAudience(descriptionOnly, lean === 'female' ? 'Women' : 'Men')
     descriptionOnly = fixDoubledArticleBeforeBrand(descriptionOnly, brandName)
     descriptionOnly = polishDescription(descriptionOnly, broadcastDesignAnchor, brandName)
+    // Degradation gate (2026-07-08): same abort-not-overwrite as bullets/title. Runs BEFORE the
+    // per-design fan-out (adversarial: an empty broadcast during an outage was firing one doomed
+    // LLM call per design group before aborting — wasted spend in the exact failure the gate covers).
+    assertCoreHealthy(input.openai, null, null, descriptionOnly)
     // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
     // previously only the broadcast updated and the regenerated copy never reached the children.
     perChildDescriptions = await fanOutPerDesignDescriptions(descriptionOnly)
@@ -5617,20 +5684,32 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   // Per-design rows arrive group-filled — the family-level byte-fill would re-introduce the
   // cross-design pool terms the group scoping just removed, so it is family-path only.
+  // Degraded-after-retry is now FLAGGED (degradedSections) instead of warn-and-persist: on
+  // 2026-07-08 the old console.warn path persisted an 86-char title-echo string over 245-byte
+  // approved keywords. The route keeps the STORED keywords for a flagged section (abort-not-
+  // overwrite, same principle as assertCoreHealthy — a full regen still ships its five healthy
+  // sections, so this flags rather than throws).
+  const degradedSections: NonNullable<PipelineResult['degradedSections']> = []
   if (!usedPerDesignBackend) {
     perChild = finishBackendFull(perChild)
     // Same degraded-output gate as the keywords-only path, but a FULL regen carries five other
-    // sections — retry the backend once, then proceed with a loud log rather than nuking the run.
+    // sections — retry the backend once, then flag rather than nuking the run.
     let problems = backendOutputProblems(perChild, input.children, apparelProduct)
     if (problems.length > 0) {
       onProgress('Backend output looked degraded — retrying…')
       perChild = finishBackendFull(await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok))
       problems = backendOutputProblems(perChild, input.children, apparelProduct)
-      if (problems.length > 0) console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
+      if (problems.length > 0) {
+        console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
+        degradedSections.push('backend_keywords')
+      }
     }
   } else {
     const problems = backendOutputProblems(perChild, input.children, apparelProduct)
-    if (problems.length > 0) console.warn(`[listingPipeline] per-design backend degraded (failed groups keep previous keywords): ${problems.join('; ')}`)
+    if (problems.length > 0) {
+      console.warn(`[listingPipeline] per-design backend degraded (failed groups keep previous keywords): ${problems.join('; ')}`)
+      degradedSections.push('backend_keywords')
+    }
   }
   // Same truthfulness backstops as title/bullets (garment-type + motif + hard audience). Uses
   // broadcastMotifTrust so a unified-set's couple-concept design names survive the ungrounded strip.
@@ -5876,10 +5955,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     description = collapseDup(scrubFitClaims(tidyDescription(description), truthFit))
   }
 
+  // FULL-PATH degradation gate (2026-07-08): a quota outage made every council fail open to empty
+  // and the empty result PERSISTED over approved content while reporting success. Abort-and-preserve
+  // before the route can reach its upsert. Empty-only checks — never a count/length floor.
+  assertCoreHealthy(input.openai, finalTitle, bullets, description)
   return scrubPublished({
     recommended_title: finalTitle,
     recommended_bullets: bullets,
     per_child_keywords: perChild,
+    degradedSections: degradedSections.length ? degradedSections : undefined,
     per_child_titles: perChildTitles,
     per_child_bullets: perChildBullets,
     per_child_descriptions: perChildDescriptions,
