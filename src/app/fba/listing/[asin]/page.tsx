@@ -2407,7 +2407,30 @@ export default function ListingDetailPage() {
         // One row per ASIN (FBA+FBM SKUs of the same ASIN collapse to one) so the page matches
         // the per-ASIN recommendations/push.
         const variants = dedupByAsin(score.children)
-        const parentItems = (recs.action_plan ?? []).filter(a => a.element !== 'backend_keywords')
+        // GUARANTEE a pushable card for every core field (title, bullets, description) from the
+        // RECOMMENDATION — which always has this content — even when the stored action_plan omitted them.
+        // The plan can arrive with only title+backend (a partial regen / stored-rec reuse skips the
+        // pipeline's synth backstop), which is why Bullets/Description cards vanished on B0FRYMM56C. The
+        // seller must ALWAYS be able to push what the optimizer generated, regardless of the audit's list.
+        const rawParent = (recs.action_plan ?? []).filter(a => a.element !== 'backend_keywords')
+        type PlanItem = (typeof rawParent)[number]
+        const presentEls = new Set(rawParent.map(a => a.element))
+        const mkCard = (element: string, content: string, label: string): PlanItem => ({
+          element, level: 'parent', verdict: 'REPLACE', priority: 'HIGH',
+          current_status: `Your live ${label} may differ from the recommended version below.`,
+          instruction: `Replace your current ${label} with the recommended version below, then save in Seller Central.`,
+          replacement_content: content,
+          seller_central_path: 'Manage Inventory > Edit Listing',
+        } as PlanItem)
+        const synthParent: PlanItem[] = []
+        if (!presentEls.has('title') && recs.recommended_title) synthParent.push(mkCard('title', recs.recommended_title, 'title'))
+        if (!presentEls.has('bullets')) (recs.recommended_bullets ?? []).forEach((b, i) => {
+          const el = `bullet_${i + 1}`
+          if (!presentEls.has(el) && typeof b === 'string' && b.trim()) synthParent.push(mkCard(el, b, `bullet ${i + 1}`))
+        })
+        if (!presentEls.has('description') && recs.recommended_description) synthParent.push(mkCard('description', recs.recommended_description, 'description'))
+        const cardOrder = (el: string) => el === 'title' ? 0 : /^bullet_(\d+)$/.test(el) ? 1 + Number(el.split('_')[1]) : el === 'description' ? 10 : 20
+        const parentItems = [...rawParent, ...synthParent].sort((a, b) => cardOrder(String(a.element)) - cardOrder(String(b.element)))
         const backendItem = (recs.action_plan ?? []).find(a => a.element === 'backend_keywords')
         const recMap = new Map((recs.per_child_keywords ?? []).map(p => [p.sku, p.keywords]))
         const perChildRows = variants.map(c => {
