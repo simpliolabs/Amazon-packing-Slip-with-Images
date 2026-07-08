@@ -2549,6 +2549,41 @@ async function maybeEnqueueParentHeal(
   }
 }
 
+/**
+ * Re-score a parent purely from the (now-current) `listing_content` cache and persist the fresh scores +
+ * display title onto `listing_seo_scores`. Single implementation of the re-score, routed through
+ * `pickRescoreRepresentative` (standing rule) — called by (a) push success and (b) heal-on-verify.
+ * Returns the score + the rows so the push path can fingerprint + append score-history. Best-effort caller.
+ */
+export async function rescoreParentFromCache(
+  db: any,   // eslint-disable-line @typescript-eslint/no-explicit-any
+  parent_asin: string,
+): Promise<{ score: any; topChildRow: Record<string, unknown> | undefined; representative: unknown; rows: Record<string, unknown>[] } | null> {  // eslint-disable-line @typescript-eslint/no-explicit-any
+  const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
+  const { data: kids } = await db.from('listing_content')
+    .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
+    .eq('parent_asin', parent_asin)
+  const rows = (kids ?? []) as Record<string, unknown>[]
+  if (rows.length === 0) return null
+  const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
+  const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
+  const { representative, scoredRows } = pickRescoreRepresentative(rows as never[], parent_asin, (sc?.top_child_asin as string) ?? null)
+  const score = scoreListingContent(representative as never, scoredRows as never, ctx)
+  // Refresh the cached display title alongside the scores (top child, matching syncListingContent).
+  const topChildRow = (sc?.top_child_asin ? rows.find((r) => r.asin === sc.top_child_asin) : rows[0]) ?? rows[0]
+  const newProductTitle = typeof topChildRow?.title === 'string' ? topChildRow.title : null
+  await db.from('listing_seo_scores').update({
+    title_score: score.title_score, bullet_score: score.bullet_score,
+    keyword_score: score.keyword_score, aplus_score: score.aplus_score,
+    description_score: score.description_score, features_score: score.features_score,
+    overall_score: score.overall_score, issues: score.issues,
+    child_override_count: score.child_override_count,
+    product_title: newProductTitle,
+    scored_at: new Date().toISOString(),  // freshness stamp — was stuck at the last full Sync
+  }).eq('parent_asin', parent_asin)
+  return { score, topChildRow, representative, rows }
+}
+
 export async function executePush(params: PushParams, emit: PushEmit): Promise<void> {
   const { parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = params
   // WHO ran this push — for keyword_push_log.pushed_by + the full-accept change-log mirror.
@@ -3043,47 +3078,19 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         if (shouldRescore) {
           emit({ type: 'rescore', message: 'Re-scoring listing…' })
           try {
-            const { scoreListingContent, fetchScoringContext } = await import('@/lib/sync/syncListingContent')
-            const { data: kids } = await db.from('listing_content')
-              .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt')
-              .eq('parent_asin', parent_asin)
-            const rows = (kids ?? []) as Record<string, unknown>[]
-            if (rows.length > 0) {
-              const { data: sc } = await db.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()
-              const ctx = await fetchScoringContext(db, parent_asin, (sc?.top_child_asin as string) || (rows[0]?.asin as string) || null)
-              const { representative, scoredRows } = pickRescoreRepresentative(rows as never[], parent_asin, (sc?.top_child_asin as string) ?? null)
-              const score = scoreListingContent(representative as never, scoredRows as never, ctx)
-              // Refresh the cached display title alongside the scores. syncListingContent
-              // populates listing_seo_scores.product_title from the top child's title at
-              // sync time; without this same update on push, the page header + dashboard
-              // card show the seller's OLD title for hours/days after a successful push.
-              // Pick the top-child's row by asin (matching syncListingContent's logic);
-              // fall back to the first row when top_child_asin isn't set yet.
-              const topChildRow = (sc?.top_child_asin
-                ? rows.find((r) => r.asin === sc.top_child_asin)
-                : rows[0]) ?? rows[0]
-              const newProductTitle = typeof topChildRow?.title === 'string' ? topChildRow.title : null
-              await db.from('listing_seo_scores').update({
-                title_score: score.title_score, bullet_score: score.bullet_score,
-                keyword_score: score.keyword_score, aplus_score: score.aplus_score,
-                description_score: score.description_score, features_score: score.features_score,
-                overall_score: score.overall_score, issues: score.issues,
-                child_override_count: score.child_override_count,
-                product_title: newProductTitle,
-                scored_at: new Date().toISOString(),  // freshness stamp — was stuck at the last full Sync
-              }).eq('parent_asin', parent_asin)
-
+            const rr = await rescoreParentFromCache(db, parent_asin)
+            if (rr) {
               // Phase C: fingerprint the measured copy (fingerprintOf VERBATIM → JOINs the snapshots)
               // and conditionally append a push-trigger score-history change-point row.
-              pushedFingerprint = fingerprintOf((topChildRow ?? representative ?? rows[0]) as never)
-              pushedOverall = typeof score.overall_score === 'number' ? score.overall_score : null
+              pushedFingerprint = fingerprintOf((rr.topChildRow ?? rr.representative ?? rr.rows[0]) as never)
+              pushedOverall = typeof rr.score.overall_score === 'number' ? rr.score.overall_score : null
               await appendScoreHistory(db, {
                 parent_asin,
-                overall_score: score.overall_score,
-                title_score: score.title_score, bullet_score: score.bullet_score,
-                keyword_score: score.keyword_score, aplus_score: score.aplus_score,
-                description_score: score.description_score, features_score: score.features_score,
-                issues: Array.isArray(score.issues) ? (score.issues as unknown[]) : null,
+                overall_score: rr.score.overall_score,
+                title_score: rr.score.title_score, bullet_score: rr.score.bullet_score,
+                keyword_score: rr.score.keyword_score, aplus_score: rr.score.aplus_score,
+                description_score: rr.score.description_score, features_score: rr.score.features_score,
+                issues: Array.isArray(rr.score.issues) ? (rr.score.issues as unknown[]) : null,
               }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, fingerprint: pushedFingerprint })
             }
           } catch (e) { console.warn('[push-content] re-score failed (non-fatal):', e) }
