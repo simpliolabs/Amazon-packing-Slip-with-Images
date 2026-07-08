@@ -39,9 +39,74 @@ export async function middleware(request: NextRequest) {
   const isMFARoute = pathname.startsWith('/mfa/')
   const isPasswordResetRoute = pathname === '/reset-password'
 
-  // Allow API routes to handle their own auth
+  // ── API auth gate (2026-07-08) ────────────────────────────────────────────
+  // This used to pass ALL /api/* through ("routes handle their own auth") — but ~30 routes had
+  // NO auth at all, including live-Amazon-write routes (push-content, relink, fix-capacity) and
+  // money-spend routes (ai-recommendations, rank-analysis, intelligence). One gate here fails
+  // CLOSED for every current and future route; routes' own checks remain as defense-in-depth.
+  // Accepted credentials, in order:
+  //   1) Supabase cookie session — every browser page (same-origin fetches carry sb-* cookies).
+  //   2) CRON_SECRET via x-cron-secret or Authorization — external schedulers + the
+  //      instrumentation self-cron + the cron routes' internal verify-push self-fetches.
+  //      Checked BEFORE JWT validation (scheduler bearers are the raw secret, not a JWT).
+  //   3) Supabase Bearer JWT — ops scripts / direct-POST verification (adds one auth call
+  //      only when neither cookie nor cron secret matched).
   if (isApiRoute) {
-    return supabaseResponse
+    // Public by design: the login endpoint and the deploy build-identity check.
+    if (pathname === '/api/auth/login' || pathname === '/api/health') {
+      return supabaseResponse
+    }
+    // Parse Authorization ONCE, case-insensitively (RFC 7235: auth-scheme is case-insensitive —
+    // a scheduler sending "bearer <secret>" must not silently 401 forever).
+    const authHeader = request.headers.get('authorization') ?? ''
+    const bearer = authHeader.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? ''
+    if (user) {
+      // MFA PARITY (adversarial 2026-07-08): pages force an AAL1 session of an MFA-enrolled user
+      // to /mfa/verify — the API must not accept the same session, or a phished password drives
+      // the whole API (Amazon writes, AI spend) with MFA bypassed. Local JWT-claims read, no
+      // network (same call as the page gate below). /api/auth/* stays reachable at AAL1: those
+      // endpoints ARE the auth flow (setup-profile during password reset, the MFA challenge).
+      if (!pathname.startsWith('/api/auth/')) {
+        const { data: aalData } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+        if (aalData?.nextLevel === 'aal2' && aalData?.currentLevel === 'aal1') {
+          return NextResponse.json({ error: 'MFA required' }, { status: 401 })
+        }
+      }
+      return supabaseResponse
+    }
+    // Machine credential. Plain === (not constant-time) is an accepted risk: CRON_SECRET is a
+    // long high-entropy string; a byte-by-byte timing oracle over internet jitter is not practical.
+    const cronSecret = process.env.CRON_SECRET
+    if (cronSecret && (
+      request.headers.get('x-cron-secret') === cronSecret ||
+      bearer === cronSecret
+    )) {
+      return supabaseResponse
+    }
+    // Supabase Bearer JWT — only attempt validation on a JWT-SHAPED token, so credential-spraying
+    // scanners don't fan out one Supabase Auth round-trip per probe.
+    if (bearer && bearer.split('.').length === 3) {
+      const { data, error } = await supabase.auth.getUser(bearer)
+      if (!error && data.user) {
+        // MFA parity for explicit tokens too: an MFA-enrolled user's token must carry aal2.
+        const enrolled = (data.user.factors ?? []).some((f) => (f as { status?: string }).status === 'verified')
+        if (enrolled) {
+          try {
+            const payload = JSON.parse(atob(bearer.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) as { aal?: string }
+            if (payload?.aal !== 'aal2') return NextResponse.json({ error: 'MFA required' }, { status: 401 })
+          } catch {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+          }
+        }
+        return supabaseResponse
+      }
+    }
+    // Navigation-style API GETs (Amazon OAuth connect/callback are top-level browser navigations)
+    // degrade to the login page instead of a raw JSON 401 dead-end mid-OAuth.
+    if (pathname.startsWith('/api/amazon/')) {
+      return NextResponse.redirect(new URL('/login?redirectTo=/settings', request.url))
+    }
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   // Allow MFA routes to pass through — they handle their own session checks client-side
@@ -92,7 +157,13 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
+  // TWO entries, OR'd (adversarial 2026-07-08): the image-extension exclusion used to apply to
+  // /api/* too, so /api/fba/rank-analysis/x.png SKIPPED the middleware entirely — a dynamic API
+  // route's [param] can end in .png and would bypass the auth gate. Entry 1 matches ALL of /api
+  // unconditionally; entry 2 keeps the image skip for pages (and excludes api/ to avoid double
+  // evaluation).
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|logo.png|logo.webp|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/api/:path*',
+    '/((?!api/|_next/static|_next/image|favicon.ico|logo.png|logo.webp|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }

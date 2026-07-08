@@ -56,6 +56,8 @@ interface VerifyResult {
 
 /** Call verify-push internally and return the parsed counts + per-SKU matches (same as the verify cron). */
 async function runVerify(origin: string, parent_asin: string, field: string, detailKey: string | null): Promise<VerifyResult> {
+  // LOUD single-cause failure (adversarial): same as cron-verify-pushes.
+  if (!process.env.CRON_SECRET) return { matched: 0, stale: 0, total: 0, results: [], error: 'CRON_SECRET not configured — internal verify self-fetch cannot authenticate' }
   let queryField = field
   let detail = ''
   if (field.startsWith('details:')) {
@@ -66,7 +68,9 @@ async function runVerify(origin: string, parent_asin: string, field: string, det
   url.searchParams.set('parent_asin', parent_asin)
   url.searchParams.set('field', queryField)
   if (detail) url.searchParams.set('detail_field', detail)
-  const resp = await fetch(url.toString(), { cache: 'no-store' })
+  // x-cron-secret (2026-07-08): same as cron-verify-pushes — the middleware API gate would
+  // 401 this internal self-fetch without the cron credential.
+  const resp = await fetch(url.toString(), { cache: 'no-store', headers: { 'x-cron-secret': process.env.CRON_SECRET ?? '' } })
   if (!resp.ok) return { matched: 0, stale: 0, total: 0, results: [], error: `verify HTTP ${resp.status}` }
   const j = await resp.json() as { matched?: number; stale?: number; total?: number; results?: { sku: string; matches: boolean; isParent?: boolean }[]; error?: string }
   if (j.error) return { matched: 0, stale: 0, total: 0, results: [], error: j.error }
