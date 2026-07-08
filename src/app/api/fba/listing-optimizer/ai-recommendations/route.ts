@@ -39,11 +39,42 @@ function getAdminSupabase() {
  */
 async function getOpenAI() {
   const { resolveOpenAIKey } = await import('@/lib/openai/credentials')
+  const { instrumentAiHealth } = await import('@/lib/openai/errorClass')
   const apiKey = await resolveOpenAIKey()
-  return new OpenAI({
+  // instrumentAiHealth (2026-07-08): records the first HARD error (quota/auth) on the client and
+  // rethrows — the pipeline's fail-open catches keep working, but the identity survives so the
+  // degradation gate + the stream catch can say "credit exhausted" instead of silently persisting
+  // empty content as success. Per-request client: the flag lives exactly one POST.
+  return instrumentAiHealth(new OpenAI({
     apiKey,
     baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  })
+  }))
+}
+
+/** Best-effort site-wide AI-health record (migration 045, single row id=1). Written DOWN on a hard
+ *  (quota/auth) failure, OK on the next healthy run — the fba layout's AiHealthBanner polls it so
+ *  the operator sees "AI is down — check billing" on EVERY page, not just the one that failed.
+ *  Never throws: a missing table (pre-migration) must not break a regen. */
+async function recordAiHealth(status: 'ok' | 'down', kind?: string, message?: string): Promise<void> {
+  try {
+    const admin = getAdminSupabase()
+    // occurred_at marks the OUTAGE START: only stamp it on the ok→down transition, so a 5-hour
+    // outage's banner reads "since 9:00 AM", not the time of the latest failed retry.
+    let alreadyDown = false
+    if (status === 'down') {
+      const { data } = await admin.from('ai_health').select('status').eq('id', 1).maybeSingle()
+      alreadyDown = (data as { status?: string } | null)?.status === 'down'
+    }
+    await admin.from('ai_health').upsert({
+      id: 1,
+      status,
+      kind: status === 'down' ? (kind ?? null) : null,
+      message: status === 'down' ? (message ?? null) : null,
+      ...(status === 'down' && !alreadyDown ? { occurred_at: new Date().toISOString() } : {}),
+      ...(status === 'ok' ? { cleared_at: new Date().toISOString() } : {}),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id' })
+  } catch { /* table absent (apply migration 045) or transient DB error — health signal is best-effort */ }
 }
 
 /** Seller's Amazon merchant id from app_settings (same source as push-content). Used by the
@@ -728,7 +759,7 @@ export async function POST(req: NextRequest) {
                 .eq('parent_asin', parent_asin))
             }
             if (updErr) {
-              emit({ type: 'error', error: `Failed to save the regenerated ${sec}: ${updErr.message}` })
+              emit({ type: 'error', kind: 'transient', error: `Failed to save the regenerated ${sec}: ${updErr.message}` })
               controller.close()
               return
             }
@@ -759,6 +790,17 @@ export async function POST(req: NextRequest) {
               regenerated_section: sec,
               titleDebug: result.debug,
             })
+            // AI-health bookkeeping (2026-07-08): a hard error that DIDN'T blank this section (e.g. an
+            // enrichment call 429'd while the core call survived) still means the account is degraded —
+            // warn + record so the next run's failure isn't a surprise. Healthy run self-heals the banner.
+            const hardP = (openai as { __aiHardError?: string }).__aiHardError
+            if (hardP) {
+              emit({ type: 'warning', kind: hardP, message: hardP === 'quota' ? 'Part of this run hit an OpenAI credit limit (insufficient_quota) — the saved section is healthy, but add credit before the next regen.' : 'Part of this run hit an OpenAI auth error — the saved section is healthy, but check the API key in Settings.' })
+              // AWAITED (fire-and-forget lesson): a detached write racing controller.close() can be lost.
+              await recordAiHealth('down', hardP, 'Hard OpenAI error during a partial regen (section saved healthy).')
+            } else {
+              await recordAiHealth('ok')
+            }
             controller.close()
             return
           }
@@ -1102,12 +1144,14 @@ export async function POST(req: NextRequest) {
           // clear it either). An explicit title regen (regenerate_section==='title') is the seller asking
           // for a fresh one → replace it and reset the lock to 'ai'.
           let titleSourceOut: 'ai' | 'manual' = 'ai'
+          let priorKwJson: string | null = null   // prior stored keywords, for the degraded-keywords preserve below
           try {
             const { data: lockRow } = await supabase
               .from('listing_seo_recommendations')
-              .select('title_source, recommended_title, per_child_titles')
+              .select('title_source, recommended_title, per_child_titles, recommended_keywords')
               .eq('parent_asin', parent_asin)
               .maybeSingle()
+            priorKwJson = (lockRow as { recommended_keywords?: string } | null)?.recommended_keywords ?? null
             const locked = (lockRow as { title_source?: string } | null)?.title_source === 'manual'
             if (locked && regenerate_section !== 'title') {
               const kept = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
@@ -1119,6 +1163,29 @@ export async function POST(req: NextRequest) {
             }
           } catch (e) { console.warn('[ai-recommendations] manual-title lock check failed (non-fatal):', e instanceof Error ? e.message : e) }
           rec.title_source = titleSourceOut   // carry the lock state into the streamed result so the "✏️ locked" badge survives a whole-audit
+
+          // DEGRADED-KEYWORDS PRESERVE (2026-07-08): the pipeline flagged the backend keywords as
+          // degraded-after-retry. The old behavior console.warn'd and PERSISTED anyway — an 86-char
+          // title-echo string replaced 245-byte approved keywords. Keep the STORED keywords instead
+          // (abort-not-overwrite, keyword edition): swap the preserved set into `rec` BEFORE dbPayload
+          // is built so the upsert simply rewrites the same stored values, and patch the action-plan
+          // card so the UI shows the preserved copy, not the degraded one. A brand-new listing with no
+          // prior keywords keeps the degraded output (better than nothing) — the warning still fires.
+          let kwPreserved = false
+          if (result.degradedSections?.includes('backend_keywords') && priorKwJson) {
+            try {
+              const prior = JSON.parse(priorKwJson) as { sku: string; asin: string; keywords: string }[]
+              if (Array.isArray(prior) && prior.length > 0 && prior.some((p) => (p?.keywords ?? '').trim())) {
+                rec.per_child_keywords = prior
+                rec.recommended_keywords = prior[0]?.keywords ?? ''
+                rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'backend_keywords'
+                  ? { ...it, replacement_content: prior[0]?.keywords ?? '', notes: `${(it as { notes?: string }).notes ?? ''} [This regen's backend output came back degraded — kept your previous keywords untouched.]`.trim() }
+                  : it) as typeof rec.action_plan
+                kwPreserved = true
+                console.warn(`[ai-recommendations] backend keywords degraded for ${parent_asin} — preserved the stored set instead of persisting the degraded one`)
+              }
+            } catch { /* prior string unparsable — fall through, persist what we generated */ }
+          }
 
           // DB write. recommended_bullets + the *_warnings/improvements/reconciliation/action_plan
           // columns are JSONB (arrays written directly); recommended_keywords is TEXT (JSON string).
@@ -1192,6 +1259,20 @@ export async function POST(req: NextRequest) {
             } catch { /* per_child_bullets/descriptions column absent — handled by migration 033 */ }
           }
 
+          // Degraded-keywords / hard-error warnings (2026-07-08): the run SUCCEEDED (core content is
+          // healthy + persisted) but something inside it degraded — say so instead of silence.
+          if (kwPreserved) {
+            emit({ type: 'warning', kind: 'degraded', message: 'Backend keywords came back degraded on this run — kept your previous keywords untouched. Run "Regenerate backend keywords" in a minute to refresh them.' })
+          }
+          const hardF = (openai as { __aiHardError?: string }).__aiHardError
+          if (hardF) {
+            emit({ type: 'warning', kind: hardF, message: hardF === 'quota' ? 'Part of this run hit an OpenAI credit limit (insufficient_quota) — the saved content is healthy, but add credit before the next regen.' : 'Part of this run hit an OpenAI auth error — the saved content is healthy, but check the API key in Settings.' })
+            // AWAITED (fire-and-forget lesson): a detached write racing controller.close() can be lost.
+            await recordAiHealth('down', hardF, 'Hard OpenAI error during a full regen (core content saved healthy).')
+          } else {
+            await recordAiHealth('ok')
+          }
+
           // (Issues panel + scores were refreshed UP FRONT — see the LIVE SCORE block above.)
           emit({
             type: 'result',
@@ -1202,7 +1283,19 @@ export async function POST(req: NextRequest) {
           controller.close()
         } catch (err) {
           console.error('[AI Recs] Pipeline error:', err)
-          emit({ type: 'error', error: err instanceof Error ? err.message : 'Unexpected error during generation' })
+          // CLASSIFIED error surfacing (2026-07-08, PO: "why doesn't the system let me know credit is
+          // exhausted?"): the error's aiKind (set by assertCoreHealthy) or the instrumented client's
+          // recorded hard error names the REAL cause — quota/auth get an actionable message + the
+          // site-wide ai_health record; everything else stays a transient retry-style message.
+          const { getAiHardError } = await import('@/lib/openai/errorClass')
+          const kind = ((err as { aiKind?: string })?.aiKind) ?? getAiHardError(openai) ?? 'transient'
+          const message =
+            kind === 'quota' ? 'AI credit exhausted — the OpenAI account is out of quota (insufficient_quota). Nothing was changed; your stored content is safe. Add credit at platform.openai.com/billing, then regenerate.' :
+            kind === 'auth' ? 'AI key rejected (401) — check the OpenAI API key in Settings. Nothing was changed; your stored content is safe.' :
+            kind === 'degraded' ? (err instanceof Error ? err.message : 'The AI came back degraded. Your previous content is untouched — retry in a minute.') :
+            (err instanceof Error ? err.message : 'Unexpected error during generation')
+          if (kind === 'quota' || kind === 'auth') await recordAiHealth('down', kind, message)
+          emit({ type: 'error', kind, error: message })
           controller.close()
         }
       },
