@@ -3028,8 +3028,11 @@ export default function ListingDetailPage() {
                     })()}
 
                     {/* Row 5b: Replacement Content (the actual fix) — broadcast card. Hidden when
-                        the per-child title table above is showing. */}
-                    {item.replacement_content && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && !(item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign) && (
+                        the per-child title table above is showing. Shown even for DONE: a 'DONE' verdict is
+                        set at ship-ACCEPTED time (cooling lock), NOT verified-live, so a section can read DONE
+                        while cohesion still says it needs updating (bullets/description went hollow/unpushable
+                        on B0FRYMM56C). The seller must always be able to copy + re-ship the recommendation. */}
+                    {item.replacement_content && item.verdict !== 'SKIP' && !(item.element === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign) && (
                       <div className="mt-2 bg-white rounded-md border-2 border-green-300 p-3">
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="flex items-center gap-1 text-[10px] font-bold text-green-800 uppercase"><Icon.Clipboard className="w-3 h-3" /> Copy & Paste This:</span>
@@ -3070,7 +3073,9 @@ export default function ListingDetailPage() {
                         : item.element === 'description' ? 'description'
                         : /^bullet/.test(item.element) ? 'bullets'
                         : null
-                      if (!shipField || item.verdict === 'DONE' || item.verdict === 'SKIP') return null
+                      // Show Ship even for DONE (see Row-5b note): DONE is ship-accepted, not verified-live,
+                      // so a bullets/description card must stay pushable while cohesion still says it differs.
+                      if (!shipField || item.verdict === 'SKIP') return null
                       // Title is per-child for capacity families; everything else is broadcast.
                       const perChildTitle = shipField === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign
                       return (
