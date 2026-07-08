@@ -21,12 +21,15 @@
  *   - lastUpdatedDate : the listing's updated timestamp (clue for whether
  *                       Amazon processed the patch recently)
  *
- * Read-only. No writes, no patches, no logging.
+ * HEAL-ON-VERIFY: after the live read, matched SKUs have their cached listing_content grounded to the
+ * verified value and the parent is re-scored — so cohesion counts + the score can't keep showing phantom
+ * "needs update" / a frozen score after a push that Amazon has actually applied. Best-effort, non-fatal.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
-import { isPushField, resolveProposed, asCompare, type PushField } from '@/lib/fba/pushFields'
+import { isPushField, resolveProposed, asCompare, cacheUpdateFor, type PushField } from '@/lib/fba/pushFields'
+import { rescoreParentFromCache } from '@/lib/fba/pushExecutor'
 
 // VerifyField broadens PushField to include 'details', which the verify route
 // supports too. pushFields.ts deliberately keeps PushField narrow (the four built-in
@@ -385,6 +388,48 @@ export async function GET(req: NextRequest) {
     // never paints these as "stale" (which implied a failed push when there was nothing to compare).
     const unknown = scored.filter((r) => !r.readFailed && r.expected.length === 0).length
     const parentSkipped = results.length - scored.length
+
+    // ── HEAL-ON-VERIFY (foundational coherence fix) ──────────────────────────────────────────────
+    // The live read above is ground truth. Ground the CACHED listing_content (which cohesion "N need
+    // update" + the listing score both read) to that truth for every MATCHED SKU, so a stale cache can't
+    // keep showing phantom "needs update" / a frozen score after a push Amazon has actually applied.
+    // Write the REC's RAW value (title string / 5-bullet array / etc.) — NOT the asCompare-normalized
+    // `expected` — and only when the rec still equals what was pushed (asCompare(raw)===expected); a rec
+    // that legitimately DRIFTED after the push then correctly STAYS red (we never hide real work). The
+    // auto-verify CRON hits this same endpoint, so the button AND the cron both self-heal. Best-effort.
+    if (field !== 'details') {
+      try {
+        let healed = 0
+        for (const r of scored) {
+          if (!r.matches || r.readFailed || r.inherited) continue
+          // Resolve the rec's RAW value for this SKU. keywords are per-child and live in recommended_keywords
+          // JSON (resolveProposed can't reach them without the push's map), so parse them directly.
+          let raw: string | string[] | null
+          if (field === 'keywords') {
+            try {
+              const arr = JSON.parse(rec.recommended_keywords ?? '[]') as { sku?: string; keywords?: string }[]
+              raw = ((Array.isArray(arr) ? arr.find((x) => x.sku === r.sku) : null)?.keywords ?? '').trim() || null
+            } catch { raw = null }
+          } else {
+            try { raw = resolveProposed(field as PushField, rec, new Map(), r.sku) } catch { continue }
+          }
+          if (raw == null) continue
+          // Drift guard: only heal when the rec still equals what was PUSHED. When `expected` came from the
+          // push LOG (asCompare-normalized), compare against it; when it came from the rec itself (no log
+          // row), `matches` already proves live==rec, so heal. A rec that drifted after the push stays red.
+          if (r.expectedSource === 'push_log' && asCompare(raw) !== r.expected) continue
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (supabase as any).from('listing_content')
+              .update({ ...cacheUpdateFor(field as PushField, raw), content_synced_at: new Date().toISOString() })
+              .eq('sku', r.sku)
+            healed++
+          } catch (e) { console.warn('[verify-heal] cache write failed', r.sku, e instanceof Error ? e.message : e) }
+        }
+        if (healed > 0) await rescoreParentFromCache(supabase, parentAsin)
+      } catch (e) { console.warn('[verify-heal] failed (non-fatal):', e instanceof Error ? e.message : e) }
+    }
+
     return NextResponse.json({
       parent_asin: parentAsin,
       field,
