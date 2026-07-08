@@ -41,6 +41,10 @@ interface VerifyResult {
 
 /** Call verify-push internally and return the parsed counts + per-SKU matches. */
 async function runVerify(origin: string, parent_asin: string, field: string, detailKey: string | null): Promise<VerifyResult> {
+  // LOUD single-cause failure (adversarial): without CRON_SECRET the self-fetch below can't
+  // authenticate against the middleware gate — fail with one diagnosable error instead of
+  // burning task attempts on per-task "verify HTTP 401"s.
+  if (!process.env.CRON_SECRET) return { matched: 0, stale: 0, total: 0, results: [], error: 'CRON_SECRET not configured — internal verify self-fetch cannot authenticate' }
   // The verify endpoint expects 'details' (not 'details:<key>') + a friendly detail_field.
   // Our task.field stores 'details:<spApiKey>' so split it.
   let queryField = field
@@ -55,7 +59,10 @@ async function runVerify(origin: string, parent_asin: string, field: string, det
   url.searchParams.set('parent_asin', parent_asin)
   url.searchParams.set('field', queryField)
   if (detail) url.searchParams.set('detail_field', detail)
-  const resp = await fetch(url.toString(), { cache: 'no-store' })
+  // x-cron-secret (2026-07-08): the middleware API gate now 401s credential-less requests —
+  // this internal self-fetch goes over real HTTP, so it must present the cron credential or
+  // every verify task soft-fails ("verify HTTP 401") and the auto-verify + self-heal loop dies.
+  const resp = await fetch(url.toString(), { cache: 'no-store', headers: { 'x-cron-secret': process.env.CRON_SECRET ?? '' } })
   if (!resp.ok) return { matched: 0, stale: 0, total: 0, results: [], error: `verify HTTP ${resp.status}` }
   const j = await resp.json() as { matched?: number; stale?: number; total?: number; results?: { sku: string; matches: boolean }[]; error?: string }
   if (j.error) return { matched: 0, stale: 0, total: 0, results: [], error: j.error }
