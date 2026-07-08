@@ -4501,9 +4501,12 @@ RULES:
 
 BACKEND STRING: ${backendSample}`
     const resp = await openai.chat.completions.create({
-      model: 'gpt-4.1', temperature: 0.3, max_tokens: 1500, response_format: { type: 'json_object' },
+      // 2500 (was 1500): title + 5 bullets + a full description + backend_drop as JSON can exceed 1500
+      // tokens → truncated JSON → JSON.parse throws → the audit fails open (raw council copy ships with
+      // "oversized"/stuffing surviving — B0FRYMM56C). Timeout + 1 retry cover a hang/transient error.
+      model: 'gpt-4.1', temperature: 0.3, max_tokens: 2500, response_format: { type: 'json_object' },
       messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ title, bullets, description }) }],
-    })
+    }, { timeout: 30_000, maxRetries: 1 })
     const p = JSON.parse(resp.choices[0]?.message?.content || '{}') as { title?: unknown; bullets?: unknown; description?: unknown; backend_drop?: unknown }
     // Title accepted only if it's a plausible rewrite (>=10 chars, still starts with the brand front) — the
     // caller re-applies capTitle75 + dedupeBrandAndStutter so it stays Amazon-legal + brand-front + de-duped.
@@ -5859,6 +5862,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }))
     }
     onProgress('Final editorial audit applied.')
+  }
+
+  // ALWAYS-RUN TRUTH GATE — the deterministic fit/dangle scrubs must NOT live only inside the FAIL-OPEN
+  // editorial audit above: a timed-out/truncated audit returns the raw council copy, and "oversized" +
+  // dangling tails survived on the bullets/description while the (independently-scrubbed) item highlight was
+  // clean (B0FRYMM56C). Re-apply them here on the FINAL bullets/description regardless of the audit outcome,
+  // collapsing any duplicate word the fit-swap creates ("oversized relaxed" → "relaxed relaxed" → "relaxed").
+  const truthFit = blankSpec?.fit || pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || ''
+  if (apparelProduct && truthFit) {
+    const collapseDup = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
+    bullets = bullets.map((b) => collapseDup(scrubFitClaims(deDangle(b), truthFit)))
+    description = collapseDup(scrubFitClaims(tidyDescription(description), truthFit))
   }
 
   return scrubPublished({
