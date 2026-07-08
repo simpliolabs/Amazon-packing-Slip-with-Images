@@ -1,5 +1,5 @@
 [variables]
-NODE_OPTIONS = "--max-old-space-size=1024"
+NODE_OPTIONS = "--max-old-space-size=2048"
 NEXT_TELEMETRY_DISABLED = "1"
 
 [phases.build]
