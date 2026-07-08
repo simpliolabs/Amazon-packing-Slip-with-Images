@@ -388,6 +388,10 @@ function fillBackendToBudget(
   /** Same token truth gate the core uses — pool phrases can carry sibling colors and
    *  ungrounded style words; the byte-fill must not smuggle back what the core banned. */
   banTok: (w: string) => boolean = () => false,
+  /** Tokens Amazon ALREADY indexes for this listing (live title + bullets + brand + colors,
+   *  normTok'd, design tokens exempted). The fill must not spend backend bytes re-adding them —
+   *  the canonical-bigram source was the title-echo culprit (PO-approved removal 2026-07-08). */
+  alreadyIndexed?: Set<string>,
 ): string {
   let out = (keywords || '').trim()
   if (getByteLength(out) >= 244) return out
@@ -397,14 +401,17 @@ function fillBackendToBudget(
   const normTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
   const have = new Set(out.split(/\s+/).map(normTok).filter(Boolean))
   const candidates: string[] = []
-  // 1. canonical descriptor bigrams, segment-aware (strip the trailing " - Color - Size" suffix)
+  // 1. leftover pool keywords FIRST (demand-backed beats title-derived bigrams — reordered 2026-07-08)
+  candidates.push(...poolKeywords.map((k) => k.toLowerCase()))
+  // 2. canonical descriptor bigrams, segment-aware (strip the trailing " - Color - Size" suffix).
+  //    KEPT deliberately: canonicalTitle is the seller's ORIGINAL catalog title — bigrams the new
+  //    optimized title dropped ("country western") are genuinely novel; only tokens in the LIVE
+  //    title/bullets are echo, and alreadyIndexed filters those below.
   const canonClean = (canonicalTitle ?? '').replace(/(\s+-\s+[A-Za-z][A-Za-z -]{1,24}){1,2}\s*$/, '')
   for (const seg of canonClean.split(/[,\-–—|]/)) {
     const w = seg.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1)
     for (let i = 0; i + 1 < w.length; i++) candidates.push(`${w[i]} ${w[i + 1]}`)
   }
-  // 2. leftover pool keywords
-  candidates.push(...poolKeywords.map((k) => k.toLowerCase()))
   for (const cand of candidates) {
     if (capacityFamily && CAPACITY_RE.test(cand)) continue
     if (findThirdPartyBrands(cand, ownBrands).length > 0) continue
@@ -412,7 +419,7 @@ function fillBackendToBudget(
     // just because "country western" as a whole missed the cap by a byte).
     for (const raw of cand.split(/\s+/)) {
       const tok = normTok(raw)
-      if (tok.length <= 1 || have.has(tok)) continue
+      if (tok.length <= 1 || have.has(tok) || alreadyIndexed?.has(tok)) continue
       if (banTok(tok)) continue
       if (getByteLength(`${out} ${tok}`) > 250) continue
       out = `${out} ${tok}`
@@ -815,9 +822,18 @@ export function isBrandProperlyFramed(text: string, brandToken: string): boolean
   return true
 }
 
-/** Get the seller's own brand tokens for exemption from brand checks. */
+/** Get the seller's own brand tokens for exemption from brand checks. Includes NORMALIZED forms
+ *  (apostrophe-deleted, punctuation-stripped) alongside the raw tokens (adversarial 2026-07-08):
+ *  the backend ban sites compare against normalized tokens ("Darlin' Co." must ban "darlin"), and
+ *  a raw-only set silently no-ops for any punctuated brand. Superset — raw consumers unaffected. */
 function ownBrandTokenSet(brandName: string): Set<string> {
-  return new Set(brandName.toLowerCase().split(/\s+/).filter(Boolean))
+  const s = new Set<string>()
+  for (const t of brandName.toLowerCase().split(/\s+/).filter(Boolean)) {
+    s.add(t)
+    const stripped = t.replace(/['’]/g, '').replace(/[^a-z0-9]/g, '')
+    if (stripped) s.add(stripped)
+  }
+  return s
 }
 // Product-type words capped at 2 total in the backend core (Amazon's bag-of-words already
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
@@ -2831,19 +2847,21 @@ async function runBackendAgent(
   const apparel = looksApparel(category, repTitle, productType)
 
   // Words already in title/bullets/brand — Amazon auto-indexes those, so exclude from backend.
+  // Apostrophe-DELETION first (2026-07-08, parity with the pool/fill token streams): "Women's"
+  // must produce 'womens' here, or the echo filter never matches the incoming 'womens' token.
   const excludeWords = new Set(
-    `${finalTitle} ${bullets.join(' ')} ${brandName}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
+    `${finalTitle} ${bullets.join(' ')} ${brandName}`.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean),
   )
   // Color names are auto-indexed from the variant attribute — never repeat them in backend.
   const colors = [...new Set(children.map((c) => (c.color || 'default').toLowerCase()))]
   colors.forEach((c) => excludeWords.add(c))
   // The seller's DESIGN NAME is identity, not a generic auto-indexed title word — exempt its tokens
   // from the exclusion so the fill/dedup can't strip "later"/"gator" out of backend (#91/#92 parity).
-  ;(designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => excludeWords.delete(w))
+  ;(designName || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => excludeWords.delete(w))
   // Title-only word set. The role-word exception ("keep 'teacher' only if this IS a teacher
   // product") must check the TITLE, not bullets — a bullet that wrongly slips "teacher" must
   // not license it back into the backend.
-  const titleWords = new Set(finalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+  const titleWords = new Set(finalTitle.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
 
   // ── SHARED CORE: the product's biggest-opportunity keywords, intelligently de-duped ──
   // The core IS the bulk of the 250 bytes and carries the TOP opportunity-score keywords
@@ -2863,12 +2881,15 @@ async function runBackendAgent(
   const coreWordSet = new Set<string>()
   let productTypeCount = 0
   for (const k of remaining) {
-    const raw = k.keyword.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
+    // Apostrophes collapse by DELETION ("he's" → "hes", matching normTok/dedupeTokenSoup), never
+    // to a space — the old space-split shipped "he s" fragments to backend (PO-caught 2026-07-08).
+    const raw = k.keyword.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
     if (!raw || isAllJunk(raw)) continue
     const toks: ({ w: string; minor: boolean } | null)[] = []
     for (const w of raw.split(' ')) {
       if (JUNK_WORDS.has(w)) { toks.push(null); continue }
       if (banTok(w)) { toks.push(null); continue }            // truth gate: ungrounded style/color/gender/stray
+      if (ownBrandsForBackend.has(w)) { toks.push(null); continue }  // own brand: the brand attribute already indexes it (Amazon guideline; PO-approved 2026-07-08)
       // ROLE WORDS ARE KEPT in the backend CORE. These phrases come from REAL opportunity keywords
       // (SQP/JS — shoppers already reach this ASIN via "later gator teacher shirt"), and backend
       // generic_keyword is invisible search indexing, NOT a customer-facing audience claim. The
@@ -2879,6 +2900,13 @@ async function runBackendAgent(
       if (kidsWords.has(w) && !titleWords.has(w)) { toks.push(null); continue }             // wrong audience (kids)
       if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) { toks.push(null); continue }  // 3P brand: trademark risk in backend
       if (MINOR_WORDS.has(w)) { toks.push({ w, minor: true }); continue }
+      // TITLE-ECHO REMOVAL (PO-approved 2026-07-08): tokens Amazon already indexes via the live
+      // title/bullets/brand/color contribute nothing in backend — the pool stays HYBRID at the
+      // phrase level (a title-covered phrase's NOVEL tokens still land), but covered tokens are
+      // dropped at the byte level. Design tokens were deleted from excludeWords above, so the
+      // design-phrase lead survives. Placed AFTER the MINOR branch so connectors keep working;
+      // the men/women guarantee below still force-adds audience tokens (PO mandate).
+      if (excludeWords.has(w)) { toks.push(null); continue }
       if (PRODUCT_TYPE_WORDS.has(w)) {
         if (productTypeCount >= 2) { toks.push(null); continue }
         productTypeCount++; toks.push({ w, minor: false }); continue
@@ -2900,26 +2928,41 @@ async function runBackendAgent(
     }
     if (out.length === 0 || out.every((w) => MINOR_WORDS.has(w))) continue
     corePhrases.push(out.join(' '))
-    if (getByteLength(corePhrases.join(' ')) >= 215) break
+    // 235 (was 215): echo removal frees bytes — let the demand-backed pool fill them before the
+    // LLM fill has to (fill-to-244 plan, 2026-07-08).
+    if (getByteLength(corePhrases.join(' ')) >= 235) break
   }
   // Guarantee the product's audience tokens (PO wants Men AND Women in the backend).
+  // UNSHIFT, not push (adversarial 2026-07-08): a tail-appended guarantee sat past the 233-byte
+  // truncate line on well-stocked pools and got silently cut — front position always survives.
+  // The dnPhrase unshift below still lands the design phrase ahead of these.
   for (const a of ['men', 'women']) {
-    if (titleWords.has(a) && !coreWordSet.has(a)) { corePhrases.push(a); coreWordSet.add(a) }
+    if (titleWords.has(a) && !coreWordSet.has(a)) { corePhrases.unshift(a); coreWordSet.add(a) }
   }
-  // Force the exact DESIGN phrase to LEAD the core (deterministic, like the title's design-name lead) so
-  // backend ranks for "later gator" and it survives the 228-byte cap. This is the missing must-include
+  // Force the DESIGN phrase to LEAD the core (deterministic, like the title's design-name lead) so
+  // backend ranks for "later gator" and it survives the byte cap. This is the missing must-include
   // that let the design name silently drop from backend ("And Again"); it costs ~1 short phrase of bytes.
-  const dnPhrase = (designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  // FILTERED (2026-07-08): apostrophes delete ("He's" → "hes", never "he s"), and OWN-BRAND tokens
+  // drop from the phrase — "CEO? He's Golfing" leads as "hes golfing", not "ceo he s golfing".
+  // Brand-only filter (adversarial): banTok here was over-reach — it stripped identity tokens the
+  // SCORER still requires ("Black Cat" → "cat" on a multi-color family; "Powered by Coffee" →
+  // "powered coffee"), creating a permanent -4 dock no regen could fix. The design phrase is the
+  // deliberate identity exception (#91/#92) — everything but the brand ships intact.
+  const dnPhrase = (designName || '').toLowerCase().replace(/['’]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+    .split(' ').filter((w) => w && !ownBrandsForBackend.has(w)).join(' ')
   if (dnPhrase && !new RegExp(`\\b${dnPhrase.replace(/\s+/g, '\\s+')}\\b`).test(corePhrases.join(' '))) corePhrases.unshift(dnPhrase)
   // FILL: a small product's opportunity pool can run dry well under 250 bytes, leaving the
   // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with LLM long-tail
   // BUYER search words (gifts / occasions / recipients / themes) — run through the SAME junk /
   // role / kids / dedup filters as the core, so it fills with real terms, not rejected junk.
-  if (getByteLength(corePhrases.join(' ')) < 205) {
+  // 240 gate (was 205, the "205-244 dead zone"): output landing 211-222 bytes never got topped up —
+  // the PO's recurring "keywords are 160/211 not 250". Now anything short of 240 fills.
+  if (getByteLength(corePhrases.join(' ')) < 240) {
     try {
       const fillSys = 'You generate ADDITIONAL Amazon backend search keywords (long-tail buyer phrases) to fill the search-term field. Return ONLY JSON: {"keywords":"lowercase space-separated search words"}.'
       const fillUsr = `Product: ${finalTitle}
-List ~25 ADDITIONAL real search terms a shopper would TYPE to find this product — gift occasions, recipients, styles, themes, related concepts (e.g. "fathers day gift", "summer vacation tee", "novelty graphic", "animal lover gift", "back to school").
+List ~40 ADDITIONAL real search terms a shopper would TYPE to find this product — gift occasions, recipients, styles, themes, related concepts (e.g. "fathers day gift", "summer vacation tee", "novelty graphic", "animal lover gift", "back to school").
 ONLY real buyer search words. NO brand, NO color names, NO sizes, NO moods/adjectives ("elegant", "timeless", "premium", "cozy"). lowercase, space-separated, no commas/quotes.
 Avoid reusing: ${[...coreWordSet, ...titleWords].slice(0, 60).join(' ')}
 Return ONLY the JSON.`
@@ -2932,22 +2975,26 @@ Return ONLY the JSON.`
       })
       const fillParsed = parseJsonLoose<{ keywords?: string }>(fc.choices[0]?.message?.content || '{}')
       const fillOut: string[] = []
-      for (const w of (fillParsed.keywords || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+      // Apostrophe-deletion here too ("valentine's" → "valentines"), matching the core normalize.
+      for (const w of (fillParsed.keywords || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
         if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w)) continue
         if (banTok(w)) continue                                        // truth gate (same as the core)
+        if (ownBrandsForBackend.has(w)) continue                       // own brand: brand attribute indexes it
         if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue          // weak-relevance role
         if (kidsWords.has(w) && !titleWords.has(w)) continue           // wrong audience
         if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) continue  // 3P brand: trademark risk
         if (coreWordSet.has(w) || excludeWords.has(w)) continue        // already covered / auto-indexed
         if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
         coreWordSet.add(w); fillOut.push(w)
-        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= 224) break
+        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= 240) break
       }
       if (fillOut.length) corePhrases.push(fillOut.join(' '))
     } catch { /* fill is best-effort; the opportunity core still ships */ }
   }
   // The core is the opportunity keywords + long-tail fill — most of the 250 bytes (NOT colors).
-  const core = truncateToBytes(corePhrases.join(' '), 228)
+  // 233 (was 228; adversarial corrected 235): the ≤3-word color tail needs ~17 bytes ("cream off
+  // white" = 16) — a 235 cap left only 14 and quietly cut tails on the best-stocked listings.
+  const core = truncateToBytes(corePhrases.join(' '), 233)
 
   // ── PER-COLOR TAIL: just the 2-3 top shade synonyms for THIS variant's color (not 10) ──
   const system = 'You generate a SHORT Amazon backend color tail per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"2-3 lowercase color words"}]}.'
@@ -3040,7 +3087,7 @@ Return ONLY the JSON object.`
         // 2) Prepend this child's own capacity (twice — both unspaced and spaced — so it ranks
         //    for "32gb" and "32 gb" search variants without burning much budget).
         stripped = `${childCapSpaced} ${childCapLc} ${stripped}`.replace(/\s{2,}/g, ' ').trim()
-        childCore = truncateToBytes(stripped, 228)
+        childCore = truncateToBytes(stripped, 233)   // matches the shared core cap (fill-to-244, 2026-07-08)
       }
     }
     return { sku: c.sku, asin: c.asin, keywords: buildString(tailMap.get(color) || '', childCore) }
@@ -5473,11 +5520,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // terms effectively"): no brand names — not even your own (the brand attribute already indexes
   // it; the canonical-bigram byte-fill was appending "the ceo" to every child — PO: "WHY does it
   // add our Brand name to the Keywords?") — and no stop words (Amazon ignores them in queries;
-  // every one wastes bytes a real term could use). Design-name tokens stay EXEMPT: "Darlin'" is
-  // the product's identity, not the brand, even when the brand phrase contains it.
+  // every one wastes bytes a real term could use). The ban is UNCONDITIONAL (2026-07-08, PO-
+  // approved): the old design-token exemption re-admitted "ceo" whenever the design name contained
+  // the brand word ("CEO? He's Golfing") — but a "ceo golfing shirt" query still matches via the
+  // brand-attribute token + the backend's design tokens; Amazon matches a token bag across
+  // indexed fields, so the brand byte buys nothing even inside the design phrase.
   const AMZ_BACKEND_STOPWORDS = new Set(['a', 'an', 'and', 'by', 'for', 'of', 'the', 'with'])
   const brandToksForBackend = ownBrandTokenSet(brandName)
-  ;(designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => brandToksForBackend.delete(w))
   const banBackendTok = (w: string): boolean => {
     if (w.length === 1 && !/\d/.test(w)) return true
     if (AMZ_BACKEND_STOPWORDS.has(w)) return true
@@ -5487,6 +5536,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
     if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
     return false
+  }
+  // Tokens Amazon ALREADY indexes for a listing (live title + bullets + brand + color attribute),
+  // normTok'd to match fillBackendToBudget's comparison. The byte-fill must not re-add them (echo
+  // removal, PO-approved 2026-07-08). Design tokens exempted — the design phrase is identity and
+  // deliberately leads the core.
+  const normIdxTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const mkAlreadyIndexed = (title: string, blts: string[], dn?: string): Set<string> => {
+    const s = new Set<string>()
+    for (const t of `${title} ${blts.join(' ')} ${brandName}`.split(/\s+/)) { const n = normIdxTok(t); if (n) s.add(n) }
+    for (const c of input.children) { const n = normIdxTok(c.color || ''); if (n) s.add(n) }
+    for (const t of (dn ?? (effectiveDesignName || designName || '')).split(/\s+/)) s.delete(normIdxTok(t))
+    return s
   }
   // ── PER-DESIGN BACKEND (parity-audit BLOCKER #12, + #13/#14) ──────────────────────────────────
   // One family-level backend core was biased to the rep design's keyword pool and shipped to EVERY
@@ -5504,8 +5565,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // dropTitleCovered=false — the PO-chosen backend HYBRID keeps title keyphrases in the core.
         const groupPool = scopeKwsToGroup(ctx, backendPool, (k) => k.keyword, false)
         const groupHay = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
+        // Own-brand ban unconditional here too (2026-07-08) — same rationale as banBackendTok.
         const groupBrandToks = ownBrandTokenSet(brandName)
-        ;(ctx.designName || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => groupBrandToks.delete(w))
         const groupBan = (w: string): boolean => {
           if (w.length === 1 && !/\d/.test(w)) return true
           if (AMZ_BACKEND_STOPWORDS.has(w)) return true
@@ -5519,8 +5580,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         const repSku = ctx.skus[0]?.sku
         const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
         let rows = await runBackendAgent(ctx.groupInput, ctx.title, groupBullets, groupPool, ctx.designName, groupBan)
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan) }))
+        // Strip BEFORE fill (2026-07-08): the fill's own banTok already blocks opposite-gender
+        // additions, and stripping first lets the fill reuse the freed bytes.
         if (lean === 'female' || lean === 'male') rows = rows.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+        const groupIndexed = mkAlreadyIndexed(ctx.title, groupBullets, ctx.designName)
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -5540,8 +5604,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       try {
         const restInput: PipelineInput = { ...input, children: uncovered }
         let rest = await runBackendAgent(restInput, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok) }))
         if (lean === 'female' || lean === 'male') rest = rest.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
+        // broadcastDesignAnchor, NOT the default (adversarial): the agent above was anchored on it —
+        // defaulting to the REP design's name would exempt design A's tokens on design B's children,
+        // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
+        const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -5591,13 +5659,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (only === 'keywords') {
     const ownB = ownBrandTokenSet(brandName)
     const finishBackend = (rows: PipelinePerChildKeywords[]): PipelinePerChildKeywords[] => {
-      let out = rows.map((p) => ({
-        ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok),
-      }))
+      // Strip BEFORE fill (2026-07-08): fill's banTok already blocks opposite-gender additions;
+      // stripping first lets the fill reuse the freed bytes. alreadyIndexed = echo removal.
+      let out = rows
       if (lean === 'female' || lean === 'male') {
         out = out.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
       }
+      // broadcastDesignAnchor (adversarial): parity with the agent's anchor — see the rest path.
+      const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
+      out = out.map((p) => ({
+        ...p,
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx),
+      }))
       return out
     }
     // Per-design first (#12): contexts exist on keywords-only regens too now (rebuilt from stored
@@ -5671,15 +5744,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // so the strip cleans additions too.
   const finishBackendFull = (rows: PipelinePerChildKeywords[]): PipelinePerChildKeywords[] => {
     const ownB = ownBrandTokenSet(brandName)
-    let out = rows.map((p) => ({
-      ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok),
-    }))
-    // HARD audience: backend search terms drop the opposite gender's standalone tokens
-    // (PO caught "…darlin mens black men…" persisting on a Female listing).
+    // HARD audience FIRST (2026-07-08 reorder): strip the opposite gender's standalone tokens
+    // (PO caught "…darlin mens black men…" persisting on a Female listing), THEN fill — the
+    // fill's banTok already blocks opposite-gender additions, and stripping first lets the
+    // fill reuse the freed bytes. alreadyIndexed = title/bullets/brand/color echo removal.
+    let out = rows
     if (lean === 'female' || lean === 'male') {
       out = out.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
     }
+    // broadcastDesignAnchor (adversarial): parity with the agent's anchor — see the rest path.
+    const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
+    out = out.map((p) => ({
+      ...p,
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx),
+    }))
     return out
   }
   // Per-design rows arrive group-filled — the family-level byte-fill would re-introduce the

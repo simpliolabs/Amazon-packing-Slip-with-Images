@@ -42,7 +42,10 @@ export interface PresenceResult {
  * and "tshirt" spellings.
  */
 function tokenize(text: string): Set<string> {
-  const lower = text.toLowerCase();
+  // Apostrophe-deletion bridge (2026-07-08): the backend generator now writes "valentines", not
+  // "valentine s" — delete apostrophes BEFORE the punctuation pass so both sides tokenize alike.
+  // Symmetric (keyword and text both pass through here), so drop-in safe.
+  const lower = text.toLowerCase().replace(/['’]/g, '');
   // Standard tokens: replace all non-alphanumeric (including hyphens) with spaces
   const standard = lower
     .replace(/[^a-z0-9\s]/g, ' ')

@@ -31,7 +31,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
-import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'
+import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
 import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
@@ -1065,7 +1065,14 @@ export function scoreListingContent(
         bulletScore = Math.max(0, bulletScore - 4)
         issues.push({ field: 'bullets', severity: 'warning', message: `Your design name "${designName}" anchors the title but is missing from your bullets — weave it into at least one bullet so every section reinforces the same hook (regenerate to fix automatically).`, auto_fixable: false })
       }
-      if (missingBulletKeywords([keywords], [designName]).length > 0) {
+      // OWN-BRAND EXEMPTION (2026-07-08, parity with the generator): the backend now BANS own-brand
+      // tokens unconditionally (Amazon's brand attribute indexes them), so a design name containing
+      // the brand word ("CEO? He's Golfing") must only require its NON-brand tokens in backend —
+      // otherwise this dock false-fires -4 with a "regenerate to fix" that regeneration can never
+      // fix (the self-healing anti-pattern).
+      const brandToksScore = new Set(bulletTokens(scoringCtx.brandName ?? ''))
+      const dnBackendReq = bulletTokens(designName).filter((t) => !brandToksScore.has(t)).join(' ')
+      if (dnBackendReq && missingBulletKeywords([keywords], [dnBackendReq]).length > 0) {
         keywordScore = Math.max(0, keywordScore - 4)
         issues.push({ field: 'backend_keywords', severity: 'warning', message: `Your design name "${designName}" anchors the title but is missing from your backend search terms — add it to every child's backend keywords (regenerate to fix automatically).`, auto_fixable: false })
       }
