@@ -10,8 +10,10 @@
  */
 export const KW_STOP = new Set(['for', 'the', 'a', 'an', 'and', 'with', 'of', 'to', 'in', 'on', 'your', 'you', 'that', 'this', '&'])
 
+// Apostrophe-deletion bridge (2026-07-08): matches the backend generator's normalization
+// ("valentine's" → "valentines") — symmetric on both haystack and keyword, so drop-in safe.
 export const kwToks = (s: string): string[] =>
-  (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t && !KW_STOP.has(t))
+  (s || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t && !KW_STOP.has(t))
 
 /** Build a coverage checker bound to a haystack (the listing family's concatenated live copy).
  *  Returns true when every significant token of the keyword appears in the haystack. */

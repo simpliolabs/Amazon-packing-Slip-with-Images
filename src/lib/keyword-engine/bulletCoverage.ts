@@ -13,11 +13,13 @@ export const BKW_STOP = new Set([
   'for', 'the', 'a', 'an', 'and', 'with', 'of', 'to', 'in', 'on', 'your', 'you', 'that', 'this',
 ])
 
-/** Significant tokens of a string: lowercase, strip punctuation, split digit-letter pairs
- *  ("128gb" → 128, gb — so solid and spaced forms match each other, same bridge as
- *  checkPresence), drop 1-char tokens + stopwords. */
+/** Significant tokens of a string: lowercase, DELETE apostrophes ("he's" → "hes" — matching the
+ *  backend generator's normalization, 2026-07-08: space-splitting made the scorer require "he"
+ *  while the generator writes "hes", a permanent false -4 dock), strip other punctuation, split
+ *  digit-letter pairs ("128gb" → 128, gb — so solid and spaced forms match each other, same
+ *  bridge as checkPresence), drop 1-char tokens + stopwords. */
 export const bulletTokens = (s: string): string[] =>
-  (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+  (s || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
     .flatMap((t) => {
       const m = t.match(/^(\d+)([a-z]+)$/) || t.match(/^([a-z]+)(\d+)$/)
       return m ? [m[1], m[2]] : [t]
