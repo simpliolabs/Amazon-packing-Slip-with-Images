@@ -289,6 +289,11 @@ export default function ListingDetailPage() {
   const [isMultiDesignOverride, setIsMultiDesignOverride] = useState<boolean | null>(null)
   const [designOverrideSaving, setDesignOverrideSaving] = useState(false)
   const [designOverrideSavedAt, setDesignOverrideSavedAt] = useState<number | null>(null)
+  // GOLD-TITLE LOCK (the discoverable "lock my title" control). Seeded from the current recommended_title
+  // until the seller edits it; a Lock stores it verbatim + title_source='manual' (no Amazon push).
+  const [titleLockInput, setTitleLockInput] = useState<string>('')
+  const [titleLockTouched, setTitleLockTouched] = useState(false)
+  const [titleLockSaving, setTitleLockSaving] = useState(false)
   const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
 
   // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords / details) ──
@@ -1019,6 +1024,33 @@ export default function ListingDetailPage() {
       setDesignOverrideSavedAt(Date.now())
     } catch { /* ignore */ }
     setDesignOverrideSaving(false)
+  }
+
+  // Seed the lock input from the current recommended title until the seller edits it.
+  useEffect(() => {
+    if (!titleLockTouched && aiRecs?.recommended_title) setTitleLockInput(aiRecs.recommended_title)
+  }, [aiRecs?.recommended_title, titleLockTouched])
+
+  // Lock the seller's exact title as the authority (title_source='manual') WITHOUT an Amazon push, or
+  // unlock to let the next Regenerate rewrite it. A locked title survives every AI Audit/Regenerate.
+  const saveTitleLock = async (action: 'lock' | 'unlock') => {
+    setTitleLockSaving(true)
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/listing-optimizer/lock-title', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ parent_asin: asin, action, title: titleLockInput.trim() }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) { alert(data.error || 'Lock update failed'); setTitleLockSaving(false); return }
+      setAiRecs((prev) => prev ? {
+        ...prev,
+        title_source: data.title_source ?? (action === 'lock' ? 'manual' : 'ai'),
+        recommended_title: action === 'lock' && titleLockInput.trim() ? titleLockInput.trim() : prev.recommended_title,
+      } : prev)
+    } catch (e) { alert(e instanceof Error ? e.message : 'Lock update failed') }
+    setTitleLockSaving(false)
   }
 
   // Per-design rename (migration 034). DB-only: POST the {designKey: name} override, then update the
@@ -2088,6 +2120,43 @@ export default function ListingDetailPage() {
           </span>
         </div>
 
+        {/* GOLD-TITLE LOCK — the discoverable "lock my title" control. Stores the seller's EXACT title as
+            the authority (title_source='manual') so an AI Audit/Regenerate never rewrites it, with NO
+            Amazon push. Fixes the modal-seeds-the-AI-title trap that buried the seller's title on B0FRYMM56C. */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="text-xs font-medium text-slate-500 whitespace-nowrap">
+            {aiRecs?.title_source === 'manual' ? '🔒 Locked Title' : '🔓 Lock Title'}
+          </label>
+          <input
+            type="text"
+            value={titleLockInput}
+            onChange={(e) => { setTitleLockInput(e.target.value); setTitleLockTouched(true) }}
+            placeholder="Your exact title — locked from AI rewrites"
+            className="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 flex-1 min-w-[20rem] focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-400 transition-shadow"
+            maxLength={200}
+          />
+          <span className={`text-[10px] ${titleLockInput.trim().length > 75 ? 'text-amber-600' : 'text-slate-400'}`}>{titleLockInput.trim().length}/75</span>
+          <button
+            onClick={() => saveTitleLock('lock')}
+            disabled={titleLockSaving || !titleLockInput.trim()}
+            className="text-xs font-medium bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors cursor-pointer">
+            {titleLockSaving ? 'Saving…' : '🔒 Lock this title'}
+          </button>
+          {aiRecs?.title_source === 'manual' && (
+            <button
+              onClick={() => saveTitleLock('unlock')}
+              disabled={titleLockSaving}
+              className="text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg disabled:opacity-50 transition-colors cursor-pointer">
+              Unlock
+            </button>
+          )}
+          <span className="text-[11px] text-slate-400">
+            {aiRecs?.title_source === 'manual'
+              ? 'Locked — an AI Audit or Regenerate keeps this exact title. Unlock to let AI rewrite it.'
+              : 'Locks your exact title so an AI Audit or Regenerate cannot replace it (no Amazon push).'}
+          </span>
+        </div>
+
         {/* MULTI-DESIGN CLASSIFICATION OVERRIDE (migration 041) — lets the seller force single or
             multi-design when the auto-detection (SKU structure) gets it wrong (e.g. BC3001 Bella Canvas). */}
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -2695,7 +2764,7 @@ export default function ListingDetailPage() {
                           )}
                           <span className="text-[11px] flex-shrink-0">
                             {f.coh.needUpdate > 0
-                              ? <span className="text-amber-700 flex items-center gap-1">{f.coh.needUpdate} need update</span>
+                              ? <span className="text-amber-700 flex items-center gap-1" title={`${f.coh.needUpdate} of your ${f.coh.total} ASIN variants have CACHED content that differs from the current recommendation (a pre-push, per-ASIN comparison — an ASIN's FBA+FBM SKUs count as one). This is NOT the same as "stale" in the Verify panel, which reads the LIVE Amazon value after a push over each individual SKU (so its denominator is ~2× and it clears itself as Amazon finishes processing).`}>{f.coh.needUpdate} need update</span>
                               : (f.coh.distinct > 1 && !f.coh.perChild)
                                 ? <span className="text-amber-700">variants differ — unify</span>
                                 : <span className="text-green-700">up to date</span>}

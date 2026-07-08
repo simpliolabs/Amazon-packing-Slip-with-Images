@@ -3103,15 +3103,21 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // "Regenerate title" clears the lock. See the regen guard in ai-recommendations POST.
           if (!cancelled && field === 'title' && typeof title_override === 'string' && title_override.trim()) {
             try {
-              const { data: rt } = await db.from('listing_seo_recommendations').select('per_child_titles').eq('parent_asin', parent_asin).single()
+              const { data: rt } = await db.from('listing_seo_recommendations').select('per_child_titles, recommended_title').eq('parent_asin', parent_asin).single()
               const isCapFam = Array.isArray(rt?.per_child_titles) && rt.per_child_titles.length > 1
-              if (!isCapFam) {
-                const manualTitle = title_override.trim().slice(0, 200)
-                // WITH the lock flag; if migration 044 (title_source) isn't applied yet, supabase-js
-                // returns { error } — retry with just recommended_title so the seller's title STILL
-                // persists (never regress the existing behaviour just because the lock column lags).
+              const manualTitle = title_override.trim().slice(0, 200)
+              // Only LOCK when the pushed title actually DIFFERS from the current AI recommendation. Pushing
+              // the AI recommended_title UNCHANGED (the Ship modal seeds it) must NOT lock the AI title as
+              // 'manual' — that corruption hit B0FRYMM56C: the modal seeded the AI rewrite, the seller
+              // shipped it, and this block buried his real title by locking the AI one. An AUTHORED title
+              // is one that differs from the AI rec (or set explicitly via the Lock-title control).
+              const isAuthored = manualTitle !== ((rt as { recommended_title?: string } | null)?.recommended_title ?? '').trim()
+              if (!isCapFam && isAuthored) {
+                // WITH the lock flag; if migration 044 (title_source) isn't applied, supabase-js returns
+                // { error } — keep the seller's title, but LOG LOUDLY (a silently un-stamped lock is exactly
+                // why a later audit could overwrite his title). Never silently pretend the lock saved.
                 const { error: upErr } = await db.from('listing_seo_recommendations').update({ recommended_title: manualTitle, title_source: 'manual' }).eq('parent_asin', parent_asin)
-                if (upErr) await db.from('listing_seo_recommendations').update({ recommended_title: manualTitle }).eq('parent_asin', parent_asin)
+                if (upErr) { console.error('[push-content] manual title-lock column write FAILED (migration 044 applied?):', upErr.message); await db.from('listing_seo_recommendations').update({ recommended_title: manualTitle }).eq('parent_asin', parent_asin) }
               }
             } catch (e) { console.warn('[push-content] persist manual title as recommendation failed (non-fatal):', e) }
           }
