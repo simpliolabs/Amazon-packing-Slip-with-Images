@@ -28,7 +28,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
-import { isPushField, resolveProposed, asCompare, cacheUpdateFor, type PushField } from '@/lib/fba/pushFields'
+import { isPushField, resolveProposed, asCompare, cacheUpdateFor, squashEquals, type PushField } from '@/lib/fba/pushFields'
 import { rescoreParentFromCache } from '@/lib/fba/pushExecutor'
 
 // VerifyField broadens PushField to include 'details', which the verify route
@@ -347,13 +347,11 @@ export async function GET(req: NextRequest) {
           sku: t.sku, asin: t.asin, isParent: t.isParent,
           currentLive, expected, expectedSource,
           // Squash-compare so a CORRECTLY-applied enum isn't falsely "stale": we push the API token
-          // ("short_sleeve") but Amazon returns the display label ("Short Sleeve"). Exact-trim first,
-          // then lowercase + strip non-alnum as a fallback — semantically identical, modulo case/
-          // punctuation. (Live: B0FRYMM56C Sleeve applied as "Short Sleeve" yet showed 0/65 matched.)
-          matches: currentLive.length > 0 && (
-            currentLive.trim() === expected.trim() ||
-            currentLive.toLowerCase().replace(/[^a-z0-9]/g, '') === expected.toLowerCase().replace(/[^a-z0-9]/g, '')
-          ),
+          // ("short_sleeve") but Amazon returns the display label ("Short Sleeve"). Now THE shared
+          // comparator (pushFields.squashEquals, 2026-07-09) — cards, cohesion, and verify judge
+          // "matches" with one implementation. (Live: B0FRYMM56C Sleeve applied as "Short Sleeve"
+          // yet showed 0/65 matched.)
+          matches: currentLive.length > 0 && squashEquals(currentLive, expected),
           inherited,
           readFailed,
           lastUpdatedDate,
