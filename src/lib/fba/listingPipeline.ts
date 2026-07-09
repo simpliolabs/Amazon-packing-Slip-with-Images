@@ -287,6 +287,19 @@ const GARMENT_TYPE_WORDS = new Set([
   'sweatshirt', 'sweatshirts', 'hoodie', 'hoodies', 'pullover', 'pullovers',
   'fleece', 'sweater', 'sweaters', 'jacket', 'jackets', 'coat', 'coats',
   'tank', 'tanks', 'polo', 'polos', 'onesie', 'romper', 'leggings',
+  // PO-caught 2026-07-08: "trendy blouses" shipped in a T-SHIRT's backend — these are garments
+  // this product is NOT (unless the truth hay says so, same grounding rule as the rest).
+  'blouse', 'blouses', 'tunic', 'tunics',
+])
+
+// Category/promo words with NO search value in backend (PO 2026-07-08: the fill read like "a
+// promotional string, not keywords") — a shopper searching "golf widow gift" never types
+// "apparel"; even when they do type a category word, the product-type tokens already cover it.
+// Unconditional ban in banBackendTok/groupBan (unlike GARMENT_TYPE_WORDS these are never
+// grounded facts about THIS product — they're catalog-speak).
+const BACKEND_GENERIC_FILLER = new Set([
+  'apparel', 'clothing', 'clothes', 'outfit', 'outfits', 'wear', 'wardrobe',
+  'garment', 'garments', 'fashion', 'trendy', 'stylish',
 ])
 
 // HEAVY (warm-layer) garments — the subset of GARMENT_TYPE_WORDS a t-shirt/tee can NEVER also be.
@@ -2960,10 +2973,14 @@ async function runBackendAgent(
   // the PO's recurring "keywords are 160/211 not 250". Now anything short of 240 fills.
   if (getByteLength(corePhrases.join(' ')) < 240) {
     try {
+      // THEME-ANCHORED fill (PO 2026-07-08: the old generic ask returned catalog-speak — "apparel
+      // clothing trendy blouses" — that read like a promotional string, not search terms). Anchor
+      // every phrase on the DESIGN's theme: its subject, wordplay, recipients, and occasions.
       const fillSys = 'You generate ADDITIONAL Amazon backend search keywords (long-tail buyer phrases) to fill the search-term field. Return ONLY JSON: {"keywords":"lowercase space-separated search words"}.'
       const fillUsr = `Product: ${finalTitle}
-List ~40 ADDITIONAL real search terms a shopper would TYPE to find this product — gift occasions, recipients, styles, themes, related concepts (e.g. "fathers day gift", "summer vacation tee", "novelty graphic", "animal lover gift", "back to school").
-ONLY real buyer search words. NO brand, NO color names, NO sizes, NO moods/adjectives ("elegant", "timeless", "premium", "cozy"). lowercase, space-separated, no commas/quotes.
+Design/theme printed on it: ${designName || '(infer from the title)'}
+List ~40 ADDITIONAL search terms real shoppers TYPE into Amazon to find THIS DESIGN on this product. Build every phrase AROUND the design's theme — its subject, its joke/wordplay and synonyms, who buys it and for whom (wife, husband, mom, friend...), and gifting occasions. Think like the buyer: "<theme> gift", "<subject> lover gifts", "funny <subject> shirt for <recipient>", "<occasion> gift for <recipient> who loves <subject>".
+ONLY concrete buyer search words tied to the theme. FORBIDDEN: generic category words ("apparel", "clothing", "clothes", "outfit", "wear", "fashion", "tops", "wardrobe"), promo adjectives ("trendy", "stylish", "premium", "elegant", "timeless", "cozy"), brand names, color names, sizes. lowercase, space-separated, no commas/quotes.
 Avoid reusing: ${[...coreWordSet, ...titleWords].slice(0, 60).join(' ')}
 Return ONLY the JSON.`
       const fc = await openai.chat.completions.create({
@@ -5530,6 +5547,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const banBackendTok = (w: string): boolean => {
     if (w.length === 1 && !/\d/.test(w)) return true
     if (AMZ_BACKEND_STOPWORDS.has(w)) return true
+    if (BACKEND_GENERIC_FILLER.has(w)) return true   // catalog-speak, never a buyer search word (PO 2026-07-08)
     if (brandToksForBackend.has(w)) return true
     if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
     if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
@@ -5570,6 +5588,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         const groupBan = (w: string): boolean => {
           if (w.length === 1 && !/\d/.test(w)) return true
           if (AMZ_BACKEND_STOPWORDS.has(w)) return true
+          if (BACKEND_GENERIC_FILLER.has(w)) return true   // catalog-speak, never a buyer search word (PO 2026-07-08)
           if (groupBrandToks.has(w)) return true
           if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
           if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
