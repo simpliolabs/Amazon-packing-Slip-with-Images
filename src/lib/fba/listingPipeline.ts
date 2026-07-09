@@ -5544,13 +5544,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // indexed fields, so the brand byte buys nothing even inside the design phrase.
   const AMZ_BACKEND_STOPWORDS = new Set(['a', 'an', 'and', 'by', 'for', 'of', 'the', 'with'])
   const brandToksForBackend = ownBrandTokenSet(brandName)
+  // POOL-BACKED EXEMPTION (PO-approved 2026-07-09): tokens from the DEMAND pool (SQP/JS — shoppers
+  // already reach this ASIN through those queries) pass the garment/style/filler gates. Backend is
+  // invisible search indexing, not a customer-facing claim — the same principle as the role-word
+  // rule in the core. The strict gates were banning MEASURED demand: "blouses" (705K/mo category
+  // phrase) and "oversized" (636K/mo combined; the 1717 blank is commonly worn oversized — PO).
+  // LLM-invented and title-derived tokens still face the full gates — those are guesses, not data.
+  // UNCONDITIONAL bans stay unconditional: brand (attribute-indexed), stopwords, single letters,
+  // sibling colors (each child's own color arrives via its tail), hard-lean opposite gender (PO:
+  // a FEMALE item stays female; "Lean Female" never entered these strips).
+  const poolToksForBackend = new Set<string>()
+  for (const k of backendPool) {
+    for (const w of k.keyword.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) if (w) poolToksForBackend.add(w)
+  }
   const banBackendTok = (w: string): boolean => {
     if (w.length === 1 && !/\d/.test(w)) return true
     if (AMZ_BACKEND_STOPWORDS.has(w)) return true
-    if (BACKEND_GENERIC_FILLER.has(w)) return true   // catalog-speak, never a buyer search word (PO 2026-07-08)
+    if (BACKEND_GENERIC_FILLER.has(w) && !poolToksForBackend.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
     if (brandToksForBackend.has(w)) return true
     if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
-    if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
+    if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !poolToksForBackend.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
     if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
     if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
     return false
@@ -5585,13 +5598,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         const groupHay = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName} ${(input.productType ?? '').replace(/_/g, ' ')}`.toLowerCase()
         // Own-brand ban unconditional here too (2026-07-08) — same rationale as banBackendTok.
         const groupBrandToks = ownBrandTokenSet(brandName)
+        // Pool-backed exemption scoped to THIS group's demand pool (PO-approved 2026-07-09) —
+        // same principle as poolToksForBackend, but a foreign design's pool can't license tokens here.
+        const groupPoolToks = new Set<string>()
+        for (const k of groupPool) {
+          for (const w of k.keyword.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) if (w) groupPoolToks.add(w)
+        }
         const groupBan = (w: string): boolean => {
           if (w.length === 1 && !/\d/.test(w)) return true
           if (AMZ_BACKEND_STOPWORDS.has(w)) return true
-          if (BACKEND_GENERIC_FILLER.has(w)) return true   // catalog-speak, never a buyer search word (PO 2026-07-08)
+          if (BACKEND_GENERIC_FILLER.has(w) && !groupPoolToks.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
           if (groupBrandToks.has(w)) return true
           if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
-          if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
+          if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !groupPoolToks.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
           if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
           if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
           return false
