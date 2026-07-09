@@ -23,6 +23,7 @@ import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
+import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
 
 function getAdminSupabase() {
   return createClient(
@@ -446,19 +447,14 @@ export async function POST(req: NextRequest) {
   Description: ${c.description ? c.description.replace(/<[^>]+>/g, ' ').trim().slice(0, 200) + '...' : '[MISSING]'}`
     }).join('\n\n')
 
-    // Build the per-child keyword slots instruction
-    // Extract color from SKU for color-grouped strategy
-    // SKU pattern: AQS-TMB-{SIZE}-{COLOR} or AQS-TMB-{SIZE}-{COLOR}-FBA
-    // We strip the -FBA suffix before extracting the color code.
-    const extractColor = (sku: string, _title: string): string => {
-      const skuParts = sku.split('-')
-      // Remove trailing FBA suffix if present
-      const partsNoFba = skuParts[skuParts.length - 1] === 'FBA'
-        ? skuParts.slice(0, -1)
-        : skuParts
-      // Color code is the last remaining segment (e.g., MOS, LG, BJ, IVO)
-      return partsNoFba[partsNoFba.length - 1] || sku
-    }
+    // Build the per-child keyword slots instruction.
+    // Color from SKU via the SHARED decoder (2026-07-09): the old inline version only stripped a
+    // trailing "-FBA" — on an all-FBM family every child returned the literal "FBM" as its color,
+    // 13 real colors collapsed into one, and the tail LLM hallucinated a shared "burgundy maroon
+    // wine" palette for all 91 children (B0FRYMM56C, PO-caught). decodeSkuColor strips FBA|FBM,
+    // decodes the code (BAY→Bay, CRI→Crimson, MUS→Mustard), falls back to the child's own title
+    // segment, and returns NULL for unknown — never a shared junk bucket.
+    const extractColor = (sku: string, title: string): string => decodeSkuColor(sku, title) ?? ''
 
     // V2: Auto-sync keyword intelligence if empty (self-healing)
     // This ensures Regenerate AI Audit works even if keyword cache was cleared
