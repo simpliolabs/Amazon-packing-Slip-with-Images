@@ -22,6 +22,7 @@
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
+import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
@@ -476,8 +477,12 @@ function backendOutputProblems(
   if (minBytes < 190) problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill`)
   const distinctColors = new Set(children.map((c) => (c.color || 'default').toLowerCase())).size
   const distinctStrings = new Set(perChild.map((p) => p.keywords)).size
-  if (apparel && distinctColors >= 3 && distinctStrings < 2) {
-    problems.push(`all ${perChild.length} children share one identical string across ${distinctColors} colors — the per-color tail failed`)
+  // UN-BLINDED (2026-07-09): the old distinctColors>=3 gate was computed from the SAME broken
+  // color values that caused the collapse (extractColor returned 'FBM' for every child → 1
+  // "color" → gate never fired while 91 children shared one hallucinated string). A ≥6-child
+  // apparel family with ONE identical string is degraded regardless of what the colors claim.
+  if (apparel && (distinctColors >= 3 || children.length >= 6) && distinctStrings < 2) {
+    problems.push(`all ${perChild.length} children share one identical string (${distinctColors} decoded color${distinctColors === 1 ? '' : 's'}) — per-color tails failed or colors could not be decoded`)
   }
   return problems
 }
@@ -3067,14 +3072,21 @@ Return ONLY the JSON.`
   const core = truncateToBytes(corePhrases.join(' '), 233)
 
   // ── PER-COLOR TAIL: just the 2-3 top shade synonyms for THIS variant's color (not 10) ──
+  // LOOKS-LIKE-A-COLOR gate (2026-07-09): only ask for shade synonyms of keys that are plausibly
+  // colors — a junk key ('default', an undecoded code, the old 'fbm' channel suffix) got a
+  // hallucinated palette ("burgundy maroon wine" for a fulfillment channel) broadcast to every
+  // child. Validated against the shared SKU color-name set + the basic-color regex; non-color
+  // keys ship the bare core (honest) instead of an invented palette.
+  const KNOWN_COLOR_NAMES = new Set(Object.values(SKU_COLOR_CODES).map((v) => v.toLowerCase()))
+  const tailColors = colors.filter((c) => c !== 'default' && (KNOWN_COLOR_NAMES.has(c) || BASIC_COLOR_RE.test(c)))
   const system = 'You generate a SHORT Amazon backend color tail per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"2-3 lowercase color words"}]}.'
-  const user = `Color variants: ${colors.join(', ')}
+  const user = `Color variants: ${tailColors.join(', ')}
 
 For EACH color, output ONLY the 2-3 MOST-SEARCHED shade synonyms a buyer would type — no more than 3. Examples:
   light green -> sage olive
   ivory -> cream off white
   pepper -> charcoal heather
-Use ONLY real color/shade SEARCH words — NEVER moods/feelings ("serene", "calm", "whimsical", "elegant", "timeless"). Max 3 words per color.
+Use ONLY real color/shade SEARCH words — NEVER moods/feelings ("serene", "calm", "whimsical", "elegant", "timeless") and NEVER product-type words ("shirt", "shirts", "tee", "tshirt"). Max 3 words per color.
 
 Do NOT use any of these words (already covered in title/bullets/core/color names):
 ${[...excludeWords].slice(0, 50).join(' ')}
@@ -3083,7 +3095,7 @@ Rules: lowercase, space-separated, NO commas, NO quotes, no brand or size words,
 Return ONLY the JSON object.`
 
   const tailMap = new Map<string, string>()
-  if (apparel) {
+  if (apparel && tailColors.length > 0) {
     // max_tokens 2000, not 800: a big apparel family (Darlin' = 25+ colors) sat right at the
     // 800-token JSON truncation edge — a truncated response parses to NOTHING, the catch
     // swallowed it, and every child silently shipped the IDENTICAL bare core (live 2026-06-12:
@@ -3105,9 +3117,11 @@ Return ONLY the JSON object.`
         /* tail is best-effort; core still ships */
       }
     }
-    if (colors.length > 1 && tailMap.size === 0) {
-      console.warn(`[runBackendAgent] color-tail call returned nothing for ${colors.length} colors — children will share the core string`)
+    if (tailColors.length > 1 && tailMap.size === 0) {
+      console.warn(`[runBackendAgent] color-tail call returned nothing for ${tailColors.length} colors — children will share the core string`)
     }
+  } else if (apparel && colors.length > 1) {
+    console.warn(`[runBackendAgent] no plausibly-color keys among [${colors.slice(0, 8).join(', ')}] — color decode likely failed upstream; children share the bare core`)
   }
 
   // ── Per-child CAPACITY awareness ──
@@ -3134,7 +3148,9 @@ Return ONLY the JSON object.`
     const effectiveCore = customCore ?? core
     const effectiveCoreWords = customCore ? new Set(effectiveCore.toLowerCase().split(/\s+/).filter(Boolean)) : new Set(core.toLowerCase().split(/\s+/).filter(Boolean))
     const tailWords = tail.toLowerCase().split(/\s+/)
-      .filter((w) => w && !effectiveCoreWords.has(w) && !excludeWords.has(w) && !MINOR_WORDS.has(w))
+      // + PRODUCT_TYPE_WORDS (PO-caught 2026-07-09: "shirts" rode in via the tail — the tail is
+      // for COLOR shade synonyms only; type words are capped in the core/fill).
+      .filter((w) => w && !effectiveCoreWords.has(w) && !excludeWords.has(w) && !MINOR_WORDS.has(w) && !PRODUCT_TYPE_WORDS.has(w))
       .slice(0, 3)   // at most 3 color words — the PO does NOT want 10 color synonyms
     // Token dedup (PO: design phrase "could be meaner" appeared twice — the force-led design
     // phrase + a keyword carrying the same words). Amazon indexes each token once anyway, so a
