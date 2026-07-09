@@ -422,9 +422,6 @@ function fillBackendToBudget(
   // as a duplicate of the already-present "darlin".
   const normTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
   const have = new Set(out.split(/\s+/).map(normTok).filter(Boolean))
-  // Product-type cap in the fill too (PO 2026-07-09: the tail stacked "tees … tops … shirts tshirts").
-  // Amazon's bag-of-words already has the type from the title; >2 is wasted bytes.
-  let typeCount = [...have].filter((t) => PRODUCT_TYPE_WORDS.has(t)).length
   const candidates: string[] = []
   // 1. leftover pool keywords FIRST (demand-backed beats title-derived bigrams — reordered 2026-07-08)
   candidates.push(...poolKeywords.map((k) => k.toLowerCase()))
@@ -446,9 +443,12 @@ function fillBackendToBudget(
       const tok = normTok(raw)
       if (tok.length <= 1 || have.has(tok) || alreadyIndexed?.has(tok)) continue
       if (banTok(tok)) continue
-      if (PRODUCT_TYPE_WORDS.has(tok) && typeCount >= 2) continue   // cap type words (PO 2026-07-09)
-      if (getByteLength(`${out} ${tok}`) > 250) continue            // fit check BEFORE spending a type slot (adversarial)
-      if (PRODUCT_TYPE_WORDS.has(tok)) typeCount++
+      // The FILL never adds product-type words (2026-07-09): the title always carries the product
+      // type ("...Shirt for Women") so Amazon already indexes it, and the core places up to 2 on
+      // purpose — the fill re-adding "shirts" was pure title-echo the singular/plural alreadyIndexed
+      // check missed ("shirt" indexed, "shirts" slipped through → the trailing "…turquoise shirts").
+      if (PRODUCT_TYPE_WORDS.has(tok)) continue
+      if (getByteLength(`${out} ${tok}`) > 250) continue
       out = `${out} ${tok}`
       have.add(tok)
     }
