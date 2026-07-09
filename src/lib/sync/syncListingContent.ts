@@ -804,11 +804,13 @@ export function scoreListingContent(
       issues.push({ field: 'bullets', severity: 'warning', message: `Only ${bulletCount}/5 bullets used — you are leaving ${5 - bulletCount} keyword slots empty. Add bullet(s) covering: compatibility with specific devices, warranty/guarantee, gift-readiness, or a comparison to alternatives. Each bullet Amazon indexes independently for search.`, auto_fixable: false })
     }
 
-    // Short bullets
-    const shortBullets = bullets.filter(b => b.length < 100)
+    // Short bullets — floor 80 (was 100; 2026-07-09): the GENERATOR's own brief mandates 80-200
+    // chars, so the scorer was docking -5/bullet for lengths the system itself produces on purpose
+    // (scorer-generator contract violation; part of the pinned-6/18 class).
+    const shortBullets = bullets.filter(b => b.length < 80)
     if (shortBullets.length > 0) {
       bulletScore -= Math.min(15, shortBullets.length * 5)
-      issues.push({ field: 'bullets', severity: 'warning', message: `${shortBullets.length} bullet(s) are under 100 chars — too thin to rank well. Expand each one: add the "so that" benefit ("90MB/s read speed so you never miss a shot during burst photography"), mention compatible devices, and weave in long-tail keywords like "for Canon EOS" or "for GoPro Hero".`, auto_fixable: false })
+      issues.push({ field: 'bullets', severity: 'warning', message: `${shortBullets.length} bullet(s) are under 80 chars — too thin to rank well. Expand each one: add the "so that" benefit ("90MB/s read speed so you never miss a shot during burst photography"), mention compatible devices, and weave in long-tail keywords like "for Canon EOS" or "for GoPro Hero".`, auto_fixable: false })
     }
 
     // Check for benefit-led format (CAPS lead)
@@ -863,10 +865,17 @@ export function scoreListingContent(
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
-      const missingOpp = missingBulletKeywords(bullets, bulletOppKw)
+      // HAYSTACK = BULLETS ∪ BACKEND (2026-07-09, the 6/18 contract fix): the PO-approved Content
+      // step 2 strategy deliberately moved opportunity-keyword coverage OUT of bullet prose INTO
+      // backend (clean human bullets; keywords index invisibly) — but this dock kept requiring the
+      // terms in the 5 bullets alone, pinning approved clean-prose bullets at -12 forever with a
+      // "regenerate to fix" that regeneration could never fix (the self-healing anti-pattern).
+      // A keyword ranks when its tokens are indexed ANYWHERE — bullets or backend both count.
+      // The design-name bullet floor keeps its own dedicated dock below (cross-section cohesion).
+      const missingOpp = missingBulletKeywords([...bullets, representativeContent.backend_keywords || ''], bulletOppKw)
       if (missingOpp.length >= 2) {
         bulletScore -= Math.min(12, missingOpp.length * 2)
-        issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. The AI rewrite weaves these in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
+        issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets + backend keywords together miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. The AI rewrite weaves these in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
       }
     }
 
