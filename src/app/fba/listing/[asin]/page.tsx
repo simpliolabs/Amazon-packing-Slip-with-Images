@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client'
 import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
+import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
 import { groupByDesign, isMultiDesign, type PerDesignGroup } from '@/lib/fba/perDesign'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import RankAnalysisPanel from './RankAnalysisPanel'
@@ -160,15 +161,8 @@ function copyToClipboard(text: string) {
   if (typeof window !== 'undefined') navigator.clipboard.writeText(text)
 }
 
-// Strip Amazon's appended variant dimensions (" -Light Green-XX-Large") so the header and the
-// cohesion comparison use the seller's BASE title, not a child's suffixed one.
-const SIZE_TOKEN = "(?:XS|S|M|L|XL|XXL|XXXL|[2-5]XL|X-?Small|XX?X?-?Large|Small|Medium|Large|One[ -]?Size)"
-function stripVariantSuffix(title: string | null | undefined): string {
-  return (title ?? '')
-    .replace(new RegExp(`\\s*[-–—|]\\s*[A-Za-z][\\w /&'-]*?\\s*[-–—|]\\s*${SIZE_TOKEN}\\s*$`, 'i'), '')
-    .replace(new RegExp(`\\s*[-–—|]\\s*${SIZE_TOKEN}\\s*$`, 'i'), '')
-    .trim()
-}
+// stripVariantSuffix moved to pushFields (ship-truth 2026-07-09) — the server deriver needs the
+// SAME suffix-strip the header/cohesion use, so there is exactly one implementation (imported above).
 
 // Strip a storage-capacity token ("64GB", "1 TB") from a title — used to render the capacity-
 // AGNOSTIC parent / variation-hub title for capacity-variation families (SD cards by GB). The
@@ -1491,20 +1485,10 @@ export default function ListingDetailPage() {
         // Rank-Top card so it stops showing now-covered "gaps" (details don't affect keyword coverage).
         if (pushField !== 'details') refreshRankFree()
 
-        // Mark matching action_plan items DONE locally — ONLY when FULLY shipped. A partial/interrupted
-        // push leaves the card in REPLACE so the seller re-checks + finishes the stragglers (else we'd
-        // falsely report a half-pushed field as done — adversarial review caught this).
+        // After a FULL ship the card verdicts change server-side (derived) — refetch below. A
+        // partial/interrupted push refetches too; the derived plan stays REPLACE for stragglers
+        // (the deriver compares every cached child, so a half-pushed field can never read DONE).
         if (fullyShipped) {
-        const matchesPushedField = (elem: string): boolean => {
-          if (pushField === 'title') return elem === 'title'
-          if (pushField === 'description') return elem === 'description'
-          if (pushField === 'keywords') return elem === 'backend_keywords'
-          if (pushField === 'details') return elem === 'product_details'
-          if (pushField === 'bullets') return /^bullet/.test(elem)
-          return false
-        }
-        const pushedAt = new Date().toISOString()
-        const pushedLabel = pushField === 'details' && pushDetailField ? pushDetailField : FIELD_LABEL[pushField]
         // Mirror the server write-through locally for the pushed DETAIL row, so its panel card
         // flips to "✓ On Amazon" immediately (PO: "no notice after PUSH") — same mirror Auto Push
         // does. The server already persisted current_value = pushed value; this avoids a refetch.
@@ -1518,20 +1502,19 @@ export default function ListingDetailPage() {
                 : pd),
           } : prev)
         }
-        setAiRecs((prev) => {
-          if (!prev) return prev
-          const action_plan = (prev.action_plan ?? []).map((it) => {
-            if (!matchesPushedField(it.element)) return it
-            return {
-              ...it,
-              verdict: 'DONE' as const,
-              current_status: `✓ Pushed ${pushedLabel} to Amazon (${data.pushed}/${data.total} variants)`,
-              notes: `${it.notes ? it.notes + ' · ' : ''}Pushed at ${pushedAt}. Submissions are ACCEPTED — Amazon applies in 15min–6hr. Use Verify on Amazon to confirm.`,
-            }
-          })
-          return { ...prev, action_plan }
-        })
         } // end if (fullyShipped)
+        // SHIP-TRUTH (2026-07-09): the local DONE-stamp mirror is GONE — the server derives card
+        // verdicts from rec-vs-cache, and the push write-through already updated the cache, so a
+        // refetch of the GET returns the truthful plan. Runs on PARTIAL pushes too (adversarial):
+        // the derived plan correctly stays REPLACE while stragglers remain, and the accepted SKUs'
+        // write-through still moves the cohesion counts.
+        void (async () => {
+          try {
+            const r = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
+            const j = await r.json() as { recommendations?: AiRecommendations | null }
+            if (j?.recommendations) setAiRecs(j.recommendations)
+          } catch { /* refetch is best-effort — the next page load serves derived truth */ }
+        })()
       }
       // Phase B: a push is a mutation that the server also mirrors into the change-log + may
       // auto-release the claim (release_reason='push'). Bump the heartbeat (covers a partial push
@@ -2489,6 +2472,11 @@ export default function ListingDetailPage() {
         // The plan can arrive with only title+backend (a partial regen / stored-rec reuse skips the
         // pipeline's synth backstop), which is why Bullets/Description cards vanished on B0FRYMM56C. The
         // seller must ALWAYS be able to push what the optimizer generated, regardless of the audit's list.
+        // SHIP-TRUTH (2026-07-09): the server GET/POST now DERIVES verdict / current_status /
+        // replacement_content from live truth AND synthesizes any missing core card
+        // (deriveActionPlan in pushFields). The #351 client synth below stays ONLY as a backstop
+        // for a failed server derive (the GET catch serves the stored plan) — on a healthy serve
+        // every core element is already present, so mkCard never fires.
         const rawParent = (recs.action_plan ?? []).filter(a => a.element !== 'backend_keywords')
         type PlanItem = (typeof rawParent)[number]
         const presentEls = new Set(rawParent.map(a => a.element))
@@ -2513,7 +2501,9 @@ export default function ListingDetailPage() {
         const perChildRows = variants.map(c => {
           const recommended = (recMap.get(c.sku) ?? '').trim()
           const current = (c.backend_keywords ?? '').trim()
-          return { sku: c.sku, current, recommended, changed: recommended !== '' && recommended !== current }
+          // squashEquals (ship-truth 2026-07-09): the SAME comparator the server deriver + verify
+          // use — byte-exact compare read "changed" on case/punctuation while the card said DONE.
+          return { sku: c.sku, current, recommended, changed: recommended !== '' && !squashEquals(current, recommended) }
         })
         const needsUpdate = perChildRows.filter(r => r.changed).length
         // ── Per-field variant cohesion (client-side; "should-match" fields only) ──
@@ -2533,7 +2523,14 @@ export default function ListingDetailPage() {
           // REPLACE). Keeps this row consistent with a 25/25 score instead of contradicting it.
           // recFor (capacity families): compare each child to ITS OWN per-child target (its own GB), not
           // one broadcast value — otherwise the divergent 128/32 GB titles read as "need update".
-          const needUpdate = optimal ? 0 : variants.filter(c => normV(getCurrent(c)) !== normV(recFor ? recFor(c) : recommended)).length
+          // squashEquals for the COUNT (ship-truth 2026-07-09 — same comparator as the cards/verify);
+          // the versions grouping above stays normV so visually-different casings still list separately.
+          // Guarded on a non-empty recommendation (adversarial: squashEquals returns false on an empty
+          // expected, which would count both-empty variants as "needs update").
+          const needUpdate = optimal ? 0 : variants.filter(c => {
+            const recV = normV(recFor ? recFor(c) : recommended)
+            return recV !== '' && !squashEquals(normV(getCurrent(c)), recV)
+          }).length
           return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal, perChild: !!recFor }
         }
         // Per-section RANK CONTEXT for the suggestions (integration A, increment 1b). Combines the rank

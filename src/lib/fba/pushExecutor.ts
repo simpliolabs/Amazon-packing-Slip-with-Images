@@ -3129,35 +3129,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             } catch (e) { console.warn('[push-content] persist manual title as recommendation failed (non-fatal):', e) }
           }
 
-          // PERSIST verdict=DONE for the pushed section — ONLY when EVERY pushed SKU succeeded
-          // (failed === 0) AND the push wasn't cancelled mid-way (a stopped push has untouched
-          // SKUs — failed===0 would lie DONE onto an incomplete field). A push with failures
-          // (or a selective re-push where some stragglers still error) must NOT flip the card to
-          // DONE, or the seller stops before the field is actually consistent on Amazon.
-          if (failed === 0 && !cancelled) try {
-            const { data: recRow } = await db.from('listing_seo_recommendations')
-              .select('action_plan').eq('parent_asin', parent_asin).single()
-            const plan = Array.isArray(recRow?.action_plan) ? recRow.action_plan as Array<Record<string, unknown>> : null
-            if (plan) {
-              const isPushed = (el: string) =>
-                field === 'title' ? el === 'title'
-                : field === 'description' ? el === 'description'
-                : field === 'keywords' ? el === 'backend_keywords'
-                : field === 'bullets' ? /^bullet_\d+$/.test(el) : false
-              const lbl = FIELD_CONFIG[field].label.toLowerCase()
-              let changed = false
-              for (const it of plan) {
-                if (isPushed(String(it.element)) && it.verdict !== 'DONE' && it.verdict !== 'SKIP') {
-                  it.verdict = 'DONE'
-                  it.current_status = `✓ Shipped to Amazon — live ${lbl} now matches the recommended version.`
-                  it.instruction = 'No action required — you pushed this. The copy box stays below if you need it.'
-                  if (it.priority !== 'HIGH') it.priority = 'NONE'
-                  changed = true
-                }
-              }
-              if (changed) await db.from('listing_seo_recommendations').update({ action_plan: plan }).eq('parent_asin', parent_asin)
-            }
-          } catch (e) { console.warn('[push-content] persist DONE verdict failed (non-fatal):', e) }
+          // DONE-flip DELETED (ship-truth derivation, 2026-07-09): card verdicts are now DERIVED at
+          // serve time from rec-vs-listing_content (deriveActionPlan in pushFields) — the push
+          // write-through above already updated the cache, so the card flips DONE on the next serve
+          // with zero stamps. The old block here was ALSO the "shipped but still red" bug: its
+          // failed===0 gate tripped on any straggler in a 91-SKU push and silently left REPLACE.
         }
 
         // AUTO-VERIFY queue (regular fields): register a follow-up verify in ~20 min. Cron

@@ -22,6 +22,7 @@ import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
+import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
 
 function getAdminSupabase() {
   return createClient(
@@ -779,10 +780,21 @@ export async function POST(req: NextRequest) {
             const perChildKw = sec === 'keywords'
               ? result.per_child_keywords
               : (() => { try { const a = JSON.parse(String(storedRec.recommended_keywords ?? '[]')); return Array.isArray(a) ? a : [] } catch { return [] } })()
+            // SHIP-TRUTH DERIVATION (2026-07-09): the emitted plan is derived live, same as the GET —
+            // dual-write-path rule: any serve-time invariant runs on BOTH the full and partial paths.
+            // A just-regenerated section correctly derives REPLACE (rec ≠ cache — not shipped yet).
+            let mergedPlan = (Array.isArray(merged.action_plan) ? merged.action_plan : []) as unknown as ActionPlanItem[]
+            try {
+              mergedPlan = deriveActionPlan(
+                { ...(merged as Record<string, unknown>), recommended_keywords: JSON.stringify(perChildKw) } as never,
+                children as unknown as DeriveContentRow[],
+              ) as unknown as ActionPlanItem[]
+            } catch (e) { console.warn('[ai-recommendations] partial derive failed — emitting stored plan:', e instanceof Error ? e.message : e) }
             emit({
               type: 'result',
               recommendations: {
                 ...merged,
+                action_plan: mergedPlan,
                 per_child_keywords: perChildKw,
                 recommended_keywords: perChildKw[0]?.keywords ?? '',
               },
@@ -1187,6 +1199,18 @@ export async function POST(req: NextRequest) {
             } catch { /* prior string unparsable — fall through, persist what we generated */ }
           }
 
+          // SHIP-TRUTH DERIVATION (2026-07-09): derive the plan from live truth for BOTH the stream
+          // and the stored row — the audit/cooling stamps above survive only as ADVISORY fields
+          // (instruction/priority/notes); verdict/current_status/replacement_content are computed
+          // from rec-vs-cache. A locked+shipped title now derives DONE with the seller's kept title
+          // displayed (the "shipped but still red" class dies here).
+          try {
+            rec.action_plan = deriveActionPlan(
+              { ...(rec as unknown as Record<string, unknown>), recommended_keywords: JSON.stringify(rec.per_child_keywords) } as never,
+              children as unknown as DeriveContentRow[],
+            ) as unknown as ActionPlanItem[]
+          } catch (e) { console.warn('[ai-recommendations] full-path derive failed — persisting audit plan:', e instanceof Error ? e.message : e) }
+
           // DB write. recommended_bullets + the *_warnings/improvements/reconciliation/action_plan
           // columns are JSONB (arrays written directly); recommended_keywords is TEXT (JSON string).
           // per_child_titles is JSONB (migration 017) — only present for capacity variation families.
@@ -1231,6 +1255,10 @@ export async function POST(req: NextRequest) {
               recommended_bullets: rec.recommended_bullets,
               recommended_keywords: JSON.stringify(rec.per_child_keywords),
               recommended_description: rec.recommended_description,
+              // action_plan is plain JSONB predating every migration — CANNOT be the missing-column
+              // culprit. Omitting it here is how the stored advisory copy froze while the columns
+              // advanced (the description card-vs-modal split, 2026-07-09).
+              action_plan: rec.action_plan,
               generated_at: rec.generated_at,
             }, { onConflict: 'parent_asin' })
             // Best-effort recover keyword_plan (the regen-time score was computed WITH it; if it doesn't land
@@ -1425,6 +1453,30 @@ export async function GET(req: NextRequest) {
   const per_child_bullets_scrubbed = per_child_bullets.map((c) => ({ ...c, bullets: scrubTrademarksArr(c.bullets || []) }))
   const per_child_descriptions_scrubbed = per_child_descriptions.map((c) => ({ ...c, description: scrubTrademarks(c.description || '') }))
 
+  // SHIP-TRUTH DERIVATION (2026-07-09, approach A): the card verdict / current_status /
+  // replacement_content are DERIVED from live truth on every serve — displayed content is the exact
+  // value the ship modal pushes (same resolver), verdict = does every cached child match its per-SKU
+  // recommendation. The stored action_plan contributes ADVISORY copy only. Same heal-on-read pattern
+  // as the trademark scrub above: retroactively fixes ALL historical stale cards, no regen needed.
+  // Best-effort: a failed content read serves the stored plan rather than erroring the page.
+  let action_plan_out = scrubTrademarksDeep(action_plan) as unknown as ActionPlanItem[]
+  try {
+    const { data: contentRows } = await supabase
+      .from('listing_content')
+      .select('sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+      .eq('parent_asin', parent_asin)
+    action_plan_out = deriveActionPlan({
+      recommended_title: (recommended_title_scrubbed ?? null) as string | null,
+      recommended_bullets: (recommended_bullets_scrubbed ?? null) as string[] | null,
+      recommended_description: (recommended_description_scrubbed ?? null) as string | null,
+      per_child_titles: per_child_titles_scrubbed,
+      per_child_bullets: per_child_bullets_scrubbed,
+      per_child_descriptions: per_child_descriptions_scrubbed,
+      recommended_keywords: JSON.stringify(per_child_keywords_scrubbed),
+      action_plan: action_plan_out,
+    }, (contentRows ?? []) as DeriveContentRow[]) as unknown as ActionPlanItem[]
+  } catch (e) { console.warn('[ai-recommendations GET] derive failed — serving stored plan:', e instanceof Error ? e.message : e) }
+
   return NextResponse.json({
     recommendations: {
       ...data,
@@ -1440,7 +1492,7 @@ export async function GET(req: NextRequest) {
       // (sku/asin/element/...) are skipped inside scrubTrademarksDeep, so SKU codes like
       // "France-World-Cup-TS-Parent" are never rewritten. Idempotent heal-on-read, same as the rest.
       keyword_reconciliation: scrubTrademarksDeep(keyword_reconciliation),
-      action_plan: scrubTrademarksDeep(action_plan),
+      action_plan: action_plan_out,
       product_details_improvements: scrubTrademarksDeep(product_details_improvements),
       field_pushed_at,
       // Keep recommended_keywords as the first child's keywords for backward compat
