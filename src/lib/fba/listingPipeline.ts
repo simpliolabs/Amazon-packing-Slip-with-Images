@@ -302,6 +302,14 @@ const BACKEND_GENERIC_FILLER = new Set([
   'garment', 'garments', 'fashion', 'trendy', 'stylish',
 ])
 
+// Foreign-language FUNCTION words (ES/PT) — no search value, English MINOR_WORDS/stopwords don't
+// list them, so a keyword like "camisetas para mujer de algodon" was placing "para"/"de" as if
+// content (adversarial 2026-07-09). Banned in the backend gate so the CONTENT tokens (camisetas,
+// mujer, algodon) still land and the function words don't waste bytes.
+const FOREIGN_FUNCTION_WORDS = new Set([
+  'para', 'de', 'del', 'la', 'el', 'los', 'las', 'un', 'una', 'con', 'por', 'y', 'o', 'e', 'en',
+])
+
 // HEAVY (warm-layer) garments — the subset of GARMENT_TYPE_WORDS a t-shirt/tee can NEVER also be.
 // When the seller's OWN text proves the product is a tee, these are stuffing/mis-categorization noise.
 const HEAVY_GARMENT_WORDS = new Set([
@@ -413,6 +421,9 @@ function fillBackendToBudget(
   // as a duplicate of the already-present "darlin".
   const normTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
   const have = new Set(out.split(/\s+/).map(normTok).filter(Boolean))
+  // Product-type cap in the fill too (PO 2026-07-09: the tail stacked "tees … tops … shirts tshirts").
+  // Amazon's bag-of-words already has the type from the title; >2 is wasted bytes.
+  let typeCount = [...have].filter((t) => PRODUCT_TYPE_WORDS.has(t)).length
   const candidates: string[] = []
   // 1. leftover pool keywords FIRST (demand-backed beats title-derived bigrams — reordered 2026-07-08)
   candidates.push(...poolKeywords.map((k) => k.toLowerCase()))
@@ -434,7 +445,9 @@ function fillBackendToBudget(
       const tok = normTok(raw)
       if (tok.length <= 1 || have.has(tok) || alreadyIndexed?.has(tok)) continue
       if (banTok(tok)) continue
-      if (getByteLength(`${out} ${tok}`) > 250) continue
+      if (PRODUCT_TYPE_WORDS.has(tok) && typeCount >= 2) continue   // cap type words (PO 2026-07-09)
+      if (getByteLength(`${out} ${tok}`) > 250) continue            // fit check BEFORE spending a type slot (adversarial)
+      if (PRODUCT_TYPE_WORDS.has(tok)) typeCount++
       out = `${out} ${tok}`
       have.add(tok)
     }
@@ -455,8 +468,11 @@ function backendOutputProblems(
   const problems: string[] = []
   if (perChild.length === 0) return ['no per-child keyword rows were generated']
   const minBytes = Math.min(...perChild.map((p) => getByteLength(p.keywords || '')))
-  // 190 floor: healthy output lands 244-250 (the fill's target); even a thin catalog with
-  // canonical bigrams clears 200. Only a starved pool / failed fill lands below.
+  // 190 floor: healthy output lands 228-250 (gap-closing + fill); a thin catalog with canonical
+  // bigrams clears ~200. Only a starved pool / failed fill / the quota-wipe class (86 chars) lands
+  // below. Kept at 190 (NOT raised): the wipe is the safety target and 86 << 190; raising to 200+
+  // would false-fail a genuinely thin catalog on keywords-only regens (which THROW), for no added
+  // safety — the underfill the PO flagged is fixed in the GENERATOR now, not by a higher floor.
   if (minBytes < 190) problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill`)
   const distinctColors = new Set(children.map((c) => (c.color || 'default').toLowerCase())).size
   const distinctStrings = new Set(perChild.map((p) => p.keywords)).size
@@ -2941,9 +2957,10 @@ async function runBackendAgent(
     }
     if (out.length === 0 || out.every((w) => MINOR_WORDS.has(w))) continue
     corePhrases.push(out.join(' '))
-    // 235 (was 215): echo removal frees bytes — let the demand-backed pool fill them before the
-    // LLM fill has to (fill-to-244 plan, 2026-07-08).
-    if (getByteLength(corePhrases.join(' ')) >= 235) break
+    // 200 (was 235): stop placing whole PHRASES early and leave ~33 bytes for the token-level
+    // gap-closing pass below, which covers more distinct keywords per byte (PO 2026-07-09 "rank in
+    // totality"). Whole phrases repeat connectors + already-placed tokens; token packing does not.
+    if (getByteLength(corePhrases.join(' ')) >= 200) break
   }
   // Guarantee the product's audience tokens (PO wants Men AND Women in the backend).
   // UNSHIFT, not push (adversarial 2026-07-08): a tail-appended guarantee sat past the 233-byte
@@ -2965,13 +2982,47 @@ async function runBackendAgent(
     .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
     .split(' ').filter((w) => w && !ownBrandsForBackend.has(w)).join(' ')
   if (dnPhrase && !new RegExp(`\\b${dnPhrase.replace(/\s+/g, '\\s+')}\\b`).test(corePhrases.join(' '))) corePhrases.unshift(dnPhrase)
+  // ── GAP-CLOSING (PO 2026-07-09, "does this rank in totality?") ────────────────────────────────
+  // The core loop above places whole demand PHRASES and stops at 200 bytes. This token-packs the
+  // STILL-MISSING content tokens of the opportunity pool, IN DEMAND ORDER, up to the byte budget.
+  // Amazon matches a token bag, so covering a keyword's tokens = ranking for the phrase — and tokens
+  // pack more distinct-keyword coverage per byte than repeating whole phrases (measured: 8/25 → 15/25
+  // came from opening the gates; this closes the byte-budget gap that left mid-pool keywords, incl.
+  // multilingual demand like "camisetas … algodon", entirely unplaced). Demand-backed, so it takes
+  // byte priority over the LLM theme fill below (guesses get truncated first). Same filters as the
+  // core; excludeWords keeps title-echo out; the product-type cap (productTypeCount) is shared.
+  for (const k of remaining) {
+    if (getByteLength(corePhrases.join(' ')) >= 233) break
+    const add: string[] = []
+    for (const w of k.keyword.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ')) {
+      if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w) || banTok(w)) continue
+      if (kidsWords.has(w) && !titleWords.has(w)) continue          // wrong audience (kids)
+      // THIRD-PARTY BRAND GUARD (adversarial BLOCKER 2026-07-09): banTok/groupBan do NOT filter
+      // competitor/licensed brands, and the pool isn't stripped upstream — the core loop drops
+      // them at THIS check, so gap-closing must mirror it or a pool brand token ("nike"/"disney")
+      // ships to live backend = trademark risk. Own-brand is belt-and-suspenders (excludeWords/
+      // banTok already cover it).
+      if (ownBrandsForBackend.has(w)) continue
+      if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) continue
+      if (excludeWords.has(w) || coreWordSet.has(w)) continue        // already title-indexed / placed
+      if (PRODUCT_TYPE_WORDS.has(w) && productTypeCount >= 2) continue
+      // Fit check BEFORE spending a type slot (adversarial): a type word that doesn't fit must not
+      // burn the cap and block a later type word that would.
+      if (getByteLength([...corePhrases, ...add, w].join(' ')) > 233) break
+      if (PRODUCT_TYPE_WORDS.has(w)) productTypeCount++
+      add.push(w); coreWordSet.add(w)
+    }
+    if (add.length) corePhrases.push(add.join(' '))
+  }
   // FILL: a small product's opportunity pool can run dry well under 250 bytes, leaving the
   // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with LLM long-tail
   // BUYER search words (gifts / occasions / recipients / themes) — run through the SAME junk /
   // role / kids / dedup filters as the core, so it fills with real terms, not rejected junk.
-  // 240 gate (was 205, the "205-244 dead zone"): output landing 211-222 bytes never got topped up —
-  // the PO's recurring "keywords are 160/211 not 250". Now anything short of 240 fills.
-  if (getByteLength(corePhrases.join(' ')) < 240) {
+  // 220 gate (adversarial 2026-07-09): the LLM theme fill is now the LAST resort, BELOW the demand-
+  // backed gap-closing. When gap-closing filled the pool to the 233 core cap, this must NOT fire
+  // (240 gate against a 233 truncate meant a paid gpt-4.1-mini call whose output was truncated away
+  // — fire-then-discard on every healthy regen). It fires only when a THIN pool left real room.
+  if (getByteLength(corePhrases.join(' ')) < 220) {
     try {
       // THEME-ANCHORED fill (PO 2026-07-08: the old generic ask returned catalog-speak — "apparel
       // clothing trendy blouses" — that read like a promotional string, not search terms). Anchor
@@ -3003,7 +3054,9 @@ Return ONLY the JSON.`
         if (coreWordSet.has(w) || excludeWords.has(w)) continue        // already covered / auto-indexed
         if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
         coreWordSet.add(w); fillOut.push(w)
-        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= 240) break
+        // 233 (was 240): stop AT the core truncate line so the themed terms actually survive
+        // (adversarial 2026-07-09 — the old 240 overshoot was sliced off by truncateToBytes(233)).
+        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= 233) break
       }
       if (fillOut.length) corePhrases.push(fillOut.join(' '))
     } catch { /* fill is best-effort; the opportunity core still ships */ }
@@ -5560,6 +5613,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const banBackendTok = (w: string): boolean => {
     if (w.length === 1 && !/\d/.test(w)) return true
     if (AMZ_BACKEND_STOPWORDS.has(w)) return true
+    if (FOREIGN_FUNCTION_WORDS.has(w)) return true   // ES/PT function words carry no search value (2026-07-09)
     if (BACKEND_GENERIC_FILLER.has(w) && !poolToksForBackend.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
     if (brandToksForBackend.has(w)) return true
     if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
@@ -5607,6 +5661,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         const groupBan = (w: string): boolean => {
           if (w.length === 1 && !/\d/.test(w)) return true
           if (AMZ_BACKEND_STOPWORDS.has(w)) return true
+          if (FOREIGN_FUNCTION_WORDS.has(w)) return true   // ES/PT function words carry no search value (2026-07-09)
           if (BACKEND_GENERIC_FILLER.has(w) && !groupPoolToks.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
           if (groupBrandToks.has(w)) return true
           if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
