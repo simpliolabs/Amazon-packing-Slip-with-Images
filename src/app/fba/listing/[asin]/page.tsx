@@ -2467,6 +2467,20 @@ export default function ListingDetailPage() {
         // One row per ASIN (FBA+FBM SKUs of the same ASIN collapse to one) so the page matches
         // the per-ASIN recommendations/push.
         const variants = dedupByAsin(score.children)
+        // ── SKU-PRIMARY COUNTS (PO decision 2026-07-09) ──────────────────────────────────────────
+        // The page showed "157 need update" / "79" / "Push to 157" / verify "182 applied" and none
+        // agreed, because each surface silently counted a DIFFERENT unit. Ground rule: counts LEAD
+        // with SKUs (an ASIN's FBA + FBM twins are two real Amazon writes) and name ASINs in parens
+        // when they differ. `variants` stays ASIN-deduped for DISPLAY (one row per ASIN) — only the
+        // printed numbers change.
+        const skusByAsin = new Map<string, number>()
+        for (const c of score.children) skusByAsin.set(c.asin, (skusByAsin.get(c.asin) ?? 0) + 1)
+        const skuCountFor = (asin: string) => skusByAsin.get(asin) ?? 1
+        const totalSkus = score.children.length
+        const fmtCount = (skus: number, asins?: number) =>
+          asins != null && asins !== skus
+            ? `${skus} SKU${skus === 1 ? '' : 's'} (${asins} ASIN${asins === 1 ? '' : 's'})`
+            : `${skus} SKU${skus === 1 ? '' : 's'}`
         // GUARANTEE a pushable card for every core field (title, bullets, description) from the
         // RECOMMENDATION — which always has this content — even when the stored action_plan omitted them.
         // The plan can arrive with only title+backend (a partial regen / stored-rec reuse skips the
@@ -2503,9 +2517,12 @@ export default function ListingDetailPage() {
           const current = (c.backend_keywords ?? '').trim()
           // squashEquals (ship-truth 2026-07-09): the SAME comparator the server deriver + verify
           // use — byte-exact compare read "changed" on case/punctuation while the card said DONE.
-          return { sku: c.sku, current, recommended, changed: recommended !== '' && !squashEquals(current, recommended) }
+          return { sku: c.sku, asin: c.asin, skus: skuCountFor(c.asin), current, recommended, changed: recommended !== '' && !squashEquals(current, recommended) }
         })
-        const needsUpdate = perChildRows.filter(r => r.changed).length
+        // SKU-primary (2026-07-09): the rows are one-per-ASIN for display, but a changed ASIN means
+        // its FBA+FBM twins BOTH get written — so the count the seller sees matches what ships.
+        const needsUpdateAsins = perChildRows.filter(r => r.changed).length
+        const needsUpdate = perChildRows.filter(r => r.changed).reduce((n, r) => n + r.skus, 0)
         // ── Per-field variant cohesion (client-side; "should-match" fields only) ──
         // Groups each child's CURRENT value to show whether the variants are consistent or split,
         // how many need updating, and which SKUs hold which version.
@@ -2527,11 +2544,14 @@ export default function ListingDetailPage() {
           // the versions grouping above stays normV so visually-different casings still list separately.
           // Guarded on a non-empty recommendation (adversarial: squashEquals returns false on an empty
           // expected, which would count both-empty variants as "needs update").
-          const needUpdate = optimal ? 0 : variants.filter(c => {
+          const stale = optimal ? [] : variants.filter(c => {
             const recV = normV(recFor ? recFor(c) : recommended)
             return recV !== '' && !squashEquals(normV(getCurrent(c)), recV)
-          }).length
-          return { versions, distinct: versions.length, needUpdate, total: variants.length, recommended, optimal, perChild: !!recFor }
+          })
+          // SKU-primary: an ASIN needing an update means BOTH its FBA and FBM SKUs get written.
+          const needUpdate = stale.reduce((n, c) => n + skuCountFor(c.asin), 0)
+          const needUpdateAsins = stale.length
+          return { versions, distinct: versions.length, needUpdate, needUpdateAsins, total: totalSkus, totalAsins: variants.length, recommended, optimal, perChild: !!recFor }
         }
         // Per-section RANK CONTEXT for the suggestions (integration A, increment 1b). Combines the rank
         // COVERAGE truth (rankData.rows: youCover + coveredIn) with the AI's PLACEMENT plan
@@ -2854,14 +2874,14 @@ export default function ListingDetailPage() {
                             {(f.key === 'title' || f.key === 'bullets') && rankChip(rankSectionChip[f.key])}
                             {split
                               ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
-                              : <span className="text-[11px] text-green-700 flex items-center gap-1"><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
+                              : <span className="text-[11px] text-green-700 flex items-center gap-1" title={`${f.coh.total} SKUs across ${f.coh.totalAsins} ASINs (FBA + FBM twins count separately).`}><span aria-hidden>✓</span>all {f.coh.total} identical</span>}
                           </button>
                           {aiRecs?.field_pushed_at?.[f.key] && (
                             <span className="text-[10px] text-slate-400 flex-shrink-0 hidden md:inline" title={`Last shipped to Amazon ${new Date(aiRecs.field_pushed_at[f.key]).toLocaleString()}`}>shipped {relDate(aiRecs.field_pushed_at[f.key])}</span>
                           )}
                           <span className="text-[11px] flex-shrink-0">
                             {f.coh.needUpdate > 0
-                              ? <span className="text-amber-700 flex items-center gap-1" title={`${f.coh.needUpdate} of your ${f.coh.total} ASIN variants have CACHED content that differs from the current recommendation (a pre-push, per-ASIN comparison — an ASIN's FBA+FBM SKUs count as one). This is NOT the same as "stale" in the Verify panel, which reads the LIVE Amazon value after a push over each individual SKU (so its denominator is ~2× and it clears itself as Amazon finishes processing).`}>{f.coh.needUpdate} need update</span>
+                              ? <span className="text-amber-700 flex items-center gap-1" title={`${f.coh.needUpdate} SKUs (across ${f.coh.needUpdateAsins} ASINs) have CACHED content that differs from the current recommendation. Counts are SKU-primary: an ASIN's FBA + FBM twins are two separate Amazon writes, so this now uses the SAME unit as the Ship modal and the Verify panel. Cached comparison — live FBM twins not yet in the cache are discovered at push time.`}>{f.coh.needUpdate} SKUs need update</span>
                               : (f.coh.distinct > 1 && !f.coh.perChild)
                                 ? <span className="text-amber-700">variants differ — unify</span>
                                 : <span className="text-green-700">up to date</span>}
@@ -2943,7 +2963,7 @@ export default function ListingDetailPage() {
                         <span className="text-[10px] text-slate-400 hidden md:inline" title={`Last shipped to Amazon ${new Date(aiRecs.field_pushed_at.keywords).toLocaleString()}`}>shipped {relDate(aiRecs.field_pushed_at.keywords)}</span>
                       )}
                       {needsUpdate > 0
-                        ? <span className="text-[11px] text-amber-700">{needsUpdate} need update</span>
+                        ? <span className="text-[11px] text-amber-700" title={`${needsUpdate} SKUs across ${needsUpdateAsins} ASINs (FBA + FBM count separately — each is its own Amazon write).`}>{needsUpdate} SKUs need update</span>
                         : <span className="text-[11px] text-emerald-600 font-medium">✓ up to date</span>}
                       <button onClick={() => openPushPreview('keywords')} className="text-[10px] px-2 py-0.5 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50 font-medium" title="Read the LIVE backend value on Amazon for every SKU — confirms what applied and re-pushes stragglers.">Verify live</button>
                       {needsUpdate > 0 && (
@@ -3327,8 +3347,8 @@ export default function ListingDetailPage() {
                   <h3 className="flex items-center gap-1.5 text-xs font-bold text-slate-700 uppercase tracking-wide"><Icon.Tag className="w-3.5 h-3.5 text-violet-500" /> Edit Per Variant</h3>
                   <span className="text-[11px] text-slate-400">Backend search terms — unique per color/size</span>
                   {needsUpdate > 0
-                    ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">{needsUpdate} of {perChildRows.length} need update</span>
-                    : <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium">all {perChildRows.length} match</span>}
+                    ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium" title={`${needsUpdate} SKUs across ${needsUpdateAsins} ASINs differ from the recommendation (each ASIN's FBA + FBM SKUs are separate Amazon writes). Cached comparison — live FBM twins not yet in the cache are discovered at push time.`}>{fmtCount(needsUpdate, needsUpdateAsins)} of {fmtCount(totalSkus, perChildRows.length)} need update</span>
+                    : <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-medium">all {fmtCount(totalSkus, perChildRows.length)} match</span>}
                   {/* PO: "I don't see a way to regenerate just keywords" — the per-section button
                       lived only on the action-plan card; surface it HERE where the per-variant
                       strings actually display. */}
@@ -3347,7 +3367,7 @@ export default function ListingDetailPage() {
                   <details className="bg-white border border-slate-200 rounded-2xl overflow-hidden group">
                     <summary className="cursor-pointer select-none px-4 py-2.5 text-xs font-medium text-slate-600 hover:bg-slate-50 flex items-center gap-2">
                       <span className="text-slate-400 transition-transform group-open:rotate-90" aria-hidden>▸</span>
-                      View per-variant backend terms — {perChildRows.length} SKUs{needsUpdate > 0 ? `, ${needsUpdate} need update` : ''}
+                      View per-variant backend terms — {perChildRows.length} ASINs ({totalSkus} SKUs incl. FBA+FBM){needsUpdate > 0 ? `, ${fmtCount(needsUpdate, needsUpdateAsins)} need update` : ''}
                     </summary>
                     <div className="overflow-x-auto border-t border-slate-100">
                     <table className="w-full text-xs">
@@ -3388,7 +3408,7 @@ export default function ListingDetailPage() {
                 )}
                 {needsUpdate > 0 && (
                   <button onClick={() => openPushPreview('keywords')} className="mt-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-medium">
-                    Push {needsUpdate} update{needsUpdate === 1 ? '' : 's'} to Amazon →
+                    Push to {needsUpdate} SKU{needsUpdate === 1 ? '' : 's'} on Amazon →
                   </button>
                 )}
 
