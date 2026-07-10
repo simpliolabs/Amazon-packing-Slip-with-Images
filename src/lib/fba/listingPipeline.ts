@@ -4624,10 +4624,16 @@ function tidyDescription(html: string): string {
 function scrubFitClaims(s: string, fit: string): string {
   if (!s || !fit || /oversized/i.test(fit)) return s
   const word = fit.split(/\s+/)[0] || fit
-  return s.replace(/\b(?:oversized|boxy)\b/gi, (m) =>
-    m === m.toUpperCase() ? word.toUpperCase()
-      : m[0] === m[0].toUpperCase() ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-        : word.toLowerCase())
+  // A NEGATED false-fit claim ("a relaxed fit ... without being oversized") is ACCURATE — but a blind swap
+  // turns it into a self-contradiction ("without being relaxed", live on B0FRYMM56C 2026-07-10). Drop the
+  // negated aside entirely (redundant once the true fit is named) BEFORE swapping remaining POSITIVE claims.
+  const out = s
+    .replace(/(?:\s+(?:and|but|yet|while|though))?[,;]?\s*(?:without being|without feeling|not|never|no longer|isn't|aren't|avoids?|free of|rather than)\s+(?:a |an |too |overly )?(?:oversized|boxy)(?:\s+(?:look|fit|cut|silhouette|style|shape|feel))?\b/gi, '')
+    .replace(/\b(?:oversized|boxy)\b/gi, (m) =>
+      m === m.toUpperCase() ? word.toUpperCase()
+        : m[0] === m[0].toUpperCase() ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+          : word.toLowerCase())
+  return out.replace(/\s{2,}/g, ' ').replace(/\s+([.,;!?])/g, '$1').trim()
 }
 
 // GROUND-TRUTH blank specs — authoritative garment facts per blank brand/style, so the pipeline stops
