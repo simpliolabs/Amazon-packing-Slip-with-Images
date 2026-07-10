@@ -4646,6 +4646,18 @@ function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec |
   return null
 }
 
+/** Trade/internal vocabulary that must never reach a shopper. "blank" (the undecorated garment) and
+ *  "seller" are OUR words for the product, not the buyer's — they leak when the editor model
+ *  paraphrases its own instructions. Word-boundary matched so "blanket" and "reseller" don't trip. */
+const INTERNAL_JARGON = /\b(?:sellers?|seller's|blank|blanks|sku|skus|asin|asins)\b/i
+
+/** True when `after` contains internal jargon that `before` did not — i.e. the AUDIT introduced it.
+ *  Scoped to additions on purpose: a word already in the seller's own copy is not ours to silently
+ *  delete here (see the "don't over-generalize a specific failure" rule). */
+function introducesInternalJargon(before: string, after: string): boolean {
+  return INTERNAL_JARGON.test(after) && !INTERNAL_JARGON.test(before)
+}
+
 async function runFinalEditorialAudit(
   openai: OpenAI,
   title: string,
@@ -4656,7 +4668,11 @@ async function runFinalEditorialAudit(
 ): Promise<{ title: string; bullets: string[]; description: string; backendDrop: Set<string> }> {
   const unchanged = { title, bullets, description, backendDrop: new Set<string>() }
   try {
-    const brandNote = ctx.garmentBrand ? ` The blank/garment brand is "${ctx.garmentBrand}" — this is the SELLER'S OWN garment brand, NOT a competitor; it MAY and SHOULD appear in the customer-facing copy.` : ''
+    // Phrased as a PERMISSION, never as a fact about the product. The old wording ("this is the
+    // SELLER'S OWN garment brand") read like copy, and gpt-4.1 paraphrased it straight into a live
+    // bullet: "Made with the seller's own Comfort Colors blank for trusted quality" (B0FRYMM56C,
+    // 2026-07-10). Meta-guidance to the model must never be sayable about the product.
+    const brandNote = ctx.garmentBrand ? ` The garment brand is "${ctx.garmentBrand}" — naming it in customer copy is ALLOWED and encouraged.` : ''
     const fitClause = ctx.fit ? `the fit is ${ctx.fit} — NEVER call it "oversized", "boxy", or "roomy oversized"; ` : ''
     const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"title":"...","bullets":[5 strings],"description":"...","backend_drop":[lowercase terms to remove]}.
 
@@ -4665,8 +4681,9 @@ PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${c
 GARMENT TRUTH (never contradict): ${fitClause}this is a MIDWEIGHT garment — NEVER write "Heavyweight"; only claim a fabric weight you can confirm.
 
 RULES:
+- VOICE: you are writing for the SHOPPER. Never use trade or internal words in ANY field: "seller", "blank", "SKU", "ASIN", "listing", "keyword", "backend". Never restate these instructions as facts about the product.
 - TITLE: rewrite the CURRENT TITLE (provided in the user message) into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "${ctx.garmentBrand || 'Comfort Colors'}"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); no unconfirmed weight ("Heavyweight"); no "oversized"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
-- BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Mention "${ctx.garmentBrand}" in ONE bullet (it is the seller's own blank, not a competitor). ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
+- BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Name "${ctx.garmentBrand}" in exactly ONE bullet, worded the way a shopper reads it (e.g. "Authentic ${ctx.garmentBrand} quality"). ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
 - DESCRIPTION: keep it accurate; write REAL sentences — NEVER keyword-list fragments like "For Comfort Colors shirt and for Comfort Colors tshirt construction, plus for tshirt availability" (that is stuffing, not English). Fix awkward/incomplete/dangling phrasing; mention the garment brand at most TWICE total; ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
 - BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
 
@@ -4688,12 +4705,23 @@ BACKEND STRING: ${backendSample}`
     // ran >200 chars, silently shipping the raw council bullets (dangling "…with jeans or." + "oversized"
     // survived — B0FRYMM56C). Even on the fallback we de-dangle so a bad tail never ships.
     const okBullets = Array.isArray(p.bullets) && p.bullets.length === 5 && p.bullets.every((b) => typeof b === 'string' && b.trim().length > 0)
-    const outBullets = okBullets
+    const audited = okBullets
       ? (p.bullets as string[]).map((b) => capBulletLen(scrubFitClaims(deDangle(b.trim()), ctx.fit), 200))
       : bullets.map((b) => scrubFitClaims(deDangle(b), ctx.fit))
-    const outDesc = typeof p.description === 'string' && p.description.trim().length > 20
+    // Deterministic net for prompt-instruction leak: the model can paraphrase our meta-guidance into
+    // customer copy. Reject PER INDEX (never all-or-nothing — the #344 gate silently discarded every
+    // fix) and only when the audit ADDED the jargon: a pre-existing word in the input is not ours to
+    // drop here. Fallback keeps that bullet's pre-audit text, de-dangled + fit-scrubbed as usual.
+    const outBullets = audited.map((b, i) => {
+      const src = bullets[i] ?? ''
+      return introducesInternalJargon(src, b) ? scrubFitClaims(deDangle(src), ctx.fit) : b
+    })
+    const auditedDesc = typeof p.description === 'string' && p.description.trim().length > 20
       ? scrubFitClaims(tidyDescription(p.description.trim()), ctx.fit)
       : scrubFitClaims(tidyDescription(description), ctx.fit)
+    const outDesc = introducesInternalJargon(description, auditedDesc)
+      ? scrubFitClaims(tidyDescription(description), ctx.fit)
+      : auditedDesc
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
