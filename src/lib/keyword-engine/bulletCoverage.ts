@@ -18,7 +18,7 @@ export const BKW_STOP = new Set([
  *  Without this the scorer required the exact plural form and docked listings for keywords they
  *  already cover ("shirt" ≠ "shirts", "tee" ≠ "tees"). Guards: >3 chars, not a double-s ("dress",
  *  "less"), not "…ss"/"…us"/"…is" endings that are not plurals. */
-const foldPlural = (t: string): string =>
+export const foldPlural = (t: string): string =>
   t.length > 3 && t.endsWith('s') && !/(?:ss|us|is)$/.test(t) ? t.slice(0, -1) : t
 
 /** Significant tokens of a string: lowercase, DELETE apostrophes ("he's" → "hes" — matching the

@@ -21,7 +21,7 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
-import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
+import { missingBulletKeywords, bulletTokens, foldPlural } from '@/lib/keyword-engine/bulletCoverage'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -389,6 +389,20 @@ function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
   return out
 }
 
+/** Top-N opportunity phrases by SEARCH VOLUME (not sales) — the volume-priority seed for
+ *  fillBackendToBudget. The backend pool is sales-PRIMARY sorted, so a high-volume/low-sales phrase
+ *  like "graphic tees for women" (710K) can sit far down the pool and never be reached before the
+ *  244-byte stop; this re-ranks a small head by volume so the score-movers win the byte budget.
+ *  Strings only — the fill appends bytes and the ORDER carries the priority. */
+const topVolumeBackendPhrases = (
+  pool: { keyword: string; searchVolume?: number | null }[],
+  n = 8,
+): string[] =>
+  [...pool]
+    .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0))
+    .slice(0, n)
+    .map((k) => k.keyword)
+
 /** Fill each child's backend string toward the 250-byte budget (PO: "NOT utilizing all
  *  250 characters" — the agent's ~240 target landed at 228, leaving ~20 bytes of free
  *  ranking real estate per child). Additions, in trust order:
@@ -399,8 +413,9 @@ function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
  *    2. Leftover pool keywords (already relevance-gated), skipping third-party brands and
  *       capacity tokens on capacity families.
  *  Only NOVEL tokens are appended (the field is a token soup — duplicates waste bytes),
- *  and the 250-byte hard cap is never crossed. Runs BEFORE the hard-lean gender strip so
- *  the strip cleans additions too. */
+ *  and the 250-byte hard cap is never crossed. All 4 call sites strip opposite-gender tokens
+ *  BEFORE calling this (the "Strip BEFORE fill" fix), so there is NO post-fill gender strip —
+ *  gender safety for our additions comes from `banTok` inside the pass. */
 function fillBackendToBudget(
   keywords: string,
   canonicalTitle: string | null | undefined,
@@ -414,6 +429,15 @@ function fillBackendToBudget(
    *  normTok'd, design tokens exempted). The fill must not spend backend bytes re-adding them —
    *  the canonical-bigram source was the title-echo culprit (PO-approved removal 2026-07-08). */
   alreadyIndexed?: Set<string>,
+  /** VOLUME-priority seed (2026-07-10): the highest-search-volume opportunity phrases, volume-sorted.
+   *  Their scorer-required tokens are force-placed BEFORE the sales-ordered generic fill, and a
+   *  product-type token (tee/tees/…) is exempted from the PRODUCT_TYPE_WORDS skip IFF title+bullets
+   *  do NOT already index it under the SCORER's plural fold. Empty [] = today's behavior byte-for-byte. */
+  priorityPhrases: string[] = [],
+  /** The scorer's non-backend HAYSTACK for THIS listing = `${title} ${bullets.join(' ')}`. Used ONLY
+   *  to decide (fold-aware, via the scorer's own bulletTokens) which priority tokens are genuinely
+   *  uncovered, so we never spend a byte echoing a token the title already ranks for. */
+  coverageHay: string = '',
 ): string {
   let out = (keywords || '').trim()
   if (getByteLength(out) >= 244) return out
@@ -434,6 +458,35 @@ function fillBackendToBudget(
     const w = seg.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1)
     for (let i = 0; i + 1 < w.length; i++) candidates.push(`${w[i]} ${w[i + 1]}`)
   }
+
+  // ── VOLUME-PRIORITY PASS (2026-07-10, the score-mover) ──────────────────────────────────────────
+  // Runs BEFORE the generic sales-ordered loop so the highest-VOLUME opportunity phrases claim bytes
+  // first, and — unlike that loop — does NOT apply the blanket PRODUCT_TYPE_WORDS skip below. The echo
+  // safety that skip provided is replaced by a FOLD-AWARE coverage gate: scorerHave is the scorer's
+  // view (bulletTokens = foldPlural'd) of title+bullets+what we've placed, so a pool "shirts" whose fold
+  // "shirt" is already in the title is skipped (no "…turquoise shirts" regression), while "tee" — fold
+  // "tee", absent from a {shirt,tshirt} title — is genuinely needed and lands. We append the RAW pool
+  // token ("tees"), not the fold: the pool-backed banTok exemption is keyed on the raw token, and the
+  // scorer folds "tees"->"tee" on read. Without this, "graphic tees for women" (710K) is uncoverable —
+  // its "tee" token is filtered out no matter how the pool is ordered.
+  const scorerHave = new Set(bulletTokens(`${coverageHay} ${out}`))
+  for (const phrase of priorityPhrases) {
+    if (getByteLength(out) >= 244) break
+    if (capacityFamily && CAPACITY_RE.test(phrase)) continue          // capacity guard (mirrors the loop)
+    if (findThirdPartyBrands(phrase, ownBrands).length > 0) continue  // competitor-brand ban (mirrors the loop)
+    for (const raw of phrase.toLowerCase().split(/\s+/)) {
+      const tok = normTok(raw)                                        // raw pool form ("tees") — the byte we write
+      if (tok.length <= 1 || have.has(tok)) continue                 // byte-novelty
+      if (banTok(tok)) continue                                      // own-brand / stopword / sibling-color / gender
+      if (scorerHave.has(foldPlural(tok))) continue                  // title/bullets/out already cover it (fold-aware)
+      if (getByteLength(`${out} ${tok}`) > 250) continue             // hard cap, never crossed
+      out = `${out} ${tok}`
+      have.add(tok)
+      scorerHave.add(foldPlural(tok))
+    }
+  }
+  if (getByteLength(out) >= 244) return out
+
   for (const cand of candidates) {
     if (capacityFamily && CAPACITY_RE.test(cand)) continue
     if (findThirdPartyBrands(cand, ownBrands).length > 0) continue
@@ -6012,7 +6065,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // additions, and stripping first lets the fill reuse the freed bytes.
         if (lean === 'female' || lean === 'male') rows = rows.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
         const groupIndexed = mkAlreadyIndexed(ctx.title, groupBullets, ctx.designName)
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed) }))
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), `${ctx.title} ${groupBullets.join(' ')}`) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -6037,7 +6090,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), `${finalTitle} ${bullets.join(' ')}`) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -6097,7 +6150,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx),
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), `${finalTitle} ${bullets.join(' ')}`),
       }))
       return out
     }
@@ -6192,7 +6245,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), `${finalTitle} ${bullets.join(' ')}`),
     }))
     return out
   }
