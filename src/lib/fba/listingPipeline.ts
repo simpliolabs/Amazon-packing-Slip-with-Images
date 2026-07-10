@@ -4646,6 +4646,34 @@ function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec |
   return null
 }
 
+/** The description is HTML end-to-end: runDescriptionAgent writes <p>/<b>/<ul>/<li> (~line 3333) and the
+ *  seller copy-pastes that markup into Seller Central. Anything that rewrites it must give HTML back. */
+// ANY element counts as structure — a tag allowlist would false-flag a well-formed <div>/<h3> rewrite as
+// "flattened" and throw away a good edit. The <ul> is checked separately because it is the one structural
+// element the prompt names, and losing it while keeping a <p> is exactly the wall-of-text failure.
+const HTML_STRUCTURE = /<[a-z][a-z0-9]*\b[^>]*>/i
+const HAS_LIST = /<(?:ul|ol|li)\b[^>]*>/i
+// An entity renders as ONE character. Counting "&#39;" as five inflates the pre-audit side and can push a
+// legitimate rewrite under the ratio (gpt-4.1 varies entity density between input and output).
+const visibleLen = (s: string): number => (s || '')
+  .replace(/<[^>]*>/g, ' ')
+  .replace(/&(?:[a-z]+|#\d+|#x[0-9a-f]+);/gi, 'x')
+  .replace(/\s+/g, ' ').trim().length
+const stripCodeFence = (s: string): string => s.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim()
+
+/** True when the audit's rewrite is a DEGRADATION of the description rather than an edit of it.
+ *  Two failure modes, both observed live on B0FRYMM56C (2026-07-10): the editor returned a plain
+ *  paragraph (all markup gone) and only 504 of ~950 visible characters — roughly half the indexed
+ *  text, silently. NOTE this is a RELATIVE gate against a known-good input, and it falls back to the
+ *  pre-audit description — it is NOT the absolute "length floor" that the abort-and-preserve rule
+ *  forbids (that rule is about aborting a whole regen on short-but-legitimate output). */
+function degradesDescription(before: string, after: string): boolean {
+  if (HTML_STRUCTURE.test(before) && !HTML_STRUCTURE.test(after)) return true // flattened to prose
+  if (HAS_LIST.test(before) && !HAS_LIST.test(after)) return true             // the <ul> was destroyed
+  const vb = visibleLen(before)
+  return vb >= 400 && visibleLen(after) < vb * 0.75                           // half the text vanished
+}
+
 /** Trade/internal vocabulary that must never reach a shopper. "blank" (the undecorated garment) and
  *  "seller" are OUR words for the product, not the buyer's — they leak when the editor model
  *  paraphrases its own instructions. Word-boundary matched so "blanket" and "reseller" don't trip. */
@@ -4674,7 +4702,7 @@ async function runFinalEditorialAudit(
     // 2026-07-10). Meta-guidance to the model must never be sayable about the product.
     const brandNote = ctx.garmentBrand ? ` The garment brand is "${ctx.garmentBrand}" — naming it in customer copy is ALLOWED and encouraged.` : ''
     const fitClause = ctx.fit ? `the fit is ${ctx.fit} — NEVER call it "oversized", "boxy", or "roomy oversized"; ` : ''
-    const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"title":"...","bullets":[5 strings],"description":"...","backend_drop":[lowercase terms to remove]}.
+    const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"title":"...","bullets":[5 strings],"description":"...HTML, see DESCRIPTION rule...","backend_drop":[lowercase terms to remove]}.
 
 PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.${brandNote}
 
@@ -4684,7 +4712,7 @@ RULES:
 - VOICE: you are writing for the SHOPPER. Never use trade or internal words in ANY field: "seller", "blank", "SKU", "ASIN", "listing", "keyword", "backend". Never restate these instructions as facts about the product.
 - TITLE: rewrite the CURRENT TITLE (provided in the user message) into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "${ctx.garmentBrand || 'Comfort Colors'}"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); no unconfirmed weight ("Heavyweight"); no "oversized"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
 - BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Name "${ctx.garmentBrand}" in exactly ONE bullet, worded the way a shopper reads it (e.g. "Authentic ${ctx.garmentBrand} quality"). ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
-- DESCRIPTION: keep it accurate; write REAL sentences — NEVER keyword-list fragments like "For Comfort Colors shirt and for Comfort Colors tshirt construction, plus for tshirt availability" (that is stuffing, not English). Fix awkward/incomplete/dangling phrasing; mention the garment brand at most TWICE total; ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
+- DESCRIPTION: the CURRENT DESCRIPTION is HTML. Return HTML — NEVER plain prose. Preserve its structure (hook -> <ul> of key features -> use cases -> short closing) using <p>, <b>, <ul>, <li>; never collapse it into one paragraph and never drop the <ul>. Keep 900-980 characters of VISIBLE text (excluding the tags) — do not shorten it. Return the raw HTML inside the JSON string, with no markdown code fences. Keep it accurate; write REAL sentences — NEVER keyword-list fragments like "For Comfort Colors shirt and for Comfort Colors tshirt construction, plus for tshirt availability" (that is stuffing, not English). Fix awkward/incomplete/dangling phrasing; mention the garment brand at most TWICE total; ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
 - BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
 
 BACKEND STRING: ${backendSample}`
@@ -4716,12 +4744,16 @@ BACKEND STRING: ${backendSample}`
       const src = bullets[i] ?? ''
       return introducesInternalJargon(src, b) ? scrubFitClaims(deDangle(src), ctx.fit) : b
     })
-    const auditedDesc = typeof p.description === 'string' && p.description.trim().length > 20
-      ? scrubFitClaims(tidyDescription(p.description.trim()), ctx.fit)
-      : scrubFitClaims(tidyDescription(description), ctx.fit)
-    const outDesc = introducesInternalJargon(description, auditedDesc)
-      ? scrubFitClaims(tidyDescription(description), ctx.fit)
-      : auditedDesc
+    // The description is HTML. The audit MAY edit it, but it may not flatten it to prose or halve its
+    // visible text (both happened live). Fall back per-field to the pre-audit HTML — which already passed
+    // validateDescription + the brand-safety judge + the length cap — rather than shipping the damage.
+    const preAuditDesc = scrubFitClaims(tidyDescription(description), ctx.fit)
+    const rawAudited = typeof p.description === 'string' ? stripCodeFence(p.description.trim()) : ''
+    const auditedDesc = rawAudited.length > 20 ? scrubFitClaims(tidyDescription(rawAudited), ctx.fit) : preAuditDesc
+    const outDesc = auditedDesc === preAuditDesc ? preAuditDesc
+      : (introducesInternalJargon(description, auditedDesc) || degradesDescription(description, auditedDesc))
+        ? preAuditDesc
+        : auditedDesc
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
