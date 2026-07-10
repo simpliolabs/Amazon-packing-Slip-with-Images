@@ -4042,6 +4042,109 @@ function polishDescription(desc: string, designName?: string | null, brandName?:
  *  guard is coverage-SAFE under the garment-folded token set (bulletSigTok), so a variant collapse
  *  (tee≈shirt) passes while losing a UNIQUE keyword concept is rejected. Modes via BULLET_COHERENCE_GATE:
  *  'shadow' (default: log would-repairs, never mutate) / 'enforce' / 'off'. Fail-open LOUD. */
+// ─── Metric-gated bullets council loop (D1, shadow-first) ──────────────────────────────────────────
+// The bullets council runs once, then many stages rewrite the 5 bullets. This gates the SHIP-READY
+// bullets against an OBJECTIVE metric and, when they fall short, has the council RE-DELIBERATE against a
+// specific deterministic critique (Approach 1, PO-approved 2026-07-10). SHADOW MODE by default
+// (BULLETS_METRIC_LOOP=shadow → runs + logs what it WOULD ship; anything else → OFF, zero cost/zero change).
+
+/** Pure coherence-defect predicate, lifted out of coherenceGateBullets so the metric can score coherence
+ *  with NO LLM call: a raw lowercase comma-tail fragment (the backstop's ", oversized tshirts." shape) or
+ *  one significant concept repeated 3+ times inside a bullet. */
+function bulletHasCoherenceDefect(b: string): boolean {
+  const seg = (b.split(',').pop() || '').trim().replace(/\.$/, '')
+  if (seg && !/[A-Z]/.test(seg)) {
+    const w = seg.split(/\s+/)
+    if (w.length >= 1 && w.length <= 5 && !w.some((x) => /^(?:and|or|the|with|for|to|a|an)$/.test(x))) return true
+  }
+  const counts = new Map<string, number>()
+  for (const t of bulletTokens(b).map(bulletSigTok)) counts.set(t, (counts.get(t) ?? 0) + 1)
+  return [...counts.values()].some((c) => c >= 3)
+}
+
+type BulletMetric = { total: number; di: number; co: number; st: number }
+/** Objective bullets quality: 0.5·design-identity + 0.3·coherence + 0.2·structure. EXCLUDES keyword
+ *  coverage (Content-step-2: coverage lives in backend, not bullets) and the <100-char length dock
+ *  (anti-Goodhart, scope B) BY CONSTRUCTION. Every sub-score is in [0,1]; higher = better. */
+function scoreBulletsMetric(bs: string[], brandName: string, designName: string): BulletMetric {
+  const n = Math.max(1, bs.length)
+  // (1) DESIGN IDENTITY — design-name tokens ONLY (fed [designName], never the opportunity pool). Binary:
+  //     once the design tokens are present, di=1 and adding any keyword cannot raise it.
+  const di = designName.trim() ? (missingBulletKeywords(bs, [designName]).length === 0 ? 1 : 0) : 1
+  // (2) COHERENCE — deterministic, no LLM.
+  const co = 1 - bs.filter(bulletHasCoherenceDefect).length / n
+  // (3) STRUCTURE — validateBullets with EMPTY oppKw (its coverage block no-ops), <100-char dock removed.
+  const structProblems = validateBullets(bs, brandName, [], []).filter((p) => !/under 100 chars/.test(p))
+  const st = 1 - Math.min(1, structProblems.length / n)
+  return { total: 0.5 * di + 0.3 * co + 0.2 * st, di, co, st }
+}
+
+/** One bullets-JSON model call, fail-open to [] (mirrors the council's askBullets). */
+async function callBulletsModel(openai: OpenAI, system: string, user: string, model: string): Promise<string[]> {
+  try {
+    const r = await openai.chat.completions.create({
+      model, temperature: 0.4, response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    }, { timeout: 60_000, maxRetries: 0 })
+    const parsed = parseJsonLoose<{ bullets?: unknown }>(r.choices[0]?.message?.content || '{}').bullets
+    return Array.isArray(parsed) ? parsed.filter((b): b is string => typeof b === 'string' && b.trim().length > 0).map((b) => b.trim()) : []
+  } catch { return [] }
+}
+
+const BULLETS_RESYNTH_SYS = 'You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence of 100-200 characters ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY {"bullets":[5 strings]}.'
+function bulletsResynthUser(title: string, designName: string, bullets: string[], critique: string): string {
+  return `PRODUCT TITLE: ${title}\nDESIGN IDENTITY (must appear in >=1 bullet): ${designName || '(none)'}\n\nCURRENT BULLETS:\n${bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')}\n\nCRITIQUE TO FIX:\n${critique}\n\nReturn ONLY {"bullets":[5 strings]}.`
+}
+/** Deterministic critique from the failed metric — no LLM. Names exactly what to fix. */
+function bulletsCritique(m: BulletMetric, bullets: string[], designName: string): string {
+  const notes: string[] = []
+  if (m.di < 1 && designName.trim()) notes.push(`The design identity "${designName}" is missing — weave it naturally into at least one bullet.`)
+  const defective = bullets.map((b, i) => (bulletHasCoherenceDefect(b) ? i + 1 : 0)).filter(Boolean)
+  if (defective.length) notes.push(`Bullet(s) ${defective.join(', ')} read incoherently (a dangling raw-token tail, or one concept repeated 3+ times) — rewrite them as clean sentences.`)
+  if (m.st < 1) notes.push('Fix weak structure: every bullet needs an ALL-CAPS 2-3 word benefit hook, then " - ", then one complete grammatical sentence.')
+  return notes.length ? notes.join('\n') : 'Tighten wording and improve clarity while keeping every bullet accurate.'
+}
+
+/** Scores the SHIP-READY bullets; if below the bar, has the council RE-DELIBERATE against a deterministic
+ *  critique (<=2 extra calls, strict keep-best). SHADOW: logs the would-ship delta, returns `best` unchanged. */
+async function metricGatedBulletsLoop(
+  openai: OpenAI,
+  shipBullets: string[],
+  ctx: { title: string; brandName: string; designName: string; fit: string; onProgress?: (m: string) => void; label: string },
+  enableLoop: boolean,
+): Promise<string[]> {
+  if (!enableLoop) return shipBullets
+  // FAIL-OPEN SEED GUARD: never seed from an empty/short council result (quota outage) — do nothing.
+  if (!Array.isArray(shipBullets) || shipBullets.length < 5) return shipBullets
+
+  const model = process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+  const collapse = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
+  // Apply the DETERMINISTIC ship gates a candidate would pass on the full path (the LLM audit is the only
+  // stage not simulated — it polishes, it does not change identity/coherence/structure). So the metric
+  // scores a faithful proxy of what ships. The baseline `shipBullets` is already post-everything.
+  const shipView = (bs: string[]): string[] => scrubTrademarksArr(bs.map((b) => collapse(scrubFitClaims(deDangle(b), ctx.fit))))
+
+  const best = shipBullets                                        // return value — FROZEN in shadow
+  let bestScore = scoreBulletsMetric(shipView(shipBullets), ctx.brandName, ctx.designName)
+  if (bestScore.total >= 0.999) return best                       // already at the bar — 0 calls
+
+  const MAX_ITERS = 2                                             // <= 2 extra council calls
+  for (let i = 0; i < MAX_ITERS; i++) {
+    const critique = bulletsCritique(bestScore, best, ctx.designName)
+    const cand = await callBulletsModel(openai, BULLETS_RESYNTH_SYS, bulletsResynthUser(ctx.title, ctx.designName, best, critique), model)
+    if (cand.length < 5) break                                    // LENGTH GUARD before any compare
+    const candScore = scoreBulletsMetric(shipView(cand), ctx.brandName, ctx.designName)
+    if (bestScore.total < candScore.total) {                      // STRICT '<' keep-best
+      const note = `[bullets-metric-loop][shadow][${ctx.label}] iter ${i + 1} WOULD improve bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)})`
+      console.warn(note, '\nWOULD_SHIP:', JSON.stringify(shipView(cand)))
+      ctx.onProgress?.(note)
+      bestScore = candScore                                       // track best SCORE for the next-iter critique + delta log
+      // `best` (the return value) is DELIBERATELY not updated — shadow ships nothing.
+    } else break                                                  // no improvement — stop early
+  }
+  return best
+}
+
 async function coherenceGateBullets(
   openai: OpenAI,
   bullets: string[],
@@ -4057,18 +4160,7 @@ async function coherenceGateBullets(
   // regen). Only spend the call when a bullet shows a plausible defect: a raw lowercase comma-tail
   // (the backstop's ", oversized tshirts." append shape — Title-Cased prose never looks like that),
   // or an intra-bullet concept repeated 3+ times (a variant cram). No signal → no call.
-  const danglingTail = (b: string): boolean => {
-    const seg = (b.split(',').pop() || '').trim().replace(/\.$/, '')
-    if (!seg || /[A-Z]/.test(seg)) return false
-    const w = seg.split(/\s+/)
-    return w.length >= 1 && w.length <= 5 && !w.some((x) => /^(?:and|or|the|with|for|to|a|an)$/.test(x))
-  }
-  const hasDefect = bullets.some((b) => {
-    if (danglingTail(b)) return true
-    const counts = new Map<string, number>()
-    for (const t of bulletTokens(b).map(bulletSigTok)) counts.set(t, (counts.get(t) ?? 0) + 1)
-    return [...counts.values()].some((c) => c >= 3)
-  })
+  const hasDefect = bullets.some(bulletHasCoherenceDefect)   // extracted predicate (shared with the metric loop)
   if (!hasDefect) return { bullets, notes: [] }
   const notes: string[] = []
   onProgress?.('Coherence review: reading final bullets...')
@@ -6358,6 +6450,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const collapseDup = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
     bullets = bullets.map((b) => collapseDup(scrubFitClaims(deDangle(b), truthFit)))
     description = collapseDup(scrubFitClaims(tidyDescription(description), truthFit))
+  }
+
+  // Metric-gated council loop (D1, shadow-first): the bullets are now SHIP-READY (this is their final
+  // assembly point — only assertCoreHealthy + the trademark scrub follow). Score them and, when short,
+  // log what the council WOULD re-deliberate to; ships NOTHING. enableLoop is decided ONCE here so the
+  // per-design fan-out can never multiply calls. Default OFF (BULLETS_METRIC_LOOP unset) → 0 cost/0 change.
+  const enableBulletsLoop = (process.env.BULLETS_METRIC_LOOP || '').toLowerCase() === 'shadow'
+  if (apparelProduct && enableBulletsLoop) {
+    bullets = await metricGatedBulletsLoop(input.openai, bullets, {
+      title: finalTitle, brandName: brandName || 'THE CEO',
+      designName: effectiveDesignName || '', fit: truthFit,
+      onProgress, label: 'full',
+    }, enableBulletsLoop)
   }
 
   // FULL-PATH degradation gate (2026-07-08): a quota outage made every council fail open to empty
