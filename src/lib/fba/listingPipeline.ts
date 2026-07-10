@@ -440,12 +440,44 @@ function fillBackendToBudget(
   coverageHay: string = '',
 ): string {
   let out = (keywords || '').trim()
-  if (getByteLength(out) >= 244) return out
   // Token-normalized novelty: the field is a token soup (Amazon matches tokens, not
   // phrases), so compare and append WITHOUT punctuation — "darlin'" must not be appended
   // as a duplicate of the already-present "darlin".
   const normTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
   const have = new Set(out.split(/\s+/).map(normTok).filter(Boolean))
+
+  // ── VOLUME-PRIORITY PASS (2026-07-10, the score-mover) ──────────────────────────────────────────
+  // Runs FIRST — BEFORE both the >=244 short-circuit and the generic sales-ordered loop — so the
+  // highest-VOLUME opportunity phrases get first claim on any free bytes up to the 250 cap, even when
+  // the agent already filled the field near budget (a completely-full 250-byte field simply can't fit
+  // more — best-effort by design, no displacement of existing tokens). Unlike the generic loop it does
+  // NOT apply the blanket PRODUCT_TYPE_WORDS skip; the echo safety that skip provided is replaced by a
+  // FOLD-AWARE coverage gate (scorerHave = the scorer's foldPlural'd view of title+bullets+placed) PLUS
+  // alreadyIndexed (which carries every sibling COLOR + title/bullet tokens). So a pool "shirts" (fold
+  // "shirt" in a Shirt title) and a sibling "turquoise" (in alreadyIndexed) are both skipped — no
+  // "…turquoise shirts" leak — while "tee" (fold "tee", absent from a {shirt,tshirt} title, not a color)
+  // lands. We append the RAW pool token ("tees"); the pool-backed banTok exemption is keyed on the raw
+  // token and the scorer folds "tees"->"tee" on read. Without this "graphic tees for women" (710K) is
+  // uncoverable — its "tee" token is filtered out no matter how the pool is ordered.
+  const scorerHave = new Set(bulletTokens(`${coverageHay} ${out}`))
+  for (const phrase of priorityPhrases) {
+    if (getByteLength(out) >= 250) break
+    if (capacityFamily && CAPACITY_RE.test(phrase)) continue          // capacity guard (mirrors the loop)
+    if (findThirdPartyBrands(phrase, ownBrands).length > 0) continue  // competitor-brand ban (mirrors the loop)
+    for (const raw of phrase.toLowerCase().split(/\s+/)) {
+      const tok = normTok(raw)                                        // raw pool form ("tees") — the byte we write
+      if (tok.length <= 1 || have.has(tok)) continue                 // byte-novelty
+      if (banTok(tok)) continue                                      // own-brand / stopword / gender
+      if (scorerHave.has(foldPlural(tok)) || alreadyIndexed?.has(tok)) continue  // fold-aware echo + sibling-color/title index
+      if (getByteLength(`${out} ${tok}`) > 250) continue             // hard cap, never crossed
+      out = `${out} ${tok}`
+      have.add(tok)
+      scorerHave.add(foldPlural(tok))
+    }
+  }
+
+  // GENERIC sales-ordered fill — only if headroom remains after the priority pass (unchanged behavior).
+  if (getByteLength(out) >= 244) return out
   const candidates: string[] = []
   // 1. leftover pool keywords FIRST (demand-backed beats title-derived bigrams — reordered 2026-07-08)
   candidates.push(...poolKeywords.map((k) => k.toLowerCase()))
@@ -458,34 +490,6 @@ function fillBackendToBudget(
     const w = seg.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1)
     for (let i = 0; i + 1 < w.length; i++) candidates.push(`${w[i]} ${w[i + 1]}`)
   }
-
-  // ── VOLUME-PRIORITY PASS (2026-07-10, the score-mover) ──────────────────────────────────────────
-  // Runs BEFORE the generic sales-ordered loop so the highest-VOLUME opportunity phrases claim bytes
-  // first, and — unlike that loop — does NOT apply the blanket PRODUCT_TYPE_WORDS skip below. The echo
-  // safety that skip provided is replaced by a FOLD-AWARE coverage gate: scorerHave is the scorer's
-  // view (bulletTokens = foldPlural'd) of title+bullets+what we've placed, so a pool "shirts" whose fold
-  // "shirt" is already in the title is skipped (no "…turquoise shirts" regression), while "tee" — fold
-  // "tee", absent from a {shirt,tshirt} title — is genuinely needed and lands. We append the RAW pool
-  // token ("tees"), not the fold: the pool-backed banTok exemption is keyed on the raw token, and the
-  // scorer folds "tees"->"tee" on read. Without this, "graphic tees for women" (710K) is uncoverable —
-  // its "tee" token is filtered out no matter how the pool is ordered.
-  const scorerHave = new Set(bulletTokens(`${coverageHay} ${out}`))
-  for (const phrase of priorityPhrases) {
-    if (getByteLength(out) >= 244) break
-    if (capacityFamily && CAPACITY_RE.test(phrase)) continue          // capacity guard (mirrors the loop)
-    if (findThirdPartyBrands(phrase, ownBrands).length > 0) continue  // competitor-brand ban (mirrors the loop)
-    for (const raw of phrase.toLowerCase().split(/\s+/)) {
-      const tok = normTok(raw)                                        // raw pool form ("tees") — the byte we write
-      if (tok.length <= 1 || have.has(tok)) continue                 // byte-novelty
-      if (banTok(tok)) continue                                      // own-brand / stopword / sibling-color / gender
-      if (scorerHave.has(foldPlural(tok))) continue                  // title/bullets/out already cover it (fold-aware)
-      if (getByteLength(`${out} ${tok}`) > 250) continue             // hard cap, never crossed
-      out = `${out} ${tok}`
-      have.add(tok)
-      scorerHave.add(foldPlural(tok))
-    }
-  }
-  if (getByteLength(out) >= 244) return out
 
   for (const cand of candidates) {
     if (capacityFamily && CAPACITY_RE.test(cand)) continue
