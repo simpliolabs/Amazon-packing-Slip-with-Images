@@ -865,17 +865,21 @@ export function scoreListingContent(
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
-      // HAYSTACK = BULLETS ∪ BACKEND (2026-07-09, the 6/18 contract fix): the PO-approved Content
-      // step 2 strategy deliberately moved opportunity-keyword coverage OUT of bullet prose INTO
-      // backend (clean human bullets; keywords index invisibly) — but this dock kept requiring the
-      // terms in the 5 bullets alone, pinning approved clean-prose bullets at -12 forever with a
-      // "regenerate to fix" that regeneration could never fix (the self-healing anti-pattern).
-      // A keyword ranks when its tokens are indexed ANYWHERE — bullets or backend both count.
-      // The design-name bullet floor keeps its own dedicated dock below (cross-section cohesion).
-      const missingOpp = missingBulletKeywords([...bullets, representativeContent.backend_keywords || ''], bulletOppKw)
+      // HAYSTACK = TITLE ∪ BULLETS ∪ BACKEND (2026-07-09, the 6/18 contract fix, completed):
+      // the PO-approved Content step 2 strategy deliberately moved opportunity-keyword coverage OUT
+      // of bullet prose INTO backend (clean human bullets; keywords index invisibly), and the TITLE
+      // carries the money keywords by design. This dock kept requiring the terms in the 5 bullets
+      // alone, pinning approved clean-prose bullets at -12 forever with a "regenerate to fix" that
+      // regeneration could never fix (the self-healing anti-pattern). Adding backend still left the
+      // listing docked for product-type phrases its own TITLE contains ("t shirts for women" while
+      // the title reads "…TShirt … Shirt for Women") — Amazon indexes the title, so those genuinely
+      // rank. A keyword ranks when its tokens are indexed ANYWHERE on the listing. What remains is
+      // an HONEST dock: a keyword covered by NO section, which regeneration CAN fix (weave it into
+      // bullets or backend). The design-name bullet floor keeps its own dedicated cohesion dock below.
+      const missingOpp = missingBulletKeywords([title, ...bullets, representativeContent.backend_keywords || ''], bulletOppKw)
       if (missingOpp.length >= 2) {
         bulletScore -= Math.min(12, missingOpp.length * 2)
-        issues.push({ field: 'bullets', severity: 'warning', message: `Your bullets + backend keywords together miss ${missingOpp.length} high-opportunity keyword(s) — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. The AI rewrite weaves these in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
+        issues.push({ field: 'bullets', severity: 'warning', message: `Your listing misses ${missingOpp.length} high-opportunity keyword(s) across title + bullets + backend — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. Regenerate to weave them in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
       }
     }
 
