@@ -3286,7 +3286,7 @@ async function runDescriptionCouncil(openai: OpenAI, baseSystem: string, baseUse
   const COUNCIL_MODEL = process.env.DESCRIPTION_COUNCIL_MODEL || process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
   const personas: { sys: string; temp: number }[] = [
     { sys: 'You are an award-winning apparel COPYWRITER. Write the most vivid, human, DESIGN-LED HTML description — evocative but tight. ', temp: 0.6 },
-    { sys: 'You are an Amazon SEO STRATEGIST. Weave the HIGH-VALUE search phrases from the brief in NATURALLY (no stuffing) while keeping the copy readable and within the length cap. ', temp: 0.3 },
+    { sys: 'You are a TEXTILE / PRODUCT expert. Turn the real product facts in the brief — fabric, weight, feel, fit, construction, care — into vivid, accurate, specific copy a shopper trusts. Never weave in search phrases. ', temp: 0.3 },
     { sys: 'You are a CONVERSION strategist. Lead with the strongest selling point, build trust, close with a clear reason to buy — clean, professional, no spam. ', temp: 0.4 },
   ]
   const drafts = (await Promise.all(personas.map((p) => ask(p.sys + baseSystem, baseUser, p.temp)))).filter(Boolean)
@@ -3295,19 +3295,19 @@ async function runDescriptionCouncil(openai: OpenAI, baseSystem: string, baseUse
   onProgress?.('Description council: drafts in, adversary reviewing...')       // keepalive (resets idle timer)
   const numbered = drafts.map((t, i) => `Description ${i + 1}:\n${t}`).join('\n\n')
   const critique = await ask(
-    'You are a ruthless Amazon listing critic. Attack each HTML description for: (1) MISSING high-value search phrases from the brief; (2) keyword stuffing or a keyword-list read; (3) any claim of a profession/role/occasion/audience NOT in the title (accuracy failure); (4) invented specs or a bare third-party brand not framed as "compatible with"; (5) any TRADEMARKED phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") — REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or removal; (6) exceeding the visible-character cap or weak structure (no hook, no <ul>). Be specific per description.',
+    'You are a ruthless Amazon listing critic. Attack each HTML description for: (1) THIN or GENERIC copy that could describe any shirt — lacking concrete product specifics (fabric, weight, fit, feel, care, the design\'s actual theme); (2) keyword stuffing, a keyword-list read, or any repeated shopper-search phrasing (e.g. "graphic tees for women", "cotton tshirts for women") that belongs in BACKEND keywords, not prose; (3) any claim of a profession/role/occasion/audience NOT in the title (accuracy failure); (4) invented specs or a bare third-party brand not framed as "compatible with"; (5) any TRADEMARKED phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") — REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or removal; (6) exceeding the visible-character cap or weak structure (no hook, no <ul>). Be specific per description.',
     `Brief the description must satisfy:\n${baseUser}\n\nCandidate HTML descriptions for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
     0.3, 600, COUNCIL_MODEL, 60_000,
   )
   onProgress?.('Description council: judge synthesizing the winner...')        // keepalive
   const judged = await ask(
-    baseSystem + ' You are the JUDGE: merge the strongest, ACCURATE elements into ONE final HTML description that satisfies every rule in the brief, weaves the high-value phrases in naturally, stays within the visible-character cap, and reads like a human wrote it. Return ONLY the HTML — no markdown, no JSON, no commentary.',
+    baseSystem + ' You are the JUDGE: merge the strongest, ACCURATE elements into ONE final HTML description that satisfies every rule in the brief, grounds every claim in the real product facts (never search phrases), stays within the visible-character cap, and reads like a human wrote it. Return ONLY the HTML — no markdown, no JSON, no commentary.',
     `${baseUser}\n\nCandidate descriptions:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final HTML description.`,
     0.2, 1200, COUNCIL_MODEL, 60_000,
   )
-  // Fail open to the SEO/coverage draft (persona #1), NOT the creative one (#0): if the judge errors or
-  // returns empty, the coverage-optimized draft is the safest fallback. Logged so it's visible.
-  if (!judged) console.warn('[description-council] judge returned empty — failing open to the SEO/coverage draft')
+  // Fail open to the FACTS-grounded draft (persona #1, the textile/product expert), NOT the creative one
+  // (#0): if the judge errors or returns empty, the facts-grounded draft is the safest fallback. Logged.
+  if (!judged) console.warn('[description-council] judge returned empty — failing open to the facts-grounded draft')
   return judged || drafts[1] || drafts[0]
 }
 
@@ -3330,7 +3330,7 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
     ? `\n🟢 HIGH-VALUE SEARCH PHRASES — weave 3-5 of these in NATURALLY where they genuinely fit the copy (do NOT list them, do NOT stuff, skip any that would read awkwardly): ${topOpportunityKws.slice(0, 8).join(', ')}.`
     : ''
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
-  const user = `Write a CONCISE, keyword-rich HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. Be tight and punchy; lead with the strongest selling points and cover ${apparel ? 'the design, materials, fit, styling, and use cases' : "the product's features, specs, quality, and use cases"}. Do NOT exceed 980 visible characters.
+  const user = `Write a CONCISE, VIVID HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. Fill the length with REAL SUBSTANCE grounded in the product facts below — ${apparel ? "the design/theme story, fabric and feel, fit, construction, care, and styling/occasions" : "the product's real features, specs, materials, quality, and use cases"}. Do NOT weave in search queries or repeat shopper-search phrasing (e.g. "graphic tees for women", "cotton tshirts for women", "relaxed tshirts for women") — those live in the BACKEND keywords, never the description prose. Be tight and punchy; lead with the strongest selling point. Do NOT exceed 980 visible characters.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}${kwLine}
 
@@ -4655,6 +4655,22 @@ function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec |
   return null
 }
 
+/** Dedup a list of product-fact strings case-insensitively AND by substring containment, so the description
+ *  model is never fed the same spec 2-3x (which it echoes → repetition → the audit trims → under-fill).
+ *  "Garment-Dyed" collapses into "midweight 6.1 oz garment-dyed"; "ring spun cotton" into "100% Ring-Spun
+ *  Cotton". Keeps the FIRST (longer/authoritative) occurrence — blankFacts are ordered before attrs.specs. */
+function dedupeFacts(facts: string[]): string[] {
+  const out: string[] = []
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  for (const f of facts) {
+    const n = norm(f)
+    if (!n) continue
+    if (out.some((k) => { const kn = norm(k); return kn === n || kn.includes(n) || n.includes(kn) })) continue
+    out.push(f)
+  }
+  return out
+}
+
 /** The description is HTML end-to-end: runDescriptionAgent writes <p>/<b>/<ul>/<li> (~line 3333) and the
  *  seller copy-pastes that markup into Seller Central. Anything that rewrites it must give HTML back. */
 // ANY element counts as structure — a tag allowlist would false-flag a well-formed <div>/<h3> rewrite as
@@ -5025,6 +5041,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
   // spec-vs-search error this fix condemns. An off-list blank earns a brand mention by being ADDED here.
   const garmentBrandCanonical = blankSpec?.brand ?? ''
+
+  // Description SUBSTANCE = REAL product facts (blank spec + extracted specs), NEVER search keyphrases.
+  // The description is a PROSE field; opportunity/search terms live in BACKEND (Content-step-2). Feeding
+  // demand queries here ("comfort colors shirt", "graphic tees for women") as "attributes" is what made
+  // the council stuff them into copy — the generator then only reached 900-980 by stuffing, and the audit
+  // stripped it back to ~776. Grounding in concrete facts (fabric/weight/dye/fit/neck/sleeve) fills the
+  // length with substance the audit keeps.
+  // Assert DETAILED specs ("6.1 oz garment-dyed", "100% ring-spun cotton") in customer PROSE only when the
+  // blank is HIGH-CONFIDENCE — its brand appears in the REAL product title, not merely in the search-derived
+  // attributePin. lookupBlankSpec matches loosely (a listing that just mentions "comfort colors" in its
+  // keyword pool would otherwise get "6.1 oz garment-dyed" asserted as fact). Low-confidence: name the brand
+  // only, claim no specs (spec-vs-search grounding). `dye` is omitted — weightNote already carries it.
+  const brandRe = blankSpec?.brand
+    ? new RegExp(`\\b${blankSpec.brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+    : null
+  const brandInTitle = !!(brandRe && brandRe.test(`${input.canonicalTitle ?? ''} ${repTitle ?? ''}`))
+  const blankFacts: string[] = blankSpec
+    ? (brandInTitle
+        ? [blankSpec.brand, blankSpec.material, blankSpec.weightNote,
+           blankSpec.fit ? `${blankSpec.fit} fit` : '', blankSpec.neck, blankSpec.sleeve]
+        : [blankSpec.brand]
+      ).map((s) => (s ?? '').trim()).filter(Boolean)
+    : []
+  const descAttrs = dedupeFacts([...blankFacts, ...attrs.specs])
 
   // Design-NICHE seed (council 2026-07-03, review-hardened). The keyword research is self-referential
   // (a niche design gets a generic pool), and the title's design-grounding filter then strips it to a
@@ -5908,10 +5948,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       try {
         const repSku = ctx.skus[0]?.sku
         const groupBullets = perChildBullets?.find((c) => c.sku === repSku)?.bullets ?? bullets
-        const groupTopOpp = scopeKwsToGroup(ctx, topOpportunityKwsForBullets, (k) => k)
         // useCouncil:false — runs once PER design group inside a Promise.all; N parallel GPT-5
         // councils would be cost/latency-prohibitive. Only the broadcast description gets the council.
-        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, bulletAttrs, compatibilityBrands, groupTopOpp, false)
+        // descAttrs (real facts, no search phrases) + [] opportunity kws — same clean-prose rule as broadcast.
+        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, descAttrs, compatibilityBrands, [], false)
         const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
         // 3rd arg = sellerGarmentText (parity-audit #8: it was missing, so the heavy-garment-
         // stuffing guard never fired for per-design descriptions).
@@ -5988,7 +6028,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('keywords', { per_child_keywords: perChildOnly })
   }
   if (only === 'description') {
-    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets)
+    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, descAttrs, compatibilityBrands, [])
     // broadcastMotifTrust (review-caught): the plain motifTrust stripped a unified-set's couple
     // design names on description-only partials, where the full regen deliberately preserves them.
     if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? '')
@@ -6026,7 +6066,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (pd) { usedPerDesignBackend = true; return pd }
       return await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok)
     })(),
-    runDescriptionAgent(input, finalTitle, bullets, bulletAttrs, compatibilityBrands, topOpportunityKwsForBullets),
+    runDescriptionAgent(input, finalTitle, bullets, descAttrs, compatibilityBrands, []),
   ])
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
   // "country western" — then leftover pool keywords), THEN the hard-lean gender strip
