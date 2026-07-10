@@ -3006,7 +3006,7 @@ export default function ListingDetailPage() {
                           <button
                             onClick={() => generateAiRecs(section)}
                             disabled={aiLoading}
-                            title={`Regenerate only the ${section === 'keywords' ? 'backend keywords' : section} — title/bullets keep their full quality council (~1-2 min); description/backend ~30-60s. Either way a fraction of the full 3-4 min audit. Other sections keep your stored recommendation; everything stays anchored on the stored title.`}
+                            title={`Regenerate only the ${section === 'keywords' ? 'backend keywords' : section} — title/bullets/description keep their full quality council AND the editorial + fit truth gates (~1-2 min); backend keywords ~30-60s. Either way a fraction of the full 3-4 min audit. Other sections keep your stored recommendation; everything stays anchored on the stored title.`}
                             className="ml-auto text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 font-medium">
                             {aiLoading && regenSection === section ? '⏳ Regenerating… hold on' : `↻ Regenerate ${section === 'keywords' ? 'backend' : section === 'bullets' ? 'all 5 bullets' : section}`}
                           </button>

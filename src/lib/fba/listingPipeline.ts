@@ -4914,6 +4914,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Declared HERE (before partialResult) so partialResult's closure captures it.
   const effectiveDesignName: string = apparelProduct && designGroupInfo.isMultiDesign ? '' : designName
 
+  // ── GROUND-TRUTH BLANK SPEC (hoisted 2026-07-10) ──────────────────────────────────────────────
+  // Was computed near the features stage, AFTER every partial-regen early-return — so the fit truth
+  // gate could not run on a bullets/description-only regen. It depends on nothing but attributes
+  // available here. Comfort Colors sweatshirts fall back to the guess rather than getting
+  // "Short Sleeve" force-pushed on (no regression on non-tees).
+  const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
+  const looksTee = /\bt[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover|long[\s-]?sleeve/i.test(garmentHay)
+  const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType) : null
+
   // Design-NICHE seed (council 2026-07-03, review-hardened). The keyword research is self-referential
   // (a niche design gets a generic pool), and the title's design-grounding filter then strips it to a
   // stub. Expand the design into niche keyphrases and GROUND them against the pre-existing design vocab
@@ -5208,6 +5217,59 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     retried = r.retried
   } else {
     finalTitle = (input.priorTitle || repTitle || '').trim()
+  }
+
+  // ── PATH-INVARIANT EDITORIAL GATES (2026-07-10, PO-reported bullet-quality regression) ─────────
+  // A bullets-only / description-only regen used to RETURN before the FINAL EDITORIAL AUDIT and the
+  // ALWAYS-RUN TRUTH GATE, so "Regenerate bullets" shipped strictly worse copy than a full audit:
+  // the fabricated "oversized" fit survived (no scrubFitClaims), the seller's OWN blank brand was
+  // never re-asserted (no "mention Comfort Colors in one bullet"), bullets came back thin (no
+  // 100-200 char enforcement) and unpolished. Same dual-write-path rule as every other invariant:
+  // a quality gate must run on BOTH the full and the partial paths. FAIL-OPEN like the full path —
+  // any error keeps the raw council copy (never blanks it: the empty-only abort rule still owns that).
+  // Fit source on partials is the AUTHORITATIVE blank spec only. The full path additionally falls
+  // back to the features-audit's inferred Fit — unavailable here (pdiFinal isn't built yet) and, per
+  // the spec-vs-search-grounding rule, that inferred value is search-demand, not a product FACT. So a
+  // partial scrubs a fabricated "oversized" exactly when the blank is known. Strictly better than the
+  // prior behavior (no gate at all on partials).
+  const truthFitEarly = blankSpec?.fit || ''
+  const collapseDupWord = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
+  const applyEditorialGates = async (
+    inBullets: string[],
+    inDescription: string,
+  ): Promise<{ bullets: string[]; description: string }> => {
+    let outB = inBullets
+    let outD = inDescription
+    // 1) Editorial audit — same gate the full path runs; single-design apparel only (multi-design
+    //    fans out per group — its broadcast copy therefore gets only the deterministic truth gate,
+    //    parity with the full path; a per-group audit is a filed follow-up). We pass the ANCHOR title
+    //    + whatever prose this partial owns, and take back ONLY the fields this partial regenerated —
+    //    a bullets regen must never rewrite the seller's (possibly locked) title.
+    //    Gate: 5 bullets to audit (bullets path) OR any description to polish (a description regen on
+    //    a listing with no stored bullets must still get audited — adversarial: it silently didn't).
+    if (apparelProduct && !designGroupInfo.isMultiDesign && (outB.length === 5 || outD.trim().length > 0)) {
+      try {
+        const ar = await runFinalEditorialAudit(input.openai, finalTitle, outB, outD, '', {
+          design: effectiveDesignName || designName || repTitle || '',
+          designPhrases: secondaryPhrases,
+          garment: input.productType ?? '',
+          audience: preferredAudience || lean || '',
+          referenceTitle: input.canonicalTitle ?? repTitle ?? '',
+          brandFront: brandName || 'THE CEO',
+          garmentBrand: attributePinFinal || '',
+          fit: truthFitEarly,
+        })
+        outB = ar.bullets
+        if (outD) outD = ar.description
+        onProgress('Editorial audit applied.')
+      } catch { /* fail-open: keep the council copy */ }
+    }
+    // 2) Deterministic truth gate — fit contradictions + dangling tails, regardless of audit outcome.
+    if (apparelProduct && truthFitEarly) {
+      outB = outB.map((b) => collapseDupWord(scrubFitClaims(deDangle(b), truthFitEarly)))
+      if (outD) outD = collapseDupWord(scrubFitClaims(tidyDescription(outD), truthFitEarly))
+    }
+    return { bullets: outB, description: outD }
   }
 
   // ── COHERENCE GATE (council 2026-07-03, Layer 2 of A+B) — ONE batched call per regen over ALL
@@ -5551,6 +5613,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // Degradation gate (2026-07-08): empty council output must abort, not overwrite (this exact
     // path persisted [] over B0FRYMM56C's approved bullets during the quota outage).
     assertCoreHealthy(input.openai, null, bullets, null)
+    // PATH-INVARIANT GATES (2026-07-10): the audit + fit truth gate the FULL path applies. Without
+    // these, "Regenerate bullets" shipped an "oversized" fit contradiction, dropped the seller's own
+    // blank brand, and returned thin unpolished copy (PO-caught). Empty-only abort already ran above.
+    ;({ bullets } = await applyEditorialGates(bullets, ''))
+    assertCoreHealthy(input.openai, null, bullets, null)   // audit must never blank the set
+    // NOTE (parity with the full path, not a regression): the gates run on the BROADCAST bullets.
+    // per_child_bullets are ungated on both paths — a pre-existing gap, filed as a follow-up.
     onProgress('Bullets regenerated.')
     return partialResult('bullets', {
       recommended_bullets: bullets,
@@ -5827,8 +5896,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // per-design fan-out (adversarial: an empty broadcast during an outage was firing one doomed
     // LLM call per design group before aborting — wasted spend in the exact failure the gate covers).
     assertCoreHealthy(input.openai, null, null, descriptionOnly)
+    // PATH-INVARIANT GATES (2026-07-10): the editorial audit + fit truth gate the FULL path applies.
+    // `bullets` here are the STORED priors — the audit needs them for context and returns them
+    // unchanged for us (we take only the description back). Fail-open; empty-only abort re-checked.
+    ;({ description: descriptionOnly } = await applyEditorialGates(bullets, descriptionOnly))
+    assertCoreHealthy(input.openai, null, null, descriptionOnly)
     // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
     // previously only the broadcast updated and the regenerated copy never reached the children.
+    // Runs AFTER the gates so the single-design BROADCAST copy is gated. Per-design groups are
+    // regenerated from scratch and fall back to the gated broadcast only on empty/error — they are
+    // NOT themselves fit-scrubbed (a pre-existing gap on BOTH paths, filed as a follow-up).
     perChildDescriptions = await fanOutPerDesignDescriptions(descriptionOnly)
     onProgress('Description regenerated.')
     return partialResult('description', { recommended_description: descriptionOnly, per_child_descriptions: perChildDescriptions })
@@ -6022,9 +6099,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // The bootstrapped Comfort Colors spec is TEE-specific (6.1oz short-sleeve). Comfort Colors also makes
   // sweatshirts, so gate on the garment actually being a short-sleeve tee — a CC sweatshirt falls back to
   // the guess rather than getting "Short Sleeve" force-pushed onto it (no regression on non-tees).
-  const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
-  const looksTee = /\bt[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover|long[\s-]?sleeve/i.test(garmentHay)
-  const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType) : null
+  // (garmentHay / looksTee / blankSpec are HOISTED above — the partial-regen quality gates need them.)
   if (blankSpec) {
     const overrideField = (re: RegExp, val: string | undefined) => {
       if (!val) return
