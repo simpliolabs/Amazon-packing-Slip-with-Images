@@ -4636,9 +4636,12 @@ function scrubFitClaims(s: string, fit: string): string {
 // OUTRANK the features-audit's keyword-derived guess. Bootstrapped with Comfort Colors (PO-confirmed:
 // CC1717 = relaxed / midweight 6.1oz / garment-dyed / crew / short-sleeve). Extend as the seller confirms
 // each blank; an UNLISTED blank simply falls back to the current guess (no regression).
-interface BlankSpec { fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string }
+interface BlankSpec { brand?: string; fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string }
 const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
-  { match: /\bcomfort\s*colors?\b/i, spec: { fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed' } },
+  // `brand` is the AUTHORITATIVE display casing. attributePin is derived from a lowercase SEARCH keyphrase
+  // ("comfort colors shirt"), so it can NEVER supply correct casing — grounding brand identity in the search
+  // pool is the spec-vs-search-grounding mistake. The shopper-facing brand comes from here.
+  { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed' } },
 ]
 function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec | null {
   const hay = sources.filter(Boolean).join(' ')
@@ -4686,6 +4689,25 @@ function introducesInternalJargon(before: string, after: string): boolean {
   return INTERNAL_JARGON.test(after) && !INTERNAL_JARGON.test(before)
 }
 
+/** Force the brand to its authoritative casing wherever it appears, case-insensitively. The model keeps
+ *  writing "the trusted comfort colors brand" (lowercase) no matter how the prompt is worded — this makes
+ *  the casing a DETERMINISTIC guarantee, not a hope. `brand` supplies the exact target casing. Function
+ *  replacement (not the raw string) so a brand containing `$` can't inject a replacement pattern. */
+function normalizeBrandCase(text: string, brand: string): string {
+  if (!text || !brand) return text
+  const esc = brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return text.replace(new RegExp(`\\b${esc}\\b`, 'gi'), () => brand)
+}
+
+/** Bullet-aware brand normalizer: leave the deliberately ALL-CAPS "LABEL - " prefix alone (mixing case into
+ *  it would read as a typo) and only re-case the brand inside the sentence body. Splits on any dash the
+ *  model might emit as the label separator (hyphen / en / em) so the label stays protected either way. */
+function normalizeBrandInBullet(bullet: string, brand: string): string {
+  const m = bullet.match(/\s[-–—]\s/)
+  if (!m || m.index === undefined) return normalizeBrandCase(bullet, brand)
+  return bullet.slice(0, m.index) + normalizeBrandCase(bullet.slice(m.index), brand)
+}
+
 async function runFinalEditorialAudit(
   openai: OpenAI,
   title: string,
@@ -4711,7 +4733,7 @@ GARMENT TRUTH (never contradict): ${fitClause}this is a MIDWEIGHT garment — NE
 RULES:
 - VOICE: you are writing for the SHOPPER. Never use trade or internal words in ANY field: "seller", "blank", "SKU", "ASIN", "listing", "keyword", "backend". Never restate these instructions as facts about the product.
 - TITLE: rewrite the CURRENT TITLE (provided in the user message) into ONE clean, natural Amazon title of AT MOST 75 characters, STARTING with the brand "${ctx.brandFront}". Keep its meaningful elements — the design/joke, the garment brand if present (e.g. "${ctx.garmentBrand || 'Comfort Colors'}"), and the audience ("for Women"). FIX these: never repeat the garment noun (no "T-Shirt … T-Shirt" — say it once); no unconfirmed weight ("Heavyweight"); no "oversized"; no dangling/cut words (e.g. a trailing "Short" — write "Short Sleeve" or drop it); no keyword soup.${ctx.referenceTitle ? ` The seller's intended wording is in this reference — preserve its design/joke + garment + audience: "${ctx.referenceTitle}".` : ''}
-- BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Name "${ctx.garmentBrand}" in exactly ONE bullet, worded the way a shopper reads it (e.g. "Authentic ${ctx.garmentBrand} quality"). ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
+- BULLETS: return EXACTLY 5, each 100-200 characters. Each = an ALL-CAPS 2-3 word NATURAL benefit hook, then " - ", then ONE COMPLETE grammatical sentence that ENDS with a period — NEVER truncated or dangling (fix "…with jeans or." and "…and for," into a finished sentence; never end a sentence on "or/and/with/for/to/of"). WEAVE the design's real theme/joke through the bullets. ${ctx.garmentBrand ? `Name the garment brand "${ctx.garmentBrand}" in exactly ONE bullet, with that exact capitalization, as a natural part of the sentence. ` : ''}Natural human copy. Do NOT keyword-stuff: never pile up near-duplicate search phrases (e.g. "oversized tshirts for women", "graphic tshirts for women", "vintage tshirts for women" all in one set) — use AT MOST ONE "for women" search phrase across all 5 bullets. No competitor blank brands.
 - DESCRIPTION: the CURRENT DESCRIPTION is HTML. Return HTML — NEVER plain prose. Preserve its structure (hook -> <ul> of key features -> use cases -> short closing) using <p>, <b>, <ul>, <li>; never collapse it into one paragraph and never drop the <ul>. Keep 900-980 characters of VISIBLE text (excluding the tags) — do not shorten it. Return the raw HTML inside the JSON string, with no markdown code fences. Keep it accurate; write REAL sentences — NEVER keyword-list fragments like "For Comfort Colors shirt and for Comfort Colors tshirt construction, plus for tshirt availability" (that is stuffing, not English). Fix awkward/incomplete/dangling phrasing; mention the garment brand at most TWICE total; ${ctx.fit ? `the fit is ${ctx.fit}, never "oversized"; ` : ''}invent no specs.
 - BACKEND_DROP: list the lowercase terms in the BACKEND STRING that DO NOT belong to THIS product: unrelated holidays/events/countries (e.g. "4th","july","fourth","america" on a non-patriotic design), competitor/other blank-garment brands (e.g. "gildan","gilden","softstyle" when the product is a DIFFERENT blank), standalone color words (Amazon has a color attribute), and junk/fragment tokens (e.g. "he","s","hes"). Do NOT list relevant terms (the design theme, garment type, real audience/occasion).
 
@@ -4740,20 +4762,24 @@ BACKEND STRING: ${backendSample}`
     // customer copy. Reject PER INDEX (never all-or-nothing — the #344 gate silently discarded every
     // fix) and only when the audit ADDED the jargon: a pre-existing word in the input is not ours to
     // drop here. Fallback keeps that bullet's pre-audit text, de-dangled + fit-scrubbed as usual.
-    const outBullets = audited.map((b, i) => {
+    const cleaned = audited.map((b, i) => {
       const src = bullets[i] ?? ''
       return introducesInternalJargon(src, b) ? scrubFitClaims(deDangle(src), ctx.fit) : b
     })
+    // Force the garment brand to its authoritative casing in every bullet BODY (never the ALL-CAPS label).
+    // The model writes "the trusted comfort colors brand" no matter the prompt; this makes casing certain.
+    const outBullets = ctx.garmentBrand ? cleaned.map((b) => normalizeBrandInBullet(b, ctx.garmentBrand)) : cleaned
     // The description is HTML. The audit MAY edit it, but it may not flatten it to prose or halve its
     // visible text (both happened live). Fall back per-field to the pre-audit HTML — which already passed
     // validateDescription + the brand-safety judge + the length cap — rather than shipping the damage.
     const preAuditDesc = scrubFitClaims(tidyDescription(description), ctx.fit)
     const rawAudited = typeof p.description === 'string' ? stripCodeFence(p.description.trim()) : ''
     const auditedDesc = rawAudited.length > 20 ? scrubFitClaims(tidyDescription(rawAudited), ctx.fit) : preAuditDesc
-    const outDesc = auditedDesc === preAuditDesc ? preAuditDesc
+    const chosenDesc = auditedDesc === preAuditDesc ? preAuditDesc
       : (introducesInternalJargon(description, auditedDesc) || degradesDescription(description, auditedDesc))
         ? preAuditDesc
         : auditedDesc
+    const outDesc = ctx.garmentBrand ? normalizeBrandCase(chosenDesc, ctx.garmentBrand) : chosenDesc
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
@@ -4982,6 +5008,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
   const looksTee = /\bt[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover|long[\s-]?sleeve/i.test(garmentHay)
   const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType) : null
+  // Shopper-facing garment brand, in AUTHORITATIVE casing — from BLANK_SPECS ONLY. Empty when the blank
+  // is unknown: attributePin is a lowercase SEARCH phrase ("vintage cat shirt"), NOT a confirmed brand, so
+  // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
+  // spec-vs-search error this fix condemns. An off-list blank earns a brand mention by being ADDED here.
+  const garmentBrandCanonical = blankSpec?.brand ?? ''
 
   // Design-NICHE seed (council 2026-07-03, review-hardened). The keyword research is self-referential
   // (a niche design gets a generic pool), and the title's design-grounding filter then strips it to a
@@ -5316,7 +5347,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           audience: preferredAudience || lean || '',
           referenceTitle: input.canonicalTitle ?? repTitle ?? '',
           brandFront: brandName || 'THE CEO',
-          garmentBrand: attributePinFinal || '',
+          garmentBrand: garmentBrandCanonical || '',
           fit: truthFitEarly,
         })
         outB = ar.bullets
@@ -6246,9 +6277,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       audience: preferredAudience || lean || '',
       referenceTitle: input.canonicalTitle ?? repTitle ?? '',
       brandFront: brandName || 'THE CEO',
-      // Garment truth so the audit can enforce it: the seller's own blank brand (keep it in customer copy,
-      // don't drop it as a "competitor") and the real fit (relaxed → forbid the fabricated "oversized").
-      garmentBrand: attributePinFinal || '',
+      // Garment truth so the audit can enforce it: the garment brand in AUTHORITATIVE casing (keep it in
+      // customer copy, don't drop it as a "competitor") and the real fit (relaxed → forbid "oversized").
+      garmentBrand: garmentBrandCanonical || '',
       fit: blankSpec?.fit || pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
     })
     // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped
