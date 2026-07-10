@@ -4676,16 +4676,17 @@ const stripCodeFence = (s: string): string => s.replace(/^```(?:html)?\s*/i, '')
  *  text, silently. NOTE this is a RELATIVE gate against a known-good input, and it falls back to the
  *  pre-audit description — it is NOT the absolute "length floor" that the abort-and-preserve rule
  *  forbids (that rule is about aborting a whole regen on short-but-legitimate output). */
+// NO length-preservation rule (reverted #369): a shorter audited description is usually the audit
+// legitimately REMOVING keyword stuffing, not damaging content. The pre-audit council draft is longer
+// precisely BECAUSE it is stuffed ("relaxed tshirts for women and vintage tshirts for women…") and
+// un-jargon-checked ("printed on a Comfort Colors shirt blank" — live 2026-07-10), so falling back to it
+// to gain length ships worse copy. "Clean but ~776" beats "fuller but stuffed". A genuinely richer clean
+// description is a GENERATOR job (add real content — fabric/care/styling — not keywords), tracked separately.
 function degradesDescription(before: string, after: string): boolean {
   if (HTML_STRUCTURE.test(before) && !HTML_STRUCTURE.test(after)) return true // flattened to prose
   if (HAS_LIST.test(before) && !HAS_LIST.test(after)) return true             // the <ul> was destroyed
-  const vb = visibleLen(before), va = visibleLen(after)
-  if (vb >= 400 && va < vb * 0.75) return true                               // half the text vanished
-  // The generator EXPANDS any council description under 850 visible chars up to the 900-980 target
-  // (LENGTH FLOOR, ~line 3450), so a pre-audit description is in-spec. gpt-4.1 nonetheless trimmed it
-  // to 776 (live 2026-07-10) despite the prompt's "do not shorten" — keep the fuller pre-audit copy
-  // rather than ship a thin one. Same floor constant (850) the generator uses, so the two agree.
-  return vb >= 850 && va < 850                                               // audit shrank an in-spec description below spec
+  const vb = visibleLen(before)
+  return vb >= 400 && visibleLen(after) < vb * 0.75                           // half the text vanished
 }
 
 /** Trade/internal vocabulary that must never reach a shopper. "blank" (the undecorated garment) and
