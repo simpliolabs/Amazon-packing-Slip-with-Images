@@ -4079,13 +4079,20 @@ function scoreBulletsMetric(bs: string[], brandName: string, designName: string)
   return { total: 0.5 * di + 0.3 * co + 0.2 * st, di, co, st }
 }
 
-/** One bullets-JSON model call, fail-open to [] (mirrors the council's askBullets). */
+/** One bullets-JSON model call, fail-open to []. MUST branch on isGpt5 exactly like the council's
+ *  askBullets: GPT-5 / o-series REJECT a non-default `temperature` (a 400), so sending one makes every
+ *  candidate call throw → [] → the shadow loop silently collects ZERO data and looks like a clean no-op
+ *  (the "failure-looks-like-success" trap). gpt-5 uses max_completion_tokens + reasoning_effort instead. */
 async function callBulletsModel(openai: OpenAI, system: string, user: string, model: string): Promise<string[]> {
   try {
-    const r = await openai.chat.completions.create({
-      model, temperature: 0.4, response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    }, { timeout: 60_000, maxRetries: 0 })
+    const isGpt5 = /^(gpt-5|o\d)/.test(model)
+    const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+    const r = await openai.chat.completions.create(
+      isGpt5
+        ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' as const, response_format: { type: 'json_object' as const } }
+        : { model, messages, temperature: 0.4, max_tokens: 1200, response_format: { type: 'json_object' as const } },
+      { timeout: 60_000, maxRetries: 0 },
+    )
     const parsed = parseJsonLoose<{ bullets?: unknown }>(r.choices[0]?.message?.content || '{}').bullets
     return Array.isArray(parsed) ? parsed.filter((b): b is string => typeof b === 'string' && b.trim().length > 0).map((b) => b.trim()) : []
   } catch { return [] }
@@ -4117,30 +4124,38 @@ async function metricGatedBulletsLoop(
   // FAIL-OPEN SEED GUARD: never seed from an empty/short council result (quota outage) — do nothing.
   if (!Array.isArray(shipBullets) || shipBullets.length < 5) return shipBullets
 
-  const model = process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
-  const collapse = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
-  // Apply the DETERMINISTIC ship gates a candidate would pass on the full path (the LLM audit is the only
-  // stage not simulated — it polishes, it does not change identity/coherence/structure). So the metric
-  // scores a faithful proxy of what ships. The baseline `shipBullets` is already post-everything.
-  const shipView = (bs: string[]): string[] => scrubTrademarksArr(bs.map((b) => collapse(scrubFitClaims(deDangle(b), ctx.fit))))
-
   const best = shipBullets                                        // return value — FROZEN in shadow
-  let bestScore = scoreBulletsMetric(shipView(shipBullets), ctx.brandName, ctx.designName)
-  if (bestScore.total >= 0.999) return best                       // already at the bar — 0 calls
+  // OUTER FAIL-OPEN: shadow is an OBSERVATION path — it must NEVER break a live regen. Any throw in the
+  // scoring/model path is logged and swallowed, returning the untouched ship bullets (coherenceGateBullets
+  // contract). Default-off (enableLoop false) never reaches here.
+  try {
+    const model = process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+    const collapse = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
+    // CANDIDATES are raw LLM output — apply the deterministic ship gates so the metric scores a faithful
+    // proxy of what would ship (the LLM audit is the only unsimulated stage; it polishes, not restructures).
+    const shipView = (bs: string[]): string[] => scrubTrademarksArr(bs.map((b) => collapse(scrubFitClaims(deDangle(b), ctx.fit))))
+    // The BASELINE is scored AS-IS: it is already the post-everything ship artifact. Re-running shipView on
+    // it would double-apply `collapse` (not idempotent for 3+ repeats) and score baseline vs candidate on
+    // divergent strings.
+    let bestScore = scoreBulletsMetric(shipBullets, ctx.brandName, ctx.designName)
+    if (bestScore.total >= 0.999) return best                     // already at the bar — 0 calls
 
-  const MAX_ITERS = 2                                             // <= 2 extra council calls
-  for (let i = 0; i < MAX_ITERS; i++) {
-    const critique = bulletsCritique(bestScore, best, ctx.designName)
-    const cand = await callBulletsModel(openai, BULLETS_RESYNTH_SYS, bulletsResynthUser(ctx.title, ctx.designName, best, critique), model)
-    if (cand.length < 5) break                                    // LENGTH GUARD before any compare
-    const candScore = scoreBulletsMetric(shipView(cand), ctx.brandName, ctx.designName)
-    if (bestScore.total < candScore.total) {                      // STRICT '<' keep-best
-      const note = `[bullets-metric-loop][shadow][${ctx.label}] iter ${i + 1} WOULD improve bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)})`
-      console.warn(note, '\nWOULD_SHIP:', JSON.stringify(shipView(cand)))
-      ctx.onProgress?.(note)
-      bestScore = candScore                                       // track best SCORE for the next-iter critique + delta log
-      // `best` (the return value) is DELIBERATELY not updated — shadow ships nothing.
-    } else break                                                  // no improvement — stop early
+    const MAX_ITERS = 2                                           // <= 2 extra council calls
+    for (let i = 0; i < MAX_ITERS; i++) {
+      const critique = bulletsCritique(bestScore, best, ctx.designName)
+      const cand = await callBulletsModel(openai, BULLETS_RESYNTH_SYS, bulletsResynthUser(ctx.title, ctx.designName, best, critique), model)
+      if (cand.length < 5) break                                  // LENGTH GUARD before any compare
+      const candScore = scoreBulletsMetric(shipView(cand), ctx.brandName, ctx.designName)
+      if (bestScore.total < candScore.total) {                    // STRICT '<' keep-best
+        const note = `[bullets-metric-loop][shadow][${ctx.label}] iter ${i + 1} WOULD improve bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)})`
+        console.warn(note, '\nWOULD_SHIP:', JSON.stringify(shipView(cand)))
+        ctx.onProgress?.(note)
+        bestScore = candScore                                     // track best SCORE for the next-iter critique + delta log
+        // `best` (the return value) is DELIBERATELY not updated — shadow ships nothing.
+      } else break                                                // no improvement — stop early
+    }
+  } catch (e) {
+    console.warn('[bullets-metric-loop][shadow] errored — shipping the original bullets:', e instanceof Error ? e.message : e)
   }
   return best
 }
