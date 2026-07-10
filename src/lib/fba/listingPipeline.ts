@@ -4655,6 +4655,22 @@ function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec |
   return null
 }
 
+/** Dedup a list of product-fact strings case-insensitively AND by substring containment, so the description
+ *  model is never fed the same spec 2-3x (which it echoes → repetition → the audit trims → under-fill).
+ *  "Garment-Dyed" collapses into "midweight 6.1 oz garment-dyed"; "ring spun cotton" into "100% Ring-Spun
+ *  Cotton". Keeps the FIRST (longer/authoritative) occurrence — blankFacts are ordered before attrs.specs. */
+function dedupeFacts(facts: string[]): string[] {
+  const out: string[] = []
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  for (const f of facts) {
+    const n = norm(f)
+    if (!n) continue
+    if (out.some((k) => { const kn = norm(k); return kn === n || kn.includes(n) || n.includes(kn) })) continue
+    out.push(f)
+  }
+  return out
+}
+
 /** The description is HTML end-to-end: runDescriptionAgent writes <p>/<b>/<ul>/<li> (~line 3333) and the
  *  seller copy-pastes that markup into Seller Central. Anything that rewrites it must give HTML back. */
 // ANY element counts as structure — a tag allowlist would false-flag a well-formed <div>/<h3> rewrite as
@@ -5031,12 +5047,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // the council stuff them into copy — the generator then only reached 900-980 by stuffing, and the audit
   // stripped it back to ~776. Grounding in concrete facts (fabric/weight/dye/fit/neck/sleeve) fills the
   // length with substance the audit keeps.
+  // Assert DETAILED specs ("6.1 oz garment-dyed", "100% ring-spun cotton") in customer PROSE only when the
+  // blank is HIGH-CONFIDENCE — its brand appears in the REAL product title, not merely in the search-derived
+  // attributePin. lookupBlankSpec matches loosely (a listing that just mentions "comfort colors" in its
+  // keyword pool would otherwise get "6.1 oz garment-dyed" asserted as fact). Low-confidence: name the brand
+  // only, claim no specs (spec-vs-search grounding). `dye` is omitted — weightNote already carries it.
+  const brandRe = blankSpec?.brand
+    ? new RegExp(`\\b${blankSpec.brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+    : null
+  const brandInTitle = !!(brandRe && brandRe.test(`${input.canonicalTitle ?? ''} ${repTitle ?? ''}`))
   const blankFacts: string[] = blankSpec
-    ? [blankSpec.brand, blankSpec.material, blankSpec.weightNote, blankSpec.dye,
-       blankSpec.fit ? `${blankSpec.fit} fit` : '', blankSpec.neck, blankSpec.sleeve]
-        .map((s) => (s ?? '').trim()).filter(Boolean)
+    ? (brandInTitle
+        ? [blankSpec.brand, blankSpec.material, blankSpec.weightNote,
+           blankSpec.fit ? `${blankSpec.fit} fit` : '', blankSpec.neck, blankSpec.sleeve]
+        : [blankSpec.brand]
+      ).map((s) => (s ?? '').trim()).filter(Boolean)
     : []
-  const descAttrs = [...blankFacts, ...attrs.specs]
+  const descAttrs = dedupeFacts([...blankFacts, ...attrs.specs])
 
   // Design-NICHE seed (council 2026-07-03, review-hardened). The keyword research is self-referential
   // (a niche design gets a generic pool), and the title's design-grounding filter then strips it to a
