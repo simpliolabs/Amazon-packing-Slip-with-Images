@@ -8,6 +8,7 @@
  * Karpathy principle: Simple, surgical, goal-driven.
  * No fuzzy matching, no stemming — exact token boundary match only.
  */
+import { coverageTokens, coverageMode } from './coverage-core';
 
 export interface ListingContent {
   title?: string | null;
@@ -41,7 +42,15 @@ export interface PresenceResult {
  * "T-Shirt" produces tokens {t, shirt, tshirt} and matches both "t shirt"
  * and "tshirt" spellings.
  */
+/** COVERAGE_CORE (Invariant 1): at =on the presence engine tokenizes with the SAME coverageTokens the
+ *  scorer + RANK use (garment-unified, plural-folded, stopword-dropped), so the STORED action_type
+ *  universe and the LIVE Present-In agree with every other screen. =off keeps the legacy tokenizer
+ *  byte-identical. Symmetric — both keyword and text pass through here. */
 function tokenize(text: string): Set<string> {
+  return coverageMode() === 'on' ? new Set(coverageTokens(text)) : tokenizeLegacy(text);
+}
+
+function tokenizeLegacy(text: string): Set<string> {
   // Apostrophe-deletion bridge (2026-07-08): the backend generator now writes "valentines", not
   // "valentine s" — delete apostrophes BEFORE the punctuation pass so both sides tokenize alike.
   // Symmetric (keyword and text both pass through here), so drop-in safe.
