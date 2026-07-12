@@ -5623,6 +5623,68 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return { bullets: outB, description: outD }
   }
 
+  // ── PER-CHILD MULTI-DESIGN GATE (task #61, Invariant 5) ─────────────────────────────────────────
+  // The push (pushFields.resolveProposed) PATCHes Amazon with per_child_bullets / per_child_descriptions
+  // for a multi-design family — NOT the broadcast copy that applyEditorialGates + the always-run truth
+  // gate clean. So multi-design used to ship UNSCRUBBED jargon (#365), lost HTML (#366), lowercase brand
+  // (#367) and "oversized" fit contradictions. Gate the per-child bytes with the SAME chain: ONE gpt-4.1
+  // audit per DESIGN GROUP (each group ships one unique set fanned to its SKUs → parity with the
+  // per-group GENERATION calls, NOT per child), budget-capped; overflow / fail-open groups still get the
+  // PURE deterministic truth+brand scrub (no LLM). Mutates the passed arrays in place. No-op for
+  // single-design (the full-path audit already covers it) and non-apparel.
+  const MULTI_DESIGN_AUDIT_MAX_GROUPS = Number(process.env.MULTI_DESIGN_AUDIT_MAX_GROUPS || 8)
+  const gatePerChildMultiDesign = async (
+    pcb: typeof perChildBullets,
+    pcd: typeof perChildDescriptions,
+    fit: string,
+    brand: string,
+  ): Promise<void> => {
+    if (!(apparelMultiDesign && designGroupContexts.length)) return
+    let auditBudget = MULTI_DESIGN_AUDIT_MAX_GROUPS
+    for (const ctx of designGroupContexts) {
+      const repSku = ctx.skus[0]?.sku
+      let gb = pcb?.find((c) => c.sku === repSku)?.bullets ?? []
+      let gd = pcd?.find((c) => c.sku === repSku)?.description ?? ''
+      // 1) LLM editorial audit on the GROUP REP — same accept condition as applyEditorialGates. Weaves
+      //    THIS group's theme (ctx.designName + ctx.groupInput.canonicalTitle), budget-capped, fail-open.
+      if (auditBudget > 0 && (gb.length === 5 || gd.trim().length > 0)) {
+        auditBudget--
+        try {
+          const ar = await runFinalEditorialAudit(input.openai, ctx.title, gb, gd, '', {
+            design: ctx.designName || effectiveDesignName || '',
+            designPhrases: secondaryPhrases,
+            garment: input.productType ?? '',
+            audience: preferredAudience || lean || '',
+            referenceTitle: ctx.groupInput.canonicalTitle ?? ctx.title ?? '',
+            brandFront: brandName || 'THE CEO',
+            garmentBrand: brand,
+            fit,
+          })
+          if (gb.length === 5) gb = ar.bullets
+          if (gd) gd = ar.description
+          onProgress('Per-design editorial audit applied.')   // keepalive between sequential calls
+        } catch { /* fail-open: the deterministic gate below still runs */ }
+      }
+      // 2) DETERMINISTIC truth + brand gate — PURE, NO LLM — every group, regardless of budget/outcome.
+      const collapseDup = (s: string) => s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')
+      if (fit) {
+        gb = gb.map((b) => collapseDup(scrubFitClaims(deDangle(b), fit)))
+        if (gd) gd = collapseDup(scrubFitClaims(tidyDescription(gd), fit))
+      }
+      if (brand) {
+        gb = gb.map((b) => normalizeBrandInBullet(b, brand))
+        if (gd) gd = normalizeBrandCase(gd, brand)
+      }
+      // 3) Broadcast the gated copy back to EVERY SKU in the group by ctx.skus membership (authoritative —
+      //    the per-child designKey is optional and may be unset). They shared one set, so this is free.
+      //    Guard on non-empty content: if the rep SKU wasn't found (gb/gd empty), NEVER overwrite the
+      //    group's real copy with a blank — that would silently destroy per-child bytes the push ships.
+      const groupSkus = new Set(ctx.skus.map((s) => s.sku))
+      if (pcb && gb.length) for (const c of pcb) if (groupSkus.has(c.sku)) c.bullets = gb
+      if (pcd && gd) for (const c of pcd) if (groupSkus.has(c.sku)) c.description = gd
+    }
+  }
+
   // ── COHERENCE GATE (council 2026-07-03, Layer 2 of A+B) — ONE batched call per regen over ALL
   // final assembled titles (parent + per-child + single/couple), at the orchestrator level so the
   // per-design fan-out never multiplies LLM calls. Shadow by default: logs what it WOULD drop;
@@ -5969,8 +6031,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // blank brand, and returned thin unpolished copy (PO-caught). Empty-only abort already ran above.
     ;({ bullets } = await applyEditorialGates(bullets, ''))
     assertCoreHealthy(input.openai, null, bullets, null)   // audit must never blank the set
-    // NOTE (parity with the full path, not a regression): the gates run on the BROADCAST bullets.
-    // per_child_bullets are ungated on both paths — a pre-existing gap, filed as a follow-up.
+    // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
+    // former "per_child_bullets are ungated on both paths" gap. Deterministic scrub always; audit capped.
+    await gatePerChildMultiDesign(perChildBullets, undefined, truthFitEarly, garmentBrandCanonical || '')
     onProgress('Bullets regenerated.')
     return partialResult('bullets', {
       recommended_bullets: bullets,
@@ -6254,10 +6317,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     assertCoreHealthy(input.openai, null, null, descriptionOnly)
     // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
     // previously only the broadcast updated and the regenerated copy never reached the children.
-    // Runs AFTER the gates so the single-design BROADCAST copy is gated. Per-design groups are
-    // regenerated from scratch and fall back to the gated broadcast only on empty/error — they are
-    // NOT themselves fit-scrubbed (a pre-existing gap on BOTH paths, filed as a follow-up).
+    // Runs AFTER the gates so the single-design BROADCAST copy is gated.
     perChildDescriptions = await fanOutPerDesignDescriptions(descriptionOnly)
+    // Per-child multi-design descriptions the push prefers now get the SAME gate (task #61) — they are
+    // fit-scrubbed + brand-cased (and audited when budget allows), closing the former both-paths gap.
+    await gatePerChildMultiDesign(undefined, perChildDescriptions, truthFitEarly, garmentBrandCanonical || '')
     onProgress('Description regenerated.')
     return partialResult('description', { recommended_description: descriptionOnly, per_child_descriptions: perChildDescriptions })
   }
@@ -6567,6 +6631,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     bullets = bullets.map((b) => collapseDup(scrubFitClaims(deDangle(b), truthFit)))
     description = collapseDup(scrubFitClaims(tidyDescription(description), truthFit))
   }
+
+  // Per-child multi-design copy (the bytes the push actually PATCHes) gets the SAME audit + truth/brand
+  // gate as the broadcast copy above — closes the R4/#61 leak where multi-design shipped unscrubbed.
+  await gatePerChildMultiDesign(perChildBullets, perChildDescriptions, truthFit, garmentBrandCanonical || '')
 
   // Metric-gated council loop (D1, shadow-first): the bullets are now SHIP-READY (this is their final
   // assembly point — only assertCoreHealthy + the trademark scrub follow). Score them and, when short,
