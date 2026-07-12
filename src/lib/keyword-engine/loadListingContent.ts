@@ -34,6 +34,21 @@ export async function loadListingRowsForPresence(
   return (data ?? []) as ListingContent[]
 }
 
+/** Child-own-twins coverage haystack (Coherence Invariant 2): TITLE ∪ BULLETS ∪ BACKEND ∪ DESCRIPTION
+ *  across the resolved child's FBA+FBM rows, lowercased. NOT the parent family (which over-credits
+ *  sibling designs), NOT parent_asin-only (which misses self/null-parented children). Mirrors the
+ *  rank-analysis buildHaystack field join, but scoped to the child's own twins. */
+export async function loadCoverageHaystack(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  childAsin: string,
+): Promise<string> {
+  const rows = await loadListingRowsForPresence(supabase, childAsin)
+  return rows
+    .map((r) => [r.title, r.bullet_1, r.bullet_2, r.bullet_3, r.bullet_4, r.bullet_5, r.description, r.backend_keywords].filter(Boolean).join(' '))
+    .join(' ').toLowerCase().replace(/\s+/g, ' ')
+}
+
 /**
  * ONE representative row for single-value uses (e.g. the research title seed, which must
  * be ONE title, not twins concatenated). Returns the most-populated row.

@@ -36,6 +36,8 @@ import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bullet
 // Every wrapped site is byte-identical at COVERAGE_CORE=off, logs old-vs-new at =shadow, uses the
 // unified predicate at =on. Retires the raw descLower.includes() substring model (3c dock).
 import { coverageMode, coveredVerdict, missingVerdict, coverageTokens } from '@/lib/keyword-engine/coverage-core'
+import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
+import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
 import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
@@ -428,8 +430,16 @@ export async function fetchScoringContext(
     productDetailsGaps: 0, hasAiRecommendations: false,
   }
 
-  // 1. Resolve the correct child ASIN that has keyword_analysis data
-  const kwAsin = await resolveKeywordAsin(supabase, parentAsin, topChildAsin)
+  // 1. Resolve the correct child ASIN that has keyword_analysis data.
+  // COVERAGE_CORE (Invariant 2): at =on, resolve the CONTENT child (resolveToChildAsin) and seed the
+  // keyword-set resolver with it, so the keyword SET and the coverage HAYSTACK are about the SAME child
+  // (the child's own FBA+FBM twins) — not the whole parent family, which over-credits sibling designs.
+  // =off is byte-identical: the resolveToChildAsin call is skipped and the legacy topChildAsin seed is used.
+  const coreOn = coverageMode() === 'on'
+  const coverageChildAsin = coreOn
+    ? ((await resolveToChildAsin(parentAsin, supabase))?.childAsin ?? topChildAsin ?? parentAsin)
+    : null
+  const kwAsin = await resolveKeywordAsin(supabase, parentAsin, coreOn ? coverageChildAsin : topChildAsin)
   if (!kwAsin) {
     // No keyword data exists for this product family — skip keyword scoring
     console.log(`[Scoring] No keyword_analysis data found for parent ${parentAsin}`)
@@ -455,14 +465,19 @@ export async function fetchScoringContext(
         // Best-effort: an empty haystack scores exactly as before.
         let haystack = ''
         try {
-          const { data: contentRows } = await supabase
-            .from('listing_content')
-            .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
-            .eq('parent_asin', parentAsin)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          haystack = ((contentRows ?? []) as any[])
-            .map((r) => [r.title, r.bullet_1, r.bullet_2, r.bullet_3, r.bullet_4, r.bullet_5, r.description, r.backend_keywords].filter(Boolean).join(' '))
-            .join(' ').toLowerCase().replace(/\s+/g, ' ')
+          if (coreOn && coverageChildAsin) {
+            // Child-own-twins haystack (Invariant 2): the resolved child's FBA+FBM rows only.
+            haystack = await loadCoverageHaystack(supabase, coverageChildAsin)
+          } else {
+            const { data: contentRows } = await supabase
+              .from('listing_content')
+              .select('title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords')
+              .eq('parent_asin', parentAsin)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            haystack = ((contentRows ?? []) as any[])
+              .map((r) => [r.title, r.bullet_1, r.bullet_2, r.bullet_3, r.bullet_4, r.bullet_5, r.description, r.backend_keywords].filter(Boolean).join(' '))
+              .join(' ').toLowerCase().replace(/\s+/g, ' ')
+          }
         } catch { /* empty haystack → score exactly as before */ }
         // TOKEN-based coverage (not exact-phrase). Amazon ranks a listing for a query when the copy
         // contains the query's WORDS, not the verbatim phrase. A keyword counts as covered when every
