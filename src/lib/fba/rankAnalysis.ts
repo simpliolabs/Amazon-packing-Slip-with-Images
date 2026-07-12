@@ -14,6 +14,11 @@ import { createHash } from 'node:crypto'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { isWithinBudget } from '@/lib/keyword-engine/cacheService'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
+// COHERENCE Invariant 2/6: at COVERAGE_CORE=on the RANK panel decides coverage LIVE from the child's
+// OWN twin rows via the shared field-agnostic predicate (same one Intelligence + the scorer use) — no
+// stale stored-flag OR. =off is byte-identical to today.
+import { coverageMode, coverageAcrossRows } from '@/lib/keyword-engine/coverage-core'
+import { loadListingRowsForPresence } from '@/lib/keyword-engine/loadListingContent'
 import { fetchShareOfVoice } from '@/lib/sync/jungleScoutClient'
 import { createAdminClient } from '@/lib/supabase/server'
 
@@ -222,7 +227,11 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     }
   } catch { /* lean read is best-effort — no filter on failure */ }
 
-  const check = makeCoverageChecker(haystack)
+  const check = makeCoverageChecker(haystack)   // today's baseline (coverage.ts kwToks over the family haystack)
+  // At =on/=shadow, load the child's OWN twin rows ONCE and decide coverage LIVE via the shared
+  // field-agnostic predicate. =off skips this query entirely (perf no-op).
+  const covMode = coverageMode()
+  const liveRows = covMode !== 'off' ? await loadListingRowsForPresence(supabase, childAsin) : []
 
   // Outcome loop (#89): per-keyword SQP share movement since the last monthly snapshot. Best-effort — {} (so
   // every shareSignal is null) until ≥2 months of history accrue or if the snapshots table isn't migrated.
@@ -234,6 +243,18 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     let coveredIn = flagCover
     // Stale-flag fallback: presence flags are a snapshot; if all false, trust the LIVE token check.
     if (!youCover && check(k.keyword)) { youCover = true; coveredIn = ['(live content)'] }
+    // COVERAGE_CORE (Invariant 2/6): at =on, coverage is decided LIVE from the child's own twin rows via
+    // the shared field-agnostic predicate — stored flags are no longer a coverage source (only a cache),
+    // and coveredIn becomes true per-field (drops the opaque '(live content)' sentinel). =shadow logs diffs.
+    let inTitleLive = k.inTitle
+    if (covMode !== 'off') {
+      const cov = coverageAcrossRows(k.keyword, liveRows)
+      if (covMode === 'shadow') {
+        if (cov.covered !== youCover) console.log(`[COVERAGE_DIFF] site=rank asin=${childAsin} kw=${JSON.stringify(k.keyword)} old=${youCover} new=${cov.covered}`)
+      } else {
+        youCover = cov.covered; coveredIn = cov.coveredIn; inTitleLive = cov.inTitle
+      }
+    }
     const actionType = k.actionType as ActionType
     // Author the honest share-movement line server-side + sanitize it (correlation only, never causation).
     const sig = (signals as Record<string, { direction: string; shareAfter: number | null; contentChangedBetween: boolean; nonContentBottleneck: boolean }>)[k.keyword.toLowerCase()]
@@ -257,7 +278,7 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
       actionType,
       youCover,
       coveredIn,
-      contentAction: sanitize(contentActionFor(actionType, youCover, k.inTitle)),
+      contentAction: sanitize(contentActionFor(actionType, youCover, inTitleLive)),
       nonContentReality: '',
       topCompetitorBrand: null,
       theirShare: null,

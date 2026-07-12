@@ -7,6 +7,7 @@
  */
 import {
   isCovered, coverageTokens, bulletTokens, missingCoverage, missingBulletKeywordsLegacy, foldGarment,
+  coverageAcrossRows,
 } from '../src/lib/keyword-engine/coverage-core'
 
 let pass = 0, fail = 0
@@ -52,6 +53,26 @@ for (const t of ['oversized', 'graphic', 'women', 'golf', 'retirement', 'gb', 'c
 }
 for (const t of ['tee', 'tees', 'tshirt', 'tshirts', 'shirt', 'shirts']) {
   ok(foldGarment(t) === 'shirt', `foldGarment("${t}") must canonicalize to "shirt"`)
+}
+
+// ── coverageAcrossRows: the single field+union read predicate (RANK + Intelligence) ──────────
+{
+  const rows = [{ title: 'Comfort Colors Graphic Tee for Women', bullet_1: 'Soft ringspun cotton', description: null, backend_keywords: 'golf mom retirement gift' }]
+  const a = coverageAcrossRows('graphic tee', rows)
+  ok(a.covered && a.inTitle && a.coveredIn.includes('title'), 'coverageAcrossRows: title phrase inTitle+covered')
+  const b = coverageAcrossRows('retirement gift', rows)
+  ok(b.covered && b.inBackend && !b.inTitle, 'coverageAcrossRows: backend-only phrase covered via backend')
+  const c = coverageAcrossRows('unicorn spaceship', rows)
+  ok(!c.covered && c.coveredIn.length === 0, 'coverageAcrossRows: absent phrase not covered')
+  // CROSS-FIELD (the seam): "cotton women" — "women" only in title, "cotton" only in a bullet.
+  // Field-agnostic union ⇒ covered:true, yet NO single field carries both ⇒ every per-field flag false.
+  const d = coverageAcrossRows('cotton women', rows)
+  ok(d.covered, 'coverageAcrossRows: cross-field keyword IS covered (field-agnostic union)')
+  ok(!d.inTitle && !d.inBullets, 'coverageAcrossRows: cross-field keyword has no single-field flag (correct)')
+  // Twin OR: a keyword present in EITHER twin row's field counts.
+  const twins = [{ title: 'Golf Shirt' }, { title: 'Funny Golf Tee for Men', backend_keywords: 'fathers day' }]
+  const e = coverageAcrossRows('golf tee for men', twins)
+  ok(e.covered && e.inTitle, 'coverageAcrossRows: twin-2 title satisfies the phrase')
 }
 
 console.log(`\ncoverage-core verify: ${pass} passed, ${fail} failed`)

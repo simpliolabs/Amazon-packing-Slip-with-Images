@@ -85,6 +85,45 @@ export function makeCoverageChecker(haystack: string): (kw: string) => boolean {
   }
 }
 
+/** A listing_content row shape (structurally compatible with checkPresence.ListingContent and the
+ *  loadListingRowsForPresence rows) — declared locally to keep coverage-core dependency-free. */
+export interface CoverageRow {
+  title?: string | null
+  bullet_1?: string | null; bullet_2?: string | null; bullet_3?: string | null
+  bullet_4?: string | null; bullet_5?: string | null
+  description?: string | null
+  backend_keywords?: string | null
+}
+
+export interface RowCoverage {
+  /** FIELD-AGNOSTIC decision (Invariant 2): covered when the keyword's tokens appear ANYWHERE across
+   *  title ∪ bullets ∪ description ∪ backend — true even if the tokens are split across fields. */
+  covered: boolean
+  /** Per-field flags for DISPLAY only (which field carries the whole phrase). A cross-field keyword can
+   *  be `covered:true` with every per-field flag false — that is correct, not a bug. */
+  inTitle: boolean; inBullets: boolean; inDescription: boolean; inBackend: boolean
+  coveredIn: string[]
+}
+
+/** THE single field+union coverage function (Invariant 1 + 2 + 6). Every READ screen — the RANK panel
+ *  and the Intelligence "Present In" tab — decides coverage HERE, over the resolved child's own twin
+ *  rows, so they can never disagree with each other or with the scorer's field-agnostic isCovered. */
+export function coverageAcrossRows(keyword: string, rows: CoverageRow[]): RowCoverage {
+  const join = (sel: (r: CoverageRow) => (string | null | undefined)[]): string =>
+    rows.map((r) => sel(r).filter(Boolean).join(' ')).join(' ')
+  const titleHay = join((r) => [r.title])
+  const bulletsHay = join((r) => [r.bullet_1, r.bullet_2, r.bullet_3, r.bullet_4, r.bullet_5])
+  const descHay = join((r) => [r.description])
+  const backHay = join((r) => [r.backend_keywords])
+  const inTitle = isCovered(keyword, titleHay)
+  const inBullets = isCovered(keyword, bulletsHay)
+  const inDescription = isCovered(keyword, descHay)
+  const inBackend = isCovered(keyword, backHay)
+  const covered = isCovered(keyword, [titleHay, bulletsHay, descHay, backHay].join(' '))
+  const coveredIn = ([inTitle && 'title', inBullets && 'bullets', inDescription && 'description', inBackend && 'backend'].filter(Boolean)) as string[]
+  return { covered, inTitle, inBullets, inDescription, inBackend, coveredIn }
+}
+
 /** UNIFIED "which of these keywords are NOT covered by the joined text". This is the garment-aware
  *  replacement for the scorer/report call sites. GENERATOR call sites keep the LEGACY export
  *  `missingBulletKeywordsLegacy` (below) so the fill can still emit garment tokens (Invariant 4). */
