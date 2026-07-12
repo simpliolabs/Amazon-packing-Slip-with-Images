@@ -47,6 +47,7 @@ export async function GET(
     }
     const { childAsin, parentAsin } = resolved;
     const refreshFree = new URL(request.url).searchParams.get('refresh') === 'free';
+    let staleCache = false;  // set when a cache hit's fingerprint no longer matches → recompute live below
 
     // 1. Cache read (0 cost). maybeSingle() → a 0-row miss is null (no throw). The try/catch only
     //    fires on a REAL error (e.g. migration 021 not yet applied) → degrade to the free core.
@@ -60,7 +61,13 @@ export async function GET(
       row = cached as { content_fingerprint: string; result: RankAnalysisResult } | null;
       if (!refreshFree && row?.result && Object.keys(row.result).length > 0) {
         const fp = await contentFingerprint(parentAsin, childAsin, supabase);
-        return NextResponse.json({ ...row.result, stale: fp !== row.content_fingerprint });
+        if (fp === row.content_fingerprint) {
+          return NextResponse.json({ ...row.result, stale: false });
+        }
+        // Content changed since the analysis ran → the frozen per-row coverage is a LIE (a keyword
+        // shows COVERED after a push removed it). Don't serve the frozen rows with a mere stale flag;
+        // fall through to a live free-core recompute + re-persist so coverage matches what's live.
+        staleCache = true;
       }
     } catch (cacheErr) {
       console.warn(`[rank-analysis GET] cache read failed for ${childAsin}, serving free core:`, cacheErr);
@@ -73,7 +80,7 @@ export async function GET(
     const core = await buildFreeCore(childAsin, parentAsin, supabase);
     const fresh = freeCoreToResult(core, childAsin, parentAsin, analyzedAt);
 
-    if (refreshFree && fresh.analyzed) {
+    if ((refreshFree || staleCache) && fresh.analyzed) {
       // Carry forward the prior PAID per-keyword SOV + council realities BY KEYWORD — the same
       // merge runCouncilAnalysis does, so a free re-check NEVER wipes paid competition data
       // (the #154 blocker class). The headline intentionally resets to the deterministic
