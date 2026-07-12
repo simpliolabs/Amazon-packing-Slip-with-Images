@@ -21,7 +21,8 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
-import { missingBulletKeywords, bulletTokens, foldPlural } from '@/lib/keyword-engine/bulletCoverage'
+import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
+import { coverageMode } from '@/lib/keyword-engine/coverage-core'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -446,6 +447,14 @@ function fillBackendToBudget(
   const normTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
   const have = new Set(out.split(/\s+/).map(normTok).filter(Boolean))
 
+  // COVERAGE_CORE coupling (Invariant 4): garment-awareness in the fill is only correct when the SCORER
+  // also folds garments (=on). At =off the scorer's checkPresence needs the LITERAL garment token, so the
+  // fill keeps adding it (today's #373/#374 behavior, byte-identical). At =on the title's "Shirt" already
+  // covers "tee"/"tees"/"shirts", so the fill must NOT waste a byte echoing it — and MAY add a garment
+  // token in the rare case the title carries none. `gfold` = the scorer's fold view for a candidate token.
+  const gOn = coverageMode() === 'on'
+  const gfold = (t: string): string => (gOn ? foldGarment(foldPlural(t)) : foldPlural(t))
+
   // ── VOLUME-PRIORITY PASS (2026-07-10, the score-mover) ──────────────────────────────────────────
   // Runs FIRST — BEFORE both the >=244 short-circuit and the generic sales-ordered loop — so the
   // highest-VOLUME opportunity phrases get first claim on any free bytes up to the 250 cap, even when
@@ -459,7 +468,9 @@ function fillBackendToBudget(
   // lands. We append the RAW pool token ("tees"); the pool-backed banTok exemption is keyed on the raw
   // token and the scorer folds "tees"->"tee" on read. Without this "graphic tees for women" (710K) is
   // uncoverable — its "tee" token is filtered out no matter how the pool is ordered.
-  const scorerHave = new Set(bulletTokens(`${coverageHay} ${out}`))
+  // scorerHave = the scorer's fold view of title+bullets+placed. At =on it is garment-unified (every
+  // garment noun → "shirt"), so a candidate garment token folds into it and is correctly seen as covered.
+  const scorerHave = new Set(bulletTokens(`${coverageHay} ${out}`).map((t) => (gOn ? foldGarment(t) : t)))
   for (const phrase of priorityPhrases) {
     if (getByteLength(out) >= 250) break
     if (capacityFamily && CAPACITY_RE.test(phrase)) continue          // capacity guard (mirrors the loop)
@@ -468,11 +479,11 @@ function fillBackendToBudget(
       const tok = normTok(raw)                                        // raw pool form ("tees") — the byte we write
       if (tok.length <= 1 || have.has(tok)) continue                 // byte-novelty
       if (banTok(tok)) continue                                      // own-brand / stopword / gender
-      if (scorerHave.has(foldPlural(tok)) || alreadyIndexed?.has(tok)) continue  // fold-aware echo + sibling-color/title index
+      if (scorerHave.has(gfold(tok)) || alreadyIndexed?.has(tok)) continue  // fold-aware echo + sibling-color/title index
       if (getByteLength(`${out} ${tok}`) > 250) continue             // hard cap, never crossed
       out = `${out} ${tok}`
       have.add(tok)
-      scorerHave.add(foldPlural(tok))
+      scorerHave.add(gfold(tok))
     }
   }
 
@@ -504,10 +515,14 @@ function fillBackendToBudget(
       // type ("...Shirt for Women") so Amazon already indexes it, and the core places up to 2 on
       // purpose — the fill re-adding "shirts" was pure title-echo the singular/plural alreadyIndexed
       // check missed ("shirt" indexed, "shirts" slipped through → the trailing "…turquoise shirts").
-      if (PRODUCT_TYPE_WORDS.has(tok)) continue
+      // At =on this becomes a FOLD-AWARE test (Invariant 4): skip a garment token only when the title
+      // already indexes a garment (scorerHave folded contains "shirt") — so a head term stays addable in
+      // the rare no-garment-title case; =off keeps the unconditional blanket skip byte-for-byte.
+      if (PRODUCT_TYPE_WORDS.has(tok) && (!gOn || scorerHave.has('shirt'))) continue
       if (getByteLength(`${out} ${tok}`) > 250) continue
       out = `${out} ${tok}`
       have.add(tok)
+      if (gOn && PRODUCT_TYPE_WORDS.has(tok)) scorerHave.add('shirt')  // keep the ≤1-garment-from-fill invariant
     }
     if (getByteLength(out) >= 244) break
   }
