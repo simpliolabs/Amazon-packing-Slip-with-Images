@@ -14,12 +14,16 @@ export async function resolveToChildAsin(
   inputAsin: string,
   supabase: Awaited<ReturnType<typeof createAdminClient>>,
 ): Promise<{ childAsin: string; parentAsin: string | null } | null> {
-  // 1. Direct match — input is already a child ASIN in listing_content
+  // 1. Direct match — input is already a child ASIN in listing_content.
+  // limit(1).maybeSingle() (NOT .single()): an ASIN with FBA+FBM twin rows returns 2 rows here,
+  // and .single() would THROW on >1 → data null → silent null-resolve to parent. Both twins share
+  // the same parent_asin, so taking either row is correct. maybeSingle() also handles 0 rows cleanly.
   const { data: directMatch } = await supabase
     .from('listing_content')
     .select('asin, parent_asin')
     .eq('asin', inputAsin)
-    .single()
+    .limit(1)
+    .maybeSingle()
   const dm = directMatch as { asin: string; parent_asin: string | null } | null
   if (dm) return { childAsin: dm.asin, parentAsin: dm.parent_asin }
 
