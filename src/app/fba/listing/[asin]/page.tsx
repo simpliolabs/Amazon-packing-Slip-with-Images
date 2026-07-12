@@ -2616,14 +2616,18 @@ export default function ListingDetailPage() {
               ? perChildTitles.every((t) => missingBulletKeywords([t.title ?? ''], kws).length === 0)
               : (recs.recommended_title ?? '').trim().length > 0 && missingBulletKeywords([recs.recommended_title ?? ''], kws).length === 0
           const out: { section: 'title' | 'bullets' | 'backend'; label: string; keywords: string[]; drafted: boolean }[] = []
+          // Backend-first (Step 3): a keyword the plan tagged for bullets may have been routed to backend
+          // by the generator (Content step 2). Judge "drafted" against the FULL live-shippable draft —
+          // title + bullets + backend (per-child) — so a keyword already indexed in the backend draft is
+          // shippable, NOT a false "regenerate to weave it into the bullets" promise the pipeline undoes.
+          const backendDraft = [recs.recommended_keywords ?? '', ...(recs.per_child_keywords ?? []).map((k) => k.keywords)].join(' ')
+          const fullDraft = [recs.recommended_title ?? '', (recs.recommended_bullets ?? []).join(' '), backendDraft].join(' ')
           for (const sec of ['title', 'bullets', 'backend'] as const) {
             const kws = [...bySection[sec]]
             if (kws.length === 0) continue
-            const bulletsDraft = (recs.recommended_bullets ?? []).join(' ')
             const drafted =
               sec === 'title' ? titleCovers(kws)
-              : sec === 'bullets' ? (bulletsDraft.trim().length > 0 && missingBulletKeywords([bulletsDraft], kws).length === 0)
-              : false   // backend → always Regenerate
+              : (fullDraft.trim().length > 0 && missingBulletKeywords([fullDraft], kws).length === 0)
             out.push({ section: sec, label: sec === 'title' ? 'Title' : sec === 'bullets' ? 'Bullets' : 'Backend keywords', keywords: kws, drafted })
           }
           return out
@@ -2728,19 +2732,26 @@ export default function ListingDetailPage() {
                                     <span className="min-w-0"><span className="font-semibold">{w.label}</span> — add {w.keywords.slice(0, 3).map((k) => `“${k}”`).join(', ')}{w.keywords.length > 3 ? ` +${w.keywords.length - 3} more` : ''}</span>
                                   </div>
                                   <div className="mt-1 ml-5">
-                                    {w.drafted && (w.section === 'title' || w.section === 'bullets') ? (
-                                      <button onClick={() => openPushPreview(w.section as PushField)} disabled={pushLoading}
-                                        title={`The fresh AI draft already weaves ${w.keywords.length === 1 ? 'this keyword' : 'these keywords'} in — ship it live to close the gap.`}
-                                        className="inline-flex items-center gap-1 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded font-semibold disabled:opacity-50 transition-colors cursor-pointer">
-                                        <Icon.Send className="w-3 h-3" /> Ship {w.label.toLowerCase()} — draft already covers {w.keywords.length === 1 ? 'it' : 'them'}
-                                      </button>
-                                    ) : (
-                                      <button onClick={() => generateAiRecs()} disabled={aiLoading}
-                                        title={`The current draft doesn’t cover ${w.keywords.length === 1 ? 'this keyword' : 'these keywords'} yet — regenerate to weave ${w.keywords.length === 1 ? 'it' : 'them'} into the ${w.label.toLowerCase()}.`}
-                                        className="inline-flex items-center gap-1 text-[10px] bg-violet-600 hover:bg-violet-700 text-white px-2 py-1 rounded font-semibold disabled:opacity-50 transition-colors cursor-pointer">
-                                        <Icon.Sparkles className="w-3 h-3" /> Regenerate to weave {w.keywords.length === 1 ? 'it' : 'them'} in
-                                      </button>
-                                    )}
+                                    {(() => {
+                                      // Backend-first (Step 3): the backend row can SHIP (its PushField is 'keywords'),
+                                      // and the regenerate verb is "index" — backend is indexed, not woven into prose.
+                                      const pushField = (w.section === 'backend' ? 'keywords' : w.section) as PushField
+                                      const verb = w.section === 'backend' ? 'index' : 'weave'
+                                      const home = w.section === 'backend' ? 'the backend keywords' : `the ${w.label.toLowerCase()}`
+                                      return w.drafted ? (
+                                        <button onClick={() => openPushPreview(pushField)} disabled={pushLoading}
+                                          title={`The fresh AI draft already carries ${w.keywords.length === 1 ? 'this keyword' : 'these keywords'} — ship it live to close the gap.`}
+                                          className="inline-flex items-center gap-1 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded font-semibold disabled:opacity-50 transition-colors cursor-pointer">
+                                          <Icon.Send className="w-3 h-3" /> Ship {w.label.toLowerCase()} — draft already covers {w.keywords.length === 1 ? 'it' : 'them'}
+                                        </button>
+                                      ) : (
+                                        <button onClick={() => generateAiRecs()} disabled={aiLoading}
+                                          title={`The current draft doesn’t cover ${w.keywords.length === 1 ? 'this keyword' : 'these keywords'} yet — regenerate to ${verb} ${w.keywords.length === 1 ? 'it' : 'them'} into ${home}.`}
+                                          className="inline-flex items-center gap-1 text-[10px] bg-violet-600 hover:bg-violet-700 text-white px-2 py-1 rounded font-semibold disabled:opacity-50 transition-colors cursor-pointer">
+                                          <Icon.Sparkles className="w-3 h-3" /> Regenerate to {verb} {w.keywords.length === 1 ? 'it' : 'them'} in
+                                        </button>
+                                      )
+                                    })()}
                                   </div>
                                 </li>
                               ))}
@@ -4519,7 +4530,7 @@ export default function ListingDetailPage() {
                         <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
                       </svg>
                       <p className="text-xs text-sky-900 leading-relaxed">
-                        <b>Mostly lateral (~{lateralKeywordAdvisory.pct}% of terms unchanged).</b> These SKUs are already at full strength (≥200 chars, ≤250 bytes), so the high-traffic terms are already indexed — pushing is <b>unlikely to move your keyword score</b>. Skim the changed rows below: push only if a <i>major</i> missing keyword is being added. To actually lift the score, add the missing top keywords to your <b>title/bullets</b>, not the backend.
+                        <b>Mostly lateral (~{lateralKeywordAdvisory.pct}% of terms unchanged).</b> These SKUs are already at full strength (≥200 chars, ≤250 bytes), so the high-traffic terms are already indexed — pushing is <b>unlikely to move your keyword score</b>. Skim the changed rows below: push only if a <i>major</i> missing keyword is being added. To actually lift the score, make sure the missing top keywords are indexed somewhere Amazon reads — the <b>backend keyword field</b> is the sanctioned home for high-value terms that don’t fit naturally in the title or bullets, so a Regenerate that re-fills the backend with them is what moves the needle here.
                       </p>
                     </div>
                   )}
