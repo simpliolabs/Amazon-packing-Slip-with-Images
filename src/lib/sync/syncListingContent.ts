@@ -32,6 +32,10 @@ import { getAccessToken } from '@/lib/amazon/auth'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bulletCoverage'
+// COHERENCE Invariant 1: the ONE garment-aware coverage predicate + the COVERAGE_CORE flag plumbing.
+// Every wrapped site is byte-identical at COVERAGE_CORE=off, logs old-vs-new at =shadow, uses the
+// unified predicate at =on. Retires the raw descLower.includes() substring model (3c dock).
+import { coverageMode, coveredVerdict, missingVerdict, coverageTokens } from '@/lib/keyword-engine/coverage-core'
 import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
@@ -466,7 +470,10 @@ export async function fetchScoringContext(
         // "SD Camera Card 64GB ... Kodak and Canon" covers "sd card for camera 64gb" and is no longer
         // flagged. The old exact-substring check is why a genuinely keyword-rich title never moved off
         // 20: no realistic title contains long-tail phrases like "sd card for camera 64gb" verbatim.
-        const isCovered = makeCoverageChecker(haystack)   // shared coverage (extracted to keyword-engine/coverage.ts)
+        // COVERAGE_CORE: today's coverage.ts checker is the shadow baseline; at =on the unified
+        // garment-aware predicate (coverage-core.isCovered) decides. =off is byte-identical.
+        const isCoveredLegacy = makeCoverageChecker(haystack)
+        const covered = (kw: string) => coveredVerdict(kw, haystack, isCoveredLegacy(kw), 'scorer.kwgap', parentAsin)
 
         // AUDIENCE-LEAN guard: under a hard Female/Male selection the generator deliberately
         // REFUSES opposite-gender keywords ("mens comfort colors tshirt" on a Female listing —
@@ -501,13 +508,13 @@ export async function fetchScoringContext(
           if (leanExcluded(String(r.keyword ?? ''))) continue  // the seller's audience choice bans it — not a gap
           switch (r.action_type) {
             case 'CRITICAL':
-              if (isCovered(r.keyword)) break  // already in the live copy — not a gap
+              if (covered(r.keyword)) break  // already in the live copy — not a gap
               criticalSeen++
               if (criticalSeen <= 10) ctx.criticalCount++  // Cap at 10
               if (ctx.topCriticalKeywords.length < 5) ctx.topCriticalKeywords.push(r.keyword)
               break
             case 'UPGRADE':
-              if (isCovered(r.keyword)) break  // already in the live copy — not a gap
+              if (covered(r.keyword)) break  // already in the live copy — not a gap
               upgradeSeen++
               if (upgradeSeen <= 10) ctx.upgradeCount++  // Cap at 10
               if (ctx.topUpgradeKeywords.length < 5) ctx.topUpgradeKeywords.push(r.keyword)
@@ -684,6 +691,11 @@ export function scoreListingContent(
   if (!representativeContent) {
     return { title_score: 0, bullet_score: 0, keyword_score: 0, aplus_score: 0, description_score: 0, features_score: 0, overall_score: 0, issues: [{ field: 'general', severity: 'critical', message: 'No listing content found — run Scan Listings to fetch data from Amazon.', auto_fixable: false }], child_override_count: 0 }
   }
+
+  // Shadow-diff label (COVERAGE_CORE=shadow): scoreListingContent has no ASIN param, so derive one from
+  // the representative row purely for log correlation. No functional effect.
+  const logAsin = ((representativeContent as { parent_asin?: string | null; asin?: string | null }).parent_asin
+    || (representativeContent as { asin?: string | null }).asin || 'scorer') as string
 
   // ── 1. TITLE SCORING ──────────────────────────────────────────────────────
   // Score the seller-entered base title, not a single child's Amazon-suffixed title
@@ -876,7 +888,8 @@ export function scoreListingContent(
       // rank. A keyword ranks when its tokens are indexed ANYWHERE on the listing. What remains is
       // an HONEST dock: a keyword covered by NO section, which regeneration CAN fix (weave it into
       // bullets or backend). The design-name bullet floor keeps its own dedicated cohesion dock below.
-      const missingOpp = missingBulletKeywords([title, ...bullets, representativeContent.backend_keywords || ''], bulletOppKw)
+      const bulletHay = [title, ...bullets, representativeContent.backend_keywords || '']
+      const missingOpp = missingVerdict(bulletHay, bulletOppKw, missingBulletKeywords(bulletHay, bulletOppKw), 'scorer.bulletdock', logAsin)
       if (missingOpp.length >= 2) {
         bulletScore -= Math.min(12, missingOpp.length * 2)
         issues.push({ field: 'bullets', severity: 'warning', message: `Your listing misses ${missingOpp.length} high-opportunity keyword(s) across title + bullets + backend — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. Regenerate to weave them in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
@@ -886,8 +899,11 @@ export function scoreListingContent(
     // Check for keyword density — bullets should cover different topics
     if (bulletCount >= 3) {
       const allBulletText = bullets.join(' ').toLowerCase()
-      const titleTokens = tokenize(title)
-      const bulletTokens = tokenize(allBulletText)
+      // COVERAGE_CORE: at =on use the unified coverageTokens (no fourth tokenizer survives); =off keeps
+      // the local tokenize. Renamed the local set (was `bulletTokens`, shadowing the imported one).
+      const useCoreTok = coverageMode() === 'on'
+      const titleTokens = useCoreTok ? new Set(coverageTokens(title)) : tokenize(title)
+      const bulletTokSet = useCoreTok ? new Set(coverageTokens(allBulletText)) : tokenize(allBulletText)
       // Variant attributes and brand fragments that appear in titles but are NOT
       // semantic keywords worth repeating in bullets (sizes, colors, brand names)
       const variantStopWords = new Set([
@@ -898,7 +914,7 @@ export function scoreListingContent(
         'loom', 'shirt', 'shirts', 'tshirt', 'adult', 'unisex', 'women', 'womens',
       ])
       // Find title keywords NOT covered in bullets (missed opportunities)
-      const titleOnlyKeywords = [...titleTokens].filter(w => !bulletTokens.has(w) && w.length > 4 && !variantStopWords.has(w))
+      const titleOnlyKeywords = [...titleTokens].filter(w => !bulletTokSet.has(w) && w.length > 4 && !variantStopWords.has(w))
       if (titleOnlyKeywords.length > 3) {
         bulletScore -= 3
         issues.push({ field: 'bullets', severity: 'info', message: `Bullets are missing ${titleOnlyKeywords.length} keywords from your title (e.g. "${titleOnlyKeywords.slice(0,3).join('", "')}""). Weave these into your bullets — Amazon cross-references title and bullet keywords to determine relevance. Missing overlap = lower ranking for those terms.`, auto_fixable: false })
@@ -934,8 +950,8 @@ export function scoreListingContent(
   // If description exists and is substantial, check if it overlaps with title keywords.
   // A description that doesn't reinforce title keywords is a missed SEO opportunity.
   if (descLen >= 200 && title) {
-    const descTokens = tokenize(descPlain)
-    const titleTokensForDesc = tokenize(title)
+    const descTokens = coverageMode() === 'on' ? new Set(coverageTokens(descPlain)) : tokenize(descPlain)
+    const titleTokensForDesc = coverageMode() === 'on' ? new Set(coverageTokens(title)) : tokenize(title)
     const descTitleOverlap = [...titleTokensForDesc].filter(w => descTokens.has(w) && w.length > 4)
     // If description doesn't share at least 3 keywords with title, it's not reinforcing SEO
     if (descTitleOverlap.length < 3) {
@@ -954,8 +970,10 @@ export function scoreListingContent(
   if (descLen >= 50) {
     const targetKws = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords].slice(0, 8)
     if (targetKws.length >= 3) {
-      const descLower = descPlain.toLowerCase()
-      const missingKws = targetKws.filter((k) => !descLower.includes(k.toLowerCase()))
+      // Retire the raw-substring model (Invariant 1 — no descLower.includes()): =off keeps the exact
+      // substring baseline byte-identical; at =on unify onto token coverage (a natural paraphrase counts).
+      const missingKwsLegacy = targetKws.filter((k) => !descPlain.toLowerCase().includes(k.toLowerCase()))
+      const missingKws = missingVerdict([descPlain], targetKws, missingKwsLegacy, 'scorer.desc3c', logAsin)
       const coverage = (targetKws.length - missingKws.length) / targetKws.length
       if (coverage < 0.5) {
         // Misses most current high-value terms → stale / under-optimized. Dock enough to fall below
@@ -1061,7 +1079,11 @@ export function scoreListingContent(
   // section away from the DONE threshold, never toward it).
   const designName = (scoringCtx.planDesignName ?? '').trim()
   if (designName) {
-    const inTitle = missingBulletKeywords([title], [designName]).length === 0
+    // COVERAGE_CORE flag-aware coverage test (=off byte-identical, =on garment-aware). Returns true when
+    // every token of `kw` is covered by the joined `texts`.
+    const isCov = (texts: string[], kw: string, site: string) =>
+      missingVerdict(texts, [kw], missingBulletKeywords(texts, [kw]), site, logAsin).length === 0
+    const inTitle = isCov([title], designName, 'scorer.cohesion.title')
     if (inTitle) {   // only enforce cohesion when the design genuinely anchors the title
       // DEDUPE (adversarial-review): if the design name is already OWNED by a bullet-opportunity keyword,
       // the #93 coverage dock above ALREADY charges its tokens when they're missing from the bullets — so
@@ -1073,8 +1095,8 @@ export function scoreListingContent(
       const oppSet = (scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
         ? scoringCtx.bulletPlanKeywords
         : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
-      const designOwnedByOppSet = oppSet.some((k) => missingBulletKeywords([k], [designName]).length === 0)
-      if (!designOwnedByOppSet && missingBulletKeywords([bullets.join(' ')], [designName]).length > 0) {
+      const designOwnedByOppSet = oppSet.some((k) => isCov([k], designName, 'scorer.cohesion.own'))
+      if (!designOwnedByOppSet && !isCov([bullets.join(' ')], designName, 'scorer.cohesion.bul')) {
         bulletScore = Math.max(0, bulletScore - 4)
         issues.push({ field: 'bullets', severity: 'warning', message: `Your design name "${designName}" anchors the title but is missing from your bullets — weave it into at least one bullet so every section reinforces the same hook (regenerate to fix automatically).`, auto_fixable: false })
       }
@@ -1085,7 +1107,7 @@ export function scoreListingContent(
       // fix (the self-healing anti-pattern).
       const brandToksScore = new Set(bulletTokens(scoringCtx.brandName ?? ''))
       const dnBackendReq = bulletTokens(designName).filter((t) => !brandToksScore.has(t)).join(' ')
-      if (dnBackendReq && missingBulletKeywords([keywords], [dnBackendReq]).length > 0) {
+      if (dnBackendReq && !isCov([keywords], dnBackendReq, 'scorer.cohesion.back')) {
         keywordScore = Math.max(0, keywordScore - 4)
         issues.push({ field: 'backend_keywords', severity: 'warning', message: `Your design name "${designName}" anchors the title but is missing from your backend search terms — add it to every child's backend keywords (regenerate to fix automatically).`, auto_fixable: false })
       }
