@@ -45,6 +45,35 @@ export interface PipelineVariantCorrection { sku: string; field: string; current
 export interface PipelineCannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
 export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string }
 export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; exact_text: string; why: string }
+
+// Backend-first placement net (Step 3, task #60): the LLM audit still tends to claim bullet_1..3 for
+// keywords the generator actually routed to BACKEND (Content step 2). Re-derive placed_in from the
+// FINALIZED content so the UI's rank work-list never promises a bullets-weave the pipeline won't
+// deliver — the false "Regenerate to weave them in" loop. Any keyword the copy does not literally carry
+// lands in backend_keywords (overflow's sanctioned home). Uses the LEGACY generator primitive so it
+// reflects what the copy LITERALLY carries; emits 'bullet_1'/'backend_keywords' tokens the page's norm()
+// understands.
+function reconcilePlacedInBackendFirst(
+  recon: PipelineKeywordReconciliation[],
+  finalTitle: string,
+  bullets: string[],
+  description: string,
+  perChild: PipelinePerChildKeywords[],
+): PipelineKeywordReconciliation[] {
+  const backendHay = perChild.map((c) => c.keywords || '').join(' ')
+  const bulletsHay = bullets.join(' ')
+  return recon.map((kr) => {
+    if (!kr.keyword) return kr
+    const kw = [kr.keyword]
+    const placed: string[] = []
+    if (missingBulletKeywords([finalTitle || ''], kw).length === 0) placed.push('title')
+    if (missingBulletKeywords([bulletsHay], kw).length === 0) placed.push('bullet_1')
+    if (missingBulletKeywords([description || ''], kw).length === 0) placed.push('description')
+    // Backend is the fallback home: index it there when the prose doesn't carry it (or nothing does).
+    if (missingBulletKeywords([backendHay], kw).length === 0 || placed.length === 0) placed.push('backend_keywords')
+    return { ...kr, placed_in: placed }
+  })
+}
 export interface PipelineAplusModuleAction { module_type: string; action: 'ADD' | 'EDIT' | 'KEEP'; content_brief: string; position: number }
 export interface PipelineActionPlanItem {
   element: string
@@ -6568,7 +6597,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     variant_corrections: Array.isArray(audit.variant_corrections) ? audit.variant_corrections : [],
     cannibalization_warnings: Array.isArray(audit.cannibalization_warnings) ? audit.cannibalization_warnings : [],
     product_details_improvements: pdiFinal,
-    keyword_reconciliation: Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [],
+    keyword_reconciliation: reconcilePlacedInBackendFirst(Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [], finalTitle, bullets, description, perChild),
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.

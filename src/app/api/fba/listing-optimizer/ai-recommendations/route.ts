@@ -345,8 +345,8 @@ Examples:
 
 If the product is a general-purpose graphic tee that incidentally ranks for a seasonal keyword, place that keyword in bullets or backend keywords only — not the title. Year-round conversion is more valuable than seasonal traffic spikes.
 
-RULE 2 — BULLETS (3-5 keywords):
-Place the top keywords from CRITICAL and UPGRADE (those not used in the title) into bullets 1-3. Each bullet should target 1-2 keywords woven naturally into the sentence. Keywords go in the body text, NOT in the ALL CAPS benefit hook.
+RULE 2 — BULLETS (natural fit only):
+Weave a CRITICAL or UPGRADE keyword into bullets 1-3 ONLY when it reads naturally in the sentence — bullets are written for the shopper, not the crawler, so never force a keyword to hit a count. Every CRITICAL/UPGRADE keyword that does not fit naturally in the title or a bullet goes to BACKEND keywords (RULE 3) — the backend is the sanctioned home for keyword coverage and Amazon indexes it identically. Keywords that DO appear in a bullet go in the body text, NOT in the ALL CAPS benefit hook.
 
 RULE 3 — BACKEND KEYWORDS (everything else):
 All remaining keywords that did not fit naturally into title or bullets go here. Also include: synonyms, common misspellings, occasion terms, audience terms, and long-tail variants not already in title/bullets.
@@ -358,7 +358,7 @@ RULE 5 — DO NOT DUPLICATE:
 Never repeat the same keyword in both title AND backend keywords. Amazon indexes title and bullet words automatically — duplicating them in backend wastes bytes.
 
 RULE 6 — ACCOUNT FOR EVERY KEYWORD:
-Every CRITICAL and UPGRADE keyword must appear somewhere: title, a bullet, or backend keywords. The keyword reconciliation report must prove placement for each one. If a keyword was intentionally excluded, state why.`
+Every CRITICAL and UPGRADE keyword must appear somewhere: in the title, in the backend keywords, or naturally in the prose (a bullet or the description). Backend is the default home — reach for a bullet only when the keyword fits the prose naturally. The keyword reconciliation report must prove placement for each one, and placed_in must name where the keyword ACTUALLY lands (do not claim a bullet you did not write). If a keyword was intentionally excluded, state why.`
 
   return {
     contextBlock,
