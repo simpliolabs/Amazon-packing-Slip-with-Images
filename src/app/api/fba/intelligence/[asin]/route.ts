@@ -35,6 +35,9 @@ import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
 import { checkPresenceAny } from '@/lib/keyword-engine/checkPresence';
+// COHERENCE Invariant 6: at COVERAGE_CORE=on the Present-In tab decides coverage via the SAME shared
+// field-agnostic predicate the RANK panel uses, so the two read screens are identical by construction.
+import { coverageMode, coverageAcrossRows } from '@/lib/keyword-engine/coverage-core';
 import { loadListingRowsForPresence, loadRepresentativeListingRow } from '@/lib/keyword-engine/loadListingContent';
 
 // resolveToChildAsin extracted to @/lib/fba/resolveAsin (shared with the rank-analysis route, no fork).
@@ -277,10 +280,13 @@ export async function GET(
       const liveRows = await loadListingRowsForPresence(supabase, childAsin);
       if (liveRows.length > 0) {
         type PresenceRow = { keyword: string; inTitle?: boolean; inBullets?: boolean; inDescription?: boolean; inBackend?: boolean };
+        const useCore = coverageMode() === 'on';
         const recompute = (rows?: PresenceRow[]) => {
           for (const r of rows ?? []) {
             // OR'd across the ASIN's FBA+FBM twin rows — divergent twins can't shadow each other.
-            const p = checkPresenceAny(r.keyword, liveRows);
+            // At =on, coverageAcrossRows is the SAME predicate the RANK panel uses (identical per-field
+            // flags by construction); =off keeps checkPresenceAny byte-identical.
+            const p = useCore ? coverageAcrossRows(r.keyword, liveRows) : checkPresenceAny(r.keyword, liveRows);
             r.inTitle = p.inTitle;
             r.inBullets = p.inBullets;
             r.inDescription = p.inDescription;
