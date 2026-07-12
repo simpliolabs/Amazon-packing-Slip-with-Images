@@ -1,5 +1,3 @@
-import { createAdminClient } from '@/lib/supabase/server'
-
 /**
  * Resolve an ASIN (parent OR child) to a child ASIN that has listing content. Extracted verbatim
  * from the intelligence route so the rank-analysis route resolves identically (no fork).
@@ -12,7 +10,10 @@ import { createAdminClient } from '@/lib/supabase/server'
  */
 export async function resolveToChildAsin(
   inputAsin: string,
-  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  // Accepts any supabase client (admin server client or the scorer's SupabaseClient) — the generated
+  // types don't constrain these reads, and it's read-only. Same pattern as loadListingRowsForPresence.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
 ): Promise<{ childAsin: string; parentAsin: string | null } | null> {
   // 1. Direct match — input is already a child ASIN in listing_content.
   // limit(1).maybeSingle() (NOT .single()): an ASIN with FBA+FBM twin rows returns 2 rows here,
