@@ -1586,6 +1586,9 @@ export function validateDescription(
    *  hardcode a specific GB/TB/MB (PR #90 — live B0GCF11RKL shipped "THE CEO 128GB..." in a
    *  32/64/128 family). Mirrors the bullet capacity check from #76. */
   capacityFamily: string[] = [],
+  /** Apparel gets a HARD gate that the description must include a <ul> feature list. Task #68 —
+   *  B0FRYMM56C shipped flat paragraphs with no bulleted list, docking description_score. */
+  requireBulletList: boolean = false,
 ): string[] {
   const problems: string[] = []
   // Strip HTML the same way the scorer does (loose tag strip — agent returns <p>/<ul>/<li>).
@@ -1596,6 +1599,12 @@ export function validateDescription(
   }
   if (plain.length < 200) {
     problems.push(`Description is only ${plain.length} chars — expand to 800-2000 chars with use cases, target audience, technical specs, and long-tail keywords. Amazon indexes the full text.`)
+  }
+
+  // 🚫 STRUCTURE — apparel descriptions must include a bulleted <ul> feature list. Flat prose docks
+  // description_score (B0FRYMM56C shipped as flat <p>-only). Task #68.
+  if (requireBulletList && !/<(?:ul|ol)\b[^>]*>[\s\S]*<li\b[^>]*>[\s\S]*<\/li>[\s\S]*<\/(?:ul|ol)>/i.test(description)) {
+    problems.push('🚫 STRUCTURE VIOLATION: description is flat prose with no bulleted feature list. Rewrite with the required structure: opening hook (<p><b>…</b> …</p>) → <ul> with 2-4 <li> items covering key features (fabric/fit/design theme/care) → closing use-cases/audience line. A description without a <ul><li>…</li></ul> block is REJECTED — Amazon apparel descriptions read as scannable feature lists.')
   }
 
   // 🚫 CAPACITY-FAMILY check (PR #90) — same rule the bullets validator enforces.
@@ -2627,9 +2636,15 @@ async function runBulletsAgent(
   const attrLine = attributes.length
     ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention ${apparel ? 'the garment brand and material' : 'the key specs'} in ONE bullet${apparel ? ' (e.g. "comfort colors", "ring-spun cotton")' : ''}. Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
     : ''
+  // Widow-format wearer-POV rule — B0FRYMM56C ("Golf Widow" tee) shipped bullet 1 as "made just for
+  // golf-loving women" (the AI inverted the joke). When the title carries "{hobby} widow/wife", inject
+  // an explicit rule enumerating forbidden vs allowed framings. No-op on every non-widow listing.
+  const widow = detectWidowFormat(finalTitle, repTitle)
+  const widowLine = widowFormatRule(widow)
+
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}. Accuracy to the actual product is non-negotiable — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
   const user = `The title is FINAL (do not change it): "${finalTitle}"
-
+${widowLine}
 🚫 ACCURACY IS THE #1 RULE — violating it is a failure:
 - ${apparel ? 'This is a GRAPHIC TEE; its design is ONLY what the title above says.' : 'This product is EXACTLY what the title above describes — do NOT reframe it as apparel, a t-shirt, "graphic tee", clothing, or "fashion" unless the title literally says so.'} Do NOT claim it is FOR a profession, role, or audience not explicitly named in the title. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title.${giftAudiences.length > 0 ? ' ONE EXCEPTION — GIFT FRAMING: inside an explicit gift phrase ("great gift for teachers, nurses…") these audience words ARE allowed: a gift suggestion is a use-case, not a product-identity claim. The exception applies ONLY to the dedicated gift bullet described below.' : ''}
 - A keyword being in the candidate list does NOT make it usable — SKIP any keyword that forces an inaccurate or awkward claim. Fewer-but-accurate beats more-but-wrong.
@@ -3430,8 +3445,13 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
   const kwLine = topOpportunityKws.length
     ? `\n🟢 HIGH-VALUE SEARCH PHRASES — weave 3-5 of these in NATURALLY where they genuinely fit the copy (do NOT list them, do NOT stuff, skip any that would read awkwardly): ${topOpportunityKws.slice(0, 8).join(', ')}.`
     : ''
+  // Widow-format wearer-POV rule (parity with runBulletsAgent — B0FRYMM56C shipped "Celebrate your
+  // golf-loving spirit" on a Golf Widow tee). No-op when not a widow-format title.
+  const widow = detectWidowFormat(finalTitle, repTitle)
+  const widowLine = widowFormatRule(widow)
+
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
-  const user = `Write a CONCISE, VIVID HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. Fill the length with REAL SUBSTANCE grounded in the product facts below — ${apparel ? "the design/theme story, fabric and feel, fit, construction, care, and styling/occasions" : "the product's real features, specs, materials, quality, and use cases"}. Do NOT weave in search queries or repeat shopper-search phrasing (e.g. "graphic tees for women", "cotton tshirts for women", "relaxed tshirts for women") — those live in the BACKEND keywords, never the description prose. Be tight and punchy; lead with the strongest selling point. Do NOT exceed 980 visible characters.
+  const user = `${widowLine}Write a CONCISE, VIVID HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. The HTML MUST include a <ul> feature list (2-4 <li> items) — a description with no bulleted list is REJECTED. Fill the length with REAL SUBSTANCE grounded in the product facts below — ${apparel ? "the design/theme story, fabric and feel, fit, construction, care, and styling/occasions" : "the product's real features, specs, materials, quality, and use cases"}. Do NOT weave in search queries or repeat shopper-search phrasing (e.g. "graphic tees for women", "cotton tshirts for women", "relaxed tshirts for women") — those live in the BACKEND keywords, never the description prose. Be tight and punchy; lead with the strongest selling point. Do NOT exceed 980 visible characters.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}${kwLine}
 
@@ -3471,7 +3491,7 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
   // PR #90: family capacity tokens for the description capacity-family check (mirrors bullets).
   const descCapTokens = descCapacityFamily ? [...descChildCaps].map((c) => c.toUpperCase()) : []
   if (description && descBrand) {
-    let dProblems = validateDescription(description, descBrand, descCapTokens)
+    let dProblems = validateDescription(description, descBrand, descCapTokens, apparel)
     for (let attempt = 0; attempt < 2 && dProblems.length > 0; attempt++) {
       try {
         const capClause = descCapTokens.length >= 2
@@ -3482,12 +3502,12 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
           messages: [
             { role: 'system', content: system },
             { role: 'user', content: `Rewrite the description to fix these problems. The product is "${finalTitle}" — describe ONLY that.
-
+${widowLine}
 Problems:
 - ${dProblems.join('\n- ')}
 
 Rules to honor on rewrite:
-- 900-980 visible characters (~150 words) HTML using <p>, <b>, <ul>, <li>. Do NOT exceed 980 visible characters.
+- 900-980 visible characters (~150 words) HTML using <p>, <b>, <ul>, <li>. Do NOT exceed 980 visible characters. The HTML MUST include a <ul>…<li>…</li>…</ul> block — flat prose is REJECTED.
 - Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capClause}
 - Return ONLY the HTML.` },
           ],
@@ -3496,7 +3516,7 @@ Rules to honor on rewrite:
         })
         const corrected = (fix.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
         if (!corrected) break
-        const cdProblems = validateDescription(corrected, descBrand, descCapTokens)
+        const cdProblems = validateDescription(corrected, descBrand, descCapTokens, apparel)
         if (cdProblems.length < dProblems.length) { description = corrected; dProblems = cdProblems }
         else break
       } catch { break /* keep best-so-far */ }
@@ -4796,6 +4816,57 @@ Rules:
  * per-color strings get cleaned). FAIL-OPEN: any LLM/parse failure returns everything unchanged, so it
  * can only ever IMPROVE. The title is NOT rewritten here (its 75-char/brand/manual-lock guards are upstream).
  */
+
+/** Detect "{HOBBY} Widow" / "{HOBBY} Wife" compound-noun titles where the WEARER is the SPOUSE of the
+ *  enthusiast, NOT the enthusiast herself. B0FRYMM56C (a Golf Widow tee) shipped bullet 1 as "made just
+ *  for golf-loving women" and the description as "Celebrate your golf-loving spirit" — the AI inverted
+ *  the joke into being about the wearer. Same class: Football Widow, Fishing Widow, Beer Wife, etc.
+ *
+ *  Distinction: "{HOBBY} Widow/Wife" is a compound noun (wearer's role = spouse of the enthusiast).
+ *  A plain "gift for wife" / "wife birthday" is an audience/occasion phrase and does NOT fire — we only
+ *  match when a KNOWN HOBBY word directly precedes widow/wife/widowed. */
+const HOBBY_NOUNS_FOR_WIDOW = new Set([
+  'golf','golfing','fishing','hunting','football','baseball','basketball','soccer','hockey','tennis',
+  'racing','poker','gambling','gaming','gamer','gym','crossfit','running','cycling','biking','skiing',
+  'snowboard','surfing','skate','skateboarding','climbing','hiking','camping','boating','sailing','yacht',
+  'motorcycle','biker','trucker','car','auto','pilot','flying','beer','whiskey','wine','coffee','pool',
+  'dart','bowling','chess',
+])
+function detectWidowFormat(...titles: (string | null | undefined)[]): { isWidowFormat: boolean; hobby: string; spouseWord: string } {
+  for (const t of titles) {
+    if (!t) continue
+    const m = String(t).toLowerCase().match(/\b(\w+)\s+(widow|widowed|widows|wife|wives)\b/)
+    if (m && HOBBY_NOUNS_FOR_WIDOW.has(m[1])) return { isWidowFormat: true, hobby: m[1], spouseWord: m[2] }
+  }
+  return { isWidowFormat: false, hobby: '', spouseWord: '' }
+}
+
+/** Injectable rule block for runBulletsAgent / runDescriptionAgent / runFinalEditorialAudit when a widow
+ *  format is detected. Names the failure mode explicitly and enumerates ALLOWED vs FORBIDDEN framings so
+ *  the model stops flipping the joke. Returns '' when not a widow format (no-op for every other listing). */
+function widowFormatRule(w: { isWidowFormat: boolean; hobby: string; spouseWord: string }): string {
+  if (!w.isWidowFormat) return ''
+  const hobby = w.hobby
+  const spouse = w.spouseWord.replace(/s$/, '').replace(/ed$/, '')   // widows/widowed → widow, wives → wife
+  const doing = hobby === 'golf' ? 'golfing' : hobby === 'fishing' ? 'fishing' : hobby === 'hunting' ? 'hunting' : hobby === 'gaming' || hobby === 'gamer' ? 'gaming' : hobby === 'gym' || hobby === 'crossfit' ? 'at the gym' : hobby === 'motorcycle' || hobby === 'biker' ? 'riding' : `doing ${hobby}`
+  const away = hobby === 'golf' ? 'at the course' : hobby === 'fishing' ? 'at the lake' : hobby === 'football' || hobby === 'baseball' || hobby === 'basketball' || hobby === 'soccer' || hobby === 'hockey' ? 'watching the game' : hobby === 'racing' ? 'at the track' : hobby === 'poker' || hobby === 'gambling' ? 'at the table' : hobby === 'hunting' ? 'out hunting' : `at ${hobby}`
+  return `\n🚫 WEARER POV — ${hobby.toUpperCase()} ${spouse.toUpperCase()} FORMAT (read this before writing anything):
+This design's title contains "${hobby} ${spouse}" — a compound noun meaning the wearer is the SPOUSE of a ${hobby} enthusiast, NOT the enthusiast herself. The joke pokes fun at HIM (or HER partner) being always ${doing}, not at the wearer's own hobby.
+- The wearer does NOT do ${hobby}. Her PARTNER does. She is the one waiting at home / ${away} / holding the fort.
+- 🚫 FORBIDDEN phrasing (this is the exact failure mode — do NOT reproduce it):
+  ✗ "for ${hobby}-loving women" / "for women who love ${hobby}"
+  ✗ "celebrate your ${hobby}-loving spirit" / "for the ${hobby} lover"
+  ✗ "made just for ${hobby}-loving women" / "channel your ${hobby} passion"
+  ✗ ANY phrasing that implies the WEARER is the one who plays/does/loves ${hobby}.
+- ✅ CORRECT framings (the wearer is the SPOUSE, the joke is on the enthusiast):
+  ✓ "for the ${hobby} ${spouse} whose husband is always ${doing}"
+  ✓ "great gift for a ${hobby} ${spouse} — you know who you are"
+  ✓ "when he's always ${doing}, tell everyone where he is with this ${hobby} ${spouse} tee"
+  ✓ "for wives who wave the ${hobby} flag from the sidelines"
+Before returning, RE-READ every sentence: if any implies SHE loves ${hobby}, rewrite it.
+`
+}
+
 // Deterministic dangle repair — trims a phrase that ends on a stray CONJUNCTION/ARTICLE. A sentence never
 // legitimately ends on "and/or/plus/the/a/an", so stripping those is safe; "for/to/of/with" are DELIBERATELY
 // excluded (they are valid stranded prepositions — "the tee every golf widow's been waiting for."). Kills a
@@ -4950,7 +5021,7 @@ async function runFinalEditorialAudit(
   bullets: string[],
   description: string,
   backendSample: string,
-  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string },
+  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string; widow?: { isWidowFormat: boolean; hobby: string; spouseWord: string } },
 ): Promise<{ title: string; bullets: string[]; description: string; backendDrop: Set<string> }> {
   const unchanged = { title, bullets, description, backendDrop: new Set<string>() }
   try {
@@ -4960,11 +5031,15 @@ async function runFinalEditorialAudit(
     // 2026-07-10). Meta-guidance to the model must never be sayable about the product.
     const brandNote = ctx.garmentBrand ? ` The garment brand is "${ctx.garmentBrand}" — naming it in customer copy is ALLOWED and encouraged.` : ''
     const fitClause = ctx.fit ? `the fit is ${ctx.fit} — NEVER call it "oversized", "boxy", or "roomy oversized"; ` : ''
+    // Widow-format wearer-POV rule — parity with the bullets/description generators, so an audit
+    // rewrite can't reintroduce "golf-loving women" on a Golf Widow tee. No-op when not detected.
+    const widowLine = ctx.widow ? widowFormatRule(ctx.widow) : ''
     const sys = `You are a senior Amazon apparel listing EDITOR. Fix the FINAL copy below so it is user-friendly, accurate, and ON-THEME. Return ONLY JSON: {"title":"...","bullets":[5 strings],"description":"...HTML, see DESCRIPTION rule...","backend_drop":[lowercase terms to remove]}.
 
 PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.${brandNote}
 
 GARMENT TRUTH (never contradict): ${fitClause}this is a MIDWEIGHT garment — NEVER write "Heavyweight"; only claim a fabric weight you can confirm.
+${widowLine}
 
 RULES:
 - VOICE: you are writing for the SHOPPER. Never use trade or internal words in ANY field: "seller", "blank", "SKU", "ASIN", "listing", "keyword", "backend". Never restate these instructions as facts about the product.
@@ -5609,6 +5684,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           brandFront: brandName || 'THE CEO',
           garmentBrand: garmentBrandCanonical || '',
           fit: truthFitEarly,
+          widow: detectWidowFormat(finalTitle, repTitle),
         })
         outB = ar.bullets
         if (outD) outD = ar.description
@@ -5659,6 +5735,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             brandFront: brandName || 'THE CEO',
             garmentBrand: brand,
             fit,
+            widow: detectWidowFormat(ctx.title, ctx.groupInput.canonicalTitle),
           })
           if (gb.length === 5) gb = ar.bullets
           if (gd) gd = ar.description
@@ -6605,6 +6682,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // customer copy, don't drop it as a "competitor") and the real fit (relaxed → forbid "oversized").
       garmentBrand: garmentBrandCanonical || '',
       fit: blankSpec?.fit || pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
+      widow: detectWidowFormat(finalTitle, repTitle),
     })
     // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped
     // (kills "T-Shirt … T-Shirt"). If the audit returned the title unchanged, these are idempotent no-ops.
