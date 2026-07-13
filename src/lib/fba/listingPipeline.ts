@@ -2737,20 +2737,25 @@ async function runBulletsAgent(
   const attrLine = attributes.length
     ? `\nKNOWN PRODUCT ATTRIBUTES — real product facts; mention ${apparel ? 'the garment brand and material' : 'the key specs'} in ONE bullet${apparel ? ' (e.g. "comfort colors", "ring-spun cotton")' : ''}. Do NOT let specs crowd out the top keyphrases above:\n  ${attributes.join(', ')}\n`
     : ''
-  // Widow-format wearer-POV rule — B0FRYMM56C ("Golf Widow" tee) shipped bullet 1 as "made just for
-  // golf-loving women" (the AI inverted the joke). When the title carries "{hobby} widow/wife", inject
-  // an explicit rule enumerating forbidden vs allowed framings. No-op on every non-widow listing.
+  // Widow-format wearer-POV note — 2026-07-13 REGRESSION FIX: the previous multi-line FORBIDDEN block
+  // caused the LLM to over-correct — it produced only 4 bullets and dropped the design name + top
+  // opportunity keywords (B0FRYMM56C bullet_score fell from 18/18 to 8/18 after regen). Replaced with
+  // a single tight sentence, moved AFTER the ACCURACY block so keyword coverage rules dominate. The
+  // rich FORBIDDEN/ALLOWED block still fires in DESCRIPTION generation via widowFormatRule() (that
+  // path handled it well). No-op on non-widow listings.
   const widow = detectWidowFormat(finalTitle, repTitle)
-  const widowLine = widowFormatRule(widow)
+  const widowNote = widow.isWidowFormat
+    ? `\n🚫 POV NOTE — "${widow.hobby} ${widow.spouseWord}" is a compound noun: the wearer is the SPOUSE of a ${widow.hobby} enthusiast, NOT the enthusiast herself. Never write "${widow.hobby}-loving" or imply SHE plays/loves ${widow.hobby}; framings like "for the ${widow.hobby} ${widow.spouseWord}" or "for wives whose husbands are always ${widow.hobby === 'golf' ? 'golfing' : widow.hobby}" are correct. This is ONE consideration among many — you STILL owe 5 bullets covering the REQUIRED search keyphrases, the garment brand once, and the design name.`
+    : ''
 
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY valid JSON: {"bullets": ["b1","b2","b3","b4","b5"]}. Accuracy to the actual product is non-negotiable — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
   const user = `The title is FINAL (do not change it): "${finalTitle}"
-${widowLine}
+
 🚫 ACCURACY IS THE #1 RULE — violating it is a failure:
 - ${apparel ? 'This is a GRAPHIC TEE; its design is ONLY what the title above says.' : 'This product is EXACTLY what the title above describes — do NOT reframe it as apparel, a t-shirt, "graphic tee", clothing, or "fashion" unless the title literally says so.'} Do NOT claim it is FOR a profession, role, or audience not explicitly named in the title. NEVER write "teacher", "nurse", "mom", "dad", "coach", "student", "educator", "boss", or any job/role word unless that exact word is in the title.${giftAudiences.length > 0 ? ' ONE EXCEPTION — GIFT FRAMING: inside an explicit gift phrase ("great gift for teachers, nurses…") these audience words ARE allowed: a gift suggestion is a use-case, not a product-identity claim. The exception applies ONLY to the dedicated gift bullet described below.' : ''}
 - A keyword being in the candidate list does NOT make it usable — SKIP any keyword that forces an inaccurate or awkward claim. Fewer-but-accurate beats more-but-wrong.
 - Before returning, RE-READ each bullet: if any implies the product is for a specific job/role/occasion NOT named in the title — or reframes it as a product type it is not — REWRITE it to describe the actual product instead.
-${topLine}${rankLine}
+${widowNote}${topLine}${rankLine}
 These are ADDITIONAL candidate keywords you MAY weave into the bullet body text (not the hook) — only when they fit naturally and accurately:
 ${kwList || '  (none — focus on benefits)'}
 ${attrLine}
