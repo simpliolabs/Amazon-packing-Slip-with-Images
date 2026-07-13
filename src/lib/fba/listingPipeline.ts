@@ -1601,10 +1601,22 @@ export function validateDescription(
     problems.push(`Description is only ${plain.length} chars — expand to 800-2000 chars with use cases, target audience, technical specs, and long-tail keywords. Amazon indexes the full text.`)
   }
 
+  // 🚫 LENGTH FLOOR — apparel target is 900-980 visible chars (agent prompt line ~3434). Under 900 =
+  // under-filled — retry to expand toward the target. B0FRYMM56C shipped 869 chars (~31 short). Task #68.
+  if (requireBulletList && plain.length >= 200 && plain.length < 900) {
+    problems.push(`🚫 LENGTH SHORT: description has only ${plain.length} visible chars — target is 900-980. Expand toward 950 by adding one more sentence to the opening paragraph OR one more <li> feature, or a fuller closing use-case line. Do NOT stuff keywords — add REAL SUBSTANCE (fabric weight/hand, fit specifics, styling ideas, gift-suggestion, care).`)
+  }
+
   // 🚫 STRUCTURE — apparel descriptions must include a bulleted <ul> feature list. Flat prose docks
   // description_score (B0FRYMM56C shipped as flat <p>-only). Task #68.
   if (requireBulletList && !/<(?:ul|ol)\b[^>]*>[\s\S]*<li\b[^>]*>[\s\S]*<\/li>[\s\S]*<\/(?:ul|ol)>/i.test(description)) {
     problems.push('🚫 STRUCTURE VIOLATION: description is flat prose with no bulleted feature list. Rewrite with the required structure: opening hook (<p><b>…</b> …</p>) → <ul> with 2-4 <li> items covering key features (fabric/fit/design theme/care) → closing use-cases/audience line. A description without a <ul><li>…</li></ul> block is REJECTED — Amazon apparel descriptions read as scannable feature lists.')
+  }
+
+  // 🚫 BOLD MISSING — the prompt asks for <p>, <b>, <ul>, <li>. B0FRYMM56C shipped with ZERO <b> tags.
+  // At least one <b> lead-in (e.g. the opening hook) gives the description shopper-scannable formatting.
+  if (requireBulletList && !/<b\b[^>]*>[\s\S]*<\/b>/i.test(description) && !/<strong\b[^>]*>[\s\S]*<\/strong>/i.test(description)) {
+    problems.push('🚫 FORMATTING: description has no <b>…</b> (or <strong>…</strong>) emphasis. Amazon renders <b> — use it at least once to bold the opening hook (e.g. "<p><b>Golf widow uniform</b> for the wife whose husband is always at the course.</p>") so the description scans, not blocks.')
   }
 
   // 🚫 CAPACITY-FAMILY check (PR #90) — same rule the bullets validator enforces.
