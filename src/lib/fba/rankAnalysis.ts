@@ -185,7 +185,11 @@ export async function buildHaystack(parentAsin: string | null, childAsin: string
 
 /** sha1 of the live copy — the staleness key persisted with a cached analysis (cheap: 1 query + hash). */
 export async function contentFingerprint(parentAsin: string | null, childAsin: string, supabase: AdminClient): Promise<string> {
-  return createHash('sha1').update(await buildHaystack(parentAsin, childAsin, supabase)).digest('hex')
+  // Tag the fingerprint with the coverage MODE so flipping COVERAGE_CORE invalidates every cached rank
+  // analysis: the cached rows were computed under the OLD predicate, so on flip the stored fingerprint
+  // mismatches and the GET recomputes live under the new mode (self-healing cutover — no manual
+  // "Re-check now" per listing). Rollback (on→off) re-invalidates the same way.
+  return createHash('sha1').update(`${coverageMode()}\n${await buildHaystack(parentAsin, childAsin, supabase)}`).digest('hex')
 }
 
 /** FREE stored-core: top opportunity keywords × content coverage. 0 credits, 0 OpenAI. */
@@ -197,7 +201,7 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
   // fallback than resolveToChildAsin — so the keyword SET can still differ on edge cases. Unifying those
   // resolvers is a tracked follow-up; this is NOT a byte-for-byte parity guarantee with the scorer.
   const haystack = await buildHaystack(parentAsin, childAsin, supabase)
-  const fingerprint = createHash('sha1').update(haystack).digest('hex')
+  const fingerprint = createHash('sha1').update(`${coverageMode()}\n${haystack}`).digest('hex')   // mode-tagged, MUST match contentFingerprint()
 
   let kws = await getStoredAnalysis(childAsin, 100)
   if (!kws || kws.length === 0) {
