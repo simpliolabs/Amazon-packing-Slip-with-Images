@@ -6203,9 +6203,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // removal, PO-approved 2026-07-08). Design tokens exempted — the design phrase is identity and
   // deliberately leads the core.
   const normIdxTok = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '')
-  const mkAlreadyIndexed = (title: string, blts: string[], dn?: string): Set<string> => {
+  // 2026-07-13 (#69): bullets are DELIBERATELY excluded from alreadyIndexed. Backend is the sanctioned
+  // home for opportunity-keyword coverage (Content step 2, PO-approved) — so a token that appears in a
+  // bullet MUST still be free to land in backend. The `blts` param is retained for signature stability
+  // (4 callers), but ignored on purpose. Title + brand + sibling colors DO stay stripped — title-echo
+  // wastes bytes on the strongest-ranking field (PO 2026-07-08); colors are per-variant tails; brand is
+  // Amazon-attribute-indexed. Design tokens are exempted (identity mandate).
+  const mkAlreadyIndexed = (title: string, _blts: string[], dn?: string): Set<string> => {
     const s = new Set<string>()
-    for (const t of `${title} ${blts.join(' ')} ${brandName}`.split(/\s+/)) { const n = normIdxTok(t); if (n) s.add(n) }
+    for (const t of `${title} ${brandName}`.split(/\s+/)) { const n = normIdxTok(t); if (n) s.add(n) }
     for (const c of input.children) { const n = normIdxTok(c.color || ''); if (n) s.add(n) }
     for (const t of (dn ?? (effectiveDesignName || designName || '')).split(/\s+/)) s.delete(normIdxTok(t))
     return s
@@ -6253,7 +6259,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // additions, and stripping first lets the fill reuse the freed bytes.
         if (lean === 'female' || lean === 'male') rows = rows.map((p) => ({ ...p, keywords: stripOppositeGenderTokens(p.keywords, lean) }))
         const groupIndexed = mkAlreadyIndexed(ctx.title, groupBullets, ctx.designName)
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), `${ctx.title} ${groupBullets.join(' ')}`) }))
+        // coverageHay = TITLE only (#69, 2026-07-13): Step-4's fold-aware echo gate MUST compare a
+        // garment-noun candidate against the title (which stably indexes the product type), not against
+        // bullets — bullets are transient prose and their "graphic"/"gift"/etc. would wrongly block
+        // high-volume opportunity phrases from ever landing in backend where Content step 2 needs them.
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -6278,7 +6288,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), `${finalTitle} ${bullets.join(' ')}`) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -6338,7 +6348,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), `${finalTitle} ${bullets.join(' ')}`),
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
       }))
       return out
     }
@@ -6434,7 +6444,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), `${finalTitle} ${bullets.join(' ')}`),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
     }))
     return out
   }
