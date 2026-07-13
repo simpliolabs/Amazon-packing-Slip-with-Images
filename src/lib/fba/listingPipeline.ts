@@ -1642,6 +1642,95 @@ export function validateDescription(
   return problems
 }
 
+/** Numeric quality score for an HTML description (task #70). Codifies the quality bar we've learned
+ *  across the session's fixes so the description retry loop can score-gate, keep the best-scored
+ *  version, and re-prompt with SPECIFIC critiques rather than the pass/fail binary of
+ *  validateDescription. Runs alongside validateDescription (which owns brand/trademark/capacity hard
+ *  gates); scoreDescription owns the CONTENT/FORMATTING gates. Returns { score: 0-100, critiques[] }. */
+export interface DescriptionScoringCtx {
+  widow?: { isWidowFormat: boolean; hobby: string; spouseWord: string }
+  /** Blank's fit (e.g. 'relaxed'). When 'relaxed', "oversized"/"boxy" claims dock. Optional. */
+  fit?: string
+}
+export function scoreDescription(html: string, ctx: DescriptionScoringCtx = {}): { score: number; critiques: string[] } {
+  const critiques: string[] = []
+  let score = 100
+  const plain = (html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+  const len = plain.length
+
+  // ── LENGTH /25 — target 900-980 visible chars ─────────────────────────────────
+  if (len >= 900 && len <= 980) {
+    // full marks
+  } else if (len >= 800 && len < 900) {
+    score -= 10
+    critiques.push(`LENGTH SHORT (${len}/900 min): expand toward ~950 chars by adding one substantive sentence to the opening paragraph OR one more <li> feature (fabric weight/hand/care/styling) — NEVER by stuffing keywords.`)
+  } else if (len > 980 && len <= 1050) {
+    score -= 10
+    critiques.push(`LENGTH OVER (${len}/980 max): trim ${len - 980}+ chars back to the 900-980 window — cut the most generic sentence.`)
+  } else if (len >= 700 && len < 800) {
+    score -= 17
+    critiques.push(`LENGTH TOO SHORT (${len} — need 900-980): expand by ~150+ chars with REAL substance (design theme, fabric feel, fit specifics, gift-suggestion, care).`)
+  } else if (len > 1050) {
+    score -= 17
+    critiques.push(`LENGTH FAR OVER (${len}, need 900-980): cut ~${len - 950} chars.`)
+  } else {
+    score -= 25
+    critiques.push(`LENGTH WRONG (${len}, need 900-980 visible chars).`)
+  }
+
+  // ── STRUCTURE /20 — must include <ul>…<li>…</li>…</ul> ────────────────────────
+  const hasUl = /<(?:ul|ol)\b[^>]*>[\s\S]*<li\b[^>]*>[\s\S]*<\/li>[\s\S]*<\/(?:ul|ol)>/i.test(html)
+  if (!hasUl) {
+    score -= 20
+    critiques.push('NO <ul> LIST: add a <ul>…<li>…</li>…</ul> feature list (2-4 <li> items covering fabric, fit, design theme, care/styling).')
+  }
+
+  // ── BOLD /15 — must include at least one <b> or <strong> ──────────────────────
+  const hasBold = /<b\b[^>]*>[\s\S]*<\/b>/i.test(html) || /<strong\b[^>]*>[\s\S]*<\/strong>/i.test(html)
+  if (!hasBold) {
+    score -= 15
+    critiques.push('NO <b> EMPHASIS: bold the opening hook or a lead-in phrase with <b>…</b> so the description scans (e.g. "<p><b>Golf widow uniform</b> for the wife whose husband is always at the course.</p>").')
+  }
+
+  // ── JARGON LEAK /20 — trade/internal words never allowed in customer copy. High penalty by design:
+  //    a single leak MUST drop below THRESHOLD (85) so any occurrence triggers a retry.
+  const JARGON = /\b(?:seller(?:'s)?|blank|blanks|SKU|ASIN|listing|keyword|backend)\b/i
+  const jm = plain.match(JARGON)
+  if (jm) {
+    score -= 20
+    critiques.push(`INTERNAL JARGON: contains "${jm[0]}" — this is a trade word, NEVER use it in customer-facing copy. Remove it and describe the product directly.`)
+  }
+
+  // ── FIT CONTRADICTION /10 — Relaxed blank ≠ oversized/boxy ────────────────────
+  if (ctx.fit && /relaxed/i.test(ctx.fit)) {
+    const fm = plain.match(/\b(oversized|boxy|roomy\s+oversized)\b/i)
+    if (fm) {
+      score -= 10
+      critiques.push(`FIT CONTRADICTION: describes as "${fm[0]}" but the blank is Relaxed. Say "relaxed fit" instead.`)
+    }
+  }
+
+  // ── WIDOW POV /10 — the wearer is the SPOUSE, never the enthusiast ────────────
+  if (ctx.widow?.isWidowFormat) {
+    const h = ctx.widow.hobby
+    const FORBIDDEN = new RegExp(`\\b(?:${h}[-\\s]?loving|${h}[-\\s]?lover|celebrate\\s+your\\s+${h})\\b`, 'i')
+    const wm = plain.match(FORBIDDEN)
+    if (wm) {
+      score -= 10
+      critiques.push(`WIDOW POV INVERTED: description contains "${wm[0]}" — the wearer is the SPOUSE, NOT the ${h} enthusiast. Rewrite: the wearer's PARTNER is the one who does ${h}. Correct framings: "for the ${h} widow", "for wives whose husbands are always ${h === 'golf' ? 'at the course' : `doing ${h}`}", "gift for a ${h} widow".`)
+    }
+  }
+
+  // ── DANGLING SENTENCE /5 — never end on a conjunction/preposition ─────────────
+  // e.g. "…styling with jeans or.</li>", "…features a relaxed and.</p>"
+  if (/\b(?:and|or|with|for|to|of|plus)\.\s*(?:<\/p>|<\/li>|$)/i.test(html)) {
+    score -= 5
+    critiques.push('DANGLING SENTENCE: a sentence ends on a stray conjunction/preposition (and/or/with/for/to/of/plus). Finish the thought.')
+  }
+
+  return { score: Math.max(0, score), critiques }
+}
+
 // ─── Stage 0 — candidate preparation (code only) ───────────────────────────────
 
 interface TitleCandidate { keyword: string; opportunityScore: number; role: 'keyphrase' | 'descriptive' | 'audience'; organicRank?: number | null }
@@ -3495,16 +3584,29 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
     description = (completion.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
   }
 
-  // ── Brand-safety + length retry (validateDescription) ─────────────────────────
-  // Same shape as runTitleAgent / runBulletsAgent: up to 2 corrective passes. Closes the
-  // last surface in PR #75 — title (#74), bullets (above), and now description all share
-  // the parent/child coverage standard for validate+retry.
+  // ── METRIC-GATED CRITIC LOOP (task #70) ──────────────────────────────────────
+  // Codifies the quality bar we've learned across the session's description fixes as a numeric score
+  // (scoreDescription) + hard problems (validateDescription). Loops generate → score+validate →
+  // re-prompt with SPECIFIC critiques → keep BEST-SCORED version, up to MAX_ITERS. Threshold = 85/100;
+  // if unreached, ships the best-scored candidate anyway (never blank/degrade). Replaces the previous
+  // pass/fail max-2 retry loop.
   const { brandName: descBrand } = input
   // PR #90: family capacity tokens for the description capacity-family check (mirrors bullets).
   const descCapTokens = descCapacityFamily ? [...descChildCaps].map((c) => c.toUpperCase()) : []
   if (description && descBrand) {
-    let dProblems = validateDescription(description, descBrand, descCapTokens, apparel)
-    for (let attempt = 0; attempt < 2 && dProblems.length > 0; attempt++) {
+    const scoringCtx: DescriptionScoringCtx = { widow }
+    const MAX_ITERS = 4
+    const THRESHOLD = 85
+    let bestDescription = description
+    let bestScore = scoreDescription(description, scoringCtx).score
+    let bestVProblems = validateDescription(description, descBrand, descCapTokens, apparel)
+    for (let attempt = 0; attempt < MAX_ITERS - 1; attempt++) {
+      const { score, critiques } = scoreDescription(bestDescription, scoringCtx)
+      const vProblems = validateDescription(bestDescription, descBrand, descCapTokens, apparel)
+      // Done when the quality bar AND hard validators are both clean.
+      if (score >= THRESHOLD && vProblems.length === 0) break
+      const allProblems = [...critiques, ...vProblems]
+      if (allProblems.length === 0) break                 // nothing to critique; can't retry
       try {
         const capClause = descCapTokens.length >= 2
           ? `\n- 🚫 CAPACITY: family spans ${descCapTokens.join(', ')}. The description is SHARED — NEVER hardcode a specific GB/TB ("128GB"). Use capacity-agnostic phrasing only.`
@@ -3513,26 +3615,32 @@ Structure: hook -> <ul> of key features -> use cases/audience -> short closing l
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite the description to fix these problems. The product is "${finalTitle}" — describe ONLY that.
+            { role: 'user', content: `Rewrite the HTML description to FIX these specific problems. The product is "${finalTitle}" — describe ONLY that.
 ${widowLine}
-Problems:
-- ${dProblems.join('\n- ')}
+Problems to fix (score ${score}/100, target ≥${THRESHOLD}):
+- ${allProblems.join('\n- ')}
 
-Rules to honor on rewrite:
-- 900-980 visible characters (~150 words) HTML using <p>, <b>, <ul>, <li>. Do NOT exceed 980 visible characters. The HTML MUST include a <ul>…<li>…</li>…</ul> block — flat prose is REJECTED.
+Non-negotiable rules on rewrite:
+- 900-980 visible characters (~150 words) of REAL substance, HTML using <p>, <b>, <ul>, <li>. The <ul>…<li>…</li>…</ul> feature list is REQUIRED. At least one <b>…</b> emphasis on the opening hook.
 - Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capClause}
-- Return ONLY the HTML.` },
+- Return ONLY the HTML — no markdown, no explanation.` },
           ],
           temperature: 0.4,
           max_tokens: 1200,
         })
         const corrected = (fix.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
         if (!corrected) break
-        const cdProblems = validateDescription(corrected, descBrand, descCapTokens, apparel)
-        if (cdProblems.length < dProblems.length) { description = corrected; dProblems = cdProblems }
-        else break
+        const cScore = scoreDescription(corrected, scoringCtx).score
+        const cVProblems = validateDescription(corrected, descBrand, descCapTokens, apparel)
+        // Keep-best-scored across all iterations. Ties broken by fewer hard-validator problems.
+        if (cScore > bestScore || (cScore === bestScore && cVProblems.length < bestVProblems.length)) {
+          bestDescription = corrected
+          bestScore = cScore
+          bestVProblems = cVProblems
+        }
       } catch { break /* keep best-so-far */ }
     }
+    description = bestDescription
 
     // 🛟 Programmatic capacity backstop (PR #90, mirrors the bullets backstop in #79). If a
     // specific capacity still survives in a multi-capacity family's shared description after
