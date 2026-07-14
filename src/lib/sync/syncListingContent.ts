@@ -991,47 +991,34 @@ export function scoreListingContent(
     }
   }
 
-  // ── 3c. DESCRIPTION KEYWORD COVERAGE (PO 2026-06-15 "GO description-scoring") ──────────────
-  // A stale description that misses the CURRENT high-opportunity keywords (e.g. a pre-soccer
-  // description on a now-soccer listing) used to still score 25/25 — length + title-overlap were
-  // the only checks — so the verdict marked it DONE / "no change needed" and NEVER prompted the
-  // seller to ship the freshly-optimized copy. Dock by how many of the top CRITICAL/UPGRADE phrases
-  // the live description is MISSING, so a stale one drops below the 'strong/DONE' convergence
-  // threshold and the section becomes actionable ("ship the optimized description").
-  if (descLen >= 50) {
-    const targetKws = [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords].slice(0, 8)
-    if (targetKws.length >= 3) {
-      // Retire the raw-substring model (Invariant 1 — no descLower.includes()): =off keeps the exact
-      // substring baseline byte-identical; at =on unify onto token coverage (a natural paraphrase counts).
-      // FIELD-AGNOSTIC (Invariant 2 + content-step-2): an opportunity keyword lives in BACKEND by
-      // design (shopper-invisible, zero ranking loss) — so a keyword covered ANYWHERE in the listing
-      // (title ∪ bullets ∪ backend ∪ description) is placed, not "missing from the description". The
-      // old descPlain-only check double-docked the description for keywords it was CORRECT to keep out
-      // of prose, an unfixable dock no amount of description rewriting could clear. Only a keyword
-      // absent everywhere is a real freshness gap. (=off keeps the legacy descPlain-only baseline.)
-      const descCoverageRows = [descPlain, title, ...bullets, representativeContent.backend_keywords || '']
-      const missingKwsLegacy = targetKws.filter((k) => !descPlain.toLowerCase().includes(k.toLowerCase()))
-      const missingKws = missingVerdict(descCoverageRows, targetKws, missingKwsLegacy, 'scorer.desc3c', logAsin)
-      const coverage = (targetKws.length - missingKws.length) / targetKws.length
-      if (coverage < 0.5) {
-        // Misses most current high-value terms → stale / under-optimized. Dock enough to fall below
-        // the strong (>=23/25) convergence so the verdict stops saying "no change needed".
-        descriptionScore -= Math.min(8, 3 + missingKws.length)
-        issues.push({ field: 'description', severity: 'warning', message: `Your listing covers only ${targetKws.length - missingKws.length}/${targetKws.length} of its current high-opportunity keywords across title + bullets + backend + description — the description looks stale or under-optimized. Ship the optimized description below to weave in: ${missingKws.slice(0, 3).map((k) => `"${k}"`).join(', ')}.`, auto_fixable: false })
-      } else if (coverage < 0.8) {
-        descriptionScore -= 3
-        issues.push({ field: 'description', severity: 'info', message: `Your listing covers ${targetKws.length - missingKws.length}/${targetKws.length} top keywords across title + bullets + backend + description — a few high-opportunity terms are still missing. Shipping the optimized version would capture them.`, auto_fixable: false })
-      }
+  // ── 3c. DESCRIPTION QUALITY (redesign 2026-07-14, PO "grade quality, not keyword coverage") ──
+  // The old 3c docked the description by how many top CRITICAL/UPGRADE keywords it "missed". But
+  // keyword coverage is the KEYWORD card's job (double-counting it here just moved the same points
+  // twice), and a SHARED, color-neutral description structurally CANNOT carry per-color terms
+  // ("black graphic tee women"), backend-home opportunity terms, or off-niche contamination
+  // ("usher and chris brown shirt") — so those were unfixable docks no rewrite could ever clear.
+  // The description card now grades what the DESCRIPTION is actually responsible for: substance
+  // (length) + scannable STRUCTURE. Theme freshness stays covered by 3b (title-overlap). Robust to
+  // Amazon HTML-stripping: structure is a SOFT nudge that can never, alone, drop a full on-theme
+  // description below the >=23 'strong/DONE' gate.
+  if (descLen >= 200 && apparel) {
+    if (descLen < 700) {
+      // The generator targets 900-980 chars; a live description well under that is under-built.
+      descriptionScore -= 3
+      issues.push({ field: 'description', severity: 'info', message: `Description is only ${descLen} characters — expand toward 900-980 with benefit-led copy (fit, feel, gift angle, occasions) so it reads full and converts.`, auto_fixable: false })
     } else {
-      // POOL TOO THIN TO CONFIRM FRESHNESS (PO 2026-06-15): targetKws < 3 means the keyword pool is
-      // empty/unresearched (no CRITICAL/UPGRADE rows in keyword_analysis — the Intelligence-pool
-      // decoupling). With nothing to check coverage against, a STALE description is indistinguishable
-      // from an optimized one — and #243 then left descriptionScore at its default 25 → 100%/12-12 →
-      // it cleared the >=23 'DONE' gate → "no change needed", so the seller was never prompted to ship.
-      // Don't hand out the DONE-clearing default when we CAN'T verify: cap below 23 so the section
-      // stays ACTIONABLE. (Stopgap; the real fix is healing the pool so coverage can actually be scored.)
-      descriptionScore = Math.min(descriptionScore, 22)
-      issues.push({ field: 'description', severity: 'info', message: 'Cannot confirm the description matches your current keyword pool — the pool is empty or unresearched. Research keywords (Intelligence tab), then regenerate the description so its coverage can be verified.', auto_fixable: false })
+      // Scannability: a bulleted highlight list + light bold emphasis convert better than a wall of
+      // prose. Soft nudges only — a full, on-theme description stays green even if the marketplace
+      // stripped the tags on sync-back.
+      const hasStructure = /<(?:ul|ol)\b[^>]*>[\s\S]*?<li\b/i.test(description)
+      const hasEmphasis = /<(?:b|strong)\b[^>]*>/i.test(description)
+      if (!hasStructure) {
+        descriptionScore -= 2
+        issues.push({ field: 'description', severity: 'info', message: 'Add a scannable bullet list (a <ul> of 3-5 short benefit lines) to the description — shoppers skim, and structured descriptions convert better.', auto_fixable: false })
+      } else if (!hasEmphasis) {
+        descriptionScore -= 1
+        issues.push({ field: 'description', severity: 'info', message: 'Bold a key phrase or two (<b>) in the description for scannability.', auto_fixable: false })
+      }
     }
   }
 
