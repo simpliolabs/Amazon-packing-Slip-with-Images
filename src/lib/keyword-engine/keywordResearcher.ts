@@ -552,6 +552,17 @@ function garmentBrandSeed(seed: string, listingTitle?: string | null): string | 
 // tokens BEFORE they enter the merged pool — so even a leaky seed can't smuggle off-product
 // keywords into Intelligence/audit/title-agent candidates.
 
+/** Synonym bridges so a keyword phrased with the OTHER common term for the same concept stays
+ *  on-identity (2026-07-14, B0H7L6KNNX: a Spain World-Cup SOCCER tee dropped every "football"
+ *  keyword — internationally "football" IS soccer — because identity held "soccer" with zero shared
+ *  letters). ASYMMETRIC ON PURPOSE: a soccer/futbol identity gains "football", but a bare "football"
+ *  identity does NOT gain "soccer" — that protects a US-football (gridiron) listing from admitting
+ *  soccer terms. Extend with other same-concept pairs as they surface. */
+const IDENTITY_SYNONYMS: Record<string, string[]> = {
+  soccer: ['football', 'futbol'],
+  futbol: ['soccer', 'football'],
+}
+
 /** Tokenize a string into a set of stemmed identity tokens (drops generics + tiny words). */
 export function identityTokensOf(...sources: (string | null | undefined)[]): Set<string> {
   const out = new Set<string>()
@@ -565,6 +576,8 @@ export function identityTokensOf(...sources: (string | null | undefined)[]): Set
       out.add(w)
     }
   }
+  // Synonym expansion so an on-concept keyword phrased with the sibling term stays on-identity.
+  for (const w of [...out]) for (const syn of IDENTITY_SYNONYMS[w] ?? []) out.add(syn)
   return out
 }
 

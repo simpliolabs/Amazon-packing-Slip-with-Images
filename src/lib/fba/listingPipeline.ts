@@ -2533,6 +2533,26 @@ Rules:
     }
   }
 
+  // Deterministic backstop (apparel, 2026-07-14, B0H7L6KNNX): never let the low-value DEPARTMENT word
+  // "Unisex"/"Adult" split the money phrase from the product type — "…Cup Champions Unisex T-Shirt"
+  // breaks the exact-match "Champions T-Shirt" the shopper searches AND burns ~7 chars. The council
+  // writes "Unisex T-Shirt" (mirroring the blank), and the "weld design-name to product-type" rule is
+  // advisory PROMPT text only, so nothing removes it. Strip "Unisex"/"Adult" sitting immediately BEFORE
+  // the garment token — UNLESS it leads the title. SCOPED to these two: gendered/age words (Mens,
+  // Womens, Girls, Boys, Kids) are real search keywords and are KEPT even if they split the phrase;
+  // "Unisex"/"Adult" carry ~no search value and live in the Department attribute row anyway. The freed
+  // chars feed the niche fill below.
+  if (apparel) {
+    const welded = title.replace(
+      /\b(?:Unisex|Adult)\s+(?=(?:Graphic\s+)?(?:T-?Shirts?|Tees?|Shirts?|Hoodies?|Sweat\s?shirts?|Tanks?|Tops?)\b)/gi,
+      (m, offset: number) => (offset === 0 ? m : ''),
+    )
+    if (welded !== title) {
+      title = welded.replace(/\s{2,}/g, ' ').trim()
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    }
+  }
+
   // Deterministic backstop (apparel): a sub-50-char title wastes real keyword space even under the
   // 75-char cap (the validator's floor is 50). Lead the garment brand with a FEEL adjective —
   // "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the title toward 50-75.
@@ -3423,7 +3443,7 @@ async function runAuditAgent(
   description: string,
   specs: string[],
 ): Promise<AuditResult> {
-  const { openai, auditModel, variantDetails, keywordContext, hasAplus, category, repTitle, productType, detailAttributeMenu } = input
+  const { openai, auditModel, variantDetails, keywordContext, hasAplus, category, repTitle, productType, detailAttributeMenu, visionDesign } = input
   const apparel = looksApparel(category, repTitle, productType)
   const backendSummary = perChild.slice(0, 3).map((p) => `  ${p.sku}: ${p.keywords}`).join('\n')
   const specsLine = specs.length
@@ -3432,9 +3452,16 @@ async function runAuditAgent(
   // Live schema menu (PO: "auto-map any item to the category's Features") — the ONLY attributes
   // Amazon accepts for THIS product type, with their real enum values. When present the audit
   // picks from it instead of guessing apparel-shaped field names (Department on sticky notes).
-  const menu = (detailAttributeMenu ?? []).slice(0, 14)
+  const menu = (detailAttributeMenu ?? []).slice(0, 26)
   const menuLine = menu.length
     ? `\n=== AMAZON ATTRIBUTE MENU for this product type (the ONLY Product-Detail field names Amazon accepts here) ===\n${menu.map((m) => `- ${m.title}${m.accepted?.length ? ` [accepted values: ${m.accepted.slice(0, 12).join(' | ')}]` : ''}`).join('\n')}\n`
+    : ''
+  // DESIGN THEME grounding (2026-07-14, B0H7L6KNNX "Theme=Game" bug): the vision scan already read what
+  // is PRINTED on the product; without it the audit derives Theme/Occasion/Sport from the generic
+  // keyword pool and guesses "Game" for a soccer World-Cup tee. Feed it so those attributes ground to
+  // the real design, not a generic guess.
+  const designThemeLine = visionDesign?.designTheme
+    ? `\n=== DESIGN THEME (what is actually printed on the product) ===\n${visionDesign.designTheme}${visionDesign.visualElements?.length ? ` — visual elements: ${visionDesign.visualElements.slice(0, 6).join(', ')}` : ''}\n`
     : ''
 
   const system = `You are a senior Amazon SEO auditor. Return ONLY valid JSON.
@@ -3448,7 +3475,7 @@ BACKEND (sample of per-child):
 ${backendSummary}
 DESCRIPTION: ${description ? 'provided (HTML)' : '(none)'}
 A+ exists: ${hasAplus}
-${specsLine}${menuLine}
+${specsLine}${menuLine}${designThemeLine}
 === CURRENT LISTING (for variant health + product details) ===
 ${variantDetails}
 
@@ -3468,7 +3495,7 @@ Rules:
 - Review EVERY element in the action plan (title, bullet_1..5, backend_keywords, description, aplus_modules, brand_story, product_details, images). For title/bullets/backend/description, the replacement_content is the FINALIZED content above — restate it, do not invent new copy.
 - DESCRIPTION: even if A+ exists, the field is still indexed for search — mark CREATE/EDIT (not SKIP) and note that customers see A+ but Amazon indexes this field.
 - CANNIBALIZATION: children in ONE variation family do NOT compete in search. Leave cannibalization_warnings empty unless the SAME backend string is duplicated identically across many children. Never report cross-listing cannibalization (not assessable here).
-- PRODUCT DETAILS: the structured attributes in Seller Central → More Details power Amazon's filtered search + the spec comparison table, and are almost always under-filled. Do NOT assume they're already set — PROACTIVELY recommend a value for EVERY standard attribute a shopper filters THIS product type by. ${menu.length ? 'Use ONLY field names from the AMAZON ATTRIBUTE MENU above, with the EXACT names shown — any other field name is rejected by Amazon for this product type. Where the menu lists accepted values, recommended_value MUST be one of them, verbatim. Pick the 5-10 menu attributes that most improve filtered search for THIS product.' : apparel ? 'Cover (as applicable), using these EXACT field names (they match Amazon\'s apparel schema — suffixed variants like "Neck Style"/"Sleeve Type" are NOT valid top-level attributes and get rejected): Material, Fabric Type, Fit Type, Care Instructions, Department, Neck, Sleeve, Closure.' : 'Cover (adapt to the ACTUAL product — e.g. for a memory/SD card): Capacity, Read Speed, Write Speed, Speed Class, Video Speed Class, Flash Memory Type, Form Factor, Hardware Interface, Compatible Devices, Manufacturer Warranty. NOT apparel fields like Fabric Weight or Fit Type.'} Derive recommended_value from the title/bullets/keywords/specs above; set current_value to null when you can't confirm it from the listing. Emit 5-10 — these win filtered search, so err toward MORE rather than fewer.
+- PRODUCT DETAILS: the structured attributes in Seller Central → More Details power Amazon's filtered search + the spec comparison table, and are almost always under-filled. Do NOT assume they're already set — PROACTIVELY recommend a value for EVERY standard attribute a shopper filters THIS product type by. ${menu.length ? 'Use ONLY field names from the AMAZON ATTRIBUTE MENU above, with the EXACT names shown — any other field name is rejected by Amazon for this product type. Where the menu lists accepted values, recommended_value MUST be one of them, verbatim. Recommend a value for EVERY menu attribute that plausibly applies to THIS product — do NOT pick a subset; a shopper filters by all of them, so each filled attribute is another filtered-search entry. Skip a menu attribute ONLY when it is genuinely irrelevant to this item.' : apparel ? 'Cover (as applicable), using these EXACT field names (they match Amazon\'s apparel schema — suffixed variants like "Neck Style"/"Sleeve Type" are NOT valid top-level attributes and get rejected): Material, Fabric Type, Fit Type, Care Instructions, Department, Neck, Sleeve, Closure.' : 'Cover (adapt to the ACTUAL product — e.g. for a memory/SD card): Capacity, Read Speed, Write Speed, Speed Class, Video Speed Class, Flash Memory Type, Form Factor, Hardware Interface, Compatible Devices, Manufacturer Warranty. NOT apparel fields like Fabric Weight or Fit Type.'} Derive recommended_value from the title/bullets/keywords/specs above; set current_value to null when you can't confirm it from the listing. For THEME / OCCASION / SPORT / SEASON / STYLE, ground the value to the DESIGN THEME section (what is actually printed) — e.g. a soccer/World-Cup design → a soccer or sports Theme, NEVER a generic guess like "Game". Fill as MANY applicable attributes as the menu offers — completeness wins filtered search, so err strongly toward MORE; skip only the truly irrelevant.
 - A+ modules: more modules lift conversion and dwell time; A+ body text is not a confirmed ranking field, so recommend filling image ALT-TEXT for discoverability.
 Return ONLY the JSON object.`
 
@@ -4667,14 +4694,16 @@ async function buildTitleFor(
     const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
     finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
   }
-  // 6b. DETERMINISTIC NICHE FILL (2026-07-06, instrumented root cause). The LLM council reliably
-  //     IGNORES the niche brief line — live proof: 8 grounded seeds handed over, title still a
-  //     47-char stub with no "Too Many Books". Since input.nicheSeeds are grounded + judge-verified
-  //     whole phrases (a TRUSTED source), append them deterministically to fill the budget. Unlike
-  //     the pool fill, this ALLOWS a word to repeat up to Amazon's 2x limit (the seller's own title
-  //     does: "Book Lover ... Too Many Books") rather than the strict all-novel rule that blocked
-  //     the shared "book". Trailing garment/gift words are trimmed (the title already names the type).
-  if (apparelProduct && (input.nicheSeeds?.length ?? 0) > 0 && finalTitle.length < 68) {
+  // 6b. DETERMINISTIC NICHE FILL (2026-07-06; widened 2026-07-14 for B0H7L6KNNX). The LLM council
+  //     reliably IGNORES the niche brief line, AND step 3's fill above enforces a strict ALL-NOVEL
+  //     rule that vetoes any on-theme keyphrase reusing a concept word. For an EVENT/slogan design
+  //     ("Spain … Soccer … Champions") EVERY on-theme fill reuses "spain"/"soccer", so step 3 can
+  //     never pack it and the title stalls at 60/75. THIS packer ALLOWS a word to repeat up to
+  //     Amazon's legal 2x limit — but it was gated on `input.nicheSeeds` (empty for event designs)
+  //     and read ONLY nicheSeeds, never the candidate/upgrade pools where "Spain Soccer Fan Tee"
+  //     actually lives. Draw from ALL three grounded pools; the 2x cap + garment-scrub guards below
+  //     keep it honest. Trailing garment/gift words are trimmed (the title already names the type).
+  if (apparelProduct && finalTitle.length < 72) {
     const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
     const tail = tailMatch ? tailMatch[0] : ''
     let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
@@ -4682,8 +4711,8 @@ async function buildTitleFor(
     const counts = new Map<string, number>()
     for (const t of bulletTokens(head).map(fillNormTok)) counts.set(t, (counts.get(t) ?? 0) + 1)
     const trimTail = (s: string) => { let p = s, prev = ''; while (p && p !== prev) { prev = p; p = p.replace(/\s+(?:tees?|t-?shirts?|shirts?|gifts?|graphic|apparel|clothing|tops?)\s*$/i, '').trim() } return p }
-    for (const seed of input.nicheSeeds!) {
-      if ((head + tail).length >= 70) break
+    for (const seed of [...(input.nicheSeeds ?? []), ...candidates.map((c) => c.keyword), ...topUpgradeKws]) {
+      if ((head + tail).length >= 73) break
       const clean = trimTail(seed.trim())
       if (bulletTokens(clean).length < 2) continue
       if (stripContradictedGarments(stripUngroundedMotifs(clean, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust) !== clean) continue
@@ -6709,7 +6738,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // 1:1 to sp_api_key and the row rides the schema-details rails (Push button, verify, write-
   // through) with ZERO new endpoints. The generated value (LLM draft → deterministic gates →
   // attribute fallback, see buildItemHighlights) replaces any audit-guessed duplicate.
-  let pdiFinal: PipelineProductDetailImprovement[] = Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 10) : []
+  let pdiFinal: PipelineProductDetailImprovement[] = Array.isArray(audit.product_details_improvements) ? audit.product_details_improvements.slice(0, 26) : []
   // The audit rows are a blind-cast LLM parse: recommended_value can arrive as an ARRAY
   // (Additional Features: ["Water Proof","Shock Proof"]) or a bare number — every consumer
   // (.trim(), byte caps, PATCH bodies) assumes string, and the listing page hard-crashed on
