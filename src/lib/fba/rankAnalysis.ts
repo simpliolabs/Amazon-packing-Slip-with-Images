@@ -19,7 +19,7 @@ import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 // stale stored-flag OR. =off is byte-identical to today.
 import { coverageMode, coverageAcrossRows } from '@/lib/keyword-engine/coverage-core'
 import { loadListingRowsForPresence } from '@/lib/keyword-engine/loadListingContent'
-import { isEquipmentNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
+import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { fetchShareOfVoice } from '@/lib/sync/jungleScoutClient'
 import { createAdminClient } from '@/lib/supabase/server'
 
@@ -232,13 +232,15 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     }
   } catch { /* lean read is best-effort — no filter on failure */ }
 
-  // WRONG-NICHE guard (2026-07-14, fourth site of the #203 symmetry): golf-EQUIPMENT keywords
-  // ("martini golf tees", "golf tees plastic/wood" — the pegs) must never appear as "ADD — high-
-  // opportunity term" advice on a golf SHIRT listing; the copy is designed to never satisfy them.
-  // Same predicate the scorer skips with (nicheGuards — Invariant 1 discipline); apparel-gated via
-  // the live haystack ("shirt/hoodie/apparel" — a peg listing's copy says "tees" but never "shirt").
+  // OFF-NICHE guard (2026-07-14, fourth site of the #203 symmetry): wrong-niche keywords — golf pegs
+  // ("martini golf tees"), competitor blanks ("gildan t shirts"), wholesale ("plain t shirts"),
+  // activewear ("oversized workout shirts"), foreign-language ("grafica tees women"), non-apparel
+  // goods ("golf accessories") — must never appear as "ADD — high-opportunity term" advice on a
+  // graphic SHIRT listing; the copy is designed to never satisfy them. Same predicate the scorer
+  // skips with (nicheGuards — Invariant 1 discipline); apparel-gated, own-brand/activewear kept via
+  // the live haystack as context.
   if (/\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(haystack)) {
-    kws = kws.filter((k) => !isEquipmentNicheKeyword(k.keyword))
+    kws = kws.filter((k) => !isOffNicheKeyword(k.keyword, { context: haystack }))
     if (kws.length === 0) {
       return { analyzed: false, reason: 'no_keywords', rows: [], top10: [], coverage: { covered: 0, total: 0 }, criticalGaps: 0, contentFingerprint: fingerprint, baselineVerdict: buildBaselineVerdict(0, 0, 0) }
     }

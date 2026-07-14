@@ -48,3 +48,72 @@ export function isEquipmentNicheKeyword(keyword: string): boolean {
   if (GARMENT_CONTEXT.test(kw)) return false              // garment context wins ("golf tee shirt for women")
   return GOLF_TEE_EQUIPMENT_SIGNALS.test(kw)              // equipment signal → it's the peg
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OFF-NICHE net (B0FRYMM56C, 2026-07-14): golf pegs were only ONE class of the
+// researcher's wrong-niche contamination. The same listing's CRITICAL/UPGRADE set
+// also carried competitor BLANK brands ("gildan t shirts"), wholesale/blank intent
+// ("plain t shirts for women"), off-niche activewear ("oversized workout shirts"),
+// a foreign-language duplicate ("grafica tees women"), and a non-apparel goods
+// category ("golf accessories") — every one an UNFIXABLE dock: a graphic-tee's copy
+// can never (and must never) satisfy them, so they wrongly read as "gaps" and gave
+// actively harmful advice ("weave in 'usher and chris brown shirt'"). One predicate,
+// consumed by the scorer AND the RANK panel (Invariant 1), scoped per
+// [[dont-overgeneralize-specific-failures]]: each class is high-confidence + guarded
+// (own-brand kept, real activewear/gear listings keep their terms). The genuinely
+// SEMANTIC tail (celebrity merch like "usher and chris brown shirt") is NOT guessed
+// here — it belongs to the relevance classifier (keyword_analysis IRRELEVANT tier).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Blank-apparel wholesale brands a PRINTED graphic tee competes AGAINST, never targets — a shopper
+ *  searching "gildan t shirts" wants an unprinted Gildan blank, not our Comfort Colors graphic tee.
+ *  Own-brand-guarded by the caller's `context`: if the listing's OWN brand is Gildan, it is kept. */
+const COMPETITOR_BLANK_BRANDS = /\b(?:gildan|bella\s*\+?\s*canvas|hanes|jerzees|anvil|tultex|alstyle|fruit\s+of\s+the\s+loom|next\s+level(?:\s+apparel)?|american\s+apparel|port\s*(?:&|and)\s*company|delta\s+apparel)\b/i
+
+/** Wholesale / blank-goods intent — the shopper wants an UNPRINTED shirt, the opposite of a graphic tee. */
+const WHOLESALE_INTENT = /\b(?:plain|blank|wholesale|bulk|unprinted)\b/i
+
+/** Activewear / performance niche — a casual garment-dyed cotton graphic tee is NOT athletic wear.
+ *  Caller gates on the LISTING itself not being activewear (a genuine gym-tee listing keeps these). */
+const ACTIVEWEAR_NICHE = /\b(?:workout|gym|athletic|activewear|jogging|yoga|training|exercise|fitness|dri-?fit|moisture-?wicking|sweat-?wicking|compression)\b/i
+
+/** Foreign-language apparel tokens — an English listing's copy can never satisfy a Spanish/Portuguese
+ *  keyword ("grafica tees women", "playeras mujer"); it is a different-market duplicate, not a gap. */
+const FOREIGN_APPAREL_TOKENS = /\b(?:gr[aá]fica|playeras?|camisetas?|camisas?|mujer|hombre|ni[nñ][oa]s?|remeras?|franelas?|blusas?|vestidos?)\b/i
+
+/** Physical sport/equipment GOODS categories (not garments): a keyword naming these with NO garment
+ *  word is off-niche for an apparel listing ("golf accessories", "golf balls" — gear, not shirts). */
+const EQUIPMENT_GOODS_NOUN = /\b(?:accessor(?:y|ies)|balls?|gloves?|clubs?|carts?|towels?|umbrellas?|gadgets?|head\s?covers?|divots?|ball\s+markers?|gift\s+sets?)\b/i
+
+/** Any garment word — presence rescues a keyword from the EQUIPMENT_GOODS_NOUN / wholesale nets. */
+const GARMENT_TOKEN = /\b(?:t-?\s?shirts?|tshirts?|shirts?|tees?|tops?|tank|hoodies?|sweat\s?shirts?|apparel|clothing|outfit)\b/i
+
+/**
+ * True when an APPAREL listing's keyword is OFF-NICHE — a term this graphic tee competes against or
+ * has nothing to do with, that the copy can never (and must never) satisfy, so it is an unfixable
+ * dock rather than a real gap. Strict SUPERSET of isEquipmentNicheKeyword (golf pegs); adds
+ * competitor-blank brands, wholesale/blank intent, activewear, foreign-language, and non-apparel
+ * equipment goods. Does NOT attempt semantic classes (celebrity/band merch) — those are the
+ * relevance classifier's job.
+ *
+ * Callers MUST gate on the listing being apparel (a real gear/activewear listing keeps these terms).
+ * `opts.context` = the listing's live copy (haystack), used to (a) NOT exclude the listing's OWN brand,
+ * and (b) NOT exclude activewear terms on a genuine activewear listing.
+ */
+export function isOffNicheKeyword(keyword: string, opts?: { context?: string }): boolean {
+  const kw = (keyword || '').toLowerCase()
+  if (!kw) return false
+  const ctx = (opts?.context || '').toLowerCase()
+
+  if (isEquipmentNicheKeyword(keyword)) return true                       // golf pegs
+  if (FOREIGN_APPAREL_TOKENS.test(kw)) return true                        // foreign-language duplicate
+
+  const brand = kw.match(COMPETITOR_BLANK_BRANDS)?.[0]                     // competitor blank brand,
+  if (brand && !ctx.includes(brand)) return true                          //   unless it is our OWN brand
+
+  if (WHOLESALE_INTENT.test(kw) && GARMENT_TOKEN.test(kw)) return true     // "plain/blank t shirts"
+  if (ACTIVEWEAR_NICHE.test(kw) && !ACTIVEWEAR_NICHE.test(ctx)) return true // activewear (unless we ARE)
+  if (EQUIPMENT_GOODS_NOUN.test(kw) && !GARMENT_TOKEN.test(kw)) return true // gear, not a garment
+
+  return false
+}

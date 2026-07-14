@@ -21,6 +21,7 @@ import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
+import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
 import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
@@ -245,6 +246,18 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
       opportunitiesUsed: 0,
       brandAnchorKeyword: null,
     }
+  }
+
+  // OFF-NICHE guard (Invariant 1 — same predicate as the scorer + rank panel): wrong-niche keywords
+  // (competitor blanks, wholesale, activewear, foreign-language, non-apparel goods, golf pegs) must
+  // NEVER be fed to the generator as "CRITICAL — you MUST include", which produced actively harmful
+  // advice ("weave in 'usher and chris brown shirt'") on a graphic-tee listing. Apparel-gated via the
+  // live child copy; the listing's OWN brand / genuine activewear survive via the context.
+  const nicheCtx = children
+    .map((c) => [c.title, c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5, c.backend_keywords].filter(Boolean).join(' '))
+    .join(' ')
+  if (/\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(nicheCtx)) {
+    analysis = analysis.filter((k) => !isOffNicheKeyword(k.keyword, { context: nicheCtx }))
   }
 
   // V2: Categorize with opportunity score + competition level shown per keyword
