@@ -19,6 +19,7 @@ import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 // stale stored-flag OR. =off is byte-identical to today.
 import { coverageMode, coverageAcrossRows } from '@/lib/keyword-engine/coverage-core'
 import { loadListingRowsForPresence } from '@/lib/keyword-engine/loadListingContent'
+import { isEquipmentNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { fetchShareOfVoice } from '@/lib/sync/jungleScoutClient'
 import { createAdminClient } from '@/lib/supabase/server'
 
@@ -230,6 +231,18 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
       }
     }
   } catch { /* lean read is best-effort — no filter on failure */ }
+
+  // WRONG-NICHE guard (2026-07-14, fourth site of the #203 symmetry): golf-EQUIPMENT keywords
+  // ("martini golf tees", "golf tees plastic/wood" — the pegs) must never appear as "ADD — high-
+  // opportunity term" advice on a golf SHIRT listing; the copy is designed to never satisfy them.
+  // Same predicate the scorer skips with (nicheGuards — Invariant 1 discipline); apparel-gated via
+  // the live haystack ("shirt/hoodie/apparel" — a peg listing's copy says "tees" but never "shirt").
+  if (/\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(haystack)) {
+    kws = kws.filter((k) => !isEquipmentNicheKeyword(k.keyword))
+    if (kws.length === 0) {
+      return { analyzed: false, reason: 'no_keywords', rows: [], top10: [], coverage: { covered: 0, total: 0 }, criticalGaps: 0, contentFingerprint: fingerprint, baselineVerdict: buildBaselineVerdict(0, 0, 0) }
+    }
+  }
 
   const check = makeCoverageChecker(haystack)   // today's baseline (coverage.ts kwToks over the family haystack)
   // At =on/=shadow, load the child's OWN twin rows ONCE and decide coverage LIVE via the shared

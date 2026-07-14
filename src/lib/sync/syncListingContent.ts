@@ -38,6 +38,7 @@ import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bullet
 import { coverageMode, coveredVerdict, missingVerdict, coverageTokens } from '@/lib/keyword-engine/coverage-core'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
+import { isEquipmentNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
@@ -512,6 +513,13 @@ export async function fetchScoringContext(
             ? (MASC_RE.test(kw) && !FEM_RE.test(kw))
             : (FEM_RE.test(kw) && !MASC_RE.test(kw))
         }
+        // WRONG-NICHE guard (2026-07-14, B0FRYMM56C): the researcher pulled golf-EQUIPMENT keywords
+        // ("martini golf tees", "golf tees plastic/wood" — the PEGS) into a golf SHIRT's CRITICAL set;
+        // the copy must NEVER cover those, so they were an unfixable -8/-10 dock. Gate on the listing
+        // being apparel (a real golf-peg listing keeps them): "shirt/hoodie/apparel" in the live copy —
+        // a peg listing's copy says "tees" but never "shirt".
+        const apparelListing = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(haystack)
+        const nicheExcluded = (kw: string): boolean => apparelListing && isEquipmentNicheKeyword(kw)
 
         // Count totals but cap what affects scoring to top 10 per category
         let criticalSeen = 0
@@ -521,6 +529,7 @@ export async function fetchScoringContext(
           const r = row as any
           ctx.totalKeywords++
           if (leanExcluded(String(r.keyword ?? ''))) continue  // the seller's audience choice bans it — not a gap
+          if (nicheExcluded(String(r.keyword ?? ''))) continue // wrong-niche equipment keyword — never a gap on apparel
           switch (r.action_type) {
             case 'CRITICAL':
               if (covered(r.keyword)) break  // already in the live copy — not a gap
