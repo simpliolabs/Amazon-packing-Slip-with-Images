@@ -3560,7 +3560,7 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
   const widowLine = widowFormatRule(widow)
 
   const system = `You are an Amazon SEO copywriter${apparel ? ' for apparel' : ''}. Return ONLY the HTML description (no markdown, no JSON). Describe ONLY the actual product — never invent an audience, profession, occasion, or product type the product is not explicitly about.`
-  const user = `${widowLine}Write a CONCISE, VIVID HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 150 words — using <p>, <b>, <ul>, <li>. The HTML MUST include a <ul> feature list (2-4 <li> items) — a description with no bulleted list is REJECTED. Fill the length with REAL SUBSTANCE grounded in the product facts below — ${apparel ? "the design/theme story, fabric and feel, fit, construction, care, and styling/occasions" : "the product's real features, specs, materials, quality, and use cases"}. Do NOT weave in search queries or repeat shopper-search phrasing (e.g. "graphic tees for women", "cotton tshirts for women", "relaxed tshirts for women") — those live in the BACKEND keywords, never the description prose. Be tight and punchy; lead with the strongest selling point. Do NOT exceed 980 visible characters.
+  const user = `${widowLine}Write a CONCISE, VIVID HTML product description (generic for all variants) of 900-980 characters of VISIBLE text (excluding HTML tags) — about 160-170 words; anything under ~160 words will land short of the 900-character floor — using <p>, <b>, <ul>, <li>. The HTML MUST include a <ul> feature list (2-4 <li> items) — a description with no bulleted list is REJECTED. Fill the length with REAL SUBSTANCE grounded in the product facts below — ${apparel ? "the design/theme story, fabric and feel, fit, construction, care, and styling/occasions" : "the product's real features, specs, materials, quality, and use cases"}. Do NOT weave in search queries or repeat shopper-search phrasing (e.g. "graphic tees for women", "cotton tshirts for women", "relaxed tshirts for women") — those live in the BACKEND keywords, never the description prose. Be tight and punchy; lead with the strongest selling point. Do NOT exceed 980 visible characters.
 Title: ${finalTitle}
 Bullet themes: ${bullets.map((b) => b.split(' - ')[0]).join(', ')}${attrLine}${kwLine}
 
@@ -3629,7 +3629,7 @@ Problems to fix (score ${score}/100, target ≥${THRESHOLD}):
 - ${allProblems.join('\n- ')}
 
 Non-negotiable rules on rewrite:
-- 900-980 visible characters (~150 words) of REAL substance, HTML using <p>, <b>, <ul>, <li>. The <ul>…<li>…</li>…</ul> feature list is REQUIRED. At least one <b>…</b> emphasis on the opening hook.
+- 900-980 visible characters (~160-170 words — under ~160 words lands short of the 900 floor) of REAL substance, HTML using <p>, <b>, <ul>, <li>. The <ul>…<li>…</li>…</ul> feature list is REQUIRED. At least one <b>…</b> emphasis on the opening hook.
 - Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${descBrand}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capClause}
 - Return ONLY the HTML — no markdown, no explanation.` },
           ],
@@ -3680,7 +3680,7 @@ Non-negotiable rules on rewrite:
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite the HTML description. ${instructions} The product is "${finalTitle}" — describe ONLY that. 900-980 visible characters (~150 words) HTML using <p>, <b>, <ul>, <li>; do NOT exceed 980 visible characters. Return ONLY the HTML.` },
+            { role: 'user', content: `Rewrite the HTML description. ${instructions} The product is "${finalTitle}" — describe ONLY that. 900-980 visible characters (~160-170 words) HTML using <p>, <b>, <ul>, <li>; do NOT exceed 980 visible characters. Return ONLY the HTML.` },
           ],
           temperature: 0.4,
           max_tokens: 1200,
@@ -3692,17 +3692,18 @@ Non-negotiable rules on rewrite:
   }
 
   // ── LENGTH FLOOR: the agent targets 900-980 VISIBLE chars but can under-deliver a thin blurb.
-  // One expand pass when notably short (< 850). Threshold sits just under the 900-floor so an
-  // in-band (900-980) description is NEVER expanded back over the cap. Best-effort; the prompt
-  // forbids inventing facts/audiences. (Was < 1300 toward 270-330 words — that fought the new cap.)
+  // One expand pass when under the 900 floor (2026-07-14: was < 850, which left an 850-899 DEAD BAND —
+  // live B0FRYMM56C shipped 861/862 twice: too long to expand, too short for the floor, and the critic
+  // retries re-anchored on the prompt's old "~150 words" ≈ 860 chars). An in-band (900-980) description
+  // is still never expanded. Best-effort; the prompt forbids inventing facts/audiences.
   const plainLen = (d: string) => d.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().length
-  if (description && plainLen(description) < 850) {
+  if (description && plainLen(description) < 900) {
     try {
       const expand = await openai.chat.completions.create({
         model: 'gpt-4.1-mini',
         messages: [
           { role: 'system', content: system },
-          { role: 'user', content: `Expand this product description to about 900-980 visible characters (~150 words; do NOT exceed 980 visible characters). Do NOT invent facts, audiences, professions, or uses not already implied. Same product ("${finalTitle}"); keep every third-party brand in "compatible with [Brand]" framing; keep clean HTML (<p>, <b>, <ul>, <li>).
+          { role: 'user', content: `Expand this product description to 920-970 visible characters (~165 words — ADD roughly ${Math.max(1, Math.ceil((920 - plainLen(description)) / 60))} sentence(s) of real substance: fabric feel, fit specifics, styling, care, or a gift suggestion; do NOT exceed 980 visible characters). Do NOT invent facts, audiences, professions, or uses not already implied. Same product ("${finalTitle}"); keep every third-party brand in "compatible with [Brand]" framing; keep clean HTML (<p>, <b>, <ul>, <li>).
 
 Too-short description to expand:
 ${description}
@@ -3713,7 +3714,11 @@ Return ONLY the expanded HTML.` },
         max_tokens: 1200,
       })
       const longer = (expand.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
-      if (longer && plainLen(longer) > plainLen(description)) description = longer
+      // Accept only if genuinely longer AND structure survived — the expander must not trade the
+      // <ul> list or <b> emphasis for prose length (nothing downstream compares vs pre-expand).
+      const keptStructure = (!/<(?:ul|ol)\b/i.test(description) || /<(?:ul|ol)\b/i.test(longer))
+        && (!/<(?:b|strong)\b/i.test(description) || /<(?:b|strong)\b/i.test(longer))
+      if (longer && keptStructure && plainLen(longer) > plainLen(description)) description = longer
     } catch { /* keep best-so-far */ }
   }
 
