@@ -1662,7 +1662,10 @@ export function scoreDescription(html: string, ctx: DescriptionScoringCtx = {}):
   if (len >= 900 && len <= 980) {
     // full marks
   } else if (len >= 800 && len < 900) {
-    score -= 10
+    // -17, NOT -10 (2026-07-14): at -10 an otherwise-clean 862-char draft scored 90 ≥ the 85
+    // threshold, so the critic loop STOPPED without retrying and shipped short (live B0FRYMM56C).
+    // Any under-900 length must land BELOW threshold so the loop keeps pushing toward 950.
+    score -= 17
     critiques.push(`LENGTH SHORT (${len}/900 min): expand toward ~950 chars by adding one substantive sentence to the opening paragraph OR one more <li> feature (fabric weight/hand/care/styling) — NEVER by stuffing keywords.`)
   } else if (len > 980 && len <= 1050) {
     score -= 10
@@ -5110,10 +5113,11 @@ function degradesDescription(before: string, after: string): boolean {
   const vb = visibleLen(before)
   const va = visibleLen(after)
   if (vb >= 400 && va < vb * 0.75) return true                                // half the text vanished
-  // #71 length-floor gate: pre-audit met the 900 floor (critic-approved) but the audit shortened past
-  // an 800 abs floor — that is destructive stripping, not a legit trim (B0FRYMM56C live: 950→784).
-  // Threshold 800 (not 900) tolerates a small polish-trim without reverting a legit audit fix.
-  if (vb >= 900 && va < 800) return true
+  // #71 length-floor gate, tightened 2026-07-14: pre-audit met the 900 floor (critic-approved) but the
+  // audit shortened below it — destructive stripping, not a trim (live: 950→784, then 9xx→862 slipped
+  // an 800 floor). The pre-audit is critic-gated (clean of jargon/stuffing), so reverting to it is safe;
+  // once a ≥900 description exists, nothing downstream may ship shorter than 900.
+  if (vb >= 900 && va < 900) return true
   return false
 }
 
