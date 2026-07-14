@@ -60,7 +60,9 @@ Return the indices of keywords that are OFF-PRODUCT for THIS listing — search 
 4. OTHER companies' brands / trademarks — a competitor blank brand, a sports team, a media franchise.
 5. An ADJACENT-but-different apparel niche this garment is NOT (e.g. "workout / gym / athletic / performance" terms for a casual garment-dyed cotton graphic tee).
 
-KEEP everything plausibly on-product: the design theme, the audience, occasions, gift terms, garment + brand descriptors, size/fit terms, and broad category angles ("graphic tees for women", "funny shirts for women"). Be CONSERVATIVE — when unsure, KEEP. Return ONLY {"drop":[...]}.`
+KEEP everything plausibly on-product: the design theme, the audience, occasions, gift terms, garment + brand descriptors, size/fit terms, and broad category angles ("graphic tees for women", "funny shirts for women").
+IMPORTANT SPORT NOTE: outside the US, "football" (and "fútbol") IS soccer — for a SOCCER or World-Cup design you MUST KEEP "football" keywords; only treat "football" as the different sport (American football / gridiron / NFL) when the PRODUCT itself is American-football themed.
+Be CONSERVATIVE — when unsure, KEEP. Return ONLY {"drop":[...]}.`
 
     const completion = await client.chat.completions.create({
       model: 'gpt-4.1-mini',

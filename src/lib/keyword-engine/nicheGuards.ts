@@ -88,6 +88,13 @@ const EQUIPMENT_GOODS_NOUN = /\b(?:accessor(?:y|ies)|balls?|gloves?|clubs?|carts
 /** Any garment word — presence rescues a keyword from the EQUIPMENT_GOODS_NOUN / wholesale nets. */
 const GARMENT_TOKEN = /\b(?:t-?\s?shirts?|tshirts?|shirts?|tees?|tops?|tank|hoodies?|sweat\s?shirts?|apparel|clothing|outfit)\b/i
 
+/** Wrong garment CUT / silhouette — a keyword whose shopper wants a DIFFERENT garment shape than this
+ *  listing's ("sleeveless printed jerseys" on a short-sleeve tee; B0H7L6KNNX). Caller gates on the
+ *  listing itself not being that cut, so a genuinely sleeveless/long-sleeve/cropped listing keeps them. */
+const WRONG_GARMENT_CUT = /\b(?:sleeveless|tank\s*tops?|racerback|long[\s-]?sleeves?|crop\s*tops?|cropped)\b/i
+/** The listing is a plain short-sleeve tee (so the cuts above are genuinely wrong for it). */
+const SHORT_SLEEVE_TEE = /\b(?:t-?\s?shirts?|tshirts?|tees?)\b/i
+
 /**
  * True when an APPAREL listing's keyword is OFF-NICHE — a term this graphic tee competes against or
  * has nothing to do with, that the copy can never (and must never) satisfy, so it is an unfixable
@@ -114,6 +121,9 @@ export function isOffNicheKeyword(keyword: string, opts?: { context?: string }):
   if (WHOLESALE_INTENT.test(kw) && GARMENT_TOKEN.test(kw)) return true     // "plain/blank t shirts"
   if (ACTIVEWEAR_NICHE.test(kw) && !ACTIVEWEAR_NICHE.test(ctx)) return true // activewear (unless we ARE)
   if (EQUIPMENT_GOODS_NOUN.test(kw) && !GARMENT_TOKEN.test(kw)) return true // gear, not a garment
+  // Wrong garment cut — only when THIS listing is a plain short-sleeve tee (a real sleeveless/
+  // long-sleeve/cropped listing has that word in its own copy, so it's kept).
+  if (WRONG_GARMENT_CUT.test(kw) && SHORT_SLEEVE_TEE.test(ctx) && !WRONG_GARMENT_CUT.test(ctx)) return true
 
   return false
 }
