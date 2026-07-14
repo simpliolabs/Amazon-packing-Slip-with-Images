@@ -31,6 +31,8 @@ import {
 import { captureRankSnapshots } from '../keyword-engine/cacheService';
 import { researchKeywords, getCachedResearch } from '../keyword-engine/keywordResearcher';
 import { loadListingRowsForPresence } from '../keyword-engine/loadListingContent';
+import { isOffNicheKeyword } from '../keyword-engine/nicheGuards';
+import { classifyOffNicheKeywords } from '../keyword-engine/relevanceClassifier';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -276,7 +278,33 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       return keywords;
     }
     console.log(`[syncKeywordIntelligence] relevance gate for ${asin}: kept ${kept.length}/${before} (dropped ${before - kept.length} off-product)`);
-    return kept;
+
+    // OFF-NICHE layer (2026-07-14): the token-overlap gate above keeps keywords that share only a
+    // GENERIC token ("shirt"/"tees"/"women") with identity, so celebrity merch ("usher and chris brown
+    // shirt"), foreign-language dupes ("grafica tees women") and off-niche gear survive into the stored
+    // pool and dock the score forever (an unfixable dock). Clean them at the SOURCE with the SAME
+    // predicates the scoring seams use: the deterministic net (enumerable classes) + an LLM pass (the
+    // semantic tail). Broad on-product category angles (fromUniverse) are exempt. Fail-open + floor.
+    const apparelCtx = [scoreRow?.product_title, listingTitle, ...childTitles].filter(Boolean).join(' ');
+    const isApparelPool = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(apparelCtx);
+    const candidates = kept.filter((k) => !(k as { fromUniverse?: boolean }).fromUniverse);
+    const offNiche = new Set<string>();
+    if (isApparelPool) {
+      for (const k of candidates) if (isOffNicheKeyword(k.keyword, { context: apparelCtx })) offNiche.add(k.keyword);
+    }
+    const llmDrop = await classifyOffNicheKeywords(
+      candidates.map((k) => k.keyword),
+      { title: scoreRow?.product_title || listingTitle, category: isApparelPool ? 'apparel / graphic t-shirt' : null },
+    );
+    for (const kw of llmDrop) offNiche.add(kw);
+    if (offNiche.size === 0) return kept;
+    const kept2 = kept.filter((k) => (k as { fromUniverse?: boolean }).fromUniverse || !offNiche.has(k.keyword));
+    if (kept2.length === 0 && before > 0) {
+      console.warn(`[syncKeywordIntelligence] off-niche gate would drop ALL for ${asin} — keeping ${kept.length} (never-collapse floor)`);
+      return kept;
+    }
+    console.log(`[syncKeywordIntelligence] off-niche gate for ${asin}: dropped ${offNiche.size} off-niche (${kept2.length}/${kept.length} kept)`);
+    return kept2;
   } catch (e) {
     console.warn('[syncKeywordIntelligence] relevance gate failed (non-fatal; pool unfiltered):', e instanceof Error ? e.message : e);
     return keywords;
