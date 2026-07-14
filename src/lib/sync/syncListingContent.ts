@@ -898,6 +898,10 @@ export function scoreListingContent(
           .filter((k) => k.split(/\s+/).length <= 6)
     ).filter((k) => !isCapacityFamily || !capRe.test(k))
      .filter((k) => !isColorNeutralFamily || !colorRe.test(k))
+     // WRONG-NICHE sibling of the capacity/color guards (2026-07-14): the persisted keyword-plan can
+     // carry golf-EQUIPMENT keywords ("martini golf tees") from a pre-guard research run — the copy
+     // must never weave those, so never dock for them. Same predicate as fetchScoringContext + rank.
+     .filter((k) => !apparel || !isEquipmentNicheKeyword(k))
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
