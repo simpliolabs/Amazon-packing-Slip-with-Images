@@ -5096,17 +5096,25 @@ const stripCodeFence = (s: string): string => s.replace(/^```(?:html)?\s*/i, '')
  *  text, silently. NOTE this is a RELATIVE gate against a known-good input, and it falls back to the
  *  pre-audit description — it is NOT the absolute "length floor" that the abort-and-preserve rule
  *  forbids (that rule is about aborting a whole regen on short-but-legitimate output). */
-// NO length-preservation rule (reverted #369): a shorter audited description is usually the audit
-// legitimately REMOVING keyword stuffing, not damaging content. The pre-audit council draft is longer
-// precisely BECAUSE it is stuffed ("relaxed tshirts for women and vintage tshirts for women…") and
-// un-jargon-checked ("printed on a Comfort Colors shirt blank" — live 2026-07-10), so falling back to it
-// to gain length ships worse copy. "Clean but ~776" beats "fuller but stuffed". A genuinely richer clean
-// description is a GENERATOR job (add real content — fabric/care/styling — not keywords), tracked separately.
+// 2026-07-13 (#71): length-preservation IS now safe. The old #369-era comment said "shorter audit =
+// legitimate stuffing removal" — that was true when the pre-audit council draft was routinely stuffed +
+// un-jargon-checked ("relaxed tshirts for women and vintage tshirts for women…", "printed on a Comfort
+// Colors shirt blank"). PR #388 shipped a metric-gated critic loop INSIDE runDescriptionAgent that gates
+// pre-audit output on scoreDescription (length 900-980, no jargon, <ul>, <b>, widow POV) — so any
+// pre-audit reaching the audit is already clean AND at target length. A post-audit shortening below the
+// 900 floor is now DESTRUCTIVE, not corrective (live B0FRYMM56C: critic pushed to ~950, audit shortened
+// to 784 — 82% ratio slipped past the 0.75 halving gate and shipped short).
 function degradesDescription(before: string, after: string): boolean {
   if (HTML_STRUCTURE.test(before) && !HTML_STRUCTURE.test(after)) return true // flattened to prose
   if (HAS_LIST.test(before) && !HAS_LIST.test(after)) return true             // the <ul> was destroyed
   const vb = visibleLen(before)
-  return vb >= 400 && visibleLen(after) < vb * 0.75                           // half the text vanished
+  const va = visibleLen(after)
+  if (vb >= 400 && va < vb * 0.75) return true                                // half the text vanished
+  // #71 length-floor gate: pre-audit met the 900 floor (critic-approved) but the audit shortened past
+  // an 800 abs floor — that is destructive stripping, not a legit trim (B0FRYMM56C live: 950→784).
+  // Threshold 800 (not 900) tolerates a small polish-trim without reverting a legit audit fix.
+  if (vb >= 900 && va < 800) return true
+  return false
 }
 
 /** Trade/internal vocabulary that must never reach a shopper. "blank" (the undecorated garment) and
