@@ -578,14 +578,22 @@ function backendOutputProblems(
   // would false-fail a genuinely thin catalog on keywords-only regens (which THROW), for no added
   // safety — the underfill the PO flagged is fixed in the GENERATOR now, not by a higher floor.
   if (minBytes < 190) problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill`)
-  const distinctColors = new Set(children.map((c) => (c.color || 'default').toLowerCase())).size
+  // DECODED colors (real, non-empty) vs UNdecodable children, counted separately (2026-07-15).
+  const decodedColors = children.map((c) => (c.color || '').toLowerCase()).filter(Boolean)
+  const distinctColors = new Set(decodedColors).size
+  const undecoded = children.length - decodedColors.length
   const distinctStrings = new Set(perChild.map((p) => p.keywords)).size
-  // UN-BLINDED (2026-07-09): the old distinctColors>=3 gate was computed from the SAME broken
-  // color values that caused the collapse (extractColor returned 'FBM' for every child → 1
-  // "color" → gate never fired while 91 children shared one hallucinated string). A ≥6-child
-  // apparel family with ONE identical string is degraded regardless of what the colors claim.
-  if (apparel && (distinctColors >= 3 || children.length >= 6) && distinctStrings < 2) {
-    problems.push(`all ${perChild.length} children share one identical string (${distinctColors} decoded color${distinctColors === 1 ? '' : 's'}) — per-color tails failed or colors could not be decoded`)
+  // An identical string across children is DEGRADED only when per-color differentiation was EXPECTED:
+  //   • the family genuinely spans ≥2 decoded colors, OR
+  //   • colors could NOT be decoded for a big family — so a mis-decode collapse (the 91-child 'FBM'
+  //     incident, 2026-07-09) can't be ruled out; keep flagging it.
+  // A family that CONFIDENTLY decodes to ONE color (e.g. B0H7L6KNNX = 9 White sizes) SHOULD share one
+  // backend string — sizes don't change backend keywords — so flagging it there was a FALSE POSITIVE that
+  // made the degradation gate PRESERVE stale junk forever (every regen silently no-op'd). The minBytes<190
+  // floor above still catches truncation/wipe garbage regardless of color count.
+  const differentiationExpected = distinctColors >= 2 || (distinctColors <= 1 && undecoded >= 6)
+  if (apparel && differentiationExpected && distinctStrings < 2) {
+    problems.push(`all ${perChild.length} children share one identical string (${distinctColors} decoded color${distinctColors === 1 ? '' : 's'}, ${undecoded} undecoded) — per-color tails failed or colors could not be decoded`)
   }
   return problems
 }

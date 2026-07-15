@@ -155,8 +155,17 @@ const SIZE_TOKEN_RE = "(?:XS|S|M|L|XL|XXL|XXXL|[2-5]XL|[2-6]X-?Large|X-?Small|XX
 export function decodeSkuColor(sku: string, title?: string | null): string | null {
   const parts = sku.toUpperCase().split('-').filter(Boolean)
   while (parts.length > 1 && (parts[parts.length - 1] === 'FBA' || parts[parts.length - 1] === 'FBM')) parts.pop()
+  // The LAST segment is the canonical color position (AQS-TMB-{SIZE}-{COLOR}) — prefer it.
   const code = parts[parts.length - 1] ?? ''
   if (SKU_COLOR_CODES[code]) return SKU_COLOR_CODES[code]
+  // Some SKUs carry the color in a MIDDLE segment: {STYLE+SIZE}-{COLOR}-{DESIGN…} (live 2026-07-15,
+  // B0H7L6KNNX: "64000M-WH-Spain-World-Champ" → the color WH sits at index 1, not last, so the last-segment
+  // read returned "CHAMP" → null → EVERY child decoded to no-color → the per-color backend collapsed to one
+  // string and the degradation gate then preserved stale keywords forever. Scan all segments, but accept
+  // ONLY when exactly ONE distinct color is present, so a design word that happens to be a code (Sky, Sage,
+  // Bay, Tan) can never be mis-read as the variant color — ambiguity falls through to the title/None path.
+  const scanned = [...new Set(parts.map((p) => SKU_COLOR_CODES[p]).filter(Boolean))]
+  if (scanned.length === 1) return scanned[0]
   const m = (title ?? '').match(new RegExp(`[-–—|]\\s*([A-Za-z0-9][\\w /&'-]*?)\\s*[-–—|]\\s*${SIZE_TOKEN_RE}\\s*$`, 'i'))
   if (m?.[1]?.trim()) return m[1].trim()
   return null
