@@ -581,14 +581,17 @@ export function identityTokensOf(...sources: (string | null | undefined)[]): Set
   return out
 }
 
-/** The sibling identity terms a listing MUST guarantee coverage of, given its own identity text — each
- *  paired with the SOURCE concept token(s) it came from so the caller can INHERIT that source's ranking
- *  opportunity (a synonym of a high-volume harvested term is itself a high-ranking opportunity, not filler).
- *  The keyword harvest seeds on the listing's OWN term ("soccer"), so the sibling ("football"/"fútbol")
- *  is never surfaced by research — yet internationally they are the SAME product, and the sibling
- *  audience is usually larger. identityTokensOf only KEEPS a sibling term when the pool already holds
- *  it; this returns the siblings to ADD. ASYMMETRIC by construction (a bare gridiron "football" identity
- *  yields nothing — it must not admit soccer terms). Returns siblings not already present as own tokens. */
+/** The sibling identity terms a listing should target, given its own identity text — each paired with the
+ *  SOURCE concept token(s) it came from so the caller can INHERIT that source's ranking opportunity (a
+ *  synonym of a high-volume harvested term is itself a high-ranking opportunity, not filler). The keyword
+ *  harvest seeds on the listing's OWN term ("soccer"), so the sibling ("football"/"fútbol") is never
+ *  surfaced by research — yet internationally they are the SAME product, and the sibling audience is
+ *  usually larger. identityTokensOf only KEEPS a sibling term when the pool already holds it; this returns
+ *  the siblings to ADD. ASYMMETRIC by construction (a bare gridiron "football" identity yields nothing —
+ *  it must not admit soccer terms; the asymmetry lives in the KEY check, not the sibling filter). We do
+ *  NOT exclude a sibling that appears in the identity TEXT: a manually-locked "Football" in the title is
+ *  covered there but absent from the harvested opportunity set, so it must still surface as an opportunity.
+ *  The CALLER dedups against the actual keyword POOL (skips a sibling already harvested). */
 export function guaranteedIdentitySynonyms(...texts: (string | null | undefined)[]): { synonym: string; sources: string[] }[] {
   const present = new Set<string>()
   for (const s of texts) {
@@ -601,7 +604,6 @@ export function guaranteedIdentitySynonyms(...texts: (string | null | undefined)
   for (const key of Object.keys(IDENTITY_SYNONYMS)) {
     if (!present.has(key)) continue
     for (const syn of IDENTITY_SYNONYMS[key]) {
-      if (present.has(syn)) continue
       if (!bySyn.has(syn)) bySyn.set(syn, new Set())
       bySyn.get(syn)!.add(key)
     }
