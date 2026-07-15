@@ -83,7 +83,7 @@ const FOREIGN_APPAREL_TOKENS = /\b(?:gr[aá]fica|playeras?|camisetas?|camisas?|m
 
 /** Physical sport/equipment GOODS categories (not garments): a keyword naming these with NO garment
  *  word is off-niche for an apparel listing ("golf accessories", "golf balls" — gear, not shirts). */
-const EQUIPMENT_GOODS_NOUN = /\b(?:accessor(?:y|ies)|balls?|gloves?|clubs?|carts?|towels?|umbrellas?|gadgets?|head\s?covers?|divots?|ball\s+markers?|gift\s+sets?)\b/i
+const EQUIPMENT_GOODS_NOUN = /\b(?:accessor(?:y|ies)|balls?|bal[oó]n|balones|pelotas?|gloves?|clubs?|carts?|towels?|umbrellas?|gadgets?|head\s?covers?|divots?|ball\s+markers?|gift\s+sets?)\b/i
 
 /** Any garment word — presence rescues a keyword from the EQUIPMENT_GOODS_NOUN / wholesale nets. */
 const GARMENT_TOKEN = /\b(?:t-?\s?shirts?|tshirts?|shirts?|tees?|tops?|tank|hoodies?|sweat\s?shirts?|apparel|clothing|outfit)\b/i
