@@ -5416,17 +5416,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
     }
   }
-  // IDENTITY-SYNONYM coverage (2026-07-15, B0H7L6KNNX): internationally soccer == football == fútbol, but
-  // the harvest seeds on the listing's OWN term ("soccer") so the sibling ("football"/"fútbol") is never
-  // surfaced — the listing indexes for soccer yet is invisible to the (larger) football/fútbol audience.
-  // The identity synonym bridge (identityTokensOf) only KEEPS a sibling term when the pool already has it;
+  // IDENTITY-SYNONYM coverage + OPPORTUNITY INHERITANCE (2026-07-15, B0H7L6KNNX): internationally
+  // soccer == football == fútbol, but the harvest seeds on the listing's OWN term ("soccer") so the sibling
+  // ("football"/"fútbol") is never surfaced — the listing indexes for soccer yet is invisible to the
+  // (larger) football/fútbol audience. identityTokensOf only KEEPS a sibling when the pool already has it;
   // it can't ADD one. Guarantee the design's identity siblings enter the SHARED pool (→ analysis →
-  // backendPool) so they reach the backend search terms (and are title/bullet-eligible). Asymmetric: a
-  // gridiron "football" design yields nothing (protected from soccer terms). Ceiling score, like secondary.
+  // backendPool), and — crucially — INHERIT the ranking opportunity of the harvested SOURCE concept so a
+  // synonym of a high-volume term is itself a HIGH-ranking opportunity that surfaces in the RANK panel and
+  // gets placement priority, instead of a flat attribute-ceiling filler. Amazon indexes the LITERAL token
+  // (it does not stem soccer↔football), so the synonym is still placed literally and only counts covered
+  // when really present. Asymmetric: a gridiron "football" design yields nothing (protected from soccer).
   if (apparelProduct) {
-    for (const syn of guaranteedIdentitySynonyms(input.canonicalTitle, repTitle)) {
-      const re = new RegExp(`\\b${syn}\\b`, 'i')
-      if (!cleanGated.some((k) => re.test(k.keyword))) cleanGated.unshift(attributeAsKeyword(syn))
+    for (const { synonym, sources } of guaranteedIdentitySynonyms(input.canonicalTitle, repTitle)) {
+      const re = new RegExp(`\\b${synonym}\\b`, 'i')
+      if (cleanGated.some((k) => re.test(k.keyword))) continue
+      const srcRe = new RegExp(`\\b(?:${sources.join('|')})\\b`, 'i')
+      const bestSibling = cleanGated
+        .filter((k) => srcRe.test(k.keyword))
+        .reduce<AnalyzedKeyword | null>((a, b) => (!a || (b.opportunityScore || 0) > (a.opportunityScore || 0) ? b : a), null)
+      // Clone the best sibling's opportunity profile (score/volume/actionType) onto the synonym token so
+      // the RANK panel + placement treat it as the high-value keyword it is; fall back to filler if no
+      // sibling is in the pool (e.g. the concept was only in the title, already stripped upstream).
+      cleanGated.unshift(bestSibling ? { ...bestSibling, keyword: synonym } : attributeAsKeyword(synonym))
     }
   }
   // (Design-NICHE seed moved BELOW designGroupInfo — it must be single-design-gated and grounded
