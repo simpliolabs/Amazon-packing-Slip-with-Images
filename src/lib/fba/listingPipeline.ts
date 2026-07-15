@@ -2553,6 +2553,35 @@ Rules:
     }
   }
 
+  // EXACT-WORD DE-DUP of the fill tail (2026-07-15, B0H7L6KNNX PO "no repeating words"). Placed HERE in
+  // runTitleAgent (the function that actually produces the shipped recommended_title — proven by the
+  // Unisex strip above landing) rather than in the buildTitleFor fill helper, which this regen path does
+  // not use. The council pads the budget by repeating a design word after the product type ("…Champions
+  // T-Shirt 2026 Tee Tshirt Gift"). Amazon indexes each word once, so a 2nd EXACT occurrence is pure
+  // stuffing. De-dup only the tail AFTER the first product-type token (brand+design+type prefix is the
+  // protected money phrase); same per-word alnum key on both sides; numbers counted; a different word for
+  // one concept (Tshirt vs Tee) is kept.
+  if (apparel) {
+    const pt = title.match(/\b(?:t-?\s?shirts?|tshirts?|tees?|hoodies?|sweat\s?shirts?|tanks?|tops?)\b/i)
+    if (pt && typeof pt.index === 'number') {
+      const cut = pt.index + pt[0].length
+      const prefix = title.slice(0, cut)
+      const dk = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const seen = new Set(prefix.split(/\s+/).map(dk).filter(Boolean))
+      const tail = title.slice(cut).split(/\s+/).filter((w) => {
+        const k = dk(w)
+        if (!k || k.length <= 2 || MINOR_WORDS.has(k)) return true
+        if (seen.has(k)) return false
+        seen.add(k); return true
+      }).join(' ')
+      const deduped = `${prefix} ${tail}`.replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').trim()
+      if (deduped !== title) {
+        title = deduped
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      }
+    }
+  }
+
   // Deterministic backstop (apparel): a sub-50-char title wastes real keyword space even under the
   // 75-char cap (the validator's floor is 50). Lead the garment brand with a FEEL adjective —
   // "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the title toward 50-75.
