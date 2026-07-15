@@ -892,22 +892,45 @@ export default function ListingDetailPage() {
     return () => { cancelled = true }
   }, [asin, router])
 
+  // Refetch the parent SEO score row → refreshes `variants` (= score.children) so the VARIANT COHESION
+  // panel re-derives its per-SKU live-vs-recommended "needs update" counts. The SERVER already grounds
+  // listing_content to Amazon's verified value + re-scores on every verify (heal-on-verify, verify-push
+  // route) and write-through on push; this pulls that fresh truth into the client so the panel flips
+  // WITHOUT a hard refresh (the bug: verify + the auto-verify poll healed server-side but the page kept
+  // rendering the stale score). Best-effort — the next full load serves the same truth.
+  const refreshScore = useCallback(async () => {
+    if (!asin) return
+    try {
+      const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+      const sdata = await sresp.json()
+      const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+      if (found) setScore(found)
+    } catch { /* best-effort — next load shows it */ }
+  }, [asin])
+
   // Verification-queue status: pending + healing + needs_attention for THIS parent. Polled every
   // 60s so a freshly-enqueued push appears in the banner and a cron flip from pending → completed →
   // needs_attention reflects without a manual refresh. Best-effort: a missing migration 030
   // returns 0/0 (the endpoint handles it), so this never errors. Exposed as a callback (not
   // effect-local) so confirmPush can refresh the banner IMMEDIATELY when a push finishes — a
   // just-scheduled self-heal must be visible before the seller can re-push, not up to 60s later.
+  const prevVerifyPendingRef = useRef<number | null>(null)
   const refreshVerifyQueue = useCallback(async () => {
     if (!asin) return
     try {
       const resp = await fetch(`/api/fba/verification-status?parent_asin=${asin}`, { cache: 'no-store' })
       if (resp.ok) {
         const j = await resp.json() as { pending?: number; healing?: number; needs_attention?: number; tasks?: VerifyQueueTask[] }
-        setVerifyQueue({ pending: j.pending ?? 0, healing: j.healing ?? 0, needs_attention: j.needs_attention ?? 0, tasks: j.tasks ?? [] })
+        const pending = j.pending ?? 0
+        setVerifyQueue({ pending, healing: j.healing ?? 0, needs_attention: j.needs_attention ?? 0, tasks: j.tasks ?? [] })
+        // When the auto-verify cron DRAINS the queue (pending drops), it just grounded listing_content +
+        // re-scored server-side — pull that so the cohesion "needs update" counts flip without a hard
+        // refresh (the bug: this poll refreshed only the banner, never the per-field cohesion).
+        if (prevVerifyPendingRef.current !== null && pending < prevVerifyPendingRef.current) refreshScore()
+        prevVerifyPendingRef.current = pending
       }
     } catch { /* silent — the banner just shows 0 */ }
-  }, [asin])
+  }, [asin, refreshScore])
   useEffect(() => {
     if (!asin) return
     refreshVerifyQueue()
@@ -1718,11 +1741,14 @@ export default function ListingDetailPage() {
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error || 'Verify failed')
       setVerifyResults(data)
+      // verify-push GROUNDED listing_content to Amazon's live value + re-scored (heal-on-verify) — pull
+      // the fresh score so the VARIANT COHESION "needs update" counts reflect it without a hard refresh.
+      await refreshScore()
     } catch (e) {
       setVerifyError(e instanceof Error ? e.message : 'Verify failed')
     }
     setVerifyLoading(false)
-  }, [asin, pushField, pushDetailField])
+  }, [asin, pushField, pushDetailField, refreshScore])
 
   // Honest "will change" count for a MANUAL title override: the preview's `changed` is computed vs the
   // AI recommendation, but the seller may have typed something else. Compare each SKU's LIVE title to
@@ -1906,6 +1932,9 @@ export default function ListingDetailPage() {
       const matched = data.matched ?? 0
       const status: 'matches' | 'needs-update' = total > 0 && matched === total ? 'matches' : 'needs-update'
       setDesignVerifyStatus((prev) => ({ ...prev, [group.designKey]: status }))
+      // Same heal-on-verify pull as runVerify: grounded listing_content + re-scored server-side, so
+      // refresh the client score → the cohesion counts flip without a hard refresh.
+      await refreshScore()
     } catch (e) {
       window.alert(e instanceof Error ? e.message : 'Verify failed')
     } finally {
