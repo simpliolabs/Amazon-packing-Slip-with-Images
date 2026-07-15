@@ -254,7 +254,7 @@ async function applyRelevanceGate<T extends { keyword: string }>(
   listingTitle?: string,
 ): Promise<T[]> {
   try {
-    const { identityTokensOf, keywordIsRelevant } = await import('../keyword-engine/keywordResearcher');
+    const { identityTokensOf, keywordIsRelevant, guaranteedIdentitySynonyms } = await import('../keyword-engine/keywordResearcher');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = supabase as any;
     const { data: scoreRow } = await db.from('listing_seo_scores')
@@ -265,6 +265,28 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       console.log(`[syncKeywordIntelligence] relevance gate: no identity tokens for ${asin} — pool kept UNFILTERED (${keywords.length} kw)`);
       return keywords;
     }
+    // IDENTITY-SYNONYM OPPORTUNITIES (2026-07-15): add the design's identity siblings (football/fútbol for a
+    // soccer design) to the STORED pool so they surface as ranking OPPORTUNITIES in the RANK panel AND the
+    // scorer AND the generator — ONE opportunity source (coherence Invariant 6), not merely placed by the
+    // generator. Each synonym clones its highest-volume harvested SIBLING so runKeywordEngine (downstream)
+    // scores it as the high-value term it is; Amazon indexes the LITERAL token (no soccer↔football stemming),
+    // so it only counts covered when really present. Asymmetric: a gridiron "football" design yields nothing.
+    const synTargets = guaranteedIdentitySynonyms(scoreRow?.product_title, listingTitle, ...childTitles);
+    const volOf = (k: T) => (k as { searchVolume?: number; volume?: number }).searchVolume ?? (k as { volume?: number }).volume ?? 0;
+    const addSynonyms = (set: T[]): T[] => {
+      if (synTargets.length === 0) return set;
+      const adds: T[] = [];
+      for (const { synonym, sources } of synTargets) {
+        const re = new RegExp(`\\b${synonym}\\b`, 'i');
+        if (set.some((k) => re.test(k.keyword))) continue;                    // already harvested — leave it
+        const srcRe = new RegExp(`\\b(?:${sources.join('|')})\\b`, 'i');
+        let best: T | null = null;                                            // highest-volume harvested sibling
+        for (const k of set) if (srcRe.test(k.keyword) && (best === null || volOf(k) > volOf(best))) best = k;
+        if (best) adds.push({ ...best, keyword: synonym });                   // inherit its volume/data profile
+      }
+      if (adds.length) console.log(`[syncKeywordIntelligence] identity-synonym opportunities for ${asin}: +${adds.map((a) => a.keyword).join(', ')}`);
+      return adds.length ? [...set, ...adds] : set;
+    };
     const before = keywords.length;
     // EXEMPT universe keywords (#280): broad-category / garment-brand angles ("graphic tees for women",
     // "comfort colors shirt") are made entirely of generic apparel/category tokens, so keywordIsRelevant's
@@ -297,14 +319,14 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       { title: scoreRow?.product_title || listingTitle, category: isApparelPool ? 'apparel / graphic t-shirt' : null },
     );
     for (const kw of llmDrop) offNiche.add(kw);
-    if (offNiche.size === 0) return kept;
+    if (offNiche.size === 0) return addSynonyms(kept);
     const kept2 = kept.filter((k) => (k as { fromUniverse?: boolean }).fromUniverse || !offNiche.has(k.keyword));
     if (kept2.length === 0 && before > 0) {
       console.warn(`[syncKeywordIntelligence] off-niche gate would drop ALL for ${asin} — keeping ${kept.length} (never-collapse floor)`);
-      return kept;
+      return addSynonyms(kept);
     }
     console.log(`[syncKeywordIntelligence] off-niche gate for ${asin}: dropped ${offNiche.size} off-niche (${kept2.length}/${kept.length} kept)`);
-    return kept2;
+    return addSynonyms(kept2);
   } catch (e) {
     console.warn('[syncKeywordIntelligence] relevance gate failed (non-fatal; pool unfiltered):', e instanceof Error ? e.message : e);
     return keywords;
