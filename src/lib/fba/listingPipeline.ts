@@ -4694,36 +4694,39 @@ async function buildTitleFor(
     const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
     finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
   }
-  // 6b. DETERMINISTIC NICHE FILL (2026-07-06; widened 2026-07-14 for B0H7L6KNNX). The LLM council
-  //     reliably IGNORES the niche brief line, AND step 3's fill above enforces a strict ALL-NOVEL
-  //     rule that vetoes any on-theme keyphrase reusing a concept word. For an EVENT/slogan design
-  //     ("Spain … Soccer … Champions") EVERY on-theme fill reuses "spain"/"soccer", so step 3 can
-  //     never pack it and the title stalls at 60/75. THIS packer ALLOWS a word to repeat up to
-  //     Amazon's legal 2x limit — but it was gated on `input.nicheSeeds` (empty for event designs)
-  //     and read ONLY nicheSeeds, never the candidate/upgrade pools where "Spain Soccer Fan Tee"
-  //     actually lives. Draw from ALL three grounded pools; the 2x cap + garment-scrub guards below
-  //     keep it honest. Trailing garment/gift words are trimmed (the title already names the type).
-  if (apparelProduct && finalTitle.length < 72) {
+  // 6b. NOVEL KEYWORD HARVEST (2026-07-06 niche fill; REDESIGNED 2026-07-15 per PO on B0H7L6KNNX:
+  //     "more keywords, no repeating words"). For an EVENT/theme design every pooled PHRASE reuses the
+  //     design tokens (spain/soccer/cup), so step 3's all-novel pass + the provenance second-pass leave
+  //     the title short. The prior fill packed it by ECHOING those words (a 2x-repeat pass shipped
+  //     "Spain Soccer Cup" twice — the PO rejected it). Instead, append the top NOVEL individual keyword
+  //     TOKENS from the candidate pool: each a real pooled token (provenance), content-bearing (not a
+  //     stopword / junk / attribute / gender / bare-number fragment), NOT already in the title, and NEVER
+  //     repeated. Yields "…Champions T-Shirt, Football Champs Graphic" instead of repeating design words.
+  if (apparelProduct && finalTitle.length < 70) {
     const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
     const tail = tailMatch ? tailMatch[0] : ''
     let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
-    const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
-    const counts = new Map<string, number>()
-    for (const t of bulletTokens(head).map(fillNormTok)) counts.set(t, (counts.get(t) ?? 0) + 1)
-    const trimTail = (s: string) => { let p = s, prev = ''; while (p && p !== prev) { prev = p; p = p.replace(/\s+(?:tees?|t-?shirts?|shirts?|gifts?|graphic|apparel|clothing|tops?)\s*$/i, '').trim() } return p }
-    for (const seed of [...(input.nicheSeeds ?? []), ...candidates.map((c) => c.keyword), ...topUpgradeKws]) {
+    const have = new Set(bulletTokens(head).map(fillNormTok))
+    const FEM_H = /\bwom[ae]ns?\b|\bladies\b/i, MASC_H = /\bm[ae]ns?\b/i
+    let firstAdd = true
+    for (const kw of [...(input.nicheSeeds ?? []), ...candidates.map((c) => c.keyword), ...topUpgradeKws]) {
       if ((head + tail).length >= 73) break
-      const clean = trimTail(seed.trim())
-      if (bulletTokens(clean).length < 2) continue
-      if (stripContradictedGarments(stripUngroundedMotifs(clean, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust) !== clean) continue
-      const seedToks = bulletTokens(clean).map(fillNormTok)
-      if (seedToks.every((t) => (counts.get(t) ?? 0) > 0)) continue                 // adds nothing novel
-      const add = new Map<string, number>(); for (const t of seedToks) add.set(t, (add.get(t) ?? 0) + 1)
-      if ([...add].some(([t, n]) => (counts.get(t) ?? 0) + n > 2)) continue          // would push a word past Amazon's 2x
-      const next = `${head}, ${titleCaseKw(clean)}`
-      if ((next + tail).length > 75) continue
-      head = next
-      for (const [t, n] of add) counts.set(t, (counts.get(t) ?? 0) + n)
+      if (lean === 'female' && MASC_H.test(kw) && !FEM_H.test(kw)) continue     // respect the audience lean
+      if (lean === 'male' && FEM_H.test(kw) && !MASC_H.test(kw)) continue
+      if (findTrademarkPhrases(kw).length > 0) continue                          // never harvest a trademark token
+      for (const w of kw.split(/\s+/)) {
+        if ((head + tail).length >= 73) break
+        const clean = w.toLowerCase().replace(/[^a-z0-9]/g, '')
+        if (clean.length < 3 || /^\d+$/.test(clean)) continue                    // skip tiny words + bare numbers
+        const norm = fillNormTok(w)
+        if (have.has(norm)) continue                                            // already in the title → no repeat
+        if (JUNK_WORDS.has(clean) || MINOR_WORDS.has(clean) || FRAG_ATTR_WORDS.has(clean)) continue
+        if (BARE_GENDER_RE.test(w)) continue
+        const capped = clean.charAt(0).toUpperCase() + clean.slice(1)
+        const next = `${head}${firstAdd ? ',' : ''} ${capped}`
+        if ((next + tail).length > 75) continue
+        head = next; have.add(norm); firstAdd = false
+      }
     }
     finalTitle = `${head}${tail}`
   }
