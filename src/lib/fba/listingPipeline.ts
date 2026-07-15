@@ -24,6 +24,7 @@ import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
+import { guaranteedIdentitySynonyms } from '@/lib/keyword-engine/keywordResearcher'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -3924,6 +3925,9 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
   //      Generic team-mascot words ("alligator", "gators", "lions") still pass through
   //      — only the multi-word REGISTERED phrases are dropped.
   const ownBrandsForGate = ownBrandTokenSet(brandName)
+  const apparelForGate = looksApparel(category, repTitle, input.productType)
+  // Listing haystack for isOffNicheKeyword's own-brand + activewear-listing + this-listing's-own-cut guards.
+  const offNicheCtx = `${repTitle ?? ''} ${input.canonicalTitle ?? ''} ${brandName}`
   const dropJunkAndTrademarks = (kws: AnalyzedKeyword[]) => kws.filter((k) => {
     if (isAllJunk(k.keyword)) return false
     if (findTrademarkPhrases(k.keyword).length > 0) return false
@@ -3931,6 +3935,14 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
     // ever sees "nike shirts women" as a required keyphrase (B0FRYMM56C). Mirrors the trademark backstop
     // above; the seller's OWN brand is exempt via ownBrandTokenSet. A tee is not "compatible with" Nike.
     if (findThirdPartyBrands(k.keyword, ownBrandsForGate).length > 0) return false
+    // OFF-NICHE net (2026-07-15, B0H7L6KNNX): this pool feeds backendPool, and it was the ONE seam that
+    // still bypassed isOffNicheKeyword — so a non-deterministic LLM-gate miss seated foreign-language dupes
+    // ("grafica", "playeras mujer"), wrong-cut ("sleeveless printed jerseys"), competitor blanks, and
+    // equipment straight into the shipped backend search terms. Deterministic + apparel-gated + context-
+    // guarded (own brand / a genuine activewear listing / this listing's own cut are KEPT). This makes the
+    // backend pool honor the SAME off-niche predicate as the scorer, RANK panel, route, and ingestion
+    // (coherence Invariant 1 — one predicate everywhere, no disagreeing seam).
+    if (apparelForGate && isOffNicheKeyword(k.keyword, { context: offNicheCtx })) return false
     return true
   })
   try {
@@ -5394,6 +5406,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     for (const p of secondaryPhrases) {
       const pl = p.toLowerCase()
       if (!cleanGated.some((k) => k.keyword.toLowerCase() === pl)) cleanGated.unshift(attributeAsKeyword(p))
+    }
+  }
+  // IDENTITY-SYNONYM coverage (2026-07-15, B0H7L6KNNX): internationally soccer == football == fútbol, but
+  // the harvest seeds on the listing's OWN term ("soccer") so the sibling ("football"/"fútbol") is never
+  // surfaced — the listing indexes for soccer yet is invisible to the (larger) football/fútbol audience.
+  // The identity synonym bridge (identityTokensOf) only KEEPS a sibling term when the pool already has it;
+  // it can't ADD one. Guarantee the design's identity siblings enter the SHARED pool (→ analysis →
+  // backendPool) so they reach the backend search terms (and are title/bullet-eligible). Asymmetric: a
+  // gridiron "football" design yields nothing (protected from soccer terms). Ceiling score, like secondary.
+  if (apparelProduct) {
+    for (const syn of guaranteedIdentitySynonyms(input.canonicalTitle, repTitle)) {
+      const re = new RegExp(`\\b${syn}\\b`, 'i')
+      if (!cleanGated.some((k) => re.test(k.keyword))) cleanGated.unshift(attributeAsKeyword(syn))
     }
   }
   // (Design-NICHE seed moved BELOW designGroupInfo — it must be single-design-gated and grounded
