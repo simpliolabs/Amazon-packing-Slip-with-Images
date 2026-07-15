@@ -4694,6 +4694,29 @@ async function buildTitleFor(
     const rest = finalTitle.slice(head.length).slice(0, finalTitle.length - head.length - tail.length).trim()
     finalTitle = capTitle75(`${head} ${designName}, ${rest}${tail}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ','))
   }
+  // 6a-dedup. EXACT-WORD DE-DUP of the fill TAIL (2026-07-15, PO on B0H7L6KNNX: "no repeating words").
+  //     The council pads the budget by repeating a design word after the product type ("…Champions
+  //     T-Shirt Football Champions Tee") — that reaches 73 chars, so the novel harvest below (fires
+  //     under 70) never ran and nothing removed the repeat. Amazon indexes each word once, so a 2nd
+  //     EXACT occurrence adds nothing and reads as stuffing. De-dup ONLY the tail after the FIRST
+  //     product-type token — the brand+design+type prefix is the protected money phrase — keeping a
+  //     different word for the same concept (Tshirt vs Tee). Shortening here lets the harvest re-fill
+  //     the freed budget with NOVEL keywords (Football, Graphic, Fan).
+  if (apparelProduct) {
+    const pt = finalTitle.match(/\b(?:t-?\s?shirts?|tshirts?|tees?|hoodies?|sweat\s?shirts?|tanks?|tops?)\b/i)
+    if (pt && typeof pt.index === 'number') {
+      const cut = pt.index + pt[0].length
+      const prefix = finalTitle.slice(0, cut)
+      const seen = new Set(prefix.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+      const tail = finalTitle.slice(cut).split(/\s+/).filter((w) => {
+        const key = w.toLowerCase().replace(/[^a-z0-9]/g, '')
+        if (!key || key.length <= 2 || /^\d+$/.test(key) || MINOR_WORDS.has(key)) return true
+        if (seen.has(key)) return false
+        seen.add(key); return true
+      }).join(' ')
+      finalTitle = `${prefix} ${tail}`.replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').trim()
+    }
+  }
   // 6b. NOVEL KEYWORD HARVEST (2026-07-06 niche fill; REDESIGNED 2026-07-15 per PO on B0H7L6KNNX:
   //     "more keywords, no repeating words"). For an EVENT/theme design every pooled PHRASE reuses the
   //     design tokens (spain/soccer/cup), so step 3's all-novel pass + the provenance second-pass leave
