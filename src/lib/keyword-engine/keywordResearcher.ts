@@ -581,25 +581,32 @@ export function identityTokensOf(...sources: (string | null | undefined)[]): Set
   return out
 }
 
-/** The sibling identity terms a listing MUST guarantee coverage of, given its own identity text.
+/** The sibling identity terms a listing MUST guarantee coverage of, given its own identity text — each
+ *  paired with the SOURCE concept token(s) it came from so the caller can INHERIT that source's ranking
+ *  opportunity (a synonym of a high-volume harvested term is itself a high-ranking opportunity, not filler).
  *  The keyword harvest seeds on the listing's OWN term ("soccer"), so the sibling ("football"/"fútbol")
  *  is never surfaced by research — yet internationally they are the SAME product, and the sibling
  *  audience is usually larger. identityTokensOf only KEEPS a sibling term when the pool already holds
  *  it; this returns the siblings to ADD. ASYMMETRIC by construction (a bare gridiron "football" identity
  *  yields nothing — it must not admit soccer terms). Returns siblings not already present as own tokens. */
-export function guaranteedIdentitySynonyms(...sources: (string | null | undefined)[]): string[] {
+export function guaranteedIdentitySynonyms(...texts: (string | null | undefined)[]): { synonym: string; sources: string[] }[] {
   const present = new Set<string>()
-  for (const s of sources) {
+  for (const s of texts) {
     if (!s) continue
     for (const raw of s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
       present.add(raw.replace(/s$/, ''))
     }
   }
-  const out = new Set<string>()
+  const bySyn = new Map<string, Set<string>>()
   for (const key of Object.keys(IDENTITY_SYNONYMS)) {
-    if (present.has(key)) for (const syn of IDENTITY_SYNONYMS[key]) if (!present.has(syn)) out.add(syn)
+    if (!present.has(key)) continue
+    for (const syn of IDENTITY_SYNONYMS[key]) {
+      if (present.has(syn)) continue
+      if (!bySyn.has(syn)) bySyn.set(syn, new Set())
+      bySyn.get(syn)!.add(key)
+    }
   }
-  return [...out]
+  return [...bySyn.entries()].map(([synonym, srcs]) => ({ synonym, sources: [...srcs] }))
 }
 
 /** Pure relevance check: does this keyword share ≥1 non-generic identity token with the
