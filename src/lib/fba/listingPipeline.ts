@@ -23,6 +23,7 @@ import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
+import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -5474,8 +5475,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // BASIC_COLOR_RE). The JS research child happened to be one color and dragged it into the
   // pool — live failure: "Black T Shirts" recommended as the shared title for 82 colors.
   const colorNeutralFamily = apparelProduct && input.children.length > 1
+  // OFF-NICHE gate on the TITLE candidate pool (2026-07-15, B0H7L6KNNX: "Balon De Futbol" reached the
+  // title). The scorer/rank/generator skip off-niche keywords, but the title's candidate pool was NEVER
+  // filtered — so a foreign / equipment / wrong-niche term in the pool could be woven into the title by
+  // the council OR the fill. Filter ONCE here, the single upstream point both consumers read, with the
+  // SAME predicate. Apparel-gated + own-brand/activewear aware via the listing's own copy as context.
+  const titleNicheCtx = [repTitle, brandName, ...(input.children || []).map((c) => c.title)].filter(Boolean).join(' ')
+  const titleIsApparel = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(titleNicheCtx)
+  const notOffNiche = (kw: string) => !titleIsApparel || !isOffNicheKeyword(kw, { context: titleNicheCtx })
   const candidates = selectTitleCandidates(analysis, brandName, repTitle, input.outcomeSignals)
     .filter((c) => !colorNeutralFamily || !BASIC_COLOR_RE.test(c.keyword))
+    .filter((c) => notOffNiche(c.keyword))
 
   // Stage 0c — top UPGRADE keywords for explicit title-coverage. UPGRADE = ranking
   // signal already present in bullets but absent from the title. The scorer in
@@ -5486,6 +5496,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const topUpgradeKws = cleanGated
     .filter((k) => k.actionType === 'UPGRADE')
     .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => notOffNiche(k.keyword))                                  // off-niche can't reach the title
     .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword))  // color-neutral broadcast title
     .filter((k) => k.keyword.split(/\s+/).length <= 6)  // skip long-tail phrases that wouldn't fit
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
