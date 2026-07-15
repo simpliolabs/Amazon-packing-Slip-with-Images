@@ -4707,11 +4707,16 @@ async function buildTitleFor(
     if (pt && typeof pt.index === 'number') {
       const cut = pt.index + pt[0].length
       const prefix = finalTitle.slice(0, cut)
-      const seen = new Set(prefix.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+      // SAME per-word key on both sides (2026-07-15 fix): the prior version built `seen` by splitting on
+      // punctuation ("T-Shirt" → "t","shirt") while the filter keyed on alnum-strip ("Tshirt" → "tshirt"),
+      // so appended garment variants slipped through; and it skipped numbers, so a repeated year ("2026")
+      // slipped through. Key every word the same way and count numbers.
+      const dkey = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const seen = new Set(prefix.split(/\s+/).map(dkey).filter(Boolean))
       const tail = finalTitle.slice(cut).split(/\s+/).filter((w) => {
-        const key = w.toLowerCase().replace(/[^a-z0-9]/g, '')
-        if (!key || key.length <= 2 || /^\d+$/.test(key) || MINOR_WORDS.has(key)) return true
-        if (seen.has(key)) return false
+        const key = dkey(w)
+        if (!key || key.length <= 2 || MINOR_WORDS.has(key)) return true   // keep punctuation / tiny / stopwords
+        if (seen.has(key)) return false                                    // exact repeat (incl. a year) → drop
         seen.add(key); return true
       }).join(' ')
       finalTitle = `${prefix} ${tail}`.replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').trim()
