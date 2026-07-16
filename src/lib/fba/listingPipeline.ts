@@ -3303,6 +3303,15 @@ async function runBackendAgent(
     }
     if (add.length) corePhrases.push(add.join(' '))
   }
+  // Size the shared core against the per-color tail (PO 2026-07-16 "keywords must be 220-250"). A
+  // colored family reserves ~17 bytes for its color-synonym tail (appended per child in buildString),
+  // so the core caps at 233; a colorless / single-key family has NO tail, so the core may use the
+  // full budget (244) — otherwise a thin single-color family caps at ~233 and never reaches the
+  // 220-250 band. Computed here (mirrors the tailColors filter below, which now reuses it) so the
+  // theme-fill + truncate target the right ceiling.
+  const KNOWN_COLOR_NAMES = new Set(Object.values(SKU_COLOR_CODES).map((v) => v.toLowerCase()))
+  const tailColors = colors.filter((c) => c !== 'default' && (KNOWN_COLOR_NAMES.has(c) || BASIC_COLOR_RE.test(c)))
+  const coreByteTarget = tailColors.length ? 233 : 244
   // FILL: a small product's opportunity pool can run dry well under 250 bytes, leaving the
   // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with LLM long-tail
   // BUYER search words (gifts / occasions / recipients / themes) — run through the SAME junk /
@@ -3311,7 +3320,7 @@ async function runBackendAgent(
   // backed gap-closing. When gap-closing filled the pool to the 233 core cap, this must NOT fire
   // (240 gate against a 233 truncate meant a paid gpt-4.1-mini call whose output was truncated away
   // — fire-then-discard on every healthy regen). It fires only when a THIN pool left real room.
-  if (getByteLength(corePhrases.join(' ')) < 220) {
+  if (getByteLength(corePhrases.join(' ')) < coreByteTarget) {
     try {
       // THEME-ANCHORED fill (PO 2026-07-08: the old generic ask returned catalog-speak — "apparel
       // clothing trendy blouses" — that read like a promotional string, not search terms). Anchor
@@ -3323,14 +3332,25 @@ List ~40 ADDITIONAL search terms real shoppers TYPE into Amazon to find THIS DES
 ONLY concrete buyer search words tied to the theme. FORBIDDEN: generic category words ("apparel", "clothing", "clothes", "outfit", "wear", "fashion", "tops", "wardrobe"), promo adjectives ("trendy", "stylish", "premium", "elegant", "timeless", "cozy"), brand names, color names, sizes. lowercase, space-separated, no commas/quotes.
 Avoid reusing: ${[...coreWordSet, ...titleWords].slice(0, 60).join(' ')}
 Return ONLY the JSON.`
-      const fc = await openai.chat.completions.create({
-        model: 'gpt-4.1-mini',
-        messages: [{ role: 'system', content: fillSys }, { role: 'user', content: fillUsr }],
-        temperature: 0.6,
-        max_tokens: 300,
-        response_format: { type: 'json_object' },
-      })
-      const fillParsed = parseJsonLoose<{ keywords?: string }>(fc.choices[0]?.message?.content || '{}')
+      // Retry once on a transient error (PO 2026-07-16): the theme-fill is the ONLY novel byte source
+      // for a thin pool, so a single swallowed failure left the field stuck at ~200 (the #352-class
+      // quiet degrade). Mirror the color-tail's retry.
+      const callFill = async (): Promise<string> => {
+        const fc = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini',
+          messages: [{ role: 'system', content: fillSys }, { role: 'user', content: fillUsr }],
+          temperature: 0.6,
+          max_tokens: 300,
+          response_format: { type: 'json_object' },
+        })
+        return fc.choices[0]?.message?.content || '{}'
+      }
+      let fillRaw = '{}'
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { fillRaw = await callFill(); break }
+        catch (e) { if (attempt === 1) throw e; console.warn(`[runBackendAgent] theme-fill attempt ${attempt + 1} failed, retrying:`, e instanceof Error ? e.message : e) }
+      }
+      const fillParsed = parseJsonLoose<{ keywords?: string }>(fillRaw)
       const fillOut: string[] = []
       // Apostrophe-deletion here too ("valentine's" → "valentines"), matching the core normalize.
       for (const w of (fillParsed.keywords || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
@@ -3343,26 +3363,27 @@ Return ONLY the JSON.`
         if (coreWordSet.has(w) || excludeWords.has(w)) continue        // already covered / auto-indexed
         if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
         coreWordSet.add(w); fillOut.push(w)
-        // 233 (was 240): stop AT the core truncate line so the themed terms actually survive
-        // (adversarial 2026-07-09 — the old 240 overshoot was sliced off by truncateToBytes(233)).
-        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= 233) break
+        // Stop AT the core truncate ceiling (coreByteTarget) so the themed terms actually survive
+        // truncateToBytes below (adversarial 2026-07-09 — an overshoot was sliced off).
+        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= coreByteTarget) break
       }
       if (fillOut.length) corePhrases.push(fillOut.join(' '))
-    } catch { /* fill is best-effort; the opportunity core still ships */ }
+    } catch (e) {
+      // Best-effort — the opportunity core still ships — but SURFACE it (not silent): a persistent
+      // failure here is why a thin backend can stick under budget (the #352-class quiet degrade).
+      console.warn('[runBackendAgent] theme-fill failed after retry; shipping core only:', e instanceof Error ? e.message : e)
+    }
   }
   // The core is the opportunity keywords + long-tail fill — most of the 250 bytes (NOT colors).
   // 233 (was 228; adversarial corrected 235): the ≤3-word color tail needs ~17 bytes ("cream off
   // white" = 16) — a 235 cap left only 14 and quietly cut tails on the best-stocked listings.
-  const core = truncateToBytes(corePhrases.join(' '), 233)
+  const core = truncateToBytes(corePhrases.join(' '), coreByteTarget)
 
   // ── PER-COLOR TAIL: just the 2-3 top shade synonyms for THIS variant's color (not 10) ──
-  // LOOKS-LIKE-A-COLOR gate (2026-07-09): only ask for shade synonyms of keys that are plausibly
-  // colors — a junk key ('default', an undecoded code, the old 'fbm' channel suffix) got a
-  // hallucinated palette ("burgundy maroon wine" for a fulfillment channel) broadcast to every
-  // child. Validated against the shared SKU color-name set + the basic-color regex; non-color
-  // keys ship the bare core (honest) instead of an invented palette.
-  const KNOWN_COLOR_NAMES = new Set(Object.values(SKU_COLOR_CODES).map((v) => v.toLowerCase()))
-  const tailColors = colors.filter((c) => c !== 'default' && (KNOWN_COLOR_NAMES.has(c) || BASIC_COLOR_RE.test(c)))
+  // KNOWN_COLOR_NAMES + tailColors are computed ABOVE (before the theme-fill) so the core could be
+  // sized against the tail. The LOOKS-LIKE-A-COLOR gate there (2026-07-09) means only plausibly-color
+  // keys get shade synonyms — a junk key ('default', an undecoded code, the old 'fbm' channel suffix)
+  // ships the bare core (honest) instead of a hallucinated palette broadcast to every child.
   const system = 'You generate a SHORT Amazon backend color tail per color variant. Return ONLY valid JSON: {"groups":[{"color":"<color>","keywords":"2-3 lowercase color words"}]}.'
   const user = `Color variants: ${tailColors.join(', ')}
 
