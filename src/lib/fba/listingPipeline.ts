@@ -4427,7 +4427,12 @@ function scoreBulletsMetric(bs: string[], brandName: string, designName: string)
   const co = 1 - bs.filter(bulletHasCoherenceDefect).length / n
   // (3) STRUCTURE — validateBullets with EMPTY oppKw (its coverage block no-ops), <100-char dock removed.
   const structProblems = validateBullets(bs, brandName, [], []).filter((p) => !/under 100 chars/.test(p))
-  const st = 1 - Math.min(1, structProblems.length / n)
+  // LENGTH (PO 2026-07-16 "not good length"): the scorer docks bullets under 80 chars (#3). The <100
+  // validateBullets dock is filtered out above (anti-Goodhart, scope B), so add the scorer's 80-char
+  // floor here as SUBSTANCE — never keyword coverage, which stays backend's job (excluded by
+  // construction so the loop can never keyword-stuff bullet prose).
+  const tooShort = bs.filter((b) => b.trim().length < 80).length
+  const st = 1 - Math.min(1, (structProblems.length + tooShort) / n)
   return { total: 0.5 * di + 0.3 * co + 0.2 * st, di, co, st }
 }
 
@@ -4460,6 +4465,8 @@ function bulletsCritique(m: BulletMetric, bullets: string[], designName: string)
   if (m.di < 1 && designName.trim()) notes.push(`The design identity "${designName}" is missing — weave it naturally into at least one bullet.`)
   const defective = bullets.map((b, i) => (bulletHasCoherenceDefect(b) ? i + 1 : 0)).filter(Boolean)
   if (defective.length) notes.push(`Bullet(s) ${defective.join(', ')} read incoherently (a dangling raw-token tail, or one concept repeated 3+ times) — rewrite them as clean sentences.`)
+  const tooShort = bullets.map((b, i) => (b.trim().length < 80 ? i + 1 : 0)).filter(Boolean)
+  if (tooShort.length) notes.push(`Bullet(s) ${tooShort.join(', ')} are too short (under 80 characters) — expand each into a full 100-200 character benefit sentence with real product substance (never padded keywords).`)
   if (m.st < 1) notes.push('Fix weak structure: every bullet needs an ALL-CAPS 2-3 word benefit hook, then " - ", then one complete grammatical sentence.')
   return notes.length ? notes.join('\n') : 'Tighten wording and improve clarity while keeping every bullet accurate.'
 }
@@ -4476,7 +4483,7 @@ async function metricGatedBulletsLoop(
   // FAIL-OPEN SEED GUARD: never seed from an empty/short council result (quota outage) — do nothing.
   if (!Array.isArray(shipBullets) || shipBullets.length < 5) return shipBullets
 
-  const best = shipBullets                                        // return value — FROZEN in shadow
+  let best = shipBullets                                          // return value — ENFORCED: updated to the best-scored candidate
   // OUTER FAIL-OPEN: shadow is an OBSERVATION path — it must NEVER break a live regen. Any throw in the
   // scoring/model path is logged and swallowed, returning the untouched ship bullets (coherenceGateBullets
   // contract). Default-off (enableLoop false) never reaches here.
@@ -4490,7 +4497,7 @@ async function metricGatedBulletsLoop(
     // it would double-apply `collapse` (not idempotent for 3+ repeats) and score baseline vs candidate on
     // divergent strings.
     let bestScore = scoreBulletsMetric(shipBullets, ctx.brandName, ctx.designName)
-    if (bestScore.total >= 0.999) return best                     // already at the bar — 0 calls
+    if (bestScore.total >= 0.90) return best                      // already good (~scorer 85%+) — ship as-is, 0 calls
 
     const MAX_ITERS = 2                                           // <= 2 extra council calls
     for (let i = 0; i < MAX_ITERS; i++) {
@@ -4499,15 +4506,16 @@ async function metricGatedBulletsLoop(
       if (cand.length < 5) break                                  // LENGTH GUARD before any compare
       const candScore = scoreBulletsMetric(shipView(cand), ctx.brandName, ctx.designName)
       if (bestScore.total < candScore.total) {                    // STRICT '<' keep-best
-        const note = `[bullets-metric-loop][shadow][${ctx.label}] iter ${i + 1} WOULD improve bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)})`
-        console.warn(note, '\nWOULD_SHIP:', JSON.stringify(shipView(cand)))
+        const shipped = shipView(cand)
+        const note = `[bullets-metric-loop][${ctx.label}] iter ${i + 1} improved bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)})`
+        console.warn(note)
         ctx.onProgress?.(note)
-        bestScore = candScore                                     // track best SCORE for the next-iter critique + delta log
-        // `best` (the return value) is DELIBERATELY not updated — shadow ships nothing.
+        best = shipped                                            // ENFORCE: ship the improved set (was shadow-frozen)
+        bestScore = candScore                                     // track best SCORE for the next-iter critique
       } else break                                                // no improvement — stop early
     }
   } catch (e) {
-    console.warn('[bullets-metric-loop][shadow] errored — shipping the original bullets:', e instanceof Error ? e.message : e)
+    console.warn('[bullets-metric-loop] errored — shipping the best bullets so far:', e instanceof Error ? e.message : e)
   }
   return best
 }
@@ -7031,12 +7039,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // gate as the broadcast copy above — closes the R4/#61 leak where multi-design shipped unscrubbed.
   await gatePerChildMultiDesign(perChildBullets, perChildDescriptions, truthFit, garmentBrandCanonical || '')
 
-  // Metric-gated council loop (D1, shadow-first): the bullets are now SHIP-READY (this is their final
-  // assembly point — only assertCoreHealthy + the trademark scrub follow). Score them and, when short,
-  // log what the council WOULD re-deliberate to; ships NOTHING. enableLoop is decided ONCE here so the
-  // per-design fan-out can never multiply calls. Default OFF (BULLETS_METRIC_LOOP unset) → 0 cost/0 change.
-  const enableBulletsLoop = (process.env.BULLETS_METRIC_LOOP || '').toLowerCase() === 'shadow'
-  if (apparelProduct && enableBulletsLoop) {
+  // Metric-gated council loop (D, 2026-07-16 — now ENFORCED, was shadow): the bullets are SHIP-READY
+  // (this is their final assembly point — only assertCoreHealthy + the trademark scrub follow). Score
+  // them against scoreBulletsMetric (design identity + coherence + structure + the 80-char length
+  // floor; keyword coverage stays BACKEND's job, excluded so this can't stuff prose) and, when below
+  // the bar, have the judge re-deliberate against a deterministic critique — keep-best (strict >),
+  // fail-open, SHIP the winner. Decided ONCE here on the broadcast bullets so the per-design fan-out
+  // can't multiply calls (per-child multi-design bullets remain a follow-up). BULLETS_METRIC_LOOP=off disables.
+  const enableBulletsLoop = apparelProduct && (process.env.BULLETS_METRIC_LOOP || '').toLowerCase() !== 'off'
+  if (enableBulletsLoop) {
     bullets = await metricGatedBulletsLoop(input.openai, bullets, {
       title: finalTitle, brandName: brandName || 'THE CEO',
       designName: effectiveDesignName || '', fit: truthFit,
