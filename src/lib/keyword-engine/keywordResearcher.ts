@@ -212,6 +212,21 @@ export async function researchKeywords(
   const topCompetitors = sovCompetitors.filter(c => !ownAsins.has(c.asin)).slice(0, 3);
   const topCompetitor = topCompetitors[0];
 
+  // The SELLER-ENTERED competitor ASIN is a first-class keyword source (PO 2026-07-16 fishing
+  // regression: "why didn't it use the competitor I entered?"). SOV auto-detect only surfaces the
+  // niche's own leaders — a seller who pastes a direct competitor wants THAT ASIN mined. Force it
+  // into the Phase-4 harvest, deduped against SOV + our own ASINs. Read BEFORE storeCompetitorMeta
+  // overwrites competitor_asin with the SOV #1. Off-niche competitor terms are stripped downstream by
+  // the same applyRelevanceGate/classifyOffNicheKeywords nets as organic terms (no contamination).
+  let manualCompetitorAsin: string | null = null;
+  try {
+    const { data: cRow } = await supabase.from('listing_seo_scores').select('competitor_asin').eq('parent_asin', parentAsin).single();
+    const raw = ((cRow as { competitor_asin: string | null } | null)?.competitor_asin || '').toUpperCase();
+    if (/^[A-Z0-9]{10}$/.test(raw) && !ownAsins.has(raw)) manualCompetitorAsin = raw;
+  } catch { /* pre-migration / no row — no manual competitor */ }
+
+  const harvestAsins = [...new Set([...(manualCompetitorAsin ? [manualCompetitorAsin] : []), ...topCompetitors.map(c => c.asin)])];
+
   if (topCompetitor) {
     competitor = {
       asin: topCompetitor.asin,
@@ -224,14 +239,18 @@ export async function researchKeywords(
 
     // Store #1 competitor metadata in DB (display + rank panel unchanged)
     await storeCompetitorMeta(parentAsin, competitor);
-
-    // ── Phase 4: keywords_by_asin on the top-3 competitors (ONE call = 1 credit) ─────────
-    const compMap = await fetchKeywordsByASIN(topCompetitors.map(c => c.asin));
-    competitorKeywords = topCompetitors.flatMap(c => compMap.get(c.asin) ?? []);
-    creditsUsed++;
-    console.log(`[keywordResearcher] Phase 4: ${competitorKeywords.length} competitor keywords from ${topCompetitors.length} competitor(s), 1 credit`);
+  } else if (manualCompetitorAsin) {
+    console.log(`[keywordResearcher] Phase 3: no SOV competitor — harvesting the seller-entered competitor ${manualCompetitorAsin}.`);
   } else {
     console.log(`[keywordResearcher] Phase 3: No competitor found in SOV. Skipping Phase 4.`);
+  }
+
+  // ── Phase 4: keywords_by_asin on the harvest set (seller competitor ∪ SOV top-3; ONE call = 1 credit) ─
+  if (harvestAsins.length > 0) {
+    const compMap = await fetchKeywordsByASIN(harvestAsins);
+    competitorKeywords = harvestAsins.flatMap(a => compMap.get(a) ?? []);
+    creditsUsed++;
+    console.log(`[keywordResearcher] Phase 4: ${competitorKeywords.length} competitor keywords from ${harvestAsins.length} ASIN(s)${manualCompetitorAsin ? ` (incl. seller competitor ${manualCompetitorAsin})` : ''}, 1 credit`);
   }
 
     // Persist the CLEAN shared niche pool (niche + competitor) BEFORE Phase 4b overlays OUR ranks,
