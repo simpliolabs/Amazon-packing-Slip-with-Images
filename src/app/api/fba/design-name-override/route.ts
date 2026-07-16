@@ -71,7 +71,9 @@ export async function POST(req: NextRequest) {
         console.error('[design-name-override] read error:', readErr.message)
         return NextResponse.json({ error: readErr.message }, { status: 500 })
       }
-      const map: Record<string, string> = { ...((existing as { design_name_overrides: Record<string, string> | null })?.design_name_overrides || {}) }
+      const prevMap = (existing as { design_name_overrides: Record<string, string> | null })?.design_name_overrides || {}
+      const prevKeyVal = prevMap[key] || null
+      const map: Record<string, string> = { ...prevMap }
       if (value) map[key] = value
       else delete map[key]
       const { error } = await supabase
@@ -82,10 +84,22 @@ export async function POST(req: NextRequest) {
         console.error('[design-name-override] per-design update error:', error.message)
         return NextResponse.json({ error: error.message }, { status: 500 })
       }
+      // A per-design name change re-seeds that group's niche + the shared universe → re-research.
+      if ((value || null) !== prevKeyVal) {
+        const { invalidateKeywordUniverse } = await import('@/lib/sync/syncKeywordIntelligence')
+        await invalidateKeywordUniverse(parentAsin)
+      }
       return NextResponse.json({ success: true, designKey: key, designNameOverride: value, designNameOverrides: map })
     }
 
-    // ── Single-design scalar path (unchanged) ──
+    // ── Single-design scalar path ──
+    // Read the current value first so we only re-seed when the design name actually CHANGES.
+    const { data: curScalar } = await supabase
+      .from('listing_seo_scores')
+      .select('design_name_override')
+      .eq('parent_asin', parentAsin)
+      .single()
+    const prevScalar = (curScalar as { design_name_override: string | null } | null)?.design_name_override || null
     const { error } = await supabase
       .from('listing_seo_scores')
       .update({ design_name_override: value } as never)
@@ -93,6 +107,13 @@ export async function POST(req: NextRequest) {
     if (error) {
       console.error('[design-name-override] update error:', error.message)
       return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+    // The design name seeds keyword research (selectSeeds feeds it to the Seed Agent). A changed name
+    // must re-seed the universe — otherwise the empty-only auto-sync gate keeps the stale, off-niche
+    // universe (the B0DMXMH266 "0 fishing keywords" regression). Awaited fast DELETE.
+    if (value !== prevScalar) {
+      const { invalidateKeywordUniverse } = await import('@/lib/sync/syncKeywordIntelligence')
+      await invalidateKeywordUniverse(parentAsin)
     }
     return NextResponse.json({ success: true, designNameOverride: value })
   } catch (err) {

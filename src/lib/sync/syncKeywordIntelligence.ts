@@ -40,6 +40,36 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+/**
+ * Invalidate this listing's keyword universe so the NEXT regen re-researches from scratch.
+ *
+ * Called when the seller changes a reference SIGNAL that seeds research — the Design Name (which
+ * selectSeeds already feeds to the Seed Agent) or the Competitor ASIN (force-harvested in Phase 4).
+ * Without this, the empty-only auto-sync gate in the recs route never re-seeds once a (signal-less)
+ * universe exists, so the newly-entered design/competitor is silently ignored (the B0DMXMH266
+ * fishing regression). We clear ONLY keyword_analysis (the per-listing derived universe) — never the
+ * cross-listing keyword_seed_pool or the raw keyword_cache, so siblings are untouched and a rebuild
+ * costs 0 fresh JS credits when the raw pull is still warm. Deleting only the derived analysis means
+ * the next recs run's `if (analysis empty)` gate fires → fresh research with the new signal.
+ */
+export async function invalidateKeywordUniverse(parentAsin: string): Promise<void> {
+  const asins = new Set<string>();
+  try {
+    const { data: score } = await supabase
+      .from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parentAsin).single();
+    const rep = (score as { top_child_asin?: string | null } | null)?.top_child_asin;
+    if (rep) asins.add(rep);
+    const { data: kids } = await supabase
+      .from('listing_content').select('asin').eq('parent_asin', parentAsin);
+    for (const k of (kids ?? []) as { asin: string | null }[]) if (k.asin) asins.add(k.asin);
+    if (asins.size === 0) { asins.add(parentAsin); }
+    await supabase.from('keyword_analysis').delete().in('asin', [...asins]);
+    console.log(`[invalidateKeywordUniverse] Cleared keyword_analysis for ${asins.size} asin(s) of ${parentAsin} — reference signal changed → next regen re-researches.`);
+  } catch (e) {
+    console.warn(`[invalidateKeywordUniverse] Non-fatal: could not clear universe for ${parentAsin}:`, e instanceof Error ? e.message : e);
+  }
+}
+
 export interface IntelligenceOptions {
   /** Force a fresh fetch even if cache is valid */
   forceRefresh?: boolean;
