@@ -33,13 +33,15 @@ import { getAccessToken } from '@/lib/amazon/auth'
 import {
   FIELD_CONFIG, isPushField, type PushField,
   resolveProposed, currentValue, asCompare, buildPatchValue,
-  cacheUpdateFor, getByteLength, capBytes,
+  cacheUpdateFor, getByteLength, capBytes, dedupByAsin,
 } from '@/lib/fba/pushFields'
 import {
   resolveDetailAttribute, unpushableReason,
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
-  type DetailAttribute,
+  setItemHighlightsApiState, isItemHighlightsField,
+  type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
@@ -284,7 +286,7 @@ function stripFulfillmentSuffix(sku: string): string {
  * augment listing_content rows whose FBM twin was never synced into our DB. Best-effort: if the
  * call fails we just return what was passed in. Filters out Amazon-managed system SKUs.
  */
-async function discoverSkusForAsin(
+export async function discoverSkusForAsin(
   sellerId: string, token: string, asin: string,
 ): Promise<{ sku: string; asin: string }[] | null> {
   // null = the lookup FAILED (HTTP error / exception) — callers must NOT infer "offerless" from a
@@ -978,6 +980,70 @@ async function patchSkuDetail(
     return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
   }
   return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
+}
+
+// ─── SELF-HEALING ITEM HIGHLIGHTS PROBE ────────────────────────────────────────
+// Classify whether Amazon's Listings API currently accepts title_differentiation (Item Highlights)
+// writes — WITHOUT ever writing (VALIDATION_PREVIEW only). Persists the marketplace-wide verdict to
+// app_settings so the write-gate (isWriteBlockedPreLaunch) is driven by fact, not a hardcoded date.
+
+/** Probe whether Amazon currently accepts Listings-API writes to title_differentiation
+ *  (Item Highlights) for a representative LIVE SKU — WITHOUT writing (VALIDATION_PREVIEW only).
+ *    'supported' → preview.ok (Amazon validated the write clean)
+ *    'blocked'   → preview failed AND joined error matches /currently unsupported/i
+ *    'unknown'   → no live SKU, no productType, HTTP transport failure, or any other rejection
+ *                  (do NOT persist as blocked — a transient blip must never flip the flag). */
+export async function probeItemHighlightsWritable(): Promise<'supported' | 'blocked' | 'unknown'> {
+  try {
+    const sellerId = await getSellerId()
+    const token = await getAccessToken()
+    const db = await createAdminClient()
+
+    // Pick ONE confirmed-live child SKU (marketplace-wide flag → any live SKU answers the question).
+    const { data: rows } = await db
+      .from('listing_content').select('sku, asin').limit(200)
+    const candidates = dedupByAsin((rows ?? []) as { sku: string; asin: string }[])
+    let liveSku: string | null = null
+    for (const c of candidates) {
+      const skus = await discoverSkusForAsin(sellerId, token, c.asin)   // null=failed, []=offerless, [..]=live
+      if (skus && skus.length > 0) { liveSku = skus[0].sku; break }
+    }
+    if (!liveSku) return 'unknown'                       // no confirmed-live SKU → inconclusive
+
+    const productType = await tryGetProductType(sellerId, token, liveSku)
+    if (!productType) return 'unknown'                   // wrong-schema preview is meaningless (#244/#245 trap)
+
+    const attribute: DetailAttribute = { spApiKey: 'title_differentiation', scope: 'broadcast' }
+    // Benign, non-empty free-text highlight (≤125 chars). Content is irrelevant — Amazon returns
+    // "currently unsupported" BEFORE value validation; the flat buildDetailPatchValue shape suffices.
+    const probeValue = 'Everyday comfort and a clean, versatile look that pairs easily with the rest of your wardrobe.'
+    const preview = await patchSkuDetail(sellerId, token, productType, liveSku, attribute, probeValue, 'VALIDATION_PREVIEW')
+
+    if (preview.ok) return 'supported'
+    if (/^HTTP \d+:/.test(preview.error ?? '')) return 'unknown'          // transport wrapper — not a verdict
+    if (preview.error && /currently unsupported/i.test(preview.error)) return 'blocked'
+    return 'unknown'                                     // some OTHER validation error — don't flip the flag
+  } catch { return 'unknown' }
+}
+
+const IH_PROBE_THROTTLE_MS = 24 * 60 * 60 * 1000
+
+/** Fire-and-forget daily refresh of the Item Highlights flag. Never blocks the caller,
+ *  never throws, never overwrites a good flag on a transient/inconclusive ('unknown') result. */
+export function maybeRefreshItemHighlightsProbe(
+  db: SupabaseClient,
+  state: ItemHighlightsApiState | null,
+): void {
+  const fresh = state && (Date.now() - Date.parse(state.probed_at)) < IH_PROBE_THROTTLE_MS
+  if (fresh) return
+  void (async () => {
+    try {
+      const verdict = await probeItemHighlightsWritable()      // 'supported' | 'blocked' | 'unknown'
+      if (verdict === 'supported') await setItemHighlightsApiState(db, true)
+      else if (verdict === 'blocked') await setItemHighlightsApiState(db, false)
+      // 'unknown' → leave the last-known flag untouched (transient/no-productType/HTTP)
+    } catch { /* best-effort */ }
+  })()
 }
 
 // ─── DETERMINISTIC AUTO-HEAL — inherit a missing BROADCAST attribute onto the parent hub ───────
@@ -2766,6 +2832,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
                 ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
                 : preview.error
+              // Belt-and-suspenders self-heal: a live "currently unsupported" on the Item Highlights
+              // field is ground truth → persist blocked. Guarded by isItemHighlightsField so the same
+              // generic error on some OTHER attribute never touches the IH flag.
+              if (isItemHighlightsField(null, ctx.attribute.spApiKey) &&
+                  preview.error && /currently unsupported/i.test(preview.error)) {
+                void (async () => { try { await setItemHighlightsApiState(await createAdminClient(), false) } catch { /* best-effort */ } })()
+              }
               results.push({ sku: item.sku, status: 'failed', submissionId: null, error: friendlyErr, isParent, issues: preview.issues })
               emit({ type: 'progress', sku: item.sku, status: 'failed', error: friendlyErr })
               await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: null, status: 'failed', error_message: friendlyErr })
@@ -2774,6 +2847,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             }
             const live = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'LIVE', ctx.valueShape, calibratedValueFor(newValueStr))
             const status = live.ok ? 'accepted' : 'failed'
+            // Self-heal → writable: a genuine live ACCEPT of the Item Highlights field proves Amazon
+            // opened writes → persist supported (the flag then unblocks the gate with no code change).
+            if (live.ok && isItemHighlightsField(null, ctx.attribute.spApiKey)) {
+              void (async () => { try { await setItemHighlightsApiState(await createAdminClient(), true) } catch { /* best-effort */ } })()
+            }
             results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent, issues: live.issues })
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
@@ -3469,10 +3547,20 @@ async function pushPerFieldFallback(
       const friendly = preview.error && /currently unsupported/i.test(preview.error)
         ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (launch July 27, 2026).`
         : preview.error
+      // Belt-and-suspenders self-heal: a live "currently unsupported" on the Item Highlights field is
+      // ground truth → persist blocked (guarded so another attribute's same error can't flip the flag).
+      if (isItemHighlightsField(null, p.attribute.spApiKey) &&
+          preview.error && /currently unsupported/i.test(preview.error)) {
+        void (async () => { try { await setItemHighlightsApiState(await createAdminClient(), false) } catch { /* best-effort */ } })()
+      }
       out.push({ field: p.field, spApiKey: p.attribute.spApiKey, ok: false, submissionId: null, error: friendly })
       await sleep(PATCH_DELAY_MS); continue
     }
     const live = await patchSkuDetail(sellerId, token, productType, sku, p.attribute, p.value, 'LIVE', p.valueShape, p.patchValue)
+    // Self-heal → writable: a genuine live ACCEPT of the Item Highlights field proves Amazon opened writes.
+    if (live.ok && isItemHighlightsField(null, p.attribute.spApiKey)) {
+      void (async () => { try { await setItemHighlightsApiState(await createAdminClient(), true) } catch { /* best-effort */ } })()
+    }
     out.push({ field: p.field, spApiKey: p.attribute.spApiKey, ok: live.ok, submissionId: live.submissionId, error: live.error })
     await sleep(PATCH_DELAY_MS)
   }

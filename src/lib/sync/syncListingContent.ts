@@ -39,7 +39,7 @@ import { coverageMode, coveredVerdict, missingVerdict, coverageTokens } from '@/
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
-import { isWriteBlockedPreLaunch } from '@/lib/fba/productDetailAttrs'
+import { isWriteBlockedPreLaunch, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
 
@@ -575,10 +575,19 @@ export async function fetchScoringContext(
         // confusion). Count only TRUE gaps: a field with no live value, or an enum field whose current
         // value is invalid against the live Amazon schema (is_enum/enum_valid persisted by validate-at-regen).
         const isEmpty = (v: unknown) => !v || !String(v).trim()
-        // Pre-launch Item Highlights are write-BLOCKED by Amazon ("currently unsupported") — an
-        // empty one is not a closable gap until July 27, 2026, so it must not dock Features.
+        // Item Highlights are write-BLOCKED by Amazon ("currently unsupported") until it opens API
+        // writes — an empty one is not a closable gap, so it must not dock Features. The verdict now
+        // comes from the persisted VALIDATION_PREVIEW probe flag (marketplace-wide, one app_settings
+        // row), NOT a hardcoded date; null flag falls back to the July-27 date inside the gate.
+        const ihState = await getItemHighlightsApiState(supabase)
+        // Fire-and-forget >24h refresh of the flag (cycle-safe dynamic import — pushExecutor is a heavy
+        // module that itself dynamic-imports THIS file; a static import here would bloat the scoring
+        // hot path and invert the established decoupling). Never blocks/throws; lands for next request.
+        void import('@/lib/fba/pushExecutor')
+          .then((m) => m.maybeRefreshItemHighlightsProbe(supabase, ihState))
+          .catch(() => { /* best-effort */ })
         ctx.productDetailsGaps = pdi.filter((p: { field_name?: string; sp_api_key?: string; current_value?: unknown; is_enum?: boolean; enum_valid?: boolean }) =>
-          !isWriteBlockedPreLaunch(p.field_name, p.sp_api_key) &&
+          !isWriteBlockedPreLaunch(p.field_name, p.sp_api_key, new Date(), { apiSupported: ihState?.supported ?? null }) &&
           (isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false)),
         ).length
       }

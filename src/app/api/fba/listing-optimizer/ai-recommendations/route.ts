@@ -948,12 +948,15 @@ export async function POST(req: NextRequest) {
             // confusion). The enum validation ran just above, so is_enum/enum_valid are set here — using the
             // SAME predicate as syncListingContent keeps THIS regen's score == the next sync's (no flip-flop).
             if (Array.isArray(result.product_details_improvements)) {
-              const { isWriteBlockedPreLaunch } = await import('@/lib/fba/productDetailAttrs')
+              const { isWriteBlockedPreLaunch, getItemHighlightsApiState } = await import('@/lib/fba/productDetailAttrs')
+              // Read the SAME app_settings probe flag the next sync will read, so THIS regen's Features
+              // score == the next sync's (the #85 no-flip-flop invariant — both consult one source).
+              const ihState = await getItemHighlightsApiState(supabase)
               const isEmpty = (v: string | null) => !v || !String(v).trim()
-              // Pre-launch Item Highlights are write-BLOCKED by Amazon ("currently unsupported") —
-              // not a closable gap until July 27, 2026, so it must not dock Features (mirrors sync).
+              // Item Highlights stay write-BLOCKED by Amazon ("currently unsupported") until the probe
+              // flips the flag — not a closable gap, so they must not dock Features (mirrors sync).
               ctx.productDetailsGaps = result.product_details_improvements.filter((p) =>
-                !isWriteBlockedPreLaunch(p.field_name, (p as unknown as { sp_api_key?: string }).sp_api_key) &&
+                !isWriteBlockedPreLaunch(p.field_name, (p as unknown as { sp_api_key?: string }).sp_api_key, new Date(), { apiSupported: ihState?.supported ?? null }) &&
                 (isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false)),
               ).length
             }
@@ -1486,6 +1489,20 @@ export async function GET(req: NextRequest) {
     }, (contentRows ?? []) as DeriveContentRow[]) as unknown as ActionPlanItem[]
   } catch (e) { console.warn('[ai-recommendations GET] derive failed — serving stored plan:', e instanceof Error ? e.message : e) }
 
+  // Item Highlights write-gate: compute the single client-facing boolean server-side so the client
+  // needs ZERO date logic. `writable == "not blocked for the IH field"` — the gate folds in the probe
+  // flag AND the July-27 fallback (null flag → date). undefined on legacy responses → client treats
+  // Item Highlights as still write-blocked (safe default).
+  const { getItemHighlightsApiState: _getIhState, isWriteBlockedPreLaunch: _isBlocked } = await import('@/lib/fba/productDetailAttrs')
+  const ihState = await _getIhState(supabase)
+  const item_highlights_writable =
+    _isBlocked('item_highlights', 'title_differentiation', new Date(), { apiSupported: ihState?.supported ?? null }) === false
+  // Fire-and-forget >24h probe refresh (cycle-safe dynamic import). This GET returns the current
+  // last-known flag; the refresh (if due) lands for the next request. Never blocks/throws.
+  void import('@/lib/fba/pushExecutor')
+    .then((m) => m.maybeRefreshItemHighlightsProbe(supabase, ihState))
+    .catch(() => { /* best-effort */ })
+
   return NextResponse.json({
     recommendations: {
       ...data,
@@ -1504,6 +1521,7 @@ export async function GET(req: NextRequest) {
       action_plan: action_plan_out,
       product_details_improvements: scrubTrademarksDeep(product_details_improvements),
       field_pushed_at,
+      item_highlights_writable,    // server-probed marketplace flag (undefined on legacy → client treats as blocked)
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords_scrubbed.length > 0
         ? per_child_keywords_scrubbed[0].keywords
