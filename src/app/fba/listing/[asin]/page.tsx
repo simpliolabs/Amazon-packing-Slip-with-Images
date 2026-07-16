@@ -912,6 +912,35 @@ export default function ListingDetailPage() {
     } catch { /* best-effort — next load shows it */ }
   }, [asin])
 
+  // A+ "Scan now" (PO 2026-07-16): A+ status is otherwise refreshed ONLY by the heavy top-50 sync, so
+  // a low-traffic parent that gains A+ shows 0/16 forever. Re-check Amazon for A+ on THIS listing,
+  // then refetch the score so the tile/ring/child table reflect it.
+  const [aplusScanning, setAplusScanning] = useState(false)
+  const [aplusScanMsg, setAplusScanMsg] = useState<string | null>(null)
+  const scanAplus = useCallback(async () => {
+    if (!asin || aplusScanning) return
+    setAplusScanning(true); setAplusScanMsg(null)
+    try {
+      const resp = await fetch('/api/fba/aplus-scan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin }),
+      })
+      const data = await resp.json()
+      if (data.scanned) {
+        setAplusScanMsg(data.has_aplus
+          ? `A+ found — ${data.aplus_module_count} module${data.aplus_module_count === 1 ? '' : 's'} detected.`
+          : 'Still no live A+ detected. If you just submitted it, Amazon may still be reviewing — re-scan shortly.')
+        await refreshScore()
+      } else {
+        setAplusScanMsg(data.reason || 'Could not scan A+.')
+      }
+    } catch {
+      setAplusScanMsg('A+ scan failed — try again.')
+    } finally {
+      setAplusScanning(false)
+    }
+  }, [asin, aplusScanning, refreshScore])
+
   // Verification-queue status: pending + healing + needs_attention for THIS parent. Polled every
   // 60s so a freshly-enqueued push appears in the banner and a cron flip from pending → completed →
   // needs_attention reflects without a manual refresh. Best-effort: a missing migration 030
@@ -3116,13 +3145,24 @@ export default function ListingDetailPage() {
                         Manager (the create/list surface — same URL as the dashboard + the audit issue copy).
                         Identifies the A+ item by its aplus_modules brief; also covers the brand-story card. */}
                     {(((item.aplus_modules && item.aplus_modules.length > 0)) || item.element === 'brand_story') && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
-                      <a
-                        href="https://sellercentral.amazon.com/enhanced-content/content-manager"
-                        target="_blank" rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 mt-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg px-3 py-2 transition-colors cursor-pointer"
-                      >
-                        <Icon.External className="w-3.5 h-3.5" /> {score.aplus_score > 0 ? 'Open A+ Content Manager' : 'Create A+ in Content Manager'} →
-                      </a>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <a
+                          href="https://sellercentral.amazon.com/enhanced-content/content-manager"
+                          target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg px-3 py-2 transition-colors cursor-pointer"
+                        >
+                          <Icon.External className="w-3.5 h-3.5" /> {score.aplus_score > 0 ? 'Open A+ Content Manager' : 'Create A+ in Content Manager'} →
+                        </a>
+                        <button
+                          onClick={scanAplus}
+                          disabled={aplusScanning}
+                          title="Re-check Amazon for A+ on this listing (e.g. right after you submit it) — updates the score without a full re-sync"
+                          className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg px-3 py-2 disabled:opacity-50 cursor-pointer"
+                        >
+                          {aplusScanning ? 'Scanning Amazon…' : '↻ Scan now'}
+                        </button>
+                        {aplusScanMsg && <span className="w-full text-[11px] text-slate-500">{aplusScanMsg}</span>}
+                      </div>
                     )}
 
                     {/* Row 5a: PER-CHILD title table (capacity families like SD cards) — overrides
