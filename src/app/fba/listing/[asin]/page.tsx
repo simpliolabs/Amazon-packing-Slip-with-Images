@@ -383,11 +383,24 @@ export default function ListingDetailPage() {
   // terminal event (accepted/failed/partial/skipped) — one per SKU, so the bar reaches 100%.
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
   const [bulkFinished, setBulkFinished] = useState(false)
-  // Mirrors (pushLoading || bulkRunning) for guards inside STABLE callbacks — a ref can't
-  // go stale the way a useCallback-captured boolean can (the concurrent-push guard relies
-  // on this being current at click time).
+  // ── "Ship all core" bulk push (element C): Title + Bullets + Description + Keywords in ONE PATCH per
+  // SKU (server executor executeBulkCorePush). Minimal state, separate from the details Auto Push above;
+  // only one push runs at a time (the shared pushActiveRef guard), so the stop flag (cancelRequested) is
+  // reused. The button island (near the ACTION PLAN) + the modal below drive it; the stream reader +
+  // stall watchdog mirror runBulkPush.
+  const [coreBulkOpen, setCoreBulkOpen] = useState(false)
+  const [coreBulkRunning, setCoreBulkRunning] = useState(false)
+  const [coreBulkFinished, setCoreBulkFinished] = useState(false)
+  const [coreBulkMessage, setCoreBulkMessage] = useState('')
+  const [coreBulkProgress, setCoreBulkProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
+  const [coreBulkPerField, setCoreBulkPerField] = useState<{ field: string; accepted: number; failed: number }[]>([])
+  const coreBulkCancelTokenRef = useRef<string | null>(null)
+  const coreBulkInterruptedRef = useRef(false)
+  // Mirrors (pushLoading || bulkRunning || coreBulkRunning) for guards inside STABLE callbacks — a ref
+  // can't go stale the way a useCallback-captured boolean can (the concurrent-push guard relies on this
+  // being current at click time).
   const pushActiveRef = useRef(false)
-  useEffect(() => { pushActiveRef.current = pushLoading || bulkRunning }, [pushLoading, bulkRunning])
+  useEffect(() => { pushActiveRef.current = pushLoading || bulkRunning || coreBulkRunning }, [pushLoading, bulkRunning, coreBulkRunning])
   // ── Family-SKUs view — full set of FBA + FBM twins + variation parent SKU. The DB cache
   // (listing_content) historically deduped some FBA/FBM pairs, so cards that render from
   // it alone hid the FBM twins (the seller saw "3 children" but the push hit 6).
@@ -1775,6 +1788,122 @@ export default function ListingDetailPage() {
     } catch { /* the run still stops between SKUs on its own if the flag landed */ }
   }, [])
 
+  /** "Ship all confirmed core": Title + Bullets + Description + Keywords in ONE PATCH per SKU via the
+   *  core_bulk executor. Cloned from runBulkPush — same NDJSON stream reader + stall watchdog. On a
+   *  result it refetches the score, recomputes the free rank card, and re-pulls the derived plan
+   *  (ship-truth). Gated by the shared concurrent-push guard so it never races another stream. */
+  const runCoreBulkPush = useCallback(async () => {
+    if (coreBulkRunning) return
+    if (pushActiveRef.current) {
+      window.alert('A push is still running (see the progress pill, bottom-right). Let it finish before shipping all core.')
+      return
+    }
+    setCoreBulkRunning(true)
+    setCoreBulkFinished(false)
+    setCoreBulkOpen(true)
+    setCoreBulkMessage('')
+    setCoreBulkPerField([])
+    setCoreBulkProgress({ done: 0, total: 0 })
+    const cancelToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `c${Math.random().toString(36).slice(2)}`
+    coreBulkCancelTokenRef.current = cancelToken
+    coreBulkInterruptedRef.current = false
+    setCancelRequested(false)
+    let anyPushed = false
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/listing-optimizer/push-content', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ parent_asin: asin, field: 'core_bulk', core_fields: ['title', 'bullets', 'description', 'keywords'], confirm: true, cancel_token: cancelToken }),
+      })
+      if (!resp.ok) { const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }; throw new Error(data.error || `HTTP ${resp.status}`) }
+      if (!resp.body) throw new Error('Connection dropped before stream.')
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let result: { perField?: { field: string; accepted: number; failed: number }[]; message?: string; pushed?: number } | null = null
+      let streamError: string | null = null
+      const handleLine = (line: string) => {
+        if (!line.trim()) return
+        try {
+          const msg = JSON.parse(line) as { type?: string; status?: string; total?: number; perField?: { field: string; accepted: number; failed: number }[]; message?: string; error?: string; pushed?: number }
+          if (msg.type === 'started') { if (typeof msg.total === 'number') setCoreBulkProgress({ done: 0, total: msg.total }) }
+          else if (msg.type === 'progress' && msg.status && msg.status !== 'validating') {
+            // one terminal event per SKU (accepted/failed/partial) → advance the bar
+            setCoreBulkProgress((p) => ({ ...p, done: Math.min(p.done + 1, p.total || p.done + 1) }))
+          }
+          else if (msg.type === 'result') result = msg
+          else if (msg.type === 'error') streamError = msg.error || 'Ship all core failed mid-stream.'
+        } catch { /* keepalive/partial line */ }
+      }
+      // WATCHDOG: a dropped stream (Coolify/Cloudflare kill long requests ~100s; the server keeps
+      // running + finishes) must not leave reader.read() hanging forever. If no chunk arrives for
+      // STALL_MS, stop waiting and tell the seller to Verify (accepted SKUs stay — the run is idempotent).
+      const STALL_MS = 60_000
+      let streamStalled = false
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const stall = new Promise<'stall'>((res) => { timer = setTimeout(() => res('stall'), STALL_MS) })
+        const next = await Promise.race([reader.read(), stall])
+        if (timer) clearTimeout(timer)
+        if (next === 'stall') { streamStalled = true; try { await reader.cancel() } catch { /* already closed */ } break }
+        const { done, value } = next as ReadableStreamReadResult<Uint8Array>
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) handleLine(line)
+      }
+      if (streamStalled && !result && !streamError) {
+        streamError = 'Connection dropped (likely a deploy or network blip). The push usually finishes on the server regardless — click Verify live to confirm; already-accepted SKUs stay pushed. Re-run Ship all core to finish any that are still missing.'
+      }
+      if (buffer.trim()) handleLine(buffer)
+      if (streamError) throw new Error(streamError)
+      if (!result) throw new Error('Stream ended without a result.')
+      const r = result as { perField?: { field: string; accepted: number; failed: number }[]; message?: string; pushed?: number }
+      setCoreBulkPerField(r.perField ?? [])
+      setCoreBulkMessage(r.message ?? 'Done.')
+      anyPushed = (r.pushed ?? 0) > 0
+    } catch (e) {
+      coreBulkInterruptedRef.current = true
+      setCoreBulkMessage(e instanceof Error ? e.message : 'Ship all core failed')
+    }
+    // On a result that shipped something: refetch score + recompute the free rank card + re-pull the
+    // derived action plan (ship-truth — the server write-through + re-score already ran).
+    if (anyPushed) {
+      try {
+        const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+        const sdata = await sresp.json()
+        const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+        if (found) setScore(found)
+      } catch { /* best-effort — the score still updates on next load */ }
+      refreshRankFree()
+      void (async () => {
+        try {
+          const rr = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
+          const jj = await rr.json() as { recommendations?: AiRecommendations | null }
+          if (jj?.recommendations) setAiRecs(jj.recommendations)
+        } catch { /* refetch is best-effort — the next page load serves derived truth */ }
+      })()
+    }
+    coreBulkCancelTokenRef.current = null
+    setCoreBulkRunning(false)
+    setCoreBulkFinished(true)
+  }, [asin, coreBulkRunning, getToken, refreshRankFree])
+
+  /** Stop a running Ship-all-core between SKUs (same server cancel as the other pushes). */
+  const stopCoreBulkPush = useCallback(async () => {
+    const token = coreBulkCancelTokenRef.current
+    if (!token) return
+    setCancelRequested(true)
+    try {
+      await fetch('/api/fba/listing-optimizer/push-content', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel', cancel_token: token }),
+      })
+    } catch { /* the run still stops between SKUs on its own if the flag landed */ }
+  }, [])
+
   /** Verify what Amazon ACTUALLY has live right now for the just-pushed field.
    *  Useful when a push was Accepted but the seller doesn't see it on Seller Central
    *  or the PDP — answers "is Amazon still processing, or did the push silently fail?". */
@@ -2520,6 +2649,23 @@ export default function ListingDetailPage() {
               <Icon.Sparkles className="w-3.5 h-3.5" /> Run AI Audit
             </button>
           )}
+        </div>
+      )}
+
+      {/* Ship all confirmed core (element C): one button ships Title + Bullets + Description + Keywords
+          together in a SINGLE PATCH per SKU (executeBulkCorePush), instead of four separate section
+          pushes. The server drops the non-buyable variation parent + skips offerless SKUs, and each
+          field still gets a full VALIDATION_PREVIEW. Gated by the shared concurrent-push guard. */}
+      {aiRecs?.action_plan && aiRecs.action_plan.some((a) => ['title', 'bullet_1', 'bullet_2', 'bullet_3', 'bullet_4', 'bullet_5', 'description', 'backend_keywords'].includes(a.element) && a.verdict !== 'DONE' && a.verdict !== 'SKIP') && (
+        <div className="flex items-center justify-end mb-3">
+          <button
+            onClick={runCoreBulkPush}
+            disabled={coreBulkRunning || pushLoading || bulkRunning}
+            className="text-xs bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-1.5 rounded-lg font-semibold whitespace-nowrap shadow-sm"
+            title="Ship Title, Bullets, Description and Backend Keywords together — one PATCH per SKU. The non-buyable variation parent is skipped; each field still gets full Amazon validation."
+          >
+            {coreBulkRunning ? 'Shipping all core…' : 'Ship all confirmed core →'}
+          </button>
         </div>
       )}
 
@@ -4477,18 +4623,85 @@ export default function ListingDetailPage() {
           </div>
         </div>
       )}
+      {/* SHIP ALL CORE — progress + result (element C). Mirrors the Auto Push modal, minimal (no
+          per-field editing — the values are the confirmed core recommendations). */}
+      {coreBulkOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl shadow-xl max-w-xl w-full max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
+              <h3 className="text-sm font-bold text-slate-900">Ship all core — Title · Bullets · Description · Keywords</h3>
+              <ModalCloseButton onClick={() => setCoreBulkOpen(false)} title={coreBulkRunning ? 'Safe to close — the push keeps running in this tab (progress pill bottom-right). Don’t close the browser tab.' : 'Close'} />
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <p className="text-xs text-slate-500">
+                {coreBulkFinished
+                  ? (coreBulkInterruptedRef.current
+                      ? '⚠ Interrupted before completion. Already-accepted SKUs stay pushed — re-run Ship all core to finish the rest (idempotent). Use Verify live to confirm.'
+                      : (coreBulkMessage || 'Done. Amazon applies accepted submissions in 15–30 min; use Verify live to confirm.'))
+                  : coreBulkRunning
+                  ? 'Shipping one PATCH per SKU (Title + Bullets + Description broadcast to every child; Keywords per child). You can close this — it keeps running in this tab (reopen from the pill, bottom-right).'
+                  : 'Ships every confirmed core field to every live child SKU in one PATCH each. The non-buyable variation parent is skipped; each field still gets full Amazon validation.'}
+              </p>
+              {/* Overall SKU progress bar. total = every SKU; done = each SKU's terminal event. */}
+              {(coreBulkRunning || (coreBulkFinished && coreBulkProgress.total > 0)) && coreBulkProgress.total > 0 && (
+                <div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-500 mb-0.5">
+                    <span className={coreBulkFinished && coreBulkInterruptedRef.current ? 'text-amber-700 font-semibold' : ''}>{coreBulkFinished ? (coreBulkInterruptedRef.current ? 'Interrupted' : 'Complete') : 'Shipping to Amazon…'}</span>
+                    <span>{coreBulkProgress.done} / {coreBulkProgress.total} SKUs</span>
+                  </div>
+                  <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${coreBulkFinished ? (coreBulkInterruptedRef.current ? 'bg-amber-500' : 'bg-emerald-500') : 'bg-violet-500'}`}
+                      style={{ width: `${Math.round((coreBulkProgress.done / coreBulkProgress.total) * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {coreBulkPerField.length > 0 && (
+                <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
+                  {coreBulkPerField.map((pf, i) => (
+                    <div key={i} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <span className="text-xs font-semibold text-slate-800">{pf.field}</span>
+                      <span className={`text-[10px] font-semibold shrink-0 ${pf.failed === 0 && pf.accepted > 0 ? 'text-emerald-600' : pf.failed > 0 ? 'text-red-600' : 'text-slate-400'}`}>
+                        {pf.accepted > 0 ? `✓ ${pf.accepted} SKU${pf.accepted === 1 ? '' : 's'}` : ''}{pf.failed > 0 ? ` · ✗ ${pf.failed} failed` : ''}{pf.accepted === 0 && pf.failed === 0 ? 'Already up to date' : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 sticky bottom-0 bg-white">
+              <button onClick={() => setCoreBulkOpen(false)} className="text-xs text-slate-600 hover:text-slate-800 px-3 py-1.5">
+                {coreBulkFinished ? 'Close' : coreBulkRunning ? 'Hide (keeps running)' : 'Cancel'}
+              </button>
+              {coreBulkRunning && (
+                <button onClick={stopCoreBulkPush} disabled={cancelRequested} className="text-xs px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60 font-medium">
+                  {cancelRequested ? 'Stopping…' : '■ Stop'}
+                </button>
+              )}
+              {!coreBulkRunning && !coreBulkFinished && (
+                <button onClick={runCoreBulkPush} className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg font-semibold">
+                  Ship all core →
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Floating push pill — the push fetch lives in the PAGE's JS, not the modal, so the
           modal can close while the stream keeps running (PO: "an employee needs to watch an
           item send for 5 min"). Within-tab navigation is safe; only closing the browser TAB
           kills the stream (guarded by beforeunload below). */}
-      {((pushLoading && !showPushModal) || (bulkRunning && !bulkOpen)) && (
+      {((pushLoading && !showPushModal) || (bulkRunning && !bulkOpen) || (coreBulkRunning && !coreBulkOpen)) && (
         <button
-          onClick={() => (bulkRunning && !bulkOpen ? setBulkOpen(true) : setShowPushModal(true))}
+          onClick={() => (coreBulkRunning && !coreBulkOpen ? setCoreBulkOpen(true) : bulkRunning && !bulkOpen ? setBulkOpen(true) : setShowPushModal(true))}
           className="fixed bottom-4 right-4 z-40 flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-lg"
           title="A push is still running in this tab — click to view progress. Keep this browser tab open until it finishes."
         >
           <span className="animate-spin w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full" />
-          {bulkRunning && !bulkOpen
+          {coreBulkRunning && !coreBulkOpen
+            ? `Shipping all core… ${coreBulkProgress.done}/${coreBulkProgress.total} SKUs`
+            : bulkRunning && !bulkOpen
             ? `Auto Push running… ${bulkItems.filter((i) => i.status === 'done' || i.status === 'failed').length}/${bulkItems.filter((i) => !i.skip).length} fields`
             : `Pushing ${pushField === 'details' && pushDetailField ? pushDetailField : FIELD_LABEL[pushField]}… ${pushProgress.filter((p) => p.status === 'accepted').length} accepted`}
           <span className="underline decoration-dotted underline-offset-2">view</span>

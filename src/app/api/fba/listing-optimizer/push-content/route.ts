@@ -18,12 +18,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
-import { FIELD_CONFIG, isPushField } from '@/lib/fba/pushFields'
+import { FIELD_CONFIG, isPushField, type PushField } from '@/lib/fba/pushFields'
 import { resolveDetailAttribute } from '@/lib/fba/productDetailAttrs'
 import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, getAttributeSubschema } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
 import {
-  executePush, executeBulkDetailsPush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff, requestPushCancel,
+  executePush, executeBulkDetailsPush, executeBulkCorePush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff, requestPushCancel,
   ENDPOINT, MARKETPLACE_ID, SYSTEM_ACTOR, type PushEmit, type PushActor,
 } from '@/lib/fba/pushExecutor'
 import { getBearerUser, resolveUserName } from '@/lib/fba/claims'
@@ -154,7 +154,7 @@ export async function POST(req: NextRequest) {
   // Validate the body BEFORE opening the stream — a 400 here is a real client error,
   // not a mid-push failure. Keeps the streaming envelope reserved for things that
   // can actually fail asynchronously.
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; detail_fields?: string[]; detail_overrides?: Record<string, string>; skus?: string[]; title_override?: string; detail_value_override?: string; action?: string; cancel_token?: string }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[]; skus?: string[]; title_override?: string; detail_value_override?: string; action?: string; cancel_token?: string }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
   // Cancel a running streaming push (PO: "NO way to cancel when it starts") — flips the
@@ -190,6 +190,10 @@ export async function POST(req: NextRequest) {
       // Bulk Auto Push: all selected detail attributes, batched per SKU (separate executor).
       if (rawField === 'details_bulk') {
         await executeBulkDetailsPush({ parent_asin, detail_fields: body.detail_fields, detail_overrides: body.detail_overrides, cancel_token: body.cancel_token, actor }, emit)
+      } else if (rawField === 'core_bulk') {
+        // Bulk "Ship all core": Title + Bullets + Description + Keywords in ONE PATCH per SKU (separate
+        // executor). core_fields is re-filtered to valid PushFields inside; absent → all four.
+        await executeBulkCorePush({ parent_asin, core_fields: body.core_fields as PushField[] | undefined, cancel_token: body.cancel_token, actor }, emit)
       } else {
         await executePush({ parent_asin, field: rawField, detail_field: detailField, skus, title_override, detail_value_override, cancel_token: body.cancel_token, actor }, emit)
       }
