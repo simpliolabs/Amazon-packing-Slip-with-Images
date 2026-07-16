@@ -9,6 +9,7 @@ import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   //
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
 import { groupByDesign, isMultiDesign, type PerDesignGroup } from '@/lib/fba/perDesign'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
+import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
 import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSparkline'
@@ -988,6 +989,20 @@ export default function ListingDetailPage() {
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
   }, [pushLoading, bulkRunning])
+
+  // Escape closes the two streaming modals (Auto Push / Ship). Like their X, this only HIDES
+  // the modal — the push keeps running in this tab and the floating pill reopens it. The three
+  // ModalShell dialogs handle their own Escape (gated on their in-flight guard).
+  useEffect(() => {
+    if (!bulkOpen && !showPushModal) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (showPushModal) setShowPushModal(false)
+      else if (bulkOpen) setBulkOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [bulkOpen, showPushModal])
 
   // FREE rank re-check (the banner's stale chip is a BUTTON now, not a dead-end): recomputes
   // live keyword coverage server-side (0 JS credits, 0 OpenAI — pure DB + coverage math),
@@ -4075,13 +4090,17 @@ export default function ListingDetailPage() {
           active, when, and whether they have UNPUSHED changes; step 2 force-reassigns + logs both ids.
           ══════════════════════════════════════════════════════════════════════ */}
       {takeoverOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !claimBusy && setTakeoverOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center gap-2 px-5 py-3.5 border-b border-slate-200">
-              <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-600" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-              <h3 className="text-sm font-bold text-slate-900">Take over this listing?</h3>
-              <button onClick={() => !claimBusy && setTakeoverOpen(false)} className="ml-auto text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
-            </div>
+        <ModalShell
+          onClose={() => setTakeoverOpen(false)}
+          dismissDisabled={claimBusy}
+          maxW="max-w-md"
+          title={
+            <span className="flex items-center gap-2">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-600 shrink-0" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+              Take over this listing?
+            </span>
+          }
+        >
             <div className="p-5 space-y-3">
               <p className="text-xs text-slate-600">
                 <span className="font-semibold text-slate-800">{takeoverInfo?.holderName || 'Someone'}</span>
@@ -4107,20 +4126,20 @@ export default function ListingDetailPage() {
                 {claimBusy ? 'Taking over…' : 'Take over'}
               </button>
             </div>
-          </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           FIX CAPACITY ATTRIBUTE — preview → confirm → live PATCH (same chain as re-link)
           ══════════════════════════════════════════════════════════════════════ */}
       {fixCapTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !fixCapLoading && setFixCapTarget(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
-              <h3 className="text-sm font-bold text-slate-900">Fix capacity for <span className="font-mono">{fixCapTarget.row.sku}</span></h3>
-              <button onClick={() => !fixCapLoading && setFixCapTarget(null)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
-            </div>
+        <ModalShell
+          onClose={() => setFixCapTarget(null)}
+          dismissDisabled={fixCapLoading}
+          maxW="max-w-2xl"
+          scroll
+          title={<>Fix capacity for <span className="font-mono">{fixCapTarget.row.sku}</span></>}
+        >
             <div className="p-5">
               <p className="text-xs text-slate-600 mb-3">
                 This patches the <span className="font-mono">{fixCapTarget.row.attributeName ?? 'capacity'}</span> attribute via SP-API. We <b>validation-preview first</b> — only an Amazon-validated change reaches Live. Amazon returns ACCEPTED before the change is actually visible, so re-run the capacity check after a few minutes. <b>Heads-up:</b> changing a variation axis value can cause Amazon to re-validate the variation family.
@@ -4195,20 +4214,20 @@ export default function ListingDetailPage() {
                 )}
               </div>
             </div>
-          </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
           RE-LINK ORPHAN — preview (VALIDATION_PREVIEW) → confirm → live PATCH
           ══════════════════════════════════════════════════════════════════════ */}
       {relinkTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !relinkLoading && setRelinkTarget(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
-              <h3 className="text-sm font-bold text-slate-900">Re-link <span className="font-mono">{relinkTarget.childSku}</span> to a parent</h3>
-              <button onClick={() => !relinkLoading && setRelinkTarget(null)} className="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
-            </div>
+        <ModalShell
+          onClose={() => setRelinkTarget(null)}
+          dismissDisabled={relinkLoading}
+          maxW="max-w-2xl"
+          scroll
+          title={<>Re-link <span className="font-mono">{relinkTarget.childSku}</span> to a parent</>}
+        >
             <div className="p-5">
               <p className="text-xs text-slate-600 mb-3">This writes the variation relationship directly to Amazon. We <b>validation-preview first</b> — only an Amazon-validated change reaches Live. After Live, Amazon returns ACCEPTED before actually applying the change, so confirm via the orphan check again in a few minutes.</p>
               <label className="block text-xs font-medium text-slate-700 mb-1">Target parent SKU</label>
@@ -4284,8 +4303,7 @@ export default function ListingDetailPage() {
                 )}
               </div>
             </div>
-          </div>
-        </div>
+        </ModalShell>
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
@@ -4293,11 +4311,11 @@ export default function ListingDetailPage() {
           ══════════════════════════════════════════════════════════════════════ */}
       {/* AUTO PUSH — one confirm, every ready Product-Detail field ships sequentially. */}
       {bulkOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setBulkOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
               <h3 className="text-sm font-bold text-slate-900">Auto Push — Product Details</h3>
-              <button onClick={() => setBulkOpen(false)} title={bulkRunning ? 'Safe to close — Auto Push keeps running in this tab (progress pill bottom-right). Just don’t close the browser tab itself.' : 'Close'} className="text-slate-400 hover:text-slate-600 text-lg leading-none">×</button>
+              <ModalCloseButton onClick={() => setBulkOpen(false)} title={bulkRunning ? 'Safe to close — Auto Push keeps running in this tab (progress pill bottom-right). Just don’t close the browser tab itself.' : 'Close'} />
             </div>
             <div className="px-5 py-4 space-y-2">
               <p className="text-xs text-slate-500">
@@ -4418,8 +4436,8 @@ export default function ListingDetailPage() {
         </button>
       )}
       {showPushModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setShowPushModal(false)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 sticky top-0 bg-white">
               <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900">
                 <Icon.Send className="w-4 h-4 text-emerald-600" />
@@ -4430,11 +4448,10 @@ export default function ListingDetailPage() {
                   <span className="text-[10px] text-slate-500 font-mono ml-1">/attributes/{pushPreview.attribute_key}</span>
                 )}
               </h3>
-              <button
+              <ModalCloseButton
                 onClick={() => setShowPushModal(false)}
                 title={pushLoading ? 'Safe to close — the push keeps running in this tab (a progress pill appears bottom-right). Just don’t close the browser tab itself.' : 'Close'}
-                className="text-lg leading-none text-slate-400 hover:text-slate-600"
-              >&times;</button>
+              />
             </div>
 
             <div className="p-5">
