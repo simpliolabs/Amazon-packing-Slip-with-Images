@@ -78,6 +78,7 @@ const ATTR_MAP: Record<string, DetailAttribute> = {
   'closure type':                   { spApiKey: 'closure_type',               scope: 'broadcast' },
   'sleeve type':                    { spApiKey: 'sleeve_type',                scope: 'broadcast' },
   'neck style':                     { spApiKey: 'neck_style',                 scope: 'broadcast' },
+  'shirt form type':                { spApiKey: 'shirt_form_type',            scope: 'broadcast' },
   'care instructions':              { spApiKey: 'care_instructions',          scope: 'broadcast' },
   'department':                     { spApiKey: 'department',                 scope: 'broadcast' },
   'target gender':                  { spApiKey: 'target_gender',              scope: 'broadcast' },
@@ -89,9 +90,12 @@ const ATTR_MAP: Record<string, DetailAttribute> = {
   // ─── GENERAL (broadcast-safe — parent-shared) ───
   'brand':                          { spApiKey: 'brand',                      scope: 'broadcast' },
   'manufacturer':                   { spApiKey: 'manufacturer',               scope: 'broadcast' },
+  'model name':                     { spApiKey: 'model_name',                 scope: 'broadcast' },
   'country of origin':              { spApiKey: 'country_of_origin',          scope: 'broadcast' },
   'theme':                          { spApiKey: 'theme',                      scope: 'broadcast' },
+  'animal theme':                   { spApiKey: 'theme',                      scope: 'broadcast' },
   'special feature':                { spApiKey: 'special_feature',            scope: 'broadcast' },
+  'special features':               { spApiKey: 'special_feature',            scope: 'broadcast' },
   'included components':            { spApiKey: 'included_components',        scope: 'broadcast' },
   'number of items':                { spApiKey: 'number_of_items',            scope: 'broadcast' },
 
