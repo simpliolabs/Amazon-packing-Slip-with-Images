@@ -3,7 +3,7 @@
 import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { isPushableDetail, unpushableReason } from '@/lib/fba/productDetailAttrs'
+import { isPushableDetail, unpushableReason, isItemHighlightsField } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
@@ -103,6 +103,9 @@ interface AiRecommendations {
   /** Last ACCEPTED push timestamp per field (title/bullets/description/keywords, details:<key>),
    *  from keyword_push_log — surfaced as "Shipped <date>" on each shippable row. */
   field_pushed_at?: Record<string, string>
+  /** Server-probed: Amazon's Listings API currently accepts title_differentiation writes.
+   *  Undefined on legacy responses → client treats Item Highlights as still write-blocked. */
+  item_highlights_writable?: boolean
 }
 
 /** Compact relative date for audit/ship timestamps ("2h ago", "3d ago", "Jun 11"). */
@@ -1564,16 +1567,16 @@ export default function ListingDetailPage() {
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   const bulkEligibleDetails = useMemo(() => {
     const rows = aiRecs?.product_details_improvements ?? []
+    const ihWritable = aiRecs?.item_highlights_writable   // boolean | undefined
     return rows.filter((pd) =>
       (pd.pushable ?? isPushableDetail(pd.field_name)) &&
       pd.enum_valid !== false &&
       (pd.recommended_value ?? '').trim() !== '' &&
       (pd.current_value ?? '').trim() !== pd.recommended_value.trim() &&
-      // Item Highlight is write-blocked by Amazon until its July 27, 2026 launch (error
-      // 100476 everywhere, incl. Seller Central) — including it in Auto Push guarantees a
-      // failed row every run. Excluded until launch day; the single-field card still shows
-      // it for copy/planning. KEEP IN SYNC with isWriteBlockedPreLaunch (server).
-      !((/title_differentiation|item_highlights/i.test(pd.sp_api_key ?? '') || /^item highlights?$/i.test(pd.field_name.trim())) && Date.now() < Date.parse('2026-07-27T00:00:00Z')),
+      // Item Highlights: excluded from Auto Push while Amazon's API refuses writes. Driven by the
+      // server probe flag (item_highlights_writable), NOT a hardcoded date. undefined (legacy GET)
+      // → treat as blocked so old cached responses stay safe. Only an explicit `true` unblocks.
+      !(isItemHighlightsField(pd.field_name, pd.sp_api_key) && ihWritable !== true),
     )
   }, [aiRecs])
 

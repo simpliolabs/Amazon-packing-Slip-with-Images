@@ -20,6 +20,7 @@
  */
 
 import type { PatchValueEntry } from '@/lib/fba/pushFields'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 /**
  * LLM/schema-sourced detail values are NOT guaranteed to be strings: the audit model can
@@ -164,17 +165,83 @@ export function buildDetailPatchValue(
   return [{ value: normalized, marketplace_id: marketplaceId, language_tag: languageTag }]
 }
 
+/** True when (fieldName, spApiKey) names Amazon's Item Highlights attribute
+ *  (schema key `title_differentiation`, docs key `item_highlights`, display "Item Highlight(s)").
+ *  Single source of truth — server gate, client Auto-Push filter, and both push hooks all call this. */
+export function isItemHighlightsField(
+  fieldName: string | null | undefined,
+  spApiKey: string | null | undefined,
+): boolean {
+  if (spApiKey === 'title_differentiation' || spApiKey === 'item_highlights') return true
+  const f = (fieldName ?? '').toLowerCase().replace(/[\s_-]+/g, '')
+  return f === 'itemhighlight' || f === 'itemhighlights' || f === 'titledifferentiation'
+}
+
+export const ITEM_HIGHLIGHTS_STATE_KEY = 'item_highlights_api_state'
+
+/** Persisted probe result. `supported` is the marketplace-wide verdict; `probed_at` throttles refresh. */
+export interface ItemHighlightsApiState { supported: boolean; probed_at: string } // probed_at = ISO
+
+/** READ — mirrors the single-key app_settings pattern (familyReconcile.ts / getSellerId).
+ *  Returns null when never probed OR on any parse/read failure (→ date fallback). Never throws. */
+export async function getItemHighlightsApiState(
+  db: SupabaseClient,
+): Promise<ItemHighlightsApiState | null> {
+  try {
+    const { data } = await db
+      .from('app_settings').select('value')
+      .eq('key', ITEM_HIGHLIGHTS_STATE_KEY).maybeSingle()
+    const raw = (data as { value?: string } | null)?.value
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return typeof parsed?.supported === 'boolean'
+      ? { supported: parsed.supported, probed_at: parsed.probed_at ?? new Date().toISOString() }
+      : null
+  } catch { return null }
+}
+
+/** WRITE — mirrors the settings/route.ts app_settings upsert with explicit onConflict. Best-effort.
+ *  `value` is a plain string column (types/database.ts) — hence JSON.stringify / JSON.parse. */
+export async function setItemHighlightsApiState(
+  db: SupabaseClient,
+  supported: boolean,
+): Promise<void> {
+  const now = new Date().toISOString()
+  try {
+    await db.from('app_settings').upsert(
+      { key: ITEM_HIGHLIGHTS_STATE_KEY, value: JSON.stringify({ supported, probed_at: now }), updated_at: now },
+      { onConflict: 'key' },
+    )
+  } catch (e) {
+    console.warn('[item-highlights] state write failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
+}
+
 /** Amazon shipped the Item Highlights ATTRIBUTE (`title_differentiation`) ahead of its July 27,
  *  2026 launch: it's in the product-type schema and the Seller Central form, but the Listings
  *  Items API still REFUSES writes — "This attribute 'Item Highlight' is currently unsupported"
- *  (live-verified 0/10 on B0F86LPSHZ, 2026-06-11). Until the launch date an empty Item Highlight
+ *  (live-verified 0/10 on B0F86LPSHZ, 2026-06-11). Until Amazon opens writes an empty Item Highlight
  *  must NOT count as a Features gap: the seller cannot close it (the unfillable-gap trust trap).
- *  From launch day it counts — and pushes — like any other field, with no code change. */
-export function isWriteBlockedPreLaunch(fieldName: string | null | undefined, spApiKey: string | null | undefined, now = new Date()): boolean {
-  if (now >= new Date('2026-07-27T00:00:00Z')) return false
-  const squash = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, '')
-  const f = squash(String(fieldName ?? ''))
-  return spApiKey === 'title_differentiation' || f === 'itemhighlight' || f === 'itemhighlights' || f === 'titledifferentiation'
+ *
+ *  `apiSupported` (the persisted VALIDATION_PREVIEW probe verdict) replaces the hardcoded date as the
+ *  primary driver; the July-27 date remains ONLY as the never-probed fallback:
+ *    true  → Amazon accepts writes → NEVER block (even before July 27).
+ *    false → "currently unsupported" → BLOCK (even after July 27).
+ *    null / undefined → never probed → fall back to the July-27-2026 launch date.
+ *  Guard-order note: the field match runs FIRST so the probe flag can override the date in BOTH
+ *  directions (the old date-first early-return could not). Stays PURE + synchronous — the async DB
+ *  read is hoisted once per request into each caller and threaded in via `opts.apiSupported`. */
+export function isWriteBlockedPreLaunch(
+  fieldName: string | null | undefined,
+  spApiKey: string | null | undefined,
+  now = new Date(),
+  opts?: { apiSupported?: boolean | null },
+): boolean {
+  if (!isItemHighlightsField(fieldName, spApiKey)) return false
+  const flag = opts?.apiSupported
+  if (flag === true) return false          // probe says writable → never block
+  if (flag === false) return true          // probe says unsupported → block regardless of date
+  return now < new Date('2026-07-27T00:00:00Z')   // never probed → legacy date fallback
 }
 
 /**
