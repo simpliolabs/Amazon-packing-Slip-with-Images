@@ -1328,6 +1328,94 @@ export interface SyncListingContentResult {
  * fly. Returns the upserted score row, or null when there is no listing_content to score (never
  * synced — a full sync must ingest its children first).
  */
+/**
+ * A+-only "Scan now" self-heal (PO 2026-07-16). A+ status is otherwise refreshed ONLY by a full
+ * content sync (top-50-by-sales bulk, or ?pull=), so a low-traffic parent that gains A+ in Amazon
+ * shows "0/16" forever. This re-checks JUST A+ for one family — one API call → UPDATE only the A+
+ * columns → re-score — with a blast radius of the A+ columns (never touches freshly-pushed title/
+ * bullets that Amazon hasn't applied yet, unlike a full syncSingleAsinContent). Phase 1 uses publish
+ * records only (APPROVED+PUBLISHED); a "submitted, pending Amazon review" A+ still reads none — the
+ * UI copy says so.
+ */
+export async function rescanAplusForAsin(
+  supabase: SupabaseClient,
+  asin: string,
+): Promise<{
+  has_aplus: boolean
+  aplus_module_count: number
+  aplus_has_brand_story: boolean
+  aplus_status: 'live' | 'none'
+  aplus_score: number
+  overall_score: number
+} | null> {
+  // Resolve the family from listing_content (the same match ensureListingScored uses). A+ is
+  // child-associated, so re-check a representative CHILD (with a parent fallback).
+  const { data: rowsRaw } = await supabase
+    .from('listing_content')
+    .select('asin, parent_asin, sku')
+    .or(`parent_asin.eq.${asin},asin.eq.${asin}`)
+    .order('sku', { ascending: true })
+  const rows = (rowsRaw ?? []) as { asin: string; parent_asin: string | null; sku: string }[]
+  if (rows.length === 0) return null // never synced — nothing to re-check
+  const parentAsin = rows.find((r) => r.parent_asin)?.parent_asin || asin
+  const childAsin = rows.find((r) => r.asin !== parentAsin)?.asin || rows[0].asin
+
+  const token = await getAccessToken()
+  // Error-aware A+ probe (inline, NOT fetchAplusStatus): fetchAplusStatus folds a non-OK response into
+  // hasAplus=false, which on a user-triggered scan would CLOBBER a real A+ on a transient blip (the
+  // #352-class silent degrade). Here a non-OK response returns null → we DON'T write, so a real A+ is
+  // never zeroed by a hiccup.
+  const probeAplus = async (a: string): Promise<AplusStatus | null> => {
+    const resp = await fetch(
+      `${ENDPOINT}/aplus/2020-11-01/contentPublishRecords?marketplaceId=${MARKETPLACE_ID}&asin=${a}`,
+      { headers: { 'x-amz-access-token': token } },
+    )
+    if (!resp.ok) return null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const json: any = await resp.json().catch(() => ({}))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const records: any[] = json.publishRecordList || []
+    const s: AplusStatus = { hasAplus: records.length > 0, moduleCount: 0, missingAltCount: 0, hasBrandStory: false, hasHeadline: false }
+    for (const r of records) {
+      const ct: string = r.contentType || ''
+      if (ct === 'EBC') { s.moduleCount += 1; s.hasHeadline = true }
+      else if (ct === 'EMC') { s.hasBrandStory = true }
+    }
+    return s
+  }
+  let status = await probeAplus(childAsin)
+  if ((!status || !status.hasAplus) && childAsin !== parentAsin) {
+    const parentStatus = await probeAplus(parentAsin)
+    if (parentStatus?.hasAplus) status = parentStatus
+    else if (status === null) status = parentStatus // child errored → fall back to the parent's definitive answer
+  }
+  // Both probes failed to reach Amazon — refuse to downgrade a possibly-real A+; surface a retry.
+  if (status === null) throw new Error('Could not reach the Amazon A+ API — please try Scan now again.')
+
+  // UPDATE only the A+ columns across the family's listing_content rows.
+  await supabase
+    .from('listing_content')
+    .update({
+      has_aplus: status.hasAplus,
+      aplus_module_count: status.moduleCount,
+      aplus_has_brand_story: status.hasBrandStory,
+      aplus_has_headline: status.hasHeadline,
+      aplus_images_missing_alt: status.missingAltCount,
+    } as never)
+    .or(`parent_asin.eq.${parentAsin},asin.eq.${parentAsin}`)
+
+  // Re-score off the freshly-updated A+ columns (ensureListingScored reads has_aplus from the row).
+  const scored = await ensureListingScored(supabase, parentAsin)
+  return {
+    has_aplus: status.hasAplus,
+    aplus_module_count: status.moduleCount,
+    aplus_has_brand_story: status.hasBrandStory,
+    aplus_status: status.hasAplus ? 'live' : 'none',
+    aplus_score: Number((scored as { aplus_score?: number } | null)?.aplus_score ?? 0),
+    overall_score: Number((scored as { overall_score?: number } | null)?.overall_score ?? 0),
+  }
+}
+
 export async function ensureListingScored(
   supabase: SupabaseClient,
   parentAsin: string,
