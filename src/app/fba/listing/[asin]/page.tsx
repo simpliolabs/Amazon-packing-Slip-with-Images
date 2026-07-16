@@ -2069,10 +2069,15 @@ export default function ListingDetailPage() {
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors cursor-pointer">
             <Icon.External className="w-3.5 h-3.5" /> Edit in Seller Central
           </a>
-          <a href={`https://sellercentral.amazon.com/enhanced-content/edit?asin=${asin}`}
+          {/* Branch on whether A+ actually exists: /edit?asin= lands on an EMPTY editor for a listing
+              with no A+ (reads as broken) — send those to /content-manager (the create surface, the
+              same URL used on the dashboard + in the audit issue copy). */}
+          <a href={score.aplus_score > 0
+              ? `https://sellercentral.amazon.com/enhanced-content/edit?asin=${asin}`
+              : `https://sellercentral.amazon.com/enhanced-content/content-manager`}
             target="_blank" rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors cursor-pointer">
-            <Icon.External className="w-3.5 h-3.5" /> Edit A+ Content
+            <Icon.External className="w-3.5 h-3.5" /> {score.aplus_score > 0 ? 'Edit A+ Content' : 'Create A+ Content'}
           </a>
           {/* PR #195 — seller-declared audience lean. Persisted on the score row; the next
               Regenerate reads it: re-weights gendered keywords across every pool and sets the
@@ -3104,6 +3109,20 @@ export default function ListingDetailPage() {
                       <p className="text-[10px] mt-1.5 text-slate-400">
                         {item.seller_central_path}
                       </p>
+                    )}
+
+                    {/* A+ hand-off deep-link. A+ can't be pushed via SP-API, so the CREATE verdict on the
+                        A+ card was a dead badge with no way to act. Give it a real link into A+ Content
+                        Manager (the create/list surface — same URL as the dashboard + the audit issue copy).
+                        Identifies the A+ item by its aplus_modules brief; also covers the brand-story card. */}
+                    {(((item.aplus_modules && item.aplus_modules.length > 0)) || item.element === 'brand_story') && item.verdict !== 'DONE' && item.verdict !== 'SKIP' && (
+                      <a
+                        href="https://sellercentral.amazon.com/enhanced-content/content-manager"
+                        target="_blank" rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 mt-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg px-3 py-2 transition-colors cursor-pointer"
+                      >
+                        <Icon.External className="w-3.5 h-3.5" /> {score.aplus_score > 0 ? 'Open A+ Content Manager' : 'Create A+ in Content Manager'} →
+                      </a>
                     )}
 
                     {/* Row 5a: PER-CHILD title table (capacity families like SD cards) — overrides
