@@ -477,25 +477,49 @@ export async function POST(req: NextRequest) {
       .eq('asin', (await supabase.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()).data?.top_child_asin || children[0]?.asin)
       .limit(1)
     
-    if (!existingKws || existingKws.length === 0) {
-      // No keyword data — trigger a sync now (synchronous, before AI generation)
+    // Reference-signal fingerprint (H follow-up): force a keyword RE-RESEARCH when the seller's
+    // competitor / design name changed since the universe was last built. Otherwise a plain Regenerate
+    // keeps serving the stale, off-niche pool for a listing whose design/competitor were entered AFTER
+    // the last research (the B0DMXMH266 "0 fishing keywords" case) — selectSeeds reads the design name
+    // and researchKeywords force-harvests the competitor from the DB, so a forced re-research picks both
+    // up. The fingerprint (stored on the score row) prevents re-researching on every regen.
+    const { data: scoreRow2 } = await supabase
+      .from('listing_seo_scores')
+      .select('top_child_asin, competitor_asin, design_name_override')
+      .eq('parent_asin', parent_asin)
+      .single()
+    const syncAsin = scoreRow2?.top_child_asin || children[0]?.asin
+    const competitorAsin = (scoreRow2 as { competitor_asin?: string | null } | null)?.competitor_asin || ''
+    const designNameOv = (scoreRow2 as { design_name_override?: string | null } | null)?.design_name_override || ''
+    const refFingerprint = `${competitorAsin}|${designNameOv}`
+    // Read the fingerprint defensively — the column may not exist pre-migration; if so, disable the
+    // signal-change trigger entirely (no thrash) and fall back to the empty-only gate.
+    let fingerprintColumnExists = true
+    let storedFingerprint = ''
+    try {
+      const { data: fpRow, error: fpErr } = await supabase
+        .from('listing_seo_scores').select('kw_ref_fingerprint').eq('parent_asin', parent_asin).single()
+      if (fpErr) fingerprintColumnExists = false
+      else storedFingerprint = (fpRow as { kw_ref_fingerprint?: string | null } | null)?.kw_ref_fingerprint ?? ''
+    } catch { fingerprintColumnExists = false }
+    const signalChanged = fingerprintColumnExists && !!(competitorAsin || designNameOv) && refFingerprint !== storedFingerprint
+
+    if (!existingKws || existingKws.length === 0 || signalChanged) {
+      // Empty OR a changed reference signal — (re-)research now, before AI generation.
       try {
-        const { data: scoreRow2 } = await supabase
-          .from('listing_seo_scores')
-          .select('top_child_asin, competitor_asin')
-          .eq('parent_asin', parent_asin)
-          .single()
-        const syncAsin = scoreRow2?.top_child_asin || children[0]?.asin
-        const competitorAsin = scoreRow2?.competitor_asin || undefined
         if (syncAsin) {
           const { syncKeywordIntelligence } = await import('@/lib/sync/syncKeywordIntelligence')
           await syncKeywordIntelligence(syncAsin, {
             includeJungleScout: true,
-            forceRefresh: false,
+            forceRefresh: signalChanged,   // a changed signal must RE-research, not return the stale universe
             parentAsin: parent_asin,
             listingTitle: children[0]?.title || undefined,
           })
-          console.log(`[ai-recommendations] Auto-synced keyword intelligence for ${syncAsin}`)
+          // Stamp the signals this universe was built with so the next regen doesn't re-research needlessly.
+          if (fingerprintColumnExists) {
+            await supabase.from('listing_seo_scores').update({ kw_ref_fingerprint: refFingerprint } as never).eq('parent_asin', parent_asin)
+          }
+          console.log(`[ai-recommendations] Keyword intelligence synced for ${syncAsin} (forceRefresh=${signalChanged}, fp=${refFingerprint})`)
         }
       } catch (syncErr) {
         console.warn('[ai-recommendations] Auto-sync failed, proceeding without keyword data:', syncErr)
