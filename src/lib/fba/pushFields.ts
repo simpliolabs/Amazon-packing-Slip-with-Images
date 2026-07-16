@@ -214,6 +214,52 @@ export function buildPatchValue(
     .map((v) => ({ value: v, marketplace_id: marketplaceId, language_tag: languageTag }))
 }
 
+// ─── BULK "Ship all core" ops assembly (element C — Title+Bullets+Description+Keywords in ONE PATCH) ──
+// The "Ship all core" push batches the four content fields into a SINGLE patchListingsItem submission
+// per child SKU (vs four field-at-a-time pushes). The body is MIXED: title/bullets/description are
+// BROADCAST (the same value on every child) while keywords are PER-CHILD (each SKU its own backend
+// string). buildCoreOps stays field-agnostic — the executor passes each field's OWN resolved value for
+// the SKU (read from that field's loadDiff row), so the per-child-vs-broadcast distinction is already
+// baked into `value` and this function just assembles the /attributes/<attr> replace ops.
+
+/** One patchListingsItem replace op for a core field (already-resolved value → attribute path). */
+export interface CorePatchOp { op: 'replace'; path: string; value: PatchValueEntry[] }
+
+/** A single (core field, resolved value) pair for ONE sku — as gathered from that field's loadDiff row.
+ *  `value` is a string for title/description/keywords and a string[] for bullets; it is expected to be
+ *  trademark-scrubbed by the caller (mirrors executePush's scrub-at-push). `isParent` is a defensive
+ *  flag: `keywords` (generic_keyword) must NEVER be built for the non-buyable variation parent, which
+ *  carries no per-child backend terms. */
+export interface CoreFieldRow {
+  field: PushField
+  value: string | string[]
+  isParent?: boolean
+}
+
+/**
+ * PURE, deterministic ops assembly for a bulk "Ship all core" push of ONE sku. Each changed field
+ * becomes exactly one `/attributes/<attribute>` replace op carrying that field's own resolved value.
+ * The mixed broadcast/per-child body is driven entirely by which rows the caller passes (the caller
+ * reads each field's own per-SKU loadDiff row), so this function never needs to know the difference.
+ * Throws if asked to build `generic_keyword` for the variation parent — a guaranteed-impossible state
+ * (the parent is dropped from the SKU set upstream) that we assert anyway so a future caller can't
+ * silently regress it.
+ */
+export function buildCoreOps(perSkuFieldRows: CoreFieldRow[], marketplaceId: string): CorePatchOp[] {
+  const ops: CorePatchOp[] = []
+  for (const r of perSkuFieldRows) {
+    if (r.field === 'keywords' && r.isParent) {
+      throw new Error('buildCoreOps: generic_keyword must never be built for the variation parent')
+    }
+    ops.push({
+      op: 'replace',
+      path: `/attributes/${FIELD_CONFIG[r.field].attribute}`,
+      value: buildPatchValue(r.value, marketplaceId),
+    })
+  }
+  return ops
+}
+
 // ─── ASIN dedup (FBA+FBM SKUs share one child ASIN → push once, prefer -FBA) ──────
 
 export function dedupByAsin<T extends { sku: string; asin: string }>(rows: T[]): T[] {

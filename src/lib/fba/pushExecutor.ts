@@ -31,9 +31,9 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { reconcileFamilyChildren } from '@/lib/fba/familyReconcile'
 import { getAccessToken } from '@/lib/amazon/auth'
 import {
-  FIELD_CONFIG, isPushField, type PushField,
+  FIELD_CONFIG, isPushField, type PushField, PUSH_FIELDS,
   resolveProposed, currentValue, asCompare, buildPatchValue,
-  cacheUpdateFor, getByteLength, capBytes, dedupByAsin,
+  cacheUpdateFor, getByteLength, capBytes, dedupByAsin, buildCoreOps,
 } from '@/lib/fba/pushFields'
 import {
   resolveDetailAttribute, unpushableReason,
@@ -2445,6 +2445,9 @@ export interface PushParams {
    *  Keyed by friendly field name; each is re-validated/coerced by loadDetailContext, so a
    *  bad manual value is flagged enumInvalid → that field is skipped, never pushed. */
   detail_overrides?: Record<string, string>
+  /** Bulk "Ship all core" (field==='core_bulk'): the subset of the four core content fields to ship
+   *  together in ONE PATCH per SKU. Absent/empty → every core field that currently has a diff. */
+  core_fields?: PushField[]
   /** WHO is running this push (spec §5 Phase B attribution). Resolved from the Bearer JWT at the
    *  route, or SYSTEM_ACTOR for cron/verify. Threaded into keyword_push_log.pushed_by + (on a
    *  full-accept push) listing_change_log + a narrow logAudit('listing.push'). Defaults to
@@ -3534,6 +3537,232 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
   }
 }
 
+// ─── BULK "Ship all core": Title + Bullets + Description + Keywords in ONE PATCH per SKU ──────────
+// The CONTENT analog of executeBulkDetailsPush. Where the details bulk batches product-detail
+// ATTRIBUTES, this batches the four CORE content fields — but with a MIXED body: title/bullets/
+// description are BROADCAST (one value to every child) while keywords are PER-CHILD (each SKU its own
+// backend string). The value for each (field, SKU) comes from that field's OWN loadDiff row, so the
+// broadcast-vs-per-child split is resolved per field and merged per SKU into ONE submission. Failure
+// isolation mirrors the details bulk (atomic batch → per-field fallback). UNLIKE the details bulk,
+// this DOES change the copy under measurement, so a FULL accept STAMPS the outcome epoch (exactly as
+// executePush does for a single core field). The non-buyable variation parent is DROPPED (it carries
+// no per-child keywords and re-validates its whole record on a content PATCH), so `generic_keyword`
+// is never built for it.
+export async function executeBulkCorePush(params: PushParams, emit: PushEmit): Promise<void> {
+  const { parent_asin } = params
+  const actor: PushActor = params.actor ?? SYSTEM_ACTOR  // attribution (spec §5 Phase B)
+  try {
+    // Requested core fields (default = all four; a field with no diff is dropped after loadDiff). Deduped
+    // so a direct POST with a repeated field can't double-push an attribute for a SKU.
+    const requested: PushField[] = [...new Set((Array.isArray(params.core_fields) && params.core_fields.length > 0)
+      ? params.core_fields.filter(isPushField)
+      : [...PUSH_FIELDS])]
+    if (requested.length === 0) { emit({ type: 'error', error: 'No core fields selected to ship.' }); return }
+
+    // Reconcile the live family ONCE (mirror executePush's full-push reconcile) so any newly-linked /
+    // never-ingested variation child gets a listing_content row BEFORE loadDiff reads it — a child with
+    // no row is invisible to the push. Offer-gated + additive (only materializes children with a LIVE
+    // offer), so every backfilled row then passes loadDiff's ground-truth gate.
+    try {
+      const supaRec = await createAdminClient()
+      const reconcileRes = await reconcileFamilyChildren(parent_asin, supaRec)
+      if (reconcileRes.backfilled > 0 || reconcileRes.reattached > 0) {
+        console.log(`[bulk-core] pre-push reconcile: +${reconcileRes.backfilled} backfilled, ${reconcileRes.reattached} reattached of ${reconcileRes.childAsins} live children`)
+      }
+    } catch (e) { console.warn('[bulk-core] pre-push reconcile skipped (non-fatal):', e instanceof Error ? e.message : e) }
+
+    // Load each requested field's per-SKU diff. loadDiff already: resolves broadcast-vs-per-child
+    // values, adds FBA/FBM twins, tags offerless rows notLive, and (for broadcast fields) appends the
+    // variation PARENT row. We DROP the parent here (bulk-core never ships the non-buyable hub — same
+    // as the details bulk) and SKIP notLive rows (never PATCH an offerless SKU → phantom listing). Each
+    // field's OWN diff row for the SKU drives its value — THAT is the mixed body.
+    interface CorePlanRow { field: PushField; value: string | string[]; current: string }
+    interface SkuPlan { sku: string; asin: string | undefined; rows: CorePlanRow[] }
+    const bySku = new Map<string, SkuPlan>()
+    const notLiveSkus = new Set<string>()
+    const activeFields: PushField[] = []
+    let parentDropped = false
+    for (const field of requested) {
+      const rows = (await loadDiff(parent_asin, field)).filter((d) => d.raw != null)
+      let fieldHasChange = false
+      for (const d of rows) {
+        // DROP the non-buyable variation parent (asin === parent_asin OR the isParent flag loadDiff set
+        // on the broadcast parent row) — no per-child keywords, and it re-validates its whole record.
+        if (d.asin === parent_asin || d.isParent) { parentDropped = true; continue }
+        if (d.notLive) { notLiveSkus.add(d.sku); continue }   // confirmed-offerless → phantom-prevention
+        if (!d.changed) continue                              // only fields that differ from live push
+        fieldHasChange = true
+        // SCRUB-AT-PUSH backstop (mirror executePush): trademark-scrub the value at publish time so a
+        // manually-typed or stale mark can never be written to Amazon. Idempotent on generated copy.
+        const raw = d.raw as string | string[]
+        const value = Array.isArray(raw) ? raw.map(scrubTrademarks) : scrubTrademarks(raw)
+        let plan = bySku.get(d.sku)
+        if (!plan) { plan = { sku: d.sku, asin: d.asin, rows: [] }; bySku.set(d.sku, plan) }
+        plan.rows.push({ field, value, current: d.current })
+      }
+      if (fieldHasChange) activeFields.push(field)
+    }
+    // A SKU any field flagged offerless must NEVER be PATCHed (even if another field's diff added it
+    // before the flag was seen) — drop it entirely so we can't half-push a phantom.
+    for (const sku of notLiveSkus) bySku.delete(sku)
+
+    const skuPlans = [...bySku.values()].filter((p) => p.rows.length > 0)
+    if (skuPlans.length === 0) {
+      emit({
+        type: 'result', mode: 'core_bulk', parent_asin, perField: [],
+        pushed: 0, failed: 0, total: 0,
+        message: notLiveSkus.size > 0
+          ? `Nothing pushed — ${notLiveSkus.size} variant${notLiveSkus.size === 1 ? '' : 's'} skipped (not a live Amazon listing yet — Missing offer/incomplete). Complete the offer${notLiveSkus.size === 1 ? '' : 's'} in Seller Central, then re-ship.`
+          : `Nothing to ship — every core field already matches live.`,
+      })
+      return
+    }
+
+    const token       = await getAccessToken()
+    const sellerId    = await getSellerId()
+    const productType = await getProductType(sellerId, token, skuPlans[0].sku)
+    const supabase    = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    const logPush = async (rowIn: Record<string, unknown>) => {
+      const row: Record<string, unknown> = { ...rowIn, pushed_by: actor.id }  // attribution (spec §5 Phase B)
+      try {
+        const { error } = await db.from('keyword_push_log').insert(row)
+        if (!error) return
+        const rest = { ...row }; delete rest.field
+        const { error: error2 } = await db.from('keyword_push_log').insert(rest)
+        if (error2) console.error('[bulk-core] keyword_push_log insert FAILED both attempts — ship date will be missing. first:', error?.message ?? error, '| second:', error2?.message ?? error2)
+      } catch (e) { console.error('[bulk-core] keyword_push_log insert threw:', e) }
+    }
+
+    // per-field tally (accepted/failed across SKUs) — drives write-through, verify enqueue, epoch.
+    const tally: Record<string, { accepted: number; failed: number }> = {}
+    for (const f of activeFields) tally[f] = { accepted: 0, failed: 0 }
+
+    emit({ type: 'started', mode: 'core_bulk', fields: activeFields.map((f) => FIELD_CONFIG[f].label), total: skuPlans.length, broadcast: false })
+
+    let cancelled = false
+    let skusTouched = 0
+    // ── per SKU: batch the changed core fields into ONE PATCH; per-field fallback on atomic rejection.
+    for (const plan of skuPlans) {
+      if (pushCancelled(params.cancel_token)) { cancelled = true; break }
+      skusTouched++
+      const rowByField = new Map(plan.rows.map((r) => [r.field, r]))
+      const changedLabels = plan.rows.map((r) => FIELD_CONFIG[r.field].label)
+      emit({ type: 'progress', sku: plan.sku, status: 'validating', fields: changedLabels })
+
+      // MIXED body: each field's own resolved (scrubbed) value → one replace op. The parent is already
+      // dropped, so no row is isParent; buildCoreOps still asserts keywords-never-for-parent.
+      const ops = buildCoreOps(plan.rows.map((r) => ({ field: r.field, value: r.value })), MARKETPLACE_ID)
+      const preview = await patchSkuMulti(sellerId, token, productType, plan.sku, ops, 'VALIDATION_PREVIEW')
+      let perFieldStatus: { field: PushField; ok: boolean; submissionId: string | null; error?: string }[]
+      if (preview.ok) {
+        const live = await patchSkuMulti(sellerId, token, productType, plan.sku, ops, 'LIVE')
+        if (live.ok) {
+          perFieldStatus = plan.rows.map((r) => ({ field: r.field, ok: true, submissionId: live.submissionId }))
+        } else {
+          // Valid preview but live rejected (race / throttle) → isolate per field for THIS sku.
+          perFieldStatus = await pushCoreFieldFallback(sellerId, token, productType, plan.sku, plan.rows)
+        }
+      } else {
+        // Atomic batch rejected (≥1 bad field) → per-field so the good ones still land.
+        perFieldStatus = await pushCoreFieldFallback(sellerId, token, productType, plan.sku, plan.rows)
+      }
+
+      // Log every (field, SKU) attempt with field UNPREFIXED (the `details:` prefix is details-only) +
+      // previous_value = the row's cached current, and WRITE-THROUGH the accepted fields into
+      // listing_content (ship-truth: omitting this leaves the card red). One cache UPDATE per SKU.
+      const cachePatch: Record<string, string | null> = {}
+      for (const r of perFieldStatus) {
+        const planRow = rowByField.get(r.field)
+        if (!planRow) continue
+        tally[r.field][r.ok ? 'accepted' : 'failed']++
+        await logPush({ parent_asin, sku: plan.sku, field: r.field, previous_value: planRow.current, new_value: asCompare(planRow.value), submission_id: r.submissionId, status: r.ok ? 'accepted' : 'failed', error_message: r.ok ? null : r.error })
+        if (r.ok) Object.assign(cachePatch, cacheUpdateFor(r.field, planRow.value))
+      }
+      if (Object.keys(cachePatch).length > 0) {
+        try {
+          await db.from('listing_content').update({ ...cachePatch, content_synced_at: new Date().toISOString() }).eq('sku', plan.sku)
+        } catch (e) { console.warn('[bulk-core] listing_content cache update failed:', e) }
+      }
+      const skuFailed = perFieldStatus.filter((r) => !r.ok)
+      emit({ type: 'progress', sku: plan.sku, status: skuFailed.length === 0 ? 'accepted' : (skuFailed.length === perFieldStatus.length ? 'failed' : 'partial'),
+        fields: changedLabels, failedFields: skuFailed.map((r) => FIELD_CONFIG[r.field].label), error: skuFailed[0]?.error })
+      await sleep(PATCH_DELAY_MS)
+    }
+
+    // ── ONE re-score for the whole batch + a push-trigger score-history change-point. Capture the
+    // fingerprint + post-push overall EXACTLY as executePush does so the epoch + history row measure the
+    // just-shipped copy.
+    const totalAccepted = activeFields.reduce((n, f) => n + tally[f].accepted, 0)
+    const totalFailed   = activeFields.reduce((n, f) => n + tally[f].failed, 0)
+    let pushedFingerprint: string | null = null
+    let pushedOverall: number | null = null
+    if (totalAccepted > 0) {
+      emit({ type: 'rescore', message: 'Re-scoring listing…' })
+      try {
+        const rr = await rescoreParentFromCache(db, parent_asin)
+        if (rr) {
+          pushedFingerprint = fingerprintOf((rr.topChildRow ?? rr.representative ?? rr.rows[0]) as never)
+          pushedOverall = typeof rr.score.overall_score === 'number' ? rr.score.overall_score : null
+          await appendScoreHistory(db, {
+            parent_asin,
+            overall_score: rr.score.overall_score,
+            title_score: rr.score.title_score, bullet_score: rr.score.bullet_score,
+            keyword_score: rr.score.keyword_score, aplus_score: rr.score.aplus_score,
+            description_score: rr.score.description_score, features_score: rr.score.features_score,
+            issues: Array.isArray(rr.score.issues) ? (rr.score.issues as unknown[]) : null,
+          }, { trigger: 'push', scoredBy: actor.id, scoredByName: actor.name, fingerprint: pushedFingerprint })
+        }
+      } catch (e) { console.warn('[bulk-core] re-score failed (non-fatal):', e) }
+
+      // AUTO-VERIFY: one task per CORE field that got ≥1 accept. Cron re-pushes stale SKUs to 100%.
+      if (!cancelled) try {
+        const { enqueueVerification } = await import('@/lib/fba/verificationQueue')
+        for (const f of activeFields) {
+          if (tally[f].accepted > 0) await enqueueVerification({ parent_asin, field: f })
+        }
+      } catch (e) { console.warn('[bulk-core] verify enqueue failed (non-fatal):', e) }
+
+      // ATTRIBUTION (spec §5 Phase B): a change-log row per accepted field + ONE narrow logAudit for the
+      // batch. Fires on totalAccepted>0 (partial included) so it still appears in Change History.
+      if (!cancelled) {
+        for (const f of activeFields) {
+          if (tally[f].accepted > 0) {
+            await logPushChange(db, { parent_asin, field: f, actor, accepted: tally[f].accepted, failed: tally[f].failed })
+          }
+        }
+        await logAudit({
+          userId: actor.id, action: 'listing.push', resourceType: 'listing', resourceId: parent_asin,
+          details: { mode: 'core_bulk', fields: activeFields.filter((f) => tally[f].accepted > 0), accepted: totalAccepted, failed: totalFailed, by: actor.name },
+        })
+      }
+    }
+
+    // ── OUTCOME EPOCH (§4-E / Risk R3): stamp on a FULL accept — every attempted op across every SKU
+    // accepted AND nothing cancelled. A bulk-core push CHANGES the copy under measurement (unlike the
+    // details bulk), so it RESETS the epoch to re-measure the shipped copy. Partial/cancelled → do NOT
+    // stamp (that copy isn't the final content). Best-effort — never blocks the push.
+    if (totalFailed === 0 && !cancelled && totalAccepted > 0) {
+      await stampOutcomeEpoch(db, { parent_asin, fingerprint: pushedFingerprint, baseline_overall_score: pushedOverall })
+    }
+
+    const perField = activeFields.map((f) => ({ field: FIELD_CONFIG[f].label, accepted: tally[f].accepted, failed: tally[f].failed }))
+    const skippedNote = notLiveSkus.size > 0
+      ? ` ${notLiveSkus.size} variant${notLiveSkus.size === 1 ? '' : 's'} skipped (not a live Amazon listing yet — Missing offer/incomplete; complete their offer in Seller Central, then re-ship).`
+      : ''
+    emit({
+      type: 'result', mode: 'core_bulk', parent_asin, perField,
+      pushed: totalAccepted, failed: totalFailed, total: skusTouched, cancelled: cancelled || undefined,
+      message: cancelled
+        ? `Stopped by you — ${skusTouched} SKU(s) processed before the stop; accepted fields stay pushed, the rest are untouched.`
+        : `Shipped ${activeFields.length} core field(s) across ${skusTouched} SKU(s) that needed it${totalFailed ? `, ${totalFailed} field-push(es) failed` : ''}.${parentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''}${skippedNote} Changes typically reflect in 15-30 minutes.`,
+    })
+  } catch (err) {
+    emit({ type: 'error', error: err instanceof Error ? err.message : 'Ship all core failed' })
+  }
+}
+
 /** Per-field fallback for ONE SKU when the atomic batch is rejected — push each field's single
  *  attribute alone so the valid ones still land and only the offending one fails for this SKU. */
 async function pushPerFieldFallback(
@@ -3562,6 +3791,30 @@ async function pushPerFieldFallback(
       void (async () => { try { await setItemHighlightsApiState(await createAdminClient(), true) } catch { /* best-effort */ } })()
     }
     out.push({ field: p.field, spApiKey: p.attribute.spApiKey, ok: live.ok, submissionId: live.submissionId, error: live.error })
+    await sleep(PATCH_DELAY_MS)
+  }
+  return out
+}
+
+/** Per-field fallback for ONE SKU when the atomic batched CORE PATCH is rejected — retry each core
+ *  field as its own single-attribute patch so the valid fields still land and only the offending one
+ *  fails for this SKU (the content analog of pushPerFieldFallback). `value` is already scrubbed;
+ *  patchSku builds the same buildPatchValue body buildCoreOps used, so the batch and the fallback are
+ *  byte-identical per field. */
+async function pushCoreFieldFallback(
+  sellerId: string, token: string, productType: string, sku: string,
+  rows: { field: PushField; value: string | string[]; current: string }[],
+): Promise<{ field: PushField; ok: boolean; submissionId: string | null; error?: string }[]> {
+  const out: { field: PushField; ok: boolean; submissionId: string | null; error?: string }[] = []
+  for (const r of rows) {
+    const attribute = FIELD_CONFIG[r.field].attribute
+    const preview = await patchSku(sellerId, token, productType, sku, attribute, r.value, 'VALIDATION_PREVIEW')
+    if (!preview.ok) {
+      out.push({ field: r.field, ok: false, submissionId: null, error: preview.error })
+      await sleep(PATCH_DELAY_MS); continue
+    }
+    const live = await patchSku(sellerId, token, productType, sku, attribute, r.value, 'LIVE')
+    out.push({ field: r.field, ok: live.ok, submissionId: live.submissionId, error: live.error })
     await sleep(PATCH_DELAY_MS)
   }
   return out
