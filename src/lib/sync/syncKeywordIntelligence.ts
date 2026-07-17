@@ -31,7 +31,7 @@ import {
 import { captureRankSnapshots } from '../keyword-engine/cacheService';
 import { researchKeywords, getCachedResearch } from '../keyword-engine/keywordResearcher';
 import { loadListingRowsForPresence } from '../keyword-engine/loadListingContent';
-import { isOffNicheKeyword } from '../keyword-engine/nicheGuards';
+import { isOffNicheKeyword, isForeignKeyword } from '../keyword-engine/nicheGuards';
 import { classifyOffNicheKeywords } from '../keyword-engine/relevanceClassifier';
 import { createClient } from '@supabase/supabase-js';
 
@@ -339,10 +339,21 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     // semantic tail). Broad on-product category angles (fromUniverse) are exempt. Fail-open + floor.
     const apparelCtx = [scoreRow?.product_title, listingTitle, ...childTitles].filter(Boolean).join(' ');
     const isApparelPool = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(apparelCtx);
+    // #280 universe terms keep the TOKEN-OVERLAP exemption above (they are generic on-product category
+    // angles keywordIsRelevant would wrongly strip) — but they are NOT exempt from CONTAMINATION. A broad
+    // category universe's keywords_by_keyword expansion drags in foreign-language dupes ("camisas para
+    // hombres") and off-niche gear the same as any pool, so the DETERMINISTIC nets (foreign + off-niche)
+    // run over universe AND niche terms alike. The LLM IRRELEVANT pass stays scoped to NON-universe terms
+    // so the semantic classifier can't strip a legit broad angle (the very reason universes were exempted
+    // from token-overlap). PO 2026-07-17 — the exemption is for genericness, never contamination.
     const candidates = kept.filter((k) => !(k as { fromUniverse?: boolean }).fromUniverse);
     const offNiche = new Set<string>();
+    // Foreign-language duplicates are off-niche for ANY listing (universe included) — an English listing
+    // can never index a Spanish keyword.
+    for (const k of kept) if (isForeignKeyword(k.keyword)) offNiche.add(k.keyword);
     if (isApparelPool) {
-      for (const k of candidates) if (isOffNicheKeyword(k.keyword, { context: apparelCtx })) offNiche.add(k.keyword);
+      // Deterministic apparel off-niche net (foreign / competitor-blank / wholesale / gear) — universe rows too.
+      for (const k of kept) if (isOffNicheKeyword(k.keyword, { context: apparelCtx })) offNiche.add(k.keyword);
     }
     const llmDrop = await classifyOffNicheKeywords(
       candidates.map((k) => k.keyword),
@@ -350,7 +361,7 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     );
     for (const kw of llmDrop) offNiche.add(kw);
     if (offNiche.size === 0) return addSynonyms(kept);
-    const kept2 = kept.filter((k) => (k as { fromUniverse?: boolean }).fromUniverse || !offNiche.has(k.keyword));
+    const kept2 = kept.filter((k) => !offNiche.has(k.keyword));
     if (kept2.length === 0 && before > 0) {
       console.warn(`[syncKeywordIntelligence] off-niche gate would drop ALL for ${asin} — keeping ${kept.length} (never-collapse floor)`);
       return addSynonyms(kept);

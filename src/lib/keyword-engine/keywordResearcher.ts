@@ -20,6 +20,7 @@ import {
   fetchKeywordsByASIN,
 } from '../sync/jungleScoutClient';
 import { ProductIdentity, scanProductImage, getProductImageUrl } from './visionScanner';
+import { isForeignKeyword } from './nicheGuards';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
@@ -291,9 +292,14 @@ export async function researchKeywords(
     }
     for (const r of up.keywords) {
       const k = (r.keyword || '').toLowerCase();
-      // fromUniverse: true exempts these from the downstream relevance gate (#280 universes are
-      // deliberate on-product angles the token-overlap gate would otherwise strip as "generic").
-      if (k && !mergedKw.has(k)) { nicheKeywords.push({ ...r, organicRank: undefined, fromUniverse: true }); mergedKw.add(k); }
+      if (!k || mergedKw.has(k)) continue;
+      // fromUniverse: true exempts these from the downstream TOKEN-OVERLAP relevance gate (#280 universes
+      // are deliberate on-product category angles it would otherwise strip as "generic") — but a broad
+      // category universe's keywords_by_keyword expansion also drags in FOREIGN-LANGUAGE dupes ("camisas
+      // para hombres"). Those an English listing can never index, so drop them at the SOURCE before they
+      // enter the pool / rank snapshots. The exemption is for genericness, never for contamination (2026-07-17).
+      if (isForeignKeyword(k)) continue;
+      nicheKeywords.push({ ...r, organicRank: undefined, fromUniverse: true }); mergedKw.add(k);
     }
   }
 

@@ -127,3 +127,39 @@ export function isOffNicheKeyword(keyword: string, opts?: { context?: string }):
 
   return false
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FOREIGN-LANGUAGE net (universe de-contamination, 2026-07-17): the #280 broad-category
+// universes ("graphic tees for women") are researched via keywords_by_keyword, whose related-term
+// expansion drags in Spanish/Portuguese duplicates ("camisas para hombres", "ropa de hombre").
+// `fromUniverse` EXEMPTS a term from the token-overlap relevance gate (it is a deliberate on-product
+// category angle the gate would wrongly strip as "generic") — but that exemption is for GENERICNESS,
+// never for CONTAMINATION. An English listing's copy can never index a Spanish keyword, so it is a
+// different-market duplicate, not a coverable gap. This net is applied to universe AND niche terms
+// alike at the pool-entry seams. Deterministic, and language-agnostic on the KEEP side.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Accented Latin letters (Spanish/Portuguese/French/German) — an English apparel keyword never carries them. */
+const NON_ASCII_LETTER = /[áàâãäåéèêëíìîïóòôõöøúùûüñçß]/i
+
+/** Spanish/Portuguese function + shopper words with negligible English collision as WHOLE tokens
+ *  ("para hombre", "ropa de mujer", "regalos divertidos"). Deliberately EXCLUDES ambiguous tokens that
+ *  appear in English place/event names ("con" in comic con, "los" in los angeles, "las" in las vegas).
+ *  The garment nouns + mujer/hombre/niño are already carried by FOREIGN_APPAREL_TOKENS. */
+const FOREIGN_FUNCTION_WORDS = /\b(?:para|ropa|regalos?|divertid[oa]s?)\b/i
+
+/**
+ * True when a keyword is predominantly non-English — a foreign-market duplicate an English listing's copy
+ * can never index for, so it reads as an unfixable "gap" rather than a real one. Deterministic union of:
+ * accented characters, the apparel-specific foreign nouns (FOREIGN_APPAREL_TOKENS), and low-collision
+ * Spanish/Portuguese function words. Category-agnostic (a foreign keyword is off-niche for ANY listing).
+ * The KEEP side is conservative: an all-ASCII English phrase ("mens graphic t-shirts") returns false.
+ */
+export function isForeignKeyword(keyword: string): boolean {
+  const kw = (keyword || '').toLowerCase()
+  if (!kw) return false
+  if (NON_ASCII_LETTER.test(kw)) return true            // accented → foreign
+  if (FOREIGN_APPAREL_TOKENS.test(kw)) return true       // playeras/camisas/mujer/hombre/… (garment nouns)
+  if (FOREIGN_FUNCTION_WORDS.test(kw)) return true       // para/ropa/regalos/divertidas (function/shopper words)
+  return false
+}
