@@ -4792,6 +4792,45 @@ async function metricGatedBulletsLoop(
   return best
 }
 
+/** D — run the metric-gated quality loop on BOTH the per-child multi-design bullets (each DISTINCT design
+ *  group looped ONCE; the winner written back to every SKU in that group) and the broadcast bullets, then
+ *  return the (possibly improved) broadcast set. Per-child bullets are mutated IN PLACE. MUST be called
+ *  BEFORE the per-child truth/audit gate so the looped bytes are still gated (INVARIANT 5). Bounded +
+ *  fail-open: scoreBulletsMetric early-returns a healthy group at 0 model calls; a mid-loop throw is
+ *  swallowed and keeps the council's per-child bullets. Shared by the full path AND the #79 bullets-only
+ *  section-regen path so the ~85 quality bar has dual-write-path parity. */
+async function runBulletsMetricLoops(
+  openai: OpenAI,
+  broadcastBullets: string[],
+  perChildBullets: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[] | undefined,
+  ctx: { title: string; brandName: string; designName: string; fit: string; onProgress?: (m: string) => void },
+  enableLoop: boolean,
+): Promise<string[]> {
+  if (!enableLoop) return broadcastBullets
+  if (perChildBullets && perChildBullets.length) {
+    try {
+      const loopedByGroup = new Map<string, string[]>()   // designKey → winning bullets (loop once per group)
+      for (const pcb of perChildBullets) {
+        const gkey = pcb.designKey || pcb.designName || pcb.sku
+        if (!loopedByGroup.has(gkey)) {
+          loopedByGroup.set(gkey, await metricGatedBulletsLoop(openai, pcb.bullets, {
+            title: ctx.title, brandName: ctx.brandName,
+            designName: pcb.designName || ctx.designName, fit: ctx.fit,
+            onProgress: ctx.onProgress, label: `design:${pcb.designName || gkey}`,
+          }, true))
+        }
+        pcb.bullets = loopedByGroup.get(gkey)!
+      }
+    } catch (e) {
+      console.warn('[pipeline] per-child bullets metric loop errored — keeping council per-child bullets:', e instanceof Error ? e.message : e)
+    }
+  }
+  return metricGatedBulletsLoop(openai, broadcastBullets, {
+    title: ctx.title, brandName: ctx.brandName, designName: ctx.designName,
+    fit: ctx.fit, onProgress: ctx.onProgress, label: 'full',
+  }, enableLoop)
+}
+
 async function coherenceGateBullets(
   openai: OpenAI,
   bullets: string[],
@@ -6988,6 +7027,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   } else {
     bullets = input.priorBullets ?? []
   }
+  // Metric-loop flag (D) — governs the per-child + broadcast bullets quality loops on BOTH the
+  // bullets-only section-regen path (immediately below) and the full path. apparel && env != 'off'.
+  const enableBulletsLoop = apparelProduct && (process.env.BULLETS_METRIC_LOOP || '').toLowerCase() !== 'off'
   if (only === 'bullets') {
     // Degradation gate (2026-07-08): empty council output must abort, not overwrite (this exact
     // path persisted [] over B0FRYMM56C's approved bullets during the quota outage).
@@ -6997,6 +7039,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // blank brand, and returned thin unpolished copy (PO-caught). Empty-only abort already ran above.
     ;({ bullets } = await applyEditorialGates(bullets, ''))
     assertCoreHealthy(input.openai, null, bullets, null)   // audit must never blank the set
+    // D (2026-07-17, dual-write-path parity #364): the metric-gated quality loop ALSO runs on this
+    // "Regenerate bullets" section-regen so it hits the same ~85 bar as a full regen — per-child (each
+    // design group looped once) + broadcast, BEFORE the gate so the looped bytes get the truth/audit scrub.
+    bullets = await runBulletsMetricLoops(input.openai, bullets, perChildBullets, {
+      title: finalTitle, brandName: brandName || 'THE CEO', designName: effectiveDesignName || '',
+      fit: truthFitEarly, onProgress,
+    }, enableBulletsLoop)
     // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
     // former "per_child_bullets are ungated on both paths" gap. Deterministic scrub always; audit capped.
     await gatePerChildMultiDesign(perChildBullets, undefined, truthFitEarly, garmentBrandCanonical || '')
@@ -7609,25 +7658,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     description = collapseDup(scrubFitClaims(tidyDescription(description), truthFit))
   }
 
+  // D — per-child + broadcast bullets metric loops (2026-07-16/17). Runs BEFORE gatePerChildMultiDesign so
+  // the looped per-child bytes still receive the per-child truth/audit scrub (INVARIANT 5). enableBulletsLoop
+  // is hoisted above (shared with the bullets-only section-regen path). Bounded + fail-open (see the helper):
+  // a healthy group/broadcast set spends 0 model calls; a sub-bar one re-deliberates ≤2 and keeps-best.
+  bullets = await runBulletsMetricLoops(input.openai, bullets, perChildBullets, {
+    title: finalTitle, brandName: brandName || 'THE CEO', designName: effectiveDesignName || '',
+    fit: truthFit, onProgress,
+  }, enableBulletsLoop)
+
   // Per-child multi-design copy (the bytes the push actually PATCHes) gets the SAME audit + truth/brand
   // gate as the broadcast copy above — closes the R4/#61 leak where multi-design shipped unscrubbed.
   await gatePerChildMultiDesign(perChildBullets, perChildDescriptions, truthFit, garmentBrandCanonical || '')
-
-  // Metric-gated council loop (D, 2026-07-16 — now ENFORCED, was shadow): the bullets are SHIP-READY
-  // (this is their final assembly point — only assertCoreHealthy + the trademark scrub follow). Score
-  // them against scoreBulletsMetric (design identity + coherence + structure + the 80-char length
-  // floor; keyword coverage stays BACKEND's job, excluded so this can't stuff prose) and, when below
-  // the bar, have the judge re-deliberate against a deterministic critique — keep-best (strict >),
-  // fail-open, SHIP the winner. Decided ONCE here on the broadcast bullets so the per-design fan-out
-  // can't multiply calls (per-child multi-design bullets remain a follow-up). BULLETS_METRIC_LOOP=off disables.
-  const enableBulletsLoop = apparelProduct && (process.env.BULLETS_METRIC_LOOP || '').toLowerCase() !== 'off'
-  if (enableBulletsLoop) {
-    bullets = await metricGatedBulletsLoop(input.openai, bullets, {
-      title: finalTitle, brandName: brandName || 'THE CEO',
-      designName: effectiveDesignName || '', fit: truthFit,
-      onProgress, label: 'full',
-    }, enableBulletsLoop)
-  }
 
   // FULL-PATH degradation gate (2026-07-08): a quota outage made every council fail open to empty
   // and the empty result PERSISTED over approved content while reporting success. Abort-and-preserve

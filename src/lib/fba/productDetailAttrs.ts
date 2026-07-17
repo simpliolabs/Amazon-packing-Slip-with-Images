@@ -150,6 +150,35 @@ export function unpushableReason(fieldName: string): string | null {
 }
 
 /**
+ * SP-API attribute keys that describe the SPECIFIC design rather than a garment fact.
+ * ───────────────────────────────────────────────────────────────────────────────────
+ * `style` / `style_name` on a print-on-demand family read off the artwork ("Vintage",
+ * "Funny", "Novelty"), so they legitimately DIFFER per design. They are `scope: 'broadcast'`
+ * (correct for a single-design family — every child shares the one design), but broadcasting
+ * one design's value across a MULTI-design family overwrites each design's distinct style —
+ * the leak this gate exists to stop. Detection uses the resolved spApiKey so it catches BOTH
+ * the static-map path and the schema-resolved (`pushable`/`sp_api_key`) path. Deliberately
+ * conservative: on multi-design we suppress the push entirely rather than guess a shared value
+ * (a future refinement could broadcast when all children already agree — see pushExecutor's
+ * pickAgreedBroadcastValue). Single-design is untouched.
+ */
+const SINGLE_DESIGN_ONLY_KEYS = new Set(['style', 'style_name'])
+
+/** True when this SP-API key describes the specific design (see SINGLE_DESIGN_ONLY_KEYS). */
+export function isSingleDesignOnlyKey(spApiKey: string | null | undefined): boolean {
+  return !!spApiKey && SINGLE_DESIGN_ONLY_KEYS.has(spApiKey)
+}
+
+/** True when this friendly name resolves to a single-design-only attribute (style / style name). */
+export function isSingleDesignOnlyDetail(fieldName: string): boolean {
+  return isSingleDesignOnlyKey(resolveDetailAttribute(fieldName)?.spApiKey)
+}
+
+/** Seller-facing reason a style attribute is suppressed on a multi-design family. */
+export const SINGLE_DESIGN_ONLY_LEAK_REASON =
+  'Style describes the specific design — on a multi-design family, pushing one value would overwrite every design’s distinct style. Set it per design in Seller Central.'
+
+/**
  * Build the SP-API patch value array for a detail attribute.
  *
  * v1: every detail uses `{value, marketplace_id, language_tag}`. Modern productType

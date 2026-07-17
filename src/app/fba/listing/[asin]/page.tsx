@@ -3,11 +3,11 @@
 import { useParams, useRouter } from 'next/navigation'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { isPushableDetail, unpushableReason, isItemHighlightsField } from '@/lib/fba/productDetailAttrs'
+import { isPushableDetail, unpushableReason, isItemHighlightsField, isSingleDesignOnlyKey, isSingleDesignOnlyDetail, SINGLE_DESIGN_ONLY_LEAK_REASON } from '@/lib/fba/productDetailAttrs'
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
-import { groupByDesign, isMultiDesign, type PerDesignGroup } from '@/lib/fba/perDesign'
+import { groupByDesign, isMultiDesign, resolveMultiDesign, type PerDesignGroup } from '@/lib/fba/perDesign'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
 import RankAnalysisPanel from './RankAnalysisPanel'
@@ -1629,6 +1629,9 @@ export default function ListingDetailPage() {
   const bulkEligibleDetails = useMemo(() => {
     const rows = aiRecs?.product_details_improvements ?? []
     const ihWritable = aiRecs?.item_highlights_writable   // boolean | undefined
+    // STYLE LEAK GATE (B) — the seller's manual override is authoritative over the auto-detector (both
+    // directions); falls back to per_child_titles when unset. Same predicate the per-row + server gates use.
+    const multi = resolveMultiDesign(aiRecs?.per_child_titles, isMultiDesignOverride)
     return rows.filter((pd) =>
       (pd.pushable ?? isPushableDetail(pd.field_name)) &&
       pd.enum_valid !== false &&
@@ -1637,9 +1640,12 @@ export default function ListingDetailPage() {
       // Item Highlights: excluded from Auto Push while Amazon's API refuses writes. Driven by the
       // server probe flag (item_highlights_writable), NOT a hardcoded date. undefined (legacy GET)
       // → treat as blocked so old cached responses stay safe. Only an explicit `true` unblocks.
-      !(isItemHighlightsField(pd.field_name, pd.sp_api_key) && ihWritable !== true),
+      !(isItemHighlightsField(pd.field_name, pd.sp_api_key) && ihWritable !== true) &&
+      // STYLE LEAK GATE (B): never bulk-push style/style_name on a multi-design family — one value would
+      // overwrite each design's distinct style. Mirrors the per-row gate + the server block (loadDetailContext).
+      !(multi && (isSingleDesignOnlyKey(pd.sp_api_key) || isSingleDesignOnlyDetail(pd.field_name))),
     )
-  }, [aiRecs])
+  }, [aiRecs, isMultiDesignOverride])
 
   const openBulkPush = useCallback(() => {
     // Same concurrent-push guard as openPushPreview — Auto Push must not start while a
@@ -3544,8 +3550,14 @@ export default function ListingDetailPage() {
                         // The regen stores schema-resolved pushability (sp_api_key/pushable) per row — ANY
                         // category's attributes get a Push button, not just the static apparel map. Rows
                         // from before that change have no flag → fall back to the static map.
-                        const pushable = pd.pushable ?? isPushableDetail(pd.field_name)
-                        const blockedReason = pushable ? null : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
+                        // STYLE LEAK GATE (B): style/style_name read off the specific artwork, so broadcasting
+                        // one value across a multi-design family overwrites each design's distinct style. The
+                        // seller's manual override is authoritative over the auto-detector (resolveMultiDesign),
+                        // so force-single un-suppresses and force-multi suppresses regardless of per_child_titles.
+                        // Single-design is untouched. Server re-checks (loadDetailContext).
+                        const styleLeak = resolveMultiDesign(aiRecs?.per_child_titles, isMultiDesignOverride) && (isSingleDesignOnlyKey(pd.sp_api_key) || isSingleDesignOnlyDetail(pd.field_name))
+                        const pushable = !styleLeak && (pd.pushable ?? isPushableDetail(pd.field_name))
+                        const blockedReason = pushable ? null : styleLeak ? SINGLE_DESIGN_ONLY_LEAK_REASON : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
                         // Pushed/up-to-date state (PO: "no notice after PUSH"): the push write-through
                         // sets current_value = recommended_value (server-side at push; mirrored locally
                         // by the modal + Auto Push), so equality IS the "this is on Amazon" signal.

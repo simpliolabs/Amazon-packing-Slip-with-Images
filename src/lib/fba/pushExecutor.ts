@@ -39,8 +39,10 @@ import {
   resolveDetailAttribute, unpushableReason,
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   setItemHighlightsApiState, isItemHighlightsField,
+  isSingleDesignOnlyKey, SINGLE_DESIGN_ONLY_LEAK_REASON,
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
+import { resolveMultiDesign } from '@/lib/fba/perDesign'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
@@ -662,7 +664,7 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   const supabase = await createAdminClient()
   const { data: recRow } = await supabase
     .from('listing_seo_recommendations')
-    .select('product_details_improvements')
+    .select('product_details_improvements, per_child_titles')
     .eq('parent_asin', parentAsin)
     .single()
   // product_details_improvements is JSONB; not in generated types yet. The regen now resolves + persists
@@ -685,6 +687,26 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
     : resolveDetailAttribute(detailField) ?? undefined
   if (!attribute || attribute.scope !== 'broadcast') {
     return { ctx: null, error: unpushableReason(detailField) || `"${detailField}" isn't a pushable attribute for this product type.` }
+  }
+  // STYLE LEAK GATE (B, defense-in-depth): style/style_name describe the specific design — broadcasting
+  // one value across a multi-design family overwrites every design's distinct style. The UI already hides
+  // the button, but a direct POST must be blocked here too (INVARIANT 5 — gate on the bytes that ship).
+  // Single-design broadcasts safely (all children share the one design). Checks the resolved spApiKey so it
+  // catches both the schema-resolved and static-map paths.
+  if (isSingleDesignOnlyKey(attribute.spApiKey)) {
+    // The seller's manual "Multi Design" override is authoritative over the auto-detected per_child_titles
+    // (both directions — force-single un-suppresses, force-multi suppresses), matching the client gates via
+    // the shared resolveMultiDesign. Read it once (only reached for a style-attr push, so rare).
+    const { data: scoreRow } = await supabase
+      .from('listing_seo_scores')
+      .select('is_multi_design_override')
+      .eq('parent_asin', parentAsin)
+      .maybeSingle()
+    const override = (scoreRow as { is_multi_design_override?: boolean | null } | null)?.is_multi_design_override ?? null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (resolveMultiDesign((recRow as any)?.per_child_titles, override)) {
+      return { ctx: null, error: SINGLE_DESIGN_ONLY_LEAK_REASON }
+    }
   }
 
   // ── Enum validation (Feature B) ──────────────────────────────────────────────

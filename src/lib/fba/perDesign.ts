@@ -30,6 +30,20 @@ export function isMultiDesign(titles?: TitleE[] | null): boolean {
   return new Set(titles.filter((t) => t.designKey).map((t) => t.designKey as string)).size >= 2
 }
 
+/** Resolve whether a family is multi-design FOR GATING PURPOSES (e.g. the style-leak push gate). The
+ *  seller's manual "Multi Design" override is AUTHORITATIVE over the SKU auto-detector, in BOTH directions:
+ *  true = force multi, false = force single (consistent with how force-single already broadcasts every
+ *  other parent-shared attribute), falling back to the per_child_titles heuristic when the override is
+ *  unset (null/undefined). Single source of truth so the per-row menu, the bulk set, and the server gate
+ *  agree by construction. NOTE: this is the GATE question ("what did the seller declare?"), distinct from
+ *  the DISPLAY question ("does per-design content exist yet?", which stays isMultiDesign(per_child_titles)
+ *  because there is nothing to show until the next regen rewrites the titles). */
+export function resolveMultiDesign(titles: TitleE[] | null | undefined, override: boolean | null | undefined): boolean {
+  if (override === true) return true
+  if (override === false) return false
+  return isMultiDesign(titles)
+}
+
 /** Cluster SKU-keyed entries into one group per designKey. All SKUs of a design share content,
  *  so the first entry is representative. designName falls back to designKey when empty so a
  *  name-resolution miss never hides a real design. bullets/description may be empty (absent set);
