@@ -40,6 +40,10 @@ export interface ScoringInputs {
   presence: PresenceResult;
   /** Data source — SQP data is more reliable than inherited */
   dataSource: 'sqp' | 'jungle_scout' | 'inherited';
+  /** Merged from a #280 broad-category / garment-brand universe ("graphic tees for women"). These are
+   *  deliberate high-VOLUME category angles kept for backend coverage, but they must NOT out-rank a
+   *  design's own winnable niche terms in the opportunity view — so their score is modestly demoted. */
+  fromUniverse?: boolean;
 }
 
 export interface ScoreResult {
@@ -54,6 +58,19 @@ export interface ScoreResult {
     rawScore: number;
   };
 }
+
+/**
+ * Universe (broad-category / garment-brand) opportunity demotion (#280 niche-priority, 2026-07-17).
+ * Universe terms are high-VOLUME but low-WINNABILITY category heads ("graphic tees for women", 456K)
+ * that would otherwise monopolize the CRITICAL/opportunity view and bury a design's own niche terms
+ * (a fishing tee's fishing keywords). A modest 0.7 factor demotes them just enough that genuinely
+ * winnable niche terms out-rank the unwinnable mega-volume heads, WITHOUT evicting universe terms from
+ * the pool — they stay for backend coverage, demoted from CRITICAL to UPGRADE at most. Applied BEFORE
+ * deriveActionType so the stored opportunityScore and the CRITICAL tier stay coherent (Invariant 6).
+ * SAFE for a listing whose niche IS broad (a plain graphic tee): its broad terms arrive via the DESIGN
+ * query (non-universe → full weight) and are deduped out of the universe merge, so they keep full priority.
+ */
+const UNIVERSE_OPPORTUNITY_WEIGHT = 0.7;
 
 /**
  * Log-scale normalizer: maps 0–∞ to 0–1.
@@ -162,11 +179,18 @@ export function calculateScore(inputs: ScoringInputs): ScoreResult {
     ? Math.round(opportunityScore * 0.85)
     : opportunityScore;
 
+  // #280 universe demotion (niche-priority): modestly down-weight broad-category / garment-brand universe
+  // heads so a design's winnable niche terms out-rank them in the opportunity view. Applied before
+  // deriveActionType so the CRITICAL tier and the stored opportunityScore agree.
+  const finalScore = inputs.fromUniverse
+    ? Math.round(adjustedScore * UNIVERSE_OPPORTUNITY_WEIGHT)
+    : adjustedScore;
+
   // Determine action type based on score and presence
-  const actionType = deriveActionType(adjustedScore, presence);
+  const actionType = deriveActionType(finalScore, presence);
 
   return {
-    opportunityScore: adjustedScore,
+    opportunityScore: finalScore,
     actionType,
     scoreBreakdown: {
       volumeScore: Math.round(vScore * 100) / 100,

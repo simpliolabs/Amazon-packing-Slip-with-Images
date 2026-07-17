@@ -255,6 +255,9 @@ export function runKeywordEngine(
       relevanceRank: normalized.relevanceRank,
       presence,
       dataSource,
+      // #280 universe terms (JS-only) are demoted in scoring so a design's niche terms out-rank the
+      // broad-category heads. SQP rows have no fromUniverse → undefined → false (full weight).
+      fromUniverse: (rawRow as JungleScoutKeywordRow).fromUniverse === true,
     };
     const score = calculateScore(scoringInputs);
 
