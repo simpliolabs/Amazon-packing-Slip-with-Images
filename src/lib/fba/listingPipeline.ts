@@ -5233,48 +5233,64 @@ Rules:
   title = stripCompetitorBrand(collapseGarmentsAndDedup(title))
   // ENFORCED 70-75 HUMANIZER RETRY (fallback chain Part 2): even with the fill + seed pools the
   // council can land short when the family's pool is thin — a short parent title wastes ranking
-  // budget (brief: TARGET LENGTH 70-75). ONE extension call on the council's judge model, seeded
-  // with the full brief + the current title, then the SAME post-pipeline as pass 1 (scrub → cap →
-  // collapse/dedup → competitor-brand net). KEEP-BEST: adopt the retry only when it is clean
-  // (trademark-free, brand still first), ≥68 chars AND longer than the original — otherwise (and on
-  // ANY error) the pass-1 title ships unchanged (fail-open).
+  // budget (brief: TARGET LENGTH 70-75). Up to TWO extension calls on the council's judge model,
+  // each seeded with the full brief + the CURRENT title + the pool keywords the title does not yet
+  // carry (live 58/75 failure: the old prompt gave the model no keywords to extend WITH), then the
+  // SAME post-pipeline as pass 1 (scrub → cap → collapse/dedup → competitor-brand net).
+  // KEEP-BEST-PROGRESS: adopt a retry when it is clean (trademark-free, brand still first) AND
+  // LONGER than the current best — 68 stays the retry TRIGGER, never the adoption bar (the old
+  // ≥68 bar discarded real progress and shipped the short pass-1 title). On ANY error the current
+  // best ships unchanged (fail-open).
   if (title && title.length < 68) {
-    try {
-      onProgress?.(`Parent title ${title.length}/75 — humanizer retry toward 70-75...`)
-      const model = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
-      const isGpt5 = /^(gpt-5|o\d)/.test(model)
-      const messages = [
-        { role: 'system' as const, content: baseSystem },
-        { role: 'user' as const, content: `${baseUser}
+    for (let attempt = 1; attempt <= 2 && title.length < 68; attempt++) {
+      try {
+        // UNUSED-KEYWORD FEED (recomputed each pass against the current title): pool phrases that
+        // still carry at least one novel token, garment-folded so "Tee" doesn't mask "T-Shirt".
+        const titleToks = new Set(bulletTokens(title).map(fillNormTok))
+        const unused = topUpgradeKws.filter((k) => {
+          const toks = bulletTokens(k).map(fillNormTok)
+          return toks.length > 0 && toks.some((t) => !titleToks.has(t))
+        }).slice(0, 8)
+        onProgress?.(`Parent title ${title.length}/75 — humanizer retry ${attempt} toward 70-75...`)
+        const model = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+        const isGpt5 = /^(gpt-5|o\d)/.test(model)
+        const messages = [
+          { role: 'system' as const, content: baseSystem },
+          { role: 'user' as const, content: `${baseUser}
 
 Current title (${title.length} chars — too short):
 ${title}
 
-Critique: Extend to 70-75 characters with natural niche phrasing a real shopper types — occasion, recipient, design subject. Keep every existing word's meaning; do NOT repeat any significant word; no generic category filler.
+Critique: Extend to 70-75 characters with natural niche phrasing a real shopper types — occasion, recipient, design subject. Keep every existing word's meaning; do NOT repeat any significant word; no generic category filler.${unused.length ? `
+Extend the title to 70-75 characters by weaving in phrases from this list (verbatim or naturally inflected, most valuable first): ${unused.join(' | ')}. Never repeat a word already in the title.` : ''}
 
 Return ONLY the extended title string.` },
-      ]
-      const r = await openai.chat.completions.create(
-        isGpt5
-          ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' }
-          : { model, messages, temperature: 0.3, max_tokens: 120 },
-        { timeout: 60_000, maxRetries: 0 },
-      )
-      const raw = (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-      if (raw) {
+        ]
+        const r = await openai.chat.completions.create(
+          isGpt5
+            ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' }
+            : { model, messages, temperature: 0.3, max_tokens: 120 },
+          { timeout: 60_000, maxRetries: 0 },
+        )
+        const raw = (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+        if (!raw) {
+          onProgress?.(`title retry ${attempt}: len ${title.length}→${title.length} (empty response, kept best)`)
+          continue
+        }
         const retryTitle = stripCompetitorBrand(collapseGarmentsAndDedup(capTitle75(scrubTrademarks(raw))))
-        const clean = retryTitle.length >= 68 && retryTitle.length > title.length
+        const clean = retryTitle.length > title.length
           && findTrademarkPhrases(retryTitle).length === 0
           && (!brandName || retryTitle.toLowerCase().startsWith(brandName.trim().toLowerCase()))
         if (clean) {
-          onProgress?.(`Humanizer retry accepted (${retryTitle.length}/75).`)
+          onProgress?.(`title retry ${attempt}: len ${title.length}→${retryTitle.length}`)
           title = retryTitle
         } else {
-          onProgress?.(`Humanizer retry kept the original (retry ${retryTitle.length} chars).`)
+          onProgress?.(`title retry ${attempt}: len ${title.length}→${title.length} (kept best; retry was ${retryTitle.length} chars${retryTitle.length > title.length ? ', unclean' : ''})`)
         }
+      } catch (e) {
+        console.warn('[parent-title] humanizer retry failed (kept current best):', e instanceof Error ? e.message : e)
+        break
       }
-    } catch (e) {
-      console.warn('[parent-title] humanizer retry failed (kept original):', e instanceof Error ? e.message : e)
     }
   }
   return title
