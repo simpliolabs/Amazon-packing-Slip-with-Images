@@ -947,7 +947,12 @@ export default function ListingDetailPage() {
   const refreshScore = useCallback(async () => {
     if (!asin) return
     try {
-      const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+      // MUST mirror the initial load's URL (?limit=200&ensure=asin): the bare LIST is the top-50-by-sales
+      // page, so a LOW-TRAFFIC listing (e.g. 11 units/30d) is ABSENT → find() returns undefined → setScore
+      // never runs → score.children stays stale → the cohesion counts + per-design chips don't move until a
+      // manual reload (PO: "41 need update didn't disappear until I refreshed"). ensure= re-scores THIS asin
+      // on-demand from the just-written listing_content, so the refetch always resolves with fresh children.
+      const sresp = await fetch(`/api/fba/listing-optimizer?limit=200&ensure=${encodeURIComponent(asin)}`, { cache: 'no-store' })
       const sdata = await sresp.json()
       const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
       if (found) setScore(found)
@@ -1586,9 +1591,11 @@ export default function ListingDetailPage() {
       // Refresh score (push re-scored server-side).
       if (data.pushed > 0) {
         try {
-          // no-store: a push just mutated listing_content; the refetch MUST be fresh so the
-          // cohesion rows (which compare per-child live backend vs recommendation) flip green.
-          const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+          // no-store + ensure=: a push just mutated listing_content; the refetch MUST be fresh AND must
+          // include THIS asin so the cohesion rows + per-design chips flip without a manual reload. The bare
+          // LIST is top-50-by-sales, so a low-traffic listing was absent → the flip only happened on reload
+          // (PO-reported). ensure= re-scores this asin on demand from the fresh cache.
+          const sresp = await fetch(`/api/fba/listing-optimizer?limit=200&ensure=${encodeURIComponent(asin)}`, { cache: 'no-store' })
           const sdata = await sresp.json()
           const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
           if (found) setScore(found)
