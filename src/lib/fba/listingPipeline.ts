@@ -5241,6 +5241,17 @@ Rules:
   // LONGER than the current best — 68 stays the retry TRIGGER, never the adoption bar (the old
   // ≥68 bar discarded real progress and shipped the short pass-1 title). On ANY error the current
   // best ships unchanged (fail-open).
+  // RETRY-CASING NORMALIZER: the adopted retry ships the LLM's raw casing (live: "THE CEO fishing
+  // humor funny t-shirt Dad Gift..." — correct content, lowercase niche phrase). Title-Case only
+  // FULLY-LOWERCASE words; any word already carrying an uppercase letter is preserved verbatim
+  // ("THE CEO", "T-shirt"); minor connector words stay lowercase unless they open the title.
+  // Pass-1 council titles are already cased — this applies to the retry candidate ONLY.
+  const RETRY_MINOR_WORDS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'to'])
+  const titleCaseRetry = (t: string): string => t.split(/\s+/).map((w, i) =>
+    /[A-Z]/.test(w) ? w
+      : (i > 0 && RETRY_MINOR_WORDS.has(w)) ? w
+      : w.charAt(0).toUpperCase() + w.slice(1),
+  ).join(' ')
   if (title && title.length < 68) {
     for (let attempt = 1; attempt <= 2 && title.length < 68; attempt++) {
       try {
@@ -5277,7 +5288,7 @@ Return ONLY the extended title string.` },
           onProgress?.(`title retry ${attempt}: len ${title.length}→${title.length} (empty response, kept best)`)
           continue
         }
-        const retryTitle = stripCompetitorBrand(collapseGarmentsAndDedup(capTitle75(scrubTrademarks(raw))))
+        const retryTitle = titleCaseRetry(stripCompetitorBrand(collapseGarmentsAndDedup(capTitle75(scrubTrademarks(raw)))))
         const clean = retryTitle.length > title.length
           && findTrademarkPhrases(retryTitle).length === 0
           && (!brandName || retryTitle.toLowerCase().startsWith(brandName.trim().toLowerCase()))
