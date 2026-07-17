@@ -376,8 +376,20 @@ function categorizeBuckets(
     }
   }
 
-  // Sort all by search volume descending, cap at 100
-  const allSorted = Array.from(merged.values())
+  // NICHE-FIRST cap (2026-07-17 live loop, B0DMXMH266): a pure volume sort let the #280 broad-category
+  // universes (500k-vol "mens shirts") monopolize ALL 100 slots — the design's own niche universe
+  // (5-15k-vol fishing terms, INCLUDING the seller-competitor harvest) was discarded entirely (1
+  // fishing row of 97 stored, live-verified even with a manual "funny fishing shirt" seed). Reserve
+  // the pool for the NICHE: non-universe rows (design-seed + competitor harvest) get up to 70 slots
+  // by volume; fromUniverse broad-category rows fill the remainder. Broad angles keep presence (the
+  // backend still sees them); the niche can never be crowded out of its own listing's universe again.
+  const allRows = Array.from(merged.values());
+  const isUni = (k: JungleScoutKeywordRow) => (k as { fromUniverse?: boolean }).fromUniverse === true;
+  const nicheRows = allRows.filter(k => !isUni(k))
+    .sort((a, b) => b.searchVolume - a.searchVolume).slice(0, 70);
+  const universeRows = allRows.filter(isUni)
+    .sort((a, b) => b.searchVolume - a.searchVolume).slice(0, 100 - nicheRows.length);
+  const allSorted = [...nicheRows, ...universeRows]
     .sort((a, b) => b.searchVolume - a.searchVolume)
     .slice(0, 100);
 
