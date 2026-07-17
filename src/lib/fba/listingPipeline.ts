@@ -1754,6 +1754,70 @@ export function scoreDescription(html: string, ctx: DescriptionScoringCtx = {}):
   return { score: Math.max(0, score), critiques }
 }
 
+/** Deterministic post-fill scorer for a BACKEND search-term CORE string (element E, 2026-07-17).
+ *  Sits beside scoreDescription for the same reason (the description self-heal pattern, #388): a
+ *  deterministic quality bar the generator's loop can re-prompt against with SPECIFIC problems,
+ *  instead of shipping the first guess. ADVISORY ONLY — it NEVER throws and nothing hard-gates a
+ *  persist on it: the <190-byte HARD floor stays in backendOutputProblems (untouched) and
+ *  fillBackendToBudget's 244 early-return is untouched. A 190-219-byte result is a critique here,
+ *  never an abort.
+ *  GREEN = (bytes in [220,250] AND clean) OR (bytes in [200,220) AND clean AND poolExhausted).
+ *  clean = zero off-niche tokens (isOffNicheKeyword), zero foreign tokens (isForeignKeyword), zero
+ *  third-party-brand tokens, zero title-echo tokens (ctx.excludeWords — pass it with the DELIBERATE
+ *  placements removed: design tokens and the men/women audience guarantee, which are forced into the
+ *  core on purpose). poolExhausted = the remaining candidate pool supplies no further clean addable
+ *  token — so a genuinely thin catalog sitting at 200-219 clean bytes is honestly green, per the
+ *  "don't false-fail the thin-catalog majority" rule backendOutputProblems already encodes.
+ *  Problem strings are STABLE: byte-band problems start with "bytes " so callers can separate DIRT
+ *  from UNDER-FILL when comparing candidates (keep-best must never adopt a dirtier string). */
+export interface BackendScoringCtx {
+  /** Listing haystack for isOffNicheKeyword's own-brand / activewear-listing / own-cut guards. */
+  nicheContext?: string
+  /** Already-indexed tokens (live title + bullets + brand + colors, normalized) — their presence in
+   *  backend is pure echo/wasted bytes. Deliberate placements must be removed by the caller. */
+  excludeWords?: Set<string>
+  /** Own-brand tokens — exempt from the third-party-brand check. */
+  ownBrands?: Set<string>
+  /** Normalized candidate tokens that could still be appended (pool + council output) — the
+   *  poolExhausted probe. Empty/absent = nothing left to add = exhausted. */
+  remainingCandidates?: string[]
+  /** True when this candidate token could still legitimately land AND is clean (the caller's fill
+   *  filters + the same off-niche/foreign nets this scorer applies). */
+  isAddableCleanToken?: (w: string) => boolean
+}
+export function scoreBackend(str: string, ctx: BackendScoringCtx = {}): { green: boolean; problems: string[]; poolExhausted: boolean } {
+  const problems: string[] = []
+  const s = (str || '').trim()
+  const bytes = getByteLength(s)
+  const toks = s.toLowerCase().split(/\s+/).filter(Boolean)
+  const offNiche: string[] = []
+  const foreign: string[] = []
+  const brands3p: string[] = []
+  const echo: string[] = []
+  for (const t of toks) {
+    if (ctx.ownBrands?.has(t)) continue                                   // own brand is never "dirt"
+    if (isForeignKeyword(t)) { foreign.push(t); continue }
+    if (isOffNicheKeyword(t, { context: ctx.nicheContext })) { offNiche.push(t); continue }
+    if (THIRD_PARTY_BRANDS.has(t)) { brands3p.push(t); continue }
+    if (ctx.excludeWords?.has(t)) echo.push(t)
+  }
+  const uniq = (a: string[]) => [...new Set(a)].slice(0, 6).join(' ')
+  if (offNiche.length) problems.push(`off-niche token(s) this copy must never carry: ${uniq(offNiche)}`)
+  if (foreign.length) problems.push(`foreign-language token(s): ${uniq(foreign)}`)
+  if (brands3p.length) problems.push(`third-party brand token(s) (trademark risk): ${uniq(brands3p)}`)
+  if (echo.length) problems.push(`title-echo token(s) (already indexed — wasted bytes): ${uniq(echo)}`)
+  const clean = problems.length === 0
+  // poolExhausted BEFORE the byte-band advisory (green's 200-220 band depends on it). Tokens already
+  // in the string never count as "further" candidates.
+  const have = new Set(toks)
+  const poolExhausted = !(ctx.remainingCandidates ?? []).some((w) => w && !have.has(w) && (ctx.isAddableCleanToken ? ctx.isAddableCleanToken(w) : true))
+  if (bytes > 250) problems.push(`bytes over cap: ${bytes}/250`)
+  else if (bytes < 200) problems.push(`bytes under band: ${bytes} (target 220-250)`)
+  else if (bytes < 220 && !poolExhausted) problems.push(`bytes under band: ${bytes} (target 220-250; clean pool candidates remain unplaced)`)
+  const green = clean && ((bytes >= 220 && bytes <= 250) || (bytes >= 200 && bytes < 220 && poolExhausted))
+  return { green, problems, poolExhausted }
+}
+
 // ─── Stage 0 — candidate preparation (code only) ───────────────────────────────
 
 interface TitleCandidate { keyword: string; opportunityScore: number; role: 'keyphrase' | 'descriptive' | 'audience'; organicRank?: number | null }
@@ -3157,6 +3221,109 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
 
 // ─── Stage 3 — Backend keywords (code grouping + LLM aesthetic assignment) ──────
 
+/** One ranked backend candidate (a token or short phrase) with its real/estimated monthly volume. */
+interface BackendCouncilCandidate { keyword: string; volume: number }
+
+/** Backend-keyword COUNCIL (element E, 2026-07-17) — the single-shot theme-fill's one gpt-4.1-mini
+ *  guess becomes the same propose→deliberate→judge shape as runBulletsCouncil/runDescriptionCouncil.
+ *  THREE proposers (gpt-4.1-mini, varied temp/persona, JSON, per-call timeout, maxRetries:0,
+ *  Promise.all) emit RANKED candidates WITH volume — deliberately given NO byte target (a byte
+ *  target at the proposer seam is a padding incentive); ONE judge (TITLE_COUNCIL_MODEL, default
+ *  gpt-5; GPT-5 params branch like callBulletsModel) packs the survivors volume-ordered toward the
+ *  byte budget. Fail-open chain: judge → proposer (i)'s demand list → (caller) the legacy
+ *  theme-fill → bare deterministic core — never empty, never a preserved stale string (#352).
+ *  The council only PROPOSES: the caller re-runs every returned token through the SAME deterministic
+ *  fill filters the theme-fill applied — nothing here bypasses the rulebook. `reAskJudge` is the
+ *  scoreBackend self-heal seam: one re-pack against the scorer's specific problems (the caller
+ *  enforces max-1-retry + keep-best + never-dirtier). */
+async function runBackendCouncil(
+  openai: OpenAI,
+  seedCore: string,
+  poolRemaining: AnalyzedKeyword[],
+  designName: string,
+  excludeWords: Set<string>,
+  /** banTok-style predicate bundle: true = this normalized token could still legitimately land
+   *  (passes every deterministic fill filter). Shown to no model — used only to build the
+   *  CRITICAL-gap brief here; the caller applies it as the real filter. */
+  isUsableWord: (w: string) => boolean,
+  /** Uncovered CRITICAL keywords ("phrase (vol/mo)") — proposer (iii)'s first-priority brief. */
+  criticalSet: string[],
+  /** Free bytes left before the core cap — the JUDGE packs toward it; proposers never see it. */
+  byteBudget: number,
+  onProgress?: (m: string) => void,
+): Promise<{ ranked: BackendCouncilCandidate[]; reAskJudge: ((problems: string[], currentFill: string) => Promise<BackendCouncilCandidate[]>) | null }> {
+  const askCandidates = async (system: string, user: string, temperature: number, model = 'gpt-4.1-mini', timeoutMs = 20_000): Promise<BackendCouncilCandidate[]> => {
+    try {
+      const isGpt5 = /^(gpt-5|o\d)/.test(model)
+      const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+      const r = await openai.chat.completions.create(
+        isGpt5
+          ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' as const, response_format: { type: 'json_object' as const } }
+          : { model, messages, temperature, max_tokens: 1000, response_format: { type: 'json_object' as const } },
+        { timeout: timeoutMs, maxRetries: 0 },
+      )
+      const parsed = parseJsonLoose<{ candidates?: { keyword?: unknown; volume?: unknown }[] }>(r.choices[0]?.message?.content || '{}')
+      return (Array.isArray(parsed.candidates) ? parsed.candidates : [])
+        .filter((c) => !!c && typeof c.keyword === 'string' && c.keyword.trim().length > 0)
+        .map((c) => {
+          const v = typeof c.volume === 'number' ? c.volume : Number(c.volume)
+          return { keyword: String(c.keyword).trim().toLowerCase(), volume: Number.isFinite(v) && v > 0 ? Math.round(v) : 0 }
+        })
+        .slice(0, 40)
+    } catch { return [] }
+  }
+  const JUDGE_MODEL = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+  const poolLines = poolRemaining.slice(0, 40).map((k) => `- ${k.keyword} (${k.searchVolume ?? 0}/mo${k.actionType === 'CRITICAL' ? ', CRITICAL' : ''})`).join('\n')
+  const avoid = [...excludeWords].slice(0, 60).join(' ')
+  const shape = 'Return ONLY JSON: {"candidates":[{"keyword":"lowercase word or 2-4 word phrase","volume":<monthly searches, number>}]} — RANKED best-first. lowercase, no punctuation or commas inside a keyword. FORBIDDEN everywhere: brand names, color names, sizes, non-English words, generic catalog words ("apparel","clothing","clothes","outfit","wear","fashion","tops","wardrobe"), promo adjectives ("trendy","stylish","premium","elegant","timeless","cozy").'
+  const brief = `Amazon backend search-term candidates (generic_keywords — invisible search indexing, a space-separated token soup) for this product.
+Design/theme printed on it: ${designName || '(infer from the already-placed terms)'}
+ALREADY PLACED in the field (never repeat these words): ${seedCore || '(nothing yet)'}
+ALREADY INDEXED by title/bullets/brand/colors (never repeat): ${avoid}
+DEMAND POOL (real shopper searches with real monthly volume):
+${poolLines || '(pool exhausted — nothing left)'}
+${shape}`
+  const proposers: { label: string; sys: string; temp: number }[] = [
+    { label: 'DEMAND MAXIMIZER', sys: 'You are a DEMAND/VOLUME MAXIMIZER for Amazon backend keywords. From the DEMAND POOL only, select the phrases whose words are NOT already placed/indexed, ranked strictly by REAL monthly volume (copy the pool volume verbatim — NEVER invent demand). 15-30 candidates.', temp: 0.2 },
+    { label: 'LONG-TAIL BUYER-INTENT', sys: 'You are a LONG-TAIL BUYER-INTENT specialist. Propose the long-tail phrases real shoppers TYPE to find THIS DESIGN: build every phrase around the design theme — its subject, its joke/wordplay and synonyms, who buys it and for whom (wife, husband, mom, friend...), and gifting occasions ("<theme> gift", "<subject> lover gifts", "funny <subject> shirt for <recipient>"). Estimate volume honestly (long-tail is low, ~50-2000/mo). 15-30 candidates.', temp: 0.6 },
+    { label: 'COVERAGE-COMPLETENESS', sys: `You are a COVERAGE-COMPLETENESS auditor. Close the remaining coverage gaps, in this order: FIRST the CRITICAL keywords below (propose their still-missing words, with the pool's real volume), THEN any DEMAND POOL phrase with unplaced words, THEN true buyer synonyms of the placed theme. 15-30 candidates.\nCRITICAL gaps to cover first:\n${criticalSet.length ? criticalSet.map((c) => `- ${c}`).join('\n') : '(none uncovered)'}`, temp: 0.3 },
+  ]
+  onProgress?.('Backend council: 3 proposers drafting candidates...')      // keepalive (resets idle timer)
+  const drafts = await Promise.all(proposers.map((p) => askCandidates(p.sys, brief, p.temp)))
+  if (drafts.every((d) => d.length === 0)) {
+    console.warn('[backend-council] all 3 proposers returned empty — failing open to the legacy theme-fill')
+    return { ranked: [], reAskJudge: null }
+  }
+  const numbered = drafts.map((d, i) => `${proposers[i].label} candidates:\n${d.map((c) => `- ${c.keyword} (${c.volume}/mo)`).join('\n') || '(none)'}`).join('\n\n')
+  const judgeSys = 'You are the JUDGE of an Amazon backend-keyword council. Merge the three proposer lists into ONE final ranked pack: keep only distinct, on-theme, English candidates whose words are not already placed/indexed; order by REAL volume (pool-backed volume beats an estimate at equal relevance) but NEVER drop a CRITICAL-gap word; and pack toward the byte budget — stop adding once the budget is spent, never pad past it. ' + shape
+  const judgeUser = `${brief}
+
+BYTE BUDGET for the NEW words: ~${byteBudget} bytes (space-separated; a word costs its length + 1).
+
+${numbered}
+
+Return the single final pack, ranked in the exact order the words should be placed.`
+  onProgress?.('Backend council: judge packing the survivors...')          // keepalive
+  const judged = await askCandidates(judgeSys, judgeUser, 0.2, JUDGE_MODEL, 60_000)
+  // Fail open to proposer (i)'s DEMAND list (pool-backed, the safest volumes), NOT the invented
+  // long-tail list — mirrors the bullets council's fail-open-to-SEO-draft rationale. Logged.
+  if (judged.length === 0) console.warn('[backend-council] judge returned empty — failing open to the demand-proposer list')
+  const ranked = judged.length > 0 ? judged : drafts[0]
+  if (ranked.length === 0) return { ranked: [], reAskJudge: null }        // demand list empty too → caller's theme-fill
+  const reAskJudge = async (problems: string[], currentFill: string): Promise<BackendCouncilCandidate[]> =>
+    askCandidates(
+      judgeSys,
+      `${judgeUser}
+
+YOUR PREVIOUS PACK was deterministically filtered and shipped as: "${currentFill}"
+A deterministic scorer found these PROBLEMS with it:
+- ${problems.join('\n- ')}
+Re-pack ONCE: drop every offending word, replace the lost bytes with the next-best CLEAN candidates from the lists above, keep everything already good.`,
+      0.2, JUDGE_MODEL, 60_000,
+    )
+  return { ranked, reAskJudge }
+}
+
 async function runBackendAgent(
   input: PipelineInput,
   finalTitle: string,
@@ -3323,66 +3490,161 @@ async function runBackendAgent(
   const tailColors = colors.filter((c) => c !== 'default' && (KNOWN_COLOR_NAMES.has(c) || BASIC_COLOR_RE.test(c)))
   const coreByteTarget = tailColors.length ? 233 : 244
   // FILL: a small product's opportunity pool can run dry well under 250 bytes, leaving the
-  // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with LLM long-tail
-  // BUYER search words (gifts / occasions / recipients / themes) — run through the SAME junk /
-  // role / kids / dedup filters as the core, so it fills with real terms, not rejected junk.
-  // 220 gate (adversarial 2026-07-09): the LLM theme fill is now the LAST resort, BELOW the demand-
-  // backed gap-closing. When gap-closing filled the pool to the 233 core cap, this must NOT fire
-  // (240 gate against a 233 truncate meant a paid gpt-4.1-mini call whose output was truncated away
-  // — fire-then-discard on every healthy regen). It fires only when a THIN pool left real room.
+  // search-term field half-empty (PO: "keywords are 150 chars"). Top it up with real buyer terms —
+  // run through the SAME junk / role / kids / dedup filters as the core, so it fills with real
+  // terms, not rejected junk. The fill fires only when a THIN pool left real room (adversarial
+  // 2026-07-09: firing at the cap was a paid call whose output was truncated away).
+  // ELEMENT E COUNCIL (2026-07-17): the single-shot theme-fill is now a propose→deliberate→judge
+  // COUNCIL (runBackendCouncil) + a deterministic scoreBackend SELF-HEAL loop. The council only
+  // AUGMENTS the deterministic core + gap-closing above — every candidate token re-runs the EXACT
+  // filter loop the theme-fill applied — and the whole chain fails open:
+  // judge → demand proposer → legacy theme-fill → bare deterministic core.
+  // Never empty, never a preserved stale string (#352 lesson). Because this runs INSIDE
+  // runBackendAgent, every call site (family-level, per-design group, ungrouped remainder,
+  // keywords-only partial, degraded-retry) inherits it; the per-color tail and per-child capacity
+  // cores below both derive from the SAME filled core, so no per-child path bypasses it.
   if (getByteLength(corePhrases.join(' ')) < coreByteTarget) {
-    try {
-      // THEME-ANCHORED fill (PO 2026-07-08: the old generic ask returned catalog-speak — "apparel
-      // clothing trendy blouses" — that read like a promotional string, not search terms). Anchor
-      // every phrase on the DESIGN's theme: its subject, wordplay, recipients, and occasions.
-      const fillSys = 'You generate ADDITIONAL Amazon backend search keywords (long-tail buyer phrases) to fill the search-term field. Return ONLY JSON: {"keywords":"lowercase space-separated search words"}.'
-      const fillUsr = `Product: ${finalTitle}
+    const onProgress = input.onProgress
+    // Apostrophe-deletion normalize ("valentine's" → "valentines"), matching the core normalize.
+    const normFill = (s: string): string => s.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ')
+    // ONE predicate: could this normalized token still legitimately land in the core? Shared by the
+    // council fill filter, the legacy fill, the CRITICAL-gap brief, and scoreBackend's
+    // poolExhausted probe — the same rulebook everywhere (coherence Invariant 1 discipline).
+    const isUsableWord = (w: string): boolean => {
+      if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w)) return false
+      if (banTok(w)) return false                                      // truth gate (same as the core)
+      if (ownBrandsForBackend.has(w)) return false                     // own brand: brand attribute indexes it
+      if (ROLE_WORDS.has(w) && !titleWords.has(w)) return false        // weak-relevance role (model-suggested, not data-backed)
+      if (kidsWords.has(w) && !titleWords.has(w)) return false         // wrong audience
+      if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) return false  // 3P brand: trademark risk
+      if (coreWordSet.has(w) || excludeWords.has(w)) return false      // already covered / auto-indexed
+      if (PRODUCT_TYPE_WORDS.has(w) && productTypeCount >= 2) return false
+      return true
+    }
+    // The SAME filter loop the single-shot theme-fill applied (JUNK/MINOR/banTok/own-brand/ROLE/
+    // kids/3P-brand/dedup/title-echo/PRODUCT_TYPE cap + the coreByteTarget stop) — now PURE (its
+    // own dedup + type-count), so a judge retry can be EVALUATED without committing; commitFill
+    // applies exactly one winner to coreWordSet/productTypeCount/corePhrases.
+    const filterFillWords = (rawText: string): string[] => {
+      const localSeen = new Set<string>()
+      let localTypeCount = productTypeCount
+      const out: string[] = []
+      for (const w of normFill(rawText).split(/\s+/)) {
+        if (!w || localSeen.has(w) || !isUsableWord(w)) continue
+        if (PRODUCT_TYPE_WORDS.has(w)) { if (localTypeCount >= 2) continue; localTypeCount++ }
+        localSeen.add(w); out.push(w)
+        // Stop AT the core truncate ceiling (coreByteTarget) so the terms actually survive
+        // truncateToBytes below (adversarial 2026-07-09 — an overshoot was sliced off).
+        if (getByteLength([...corePhrases, out.join(' ')].join(' ')) >= coreByteTarget) break
+      }
+      return out
+    }
+    const commitFill = (words: string[]): void => {
+      if (words.length === 0) return
+      for (const w of words) { coreWordSet.add(w); if (PRODUCT_TYPE_WORDS.has(w)) productTypeCount++ }
+      corePhrases.push(words.join(' '))
+    }
+    // LEGACY single-shot theme-fill — the council's LAST fail-open rung. Behavior preserved
+    // verbatim (THEME-ANCHORED ask, PO 2026-07-08; transient-error retry, PO 2026-07-16: this is
+    // the ONLY novel byte source for a thin pool, so a swallowed failure stuck the field at ~200).
+    const legacyThemeFill = async (): Promise<void> => {
+      try {
+        const fillSys = 'You generate ADDITIONAL Amazon backend search keywords (long-tail buyer phrases) to fill the search-term field. Return ONLY JSON: {"keywords":"lowercase space-separated search words"}.'
+        const fillUsr = `Product: ${finalTitle}
 Design/theme printed on it: ${designName || '(infer from the title)'}
 List ~40 ADDITIONAL search terms real shoppers TYPE into Amazon to find THIS DESIGN on this product. Build every phrase AROUND the design's theme — its subject, its joke/wordplay and synonyms, who buys it and for whom (wife, husband, mom, friend...), and gifting occasions. Think like the buyer: "<theme> gift", "<subject> lover gifts", "funny <subject> shirt for <recipient>", "<occasion> gift for <recipient> who loves <subject>".
 ONLY concrete buyer search words tied to the theme. FORBIDDEN: generic category words ("apparel", "clothing", "clothes", "outfit", "wear", "fashion", "tops", "wardrobe"), promo adjectives ("trendy", "stylish", "premium", "elegant", "timeless", "cozy"), brand names, color names, sizes. lowercase, space-separated, no commas/quotes.
 Avoid reusing: ${[...coreWordSet, ...titleWords].slice(0, 60).join(' ')}
 Return ONLY the JSON.`
-      // Retry once on a transient error (PO 2026-07-16): the theme-fill is the ONLY novel byte source
-      // for a thin pool, so a single swallowed failure left the field stuck at ~200 (the #352-class
-      // quiet degrade). Mirror the color-tail's retry.
-      const callFill = async (): Promise<string> => {
-        const fc = await openai.chat.completions.create({
-          model: 'gpt-4.1-mini',
-          messages: [{ role: 'system', content: fillSys }, { role: 'user', content: fillUsr }],
-          temperature: 0.6,
-          max_tokens: 300,
-          response_format: { type: 'json_object' },
-        })
-        return fc.choices[0]?.message?.content || '{}'
+        const callFill = async (): Promise<string> => {
+          const fc = await openai.chat.completions.create({
+            model: 'gpt-4.1-mini',
+            messages: [{ role: 'system', content: fillSys }, { role: 'user', content: fillUsr }],
+            temperature: 0.6,
+            max_tokens: 300,
+            response_format: { type: 'json_object' },
+          })
+          return fc.choices[0]?.message?.content || '{}'
+        }
+        let fillRaw = '{}'
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try { fillRaw = await callFill(); break }
+          catch (e) { if (attempt === 1) throw e; console.warn(`[runBackendAgent] theme-fill attempt ${attempt + 1} failed, retrying:`, e instanceof Error ? e.message : e) }
+        }
+        const fillParsed = parseJsonLoose<{ keywords?: string }>(fillRaw)
+        commitFill(filterFillWords(fillParsed.keywords || ''))
+      } catch (e) {
+        // Best-effort — the opportunity core still ships — but SURFACE it (not silent): a persistent
+        // failure here is why a thin backend can stick under budget (the #352-class quiet degrade).
+        console.warn('[runBackendAgent] theme-fill failed after retry; shipping core only:', e instanceof Error ? e.message : e)
       }
-      let fillRaw = '{}'
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try { fillRaw = await callFill(); break }
-        catch (e) { if (attempt === 1) throw e; console.warn(`[runBackendAgent] theme-fill attempt ${attempt + 1} failed, retrying:`, e instanceof Error ? e.message : e) }
-      }
-      const fillParsed = parseJsonLoose<{ keywords?: string }>(fillRaw)
-      const fillOut: string[] = []
-      // Apostrophe-deletion here too ("valentine's" → "valentines"), matching the core normalize.
-      for (const w of (fillParsed.keywords || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
-        if (!w || JUNK_WORDS.has(w) || MINOR_WORDS.has(w)) continue
-        if (banTok(w)) continue                                        // truth gate (same as the core)
-        if (ownBrandsForBackend.has(w)) continue                       // own brand: brand attribute indexes it
-        if (ROLE_WORDS.has(w) && !titleWords.has(w)) continue          // weak-relevance role
-        if (kidsWords.has(w) && !titleWords.has(w)) continue           // wrong audience
-        if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) continue  // 3P brand: trademark risk
-        if (coreWordSet.has(w) || excludeWords.has(w)) continue        // already covered / auto-indexed
-        if (PRODUCT_TYPE_WORDS.has(w)) { if (productTypeCount >= 2) continue; productTypeCount++ }
-        coreWordSet.add(w); fillOut.push(w)
-        // Stop AT the core truncate ceiling (coreByteTarget) so the themed terms actually survive
-        // truncateToBytes below (adversarial 2026-07-09 — an overshoot was sliced off).
-        if (getByteLength([...corePhrases, fillOut.join(' ')].join(' ')) >= coreByteTarget) break
-      }
-      if (fillOut.length) corePhrases.push(fillOut.join(' '))
-    } catch (e) {
-      // Best-effort — the opportunity core still ships — but SURFACE it (not silent): a persistent
-      // failure here is why a thin backend can stick under budget (the #352-class quiet degrade).
-      console.warn('[runBackendAgent] theme-fill failed after retry; shipping core only:', e instanceof Error ? e.message : e)
     }
+    let filledByCouncil = false
+    try {
+      // Uncovered CRITICAL keywords (still carrying >=1 usable token) → proposer (iii)'s brief.
+      const criticalSet = remaining
+        .filter((k) => k.actionType === 'CRITICAL' && normFill(k.keyword).split(/\s+/).some((w) => w && isUsableWord(w)))
+        .slice(0, 15)
+        .map((k) => `${k.keyword} (${k.searchVolume ?? 0}/mo)`)
+      const freeBytes = Math.max(0, coreByteTarget - getByteLength(corePhrases.join(' ')) - 1)
+      const council = await runBackendCouncil(openai, corePhrases.join(' '), remaining, designName, excludeWords, isUsableWord, criticalSet, freeBytes, onProgress)
+      if (council.ranked.length > 0) {
+        // The judge's pack is volume-ordered; the deterministic filters have the FINAL word — every
+        // council token passes the exact same loop the theme-fill applied, capped at coreByteTarget.
+        let bestFill = filterFillWords(council.ranked.map((c) => c.keyword).join(' '))
+        // ── scoreBackend SELF-HEAL (max 1 judge re-ask; keep-best; never adopt a dirtier string) ──
+        const candidateCore = (f: string[]): string => truncateToBytes([...corePhrases, f.join(' ')].filter(Boolean).join(' '), coreByteTarget)
+        // Echo scoring view: the men/women audience guarantee is a DELIBERATE forced placement
+        // (unshifted into the core above), never an "echo problem"; design tokens were already
+        // deleted from excludeWords (identity exemption, #91/#92).
+        const scoreExclude = new Set(excludeWords)
+        scoreExclude.delete('men')
+        scoreExclude.delete('women')
+        const nicheCtx = `${finalTitle} ${bullets.join(' ')} ${repTitle ?? ''} ${input.canonicalTitle ?? ''} ${brandName}`
+        const scoreCtx: BackendScoringCtx = {
+          nicheContext: nicheCtx,
+          excludeWords: scoreExclude,
+          ownBrands: ownBrandsForBackend,
+          remainingCandidates: [...new Set([
+            ...council.ranked.flatMap((c) => normFill(c.keyword).split(/\s+/)),
+            ...remaining.flatMap((k) => normFill(k.keyword).split(/\s+/)),
+          ].filter(Boolean))],
+          isAddableCleanToken: (w) => isUsableWord(w) && !isForeignKeyword(w) && !isOffNicheKeyword(w, { context: nicheCtx }),
+        }
+        // DIRT vs UNDER-FILL split (scoreBackend's stable "bytes " prefix): keep-best compares
+        // dirt first — a retry that packs more bytes but adds an off-niche token must LOSE.
+        const dirt = (sc: { problems: string[] }): number => sc.problems.filter((p) => !p.startsWith('bytes ')).length
+        let bestScore = scoreBackend(candidateCore(bestFill), scoreCtx)
+        if (!bestScore.green && !bestScore.poolExhausted && council.reAskJudge) {
+          onProgress?.('Backend council: self-heal — judge re-packing against scorer problems...')  // keepalive
+          try {
+            const retry = await council.reAskJudge(bestScore.problems, candidateCore(bestFill))
+            if (retry.length > 0) {
+              const retryFill = filterFillWords(retry.map((c) => c.keyword).join(' '))
+              const retryScore = scoreBackend(candidateCore(retryFill), scoreCtx)
+              if (dirt(retryScore) < dirt(bestScore)
+                || (dirt(retryScore) === dirt(bestScore) && getByteLength(candidateCore(retryFill)) > getByteLength(candidateCore(bestFill)))) {
+                bestFill = retryFill
+                bestScore = retryScore
+              }
+            }
+          } catch (e) {
+            console.warn('[runBackendAgent] council self-heal re-ask failed — keeping the first pack:', e instanceof Error ? e.message : e)
+          }
+        }
+        if (bestFill.length > 0) {
+          commitFill(bestFill)
+          filledByCouncil = true
+          // ADVISORY ONLY (never a throw): the <190 hard floor stays in backendOutputProblems.
+          if (!bestScore.green) console.warn(`[runBackendAgent] backend core not green after council (${bestScore.problems.join('; ') || 'no listed problems'}${bestScore.poolExhausted ? '; pool exhausted' : ''}) — shipping best-effort`)
+        } else {
+          console.warn('[runBackendAgent] council candidates were fully filtered out — falling back to the legacy theme-fill')
+        }
+      }
+    } catch (e) {
+      console.warn('[runBackendAgent] backend council failed — falling back to the legacy theme-fill:', e instanceof Error ? e.message : e)
+    }
+    if (!filledByCouncil) await legacyThemeFill()
   }
   // The core is the opportunity keywords + long-tail fill — most of the 250 bytes (NOT colors).
   // 233 (was 228; adversarial corrected 235): the ≤3-word color tail needs ~17 bytes ("cream off
