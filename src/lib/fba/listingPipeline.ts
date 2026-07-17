@@ -4850,11 +4850,15 @@ async function buildTitleFor(
 // persona proposers → adversary critique → judge synthesis) with a parent-scoped brief; the
 // council infers the niche from the design names + top upgrade keywords. Single LLM call —
 // Karpathy simplicity: no separate niche-extractor stage. Post-guards: capTitle75 + brand-front
-// + blank-brand dedup. Design-name backstop SKIPPED (no single design name to anchor).
+// + blank-brand dedup. NO per-design backstop (no single design name to anchor) — but a POSITIVE
+// FAMILY-NICHE anchor (`familyNiche`, e.g. "funny fishing shirt") IS seated when the council drops
+// the shared niche; it is a niche NOUN derived from the family design_name_override, never a design
+// name. `designNames` stays the EXCLUSION arg (design names banned from the hub title).
 async function buildNicheParentTitle(
   openai: OpenAI,
   brandName: string,
   designNames: string[],
+  familyNiche: string,
   blankBrand: string | undefined,
   preferredAudience: string,
   productType: string | null,
@@ -4867,23 +4871,55 @@ async function buildNicheParentTitle(
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
   const upgradeList = topUpgradeKws.slice(0, 8).join(', ') || '(none)'
   const compatList = compatibilityBrands.length > 0 ? compatibilityBrands.slice(0, 3).join(', ') : ''
+  // FAMILY-NICHE ANCHOR (H "Seam 2"). familyNiche is the POSITIVE niche the whole family shares
+  // ("funny fishing shirt"), derived at the call site from the scalar family design_name_override via
+  // expandDesignNiche (a niche PHRASE, never a design name / slogan) and already off-niche-gated there.
+  // Re-scrub trademarks here — belt-and-suspenders so a value like "Bluey Fishing" can never inject a
+  // mark. Empty ('') when the family has no override / the expansion failed → every use below no-ops,
+  // so this is a pure enhancement with zero regression on families that lack a niche anchor.
+  const familyNicheClean = (() => {
+    const s = scrubTrademarks((familyNiche || '').trim())
+    return s && findTrademarkPhrases(s).length === 0 ? s : ''
+  })()
   const baseSystem = `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family where the children carry distinct DESIGNS that share a NICHE. The parent title is the variation hub shoppers see in search results BEFORE picking a specific design — it must capture the NICHE and product type but MUST NOT name any specific design.`
   const baseUser = `Brand: ${brandName}
 Blank brand (if any): ${blankBrand ?? '(none)'}
 Product type: ${ptWord}
 Audience: ${aud}
+Family niche anchor (LEAD the title with THIS niche phrase + a SINGULAR product word — it broadcasts to EVERY design, so it is never a specific design name): ${familyNicheClean || '(infer the shared niche from the design names + keywords below)'}
 Child design names (DO NOT name any of these in the parent title — they belong to specific children): ${designNameList}
 High-value niche keywords from the keyword pool (use ONLY the ones that broadcast to ALL designs in this family — pick the niche-wide terms, skip design-specific motifs): ${upgradeList}${compatList ? `
 Compatibility (for-Brand framing if relevant): ${compatList}` : ''}
 
 Rules:
-- Brand FIRST. Then ${blankBrand ? `the blank brand "${blankBrand}", then ` : ''}the niche + product type, then optional supporting niche keyphrases that broadcast to ALL designs, then "for ${aud}" at the end.
+- Brand FIRST. Then ${blankBrand ? `the blank brand "${blankBrand}", then ` : ''}the FAMILY NICHE + product type${familyNicheClean ? ` (lead with "${familyNicheClean}")` : ''}, then supporting niche keyphrases that broadcast to ALL designs, then "for ${aud}" at the end.
 - HARD CAP 75 characters (Amazon auto-rewrites longer titles after July 27, 2026).
 - 50-75 chars; do not stuff. No design names, no design-specific motifs.
+- Use the product-type word ONCE and SINGULAR ("Shirt"/"Tee", never "T-Shirts, ... Shirts"). No generic category filler ("Graphic Shirts for Men") — spend the budget on real niche keyphrases.
 - Read like a human wrote it. Return ONLY the final title string.`
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress)
   let title = (judged || '').trim()
-  // Post-guards: capTitle75 + blank-brand dedup + brand-dedup + brand-front. NO design-name backstop (intentional).
+  // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
+  // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
+  // right after the brand, BEFORE capTitle75 + every dedup/cap guard below, so they all run on it.
+  // Token-subset presence check (fillNormTok — garment-folded) so a plural "T-Shirts" already counts
+  // the "shirt" token and the anchor is never double-seated. Trademark-clean by construction
+  // (familyNicheClean scrubbed above); off-niche-gated at derivation. effectiveDesignName='' (bullet
+  // cohesion) is untouched — this is a SEPARATE niche channel for the TITLE only.
+  if (familyNicheClean && title) {
+    const anchorToks = new Set(bulletTokens(familyNicheClean).map(fillNormTok))
+    const titleToks = new Set(bulletTokens(title).map(fillNormTok))
+    const present = anchorToks.size > 0 && [...anchorToks].every((t) => titleToks.has(t))
+    if (!present) {
+      const brandMatch = brandName ? title.match(new RegExp(`^\\s*${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i')) : null
+      const head = brandMatch ? brandMatch[0].trim() : ''
+      const rest = title.slice(head.length).replace(/^[\s,]+/, '').trim()
+      const anchorTC = familyNicheClean.replace(/\b\w/g, (c) => c.toUpperCase())
+      title = `${head ? `${head} ` : ''}${anchorTC}${rest ? `, ${rest}` : ''}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ').trim()
+    }
+  }
+  // Post-guards: capTitle75 + blank-brand dedup + brand-dedup + brand-front. The only positive niche
+  // insertion is the FAMILY-NICHE ANCHOR above (a niche noun, never a design name); no per-design backstop.
   title = capTitle75(title)
   if (blankBrand && title) {
     const re = new RegExp(`\\b${blankBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
@@ -4988,7 +5024,12 @@ Rules:
     const headToks = new Set([...bulletTokens(fillHead), ...bulletTokens(tail)].map(fillNormTok))
     // Design sets share the fill normalization (review-caught: raw "mens" in a design name dodged
     // the >=2-token overlap guard once the kw side was normalized).
-    const designTokSets = designNames.filter(Boolean).map((d) => new Set(bulletTokens(d).map(fillNormTok)))
+    // NICHE-AWARE design-motif guard (H "Seam 2"): subtract the family-niche tokens ("funny"/"fishing")
+    // from every per-design motif set. The niche is shared by ALL designs, so a niche keyphrase must NOT
+    // be blocked as a "design-specific motif" — that block is exactly why the fishing pool never reached
+    // this parent title. A truly design-specific motif ("american flag") keeps its tokens, stays blocked.
+    const familyNicheToks = new Set(bulletTokens(familyNicheClean).map(fillNormTok))
+    const designTokSets = designNames.filter(Boolean).map((d) => new Set([...bulletTokens(d)].map(fillNormTok).filter((t) => !familyNicheToks.has(t))))
     const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
     // Garment-truthfulness rail (review-caught BLOCKER): the child fill vets keywords against the
     // seller's own text; the parent fill had NO rail, so a stray "hoodie" keyword in the family
@@ -5070,7 +5111,30 @@ Rules:
   // mid-title duplicate once the leading brand is sliced off.
   {
     const bLen = brandName && title.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
-    title = (title.slice(0, bLen) + title.slice(bLen).replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')).replace(/\s{2,}/g, ' ').trim()
+    const pre = title.slice(0, bLen).trim()
+    // GARMENT-REPETITION collapse + singularize (H "Seam 2" — extends the adjacent-stutter cleanup to
+    // the exact "Funny Fishing T-Shirts, Graphic Shirts" case the plain stutter regex misses). Amazon
+    // indexes the garment noun once, so a 2nd shirt-family word reads as stuffing. Keep the FIRST of
+    // each garment family and drop later same-family repeats — shirt-family (t-shirt/tshirt/shirt) and
+    // tee stay DISTINCT, so a legit "Shirt ... Tee" survives — then singularize the survivor
+    // ("T-Shirts" → "T-Shirt") for a clean product title. Brand-prefix exempt.
+    const garmentFamily = (w: string): 'shirt' | 'tee' | null => {
+      const c = w.toLowerCase().replace(/[^a-z]/g, '')
+      return /^t?shirts?$/.test(c) ? 'shirt' : /^tees?$/.test(c) ? 'tee' : null
+    }
+    const seenG = new Set<string>()
+    const restStr = title.slice(bLen).trim().split(/\s+/)
+      .filter((w) => {
+        const fam = garmentFamily(w)
+        if (!fam) return true
+        if (seenG.has(fam)) return false
+        seenG.add(fam); return true
+      })
+      .map((w) => (garmentFamily(w) ? w.replace(/s([^A-Za-z]*)$/i, '$1') : w))
+      .join(' ')
+      .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1') // adjacent stutter ("Fishing Fishing" → "Fishing")
+    title = `${pre}${pre && restStr ? ' ' : ''}${restStr}`
+      .replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').replace(/[\s,]+$/g, '').trim()
   }
   return title
 }
@@ -5948,7 +6012,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // Capture per-group contexts (skus + resolved design name + title + groupInput) so the bullets +
       // description stages generate PER DESIGN reusing this work — no second design-name/vision pass.
       designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput, key: gr.group.key }))
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
+      // FAMILY-NICHE ANCHOR (H "Seam 2"): the multi-design parent had NO positive niche anchor, so a
+      // weak council pass shipped dead filler ("...Graphic Shirts for Men") with no niche pull. Derive
+      // ONE niche noun ("funny fishing shirt") from the scalar FAMILY design_name_override via
+      // expandDesignNiche — a niche PHRASE, never the verbatim slogan — trademark-scrubbed + off-niche-
+      // gated (notOffNiche uses the rich title context), and hand it to the parent builder as a POSITIVE
+      // anchor (TITLE channel only; the bullet-cohesion scorer still sees effectiveDesignName=''). Sourced
+      // from the family override ALONE (no per-design vision/secondary phrases) so the niche broadcasts to
+      // EVERY design. Best-effort → '' on any miss, and the builder no-ops on '' (zero regression).
+      let familyNiche = ''
+      const familyOverride = (input.designNameOverride ?? '').trim()
+      if (familyOverride) {
+        const nicheRaw = await expandDesignNiche(input.openai, familyOverride, [], undefined, input.productType ?? null)
+        const cleanNiche = nicheRaw
+          .map((s) => scrubTrademarks(s).trim().toLowerCase())
+          .filter((s) => s && findTrademarkPhrases(s).length === 0 && bulletTokens(s).length >= 2 && notOffNiche(s))
+        // Prefer a niche noun that already carries a garment word ("funny fishing shirt"); else the
+        // first clean expansion.
+        familyNiche = cleanNiche.find((s) => /\b(?:t-?shirts?|tshirts?|tees?|shirts?)\b/i.test(s)) || cleanNiche[0] || ''
+        if (familyNiche) onProgress(`Family-niche anchor: "${familyNiche}".`)
+      }
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
