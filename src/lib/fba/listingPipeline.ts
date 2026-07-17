@@ -6021,6 +6021,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // from the family override ALONE (no per-design vision/secondary phrases) so the niche broadcasts to
       // EVERY design. Best-effort → '' on any miss, and the builder no-ops on '' (zero regression).
       let familyNiche = ''
+      let nicheFillSeeds: string[] = []
       const familyOverride = (input.designNameOverride ?? '').trim()
       if (familyOverride) {
         const nicheRaw = await expandDesignNiche(input.openai, familyOverride, [], undefined, input.productType ?? null)
@@ -6031,8 +6032,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // first clean expansion.
         familyNiche = cleanNiche.find((s) => /\b(?:t-?shirts?|tshirts?|tees?|shirts?)\b/i.test(s)) || cleanNiche[0] || ''
         if (familyNiche) onProgress(`Family-niche anchor: "${familyNiche}".`)
+        // NICHE FILL SEEDS (live loop 2026-07-17, B0DMXMH266): the parent fill draws from topUpgradeKws,
+        // but after the #419 universe demotion that pool is broad-category permutations whose tokens are
+        // already in the title (the ALL-NOVEL rule skips every one) — while the family's own niche
+        // keyphrases are COVERED (Defended) and never enter topUpgradeKws. Net: the fill added nothing
+        // and the parent shipped 30 chars short. Authorize the REMAINING clean niche expansions
+        // ("fisherman gift tee", "fishing lover shirt") as fill seeds AHEAD of the upgrade pool — the
+        // same judge-gated, trademark/off-niche-scrubbed provenance class as single-design nicheSeeds.
+        nicheFillSeeds = cleanNiche.filter((s) => s !== familyNiche).slice(0, 4)
       }
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, topUpgradeKws, compatibilityBrands, onProgress)
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, [...nicheFillSeeds, ...topUpgradeKws], compatibilityBrands, onProgress)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
