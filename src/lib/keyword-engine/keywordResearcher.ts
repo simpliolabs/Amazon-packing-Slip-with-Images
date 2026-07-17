@@ -909,7 +909,7 @@ export async function freshResearchPoolSize(asin: string): Promise<number> {
  * Deliberately does NOT fold plurals/synonyms — an imperfect match only costs one extra research
  * (minor), whereas over-folding could merge distinct niches (pollution). Conservative on purpose.
  */
-function normalizeSeedKey(seed: string): string {
+export function normalizeSeedKey(seed: string): string {
   return (seed || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -922,7 +922,7 @@ function normalizeSeedKey(seed: string): string {
  * any error (table absent pre-migration) — every "null" path makes the caller fall through to a
  * fresh research, so this is safe to deploy BEFORE migration 032 runs.
  */
-async function getSeedPool(
+export async function getSeedPool(
   seedKey: string,
 ): Promise<{ keywords: JungleScoutKeywordRow[]; competitor: CompetitorMeta | null } | null> {
   if (!seedKey) return null;

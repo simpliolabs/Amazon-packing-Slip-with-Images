@@ -23,8 +23,11 @@ import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
-import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
-import { guaranteedIdentitySynonyms } from '@/lib/keyword-engine/keywordResearcher'
+import { isOffNicheKeyword, isForeignKeyword } from '@/lib/keyword-engine/nicheGuards'
+import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey } from '@/lib/keyword-engine/keywordResearcher'
+// Competitor SEO snapshot (title-council fallback chain Part 1): the seller-named competitor's live
+// title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
+import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -160,6 +163,13 @@ export interface PipelineInput {
    *  These are LLM-expanded from the design name + secondary phrase, GROUNDED (added to the title's
    *  ground vocab) so the council can fill a full, relevant, on-niche title. */
   nicheSeeds?: string[] | null
+  /** Seller-named #1 competitor (listing_seo_scores.competitor_asin/_brand) — title-council
+   *  fallback chain Part 1. When set, the multi-design parent title path fetches that listing's
+   *  live Catalog SEO snapshot (title/bullets) and hands it to the council as a KEYWORD-STRATEGY/
+   *  STRUCTURE reference (constraints-not-exemplars; deterministic brand-leak net downstream).
+   *  Absent/null → the snapshot stage is skipped entirely (fail-open, zero behavior change). */
+  competitorAsin?: string | null
+  competitorBrand?: string | null
   /** Per-variant content block (for the audit's variant-health check) */
   variantDetails: string
   /** Keyword intelligence context block (reused for the audit agent) */
@@ -4865,6 +4875,9 @@ async function buildNicheParentTitle(
   topUpgradeKws: string[],
   compatibilityBrands: string[],
   onProgress: ((m: string) => void) | undefined,
+  // Title-council fallback chain Part 1: the seller-named competitor's live SEO snapshot (+brand
+  // for the deterministic leak net). Null/absent → the brief and the net both no-op (fail-open).
+  competitorSeo?: (CompetitorSeoSnapshot & { brand: string }) | null,
 ): Promise<string> {
   const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'T-Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt')
   const aud = preferredAudience || 'Men and Women'
@@ -4882,6 +4895,22 @@ async function buildNicheParentTitle(
     return s && findTrademarkPhrases(s).length === 0 ? s : ''
   })()
   const baseSystem = `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family where the children carry distinct DESIGNS that share a NICHE. The parent title is the variation hub shoppers see in search results BEFORE picking a specific design — it must capture the NICHE and product type but MUST NOT name any specific design.`
+  // COMPETITOR SEO SNAPSHOT (fallback chain Part 1) — CONSTRAINTS-NOT-EXEMPLARS (prompt-leak
+  // history #365/#367: instruction text the model can echo becomes product copy). The snapshot is
+  // framed as a strategy REFERENCE with explicit prohibitions; every field is trademark-scrubbed
+  // before it enters the brief, and the deterministic brand-leak net below backstops the "never
+  // their brand" rule on both generation passes.
+  const compSnapshotBlock = (() => {
+    if (!competitorSeo || (!competitorSeo.title && competitorSeo.bullets.length === 0)) return ''
+    const compTitle = scrubTrademarks(competitorSeo.title).trim()
+    const compBullets = competitorSeo.bullets.slice(0, 3).map((b) => scrubTrademarks(b).trim().slice(0, 140)).filter(Boolean)
+    if (!compTitle && compBullets.length === 0) return ''
+    return `
+
+TOP-RANKING COMPETITOR SNAPSHOT (study HOW they rank — use their KEYWORD STRATEGY and STRUCTURE as reference; write ORIGINAL sentences; NEVER use their brand name${competitorSeo.brand.trim() ? ` '${competitorSeo.brand.trim()}'` : ''}):
+Their title: ${compTitle || '(none)'}
+Their bullets: ${compBullets.length ? compBullets.join(' | ') : '(none)'}`
+  })()
   const baseUser = `Brand: ${brandName}
 Blank brand (if any): ${blankBrand ?? '(none)'}
 Product type: ${ptWord}
@@ -4889,7 +4918,7 @@ Audience: ${aud}
 Family niche anchor (LEAD the title with THIS niche phrase + a SINGULAR product word — it broadcasts to EVERY design, so it is never a specific design name): ${familyNicheClean || '(infer the shared niche from the design names + keywords below)'}
 Child design names (DO NOT name any of these in the parent title — they belong to specific children): ${designNameList}
 High-value niche keywords from the keyword pool (use ONLY the ones that broadcast to ALL designs in this family — pick the niche-wide terms, skip design-specific motifs): ${upgradeList}${compatList ? `
-Compatibility (for-Brand framing if relevant): ${compatList}` : ''}
+Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapshotBlock}
 
 Rules:
 - Brand FIRST. Then ${blankBrand ? `the blank brand "${blankBrand}", then ` : ''}the FAMILY NICHE + product type${familyNicheClean ? ` (lead with "${familyNicheClean}")` : ''}, then supporting niche keyphrases that broadcast to ALL designs, then "for ${aud}" at the end.
@@ -5110,9 +5139,12 @@ Rules:
   // doubled brand ("Mahi Mahi Co") survives, and stutter-collapse only — the parent already
   // deduped brand occurrences above, and dedupeBrandAndStutter's keep-first logic would KEEP a
   // mid-title duplicate once the leading brand is sliced off.
-  {
-    const bLen = brandName && title.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
-    const pre = title.slice(0, bLen).trim()
+  // Extracted into a local function (fallback chain Part 2) so the humanizer retry below runs its
+  // output through the IDENTICAL garment-collapse + token-dedup pass — shared logic, no drift.
+  const collapseGarmentsAndDedup = (t0: string): string => {
+    let t = t0
+    const bLen = brandName && t.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
+    const pre = t.slice(0, bLen).trim()
     // GARMENT-REPETITION collapse + singularize (H "Seam 2" — extends the adjacent-stutter cleanup to
     // the exact "Funny Fishing T-Shirts, Graphic Shirts" case the plain stutter regex misses). Amazon
     // indexes the garment noun once, so a 2nd shirt-family word reads as stuffing. Keep the FIRST of
@@ -5124,7 +5156,7 @@ Rules:
       return /^t?shirts?$/.test(c) ? 'shirt' : /^tees?$/.test(c) ? 'tee' : null
     }
     const seenG = new Set<string>()
-    const restStr = title.slice(bLen).trim().split(/\s+/)
+    const restStr = t.slice(bLen).trim().split(/\s+/)
       .filter((w) => {
         const fam = garmentFamily(w)
         if (!fam) return true
@@ -5134,7 +5166,7 @@ Rules:
       .map((w) => (garmentFamily(w) ? w.replace(/s([^A-Za-z]*)$/i, '$1') : w))
       .join(' ')
       .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1') // adjacent stutter ("Fishing Fishing" → "Fishing")
-    title = `${pre}${pre && restStr ? ' ' : ''}${restStr}`
+    t = `${pre}${pre && restStr ? ' ' : ''}${restStr}`
       .replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').replace(/[\s,]+$/g, '').trim()
     // NON-ADJACENT TOKEN dedup (live loop 2026-07-17): with a niche-rich pool the council emitted
     // "Funny Fishing T-shirt Funny Fish, ..." — duplicate significant tokens the ADJACENT stutter
@@ -5144,19 +5176,19 @@ Rules:
     // one. Brand prefix exempt; minor/short words ("for", "Men") only exact-dup. Then sweep segments
     // left with no significant token and tidy commas. Deterministic, drop-only.
     {
-      const headStr = title.slice(0, bLen).trim()
+      const headStr = t.slice(0, bLen).trim()
       const seenToks = new Set<string>(bulletTokens(headStr).map(fillNormTok).filter(Boolean))
-      const dup = (t: string) => {
-        if (!t) return false
-        if (seenToks.has(t)) return true
-        if (t.length >= 4) for (const s of seenToks) if (s.length >= 4 && (s.startsWith(t) || t.startsWith(s))) return true
+      const dup = (tok: string) => {
+        if (!tok) return false
+        if (seenToks.has(tok)) return true
+        if (tok.length >= 4) for (const s of seenToks) if (s.length >= 4 && (s.startsWith(tok) || tok.startsWith(s))) return true
         return false
       }
-      const words = title.slice(bLen).trim().split(/\s+/).filter((w) => {
+      const words = t.slice(bLen).trim().split(/\s+/).filter((w) => {
         const toks = bulletTokens(w).map(fillNormTok).filter(Boolean)
         if (toks.length === 0) return true // pure connector/punct — kept; comma tidy below
         if (toks.every(dup)) return false
-        for (const t of toks) seenToks.add(t)
+        for (const tok of toks) seenToks.add(tok)
         return true
       })
       let rest2 = words.join(' ')
@@ -5165,7 +5197,84 @@ Rules:
       rest2 = rest2.split(',').map((s) => s.trim())
         .filter((s) => s && bulletTokens(s).map(fillNormTok).some(Boolean))
         .join(', ')
-      title = `${headStr}${headStr && rest2 ? ' ' : ''}${rest2}`.replace(/\s{2,}/g, ' ').trim()
+      t = `${headStr}${headStr && rest2 ? ' ' : ''}${rest2}`.replace(/\s{2,}/g, ' ').trim()
+    }
+    return t
+  }
+  // Deterministic COMPETITOR-BRAND leak net (fallback chain Part 1 — prompt-leak history #365/#367:
+  // the snapshot brief can still tempt a pass into echoing the competitor's brand). Strip every
+  // significant competitor-brand token (len>=3) from OUR title — never ship their brand. Tokens the
+  // family legitimately owns (our brand / the niche anchor / the product word) are PROTECTED, so a
+  // generic-word competitor name ("Fishing Tees Co") can never hollow out the title. Runs after BOTH
+  // generation passes; drop-only + comma tidy, so it can never add or reorder content.
+  const stripCompetitorBrand = (t: string): string => {
+    const compBrand = (competitorSeo?.brand || '').trim()
+    if (!compBrand || !t) return t
+    const protectedToks = new Set(bulletTokens(`${brandName} ${familyNicheClean} ${ptWord}`).map(fillNormTok).filter(Boolean))
+    let out = t
+    for (const rawTok of compBrand.split(/\s+/)) {
+      const w = rawTok.replace(/[^A-Za-z0-9'’-]/g, '')
+      if (w.length < 3) continue
+      const norm = bulletTokens(w).map(fillNormTok).filter(Boolean)
+      if (norm.length === 0) continue                        // stopword — not a significant brand token
+      if (norm.every((n) => protectedToks.has(n))) continue  // shared our-brand/niche/product token — keep
+      const re = new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi')
+      out = out.replace(re, ' ')
+    }
+    if (out === t) return t
+    out = out
+      .replace(/\bfor\s*(?=,|$)/gi, ' ')                     // a stripped token can orphan its "for"
+      .replace(/\s+,/g, ',').replace(/,\s*,+/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').replace(/\s{2,}/g, ' ').trim()
+    // Sweep comma segments left with no significant token (same tidy as the token dedup above).
+    return out.split(',').map((s) => s.trim())
+      .filter((s) => s && bulletTokens(s).map(fillNormTok).some(Boolean))
+      .join(', ')
+  }
+  title = stripCompetitorBrand(collapseGarmentsAndDedup(title))
+  // ENFORCED 70-75 HUMANIZER RETRY (fallback chain Part 2): even with the fill + seed pools the
+  // council can land short when the family's pool is thin — a short parent title wastes ranking
+  // budget (brief: TARGET LENGTH 70-75). ONE extension call on the council's judge model, seeded
+  // with the full brief + the current title, then the SAME post-pipeline as pass 1 (scrub → cap →
+  // collapse/dedup → competitor-brand net). KEEP-BEST: adopt the retry only when it is clean
+  // (trademark-free, brand still first), ≥68 chars AND longer than the original — otherwise (and on
+  // ANY error) the pass-1 title ships unchanged (fail-open).
+  if (title && title.length < 68) {
+    try {
+      onProgress?.(`Parent title ${title.length}/75 — humanizer retry toward 70-75...`)
+      const model = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+      const isGpt5 = /^(gpt-5|o\d)/.test(model)
+      const messages = [
+        { role: 'system' as const, content: baseSystem },
+        { role: 'user' as const, content: `${baseUser}
+
+Current title (${title.length} chars — too short):
+${title}
+
+Critique: Extend to 70-75 characters with natural niche phrasing a real shopper types — occasion, recipient, design subject. Keep every existing word's meaning; do NOT repeat any significant word; no generic category filler.
+
+Return ONLY the extended title string.` },
+      ]
+      const r = await openai.chat.completions.create(
+        isGpt5
+          ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' }
+          : { model, messages, temperature: 0.3, max_tokens: 120 },
+        { timeout: 60_000, maxRetries: 0 },
+      )
+      const raw = (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+      if (raw) {
+        const retryTitle = stripCompetitorBrand(collapseGarmentsAndDedup(capTitle75(scrubTrademarks(raw))))
+        const clean = retryTitle.length >= 68 && retryTitle.length > title.length
+          && findTrademarkPhrases(retryTitle).length === 0
+          && (!brandName || retryTitle.toLowerCase().startsWith(brandName.trim().toLowerCase()))
+        if (clean) {
+          onProgress?.(`Humanizer retry accepted (${retryTitle.length}/75).`)
+          title = retryTitle
+        } else {
+          onProgress?.(`Humanizer retry kept the original (retry ${retryTitle.length} chars).`)
+        }
+      }
+    } catch (e) {
+      console.warn('[parent-title] humanizer retry failed (kept original):', e instanceof Error ? e.message : e)
     }
   }
   return title
@@ -6082,7 +6191,49 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // the provenance-correct source for them; the fill's design-motif/gender/garment/junk rails still
       // apply per keyword. Order: niche seeds first, then pool candidates, then broad upgrades.
       const parentFillPool = [...nicheFillSeeds, ...candidates.map((c) => c.keyword), ...topUpgradeKws]
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress)
+      // SEED-POOL FALLBACK (fallback chain Part 3): when even seeds + candidates + upgrades leave
+      // the fill pool starved of real phrases (<8 multi-token entries), pull the cross-listing
+      // niche pool for the family niche (keyword_seed_pool, the same store researchKeywords shares
+      // by seed) — top 10 by volume, trademark/off-niche/foreign-gated like every other title
+      // source. Appended LAST so provenance order (niche seeds → candidates → upgrades → pool)
+      // is preserved; the fill's ALL-NOVEL/junk/gender/garment rails still vet each phrase.
+      // Fail-open: any error leaves the pool exactly as built above.
+      try {
+        const usable = parentFillPool.filter((k) => bulletTokens(k).length >= 2)
+        if (usable.length < 8 && familyNiche) {
+          const seedKey = normalizeSeedKey(familyNiche)
+          const pool = await getSeedPool(seedKey)
+          if (pool) {
+            const extras = [...pool.keywords]
+              .sort((a, b) => b.searchVolume - a.searchVolume)
+              .slice(0, 10)
+              .map((k) => scrubTrademarks(k.keyword).trim())
+              .filter((s) => s && findTrademarkPhrases(s).length === 0 && notOffNiche(s) && !isForeignKeyword(s))
+            if (extras.length) {
+              parentFillPool.push(...extras)
+              console.log(`[TITLE] seed-pool fallback: +${extras.length} phrases from "${seedKey}"`)
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[TITLE] seed-pool fallback failed (non-fatal):', e instanceof Error ? e.message : e)
+      }
+      // COMPETITOR SEO SNAPSHOT (fallback chain Part 1): the seller-named competitor's live
+      // title/bullets, studied by the council as a keyword-strategy/structure reference (their
+      // brand never ships — deterministic net inside buildNicheParentTitle). Fail-open on any miss.
+      let compSeo: (CompetitorSeoSnapshot & { brand: string }) | null = null
+      if (input.competitorAsin) {
+        try {
+          const snap = await getCompetitorSeoSnapshot(input.competitorAsin)
+          if (snap) {
+            compSeo = { ...snap, brand: (input.competitorBrand ?? '').trim() }
+            onProgress(`Studying top competitor ${input.competitorAsin}'s title strategy...`)
+          }
+        } catch (e) {
+          console.warn('[TITLE] competitor snapshot failed (non-fatal):', e instanceof Error ? e.message : e)
+        }
+      }
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
