@@ -247,6 +247,10 @@ export default function ListingDetailPage() {
   const [score, setScore] = useState<SeoScoreRow | null>(null)
   const [aiRecs, setAiRecs] = useState<AiRecommendations | null>(null)
   const [kwData, setKwData] = useState<KeywordIntelligenceResult | null>(null)
+  // Intelligence table "Show all" (PO 2026-07-17): the top-20 cap hid the design-NICHE terms — after
+  // the #419 demotion the top of the list is broad category UPGRADEs, while the niche rows (covered →
+  // Defended, lower opp) sat below the cap and looked absent ("where are my fishing keywords?").
+  const [kwShowAll, setKwShowAll] = useState(false)
   const [rankData, setRankData] = useState<RankAnalysisResult | null>(null)
   const [rankRefreshing, setRankRefreshing] = useState(false)
   // H10 competitor-keyword CSV import (Intelligence tab)
@@ -4050,7 +4054,9 @@ export default function ListingDetailPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {kwData.topOpportunities.slice(0, 20).map((kw, i) => (
+                  {(kwShowAll
+                    ? (((kwData as unknown as { allKeywords?: AnalyzedKeyword[] }).allKeywords ?? kwData.topOpportunities))
+                    : kwData.topOpportunities.slice(0, 20)).map((kw, i) => (
                     <tr key={i} className="hover:bg-slate-50">
                       <td className="px-3 py-2 text-slate-800">
                         {kw.keyword}
@@ -4107,7 +4113,19 @@ export default function ListingDetailPage() {
                   ))}
                 </tbody>
               </table>
-              <p className="px-3 py-2 text-[10px] text-slate-400 border-t border-slate-100">Present-In flags are checked live against your current content on every load; Action chips and scores reflect the last research run.</p>
+              <div className="flex items-center justify-between px-3 py-2 border-t border-slate-100">
+                <p className="text-[10px] text-slate-400">Present-In flags are checked live against your current content on every load; Action chips and scores reflect the last research run.</p>
+                {(() => {
+                  const fullCount = ((kwData as unknown as { allKeywords?: AnalyzedKeyword[] }).allKeywords ?? kwData.topOpportunities).length
+                  return fullCount > 20 ? (
+                    <button onClick={() => setKwShowAll((v) => !v)}
+                      className="shrink-0 text-[11px] font-semibold text-violet-700 hover:text-violet-900 underline underline-offset-2 cursor-pointer"
+                      title="The top of this list is sorted by opportunity (gaps first) — your covered niche terms sit further down as DEFENDED.">
+                      {kwShowAll ? 'Show top 20' : `Show all ${fullCount} keywords (incl. your covered niche terms)`}
+                    </button>
+                  ) : null
+                })()}
+              </div>
             </div>
             <RankAnalysisPanel key={asin} asin={asin} />
             </>
