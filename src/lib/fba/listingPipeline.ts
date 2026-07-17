@@ -5135,6 +5135,37 @@ Rules:
       .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1') // adjacent stutter ("Fishing Fishing" → "Fishing")
     title = `${pre}${pre && restStr ? ' ' : ''}${restStr}`
       .replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').replace(/[\s,]+$/g, '').trim()
+    // NON-ADJACENT TOKEN dedup (live loop 2026-07-17): with a niche-rich pool the council emitted
+    // "Funny Fishing T-shirt Funny Fish, ..." — duplicate significant tokens the ADJACENT stutter
+    // regex can't see ("Funny ... Funny"; "Fish" ⊂ "Fishing"). In a title a repeated significant word
+    // is always stuffing (Amazon indexes a token once) — keep the FIRST occurrence, drop later words
+    // whose normalized token duplicates (or is a ≥4-char morphological prefix/extension of) an earlier
+    // one. Brand prefix exempt; minor/short words ("for", "Men") only exact-dup. Then sweep segments
+    // left with no significant token and tidy commas. Deterministic, drop-only.
+    {
+      const headStr = title.slice(0, bLen).trim()
+      const seenToks = new Set<string>(bulletTokens(headStr).map(fillNormTok).filter(Boolean))
+      const dup = (t: string) => {
+        if (!t) return false
+        if (seenToks.has(t)) return true
+        if (t.length >= 4) for (const s of seenToks) if (s.length >= 4 && (s.startsWith(t) || t.startsWith(s))) return true
+        return false
+      }
+      const words = title.slice(bLen).trim().split(/\s+/).filter((w) => {
+        const toks = bulletTokens(w).map(fillNormTok).filter(Boolean)
+        if (toks.length === 0) return true // pure connector/punct — kept; comma tidy below
+        if (toks.every(dup)) return false
+        for (const t of toks) seenToks.add(t)
+        return true
+      })
+      let rest2 = words.join(' ')
+        .replace(/\s+,/g, ',').replace(/,\s*,+/g, ',').replace(/^\s*,/, '').replace(/[\s,]+$/g, '').trim()
+      // Sweep comma segments that lost every significant token (only connectors left).
+      rest2 = rest2.split(',').map((s) => s.trim())
+        .filter((s) => s && bulletTokens(s).map(fillNormTok).some(Boolean))
+        .join(', ')
+      title = `${headStr}${headStr && rest2 ? ' ' : ''}${rest2}`.replace(/\s{2,}/g, ' ').trim()
+    }
   }
   return title
 }
