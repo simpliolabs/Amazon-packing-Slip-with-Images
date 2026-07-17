@@ -4896,6 +4896,7 @@ Rules:
 - HARD CAP 75 characters (Amazon auto-rewrites longer titles after July 27, 2026).
 - 50-75 chars; do not stuff. No design names, no design-specific motifs.
 - Use the product-type word ONCE and SINGULAR ("Shirt"/"Tee", never "T-Shirts, ... Shirts"). No generic category filler ("Graphic Shirts for Men") — spend the budget on real niche keyphrases.
+- TARGET LENGTH 70-75 characters (hard goal — a short title wastes ranking budget). If the keyword list runs thin, act as a HUMAN COPYWRITER who knows this product (its designs, its niche, its buyer): extend with natural niche phrasing a real shopper types — the occasion ("Fathers Day"), the recipient ("Gift for Dad", "for Grandpa"), the design subject — the way top competitor titles do. NEVER pad with generic category words and NEVER repeat a significant word.
 - Read like a human wrote it. Return ONLY the final title string.`
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress)
   let title = (judged || '').trim()
