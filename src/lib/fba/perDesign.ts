@@ -44,6 +44,53 @@ export function resolveMultiDesign(titles: TitleE[] | null | undefined, override
   return isMultiDesign(titles)
 }
 
+/**
+ * Build a per-SKU value resolver for a per_child_* array (titles / bullets / descriptions).
+ * ─────────────────────────────────────────────────────────────────────────────────────────
+ * This is the ONE model that must drive every READ surface (VARIANT COHESION counts, the EDIT-ONCE
+ * label, the per-design verify chip) so they agree with the SHIP ENGINE, which already resolves each
+ * SKU's own value via `resolveProposed`'s per_child preference (pushFields.ts). Returns `null` when the
+ * family is not per-child (≤1 row) so the caller falls back to the broadcast value — i.e. single-design
+ * families keep the exact old broadcast behavior. Non-null for BOTH capacity families (per-child GB) and
+ * multi-design families (per-design copy). Includes an ASIN fallback because per_child_* is built from
+ * the FBA `listing_content`, so an FBM twin SKU is absent from `bySku` but shares its sibling's ASIN —
+ * the same twin resolution the push applies. Returns `undefined` for a SKU with no per-child match so the
+ * caller can `?? broadcast`.
+ */
+export function perChildValueResolver<T extends { sku: string; asin?: string | null }>(
+  rows: T[] | null | undefined,
+  pick: (r: T) => string,
+): ((sku: string, asin?: string | null) => string | undefined) | null {
+  if (!Array.isArray(rows) || rows.length <= 1) return null
+  const bySku = new Map<string, string>()
+  const byAsin = new Map<string, string>()
+  for (const r of rows) {
+    const v = pick(r)
+    if (r.sku) bySku.set(r.sku, v)
+    if (r.asin && !byAsin.has(r.asin)) byAsin.set(r.asin, v)
+  }
+  return (sku, asin) => bySku.get(sku) ?? (asin ? byAsin.get(asin) : undefined)
+}
+
+/** Distinct per-DESIGN entries from a per_child_* array (one row per designKey — the first SKU of each
+ *  group is representative), for a compact "one per design" display instead of one row per SKU. Falls
+ *  back to the sku when a row has no designName. */
+export function perDesignEntries<T extends { sku: string; designKey?: string | null; designName?: string | null }>(
+  rows: T[] | null | undefined,
+  pick: (r: T) => string,
+): { label: string; sku: string; value: string }[] {
+  if (!Array.isArray(rows)) return []
+  const seen = new Set<string>()
+  const out: { label: string; sku: string; value: string }[] = []
+  for (const r of rows) {
+    const key = r.designKey || r.sku
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ label: r.designName || r.designKey || r.sku, sku: r.sku, value: pick(r) })
+  }
+  return out
+}
+
 /** Cluster SKU-keyed entries into one group per designKey. All SKUs of a design share content,
  *  so the first entry is representative. designName falls back to designKey when empty so a
  *  name-resolution miss never hides a real design. bullets/description may be empty (absent set);

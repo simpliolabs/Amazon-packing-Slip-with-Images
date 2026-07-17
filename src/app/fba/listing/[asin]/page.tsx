@@ -7,7 +7,7 @@ import { isPushableDetail, unpushableReason, isItemHighlightsField, isSingleDesi
 import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
-import { groupByDesign, isMultiDesign, resolveMultiDesign, type PerDesignGroup } from '@/lib/fba/perDesign'
+import { groupByDesign, isMultiDesign, resolveMultiDesign, perChildValueResolver, perDesignEntries, type PerDesignGroup } from '@/lib/fba/perDesign'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
 import RankAnalysisPanel from './RankAnalysisPanel'
@@ -336,6 +336,31 @@ export default function ListingDetailPage() {
     () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions, designNameOverrides),
     [aiRecs, designNameOverrides],
   )
+  // PR-4: DERIVE each design's verify chip from LIVE truth — score.children (the cached listing_content the
+  // VARIANT COHESION panel already reads) compared to the design's own recommended title. This makes the
+  // chip truthful on LOAD (no more "Not verified" for everything), survive reloads, and flip to "Live
+  // matches" after a ship+refresh WITHOUT a manual "Verify" click — parity with how single-design cards
+  // derive from live truth. An explicit onVerifyDesign result (a live Amazon read) still OVERRIDES this
+  // cache-derived default. Title is the per-design discriminator, so it's the compared field (== onVerifyDesign).
+  const derivedDesignStatus = useMemo<Record<string, 'matches' | 'needs-update'>>(() => {
+    const out: Record<string, 'matches' | 'needs-update'> = {}
+    const children = score?.children ?? []
+    if (!children.length || !designGroups.length) return out
+    const liveBySku = new Map(children.map((c) => [c.sku, c] as const))
+    const norm = (s: string) => (s ?? '').replace(/\s+/g, ' ').trim()
+    for (const g of designGroups) {
+      const expected = norm(g.title)
+      if (!expected) continue // no recommendation for this design → leave undefined → 'unknown'
+      let allMatch = g.skus.length > 0
+      for (const sku of g.skus) {
+        const child = liveBySku.get(sku)
+        const live = child ? norm(stripVariantSuffix(child.title ?? '')) : ''
+        if (!live || !squashEquals(live, expected)) { allMatch = false; break }
+      }
+      out[g.designKey] = allMatch ? 'matches' : 'needs-update'
+    }
+    return out
+  }, [score?.children, designGroups])
   const [pushPreview, setPushPreview] = useState<PushPreview | null>(null)
   /** Part 2b — the value the seller picked from Amazon's accepted list for an uncoercible dropdown
    *  detail (e.g. Material "100% ring-spun cotton" → pick "Cotton"). Sent as detail_value_override. */
@@ -2764,7 +2789,7 @@ export default function ListingDetailPage() {
         // Groups each child's CURRENT value to show whether the variants are consistent or split,
         // how many need updating, and which SKUs hold which version.
         const normV = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim()
-        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string, optimal: boolean, recFor?: (c: ChildContentRow) => string) => {
+        const fieldCohesion = (getCurrent: (c: ChildContentRow) => string | null | undefined, recommended: string, optimal: boolean, recFor?: (c: ChildContentRow) => string, perDesign?: boolean) => {
           const groups = new Map<string, string[]>()
           for (const c of variants) {
             const v = normV(getCurrent(c))
@@ -2781,7 +2806,12 @@ export default function ListingDetailPage() {
           // the versions grouping above stays normV so visually-different casings still list separately.
           // Guarded on a non-empty recommendation (adversarial: squashEquals returns false on an empty
           // expected, which would count both-empty variants as "needs update").
-          const stale = optimal ? [] : variants.filter(c => {
+          // PER-DESIGN fields skip the optimal short-circuit: a multi-design section can score title-optimal
+          // (good title QUALITY) while its live titles still differ from the fresh per-design recommendations
+          // (nothing shipped yet) — the byte-truth "N need update" must then show, matching the per-design
+          // verify chip (derivedDesignStatus, which has no optimal gate). Capacity/broadcast fields keep the
+          // optimal suppression so a 25/25 section isn't contradicted by a never-byte-identical fresh draft.
+          const stale = (optimal && !perDesign) ? [] : variants.filter(c => {
             const recV = normV(recFor ? recFor(c) : recommended)
             return recV !== '' && !squashEquals(normV(getCurrent(c)), recV)
           })
@@ -2878,15 +2908,28 @@ export default function ListingDetailPage() {
               ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 flex-shrink-0 hidden sm:inline" title="Top keywords already covered here — rank now depends on reviews, price, and sales velocity, not more copy.">Content done here</span>
               : null
 
-        // Capacity families: TITLE is PER-CHILD (each variant keeps its own GB), like Backend — NOT a
-        // broadcast "should match" field. Compare each child to ITS OWN per-child title; the Ship push
-        // (pushFields resolveProposed) already resolves per-SKU, so this is the matching display/count fix.
-        const titleBySku = new Map<string, string>((recs.per_child_titles ?? []).map(t => [t.sku, t.title] as [string, string]))
-        const titleRecFor = (c: ChildContentRow) => titleBySku.get(c.sku) ?? recs.recommended_title
+        // PER-CHILD families (capacity OR multi-design): title/bullets/description are NOT one broadcast
+        // "should match" value — each SKU keeps its own (capacity = its GB; multi-design = its design's
+        // copy). Compare each child to ITS OWN per-child target via the SAME resolver the ship engine uses
+        // (perChildValueResolver mirrors pushFields.resolveProposed's per_child preference, incl. the ASIN
+        // fallback for FBM twins). Single-design families → resolver null → recFor undefined → the exact
+        // old broadcast behavior. This is the display/count fix that stops "41 need update / all identical"
+        // on a multi-design family and makes the COHESION panel agree with the ship + PER-DESIGN cards.
+        const titleResolve = perChildValueResolver(recs.per_child_titles, t => t.title)
+        const bulletsResolve = perChildValueResolver(recs.per_child_bullets, b => (b.bullets ?? []).filter(Boolean).join('\n'))
+        const descResolve = perChildValueResolver(recs.per_child_descriptions, d => d.description)
+        const mkRecFor = (resolve: ((sku: string, asin?: string | null) => string | undefined) | null, broadcast: string): ((c: ChildContentRow) => string) | undefined =>
+          resolve ? (c) => resolve(c.sku, c.asin) ?? broadcast : undefined
+        // perDesign is PER-FIELD: multi-design AND this field actually has per-design data (resolver non-null).
+        // Coupling to the resolver keeps the chip, body, count, EDIT-ONCE label, and ship engine all consistent
+        // even when a field's per-design fan-out didn't populate (e.g. titles fanned out but bullets/desc absent).
+        const titlePerDesign = multiDesign && !!titleResolve
+        const bulletsPerDesign = multiDesign && !!bulletsResolve
+        const descPerDesign = multiDesign && !!descResolve
         const cohFields = [
-          { key: 'title', label: 'Title', coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 23, isCapacityFamily ? titleRecFor : undefined), copyVal: recs.recommended_title, perChildTitles: isCapacityFamily ? (recs.per_child_titles ?? []) : null },
-          { key: 'bullets', label: 'Bullets', coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 23), copyVal: (recs.recommended_bullets ?? []).join('\n'), perChildTitles: null },
-          { key: 'description', label: 'Description', coh: fieldCohesion(c => c.description, recs.recommended_description, (score.description_score ?? 0) >= 23), copyVal: recs.recommended_description, perChildTitles: null },
+          { key: 'title', label: 'Title', perDesign: titlePerDesign, coh: fieldCohesion(c => stripVariantSuffix(c.title), recs.recommended_title, score.title_score >= 23, mkRecFor(titleResolve, recs.recommended_title), titlePerDesign), copyVal: recs.recommended_title, perChildEntries: titleResolve ? perDesignEntries(recs.per_child_titles, t => t.title) : null },
+          { key: 'bullets', label: 'Bullets', perDesign: bulletsPerDesign, coh: fieldCohesion(c => [c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join('\n'), (recs.recommended_bullets ?? []).join('\n'), score.bullet_score >= 23, mkRecFor(bulletsResolve, (recs.recommended_bullets ?? []).join('\n')), bulletsPerDesign), copyVal: (recs.recommended_bullets ?? []).join('\n'), perChildEntries: bulletsResolve ? perDesignEntries(recs.per_child_bullets, b => (b.bullets ?? []).filter(Boolean).join('\n')) : null },
+          { key: 'description', label: 'Description', perDesign: descPerDesign, coh: fieldCohesion(c => c.description, recs.recommended_description, (score.description_score ?? 0) >= 23, mkRecFor(descResolve, recs.recommended_description), descPerDesign), copyVal: recs.recommended_description, perChildEntries: descResolve ? perDesignEntries(recs.per_child_descriptions, d => d.description) : null },
         ]
         return (
         <section>
@@ -2915,7 +2958,7 @@ export default function ListingDetailPage() {
                       edit={designEdits[g.designKey]}
                       dirty={designDirty(g.designKey)}
                       busy={!!designBusy[g.designKey]}
-                      status={designVerifyStatus[g.designKey] ?? 'unknown'}
+                      status={designVerifyStatus[g.designKey] ?? derivedDesignStatus[g.designKey] ?? 'unknown'}
                       onEditTitle={(v) => onEditDesignTitle(g.designKey, v)}
                       onEditBullet={(i, v) => onEditDesignBullet(g.designKey, i, v)}
                       onEditDescription={(v) => onEditDesignDescription(g.designKey, v)}
@@ -3118,7 +3161,7 @@ export default function ListingDetailPage() {
                         <div className="w-full flex items-center gap-2 px-4 py-2 hover:bg-slate-50 transition-colors">
                           <button onClick={() => toggle(`coh-${f.key}`)} className="flex items-center gap-2 text-left flex-1 min-w-0">
                             <span className="text-xs font-semibold text-slate-800 w-20 flex-shrink-0">{f.label}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 hidden sm:inline ${f.coh.perChild ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>{f.coh.perChild ? 'unique each' : 'should match'}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 hidden sm:inline ${f.perDesign ? 'bg-violet-50 text-violet-600' : f.coh.perChild ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>{f.perDesign ? 'per design' : f.coh.perChild ? 'unique each' : 'should match'}</span>
                             {(f.key === 'title' || f.key === 'bullets') && rankChip(rankSectionChip[f.key])}
                             {split
                               ? <span className="text-[11px] text-purple-700 flex items-center gap-1">{f.coh.distinct} versions live</span>
@@ -3139,24 +3182,27 @@ export default function ListingDetailPage() {
                         </div>
                         {open && (
                           <div className="px-4 pb-3 pt-1 bg-slate-50/60 space-y-2">
-                            {f.perChildTitles ? (
-                              // Capacity family: show each variant's OWN-capacity target (never one broadcast
-                              // 64GB title for all). The Ship push already resolves per-SKU (pushFields).
+                            {f.perChildEntries ? (
+                              // PER-CHILD family (capacity = each variant's own GB; multi-design = each design's
+                              // own copy). Show each per-child/per-design target — never one broadcast value.
+                              // The Ship push already resolves per-SKU (pushFields.resolveProposed), so a
+                              // family-wide Ship correctly writes each design's own value to its own SKUs.
                               <div className="bg-indigo-50 border border-indigo-200 rounded p-2">
                                 <div className="flex items-start justify-between gap-2">
-                                  <p className="text-[10px] font-bold text-indigo-800 uppercase">Per-variant — each keeps its own capacity:</p>
+                                  <p className="text-[10px] font-bold text-indigo-800 uppercase">{f.perDesign ? `Per design — each design keeps its own ${f.label.toLowerCase()}:` : 'Per-variant — each keeps its own capacity:'}</p>
                                   {f.coh.needUpdate > 0 && (
-                                    <button onClick={() => openPushPreview('title')} className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap flex-shrink-0">Ship →</button>
+                                    <button onClick={() => openPushPreview(f.key as 'title' | 'bullets' | 'description')} className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-0.5 rounded font-medium whitespace-nowrap flex-shrink-0">Ship →</button>
                                   )}
                                 </div>
                                 <div className="mt-1.5 space-y-1.5">
-                                  {f.perChildTitles.map((t, ti) => (
+                                  {f.perChildEntries.map((e, ti) => (
                                     <div key={ti} className="bg-white border border-slate-200 rounded px-2 py-1">
-                                      <p className="text-[10px] font-mono text-slate-400 break-words">{t.sku}</p>
-                                      <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{t.title}</p>
+                                      <p className="text-[10px] font-mono text-slate-400 break-words">{e.label}</p>
+                                      <p className="text-xs text-slate-800 break-words whitespace-pre-wrap">{e.value.length > 220 ? e.value.slice(0, 220) + '…' : e.value}</p>
                                     </div>
                                   ))}
                                 </div>
+                                {f.perDesign && <p className="text-[10px] text-slate-500 mt-1.5">Edit each design individually in <span className="font-semibold">Per-Design Content</span> above.</p>}
                               </div>
                             ) : (
                             <div className="flex items-start justify-between gap-2 bg-green-50 border border-green-200 rounded p-2">
@@ -3466,14 +3512,21 @@ export default function ListingDetailPage() {
                       // Show Ship even for DONE (see Row-5b note): DONE is ship-accepted, not verified-live,
                       // so a bullets/description card must stay pushable while cohesion still says it differs.
                       if (!shipField || item.verdict === 'SKIP') return null
-                      // Title is per-child for capacity families; everything else is broadcast.
+                      // Title is per-child for capacity families; on a MULTI-DESIGN family title, bullets AND
+                      // description are each PER-DESIGN — the ship engine resolves per-SKU (resolveProposed),
+                      // so the "same value written to all N" broadcast label is FALSE there. Show "Per design".
                       const perChildTitle = shipField === 'title' && Array.isArray(recs.per_child_titles) && recs.per_child_titles.length > 1 && !multiDesign
+                      const perDesignField = multiDesign && (
+                        (shipField === 'title' && (recs.per_child_titles?.length ?? 0) > 1) ||
+                        (shipField === 'bullets' && (recs.per_child_bullets?.length ?? 0) > 1) ||
+                        (shipField === 'description' && (recs.per_child_descriptions?.length ?? 0) > 1)
+                      )
                       return (
                         <div className="mt-2.5 flex items-center gap-2 flex-wrap border-t border-current/10 pt-2.5">
                           <button
                             onClick={() => openPushPreview(shipField)}
                             disabled={pushLoading}
-                            title={perChildTitle ? 'Each variant gets its own capacity-specific title' : `Write the recommended ${FIELD_LABEL[shipField].toLowerCase()} directly to Amazon for every variant`}
+                            title={perChildTitle ? 'Each variant gets its own capacity-specific title' : perDesignField ? `Each design keeps its own ${FIELD_LABEL[shipField].toLowerCase()} — ships to that design’s SKUs` : `Write the recommended ${FIELD_LABEL[shipField].toLowerCase()} directly to Amazon for every variant`}
                             className="inline-flex items-center gap-1.5 text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-semibold disabled:opacity-50 transition-colors cursor-pointer">
                             <Icon.Send className="w-3.5 h-3.5" /> Ship {shipField === 'bullets' ? 'all 5 bullets' : FIELD_LABEL[shipField].toLowerCase()} to Amazon
                           </button>
@@ -3482,6 +3535,11 @@ export default function ListingDetailPage() {
                               <>
                                 <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium">Per child</span>
                                 each variant gets its own capacity-specific title
+                              </>
+                            ) : perDesignField ? (
+                              <>
+                                <span className="px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 font-medium">Per design</span>
+                                each design keeps its own — ships to that design’s SKUs
                               </>
                             ) : (
                               <>
