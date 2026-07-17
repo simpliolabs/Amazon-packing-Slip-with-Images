@@ -6041,7 +6041,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // same judge-gated, trademark/off-niche-scrubbed provenance class as single-design nicheSeeds.
         nicheFillSeeds = cleanNiche.filter((s) => s !== familyNiche).slice(0, 4)
       }
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, [...nicheFillSeeds, ...topUpgradeKws], compatibilityBrands, onProgress)
+      // FILL POOL (live-loop iteration 3, B0DMXMH266): nicheFillSeeds + topUpgradeKws alone still left the
+      // parent 26 chars short — every niche EXPANSION phrase shares its tokens with the anchor already in
+      // the title (the ALL-NOVEL rule rightly skips them), and every UPGRADE term is a broad-category
+      // permutation of covered tokens. The pool's own COVERED niche terms ("fisherman gifts", "bass
+      // fishing") carry genuinely NOVEL title tokens but are Defended, so they never enter topUpgradeKws.
+      // `candidates` (selectTitleCandidates — already off-niche-gated #402, outcome-weighted, grounded) is
+      // the provenance-correct source for them; the fill's design-motif/gender/garment/junk rails still
+      // apply per keyword. Order: niche seeds first, then pool candidates, then broad upgrades.
+      const parentFillPool = [...nicheFillSeeds, ...candidates.map((c) => c.keyword), ...topUpgradeKws]
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
