@@ -170,7 +170,10 @@ export async function GET(req: NextRequest) {
         : ' to Amazon'
       // Show the pushed value for the title (short + high-signal) so the seller sees WHAT shipped.
       const val = e.field === 'title' && e.after_value ? `: "${e.after_value}"` : ''
-      summary = `${actor} pushed${fieldPhrase(e.field)}${scope}${e.sku ? ` (${e.sku})` : ''}${val}`
+      // PR-5: a WHOLLY-REJECTED push (0 accepted, all failed) reads "tried to push … 0/N" so it's clearly
+      // an attempt Amazon rejected — distinct from a real ship AND from "never pushed" (no row at all).
+      const rejected = e.accepted_count === 0 && total > 0
+      summary = `${actor} ${rejected ? 'tried to push' : 'pushed'}${fieldPhrase(e.field)}${scope}${e.sku ? ` (${e.sku})` : ''}${val}`
     } else {
       summary = `${actor} ${verb}${fieldPhrase(e.field)}`
     }

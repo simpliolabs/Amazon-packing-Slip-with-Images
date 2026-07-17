@@ -3837,7 +3837,62 @@ Return ONLY the JSON object.`
     max_completion_tokens: 8000,
     response_format: { type: 'json_object' },
   })
-  return parseJsonLoose<AuditResult>(completion.choices[0]?.message?.content || '{}')
+  const auditResult = parseJsonLoose<AuditResult>(completion.choices[0]?.message?.content || '{}')
+
+  // DEDICATED PRODUCT-DETAILS FILL (2026-07-17) — the mega-audit above emits product_details as ONE of six
+  // JSON outputs inside a single 8000-token call, so it chronically UNDER-fills the attribute menu (PO: "we
+  // had ~12, the directive added ~12 more — where are they?"). The extra attributes ARE in the menu (#79's
+  // force-adds + the schema's SEO band); the LLM just never gets to them. A FOCUSED second call that sees
+  // ONLY the menu + specs + design fills far more of the applicable attributes. Enum-verbatim + grounded +
+  // null-when-indeterminable; the route's enum coercion + VALIDATION_PREVIEW still backstop any bad value at
+  // push. Fail-open (empty/error keeps the mega-audit rows). Union by field_name (audit rows win — they were
+  // already truth-checked), cap 26. Only runs when a real schema menu resolved.
+  if (menu.length > 0) {
+    try {
+      const dSys = 'You are an Amazon catalog specialist filling structured Product-Detail attributes for filtered search. Return ONLY valid JSON.'
+      const dUser = `Fill Amazon Product-Detail attributes for THIS product, choosing field names + values ONLY from the menu below.
+=== PRODUCT ===
+TITLE: ${finalTitle}
+BULLETS:
+${bullets.map((b, i) => `  ${i + 1}. ${b}`).join('\n')}
+${specsLine}${designThemeLine}
+=== AMAZON ATTRIBUTE MENU (the ONLY field names Amazon accepts here — use the EXACT title shown) ===
+${menu.map((m) => `- ${m.title}${m.accepted?.length ? ` [accepted values: ${m.accepted.slice(0, 20).join(' | ')}]` : ''}`).join('\n')}
+
+Return {"product_details_improvements":[{"field_name":"...","recommended_value":"...","reason":"..."}]} obeying:
+- A row for EVERY menu attribute you can determine for THIS product from the facts above. A standard apparel item legitimately HAS most of them (neck, sleeve, fit, material, fabric, care, department, target gender, age range, pattern, style, occasion, season, theme, closure, weave, shape) — fill them, do not stop early.
+- recommended_value MUST be VERBATIM one of the [accepted values] when the menu lists them; otherwise a concise, correct value derived from the facts. Ground fit/material/fabric to the SPEC facts, never a guess.
+- Ground THEME / OCCASION / SPORT / SEASON / STYLE to the DESIGN THEME (what is actually printed), never a generic guess.
+- Use null ONLY when an attribute is genuinely indeterminable for this product — do NOT skip a determinable one. Completeness wins filtered search.
+Return ONLY the JSON object.`
+      const dResp = await openai.chat.completions.create({
+        model: auditModel,
+        messages: [{ role: 'system', content: dSys }, { role: 'user', content: dUser }],
+        max_completion_tokens: 3000,
+        response_format: { type: 'json_object' },
+      })
+      const dParsed = parseJsonLoose<{ product_details_improvements?: PipelineProductDetailImprovement[] }>(dResp.choices[0]?.message?.content || '{}')
+      const extra = Array.isArray(dParsed.product_details_improvements) ? dParsed.product_details_improvements : []
+      if (extra.length > 0) {
+        const base = Array.isArray(auditResult.product_details_improvements) ? auditResult.product_details_improvements : []
+        const seen = new Set(base.map((p) => detailValueToString(p.field_name).toLowerCase().trim()))
+        const merged = [...base]
+        for (const e of extra) {
+          const key = detailValueToString(e.field_name).toLowerCase().trim()
+          const val = e.recommended_value
+          if (!key || val == null || detailValueToString(val).trim() === '' || seen.has(key)) continue
+          seen.add(key)
+          merged.push(e)
+        }
+        auditResult.product_details_improvements = merged.slice(0, 26)
+        console.log(`[details-fill] product details: audit ${base.length} + dedicated ${extra.length} → ${auditResult.product_details_improvements.length} (menu offered ${menu.length})`)
+      }
+    } catch (e) {
+      console.warn('[details-fill] dedicated product-details agent failed (non-fatal, keeping audit rows):', e instanceof Error ? e.message : e)
+    }
+  }
+
+  return auditResult
 }
 
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────

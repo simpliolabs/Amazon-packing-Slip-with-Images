@@ -3249,6 +3249,14 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.warn('[push-content] verify enqueue failed (non-fatal):', e) }
         }
 
+        // PR-5 ship-truth visibility: a WHOLLY-REJECTED push (Amazon rejected EVERY SKU) otherwise writes
+        // only keyword_push_log 'failed' rows and NO change-log row → indistinguishable in Change History
+        // from "never pushed" (the exact "did anything ship?" ambiguity). Log a 0/N row so a rejected
+        // attempt is VISIBLE and distinct from silence. No verify enqueue (nothing landed to verify).
+        if (accepted === 0 && failed > 0 && !cancelled) {
+          await logPushChange(db, { parent_asin, field, actor, accepted: 0, failed })
+        }
+
         // ATTRIBUTION (spec §5 Phase B): a push mirrors a product-facing change-log row (action='push',
         // source='push_executor') + a NARROW compliance audit (listing.push). The exact pushed bytes
         // live in keyword_push_log; this row is the WHO/WHEN/action timeline. Fires whenever SOMETHING
@@ -3752,6 +3760,10 @@ export async function executeBulkCorePush(params: PushParams, emit: PushEmit): P
         for (const f of activeFields) {
           if (tally[f].accepted > 0) {
             await logPushChange(db, { parent_asin, field: f, actor, accepted: tally[f].accepted, failed: tally[f].failed })
+          } else if (tally[f].failed > 0) {
+            // PR-5 ship-truth visibility: a field Amazon rejected on EVERY SKU logs a 0/N row so a
+            // wholly-rejected field is visible in Change History (not silently absent = "never pushed").
+            await logPushChange(db, { parent_asin, field: f, actor, accepted: 0, failed: tally[f].failed })
           }
         }
         await logAudit({
