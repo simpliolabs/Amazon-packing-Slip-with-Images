@@ -714,6 +714,11 @@ export async function POST(req: NextRequest) {
             // Amazon Color attribute. undefined (NULL/absent column) → no per-design seeding.
             designNameOverridesByKey: (pipelineScoreRow as { design_name_overrides?: Record<string, string> | null })?.design_name_overrides || undefined,
             isMultiDesignOverride: (pipelineScoreRow as { is_multi_design_override?: boolean | null })?.is_multi_design_override ?? null,
+            // Seller-named #1 competitor (title-council fallback chain Part 1): the multi-design
+            // parent title studies this listing's live SEO snapshot for keyword strategy/structure.
+            // Rides the '*' select — cast like the other maybe-missing columns above.
+            competitorAsin: (pipelineScoreRow as { competitor_asin?: string | null } | null)?.competitor_asin ?? null,
+            competitorBrand: (pipelineScoreRow as { competitor_brand?: string | null } | null)?.competitor_brand ?? null,
             // Seller-declared audience lean (PR #195) — persisted on the score row by the
             // listing-page selector; re-weights gendered keywords + sets the title tail.
             audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')
