@@ -1291,19 +1291,37 @@ async function buildItemHighlights(
     } catch { return '' }
   }
 
-  // Draft → validate → ONE corrective retry → deterministic fallback. scrubTrademarks runs
-  // BEFORE validation on every LLM output (the scrubbed string is what ships), so a scrub that
-  // introduces a repeat (e.g. a second "soccer") is still caught by the repetition gate.
+  // KEYWORD-LIST DETECTOR (2026-07-18, PO: "NOT SEO friendly … confirm via Vision and DB"): the LLM
+  // sometimes ignores "NEVER a keyword list" and emits search permutations ("… comfort colors tshirt women,
+  // comfort colors t-shirts, plain t shirts") — Amazon accepts it but it's spam, not a customer highlight.
+  // Detect it (>=3 comma-phrases each carrying a garment noun — a real highlight names ATTRIBUTES/use-cases,
+  // not the product type in every phrase) and force the clean, SPEC-GROUNDED buildHighlightsFallback (built
+  // from the DB fact rows: Material/Fit/Neck/Sleeve/Department + the design). This is the deterministic
+  // "ground in DB + design, never a keyword list" the field was specified to do.
+  const isKeywordList = (s: string): boolean => {
+    const phrases = s.split(',').map((p) => p.trim()).filter(Boolean)
+    const garmentRe = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|hoodies?|sweatshirts?|tank ?tops?)\b/i
+    return phrases.length >= 3 && phrases.filter((p) => garmentRe.test(p)).length >= 3
+  }
+  const gate = (s: string): string[] => {
+    if (!s) return ['empty response']
+    const p = validateItemHighlights(s, brandName, capacityFamily)
+    if (isKeywordList(s)) p.push('reads as a keyword LIST (product-type permutations) — Item Highlights must name the MATERIAL, FIT, FEATURES + ONE use-case in human phrases grounded in the product facts, NEVER a search-keyword list')
+    return p
+  }
+  // Draft → validate (incl. keyword-list gate) → ONE corrective retry → deterministic spec-based fallback.
+  // scrubTrademarks runs BEFORE validation on every LLM output (the scrubbed string is what ships).
   let out = scrubTrademarks(await ask('')).trim()
-  let problems = out ? validateItemHighlights(out, brandName, capacityFamily) : ['empty response']
+  let problems = gate(out)
   if (problems.length > 0) {
     const correction = `Your previous attempt was rejected:\n"${out}"\nViolations:\n${problems.map((p) => `- ${p}`).join('\n')}\nRewrite the Item Highlights string fixing EVERY violation. Return ONLY the string.`
     out = scrubTrademarks(await ask(correction)).trim()
-    problems = out ? validateItemHighlights(out, brandName, capacityFamily) : ['empty response']
+    problems = gate(out)
   }
   // Deterministic repeated-words cap on EVERY return path (the LLM ignored the "no repeats" rule and
   // shipped "comfort colors" ×3 on a Comfort-Colors blank; the fallback is repeat-safe by construction but
-  // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant.
+  // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant AND
+  // (via the keyword-list gate above) a real spec-grounded highlight, not a truncated keyword list.
   if (problems.length === 0) return capItemHighlightRepeats(out)
   return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily))
 }
