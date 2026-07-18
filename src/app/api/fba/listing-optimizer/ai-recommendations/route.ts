@@ -19,7 +19,7 @@ import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
-import { detailValueToString } from '@/lib/fba/productDetailAttrs'
+import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -1447,12 +1447,23 @@ export async function GET(req: NextRequest) {
   // page hard-crashed on exactly this — so normalize HERE too, healing ALL historical
   // rows without requiring a regen.
   const product_details_improvements = Array.isArray(data.product_details_improvements)
-    ? (data.product_details_improvements as Record<string, unknown>[]).map((p) => ({
-        ...p,
-        field_name: detailValueToString(p.field_name),
-        current_value: p.current_value == null ? null : detailValueToString(p.current_value),
-        recommended_value: detailValueToString(p.recommended_value),
-      }))
+    ? (data.product_details_improvements as Record<string, unknown>[]).map((p) => {
+        const fieldName = detailValueToString(p.field_name)
+        const recVal = detailValueToString(p.recommended_value)
+        return {
+          ...p,
+          field_name: fieldName,
+          current_value: p.current_value == null ? null : detailValueToString(p.current_value),
+          // HEAL-ON-SERVE (2026-07-18): a STALE keyword-stuffed Item Highlight (a word repeated >2x, e.g.
+          // "comfort colors" x3) is rejected by Amazon AND — because Amazon re-validates the whole item on
+          // any PATCH — blocks unrelated pushes (a title push failed on it). Cap it on the READ path so the
+          // seller never SEES or pushes the raw spam; same heal-on-read as the value normalization here and
+          // the trademark scrub-on-serve below. No-op on a clean value; the push boundary caps too.
+          recommended_value: isItemHighlightsField(fieldName, (p as { sp_api_key?: string }).sp_api_key)
+            ? capItemHighlightRepeats(recVal)
+            : recVal,
+        }
+      })
     : data.product_details_improvements
 
   // Per-field LAST-SHIPPED timestamp (PO: "see when any SEO item was shipped, for all shippable
