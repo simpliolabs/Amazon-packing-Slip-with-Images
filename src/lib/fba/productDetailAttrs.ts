@@ -186,14 +186,51 @@ export const SINGLE_DESIGN_ONLY_LEAK_REASON =
  * schemas in some categories) will surface a clear VALIDATION_PREVIEW error which the
  * UI shows the seller. Cheap and robust without a per-attribute shape table.
  */
+/**
+ * Amazon's Item Highlight repeated-words rule: no non-trivial word may appear more than TWICE (a
+ * "Comfort Colors" blank produced "…comfort colors tshirt, comfort colors tshirt…, comfort colors
+ * t-shirts…" → "comfort"×4/"colors"×3 → Amazon rejected the SKU, and — because Amazon re-validates the
+ * WHOLE item on any PATCH — it also blocked an unrelated TITLE push for that SKU). Enforce it
+ * DETERMINISTICALLY at the push boundary so NO source (LLM draft, stale stored value, seller paste) can
+ * ship a value Amazon rejects. Split into comma phrases; keep a phrase only while every one of its words
+ * stays ≤2 (1-char tokens + trivial connectors exempt; plurals + "tshirt" folded so shirt/shirts/tshirt
+ * count as one); drop the offending later phrase(s). Never blanks the field.
+ */
+const IH_TRIVIAL = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'in', 'to', 'great', 'her', 'his', 'on', 'or', 'your'])
+export function capItemHighlightRepeats(value: string): string {
+  const fold = (w: string): string => {
+    let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')
+    if (b === 'tshirt' || b === 'tshirts') b = 'shirt'
+    return b.replace(/s$/, '')
+  }
+  const counts = new Map<string, number>()
+  const kept: string[] = []
+  for (const phrase of value.split(',').map((p) => p.trim()).filter(Boolean)) {
+    const local = new Map<string, number>()
+    for (const w of phrase.split(/[\s/-]+/).map(fold)) {
+      if (w.length <= 1 || IH_TRIVIAL.has(w)) continue
+      local.set(w, (local.get(w) ?? 0) + 1)
+    }
+    let ok = true
+    for (const [w, c] of local) if ((counts.get(w) ?? 0) + c > 2) { ok = false; break }
+    if (!ok) continue
+    for (const [w, c] of local) counts.set(w, (counts.get(w) ?? 0) + c)
+    kept.push(phrase)
+  }
+  return kept.join(', ') || value.split(',')[0]?.trim() || value
+}
+
 export function buildDetailPatchValue(
   attr: DetailAttribute,
   rawValue: string,
   marketplaceId: string,
   languageTag = 'en_US',
 ): PatchValueEntry[] {
-  const trimmed = (rawValue || '').trim()
+  let trimmed = (rawValue || '').trim()
   if (!trimmed) return []
+  // Item Highlight: cap repeated words so a non-compliant value (LLM/stored/stale) can never be the reason
+  // Amazon rejects this OR any other attribute's patch for the SKU (Amazon re-validates the whole item).
+  if (isItemHighlightsField(null, attr.spApiKey)) trimmed = capItemHighlightRepeats(trimmed)
   const normalized = attr.enumMap ? (attr.enumMap[trimmed.toLowerCase()] ?? trimmed) : trimmed
   return [{ value: normalized, marketplace_id: marketplaceId, language_tag: languageTag }]
 }

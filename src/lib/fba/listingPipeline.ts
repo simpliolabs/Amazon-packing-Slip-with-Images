@@ -29,7 +29,7 @@ import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey } from '@/lib
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString } from '@/lib/fba/productDetailAttrs'
+import { detailValueToString, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -1301,8 +1301,11 @@ async function buildItemHighlights(
     out = scrubTrademarks(await ask(correction)).trim()
     problems = out ? validateItemHighlights(out, brandName, capacityFamily) : ['empty response']
   }
-  if (problems.length === 0) return out
-  return buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily)
+  // Deterministic repeated-words cap on EVERY return path (the LLM ignored the "no repeats" rule and
+  // shipped "comfort colors" ×3 on a Comfort-Colors blank; the fallback is repeat-safe by construction but
+  // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant.
+  if (problems.length === 0) return capItemHighlightRepeats(out)
+  return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily))
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
