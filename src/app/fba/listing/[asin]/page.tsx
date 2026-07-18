@@ -1658,6 +1658,31 @@ export default function ListingDetailPage() {
   }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory, refreshOutcome, refreshVerifyQueue])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
+  // Per-field "Regenerate Item Highlight" (PO 2026-07-18: "no REGENERATE button"). POSTs the isolated
+  // regenerate-item-highlight endpoint (rebuilds from stored spec facts + design via buildItemHighlights →
+  // clean spec-grounded fallback, never a keyword-list, capped), then swaps the fresh
+  // product_details_improvements into local state so the row updates without a reload.
+  const [regenIhBusy, setRegenIhBusy] = useState(false)
+  const onRegenerateItemHighlight = useCallback(async () => {
+    if (regenIhBusy) return
+    setRegenIhBusy(true)
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/regenerate-item-highlight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ parent_asin: asin }),
+      })
+      const data = await resp.json() as { error?: string; product_details_improvements?: AiRecommendations['product_details_improvements'] }
+      if (!resp.ok) throw new Error(data.error || 'Regenerate failed')
+      if (data.product_details_improvements) setAiRecs((prev) => prev ? { ...prev, product_details_improvements: data.product_details_improvements } : prev)
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Regenerate failed')
+    } finally {
+      setRegenIhBusy(false)
+    }
+  }, [asin, regenIhBusy])
+
   const bulkEligibleDetails = useMemo(() => {
     const rows = aiRecs?.product_details_improvements ?? []
     const ihWritable = aiRecs?.item_highlights_writable   // boolean | undefined
@@ -3648,6 +3673,12 @@ export default function ListingDetailPage() {
                                 )}
                               </span>
                               <div className="flex items-center gap-2 shrink-0">
+                                {/* Per-field regenerate for the Item Highlight (PO: "no REGENERATE button") — rebuilds it
+                                    from the product's spec facts + design (clean, spec-grounded, never a keyword-list), no
+                                    full 18-min audit. Only on the Item Highlight row. */}
+                                {isItemHighlightsField(pd.field_name, pd.sp_api_key) && (
+                                  <button onClick={onRegenerateItemHighlight} disabled={regenIhBusy} title="Regenerate this Item Highlight from the product's specs + design (no full audit — clean, spec-grounded, never a keyword list)" className="text-[10px] px-2 py-0.5 rounded border border-violet-300 text-violet-700 hover:bg-violet-50 font-medium whitespace-nowrap disabled:opacity-50">{regenIhBusy ? '…' : '↻ Regen'}</button>
+                                )}
                                 <button onClick={() => copy(prettyDetailValue(pd.recommended_value, pd.enum_accepted), `pd-${i}`)} className="text-[10px] text-violet-600 hover:underline">{copied === `pd-${i}` ? 'Copied!' : 'Copy'}</button>
                                 {pushable ? (
                                   <button

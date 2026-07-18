@@ -1231,7 +1231,7 @@ export function buildHighlightsFallback(
 
 // Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
 // material/fit/feature/use-case phrases, no word repeated, <=125 chars.
-async function buildItemHighlights(
+export async function buildItemHighlights(
   openai: OpenAI, finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
   pool: AnalyzedKeyword[], brandName: string, apparelProduct: boolean, capacityFamily: boolean,
 ): Promise<string> {
