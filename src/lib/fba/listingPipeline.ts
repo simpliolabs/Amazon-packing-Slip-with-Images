@@ -2687,6 +2687,45 @@ Rules:
     }
   }
 
+  // ── SHARED 70-75 HUMANIZER (single-design path-parity, 2026-07-18): the fix for the 61-char generic
+  // regression (B0FKJW57H7). The ENFORCED 70-75 LLM extension used to live ONLY in buildNicheParentTitle
+  // (multi-design); single-design ships THIS function's output with no humanizer, so a thin-pool listing
+  // landed short + generic. Run the SAME shared humanizer with a single-design (design-LED) brief, BEFORE
+  // the design-name-lead + Title-Case + HARD CAP below so they re-seat/re-case the extended title. Gated
+  // on apparel + a short title; fail-open (a rejection is a no-op = no worse than before). Pool = the
+  // design-niche seeds (now fed by the vision→universe wire) + the upgrade keywords.
+  if (apparel && title.length < 68) {
+    const aud = preferredAudience || 'Men and Women'
+    const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'Tee Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt')
+    const nichePool = [...new Set([...(input.nicheSeeds || []), ...upgradeKws].map((s) => (s || '').trim()).filter(Boolean))]
+    const sdSystem = `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title. Lead with the brand, then the design/niche, then the product type, then supporting niche keyphrases a real shopper types, then "for ${aud}". Write like a human — never keyword soup.`
+    const sdUser = `Brand: ${brandName}
+${attributePin ? `Blank/garment brand: ${attributePin}\n` : ''}Product type: ${ptWord}
+Audience: ${aud}
+Design name (KEEP verbatim — the product's identity): ${designName || '(none)'}
+Niche keyphrases (weave in those that fit — occasion, recipient, design subject): ${nichePool.slice(0, 8).join(', ') || '(none)'}
+
+Rules:
+- Brand FIRST${designName ? `, then the design name "${designName}"` : ''}, then the niche + product type, then supporting niche keyphrases, then "for ${aud}".
+${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the #1 ranking keyword; never paraphrase it away.\n` : ''}- TARGET LENGTH 70-75 characters (hard goal — a short title wastes ranking budget).
+- Use a garment structure like "Tee Shirt | ... TShirt" — keep "Shirt" and "Tee/TShirt" as DISTINCT indexable variants; never collapse to one, never pluralize into "Shirts ... Shirts".
+- Do NOT repeat any significant word. No generic category filler ("Graphic Shirts for Women").
+- Read like a human wrote it. Return ONLY the final title string.`
+    const extended = await humanizeTitleTo75(openai, title, {
+      baseSystem: sdSystem, baseUser: sdUser,
+      pool: nichePool,
+      brandName,
+      postProcess: (raw) => capTitle75(scrubTrademarks(raw)),
+      onProgress: input.onProgress,   // SSE keepalive parity with the parent call — the 1-2 gpt-5 extension calls must not run the stream silent (stream-idle-drop risk)
+      trigger: 68,
+      label: 'Title',
+    })
+    if (extended && extended !== title) {
+      title = extended
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    }
+  }
+
   // Deterministic backstop (apparel): a sub-50-char title wastes real keyword space even under the
   // 75-char cap (the validator's floor is 50). Lead the garment brand with a FEEL adjective —
   // "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the title toward 50-75.
@@ -5249,6 +5288,97 @@ async function buildTitleFor(
 // FAMILY-NICHE anchor (`familyNiche`, e.g. "funny fishing shirt") IS seated when the council drops
 // the shared niche; it is a niche NOUN derived from the family design_name_override, never a design
 // name. `designNames` stays the EXCLUSION arg (design names banned from the hub title).
+/**
+ * SHARED 70-75 HUMANIZER (title path-parity, 2026-07-18) — the fix for the recurring "short/generic
+ * title" regression. Until now the ENFORCED 70-75 LLM extension lived ONLY inside buildNicheParentTitle
+ * (the MULTI-design producer); single-design titles ship runTitleAgent's output, which had no humanizer,
+ * so a thin-pool listing landed short + generic (B0FKJW57H7 = 61 chars). This is the ONE post-processor
+ * BOTH producers call, so 70-75 enforcement is identical on every path (INVARIANT 1, fba-generation-
+ * invariants). Extends a short apparel title via up to 2 LLM calls, each seeded with the caller's OWN
+ * brief (system+user) + the pool phrases the title does not yet carry; post-processes each candidate with
+ * the caller's cleanup (scrub→cap→dedup) then Title-Cases; adopts a candidate ONLY when it is LONGER,
+ * trademark-free, and still brand-first. Fail-open: any error / empty response keeps the current best.
+ */
+async function humanizeTitleTo75(
+  openai: OpenAI,
+  title: string,
+  opts: {
+    baseSystem: string
+    baseUser: string
+    pool: string[]
+    brandName: string
+    postProcess: (raw: string) => string
+    onProgress?: (m: string) => void
+    trigger?: number
+    label?: string
+  },
+): Promise<string> {
+  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title' } = opts
+  // RETRY-CASING NORMALIZER: the LLM ships raw casing (live: "THE CEO fishing humor funny t-shirt…" —
+  // correct content, lowercase niche). Title-Case only FULLY-LOWERCASE words; any word already carrying
+  // an uppercase letter is preserved verbatim ("THE CEO", "T-shirt"); minor connectors stay lowercase
+  // unless they open the title.
+  const RETRY_MINOR_WORDS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'to'])
+  const titleCaseRetry = (t: string): string => t.split(/\s+/).map((w, i) =>
+    /[A-Z]/.test(w) ? w
+      : (i > 0 && RETRY_MINOR_WORDS.has(w)) ? w
+      : w.charAt(0).toUpperCase() + w.slice(1),
+  ).join(' ')
+  if (title && title.length < trigger) {
+    for (let attempt = 1; attempt <= 2 && title.length < trigger; attempt++) {
+      try {
+        // UNUSED-KEYWORD FEED (recomputed each pass against the current title): pool phrases that still
+        // carry at least one novel token, garment-folded so "Tee" doesn't mask "T-Shirt".
+        const titleToks = new Set(bulletTokens(title).map(fillNormTok))
+        const unused = pool.filter((k) => {
+          const toks = bulletTokens(k).map(fillNormTok)
+          return toks.length > 0 && toks.some((t) => !titleToks.has(t))
+        }).slice(0, 8)
+        onProgress?.(`${label} ${title.length}/75 — humanizer retry ${attempt} toward 70-75...`)
+        const model = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+        const isGpt5 = /^(gpt-5|o\d)/.test(model)
+        const messages = [
+          { role: 'system' as const, content: baseSystem },
+          { role: 'user' as const, content: `${baseUser}
+
+Current title (${title.length} chars — too short):
+${title}
+
+Critique: Extend to 70-75 characters with natural niche phrasing a real shopper types — occasion, recipient, design subject. Keep every existing word's meaning; do NOT repeat any significant word; no generic category filler.${unused.length ? `
+Extend the title to 70-75 characters by weaving in phrases from this list (verbatim or naturally inflected, most valuable first): ${unused.join(' | ')}. Never repeat a word already in the title.` : ''}
+
+Return ONLY the extended title string.` },
+        ]
+        const r = await openai.chat.completions.create(
+          isGpt5
+            ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' }
+            : { model, messages, temperature: 0.3, max_tokens: 120 },
+          { timeout: 60_000, maxRetries: 0 },
+        )
+        const raw = (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+        if (!raw) {
+          onProgress?.(`${label} retry ${attempt}: len ${title.length}→${title.length} (empty response, kept best)`)
+          continue
+        }
+        const retryTitle = titleCaseRetry(postProcess(raw))
+        const clean = retryTitle.length > title.length
+          && findTrademarkPhrases(retryTitle).length === 0
+          && (!brandName || retryTitle.toLowerCase().startsWith(brandName.trim().toLowerCase()))
+        if (clean) {
+          onProgress?.(`${label} retry ${attempt}: len ${title.length}→${retryTitle.length}`)
+          title = retryTitle
+        } else {
+          onProgress?.(`${label} retry ${attempt}: len ${title.length}→${title.length} (kept best; retry was ${retryTitle.length} chars${retryTitle.length > title.length ? ', unclean' : ''})`)
+        }
+      } catch (e) {
+        console.warn(`[${label}] humanizer retry failed (kept current best):`, e instanceof Error ? e.message : e)
+        break
+      }
+    }
+  }
+  return title
+}
+
 async function buildNicheParentTitle(
   openai: OpenAI,
   brandName: string,
@@ -5631,64 +5761,16 @@ Rules:
   // FULLY-LOWERCASE words; any word already carrying an uppercase letter is preserved verbatim
   // ("THE CEO", "T-shirt"); minor connector words stay lowercase unless they open the title.
   // Pass-1 council titles are already cased — this applies to the retry candidate ONLY.
-  const RETRY_MINOR_WORDS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'to'])
-  const titleCaseRetry = (t: string): string => t.split(/\s+/).map((w, i) =>
-    /[A-Z]/.test(w) ? w
-      : (i > 0 && RETRY_MINOR_WORDS.has(w)) ? w
-      : w.charAt(0).toUpperCase() + w.slice(1),
-  ).join(' ')
-  if (title && title.length < 68) {
-    for (let attempt = 1; attempt <= 2 && title.length < 68; attempt++) {
-      try {
-        // UNUSED-KEYWORD FEED (recomputed each pass against the current title): pool phrases that
-        // still carry at least one novel token, garment-folded so "Tee" doesn't mask "T-Shirt".
-        const titleToks = new Set(bulletTokens(title).map(fillNormTok))
-        const unused = topUpgradeKws.filter((k) => {
-          const toks = bulletTokens(k).map(fillNormTok)
-          return toks.length > 0 && toks.some((t) => !titleToks.has(t))
-        }).slice(0, 8)
-        onProgress?.(`Parent title ${title.length}/75 — humanizer retry ${attempt} toward 70-75...`)
-        const model = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
-        const isGpt5 = /^(gpt-5|o\d)/.test(model)
-        const messages = [
-          { role: 'system' as const, content: baseSystem },
-          { role: 'user' as const, content: `${baseUser}
-
-Current title (${title.length} chars — too short):
-${title}
-
-Critique: Extend to 70-75 characters with natural niche phrasing a real shopper types — occasion, recipient, design subject. Keep every existing word's meaning; do NOT repeat any significant word; no generic category filler.${unused.length ? `
-Extend the title to 70-75 characters by weaving in phrases from this list (verbatim or naturally inflected, most valuable first): ${unused.join(' | ')}. Never repeat a word already in the title.` : ''}
-
-Return ONLY the extended title string.` },
-        ]
-        const r = await openai.chat.completions.create(
-          isGpt5
-            ? { model, messages, max_completion_tokens: 4000, reasoning_effort: 'low' }
-            : { model, messages, temperature: 0.3, max_tokens: 120 },
-          { timeout: 60_000, maxRetries: 0 },
-        )
-        const raw = (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-        if (!raw) {
-          onProgress?.(`title retry ${attempt}: len ${title.length}→${title.length} (empty response, kept best)`)
-          continue
-        }
-        const retryTitle = titleCaseRetry(stripCompetitorBrand(collapseGarmentsAndDedup(capTitle75(scrubTrademarks(raw)))))
-        const clean = retryTitle.length > title.length
-          && findTrademarkPhrases(retryTitle).length === 0
-          && (!brandName || retryTitle.toLowerCase().startsWith(brandName.trim().toLowerCase()))
-        if (clean) {
-          onProgress?.(`title retry ${attempt}: len ${title.length}→${retryTitle.length}`)
-          title = retryTitle
-        } else {
-          onProgress?.(`title retry ${attempt}: len ${title.length}→${title.length} (kept best; retry was ${retryTitle.length} chars${retryTitle.length > title.length ? ', unclean' : ''})`)
-        }
-      } catch (e) {
-        console.warn('[parent-title] humanizer retry failed (kept current best):', e instanceof Error ? e.message : e)
-        break
-      }
-    }
-  }
+  title = await humanizeTitleTo75(openai, title, {
+    baseSystem, baseUser,
+    pool: topUpgradeKws,
+    brandName,
+    // SAME post-pipeline as council pass 1 — scrub → cap → garment-collapse/dedup → competitor-brand net.
+    postProcess: (raw) => stripCompetitorBrand(collapseGarmentsAndDedup(capTitle75(scrubTrademarks(raw)))),
+    onProgress,
+    trigger: 68,
+    label: 'Parent title',
+  })
   return title
 }
 
@@ -7185,8 +7267,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // gives backend the SAME 3-source fallback the title already has. Fail-open (any error leaves the pool as-is).
   let backendSeedExtras: string[] = []
   try {
-    // Anchor = the seller's family/design-name override (function-scoped, the same source the title's niche
-    // anchor uses). Fail-open: no override or no matching seed-pool entry → no extras → backend unchanged.
+    // Anchor = the seller's family/design-name override (multi-design). Fail-open: no override or no
+    // matching seed-pool entry → no extras → backend unchanged. NOTE (2026-07-18): single-design listings
+    // have an EMPTY override, so this seed-pool overflow does NOT fire for them — by design. The seed pool
+    // is keyed by the deriveNicheSeeds phrasing the research wire stores, which a single design's own
+    // expandDesignNiche phrasing can't reliably match; anchoring on it would be an inert no-op. Single-
+    // design's backend byte lift instead comes UPSTREAM from the vision→universe wire (keywordResearcher
+    // researchKeywords) refilling `backendPool` with the on-niche keywords the council + fill draw from.
     const backendNiche = (input.designNameOverride ?? '').trim()
     if (backendNiche) {
       const sp = await getSeedPool(normalizeSeedKey(backendNiche))
