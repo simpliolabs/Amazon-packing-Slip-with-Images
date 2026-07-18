@@ -689,7 +689,7 @@ export async function POST(req: NextRequest) {
           // the SELLER's OpenAI client so the vision call is actually authenticated — the env key is
           // unset in prod, so `new OpenAI()` inside the scanner used to silently fail and leave
           // product_identity empty. Non-fatal: a miss just falls back to title-based extraction.
-          let visionDesign: { designTheme: string; visualElements: string[]; seedKeywords: string[] } | null = null
+          let visionDesign: { designTheme: string; visualElements: string[]; seedKeywords: string[]; suggestedSearchTerms?: string[] } | null = null
           try {
             emit({ type: 'progress', message: 'Reading the product design off the image...' })
             const imageUrl = await getProductImageUrl(parent_asin)
@@ -699,6 +699,9 @@ export async function POST(req: NextRequest) {
                 designTheme: identity.designTheme || '',
                 visualElements: Array.isArray(identity.visualElements) ? identity.visualElements : [],
                 seedKeywords: Array.isArray(identity.seedKeywords) ? identity.seedKeywords : [],
+                // Forward suggestedSearchTerms too (2026-07-18): deriveNicheSeeds keys the seed-pool
+                // universes on these, so the backend fill can pull the UNIVERSAL pool for single-design.
+                suggestedSearchTerms: Array.isArray(identity.suggestedSearchTerms) ? identity.suggestedSearchTerms : [],
               }
               console.log(`[ai-recommendations] vision design for ${parent_asin}: theme="${visionDesign.designTheme}" seeds=[${visionDesign.seedKeywords.join(', ')}]`)
             } else {

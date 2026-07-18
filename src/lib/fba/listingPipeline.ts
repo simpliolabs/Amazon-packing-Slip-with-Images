@@ -24,7 +24,7 @@ import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
 import { isOffNicheKeyword, isForeignKeyword } from '@/lib/keyword-engine/nicheGuards'
-import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey } from '@/lib/keyword-engine/keywordResearcher'
+import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey, deriveNicheSeeds } from '@/lib/keyword-engine/keywordResearcher'
 // Competitor SEO snapshot (title-council fallback chain Part 1): the seller-named competitor's live
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
@@ -181,7 +181,7 @@ export interface PipelineInput {
   /** Vision-scanned design identity read off the product IMAGE (visionScanner.ts) — ground-truth
    *  design/slogan (e.g. "text 'Later Gator'") so the design name doesn't depend on a poorly-written
    *  title. Null when there's no image, the scan failed, or the product isn't a design product. */
-  visionDesign?: { designTheme: string; visualElements: string[]; seedKeywords: string[] } | null
+  visionDesign?: { designTheme: string; visualElements: string[]; seedKeywords: string[]; suggestedSearchTerms?: string[] } | null
   /** Reasoning-class model for the audit step, e.g. 'o4-mini' */
   auditModel: string
   /** Outcome-loop signals (task #89), keyed by LOWERCASED keyword: per-keyword SQP share rose/flat/fell
@@ -7265,27 +7265,37 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // appended LAST so it's consumed only after the primary pool is exhausted, trademark/off-niche/foreign
   // pre-gated here, and every term still faces fillBackendToBudget's banBackendTok + echo/dedup rails. This
   // gives backend the SAME 3-source fallback the title already has. Fail-open (any error leaves the pool as-is).
-  let backendSeedExtras: string[] = []
+  const backendSeedExtras: string[] = []
   try {
-    // Anchor = the seller's family/design-name override (multi-design). Fail-open: no override or no
-    // matching seed-pool entry → no extras → backend unchanged. NOTE (2026-07-18): single-design listings
-    // have an EMPTY override, so this seed-pool overflow does NOT fire for them — by design. The seed pool
-    // is keyed by the deriveNicheSeeds phrasing the research wire stores, which a single design's own
-    // expandDesignNiche phrasing can't reliably match; anchoring on it would be an inert no-op. Single-
-    // design's backend byte lift instead comes UPSTREAM from the vision→universe wire (keywordResearcher
-    // researchKeywords) refilling `backendPool` with the on-niche keywords the council + fill draw from.
-    const backendNiche = (input.designNameOverride ?? '').trim()
-    if (backendNiche) {
-      const sp = await getSeedPool(normalizeSeedKey(backendNiche))
-      if (sp) backendSeedExtras = [...sp.keywords]
-        .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0))
-        .slice(0, 25)
-        .map((k) => scrubTrademarks(k.keyword).trim().toLowerCase())
-        .filter((s) => s && findTrademarkPhrases(s).length === 0 && notOffNiche(s) && !isForeignKeyword(s))
-      if (backendSeedExtras.length) console.log(`[BACKEND] seed-pool fallback: +${backendSeedExtras.length} phrases from "${normalizeSeedKey(backendNiche)}"`)
+    // UNIVERSAL KEYWORD POOL overflow (PO: "keywords → council logic → keyword POOL"). The council + fill
+    // draw from the listing's OWN top-analysis pool (getStoredAnalysis ~150), which a thin single-design
+    // niche exhausts ~200 bytes — short of the 240-250 budget. The overflow source is the shared seed pool
+    // (keyword_seed_pool). Keys queried:
+    //  • MULTI-design: the family design-name override (as before — why multi-design already hits budget).
+    //  • SINGLE-design: the VISION niche universes, keyed by the SAME deriveNicheSeeds phrasing the research
+    //    wire (keywordResearcher) stores them under — so the keys MATCH. This is the wire that finally lets
+    //    a single design (empty override) reach the universal pool. Needs visionDesign.suggestedSearchTerms
+    //    (now threaded through from the route) for deriveNicheSeeds to reproduce the stored keys.
+    // Fail-open; every term trademark/off-niche/foreign gated + deduped; appended LAST (true overflow).
+    const overflowKeys = new Set<string>()
+    const ov = (input.designNameOverride ?? '').trim()
+    if (ov) overflowKeys.add(normalizeSeedKey(ov))
+    for (const s of deriveNicheSeeds(input.visionDesign, designName || broadcastDesignAnchor || '', 6)) {
+      const k = normalizeSeedKey(s); if (k) overflowKeys.add(k)
     }
-  } catch (e) { console.warn('[BACKEND] seed-pool fallback failed (non-fatal):', e instanceof Error ? e.message : e) }
-  // The backend fill's overflow keyword list = the listing's own pool THEN the shared niche pool.
+    const seen = new Set<string>()
+    for (const k of overflowKeys) {
+      if (!k) continue
+      const sp = await getSeedPool(k)
+      if (!sp) continue
+      for (const kw of [...sp.keywords].sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0)).slice(0, 30)) {
+        const s = scrubTrademarks(kw.keyword).trim().toLowerCase()
+        if (s && !seen.has(s) && findTrademarkPhrases(s).length === 0 && notOffNiche(s) && !isForeignKeyword(s)) { seen.add(s); backendSeedExtras.push(s) }
+      }
+    }
+    if (backendSeedExtras.length) console.log(`[BACKEND] universal-pool overflow: +${backendSeedExtras.length} phrases from ${overflowKeys.size} universe key(s) [${[...overflowKeys].join(', ')}]`)
+  } catch (e) { console.warn('[BACKEND] universal-pool overflow failed (non-fatal):', e instanceof Error ? e.message : e) }
+  // The backend fill's overflow keyword list = the listing's own pool THEN the shared universal pool.
   const backendKeywordPool = backendSeedExtras.length
     ? [...backendPool.map((k) => k.keyword), ...backendSeedExtras]
     : backendPool.map((k) => k.keyword)
