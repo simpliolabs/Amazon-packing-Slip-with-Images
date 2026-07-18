@@ -3900,6 +3900,31 @@ Return ONLY the JSON object.`
 
 // ─── Description (code-triggered LLM, always generated — field is indexed) ──────
 
+/** Deterministic VISIBLE-length cap for the description HTML (mirrors capTitle75 + the Item Highlight cap).
+ *  Trim to <= `cap` visible (tag-stripped) chars at the last </p>/</li>/</ul> boundary at/before the cap so
+ *  the live PDP never shows a cut mid-word/mid-tag. MUST run on the FINAL SHIPPED bytes: runDescriptionAgent
+ *  caps its own output, but the description is then re-written by applyEditorialGates (LLM audit) and
+ *  fanOutPerDesignDescriptions (per-design LLM) with NOTHING re-capping — that is the "1600-char description"
+ *  regression (the safeguard ran BEFORE the rewrite that expanded it). */
+export function capDescriptionVisible(html: string, cap = 980): string {
+  const plainLen = (d: string) => d.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().length
+  if (!html || plainLen(html) <= cap) return html
+  let vis = 0
+  let off = html.length
+  for (let i = 0; i < html.length; i++) {
+    if (html[i] === '<') { const c = html.indexOf('>', i); if (c === -1) break; i = c; continue }
+    if (++vis >= cap) { off = i + 1; break }
+  }
+  let bestEnd = -1
+  for (const tag of ['</p>', '</li>', '</ul>']) {
+    const i = html.lastIndexOf(tag, off)
+    if (i >= 0 && i + tag.length > bestEnd) bestEnd = i + tag.length
+  }
+  return bestEnd > 0
+    ? html.slice(0, bestEnd).trim()
+    : html.slice(0, off).replace(/<[^>]*$/, '').replace(/\s+\S*$/, '').trim()
+}
+
 /** Description COUNCIL (Approach B) — the description was previously the ONLY published field with no
  *  council (a single gpt-4.1-mini call), yet it is an INDEXED search field. So it now gets the same
  *  3-persona -> GPT-5 adversary -> GPT-5 judge debate as the title/bullets councils. Returns a single
@@ -4139,27 +4164,10 @@ Return ONLY the expanded HTML.` },
     } catch { /* keep best-so-far */ }
   }
 
-  // ── CAP at 980 VISIBLE chars (PO 2026-06-17: keep the description Amazon-compliant at 900-980
-  // visible chars — the deterministic guarantee, mirroring capTitle75). Measure tag-stripped length;
-  // if over, find the HTML offset where visible text reaches the cap, then trim at the last closing
-  // tag boundary at/before it so the live PDP never shows a cut mid-word / mid-tag.
-  const DESC_VISIBLE_CAP = 980
-  if (plainLen(description) > DESC_VISIBLE_CAP) {
-    let vis = 0
-    let off = description.length
-    for (let i = 0; i < description.length; i++) {
-      if (description[i] === '<') { const c = description.indexOf('>', i); if (c === -1) break; i = c; continue }
-      if (++vis >= DESC_VISIBLE_CAP) { off = i + 1; break }
-    }
-    let bestEnd = -1
-    for (const tag of ['</p>', '</li>', '</ul>']) {
-      const i = description.lastIndexOf(tag, off)
-      if (i >= 0 && i + tag.length > bestEnd) bestEnd = i + tag.length
-    }
-    description = bestEnd > 0
-      ? description.slice(0, bestEnd).trim()
-      : description.slice(0, off).replace(/<[^>]*$/, '').replace(/\s+\S*$/, '').trim()
-  }
+  // Deterministic 980-visible-char cap (extracted to capDescriptionVisible so the SHIP paths can RE-cap
+  // after the editorial audit + per-design fan-out, which run AFTER runDescriptionAgent and can re-expand
+  // the copy with nothing else re-capping — the "1600-char description" regression).
+  description = capDescriptionVisible(description)
 
   return description
 }
@@ -7405,6 +7413,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // Per-child multi-design descriptions the push prefers now get the SAME gate (task #61) — they are
     // fit-scrubbed + brand-cased (and audited when budget allows), closing the former both-paths gap.
     await gatePerChildMultiDesign(undefined, perChildDescriptions, truthFitEarly, garmentBrandCanonical || '')
+    // FINAL length cap on the SHIPPED bytes: applyEditorialGates + fanOutPerDesignDescriptions above are LLM
+    // rewrites that can re-expand past 980 (the "1600-char description" regression) — re-cap broadcast + each
+    // per-child so the shipped description is always Amazon-lean, not just runDescriptionAgent's interim output.
+    descriptionOnly = capDescriptionVisible(descriptionOnly)
+    if (perChildDescriptions) perChildDescriptions = perChildDescriptions.map((c) => ({ ...c, description: capDescriptionVisible(c.description) }))
     onProgress('Description regenerated.')
     return partialResult('description', { recommended_description: descriptionOnly, per_child_descriptions: perChildDescriptions })
   }
@@ -7728,6 +7741,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Per-child multi-design copy (the bytes the push actually PATCHes) gets the SAME audit + truth/brand
   // gate as the broadcast copy above — closes the R4/#61 leak where multi-design shipped unscrubbed.
   await gatePerChildMultiDesign(perChildBullets, perChildDescriptions, truthFit, garmentBrandCanonical || '')
+
+  // FINAL length cap on the SHIPPED description bytes (broadcast + per-child): the editorial audit + the
+  // per-design fan-out are LLM rewrites that can re-expand past 980 with nothing else re-capping (the
+  // "1600-char description" regression). Re-cap LAST so the shipped description is always Amazon-lean.
+  description = capDescriptionVisible(description)
+  if (perChildDescriptions) perChildDescriptions = perChildDescriptions.map((c) => ({ ...c, description: capDescriptionVisible(c.description) }))
 
   // FULL-PATH degradation gate (2026-07-08): a quota outage made every council fail open to empty
   // and the empty result PERSISTED over approved content while reporting success. Abort-and-preserve
