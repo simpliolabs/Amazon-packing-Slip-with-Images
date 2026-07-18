@@ -7158,6 +7158,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       (b.searchVolume || 0) - (a.searchVolume || 0) ||
       b.opportunityScore - a.opportunityScore)
 
+  // FALLBACK CHAIN — Part 3, "then use the keyword POOL" (PO 2026-07-18: keywords → council logic → pool).
+  // A thin-niche listing's own analysis pool can't fill the 250-byte backend budget with unique clean
+  // terms (it maxes ~209 → the PO's "missing 30-40 bytes"). Append the cross-listing niche SEED POOL
+  // (keyword_seed_pool — the SAME store the TITLE fallback pulls from at ~6595-6611) as an OVERFLOW source:
+  // appended LAST so it's consumed only after the primary pool is exhausted, trademark/off-niche/foreign
+  // pre-gated here, and every term still faces fillBackendToBudget's banBackendTok + echo/dedup rails. This
+  // gives backend the SAME 3-source fallback the title already has. Fail-open (any error leaves the pool as-is).
+  let backendSeedExtras: string[] = []
+  try {
+    // Anchor = the seller's family/design-name override (function-scoped, the same source the title's niche
+    // anchor uses). Fail-open: no override or no matching seed-pool entry → no extras → backend unchanged.
+    const backendNiche = (input.designNameOverride ?? '').trim()
+    if (backendNiche) {
+      const sp = await getSeedPool(normalizeSeedKey(backendNiche))
+      if (sp) backendSeedExtras = [...sp.keywords]
+        .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0))
+        .slice(0, 25)
+        .map((k) => scrubTrademarks(k.keyword).trim().toLowerCase())
+        .filter((s) => s && findTrademarkPhrases(s).length === 0 && notOffNiche(s) && !isForeignKeyword(s))
+      if (backendSeedExtras.length) console.log(`[BACKEND] seed-pool fallback: +${backendSeedExtras.length} phrases from "${normalizeSeedKey(backendNiche)}"`)
+    }
+  } catch (e) { console.warn('[BACKEND] seed-pool fallback failed (non-fatal):', e instanceof Error ? e.message : e) }
+  // The backend fill's overflow keyword list = the listing's own pool THEN the shared niche pool.
+  const backendKeywordPool = backendSeedExtras.length
+    ? [...backendPool.map((k) => k.keyword), ...backendSeedExtras]
+    : backendPool.map((k) => k.keyword)
+
   // TOKEN TRUTH GATE for every word that enters a backend string (core, LLM fill, byte-fill) —
   // the deterministic "council" the PO asked for ("Super BAD keywords — how did the council
   // approve this?"). Bans: stray single letters from "t-shirt" splits; OTHER variants' colors
@@ -7292,7 +7319,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -7352,7 +7379,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
       }))
       return out
     }
@@ -7453,7 +7480,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
     }))
     return out
   }
