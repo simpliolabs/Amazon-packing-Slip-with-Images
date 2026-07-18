@@ -24,7 +24,7 @@ import { isForeignKeyword } from './nicheGuards';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
-import { scrubTrademarks } from '../fba/trademarkGuard';
+import { scrubTrademarks, hasTrademark } from '../fba/trademarkGuard';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -268,9 +268,30 @@ export async function researchKeywords(
   // "comfort colors shirt"). The design pool above stays pure; these are merged into THIS listing's
   // pool only. Runs after the fresh/reuse branch so every product gets them. Relevance gate filters
   // off-angle terms; Phase 4b overlays OUR organic rank. (Generalizes the #278 garment-only block.)
+  // ── VISION NICHE UNIVERSES (ROOT wire, 2026-07-18): the Seed Agent's output is title-gated by
+  // validateSeeds (identityTokensOf = title tokens ONLY, L~731/761), so a strong image/design theme
+  // the title never spells out ("ocean animals", "save the ocean", "sea animals") is silently dropped
+  // and NEVER enters the universe on the research path — the recurring "vision not feeding the
+  // universe" regression. deriveNicheSeeds reads the FULL vision identity (designTheme + seedKeywords
+  // + suggestedSearchTerms) under its OWN novel-token gate (never validateSeeds), so those niches
+  // become first-class universes HERE, flowing through the same merge loop as U2/U3 → tagged
+  // fromUniverse:true (exempt from the token-overlap relevance gate). Vision identity is written under
+  // the PARENT asin; read child then parent (mirrors selectSeeds / enrichResearchWithNiche). Fail-open:
+  // no identity → deriveNicheSeeds returns [] → pure no-op. Runs in the always-on region (past the
+  // fresh/seed-reuse branch) so a seed-pool-reuse regenerate still merges the niche.
+  // APPAREL-ONLY (mirror U2/U3, which no-op for non-apparel): `categorySeed` is supplied by the caller
+  // ONLY for non-apparel, so its ABSENCE marks an apparel/design-led listing — the only place a vision
+  // "tshirt"-suffixed niche belongs. TRADEMARK-SCRUB each seed (deriveNicheSeeds does not, unlike
+  // expandDesignNiche) so a marked/celebrity vision term can't seed a full gate-bypassed universe.
+  const visionIdentity = categorySeed ? null : ((await getVisionIdentityRaw(asin)) || (await getVisionIdentityRaw(parentAsin)));
+  const visionNicheSeeds = deriveNicheSeeds(visionIdentity, seed, 2)
+    .map((s) => scrubTrademarks(s).trim())
+    .filter((s) => s && !hasTrademark(s));
+  if (visionNicheSeeds.length) console.log(`[keywordResearcher] Vision niche universes: [${visionNicheSeeds.join(' | ')}]`);
   const extraUniverses = [
-    broadCategorySeed(seed, listingTitle), // U2 — broad category, e.g. "graphic tees for women"
-    garmentBrandSeed(seed, listingTitle),  // U3 — garment brand, e.g. "comfort colors shirt"
+    ...visionNicheSeeds,                    // U1.x — FULL vision niche set (bypasses the title-only validateSeeds gate)
+    broadCategorySeed(seed, listingTitle),  // U2 — broad category, e.g. "graphic tees for women"
+    garmentBrandSeed(seed, listingTitle),   // U3 — garment brand, e.g. "comfort colors shirt"
   ].filter((s): s is string => !!s);
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));

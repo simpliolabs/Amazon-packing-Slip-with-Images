@@ -491,7 +491,22 @@ export async function POST(req: NextRequest) {
     const syncAsin = scoreRow2?.top_child_asin || children[0]?.asin
     const competitorAsin = (scoreRow2 as { competitor_asin?: string | null } | null)?.competitor_asin || ''
     const designNameOv = (scoreRow2 as { design_name_override?: string | null } | null)?.design_name_override || ''
-    const refFingerprint = `${competitorAsin}|${designNameOv}`
+    // VISION SIGNAL (2026-07-18): a fresh design scan writes product_identity but does NOT move the
+    // competitor/design-name fingerprint, so a warm listing's plain Regenerate never re-researched and the
+    // vision niche never reached the universe (the recurring "vision not feeding universe" regression — the
+    // wire in researchKeywords sits AFTER the research cache, so it only runs when research actually re-runs).
+    // Fold a compact vision signature into the fingerprint so a new/changed scan forces ONE re-research
+    // (which runs the vision→universe wire) then re-stamps. Fail-open: no identity row → '' → no extra thrash.
+    let visionSig = ''
+    for (const a of [syncAsin, parent_asin]) {
+      if (!a || visionSig) continue
+      try {
+        const { data: viRow } = await supabase.from('product_identity').select('identity_data').eq('asin', a).maybeSingle()
+        const vi = (viRow as { identity_data?: { designTheme?: string; suggestedSearchTerms?: string[] } } | null)?.identity_data
+        if (vi) visionSig = `${(vi.designTheme || '').trim().toLowerCase()}#${(vi.suggestedSearchTerms || []).slice(0, 3).join(',').toLowerCase()}`.slice(0, 120)
+      } catch { /* product_identity may not exist for this asin */ }
+    }
+    const refFingerprint = `${competitorAsin}|${designNameOv}|${visionSig}`
     // Read the fingerprint defensively — the column may not exist pre-migration; if so, disable the
     // signal-change trigger entirely (no thrash) and fall back to the empty-only gate.
     let fingerprintColumnExists = true
@@ -502,7 +517,7 @@ export async function POST(req: NextRequest) {
       if (fpErr) fingerprintColumnExists = false
       else storedFingerprint = (fpRow as { kw_ref_fingerprint?: string | null } | null)?.kw_ref_fingerprint ?? ''
     } catch { fingerprintColumnExists = false }
-    const signalChanged = fingerprintColumnExists && !!(competitorAsin || designNameOv) && refFingerprint !== storedFingerprint
+    const signalChanged = fingerprintColumnExists && !!(competitorAsin || designNameOv || visionSig) && refFingerprint !== storedFingerprint
 
     if (!existingKws || existingKws.length === 0 || signalChanged) {
       // Empty OR a changed reference signal — (re-)research now, before AI generation.
