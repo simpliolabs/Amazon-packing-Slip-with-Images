@@ -360,7 +360,7 @@ const MENU_PER_VARIANT = new Set(['color', 'size', 'memory_storage_capacity', 's
 // Without ranking, the menu was "first 14 in SCHEMA order", which on SHIRT (157 props) spent
 // slots on voltage/wattage while occasion/theme/pattern landed 15th+ and were never offered
 // (PO: "Why only 4 extra values? are there no extra features that will help us rank better?").
-const MENU_SEO_PRIORITY = /occasion|theme|pattern|special_feature|lifestyle|style_name|model_name|collar|neck|sleeve|closure|fit_type|material|fabric|care_instructions|age_range|target_gender|department|season|sport|character|team_name|league|item_type_name|top_style|shirt_form_type|weave|finish|shape/
+const MENU_SEO_PRIORITY = /occasion|theme|pattern|special_feature|lifestyle|style_name|model_name|collar|neck|sleeve|closure|fit_type|fit_to_size|stretch|material|fabric|care_instructions|age_range|target_gender|department|season|sport|character|team_name|league|item_type_name|top_style|shirt_form_type|weave|finish|shape/
 // Compliance/electrical/logistics noise — real schema keys that never help a shopper find the
 // product; they go LAST so they only appear when nothing better fills the menu.
 const MENU_NOISE = /voltage|wattage|batter|compliance|regulat|warrant|hazmat|ghs|safety|unspsc|fcc_|dsa_|epr_|package_(?:weight|dimension|level|quantity)|item_(?:weight|dimension)|country_of_origin|manufacturer|external|gtin|upc|ean/
@@ -402,7 +402,16 @@ export async function listPushableSchemaAttributes(
     // shirt_form_type) get the same force-add treatment: they rank as SEO-priority but on dense
     // schemas (SHIRT: 157 props) can still land past the first `max` slots. Each is only added
     // when THIS schema actually has it (hasOwnProperty gate below), so it's a no-op elsewhere.
-    for (const mustKey of ['item_highlights', 'title_differentiation', 'model_name', 'special_feature', 'fabric_type', 'care_instructions', 'theme', 'shirt_form_type']) {
+    // 2026-07-19 (PO, Comfort Colors 1717): "Apparel Fabric Stretch" (richer than our binary
+    // fabric_stretchability) and "Fit to Size Sentiment" ("Runs Slightly Small") are real SHIRT-schema
+    // attributes the seller can set in Seller Central, but they never reached the audit menu, so the
+    // optimizer never proposed them and they were never pushable. Once in the menu, the audit proposes a
+    // value and resolveSpApiKeyFromTitle maps the schema title -> real key automatically (no static
+    // ATTR_MAP entry needed). Several spellings are listed because the exact key is unconfirmed; the
+    // hasOwnProperty gate below makes every non-existent candidate a silent no-op, so only the REAL key
+    // this schema actually has is ever added.
+    for (const mustKey of ['item_highlights', 'title_differentiation', 'model_name', 'special_feature', 'fabric_type', 'care_instructions', 'theme', 'shirt_form_type',
+      'apparel_fabric_stretch', 'fabric_stretch', 'fit_to_size', 'fit_to_size_sentiment', 'size_to_size_recommendation']) {
       if (!out.some((o) => o.key === mustKey) && Object.prototype.hasOwnProperty.call(props, mustKey)) {
         const sub = props[mustKey]
         const enumDef = extractEnum(sub)

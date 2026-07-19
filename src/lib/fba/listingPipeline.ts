@@ -5898,12 +5898,16 @@ function scrubFitClaims(s: string, fit: string): string {
 // OUTRANK the features-audit's keyword-derived guess. Bootstrapped with Comfort Colors (PO-confirmed:
 // CC1717 = relaxed / midweight 6.1oz / garment-dyed / crew / short-sleeve). Extend as the seller confirms
 // each blank; an UNLISTED blank simply falls back to the current guess (no regression).
-interface BlankSpec { brand?: string; fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string }
+// `stretch` / `fitToSize` (2026-07-19, PO) feed Amazon's "Apparel Fabric Stretch" + "Fit to Size Sentiment"
+// attributes — richer than our binary `fabric_stretchability` (Non-stretchable/Stretchable): CC1717's
+// garment-dyed ring-spun cotton is genuinely LOW stretch (not zero) and runs slightly small. Both are
+// product FACTS, so they ground here rather than being guessed from the search pool.
+interface BlankSpec { brand?: string; fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string; stretch?: string; fitToSize?: string }
 const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
   // `brand` is the AUTHORITATIVE display casing. attributePin is derived from a lowercase SEARCH keyphrase
   // ("comfort colors shirt"), so it can NEVER supply correct casing — grounding brand identity in the search
   // pool is the spec-vs-search-grounding mistake. The shopper-facing brand comes from here.
-  { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed' } },
+  { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed', stretch: 'Low Stretch', fitToSize: 'Runs Slightly Small' } },
 ]
 function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec | null {
   const hay = sources.filter(Boolean).join(' ')
@@ -7788,6 +7792,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // right ("Crew Neck") and force-setting it would mislabel a rare Comfort Colors V-neck the title omits.
     overrideField(/\bfit\b/i, blankSpec.fit)
     overrideField(/sleeve/i, blankSpec.sleeve)
+    // Apparel Fabric Stretch + Fit to Size Sentiment (2026-07-19, PO): ground these to the blank's real
+    // spec instead of an LLM guess. NOTE the precise regexes — /fabric stretch\b/i matches Amazon's
+    // "Apparel Fabric Stretch" but NOT our existing binary "Fabric Stretchability" (\b fails before
+    // "ability"), so the Non-stretchable/Stretchable attribute is left exactly as-is; and /fit\s*to\s*size/i
+    // can't collide with "Fit Type". Values are enum-coerced against the LIVE schema downstream, so a
+    // casing/member mismatch surfaces as enum_accepted rather than a bad push.
+    overrideField(/fabric stretch\b/i, blankSpec.stretch)
+    overrideField(/fit\s*to\s*size/i, blankSpec.fitToSize)
   }
   // FLAG-AND-FIX rows for catalog blank-boilerplate (PO: "our system needs to FLAG and
   // recommend a FIX — that's why we have the product features optimizer"). Each garment-
