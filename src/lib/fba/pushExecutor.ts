@@ -40,6 +40,7 @@ import {
   resolveDetailAttribute, unpushableReason,
   buildDetailPatchValue, currentDetailValue, normalizeFieldName, detailValueToString,
   setItemHighlightsApiState, isItemHighlightsField,
+  isItemHighlightTitleTooLongError, ITEM_HIGHLIGHT_TITLE_TOO_LONG_MSG,
   isSingleDesignOnlyKey, SINGLE_DESIGN_ONLY_LEAK_REASON,
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
@@ -2860,7 +2861,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               // instead of leaving the seller to decode Amazon's "refer to the tool tip".
               const friendlyErr = preview.error && /currently unsupported/i.test(preview.error)
                 ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (full launch July 27, 2026). The value is generated and saved; push it again once Amazon enables the field.`
-                : preview.error
+                // Amazon 100476 on Item Highlights = this SKU's LIVE title is >75 chars (per-SKU, not the
+                // pre-launch wall). Ground truth from Amazon itself — our cached title length can be stale.
+                // Say the real remedy instead of leaking the raw code (which the auto-heal cron then retried
+                // every ~25min for 24h+ on B0FKKN8XKV without ever explaining why).
+                : isItemHighlightsField(null, ctx.attribute.spApiKey) && isItemHighlightTitleTooLongError(preview.error)
+                  ? ITEM_HIGHLIGHT_TITLE_TOO_LONG_MSG
+                  : preview.error
               // Belt-and-suspenders self-heal: a live "currently unsupported" on the Item Highlights
               // field is ground truth → persist blocked. Guarded by isItemHighlightsField so the same
               // generic error on some OTHER attribute never touches the IH flag.
@@ -3813,7 +3820,10 @@ async function pushPerFieldFallback(
     if (!preview.ok) {
       const friendly = preview.error && /currently unsupported/i.test(preview.error)
         ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (launch July 27, 2026).`
-        : preview.error
+        // PARITY with the single-attribute IH site: Amazon 100476 = this SKU's live title is >75 chars.
+        : isItemHighlightsField(null, p.attribute.spApiKey) && isItemHighlightTitleTooLongError(preview.error)
+          ? ITEM_HIGHLIGHT_TITLE_TOO_LONG_MSG
+          : preview.error
       // Belt-and-suspenders self-heal: a live "currently unsupported" on the Item Highlights field is
       // ground truth → persist blocked (guarded so another attribute's same error can't flip the flag).
       if (isItemHighlightsField(null, p.attribute.spApiKey) &&

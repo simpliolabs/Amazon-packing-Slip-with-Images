@@ -259,6 +259,24 @@ export function isItemHighlightsField(
   return f === 'itemhighlight' || f === 'itemhighlights' || f === 'titledifferentiation'
 }
 
+/** Amazon error 100476 — "Provide an Item Name that is 75 characters or less to use Item Highlights".
+ *  Item Highlights only render beside a SHORT title, so Amazon REFUSES the write while the listing's live
+ *  item_name exceeds 75 chars. This is a DIFFERENT condition from the marketplace-wide pre-launch wall
+ *  (isWriteBlockedPreLaunch / "currently unsupported"): it is PER-SKU and self-clears the moment a ≤75
+ *  title is live on that SKU.
+ *
+ *  WHY THIS IS THE GROUND TRUTH (2026-07-19, B0FKKN8XKV): a pre-emptive gate on our OWN cached title can
+ *  NOT catch this — our listing_content cache said 73 chars while Amazon rejected the write, i.e. the live
+ *  item_name had diverged from the cache. Amazon's own 100476 is the only reliable signal, so we classify
+ *  IT (and let the caller self-heal by pushing the ≤75 title) instead of trusting a stale local length. */
+export function isItemHighlightTitleTooLongError(err: string | null | undefined): boolean {
+  return !!err && /\b100476\b|item name that is 75 characters or less/i.test(err)
+}
+
+/** The remedy text shown in place of Amazon's raw code. Shared so both IH write sites say the same thing. */
+export const ITEM_HIGHLIGHT_TITLE_TOO_LONG_MSG =
+  "Amazon rejects Item Highlights while this SKU's live title is over 75 characters (error 100476). Push the optimized ≤75 title to this SKU first, then re-push the highlight — the block clears automatically once the short title is live."
+
 export const ITEM_HIGHLIGHTS_STATE_KEY = 'item_highlights_api_state'
 
 /** Persisted probe result. `supported` is the marketplace-wide verdict; `probed_at` throttles refresh. */
