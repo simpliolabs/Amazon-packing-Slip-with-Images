@@ -1151,7 +1151,12 @@ const normHighlightToken = (t: string): string => {
  *  trademark gate only fires if a mark somehow survives the scrub. */
 export function validateItemHighlights(s: string, brandName: string, capacityFamily: boolean): string[] {
   const problems: string[] = []
-  if (s.length > 125) problems.push(`${s.length} characters — the hard limit is 125`)
+  // PO 2026-07-19: Item Highlights must be SHORT feature/benefit phrases (≤75 chars total), NOT a full
+  // sentence — Amazon's field shows next to a ≤75-char title. Was a 125-char budget, which produced a
+  // ~120-char comma-sentence live (B0FKKN8XKV). Cap 75 + ban sentence punctuation so the corrective-retry
+  // loop + the deterministic fallback both converge on short phrases.
+  if (s.length > 75) problems.push(`${s.length} characters — keep it ≤75; short feature/benefit phrases, not a sentence`)
+  if (/[.!?](\s|$)/.test(s)) problems.push('reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)')
   const counts = new Map<string, number>()
   for (const t of highlightTokens(s)) {
     if (HIGHLIGHT_STOPWORDS.has(t)) continue
@@ -1221,7 +1226,7 @@ export function buildHighlightsFallback(
     if (new Set(toks).size !== toks.length) continue          // repeats a word within itself
     if (toks.some((t) => used.has(t))) continue               // would repeat an earlier phrase's word — drop it
     const next = phrases.length ? len + 2 + p.length : p.length
-    if (next > 125) continue
+    if (next > 75) continue   // PO 2026-07-19: Item Highlights ≤75 chars (short phrases, not a sentence)
     toks.forEach((t) => used.add(t))
     phrases.push(p)
     len = next
@@ -1251,14 +1256,15 @@ export async function buildItemHighlights(
       && !(capacityFamily && CAPACITY_RE.test(kw)))
     .slice(0, 3)
 
-  // The PO's rules, verbatim, as the brief's spine.
-  const system = 'You write the Amazon "Item Highlights" field — a short CUSTOMER-FACING line shown near the title. It is NOT backend keywords. '
-    + 'Item Highlights must read like human-friendly phrases highlighting MATERIAL, FIT, FEATURES, USE-CASES. Format: short comma-separated phrases. '
-    + 'Rules: do not repeat words, no pricing/promotions, maximum 125 characters. '
-    + 'Good example: "100% breathable cotton, custom name & number printing, tailored athletic fit for men. Great for World Soccer Cup matches." '
-    + 'HARD RULES: express the product\'s real material/fit/features plus at most ONE use-case phrase; NEVER output a list of search keywords; '
-    + 'no word may appear twice (trivial connectors like for/and/the/a/of/with/in/to are fine); 125 characters maximum; no prices, promotions or discount language; '
-    + 'no third-party brand names, sports teams, leagues or franchises; at least 2 comma-separated phrases. '
+  // The PO's rules (2026-07-19), verbatim, as the brief's spine: ≤75 chars, short feature/benefit PHRASES
+  // (NOT a full sentence), and do NOT repeat what the title already says (add NEW info — fabric/fit/feel/care).
+  const system = 'You write the Amazon "Item Highlights" field — a short CUSTOMER-FACING line shown next to the title (only when the title is under 75 characters). It is NOT backend keywords and NOT a sentence. '
+    + 'Output 2-3 SHORT feature/benefit PHRASES about MATERIAL, FIT, FEEL, and at most ONE USE-CASE — comma-separated. '
+    + 'HARD RULES: 75 characters MAXIMUM total (aim 65-75); phrases NOT a sentence — NO periods or other sentence punctuation (. ! ?); '
+    + 'do NOT repeat the design, theme, niche, or product-type words already in the title — the title already says those; add NEW info the title lacks (fabric, fit, feel, care); '
+    + 'no word may appear twice (trivial connectors like for/and/the/a/of/with/in/to are fine); NEVER output a list of search keywords; '
+    + 'no prices, promotions or discount language; no third-party brand names, sports teams, leagues or franchises; at least 2 comma-separated phrases. '
+    + 'Good example (63 chars): "100% cotton fabric, relaxed crew-neck fit, soft everyday comfort". '
     + 'Return ONLY the Item Highlights string — no quotes, no explanation.'
   const user = [
     'Product facts:',
@@ -1283,7 +1289,7 @@ export async function buildItemHighlights(
             { role: 'user' as const, content: corrective ? `${user}\n\n${corrective}` : user },
           ],
           temperature: 0.4,
-          max_tokens: 120,
+          max_tokens: 40,   // ≤75 chars of output — cannot spill into a long sentence
         },
         { timeout: 15_000, maxRetries: 0 },
       )

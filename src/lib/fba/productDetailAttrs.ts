@@ -217,7 +217,19 @@ export function capItemHighlightRepeats(value: string): string {
     for (const [w, c] of local) counts.set(w, (counts.get(w) ?? 0) + c)
     kept.push(phrase)
   }
-  return kept.join(', ') || value.split(',')[0]?.trim() || value
+  // TERMINAL LENGTH NET (PO 2026-07-19): Item Highlights must stay ≤75 chars (short feature/benefit phrases,
+  // not a full sentence). This runs at the PUSH boundary (buildDetailPatchValue) + every generator return +
+  // the regen route, so a stale/LLM/stored ~120-char value is truncated to ≤75 at a COMMA boundary (never
+  // mid-word) even if it never went through the ≤75 generator gate. Always keeps ≥1 phrase (never blanks).
+  const capped: string[] = []
+  let len = 0
+  for (const p of kept) {
+    const next = capped.length ? len + 2 + p.length : p.length
+    if (next > 75 && capped.length >= 1) break
+    capped.push(p); len = next
+  }
+  const finalPhrases = capped.length ? capped : kept.slice(0, 1)
+  return finalPhrases.join(', ') || value.split(',')[0]?.trim() || value
 }
 
 export function buildDetailPatchValue(
