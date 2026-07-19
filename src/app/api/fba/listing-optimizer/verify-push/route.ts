@@ -30,6 +30,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { isPushField, resolveProposed, asCompare, cacheUpdateFor, squashEquals, type PushField } from '@/lib/fba/pushFields'
 import { rescoreParentFromCache } from '@/lib/fba/pushExecutor'
+import { spApiReadBucket } from '@/lib/fba/spApiRateLimiter'
 
 // VerifyField broadens PushField to include 'details', which the verify route
 // supports too. pushFields.ts deliberately keeps PushField narrow (the four built-in
@@ -67,6 +68,7 @@ async function getListing(sellerId: string, token: string, sku: string): Promise
   // to 3 attempts; null only after all fail — the caller buckets that as "couldn't read", NOT stale.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
+      await spApiReadBucket.acquire()   // global 5-rps read ceiling so concurrent verifies (4 employees) can't get throttled (task #23)
       const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
       if (resp.ok) return (await resp.json()) as LiveListing
       // 4xx other than 429 (e.g. a genuine 404) won't fix on retry — give up now.

@@ -57,3 +57,8 @@ class TokenBucket {
 
 /** patchListingsItem (all live writes: single field, bulk details, bulk core, heal, verify re-push). */
 export const spApiWriteBucket = new TokenBucket(5, 5)
+
+/** getListingsItem (verify-on-Amazon reads). A SEPARATE per-operation bucket — Amazon meters reads and
+ *  writes independently, so verifies run in parallel with pushes yet concurrent verifies (4 employees)
+ *  can't collectively exceed 5 read rps → no more "Amazon throttled the check / couldn't read". */
+export const spApiReadBucket = new TokenBucket(5, 5)
