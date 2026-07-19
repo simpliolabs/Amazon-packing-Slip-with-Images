@@ -342,6 +342,27 @@ interface ScoringContext {
   /** KeywordPlan (#92) — the real extractDesignName output ('' for generic/non-apparel). The scorer docks a
    *  section that drops the design name the title anchors. From the plan, NOT a capacity-unsafe title heuristic. */
   planDesignName?: string
+  /** Hard audience lean ('male'|'female') persisted on the score row — null for soft-lean/unisex/unset. Threaded
+   *  so the bullet-dock in scoreListingContent excludes opposite-gender keywords the generator REFUSES to weave,
+   *  in parity with the keyword-gap counter (the live B0FKJW57H7 fix: bullets were docked -6 for 3 mens keywords
+   *  in keyword_plan.bullets on a hard-Female listing — an unfixable dock the counter already skipped). */
+  hardLean?: 'male' | 'female' | null
+}
+
+// AUDIENCE-LEAN opposite-gender predicate — SHARED by BOTH scorer paths (the keyword-gap counter in
+// fetchScoringContext AND the bullet-dock in scoreListingContent) so they can never diverge. Under a HARD
+// male/female lean the generator strips opposite-gender keywords everywhere, so counting a "…for men" term as
+// a gap on a Female listing docks the seller for obeying their own selection — an unfixable dock (live:
+// B0FKJW57H7 bullets pinned at 19/25 for 3 mens keywords the Female copy will never carry). lean_*/unisex/null
+// → no-op (cross-gender traffic is the point of a soft lean). KEEP IN SYNC with the FEM/MASC regexes in
+// listingPipeline + rankAnalysis.
+const LEAN_FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
+const LEAN_MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
+function leanExcludesKeyword(kw: string, hardLean: 'male' | 'female' | null | undefined): boolean {
+  if (hardLean !== 'male' && hardLean !== 'female') return false
+  return hardLean === 'female'
+    ? (LEAN_MASC_RE.test(kw) && !LEAN_FEM_RE.test(kw))
+    : (LEAN_FEM_RE.test(kw) && !LEAN_MASC_RE.test(kw))
 }
 
 /**
@@ -431,6 +452,17 @@ export async function fetchScoringContext(
     productDetailsGaps: 0, hasAiRecommendations: false,
   }
 
+  // AUDIENCE-LEAN (hard male/female) — read ONCE here, independent of keyword_analysis presence, so BOTH the
+  // keyword-gap counter below AND the bullet-dock in scoreListingContent (via ctx.hardLean) exclude
+  // opposite-gender keywords. A plan-only listing (keyword_plan.bullets present but no keyword_analysis row)
+  // still needs it. select('*') — the audience_lean column (migration 029) may be absent on old DBs.
+  try {
+    const { data: leanRow } = await supabase
+      .from('listing_seo_scores').select('*').eq('parent_asin', parentAsin).maybeSingle()
+    const al = (leanRow as { audience_lean?: string | null } | null)?.audience_lean
+    if (al === 'male' || al === 'female') ctx.hardLean = al
+  } catch { /* audience_lean column absent (pre-migration) — no lean guard */ }
+
   // 1. Resolve the correct child ASIN that has keyword_analysis data.
   // COVERAGE_CORE (Invariant 2): at =on, resolve the CONTENT child (resolveToChildAsin) and seed the
   // keyword-set resolver with it, so the keyword SET and the coverage HAYSTACK are about the SAME child
@@ -498,21 +530,9 @@ export async function fetchScoringContext(
         // message literally naming a mens keyword on a Female run). Skip them from gap
         // counting under hard leans; lean_*/unisex unaffected. KEEP IN SYNC with the
         // FEM/MASC regexes in listingPipeline. Best-effort read — missing column = no guard.
-        let hardLean: 'male' | 'female' | null = null
-        try {
-          const { data: leanRow } = await supabase
-            .from('listing_seo_scores').select('*').eq('parent_asin', parentAsin).maybeSingle()
-          const al = (leanRow as { audience_lean?: string | null } | null)?.audience_lean
-          if (al === 'male' || al === 'female') hardLean = al
-        } catch { /* no guard */ }
-        const FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
-        const MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
-        const leanExcluded = (kw: string): boolean => {
-          if (!hardLean) return false
-          return hardLean === 'female'
-            ? (MASC_RE.test(kw) && !FEM_RE.test(kw))
-            : (FEM_RE.test(kw) && !MASC_RE.test(kw))
-        }
+        // hardLean read ONCE at the top of fetchScoringContext (ctx.hardLean) — shared with the bullet-dock
+        // so the two paths can never disagree. The shared leanExcludesKeyword predicate is the SAME one.
+        const leanExcluded = (kw: string): boolean => leanExcludesKeyword(kw, ctx.hardLean)
         // OFF-NICHE guard (2026-07-14, B0FRYMM56C): the researcher pulled wrong-niche keywords into a
         // golf SHIRT's CRITICAL/UPGRADE set — golf-EQUIPMENT pegs ("martini golf tees"), competitor
         // BLANK brands ("gildan t shirts"), wholesale intent ("plain t shirts"), activewear ("oversized
@@ -914,6 +934,12 @@ export function scoreListingContent(
      // non-apparel goods) from a pre-guard research run — the copy must never weave those, so never
      // dock for them. Same predicate as fetchScoringContext + rank; own-brand/activewear kept via ctx.
      .filter((k) => !apparel || !isOffNicheKeyword(k, { context: [title, ...bullets, representativeContent.backend_keywords || ''].join(' ') }))
+     // AUDIENCE-LEAN sibling of the capacity/color/off-niche guards: under a HARD male/female lean the
+     // generator refuses opposite-gender keywords, so the shared broadcast bullets can never carry a
+     // "…for men" term on a Female listing — an unfixable dock. PARITY with the keyword-gap counter, which
+     // already skips these via the SAME leanExcludesKeyword predicate (the live B0FKJW57H7 fix: bullets were
+     // pinned at 19/25 for 3 mens keywords in keyword_plan.bullets that a Female listing will never weave).
+     .filter((k) => !leanExcludesKeyword(k, scoringCtx.hardLean))
     if (bulletOppKw.length > 0) {
       // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
       // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
