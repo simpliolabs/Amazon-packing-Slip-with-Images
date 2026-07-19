@@ -368,6 +368,9 @@ export default function ListingDetailPage() {
   // Cancel support for a streaming push: the token travels with the push body; Stop POSTs it back.
   const pushCancelTokenRef = useRef<string | null>(null)
   const bulkCancelTokenRef = useRef<string | null>(null)
+  // The push_jobs row id of the CURRENTLY-running flag-on bulk push (Auto Push OR Ship-all-core — only
+  // one runs at a time), so the Stop button can cancel the durable job via POST push-jobs {action:cancel,id}.
+  const activeBulkJobIdRef = useRef<string | null>(null)
   // True when the stream ended without a clean result (interrupted/timeout) — the modal header
   // shows "Interrupted" instead of "Complete" so the seller isn't told the push finished when it didn't.
   const bulkStreamInterruptedRef = useRef(false)
@@ -1728,7 +1731,7 @@ export default function ListingDetailPage() {
    *  driving the progress bar off the REAL DB row (not an optimistic client counter — that divergence is
    *  what showed SKUs "complete" that reverted on refresh). Survives tab-close + deploys; serialized with
    *  every other push under the global 5-rps bucket. Shared by Auto Push (details) and Ship-all-core. */
-  const runBulkViaQueue = useCallback(async (bulkBody: { field: 'details_bulk' | 'core_bulk'; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[] }, setProgress: (p: { done: number; total: number }) => void): Promise<{ ok: boolean; note: string }> => {
+  const runBulkViaQueue = useCallback(async (bulkBody: { field: 'details_bulk' | 'core_bulk'; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[] }, setProgress: (p: { done: number; total: number }) => void): Promise<{ ok: boolean; note: string; perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[] }> => {
     try {
       const token = await getToken()
       const resp = await fetch('/api/fba/push-jobs', {
@@ -1737,25 +1740,36 @@ export default function ListingDetailPage() {
       })
       const data = await resp.json() as { id?: string; error?: string }
       if (!resp.ok || !data.id) throw new Error(data.error || 'Failed to queue the push')
-      window.dispatchEvent(new Event('push-jobs-changed'))   // show it in the global status bar immediately
       const jobId = data.id
-      // Poll the real row to a terminal state. Transient fetch errors just retry — the server keeps pushing.
-      for (;;) {
-        await new Promise((r) => setTimeout(r, 2000))
-        let row: { status?: string; accepted?: number; failed?: number; total?: number; message?: string } | undefined
-        try {
-          const gr = await fetch(`/api/fba/push-jobs?parent_asin=${asin}`, { cache: 'no-store' })
-          const gd = await gr.json() as { jobs?: ({ id: string; status?: string; accepted?: number; failed?: number; total?: number; message?: string })[] }
-          row = (gd.jobs ?? []).find((j) => j.id === jobId)
-        } catch { continue }
-        if (!row) continue
-        setProgress({ done: (row.accepted ?? 0) + (row.failed ?? 0), total: row.total ?? 0 })
-        if (row.status === 'done' || row.status === 'failed' || row.status === 'interrupted') {
-          const ok = row.status === 'done'
-          return { ok, note: ok ? (row.message || 'Pushed to all SKUs.')
-            : 'Interrupted — already-accepted SKUs stay pushed; re-run to finish the rest (idempotent). Verify live to confirm.' }
+      activeBulkJobIdRef.current = jobId   // so Stop can cancel THIS durable job
+      window.dispatchEvent(new Event('push-jobs-changed'))   // show it in the global status bar immediately
+      // Wall-clock cap ABOVE the server's 30-min ceiling so the poll always terminates (a stuck 'running'
+      // row can't spin the modal forever). Poll BY ID so the target never falls out of a newest-N window.
+      const deadline = Date.now() + 40 * 60_000
+      try {
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 2000))
+          if (Date.now() > deadline) return { ok: false, note: 'Still running after 40 min — check the status bar or Verify live.' }
+          let row: { status?: string; accepted?: number; failed?: number; total?: number; message?: string; progress?: { type?: string; perField?: { field: string; accepted: number; failed: number; skippedReason?: string }[] }[] } | undefined
+          try {
+            const gr = await fetch(`/api/fba/push-jobs?id=${jobId}`, { cache: 'no-store' })
+            const gd = await gr.json() as { jobs?: (NonNullable<typeof row> & { id: string })[] }
+            row = (gd.jobs ?? [])[0]
+          } catch { continue }
+          if (!row) continue
+          if (row.status === 'done' || row.status === 'failed' || row.status === 'interrupted') {
+            const ok = row.status === 'done'
+            // Snap the bar to 100% on success (skipped/already-correct SKUs otherwise leave it short of total).
+            setProgress({ done: ok ? (row.total ?? 0) : (row.accepted ?? 0) + (row.failed ?? 0), total: row.total ?? 0 })
+            // Per-field truth from the 'result' event in the progress tail — so a field rejected on all SKUs
+            // shows failed instead of a blanket green ✓.
+            const result = [...(row.progress ?? [])].reverse().find((e) => e?.type === 'result')
+            return { ok, perField: result?.perField, note: ok ? (row.message || 'Pushed to all SKUs.')
+              : 'Interrupted — already-accepted SKUs stay pushed; re-run to finish the rest (idempotent). Verify live to confirm.' }
+          }
+          setProgress({ done: (row.accepted ?? 0) + (row.failed ?? 0), total: row.total ?? 0 })
         }
-      }
+      } finally { activeBulkJobIdRef.current = null }
     } catch (e) {
       return { ok: false, note: e instanceof Error ? e.message : 'Failed to queue the push' }
     }
@@ -1781,9 +1795,23 @@ export default function ListingDetailPage() {
     if (process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on') {
       const overrides = Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value]))
       const outcome = await runBulkViaQueue({ field: 'details_bulk', detail_fields: fields, detail_overrides: overrides }, setBulkProgress)
-      setBulkItems((prev) => prev.map((it) => it.skip || it.status === 'done' || it.status === 'failed' ? it
-        : { ...it, status: outcome.ok ? 'done' : 'failed', note: outcome.note }))
-      if (outcome.ok) { anyPushed = true } else { bulkStreamInterruptedRef.current = true }
+      const pf = outcome.perField
+      if (pf && pf.length) {
+        for (const p of pf) {
+          if (p.skippedReason) { setByField(p.field, { status: 'failed', note: p.skippedReason }); continue }
+          const okF = p.failed === 0 && p.accepted > 0
+          const upToDate = p.failed === 0 && p.accepted === 0
+          if (okF) anyPushed = true
+          setByField(p.field, { status: okF || upToDate ? 'done' : 'failed', note: upToDate ? 'Already up to date on all SKUs' : `${p.accepted} pushed${p.failed ? `, ${p.failed} failed` : ''}` })
+        }
+        // Any row still pending (not in perField / interrupted before result) → reflect the aggregate outcome.
+        setBulkItems((prev) => prev.map((it) => it.skip || it.status === 'done' || it.status === 'failed' ? it : { ...it, status: outcome.ok ? 'done' : 'failed', note: outcome.note }))
+      } else {
+        // No per-field detail (interrupted before the result event) → mark every pending row by the aggregate.
+        setBulkItems((prev) => prev.map((it) => it.skip || it.status === 'done' || it.status === 'failed' ? it : { ...it, status: outcome.ok ? 'done' : 'failed', note: outcome.note }))
+        if (outcome.ok) anyPushed = true
+      }
+      if (!outcome.ok) bulkStreamInterruptedRef.current = true
       if (anyPushed) { try { const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' }); const sdata = await sresp.json(); const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin); if (found) setScore(found) } catch { /* best-effort */ } }
       bulkCancelTokenRef.current = null
       setBulkRunning(false)
@@ -1896,16 +1924,27 @@ export default function ListingDetailPage() {
 
   /** Stop a running Auto Push between SKUs (same server cancel as the single-push Stop). */
   const stopBulkPush = useCallback(async () => {
+    setCancelRequested(true)
+    // Flag-on: the push is a DURABLE job → cancel it via push-jobs {action:'cancel', id} (the streaming
+    // cancel_token means nothing to a background job). The runner's heartbeat reads cancel_requested and
+    // stops the SKU loop; already-accepted SKUs stay on Amazon.
+    const jobId = activeBulkJobIdRef.current
+    if (jobId) {
+      try {
+        const t = await getToken()
+        await fetch('/api/fba/push-jobs', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) }, body: JSON.stringify({ action: 'cancel', id: jobId }) })
+      } catch { /* the runner also stops when it next reads the flag */ }
+      return
+    }
     const token = bulkCancelTokenRef.current
     if (!token) return
-    setCancelRequested(true)
     try {
       await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'cancel', cancel_token: token }),
       })
     } catch { /* the run still stops between SKUs on its own if the flag landed */ }
-  }, [])
+  }, [getToken])
 
   /** "Ship all confirmed core": Title + Bullets + Description + Keywords in ONE PATCH per SKU via the
    *  core_bulk executor. Cloned from runBulkPush — same NDJSON stream reader + stall watchdog. On a
@@ -1932,6 +1971,7 @@ export default function ListingDetailPage() {
     if (process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on') {
       const outcome = await runBulkViaQueue({ field: 'core_bulk', core_fields: ['title', 'bullets', 'description', 'keywords'] }, setCoreBulkProgress)
       setCoreBulkMessage(outcome.note)
+      setCoreBulkPerField(outcome.perField ?? [])
       if (!outcome.ok) coreBulkInterruptedRef.current = true
       else {
         try {
@@ -2038,16 +2078,25 @@ export default function ListingDetailPage() {
 
   /** Stop a running Ship-all-core between SKUs (same server cancel as the other pushes). */
   const stopCoreBulkPush = useCallback(async () => {
+    setCancelRequested(true)
+    // Flag-on: cancel the durable job (same as stopBulkPush — only one bulk job runs at a time).
+    const jobId = activeBulkJobIdRef.current
+    if (jobId) {
+      try {
+        const t = await getToken()
+        await fetch('/api/fba/push-jobs', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) }, body: JSON.stringify({ action: 'cancel', id: jobId }) })
+      } catch { /* the runner also stops when it next reads the flag */ }
+      return
+    }
     const token = coreBulkCancelTokenRef.current
     if (!token) return
-    setCancelRequested(true)
     try {
       await fetch('/api/fba/listing-optimizer/push-content', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'cancel', cancel_token: token }),
       })
     } catch { /* the run still stops between SKUs on its own if the flag landed */ }
-  }, [])
+  }, [getToken])
 
   /** Verify what Amazon ACTUALLY has live right now for the just-pushed field.
    *  Useful when a push was Accepted but the seller doesn't see it on Seller Central

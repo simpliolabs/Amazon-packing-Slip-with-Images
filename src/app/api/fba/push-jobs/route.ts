@@ -107,12 +107,18 @@ export async function GET(req: NextRequest) {
   try { await markStaleJobs() } catch { /* best-effort */ }
   try { await kickQueuedJobs() } catch { /* best-effort */ }
 
+  const jobId = url.searchParams.get('id')
   const supabase = await createAdminClient()
   let q = supabase
     .from('push_jobs')
-    .select('id, parent_asin, field, detail_field, status, total, accepted, failed, message, created_at, started_at, finished_at')
+    // `progress` carries the tail events incl. the bulk 'result' (per-field accepted/failed) that the
+    // flag-on modal poll maps back onto the field rows — without it a rejected field renders green.
+    .select('id, parent_asin, field, detail_field, status, total, accepted, failed, message, progress, created_at, started_at, finished_at')
     .order('created_at', { ascending: false })
     .limit(20)
+  // Poll-by-id (the modal): match the exact job regardless of how many newer rows exist for the parent
+  // (a parent-only, newest-20 filter would drop the target once ≥20 newer jobs appear → an infinite poll).
+  if (jobId) q = q.eq('id', jobId)
   if (activeOnly) {
     // Active = anything in flight, plus jobs that finished in the last 2 minutes so
     // the status bar can show the final state briefly before the entry fades.
