@@ -7284,15 +7284,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const k = normalizeSeedKey(s); if (k) overflowKeys.add(k)
     }
     const seen = new Set<string>()
+    let poolHits = 0, rawKw = 0
     for (const k of overflowKeys) {
       if (!k) continue
       const sp = await getSeedPool(k)
       if (!sp) continue
+      poolHits++; rawKw += sp.keywords.length
       for (const kw of [...sp.keywords].sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0)).slice(0, 30)) {
         const s = scrubTrademarks(kw.keyword).trim().toLowerCase()
         if (s && !seen.has(s) && findTrademarkPhrases(s).length === 0 && notOffNiche(s) && !isForeignKeyword(s)) { seen.add(s); backendSeedExtras.push(s) }
       }
     }
+    // TEMP DIAGNOSTIC (2026-07-18) — surface WHY the single-design backend stays short: inert key match
+    // (poolHits=0) vs thin niche universe (poolHits>0 but few clean terms). Emitted to the SSE stream.
+    onProgress(`[DIAG] backend universal-pool: keys=${overflowKeys.size} [${[...overflowKeys].join(' | ')}] poolHits=${poolHits} rawKw=${rawKw} cleanExtras=${backendSeedExtras.length}`)
     if (backendSeedExtras.length) console.log(`[BACKEND] universal-pool overflow: +${backendSeedExtras.length} phrases from ${overflowKeys.size} universe key(s) [${[...overflowKeys].join(', ')}]`)
   } catch (e) { console.warn('[BACKEND] universal-pool overflow failed (non-fatal):', e instanceof Error ? e.message : e) }
   // The backend fill's overflow keyword list = the listing's own pool THEN the shared universal pool.
