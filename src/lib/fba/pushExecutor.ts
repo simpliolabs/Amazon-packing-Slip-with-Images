@@ -28,6 +28,7 @@
  */
 
 import { createAdminClient } from '@/lib/supabase/server'
+import { spApiWriteBucket } from '@/lib/fba/spApiRateLimiter'
 import { reconcileFamilyChildren } from '@/lib/fba/familyReconcile'
 import { getAccessToken } from '@/lib/amazon/auth'
 import {
@@ -947,6 +948,7 @@ async function patchSku(
   sellerId: string, token: string, productType: string, sku: string,
   attribute: string, value: string | string[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
 ): Promise<PatchResult> {
+  await spApiWriteBucket.acquire()   // global 5-rps ceiling across ALL writers (task #23) — 1 token per patchListingsItem call
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute}`, value: buildPatchValue(value, MARKETPLACE_ID) }],
@@ -979,6 +981,7 @@ async function patchSkuDetail(
   /** Calibrated patch value (a specific write-form variant) — overrides the builders. */
   patchValue?: Record<string, unknown>[],
 ): Promise<PatchResult> {
+  await spApiWriteBucket.acquire()   // global 5-rps ceiling (task #23)
   const body = {
     productType,
     patches: [{ op: 'replace', path: `/attributes/${attribute.spApiKey}`,
@@ -2399,6 +2402,7 @@ async function patchSkuMulti(
   mode: 'VALIDATION_PREVIEW' | 'LIVE',
 ): Promise<PatchResult> {
   if (ops.length === 0) return { ok: true, submissionId: null }
+  await spApiWriteBucket.acquire()   // global 5-rps ceiling (task #23) — after the no-op guard
   const body = { productType, patches: ops }
   const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
   const url =

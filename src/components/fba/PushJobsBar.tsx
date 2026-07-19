@@ -25,6 +25,7 @@ interface JobEntry {
 
 const FIELD_LABEL: Record<string, string> = {
   title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords',
+  details_bulk: 'Auto Push (details)', core_bulk: 'Ship all core',
 }
 
 function jobLabel(j: JobEntry): string {

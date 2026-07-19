@@ -1724,6 +1724,43 @@ export default function ListingDetailPage() {
    *  multi-attribute PATCH) — ~7× fewer Amazon calls than field-at-a-time. The server batches
    *  the changed fields per SKU and falls back to per-field for any SKU whose batch is rejected,
    *  so failure isolation is preserved. We map the final per-field tally back onto the rows. */
+  /** DURABLE QUEUE (flag PUSH_QUEUE_ALL): enqueue a bulk push_jobs row and POLL it to a terminal state,
+   *  driving the progress bar off the REAL DB row (not an optimistic client counter — that divergence is
+   *  what showed SKUs "complete" that reverted on refresh). Survives tab-close + deploys; serialized with
+   *  every other push under the global 5-rps bucket. Shared by Auto Push (details) and Ship-all-core. */
+  const runBulkViaQueue = useCallback(async (bulkBody: { field: 'details_bulk' | 'core_bulk'; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[] }, setProgress: (p: { done: number; total: number }) => void): Promise<{ ok: boolean; note: string }> => {
+    try {
+      const token = await getToken()
+      const resp = await fetch('/api/fba/push-jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ parent_asin: asin, confirm: true, ...bulkBody }),
+      })
+      const data = await resp.json() as { id?: string; error?: string }
+      if (!resp.ok || !data.id) throw new Error(data.error || 'Failed to queue the push')
+      window.dispatchEvent(new Event('push-jobs-changed'))   // show it in the global status bar immediately
+      const jobId = data.id
+      // Poll the real row to a terminal state. Transient fetch errors just retry — the server keeps pushing.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2000))
+        let row: { status?: string; accepted?: number; failed?: number; total?: number; message?: string } | undefined
+        try {
+          const gr = await fetch(`/api/fba/push-jobs?parent_asin=${asin}`, { cache: 'no-store' })
+          const gd = await gr.json() as { jobs?: ({ id: string; status?: string; accepted?: number; failed?: number; total?: number; message?: string })[] }
+          row = (gd.jobs ?? []).find((j) => j.id === jobId)
+        } catch { continue }
+        if (!row) continue
+        setProgress({ done: (row.accepted ?? 0) + (row.failed ?? 0), total: row.total ?? 0 })
+        if (row.status === 'done' || row.status === 'failed' || row.status === 'interrupted') {
+          const ok = row.status === 'done'
+          return { ok, note: ok ? (row.message || 'Pushed to all SKUs.')
+            : 'Interrupted — already-accepted SKUs stay pushed; re-run to finish the rest (idempotent). Verify live to confirm.' }
+        }
+      }
+    } catch (e) {
+      return { ok: false, note: e instanceof Error ? e.message : 'Failed to queue the push' }
+    }
+  }, [asin, getToken])
+
   const runBulkPush = useCallback(async () => {
     if (bulkRunning) return
     setBulkRunning(true)
@@ -1738,6 +1775,21 @@ export default function ListingDetailPage() {
     setBulkProgress({ done: 0, total: 0 })
     bulkStreamInterruptedRef.current = false
     let anyPushed = false
+    // ── DURABLE QUEUE PATH (flag PUSH_QUEUE_ALL) — enqueue a durable push_jobs row + POLL it instead of
+    //    streaming, so the push survives tab-close/deploys and serializes with every other employee's
+    //    pushes under the global 5-rps bucket (no more mid-stream drop). Flag OFF = today's streaming path.
+    if (process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on') {
+      const overrides = Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value]))
+      const outcome = await runBulkViaQueue({ field: 'details_bulk', detail_fields: fields, detail_overrides: overrides }, setBulkProgress)
+      setBulkItems((prev) => prev.map((it) => it.skip || it.status === 'done' || it.status === 'failed' ? it
+        : { ...it, status: outcome.ok ? 'done' : 'failed', note: outcome.note }))
+      if (outcome.ok) { anyPushed = true } else { bulkStreamInterruptedRef.current = true }
+      if (anyPushed) { try { const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' }); const sdata = await sresp.json(); const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin); if (found) setScore(found) } catch { /* best-effort */ } }
+      bulkCancelTokenRef.current = null
+      setBulkRunning(false)
+      setBulkFinished(true)
+      return
+    }
     try {
       const token = await getToken()
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
@@ -1840,7 +1892,7 @@ export default function ListingDetailPage() {
     bulkCancelTokenRef.current = null
     setBulkRunning(false)
     setBulkFinished(true)
-  }, [asin, bulkItems, bulkRunning, getToken])
+  }, [asin, bulkItems, bulkRunning, getToken, runBulkViaQueue])
 
   /** Stop a running Auto Push between SKUs (same server cancel as the single-push Stop). */
   const stopBulkPush = useCallback(async () => {
@@ -1876,6 +1928,32 @@ export default function ListingDetailPage() {
     coreBulkInterruptedRef.current = false
     setCancelRequested(false)
     let anyPushed = false
+    // ── DURABLE QUEUE PATH (flag PUSH_QUEUE_ALL) — enqueue + poll (survives drops/deploys, rate-safe).
+    if (process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on') {
+      const outcome = await runBulkViaQueue({ field: 'core_bulk', core_fields: ['title', 'bullets', 'description', 'keywords'] }, setCoreBulkProgress)
+      setCoreBulkMessage(outcome.note)
+      if (!outcome.ok) coreBulkInterruptedRef.current = true
+      else {
+        try {
+          const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+          const sdata = await sresp.json()
+          const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+          if (found) setScore(found)
+        } catch { /* best-effort */ }
+        refreshRankFree()
+        void (async () => {
+          try {
+            const rr = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
+            const jj = await rr.json() as { recommendations?: AiRecommendations | null }
+            if (jj?.recommendations) setAiRecs(jj.recommendations)
+          } catch { /* best-effort */ }
+        })()
+      }
+      coreBulkCancelTokenRef.current = null
+      setCoreBulkRunning(false)
+      setCoreBulkFinished(true)
+      return
+    }
     try {
       const token = await getToken()
       const resp = await fetch('/api/fba/listing-optimizer/push-content', {
@@ -1956,7 +2034,7 @@ export default function ListingDetailPage() {
     coreBulkCancelTokenRef.current = null
     setCoreBulkRunning(false)
     setCoreBulkFinished(true)
-  }, [asin, coreBulkRunning, getToken, refreshRankFree])
+  }, [asin, coreBulkRunning, getToken, refreshRankFree, runBulkViaQueue])
 
   /** Stop a running Ship-all-core between SKUs (same server cancel as the other pushes). */
   const stopCoreBulkPush = useCallback(async () => {

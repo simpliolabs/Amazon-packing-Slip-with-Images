@@ -20,7 +20,7 @@
  */
 
 import { createAdminClient } from '@/lib/supabase/server'
-import { executePush, executeBulkDetailsPush, executeBulkCorePush, type PushParams } from '@/lib/fba/pushExecutor'
+import { executePush, executeBulkDetailsPush, executeBulkCorePush, requestPushCancel, type PushParams } from '@/lib/fba/pushExecutor'
 
 export interface PushJobRow {
   id: string
@@ -73,8 +73,20 @@ async function runJob(jobId: string): Promise<void> {
   // Heartbeat on an interval, not just on events: executePush has quiet stretches
   // (initial diff load, the post-push re-score) where no events fire for a while —
   // without this the watchdog could call a healthy slow job "interrupted".
+  // Heartbeat doubles as the DURABLE-CANCEL poll: each tick stamps heartbeat_at AND reads back
+  // cancel_requested (set by POST {action:'cancel', id}). When true, translate it into the executors'
+  // existing in-memory cancel via requestPushCancel(cancel_token) — the SKU loops check pushCancelled()
+  // between SKUs and stop, leaving already-accepted SKUs on Amazon. Living on the ROW (not an in-memory
+  // Set) is what makes cancel work for a background job and survive a deploy.
+  let cancelSignalled = false
   const beat = setInterval(() => {
-    void supabase.from('push_jobs').update({ heartbeat_at: new Date().toISOString() } as never).eq('id', jobId)
+    void (async () => {
+      const { data } = await supabase.from('push_jobs')
+        .update({ heartbeat_at: new Date().toISOString() } as never)
+        .eq('id', jobId).select('cancel_requested')
+      const cr = (data as { cancel_requested?: boolean }[] | null)?.[0]?.cancel_requested
+      if (cr && !cancelSignalled && job.payload.cancel_token) { cancelSignalled = true; requestPushCancel(job.payload.cancel_token) }
+    })()
   }, 30_000)
 
   const events: Record<string, unknown>[] = []

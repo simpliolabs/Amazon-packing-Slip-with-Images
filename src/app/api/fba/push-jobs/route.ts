@@ -29,9 +29,22 @@ function isMissingTable(err: { code?: string; message?: string } | null): boolea
 }
 
 export async function POST(req: NextRequest) {
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[] }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[]; action?: string; id?: string }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
+
+  // DURABLE CANCEL: {action:'cancel', id}. Flag the row (the running runner's heartbeat reads
+  // cancel_requested → requestPushCancel → the SKU loop stops between SKUs); a still-QUEUED job never
+  // starts, so also flip it terminal immediately so it leaves the queue. Already-accepted SKUs stay
+  // pushed (they're Amazon's now). Works for background jobs and survives a deploy (flag lives on the row).
+  if (body.action === 'cancel' && typeof body.id === 'string' && body.id) {
+    const supabase = await createAdminClient()
+    await supabase.from('push_jobs').update({ cancel_requested: true, message: 'Cancelling…' } as never)
+      .eq('id', body.id).in('status', ['queued', 'running'])
+    await supabase.from('push_jobs').update({ status: 'failed', message: 'Cancelled before it started.', finished_at: new Date().toISOString() } as never)
+      .eq('id', body.id).eq('status', 'queued')
+    return NextResponse.json({ ok: true })
+  }
 
   const { parent_asin, confirm, field, detail_field, skus, title_override, detail_value_override, detail_fields, detail_overrides, core_fields } = body
   if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
