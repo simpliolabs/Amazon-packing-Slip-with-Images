@@ -20,7 +20,7 @@
  */
 
 import { createAdminClient } from '@/lib/supabase/server'
-import { executePush, type PushParams } from '@/lib/fba/pushExecutor'
+import { executePush, executeBulkDetailsPush, executeBulkCorePush, type PushParams } from '@/lib/fba/pushExecutor'
 
 export interface PushJobRow {
   id: string
@@ -78,7 +78,8 @@ async function runJob(jobId: string): Promise<void> {
   }, 30_000)
 
   const events: Record<string, unknown>[] = []
-  let total = 0, accepted = 0, failed = 0
+  let total = 0, accepted = 0, failed = 0, skipped = 0
+  const isBulk = job.payload.field === 'details_bulk' || job.payload.field === 'core_bulk'
   let message: string | null = null
   let sawResult = false
   let lastFlush = 0
@@ -104,16 +105,26 @@ async function runJob(jobId: string): Promise<void> {
       total = Number(obj.total ?? 0) || total
       message = `Pushing ${String(obj.detail_field ?? obj.field ?? '')}…`
     } else if (t === 'progress') {
-      if (obj.status === 'accepted') accepted++
+      // One progress event per SKU. Single-field emits accepted|failed; BULK also emits
+      // partial (some of the SKU's fields wrote) and skipped (nothing to change) — count all four
+      // toward the processed tally so the "N/total SKUs" bar actually reaches total for a bulk job.
+      if (obj.status === 'accepted' || obj.status === 'partial') accepted++
       else if (obj.status === 'failed') failed++
-      message = `${accepted + failed}/${total || '?'} SKUs (${accepted} accepted${failed ? `, ${failed} failed` : ''})`
+      else if (obj.status === 'skipped') skipped++
+      message = `${accepted + failed + skipped}/${total || '?'} SKUs (${accepted} accepted${failed ? `, ${failed} failed` : ''}${skipped ? `, ${skipped} skipped` : ''})`
     } else if (t === 'rescore') {
       message = String(obj.message ?? 'Re-scoring…')
     } else if (t === 'result') {
       sawResult = true
-      accepted = Number(obj.pushed ?? accepted)
-      failed = Number(obj.failed ?? failed)
-      total = Number(obj.total ?? total)
+      // Single-field result is SKU-grained (pushed/failed/total per SKU) → adopt it. BULK result is
+      // FIELD×SKU grained (pushed = sum over fields of per-field accepts) against a SKU total, so copying
+      // it would render accepted>total in the status bar — keep the per-SKU-counted values above and use
+      // the bulk result only for its human message.
+      if (!isBulk) {
+        accepted = Number(obj.pushed ?? accepted)
+        failed = Number(obj.failed ?? failed)
+        total = Number(obj.total ?? total)
+      }
       message = String(obj.message ?? message ?? '')
     } else if (t === 'error') {
       message = String(obj.error ?? 'Push failed')
@@ -129,7 +140,13 @@ async function runJob(jobId: string): Promise<void> {
   let ceiling: ReturnType<typeof setTimeout> | null = null
   try {
     await Promise.race([
-      executePush(job.payload, emit),
+      // Dispatch by kind (2026-07-19): bulk Auto Push / Ship-all-core now run through the SAME durable
+      // queue as single-field pushes, so concurrent multi-employee pushes serialize (one at a time =
+      // global 5 rps) and survive tab-close + deploys. All three executors share the PushEmit vocabulary
+      // runJob.emit consumes, so the ceiling/heartbeat/terminal-status logic below is unchanged.
+      job.payload.field === 'details_bulk' ? executeBulkDetailsPush(job.payload, emit)
+        : job.payload.field === 'core_bulk' ? executeBulkCorePush(job.payload, emit)
+        : executePush(job.payload, emit),
       new Promise<void>((resolve) => {
         ceiling = setTimeout(() => {
           emit({ type: 'error', error: 'Push exceeded the 30-minute job ceiling and was abandoned. Already-accepted SKUs stayed pushed — Verify on Amazon, then push just the stale.' })

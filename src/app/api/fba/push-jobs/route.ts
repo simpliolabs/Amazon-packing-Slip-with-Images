@@ -13,6 +13,7 @@
  *     is what heals the queue after a restart; no cron needed.
  */
 
+import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { enqueueJobRun, markStaleJobs, kickQueuedJobs, type PushJobRow } from '@/lib/fba/pushJobs'
@@ -28,11 +29,11 @@ function isMissingTable(err: { code?: string; message?: string } | null): boolea
 }
 
 export async function POST(req: NextRequest) {
-  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string }
+  let body: { parent_asin?: string; confirm?: boolean; field?: string; detail_field?: string; skus?: string[]; title_override?: string; detail_value_override?: string; detail_fields?: string[]; detail_overrides?: Record<string, string>; core_fields?: string[] }
   try { body = (await req.json().catch(() => ({}))) as typeof body }
   catch { return NextResponse.json({ error: 'Invalid request body' }, { status: 400 }) }
 
-  const { parent_asin, confirm, field, detail_field, skus, title_override, detail_value_override } = body
+  const { parent_asin, confirm, field, detail_field, skus, title_override, detail_value_override, detail_fields, detail_overrides, core_fields } = body
   if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
   if (confirm !== true) {
     return NextResponse.json({ error: 'Refusing to queue a write without explicit confirm:true.' }, { status: 400 })
@@ -41,6 +42,11 @@ export async function POST(req: NextRequest) {
   // must be a known push field. Catch it here so a bad job never reaches the queue.
   if (field === 'details') {
     if (!detail_field) return NextResponse.json({ error: 'detail_field is required for field=details' }, { status: 400 })
+  } else if (field === 'details_bulk') {
+    // Bulk Auto Push — needs at least one detail field selected.
+    if (!detail_fields?.length) return NextResponse.json({ error: 'detail_fields is required for field=details_bulk' }, { status: 400 })
+  } else if (field === 'core_bulk') {
+    // Ship-all-core — core_fields optional; the executor defaults to every core field that has a diff.
   } else if (!isPushField(field ?? '')) {
     return NextResponse.json({ error: `unknown field "${field}"` }, { status: 400 })
   }
@@ -52,7 +58,10 @@ export async function POST(req: NextRequest) {
   const actor: PushActor = bearer
     ? { id: bearer.id, name: await resolveUserName(bearer.id, bearer.email) }
     : SYSTEM_ACTOR
-  const payload: PushParams = { parent_asin, field, detail_field, skus, title_override, detail_value_override, actor }
+  // A server-generated cancel token, PERSISTED in the payload so the durable cancel (a cancel_requested
+  // flag on the row, read by the runner) can translate into the executors' existing pushCancelled() check.
+  const cancel_token = randomUUID()
+  const payload: PushParams = { parent_asin, field, detail_field, skus, title_override, detail_value_override, detail_fields, detail_overrides, core_fields: core_fields as PushParams['core_fields'], cancel_token, actor }
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from('push_jobs')
