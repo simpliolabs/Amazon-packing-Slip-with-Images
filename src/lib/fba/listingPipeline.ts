@@ -7339,7 +7339,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (BACKEND_GENERIC_FILLER.has(w) && !poolToksForBackend.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
     if (brandToksForBackend.has(w)) return true
     if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
-    if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !poolToksForBackend.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
+    // GARMENT_TYPE_WORDS (polo/tank/blouse/…) flip the product IDENTITY, so a garment word may appear
+    // ONLY when the PRODUCT'S OWN TRUTH corroborates it — pool membership must NOT license it. The broad
+    // "graphic tees for women" universe drags "polo" into the pool, which then rode past this ban via the
+    // old `!poolToks` exemption (PO 2026-07-19: "polo" in a graphic-tee backend). STYLE_CUT_WORDS keep the
+    // pool exemption — a cut/style term (e.g. "oversized") is a real demand signal, not an identity flip.
+    if (GARMENT_TYPE_WORDS.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
+    if (STYLE_CUT_WORDS.has(w) && !poolToksForBackend.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(backendTruthHay)) return true
     if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
     if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
     return false
@@ -7386,14 +7392,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         for (const k of groupPool) {
           for (const w of k.keyword.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) if (w) groupPoolToks.add(w)
         }
+        // SIBLING-DESIGN BLEED (PO 2026-07-19: "not per design"): the OTHER designs' distinctive NAME
+        // tokens must not ride into THIS design's backend ("beast mode"/"real king" inside the Relax
+        // design). Sibling tokens = every other group's design-name tokens MINUS this group's own, so a
+        // token shared by this design (or a family term this design also carries) is never banned here.
+        const siblingNameToks = new Set<string>()
+        for (const [k, toks] of groupNameToks) if (k !== ctx.key) for (const t of toks) siblingNameToks.add(t)
+        for (const t of (groupNameToks.get(ctx.key) ?? new Set<string>())) siblingNameToks.delete(t)
         const groupBan = (w: string): boolean => {
           if (w.length === 1 && !/\d/.test(w)) return true
           if (AMZ_BACKEND_STOPWORDS.has(w)) return true
           if (FOREIGN_FUNCTION_WORDS.has(w)) return true   // ES/PT function words carry no search value (2026-07-09)
           if (BACKEND_GENERIC_FILLER.has(w) && !groupPoolToks.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
           if (groupBrandToks.has(w)) return true
+          // A sibling design's own name token — drop it unless THIS group's product truth also carries it.
+          if (siblingNameToks.has(fillNormTok(w)) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
           if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
-          if ((STYLE_CUT_WORDS.has(w) || GARMENT_TYPE_WORDS.has(w)) && !groupPoolToks.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
+          // Garment identity words: only if THIS group's product truth corroborates it — never via pool
+          // membership (the "polo" leak). Style/cut words keep the group-pool demand exemption.
+          if (GARMENT_TYPE_WORDS.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
+          if (STYLE_CUT_WORDS.has(w) && !groupPoolToks.has(w) && !new RegExp(`\\b${w}\\b`, 'i').test(groupHay)) return true
           if (lean === 'female' && /^(?:men|mens|man|male|boys?)$/i.test(w)) return true
           if (lean === 'male' && /^(?:women|womens|woman|ladies|female|girls?)$/i.test(w)) return true
           return false
