@@ -2487,31 +2487,77 @@ async function negotiateParentRecordFix(
       if (process.env.PUSH_HEAL_FEEDS_FALLBACK === 'on' && (loop.kind === 'no-progress' || loop.kind === 'exhausted')) {
         try {
           const { submitJsonListingsFeed, mapFeedIssuesToRejectedKeys } = await import('@/lib/fba/feedsSubmit')
-          // Ship ONLY the composite baseline the negotiation was trying to converge — no item_name
-          // or other content changes. Karpathy simplicity: minimum surface area for the probe.
+          // ENHANCED (2026-07-20 workflow #wi9onywfg): also bundle the parent's recommended item_name
+          // in the SAME PARTIAL_UPDATE so a successful heal LANDS THE TITLE too — otherwise the
+          // composite gets healed but the seller still needs a second push to ship the title, and
+          // Strategies 1-4 already-run means that second push would face the same PATCH silent-drop
+          // wall. Read recommended_title with loadDiff's same parent-title rule (:592-597): apply
+          // stripCapacity for multi-child-title families to keep the parent hub capacity-agnostic;
+          // cap 200 chars. Uses buildPatchValue for the exact same shape every PATCH write uses.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let parentTitleForFeed = ''
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const { data: recRow } = await (db as any).from('listing_seo_recommendations')
+              .select('recommended_title, per_child_titles')
+              .eq('parent_asin', parent_asin).maybeSingle()
+            const rec = recRow as { recommended_title?: string; per_child_titles?: unknown } | null
+            const rawTitle = (rec?.recommended_title ?? '').trim()
+            const multiChildTitles = Array.isArray(rec?.per_child_titles) && (rec!.per_child_titles as unknown[]).length > 1
+            parentTitleForFeed = (multiChildTitles ? stripCapacity(rawTitle) : rawTitle).slice(0, 200)
+          } catch (e) { console.warn('[push-heal] Strategy 5 recommended_title lookup failed (non-fatal, will ship composite only):', e instanceof Error ? e.message : e) }
+          const feedAttributes: Record<string, unknown> = {
+            [containerKey]: [{ ...donorItem, marketplace_id: MARKETPLACE_ID }],
+          }
+          if (parentTitleForFeed.length > 0) {
+            feedAttributes.item_name = buildPatchValue(parentTitleForFeed, MARKETPLACE_ID)
+          }
           const feedResult = await submitJsonListingsFeed({
             sku: parentSku,
             productType,
-            attributes: { [containerKey]: [{ ...donorItem, marketplace_id: MARKETPLACE_ID }] },
+            attributes: feedAttributes,
           })
-          console.warn(`[push-heal] Strategy 5 (Feeds) for ${containerKey} on ${parentSku}: ${feedResult.processingStatus}, feedId=${feedResult.feedId}, errors=${feedResult.errorIssues.length}, accepted=${feedResult.messagesAccepted}/${feedResult.messagesProcessed}`)
+          console.warn(`[push-heal] Strategy 5 (Feeds) for ${containerKey}${parentTitleForFeed ? '+item_name' : ''} on ${parentSku}: ${feedResult.processingStatus}, feedId=${feedResult.feedId}, errors=${feedResult.errorIssues.length}, accepted=${feedResult.messagesAccepted}/${feedResult.messagesProcessed}`)
           if (feedResult.processingStatus === 'DONE' && feedResult.messagesAccepted === 1 && feedResult.errorIssues.length === 0) {
-            // Feeds ACCEPTED — read back to confirm the composite ACTUALLY persisted (Feeds can silent-
-            // drop too — spec §error_handling SILENT NO-OP class). If persisted, we're healed; if not,
-            // this parent is genuinely architecturally impossible via any SP-API write path (fall
-            // through with a specific dead-end message).
+            // Feeds ACCEPTED — read back to confirm BOTH composite AND item_name actually persisted
+            // (Feeds can silent-drop too — spec §error_handling SILENT NO-OP class). Composite silent-
+            // drop → SP-API cannot cure this parent. Title silent-drop with composite persisted → a
+            // NEW failure mode this enhancement newly exposes (was invisible on composite-only probe).
             await sleep(PATCH_DELAY_MS)
             const postRead = await fetchChildAttributesMap(sellerId, token, [parentSku])
             const postAttrs = postRead.get(parentSku)
             const persistedArr = postAttrs?.[containerKey]
-            const persisted = Array.isArray(persistedArr) && persistedArr.length > 0
-            if (persisted) {
-              console.warn(`[push-heal] Strategy 5 (Feeds) HEALED ${containerKey} on ${parentSku} — feedId=${feedResult.feedId}`)
+            const compositePersisted = Array.isArray(persistedArr) && persistedArr.length > 0
+            let titlePersisted = true
+            let liveTitle = ''
+            if (parentTitleForFeed.length > 0) {
+              liveTitle = await readbackItemName(sellerId, token, parentSku)
+              titlePersisted = liveTitle === parentTitleForFeed
+            }
+            if (compositePersisted && titlePersisted) {
+              console.warn(`[push-heal] Strategy 5 (Feeds) HEALED ${containerKey}${parentTitleForFeed ? ' + item_name' : ''} on ${parentSku} — feedId=${feedResult.feedId}`)
               out.healed.push(containerKey)
+              // Belt-and-suspenders audit trail: a SECOND keyword_push_log row for the title write
+              // (the existing intent-audit row at :2547 records composite finalOps only). Best-effort;
+              // never blocks the healed return.
+              if (parentTitleForFeed.length > 0) {
+                try {
+                  await db.from('keyword_push_log').insert({
+                    parent_asin, sku: parentSku, field: 'title',
+                    previous_value: null, new_value: parentTitleForFeed,
+                    submission_id: feedResult.feedId, status: 'accepted', error_message: null,
+                    pushed_by: SYSTEM_ACTOR.id,
+                  })
+                } catch (e) { console.warn('[push-heal] Strategy 5 title keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
+              }
               try { await completeWriteSuccessSideEffects(db, { parent_asin, parentSku, productType, containerKey, liveChildCount, sampledChildCount: childAttrs.size }) } catch { /* best-effort */ }
               return out
             }
-            extraDetail = ` | Strategy 5 (Feeds) accepted-no-op: feedId=${feedResult.feedId} DONE with 0 errors but ${containerKey} still absent on read-back → SP-API cannot cure this parent hub. Seller Central Variations form (5 fields) required.`
+            if (!compositePersisted) {
+              extraDetail = ` | Strategy 5 (Feeds) accepted-no-op on composite: feedId=${feedResult.feedId} DONE with 0 errors but ${containerKey} still absent on read-back → SP-API cannot cure this parent hub. Seller Central Variations form (5 fields) required.`
+            } else {
+              extraDetail = ` | Strategy 5 (Feeds) SILENT-DROP item_name: feedId=${feedResult.feedId} accepted the write but live title still reads "${liveTitle.slice(0, 80)}" (sent "${parentTitleForFeed.slice(0, 80)}"). Composite healed but title did not persist — parent hub structurally rejects item_name via Feeds too.`
+            }
           } else if (feedResult.errorIssues.length > 0) {
             const rejectedKeys = mapFeedIssuesToRejectedKeys(feedResult.errorIssues)
             const detail = feedResult.errorIssues.slice(0, 2).map((i) => i.message ?? '').join(' | ').slice(0, 280)
