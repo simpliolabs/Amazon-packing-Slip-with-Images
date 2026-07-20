@@ -273,9 +273,17 @@ export function isItemHighlightTitleTooLongError(err: string | null | undefined)
   return !!err && /\b100476\b|item name that is 75 characters or less/i.test(err)
 }
 
-/** The remedy text shown in place of Amazon's raw code. Shared so both IH write sites say the same thing. */
+/** The remedy text shown in place of Amazon's raw code. Shared so both IH write sites say the same thing.
+ *
+ *  WORDED FROM VERIFIED FACT (2026-07-19, B0FKKN8XKV live push: 18 accepted / 2 failed): do NOT claim the
+ *  stored title is >75 — it is NOT. A live read of all 163 buyable SKUs showed every stored item_name at
+ *  73 chars with ZERO over 75, yet Amazon still returned 100476 for PHE-STS-4XL-CRMS-FBA (stored title 73)
+ *  and for the variation PARENT PHE-STS-P. So Amazon measures a LONGER effective name than the one we
+ *  store — most likely the variation-composed name (title + size/colour, e.g. "…TShirt, 4XL, Crimson") or a
+ *  stale parent item_name that the child-title push never overwrites. The message therefore reports what
+ *  Amazon said and gives the actionable lever (headroom) without asserting an unverified cause. */
 export const ITEM_HIGHLIGHT_TITLE_TOO_LONG_MSG =
-  "Amazon rejects Item Highlights while this SKU's live title is over 75 characters (error 100476). Push the optimized ≤75 title to this SKU first, then re-push the highlight — the block clears automatically once the short title is live."
+  'Amazon rejected Item Highlights for this SKU with error 100476 ("Provide an Item Name that is 75 characters or less"). NOTE: this listing\'s stored title is already ≤75, so Amazon is measuring a LONGER effective name for this variant — typically the variation-composed name (title + size/colour) or a stale parent item_name. Shorten the title to leave headroom for the variant suffix, then re-push; or set this one SKU\'s highlight in Seller Central.'
 
 export const ITEM_HIGHLIGHTS_STATE_KEY = 'item_highlights_api_state'
 
