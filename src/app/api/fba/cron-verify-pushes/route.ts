@@ -72,13 +72,43 @@ async function runVerify(origin: string, parent_asin: string, field: string, det
   }
 }
 
+/** STRUCTURAL error classifier (2026-07-20, PO family-split incident). Errors that no amount of retrying
+ *  can fix — the underlying CONDITION (a too-long live title; a pre-launch attribute) must change first.
+ *  When EVERY failing SKU in a re-push carries one of these, the cron circuit-breaks to needs_attention
+ *  instead of rescheduling; otherwise the cron hammers Amazon every ~25 min for a full day (24h+ of
+ *  identical "N/N variants (X failed)" seen on B0DQ5YZH38 + B0FKKN8XKV) and — evidence from the split
+ *  incident — may contribute to Amazon detaching the problem SKUs into a new variation family.
+ *
+ *  Kept intentionally NARROW: only patterns we KNOW cannot be fixed by a plain retry. Transient errors
+ *  (429, 5xx, connection resets) do NOT match and stay on the normal reschedule path. */
+function isStructuralError(err: string | null | undefined): boolean {
+  if (!err) return false
+  return /\b100476\b/.test(err)                                       // "provide an Item Name that is 75 characters or less"
+    || /75 characters? or less/i.test(err)                            // paraphrased 100476
+    || /currently unsupported/i.test(err)                             // Item Highlights pre-launch API wall
+    || /Amazon hasn't opened API writes/i.test(err)                   // our friendly wrapper of the same
+    || /rejected every known write form/i.test(err)                   // composite write-form calibration exhausted
+}
+
 /** Re-push ONLY the stale SKUs for this task (selective push via the existing skus[]
- *  parameter). Returns true if the executor signalled at least one accept. */
-async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Promise<{ pushed: number; failed: number; error?: string }> {
-  if (staleSkus.length === 0) return { pushed: 0, failed: 0 }
+ *  parameter). Returns the accept/fail counts plus per-SKU errors so the caller can circuit-break
+ *  when every failure is structural (see isStructuralError). */
+async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Promise<{
+  pushed: number; failed: number; perSkuErrors: { sku: string; error: string }[]; error?: string
+}> {
+  if (staleSkus.length === 0) return { pushed: 0, failed: 0, perSkuErrors: [] }
   let pushed = 0
   let failed = 0
   let error: string | undefined
+  const perSkuErrors: { sku: string; error: string }[] = []
+  const captureEvt = (evt: unknown) => {
+    const e = evt as { type?: string; status?: string; sku?: string; error?: string; pushed?: number; failed?: number }
+    if (e.type === 'result') { pushed = e.pushed ?? 0; failed = e.failed ?? 0 }
+    else if (e.type === 'error') { error = e.error }
+    else if (e.type === 'progress' && e.status === 'failed' && e.sku && e.error) {
+      perSkuErrors.push({ sku: e.sku, error: e.error })
+    }
+  }
   try {
     if (task.field.startsWith('details:')) {
       // details branch — needs detail_field (friendly name) + value override (task.expected_value).
@@ -89,14 +119,7 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
         detail_value_override: task.expected_value ?? undefined,
         skus: staleSkus,
         actor: SYSTEM_ACTOR,  // cron/verify-initiated re-push (spec §5 Phase B attribution)
-      }, (evt) => {
-        if ((evt as { type?: string }).type === 'result') {
-          const r = evt as { pushed?: number; failed?: number; message?: string }
-          pushed = r.pushed ?? 0; failed = r.failed ?? 0
-        } else if ((evt as { type?: string }).type === 'error') {
-          error = (evt as { error?: string }).error
-        }
-      })
+      }, captureEvt)
     } else {
       // Regular field (title/bullets/description/keywords) — selective re-push via skus[].
       await executePush({
@@ -104,17 +127,10 @@ async function rePushStale(task: PushVerificationTask, staleSkus: string[]): Pro
         field: task.field,
         skus: staleSkus,
         actor: SYSTEM_ACTOR,  // cron/verify-initiated re-push (spec §5 Phase B attribution)
-      }, (evt) => {
-        if ((evt as { type?: string }).type === 'result') {
-          const r = evt as { pushed?: number; failed?: number }
-          pushed = r.pushed ?? 0; failed = r.failed ?? 0
-        } else if ((evt as { type?: string }).type === 'error') {
-          error = (evt as { error?: string }).error
-        }
-      })
+      }, captureEvt)
     }
   } catch (e) { error = e instanceof Error ? e.message : String(e) }
-  return { pushed, failed, error }
+  return { pushed, failed, perSkuErrors, error }
 }
 
 /** Run a SELF-HEAL task (kind='heal'): inherit the parent hub's missing BROADCAST attributes from a
@@ -297,7 +313,23 @@ export async function GET(request: NextRequest) {
 
     // 4) Have attempts left — re-push the stale SKUs and reschedule the next verify.
     const re = await rePushStale(task, staleSkus)
-    void re   // pushed/failed are logged server-side via keyword_push_log; we just bump attempts
+    // CIRCUIT BREAKER (2026-07-20, PO family-split incident): if the re-push ACCEPTED nothing AND every
+    // failing SKU came back with a STRUCTURAL error (title too long / attribute pre-launch / all write-
+    // forms rejected), retrying cannot fix the condition — flag needs_attention NOW instead of scheduling
+    // another 25-min-later retry that will fail identically. Kept narrow: requires (a) 0 accepts, (b) ≥1
+    // per-SKU error captured, (c) EVERY captured error matches isStructuralError. A single transient error
+    // (429/5xx) in the mix keeps the task on the normal reschedule path. Live evidence: B0DQ5YZH38 +
+    // B0FKKN8XKV each looped identical "N failed" for 24h+ before this fix.
+    const allStructural = re.pushed === 0
+      && re.perSkuErrors.length > 0
+      && re.perSkuErrors.every((e) => isStructuralError(e.error))
+    if (allStructural) {
+      const sample = re.perSkuErrors[0].error.slice(0, 200)
+      const reason = `Amazon rejected all ${re.perSkuErrors.length} SKU(s) with the same structural error — retrying cannot fix this. First error: "${sample}". Address the underlying condition (shorten the live item_name, wait for the Amazon attribute to launch, etc.) and re-push manually.`
+      await flagNeedsAttention(task.id, verify.matched, verify.total, staleSkus, reason)
+      processed.push({ id: task.id, field: task.field, result: 'needs_attention_structural', matched: verify.matched, total: verify.total })
+      continue
+    }
     await rescheduleTask(task.id, verify.matched, verify.total, staleSkus)
     processed.push({ id: task.id, field: task.field, result: 'rescheduled', matched: verify.matched, total: verify.total })
   }
