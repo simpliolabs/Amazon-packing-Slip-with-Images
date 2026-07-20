@@ -1727,6 +1727,23 @@ export default function ListingDetailPage() {
    *  multi-attribute PATCH) — ~7× fewer Amazon calls than field-at-a-time. The server batches
    *  the changed fields per SKU and falls back to per-field for any SKU whose batch is rejected,
    *  so failure isolation is preserved. We map the final per-field tally back onto the rows. */
+  /** Is the durable queue ON? ASK THE SERVER, at click time.
+   *
+   *  This used to read `process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL`, which Next.js inlines at BUILD time —
+   *  and on Coolify with "Use Docker Build Secrets" the value arrives as a mounted secret FILE, not an
+   *  env var, so the build inlined `undefined`, folded the check to false and stripped the queue branch
+   *  as dead code. The flag looked ON in Coolify while every Auto Push silently used the old streaming
+   *  path and died mid-run (B0FKKN8XKV: 58/151, zero push_jobs rows). Asking the server per click makes
+   *  it a RESTART-only toggle, removes the build dependency, and has no startup race.
+   *  Fails CLOSED to the streaming path on any error — i.e. exactly today's behaviour, never a hang. */
+  const isPushQueueOn = useCallback(async (): Promise<boolean> => {
+    try {
+      const r = await fetch('/api/fba/push-jobs?config=1', { cache: 'no-store' })
+      if (!r.ok) return false
+      return ((await r.json()) as { queue_all?: boolean }).queue_all === true
+    } catch { return false }
+  }, [])
+
   /** DURABLE QUEUE (flag PUSH_QUEUE_ALL): enqueue a bulk push_jobs row and POLL it to a terminal state,
    *  driving the progress bar off the REAL DB row (not an optimistic client counter — that divergence is
    *  what showed SKUs "complete" that reverted on refresh). Survives tab-close + deploys; serialized with
@@ -1792,7 +1809,7 @@ export default function ListingDetailPage() {
     // ── DURABLE QUEUE PATH (flag PUSH_QUEUE_ALL) — enqueue a durable push_jobs row + POLL it instead of
     //    streaming, so the push survives tab-close/deploys and serializes with every other employee's
     //    pushes under the global 5-rps bucket (no more mid-stream drop). Flag OFF = today's streaming path.
-    if (process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on') {
+    if (await isPushQueueOn()) {
       const overrides = Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value]))
       const outcome = await runBulkViaQueue({ field: 'details_bulk', detail_fields: fields, detail_overrides: overrides }, setBulkProgress)
       const pf = outcome.perField
@@ -1920,7 +1937,7 @@ export default function ListingDetailPage() {
     bulkCancelTokenRef.current = null
     setBulkRunning(false)
     setBulkFinished(true)
-  }, [asin, bulkItems, bulkRunning, getToken, runBulkViaQueue])
+  }, [asin, bulkItems, bulkRunning, getToken, runBulkViaQueue, isPushQueueOn])
 
   /** Stop a running Auto Push between SKUs (same server cancel as the single-push Stop). */
   const stopBulkPush = useCallback(async () => {
@@ -1968,7 +1985,7 @@ export default function ListingDetailPage() {
     setCancelRequested(false)
     let anyPushed = false
     // ── DURABLE QUEUE PATH (flag PUSH_QUEUE_ALL) — enqueue + poll (survives drops/deploys, rate-safe).
-    if (process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on') {
+    if (await isPushQueueOn()) {
       const outcome = await runBulkViaQueue({ field: 'core_bulk', core_fields: ['title', 'bullets', 'description', 'keywords'] }, setCoreBulkProgress)
       setCoreBulkMessage(outcome.note)
       setCoreBulkPerField(outcome.perField ?? [])
@@ -2074,7 +2091,7 @@ export default function ListingDetailPage() {
     coreBulkCancelTokenRef.current = null
     setCoreBulkRunning(false)
     setCoreBulkFinished(true)
-  }, [asin, coreBulkRunning, getToken, refreshRankFree, runBulkViaQueue])
+  }, [asin, coreBulkRunning, getToken, refreshRankFree, runBulkViaQueue, isPushQueueOn])
 
   /** Stop a running Ship-all-core between SKUs (same server cancel as the other pushes). */
   const stopCoreBulkPush = useCallback(async () => {

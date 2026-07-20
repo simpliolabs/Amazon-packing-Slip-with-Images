@@ -97,8 +97,27 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ id, status: 'queued' })
 }
 
+/** RUNTIME queue switch (2026-07-19). Read on the SERVER, per request.
+ *
+ *  WHY: the old gate was `NEXT_PUBLIC_PUSH_QUEUE_ALL`, and Next.js inlines NEXT_PUBLIC_* at BUILD time.
+ *  On Coolify with "Use Docker Build Secrets" enabled, build-time values are delivered as mounted secret
+ *  FILES rather than environment variables, so `next build` never saw it, folded `=== 'on'` to false and
+ *  dead-code-eliminated the entire queue branch. Live proof: the var was set WITH "Available at Buildtime"
+ *  ticked, yet B0FKKN8XKV had ZERO push_jobs rows and the Auto Push still died on the streaming path at
+ *  58/151 SKUs. Reading it here makes it a RESTART-only toggle that cannot silently deactivate, and lets
+ *  the client ask at click time (no build, no race). NEXT_PUBLIC_ is still honoured so that if a build DID
+ *  inline it, nothing regresses. */
+export function pushQueueAllEnabled(): boolean {
+  return process.env.PUSH_QUEUE_ALL === 'on' || process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on'
+}
+
 export async function GET(req: NextRequest) {
   const url = new URL(req.url)
+  // Cheap config probe — the client calls this right before a bulk push to decide queue vs stream.
+  // Answered BEFORE any DB work so it stays a few-ms call even when push_jobs is missing/slow.
+  if (url.searchParams.get('config') === '1') {
+    return NextResponse.json({ queue_all: pushQueueAllEnabled() })
+  }
   const activeOnly = url.searchParams.get('active') === '1'
   const parentAsin = url.searchParams.get('parent_asin')
 
@@ -129,8 +148,8 @@ export async function GET(req: NextRequest) {
 
   const { data, error } = await q
   if (error) {
-    if (isMissingTable(error)) return NextResponse.json({ jobs: [], missing_table: true })
+    if (isMissingTable(error)) return NextResponse.json({ jobs: [], missing_table: true, queue_all: pushQueueAllEnabled() })
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
-  return NextResponse.json({ jobs: (data ?? []) as Partial<PushJobRow>[] })
+  return NextResponse.json({ jobs: (data ?? []) as Partial<PushJobRow>[], queue_all: pushQueueAllEnabled() })
 }
