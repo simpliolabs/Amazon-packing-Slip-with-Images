@@ -2252,9 +2252,19 @@ async function healCompositeCompleteWrite(
     }
     console.warn(`[push-heal] complete-write fallback for ${containerKey} on ${parentSku}: donor child ${selected.donorSku}`)
 
-    // Copy the donor's FIRST container item VERBATIM (all sub-objects: size_system, size_class, size,
-    // plus anything else it carries) — only marketplace_id is normalized to OUR marketplace.
-    const item: CompositeItem = { ...selected.donor, marketplace_id: MARKETPLACE_ID }
+    // Copy ONLY the schema-required sub-fields from the donor: spec.subKeys (size_system, size_class)
+    // + spec.perVariantField (size) + marketplace_id. Strip every OTHER sub-field the donor carries
+    // (body_type, height_type, size_to, etc.). Live probe 2026-07-20T21Z on PHE-STS-P (B0FKKN8XKV)
+    // proved the disease: the parent's stored shirt_size[0] carries {body_type:'regular',
+    // height_type:'regular', size_class:'alpha', size_system:'as1'} with NO size — Amazon's rule
+    // 99022 fires ("size does not have enough values"), then every complete-write we tried copied
+    // the donor's body_type/height_type verbatim, which armed the NEXT rule ("body_type Expected at
+    // most '0'" once size is present) and stalled Strategy 4 for lack of a top-level attribute to
+    // delete. Sending ONLY the schema-required sub-fields satisfies rule 99022 AND avoids arming the
+    // "at most 0" rules, because op=replace on the whole container overwrites the stored state.
+    const requiredKeys = new Set<string>([...spec.subKeys, spec.perVariantField])
+    const item: CompositeItem = { marketplace_id: MARKETPLACE_ID }
+    for (const k of requiredKeys) if (selected.donor[k] !== undefined) item[k] = selected.donor[k]
     const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
     const preview = await patchSkuMulti(sellerId, token, productType, parentSku, ops, 'VALIDATION_PREVIEW')
     if (!preview.ok) {
