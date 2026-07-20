@@ -107,7 +107,10 @@ export async function POST(req: NextRequest) {
  *  58/151 SKUs. Reading it here makes it a RESTART-only toggle that cannot silently deactivate, and lets
  *  the client ask at click time (no build, no race). NEXT_PUBLIC_ is still honoured so that if a build DID
  *  inline it, nothing regresses. */
-export function pushQueueAllEnabled(): boolean {
+// NOT exported: a Next.js App Router route.ts may only export route handlers + the known route config
+// (dynamic/revalidate/...). Exporting an arbitrary helper fails the production build (it type-checks
+// locally, so tsc will NOT catch it — this exact mistake broke the 8581e63 deploy).
+function pushQueueAllEnabled(): boolean {
   return process.env.PUSH_QUEUE_ALL === 'on' || process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on'
 }
 
