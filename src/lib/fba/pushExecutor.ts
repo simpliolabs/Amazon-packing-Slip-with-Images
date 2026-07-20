@@ -1010,6 +1010,87 @@ async function patchSku(
 // getProductType moved to @/lib/amazon/productType (shared + process-cached for consistent enum
 // resolution). Imported above; both loadDetailContext and the ?debug branch use the shared version.
 
+/** PARENT-HUB baseline attributes — the SP-API research (2026-07-20) confirmed the "ACCEPTED then
+ *  silently dropped" behavior on variation-parent PATCHes is caused by our writes omitting the coherent
+ *  family attribute set Amazon requires on every parent-record edit. amzn/selling-partner-api-models
+ *  #439/#2489/#3500 all describe the same pattern; own-code comments name it at pushExecutor.ts:1177.
+ *
+ *  READ, don't guess: fetch the parent's OWN current parentage_level + child_parent_sku_relationship +
+ *  variation_theme. Whatever Amazon already stores is authoritative for this SKU (a shirt family may be
+ *  SIZE or SIZE-COLOR or COLOR-SIZE — reading avoids hard-coding the wrong theme). We then RE-SEND those
+ *  exact values alongside the actual target attribute so Amazon has the coherent set inside one PATCH.
+ *
+ *  Returns null on any read failure — caller falls back to the pre-fix single-attribute PATCH (never
+ *  over-block the push on a transient GET flake). */
+type ParentBaselineAttrs = {
+  parentage_level?: unknown[]
+  child_parent_sku_relationship?: unknown[]
+  variation_theme?: unknown[]
+}
+async function fetchParentFamilyBaseline(
+  sellerId: string, token: string, parentSku: string,
+): Promise<ParentBaselineAttrs | null> {
+  try {
+    await spApiReadBucket.acquire()
+    const url = `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(parentSku)}?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return null
+    const json = (await resp.json()) as { attributes?: Record<string, unknown[]> }
+    const attrs = json.attributes ?? {}
+    const out: ParentBaselineAttrs = {}
+    if (Array.isArray(attrs.parentage_level)) out.parentage_level = attrs.parentage_level
+    if (Array.isArray(attrs.child_parent_sku_relationship)) out.child_parent_sku_relationship = attrs.child_parent_sku_relationship
+    if (Array.isArray(attrs.variation_theme)) out.variation_theme = attrs.variation_theme
+    // At least ONE baseline attr must be present or the "coherent family set" claim is meaningless —
+    // return null so caller falls back to plain patchSku instead of shipping a wrong-shaped baseline.
+    return Object.keys(out).length > 0 ? out : null
+  } catch { return null }
+}
+
+/** PATCH a parent SKU with the target attribute PLUS its family baseline in ONE top-level replace.
+ *  Mirrors patchSku's response contract so callers can drop it in as a replacement for isParent rows.
+ *  Amazon needs the WHOLE family set present, not just the target — omitting it is what causes silent-
+ *  drop. Rate-limited via the same spApiWriteBucket. */
+async function patchParentSkuWithBaseline(
+  sellerId: string, token: string, productType: string, sku: string,
+  attribute: string, value: string | string[], mode: 'VALIDATION_PREVIEW' | 'LIVE',
+  baseline: ParentBaselineAttrs,
+): Promise<PatchResult> {
+  await spApiWriteBucket.acquire()
+  const patches: { op: string; path: string; value: unknown }[] = [
+    // Target FIRST so downstream diagnostics see it in the patches[0] slot.
+    { op: 'replace', path: `/attributes/${attribute}`, value: buildPatchValue(value, MARKETPLACE_ID) },
+  ]
+  if (baseline.parentage_level) patches.push({ op: 'replace', path: '/attributes/parentage_level', value: baseline.parentage_level })
+  if (baseline.child_parent_sku_relationship) patches.push({ op: 'replace', path: '/attributes/child_parent_sku_relationship', value: baseline.child_parent_sku_relationship })
+  if (baseline.variation_theme) patches.push({ op: 'replace', path: '/attributes/variation_theme', value: baseline.variation_theme })
+  const modeParam = mode === 'VALIDATION_PREVIEW' ? '&mode=VALIDATION_PREVIEW' : ''
+  const url =
+    `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+    `?marketplaceIds=${MARKETPLACE_ID}&includedData=issues${modeParam}`
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ productType, patches }),
+  })
+  if (!resp.ok) {
+    const txt = await resp.text()
+    return { ok: false, submissionId: null, error: `HTTP ${resp.status}: ${txt.slice(0, 200)}` }
+  }
+  return parsePatchIssues(await resp.json() as Parameters<typeof parsePatchIssues>[0])
+}
+
+/** Read item_name for one SKU — the specific readback we need on parent-hub title pushes.
+ *  fetchCurrentDetail already handles the shape (attributes.item_name[0].value); this is just the
+ *  narrow-purpose call site for the parent-silent-drop detector, named for grep-ability. Returns ''
+ *  on any fetch/parse failure (caller must not treat '' as a definitive mismatch — the readback
+ *  guard tolerates '' and skips the mismatch classification). */
+async function readbackItemName(
+  sellerId: string, token: string, sku: string,
+): Promise<string> {
+  return (await fetchCurrentDetail(sellerId, token, sku, 'item_name')).trim()
+}
+
 /** AUTO-HEAL for Amazon error 100476 on Item Highlights (2026-07-20, PO explicit ask).
  *
  *  WHY: 100476 means "provide an Item Name ≤75 chars to use Item Highlights". It fires when the SKU's
@@ -3224,6 +3305,20 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           } catch (e) { console.error('[push-content] keyword_push_log insert threw:', e) }
         }
 
+        // PARENT-HUB BASELINE (2026-07-20 deep-dive): fetched ONCE per push run, reused for every
+        // isParent PATCH in this loop. Amazon silently drops parent PATCHes that omit the coherent
+        // family attribute set — fetching + re-sending parentage_level + child_parent_sku_relationship
+        // + variation_theme in one top-level replace is what makes item_name actually stick. Cached
+        // locally to avoid a GET per patch; null on read failure → falls back to plain patchSku (no
+        // over-block on a transient flake).
+        let parentBaseline: ParentBaselineAttrs | null = null
+        const parentSkuInDiff = diff.find((d) => d.asin === parent_asin)?.sku
+        if (parentSkuInDiff) {
+          parentBaseline = await fetchParentFamilyBaseline(sellerId, token, parentSkuInDiff)
+          if (parentBaseline) console.log(`[push-content] parent-hub baseline loaded for ${parentSkuInDiff}: keys=[${Object.keys(parentBaseline).join(',')}]`)
+          else console.log(`[push-content] parent-hub baseline UNREADABLE for ${parentSkuInDiff} — parent PATCH falls back to plain patchSku (may silent-drop)`)
+        }
+
         const results: PushResultRow[] = []
         let cancelled = false
         for (const item of diff) {
@@ -3269,7 +3364,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           const value = Array.isArray(rawValue) ? rawValue.map(scrubTrademarks) : scrubTrademarks(rawValue)
           const newValueStr = asCompare(value)
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
-          const preview = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
+          // PARENT-HUB path: augment the PATCH with the family baseline (parentage_level,
+          // child_parent_sku_relationship, variation_theme) so Amazon has the coherent set inside one
+          // patch. Non-parent rows keep going through plain patchSku (byte-identical to pre-fix).
+          const usePartnerBaseline = isParent && parentBaseline !== null
+          const preview = usePartnerBaseline
+            ? await patchParentSkuWithBaseline(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW', parentBaseline as ParentBaselineAttrs)
+            : await patchSku(sellerId, token, productType, item.sku, attribute, value, 'VALIDATION_PREVIEW')
           if (!preview.ok) {
             results.push({ sku: item.sku, status: 'failed', submissionId: null, error: preview.error, isParent, issues: preview.issues })
             emit({ type: 'progress', sku: item.sku, status: 'failed', error: preview.error })
@@ -3277,12 +3378,36 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             await sleep(PATCH_DELAY_MS)
             continue
           }
-          const live = await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
-          const status = live.ok ? 'accepted' : 'failed'
-          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: live.error, isParent, issues: live.issues })
-          emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
-          await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
-          if (live.ok) {
+          const live = usePartnerBaseline
+            ? await patchParentSkuWithBaseline(sellerId, token, productType, item.sku, attribute, value, 'LIVE', parentBaseline as ParentBaselineAttrs)
+            : await patchSku(sellerId, token, productType, item.sku, attribute, value, 'LIVE')
+          let status = live.ok ? 'accepted' : 'failed'
+          let effectiveError = live.error
+          const liveIssues: AmazonIssue[] | undefined = live.issues
+          // PARENT-HUB SILENT-DROP DETECTOR (2026-07-20): mirror the heal-path readback pattern at
+          // :1350-1352 for ordinary parent PATCHes too — Amazon can return "ACCEPTED, no issues" and
+          // still discard the write async on the parent hub (research-confirmed). For TITLE pushes the
+          // readback is item_name; for other content fields (bullets/description) we skip the readback
+          // (a joined-first-value comparison would false-mismatch) and rely on the existing verify path.
+          // If the readback shows the pushed value did NOT persist, downgrade to status='failed' with a
+          // silent-drop marker so summarizePush's parentNote fires + the heal cron can retry (and next
+          // pass will benefit from any additional baseline attrs we learn to include).
+          if (live.ok && isParent && field === 'title') {
+            await sleep(PATCH_DELAY_MS)
+            const readBack = await readbackItemName(sellerId, token, item.sku)
+            if (readBack.length > 0 && readBack !== (typeof value === 'string' ? value : String(value)).trim()) {
+              console.warn(`[push-content] PARENT-HUB SILENT-DROP on ${item.sku} item_name: pushed "${(typeof value === 'string' ? value : String(value)).trim().slice(0, 120)}", live "${readBack.slice(0, 120)}". Amazon accepted then dropped.`)
+              status = 'failed'
+              effectiveError = `silent-drop:item_name — Amazon accepted the parent PATCH but the live item_name still reads "${readBack.slice(0, 120)}". Family-baseline attrs (parentage_level + variation_theme) were included; readback still mismatched — likely a required parent attr Amazon expects we haven't identified yet. Manual check may be needed.`
+            }
+          }
+          results.push({ sku: item.sku, status, submissionId: live.submissionId, error: effectiveError, isParent, issues: liveIssues })
+          emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: effectiveError })
+          await logPush({ parent_asin, sku: item.sku, field, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: status === 'accepted' ? null : effectiveError })
+          // Gate on `status` not `live.ok`: a parent-hub silent-drop downgraded live.ok=true to
+          // status='failed', and optimistically caching the pushed value there would poison the
+          // downstream ship-truth (cohesion / EDIT-ONCE / score) with a value Amazon never stored.
+          if (status === 'accepted') {
             try {
               await db.from('listing_content')
                 .update({ ...cacheUpdateFor(field, value), content_synced_at: new Date().toISOString() })
