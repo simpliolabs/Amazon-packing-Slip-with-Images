@@ -103,15 +103,15 @@ export async function GET(req: NextRequest) {
     let live: Awaited<ReturnType<typeof fetchLiveParentState>> | null = null
     if (deep) {
       let parentSku = skuOverride
+      // Fallback 1: mine heal_payload.parentSku from the freshest heal:composite queue row we already
+      // fetched — this is the exact parent SKU the heal chain is targeting, so it never disagrees
+      // with what pushExecutor sees. Preferred over any DB join.
       if (!parentSku) {
-        const { data: hRow } = await db
-          .from('listing_health')
-          .select('parent_sku, sku')
-          .eq('parent_asin', parentAsin)
-          .limit(1).maybeSingle()
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const h = hRow as { parent_sku?: string | null; sku?: string | null } | null
-        parentSku = h?.parent_sku ?? h?.sku ?? undefined
+        for (const r of rows) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const hp = (r as any).heal_payload as { parentSku?: string } | null
+          if (hp?.parentSku && String(hp.parentSku).trim()) { parentSku = String(hp.parentSku).trim(); break }
+        }
       }
       if (!parentSku) {
         live = { ok: false, status: 0, sku: '', error: `no parent SKU resolved for ${parentAsin} — pass ?sku=<sku>` }

@@ -198,15 +198,20 @@ export async function submitJsonListingsFeed(args: {
       messages: [{
         messageId: 1,
         sku: args.sku,
-        // PARTIAL_UPDATE only (spec §body_shape NOTE 1): full-replace UPDATE risks family de-link on
-        // any omitted parent attr. Karpathy simplicity — stay in the safer semantics until we
-        // measurably need the escape UPDATE offers.
-        operationType: 'PARTIAL_UPDATE',
+        // 2026-07-20 fix: v2.0 message schema requires operationType='PATCH' with a `patches` array
+        // in JSON-Patch shape — our prior PARTIAL_UPDATE + attributes shape was rejected by Amazon
+        // pre-processing with '#: required key [patches] not found' + '#/operationType:' (queue log
+        // 2026-07-20T21:01Z on B0FKKN8XKV, task ebeb4980-3781-4530-81cf-6d13716d2cdd). PATCH
+        // semantics are also STRICTLY additive per attribute (no risk of family de-link — every
+        // attribute NOT named in a patches[] entry is left untouched).
+        operationType: 'PATCH',
         productType: args.productType,
-        // LISTING_PRODUCT_ONLY (spec §required_fields): parent hubs have no offer, and the default
-        // LISTING class rejects on missing offer/sales-terms fields.
         requirements: 'LISTING_PRODUCT_ONLY',
-        attributes: args.attributes,
+        patches: Object.entries(args.attributes).map(([attr, value]) => ({
+          op: 'replace' as const,
+          path: `/attributes/${attr}`,
+          value,
+        })),
       }],
     })
     const { feedDocumentId, url } = await createFeedDocument(token)
