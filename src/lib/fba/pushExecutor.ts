@@ -2474,7 +2474,57 @@ async function negotiateParentRecordFix(
     stageIter = loop.iterations
 
     if (loop.kind !== 'converged') {
-      fail(loop.failureDetail ?? `negotiation iter ${loop.iterations}: preview did not converge`)
+      // STRATEGY 5 (Path Z, 2026-07-20, feature-flagged): before the final flag_attention, try a
+      // JSON_LISTINGS_FEED PARTIAL_UPDATE submission. The Feeds path returns machine-readable
+      // snake_case attribute names in its async business-validation issues report — the exact class
+      // patchListingsItem swallows (spec §submission_flow, developer-docs.amazon.com update-
+      // json_listings_feed…). If Feeds accepts + read-back confirms the composite persisted, we've
+      // cured a case Strategies 1-4 could not. If Feeds surfaces errors, we get real snake_case for
+      // a more actionable flag_attention message. Feature flag off = ZERO behavior change — the whole
+      // block below is skipped and the pre-fix behavior runs identically. Runtime env read (like
+      // PUSH_QUEUE_ALL) so it can be flipped in Coolify without a rebuild.
+      let extraDetail = ''
+      if (process.env.PUSH_HEAL_FEEDS_FALLBACK === 'on' && (loop.kind === 'no-progress' || loop.kind === 'exhausted')) {
+        try {
+          const { submitJsonListingsFeed, mapFeedIssuesToRejectedKeys } = await import('@/lib/fba/feedsSubmit')
+          // Ship ONLY the composite baseline the negotiation was trying to converge — no item_name
+          // or other content changes. Karpathy simplicity: minimum surface area for the probe.
+          const feedResult = await submitJsonListingsFeed({
+            sku: parentSku,
+            productType,
+            attributes: { [containerKey]: [{ ...donorItem, marketplace_id: MARKETPLACE_ID }] },
+          })
+          console.warn(`[push-heal] Strategy 5 (Feeds) for ${containerKey} on ${parentSku}: ${feedResult.processingStatus}, feedId=${feedResult.feedId}, errors=${feedResult.errorIssues.length}, accepted=${feedResult.messagesAccepted}/${feedResult.messagesProcessed}`)
+          if (feedResult.processingStatus === 'DONE' && feedResult.messagesAccepted === 1 && feedResult.errorIssues.length === 0) {
+            // Feeds ACCEPTED — read back to confirm the composite ACTUALLY persisted (Feeds can silent-
+            // drop too — spec §error_handling SILENT NO-OP class). If persisted, we're healed; if not,
+            // this parent is genuinely architecturally impossible via any SP-API write path (fall
+            // through with a specific dead-end message).
+            await sleep(PATCH_DELAY_MS)
+            const postRead = await fetchChildAttributesMap(sellerId, token, [parentSku])
+            const postAttrs = postRead.get(parentSku)
+            const persistedArr = postAttrs?.[containerKey]
+            const persisted = Array.isArray(persistedArr) && persistedArr.length > 0
+            if (persisted) {
+              console.warn(`[push-heal] Strategy 5 (Feeds) HEALED ${containerKey} on ${parentSku} — feedId=${feedResult.feedId}`)
+              out.healed.push(containerKey)
+              try { await completeWriteSuccessSideEffects(db, { parent_asin, parentSku, productType, containerKey, liveChildCount, sampledChildCount: childAttrs.size }) } catch { /* best-effort */ }
+              return out
+            }
+            extraDetail = ` | Strategy 5 (Feeds) accepted-no-op: feedId=${feedResult.feedId} DONE with 0 errors but ${containerKey} still absent on read-back → SP-API cannot cure this parent hub. Seller Central Variations form (5 fields) required.`
+          } else if (feedResult.errorIssues.length > 0) {
+            const rejectedKeys = mapFeedIssuesToRejectedKeys(feedResult.errorIssues)
+            const detail = feedResult.errorIssues.slice(0, 2).map((i) => i.message ?? '').join(' | ').slice(0, 280)
+            extraDetail = ` | Strategy 5 (Feeds) surfaced ERRORS: attributeNames=[${rejectedKeys.join(', ')}]; ${detail}`
+          } else {
+            extraDetail = ` | Strategy 5 (Feeds) ${feedResult.processingStatus}: ${feedResult.errorMessage ?? '(no detail)'}`
+          }
+        } catch (e) {
+          console.warn('[push-heal] Strategy 5 (Feeds) threw (non-fatal, falling through to flagAttention):', e instanceof Error ? e.message : e)
+          extraDetail = ` | Strategy 5 (Feeds) threw: ${e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200)}`
+        }
+      }
+      fail((loop.failureDetail ?? `negotiation iter ${loop.iterations}: preview did not converge`) + extraDetail)
       // 'no-progress' / 'exhausted' are durable dead-ends a human must see (observability: the
       // failureDetail above carries every blocking issue text). 'transport' is a transient preview
       // failure — the queue's backoff retries it; no false-alarm flag.
