@@ -269,6 +269,7 @@ export async function GET(req: NextRequest) {
         `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
+          await spApiReadBucket.acquire()   // parent-SKU lookup — parity with the child GET at :71 (2026-07-20 audit gap #1)
           const resp = await fetch(urlP, { headers: { 'x-amz-access-token': token } })
           if (resp.ok) {
             const j = (await resp.json()) as { items?: { sku?: string }[] }

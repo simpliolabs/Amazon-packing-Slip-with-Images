@@ -42,6 +42,7 @@ import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { isWriteBlockedPreLaunch, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
+import { spApiReadBucket } from '@/lib/fba/spApiRateLimiter'   // global 5-rps read ceiling shared with pushExecutor + verify-push (task #23 / 2026-07-20 audit)
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -108,6 +109,7 @@ async function fetchImageCount(token: string, asin: string): Promise<number> {
     `${ENDPOINT}/catalog/2022-04-01/items/${asin}` +
     `?marketplaceIds=${MARKETPLACE_ID}` +
     `&includedData=images`
+  await spApiReadBucket.acquire()   // global 5-rps read ceiling (task #23 / 2026-07-20 audit — sync GETs share the seller's read budget with pushExecutor + verify-push)
   const resp = await fetch(url, {
     headers: { 'x-amz-access-token': token },
   })
@@ -138,6 +140,7 @@ async function fetchListingContent(
     `?marketplaceIds=${MARKETPLACE_ID}` +
     `&includedData=summaries,attributes`
 
+  await spApiReadBucket.acquire()   // global 5-rps read ceiling (task #23 / 2026-07-20 audit — sync GETs share the seller's read budget with pushExecutor + verify-push)
   const resp = await fetch(url, {
     headers: { 'x-amz-access-token': token },
   })
@@ -242,6 +245,7 @@ async function fetchAplusStatus(
     `?marketplaceId=${MARKETPLACE_ID}` +
     `&asin=${asin}`
 
+  await spApiReadBucket.acquire()   // global 5-rps read ceiling (task #23 / 2026-07-20 audit — sync GETs share the seller's read budget with pushExecutor + verify-push)
   const resp = await fetch(url, {
     headers: { 'x-amz-access-token': token },
   })
@@ -1392,6 +1396,7 @@ export async function rescanAplusForAsin(
   // #352-class silent degrade). Here a non-OK response returns null → we DON'T write, so a real A+ is
   // never zeroed by a hiccup.
   const probeAplus = async (a: string): Promise<AplusStatus | null> => {
+    await spApiReadBucket.acquire()   // global 5-rps read ceiling (2026-07-20 audit — the inline A+ probe was ungated)
     const resp = await fetch(
       `${ENDPOINT}/aplus/2020-11-01/contentPublishRecords?marketplaceId=${MARKETPLACE_ID}&asin=${a}`,
       { headers: { 'x-amz-access-token': token } },
@@ -1535,6 +1540,7 @@ async function discoverSkusForAsin(token: string, sellerId: string, asin: string
       `&identifiersType=ASIN` +
       `&pageSize=20` +
       `&includedData=summaries`
+    await spApiReadBucket.acquire()   // global 5-rps read ceiling (2026-07-20 audit — discoverSkusForAsin was ungated in the 4-space-indented site)
     const resp = await fetch(url, {
       headers: { 'x-amz-access-token': token },
     })

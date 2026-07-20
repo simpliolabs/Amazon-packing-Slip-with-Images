@@ -6542,6 +6542,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (!spToken || !spSellerId || !sku) return ''
       try {
         const u = `${SP_ENDPOINT_URL}/listings/2021-08-01/items/${spSellerId}/${encodeURIComponent(sku)}?marketplaceIds=${SP_MP_ID}&includedData=attributes`
+        // Global 5-rps read ceiling (2026-07-20 audit — per-SKU design-name attr fetch was ungated).
+        // Dynamic import to keep the pipeline module's static graph unchanged; the bucket is a
+        // process-shared singleton regardless of how it's imported.
+        const { spApiReadBucket } = await import('@/lib/fba/spApiRateLimiter')
+        await spApiReadBucket.acquire()
         const resp = await fetch(u, { headers: { 'x-amz-access-token': spToken } })
         if (!resp.ok) return ''
         const json = await resp.json() as { attributes?: Record<string, unknown> }
