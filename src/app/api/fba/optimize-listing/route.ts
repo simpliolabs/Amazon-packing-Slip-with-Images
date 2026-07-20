@@ -92,6 +92,11 @@ export async function POST(request: NextRequest) {
       `?marketplaceIds=${MARKETPLACE_ID}` +
       `&includedData=issues`
 
+    // Global 5-rps ceiling shared with every other patchListingsItem site (task #23, 2026-07-20 audit
+    // caught this UNDOCUMENTED bypass — under concurrent employee pushes this legacy optimize route
+    // could push us past Amazon's per-operation limit and trigger throttling on the primary path).
+    const { spApiWriteBucket } = await import('@/lib/fba/spApiRateLimiter')
+    await spApiWriteBucket.acquire()
     const resp = await fetch(url, {
       method:  'PATCH',
       headers: {

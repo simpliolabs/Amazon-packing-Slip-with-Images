@@ -28,7 +28,7 @@
  */
 
 import { createAdminClient } from '@/lib/supabase/server'
-import { spApiWriteBucket } from '@/lib/fba/spApiRateLimiter'
+import { spApiWriteBucket, spApiReadBucket } from '@/lib/fba/spApiRateLimiter'
 import { reconcileFamilyChildren } from '@/lib/fba/familyReconcile'
 import { getAccessToken } from '@/lib/amazon/auth'
 import {
@@ -301,6 +301,7 @@ export async function discoverSkusForAsin(
       `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
       `?identifiers=${encodeURIComponent(asin)}&identifiersType=ASIN` +
       `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
+    await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
     if (!resp.ok) return null
     const json = (await resp.json()) as { items?: { sku?: string }[] }
@@ -317,6 +318,7 @@ async function findParentSku(sellerId: string, token: string, parentAsin: string
       `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
       `?identifiers=${encodeURIComponent(parentAsin)}&identifiersType=ASIN` +
       `&marketplaceIds=${MARKETPLACE_ID}&includedData=summaries`
+    await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
     if (!resp.ok) return null
     const json = (await resp.json()) as { items?: { sku?: string }[] }
@@ -811,6 +813,7 @@ async function detectLiveDetailSubfield(
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
       `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
     if (!resp.ok) return null
     const json = (await resp.json()) as { attributes?: Record<string, unknown> }
@@ -834,6 +837,7 @@ async function fetchCurrentDetail(
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
       `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
     if (!resp.ok) return ''
     const json = (await resp.json()) as { attributes?: Record<string, unknown> }
@@ -855,7 +859,7 @@ async function fetchCurrentDetail(
  *  same set from one place — no drift between the two paths. isParent flags the hub row. */
 export async function expandDetailSkuSet(
   parentAsin: string, sellerId: string, token: string,
-): Promise<{ sku: string; asin: string; isParent: boolean }[]> {
+): Promise<{ sku: string; asin: string; isParent: boolean; notLive?: boolean }[]> {
   const supabase = await createAdminClient()
   const { data: rowsRaw } = await supabase
     .from('listing_content')
@@ -868,8 +872,16 @@ export async function expandDetailSkuSet(
   const knownSkus = new Set(rows.map((r) => r.sku))
   const expanded: { sku: string; asin: string }[] = [...rows]
   const asinsToProbe = [...new Set(rows.map((r) => r.asin).filter(Boolean))]
+  // Track discovery result per ASIN so we can compute notLive AFTER the loop — mirrors the content-path
+  // gate pattern (loadDiff:550-567) that already saved us from phantom-listing creation on backfilled
+  // rows. Details-path was ungated (2026-07-20 workflow verifier: "CRITICAL — same class of bug that
+  // bit PO on B0DQ5YZH38"); this brings parity so a details:title_differentiation push (which likely
+  // triggered the B0DQ5YZH38 family split when repeated on offerless-backfilled SKUs) can no longer
+  // materialize phantom ASINs.
+  const discoveredByAsin = new Map<string, { sku: string; asin: string }[] | null>()
   for (const asin of asinsToProbe) {
     const discovered = await discoverSkusForAsin(sellerId, token, asin)
+    discoveredByAsin.set(asin, discovered)
     for (const d of (discovered ?? [])) {
       if (knownSkus.has(d.sku)) continue
       // TWIN-NAME GUARD: only inherit when the discovered SKU's stripped name matches one of
@@ -889,7 +901,28 @@ export async function expandDetailSkuSet(
     if (ps && !knownSkus.has(ps)) { parentSku = ps; expanded.push({ sku: ps, asin: parentAsin }); knownSkus.add(ps) }
   } catch { /* parent enrichment is best-effort */ }
 
-  return expanded.map((r) => ({ sku: r.sku, asin: r.asin, isParent: r.sku === parentSku && !knownChildSkus.has(r.sku) }))
+  // ── GROUND-TRUTH GATE (2026-07-20 details-path parity): tag notLive iff Amazon SUCCESSFULLY reported
+  // ZERO seller SKUs under the row's ASIN (offerless-backfilled phantom). null (lookup failed) or an
+  // un-probed ASIN stays live → we NEVER over-skip on an API hiccup, the mistake the reverted
+  // listing_health gate made (#260 → #264, 121-listing revert). PARENT row (asin===parentAsin) is
+  // exempted — a non-buyable hub is normal, not phantom.
+  const withNotLive = expanded.map((r) => {
+    const isParent = r.sku === parentSku && !knownChildSkus.has(r.sku)
+    if (isParent || r.asin === parentAsin) return { sku: r.sku, asin: r.asin, isParent, notLive: false }
+    const disc = r.asin ? discoveredByAsin.get(r.asin) : undefined
+    const notLive = Array.isArray(disc) && disc.length === 0
+    return { sku: r.sku, asin: r.asin, isParent, notLive }
+  })
+  // SAFETY VALVE (same threshold + rationale as loadDiff's content-path gate at :564-566): offerless
+  // rows are a small MINORITY of a real family. If this gate would skip HALF OR MORE, distrust it
+  // (discovery rate-limited / Amazon returning empty en masse / stale asin mapping) and push everything
+  // — a rare phantom is far better than the #260/#262/#263/#264 revert cycle that blanket-skipped 121
+  // real POD listings.
+  const wouldSkip = withNotLive.filter((r) => r.notLive).length
+  if (wouldSkip > 0 && wouldSkip >= Math.ceil(withNotLive.length / 2)) {
+    for (const r of withNotLive) r.notLive = false
+  }
+  return withNotLive
 }
 
 export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Promise<DiffRow[]> {
@@ -914,6 +947,9 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
       chars: proposedStr.length,
       changed: proposedStr.length > 0 && current !== proposedStr,
       isParent: isParentSet.has(r.sku) || undefined,
+      // Propagate the ground-truth phantom-gate signal so single-attribute detail push (executePush
+      // details branch) can skip offerless-backfilled rows — parity with content-path's own notLive.
+      notLive: r.notLive === true ? true : false,
     })
   }
   return diff
@@ -1218,7 +1254,8 @@ async function fetchChildAttributesMap(
       const url =
         `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
         `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
-      const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+      await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
       if (resp.ok) {
         const json = (await resp.json()) as { attributes?: Record<string, unknown> }
         map.set(sku, json.attributes ?? null)
@@ -1595,6 +1632,7 @@ async function confirmNonBuyableVariationParent(
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
       `?marketplaceIds=${MARKETPLACE_ID}&includedData=summaries,relationships`
+    await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
     if (!resp.ok) return { confirmed: false, fetchFailed: true, reason: `parentage GET HTTP ${resp.status}`, childCount: 0 }
     const json = (await resp.json()) as {
@@ -2482,6 +2520,7 @@ async function fetchSkuDetails(
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
       `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    await spApiReadBucket.acquire()   // global 5-rps ceiling for getListingsItem reads (task #23) — 1 token per GET
     const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
     if (!resp.ok) return out
     const json = (await resp.json()) as { attributes?: Record<string, unknown> }
@@ -2896,9 +2935,22 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             calibratedValueFor = (v: string) => buildShapedDetailValueVariants(finalShape, v, MARKETPLACE_ID).find((x) => x.id === finalWinId)?.value
           }
 
+          // PHANTOM GATE (2026-07-20 details-path parity): skip confirmed-offerless rows so a PATCH
+          // never materializes a phantom listing (the class of bug that split B0DQ5YZH38 into 39+8
+          // variants after repeated details:title_differentiation retries on backfilled duplicates).
+          // Parent hub is exempt (a non-buyable hub is normal, not phantom). Mirrors the identical
+          // filter in executeBulkDetailsPush and the content-path (~line 3121).
+          const skippedNotLive = diff.filter((d) => d.notLive && d.asin !== parent_asin)
+          const workingDiff = skippedNotLive.length > 0
+            ? diff.filter((d) => !(d.notLive && d.asin !== parent_asin))
+            : diff
+          if (skippedNotLive.length > 0) {
+            emit({ type: 'progress', message: `Skipping ${skippedNotLive.length} SKU(s) with no live Amazon offer (backfilled duplicates) — pushing to them would create phantom listings.` })
+          }
+
           const results: PushResultRow[] = []
           let cancelled = false
-          for (const item of diff) {
+          for (const item of workingDiff) {
             if (pushCancelled(params.cancel_token)) { cancelled = true; break }
             const isParent = item.asin === parent_asin
             const newValueStr = ctx.recommendedValue
@@ -2960,6 +3012,13 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             emit({ type: 'progress', sku: item.sku, status, submissionId: live.submissionId, error: live.error })
             await logPush({ parent_asin, sku: item.sku, field: `details:${ctx.attribute.spApiKey}`, previous_value: item.current, new_value: newValueStr, submission_id: live.submissionId, status, error_message: live.ok ? null : live.error })
             await sleep(PATCH_DELAY_MS)
+          }
+          // Fold phantom-gated skips into results so the modal shows them per-SKU (parity with
+          // content-path 3187/3422 — the seller sees WHICH SKUs were skipped and why).
+          for (const s of skippedNotLive) {
+            const isParent = s.asin === parent_asin
+            results.push({ sku: s.sku, status: 'skipped', submissionId: null, error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped so the push cannot create a phantom. Complete its offer in Seller Central, then re-push.', isParent })
+            emit({ type: 'progress', sku: s.sku, status: 'skipped', error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped.' })
           }
 
           // Pass/fail over the buyable CHILDREN; the parent hub's outcome is a non-blocking note.
@@ -3449,7 +3508,15 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     // detail PATCH (Amazon re-validates its whole record + rejects on incomplete required attributes),
     // so counting it as a target produced a permanent partial-fail. Buyable children carry everything.
     const bulkParentDropped = skuSetRaw.some((s) => s.asin === parent_asin)
-    const skuSet = skuSetRaw.filter((s) => s.asin !== parent_asin)
+    // PHANTOM GATE (2026-07-20 details-path parity): skip offerless-backfilled rows BEFORE they reach
+    // Amazon's PATCH endpoint — the SAME class of bug that split B0DQ5YZH38 into 39+8 variants when
+    // details:title_differentiation was retried against phantom SKUs. Mirrors the single-attribute path
+    // above + the content-path (~line 3121). 50%-safety-valve already applied inside expandDetailSkuSet.
+    const bulkSkippedNotLive = skuSetRaw.filter((s) => s.notLive && s.asin !== parent_asin)
+    if (bulkSkippedNotLive.length > 0) {
+      emit({ type: 'progress', message: `Skipping ${bulkSkippedNotLive.length} SKU(s) with no live Amazon offer (backfilled duplicates) — pushing to them would create phantom listings.` })
+    }
+    const skuSet = skuSetRaw.filter((s) => s.asin !== parent_asin && !s.notLive)
     if (skuSet.length === 0) { emit({ type: 'error', error: 'No SKUs found for this parent. Run a Sync first.' }); return }
     const spKeys = checkedPlans.map((p) => p.attribute.spApiKey)
 
@@ -3639,7 +3706,7 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       pushed: totalAccepted, failed: totalFailed, total: skusTouched, cancelled: cancelled || undefined,
       message: cancelled
         ? `Stopped by you — ${skusTouched} SKU(s) processed before the stop; accepted fields stay pushed, the rest are untouched.`
-        : `Auto Push done — ${livePlans.length} field(s) across ${skusTouched} SKU(s) that needed it${skipped.length ? `; ${skipped.length} field(s) skipped` : ''}.${bulkParentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''} Changes reflect in 15min–6hr; use Verify live to confirm.`,
+        : `Auto Push done — ${livePlans.length} field(s) across ${skusTouched} SKU(s) that needed it${skipped.length ? `; ${skipped.length} field(s) skipped` : ''}.${bulkParentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''}${bulkSkippedNotLive.length > 0 ? ` (${bulkSkippedNotLive.length} SKU${bulkSkippedNotLive.length === 1 ? '' : 's'} skipped — no live Amazon offer; complete the offer${bulkSkippedNotLive.length === 1 ? '' : 's'} in Seller Central, then re-push.)` : ''} Changes reflect in 15min–6hr; use Verify live to confirm.`,
     })
   } catch (err) {
     emit({ type: 'error', error: err instanceof Error ? err.message : 'Auto Push failed' })

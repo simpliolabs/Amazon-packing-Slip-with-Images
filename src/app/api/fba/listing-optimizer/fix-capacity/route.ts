@@ -86,6 +86,12 @@ async function patchSku(
   const url =
     `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
     `?marketplaceIds=${MARKETPLACE_ID}&includedData=issues&issueLocale=en_US${modeParam}`
+  // Global 5-rps ceiling shared with every other patchListingsItem site (task #23, 2026-07-20
+  // workflow verifier caught this admin-route bypass — under concurrent employee pushes it could
+  // let this repair path push us past Amazon's per-operation limit and trigger the same 429 storm
+  // the primary pushExecutor already survives).
+  const { spApiWriteBucket } = await import('@/lib/fba/spApiRateLimiter')
+  await spApiWriteBucket.acquire()
   const resp = await fetch(url, {
     method: 'PATCH',
     headers: { 'x-amz-access-token': token, 'Content-Type': 'application/json' },

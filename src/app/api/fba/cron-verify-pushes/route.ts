@@ -316,16 +316,27 @@ export async function GET(request: NextRequest) {
     // CIRCUIT BREAKER (2026-07-20, PO family-split incident): if the re-push ACCEPTED nothing AND every
     // failing SKU came back with a STRUCTURAL error (title too long / attribute pre-launch / all write-
     // forms rejected), retrying cannot fix the condition — flag needs_attention NOW instead of scheduling
-    // another 25-min-later retry that will fail identically. Kept narrow: requires (a) 0 accepts, (b) ≥1
-    // per-SKU error captured, (c) EVERY captured error matches isStructuralError. A single transient error
-    // (429/5xx) in the mix keeps the task on the normal reschedule path. Live evidence: B0DQ5YZH38 +
-    // B0FKKN8XKV each looped identical "N failed" for 24h+ before this fix.
-    const allStructural = re.pushed === 0
+    // another 25-min-later retry that will fail identically. Kept narrow: requires (a) 0 accepts, (b) EITHER
+    // per-SKU errors that ALL match isStructuralError, OR a top-level executor error that itself is
+    // structural (composite calibration-exhausted "rejected every known write form" — pushExecutor emits it
+    // as an executor 'error' event BEFORE any per-SKU push runs, so it never populates perSkuErrors; the
+    // workflow verifier caught this dead pattern on 2026-07-20). A single transient error (429/5xx) in the
+    // mix keeps the task on the normal reschedule path.
+    const perSkuAllStructural = re.pushed === 0
       && re.perSkuErrors.length > 0
       && re.perSkuErrors.every((e) => isStructuralError(e.error))
+    const executorStructural = re.pushed === 0
+      && re.perSkuErrors.length === 0
+      && isStructuralError(re.error)
+    const allStructural = perSkuAllStructural || executorStructural
     if (allStructural) {
-      const sample = re.perSkuErrors[0].error.slice(0, 200)
-      const reason = `Amazon rejected all ${re.perSkuErrors.length} SKU(s) with the same structural error — retrying cannot fix this. First error: "${sample}". Address the underlying condition (shorten the live item_name, wait for the Amazon attribute to launch, etc.) and re-push manually.`
+      const sample = perSkuAllStructural
+        ? re.perSkuErrors[0].error.slice(0, 200)
+        : (re.error ?? '').slice(0, 200)
+      const source = perSkuAllStructural
+        ? `all ${re.perSkuErrors.length} SKU(s) with the same structural error`
+        : 'the executor with a structural error (e.g. composite calibration exhausted) before per-SKU push began'
+      const reason = `Amazon rejected ${source} — retrying cannot fix this. First error: "${sample}". Address the underlying condition (shorten the live item_name, wait for the Amazon attribute to launch, etc.) and re-push manually.`
       await flagNeedsAttention(task.id, verify.matched, verify.total, staleSkus, reason)
       processed.push({ id: task.id, field: task.field, result: 'needs_attention_structural', matched: verify.matched, total: verify.total })
       continue
