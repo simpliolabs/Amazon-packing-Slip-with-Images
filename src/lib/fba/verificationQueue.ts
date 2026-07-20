@@ -223,6 +223,48 @@ export async function enqueueFamilyIntegrityCheck(
   }
 }
 
+/** CLEAR a stale heal:manual needs_attention flag for a parent+container by ABANDONING matching rows.
+ *  Complements hasActiveManualHealFlag's "don't re-enqueue while a live alert stands" guard: gives the
+ *  composite-heal path a way to RETRY when the underlying evidence has plausibly changed (2026-07-20:
+ *  the parent-baseline PATCH now surfaces the REAL Amazon rejection instead of silent-dropping, which
+ *  is fresh evidence the heal deserves another attempt on).
+ *
+ *  Only clears rows OLDER than `staleAfterMs` — protects a genuinely rapid retry from resetting a
+ *  fresh flag's 3-attempt budget every push. Returns whether a clear actually happened, so the caller
+ *  can chain the enqueue only when the flag was genuinely stale.
+ *
+ *  Best-effort + non-throwing: on any error returns false (caller keeps the "skip enqueue" behavior,
+ *  same fallback as hasActiveManualHealFlag). */
+export async function clearManualHealFlagIfStale(
+  parent_asin: string, containerKey: string, staleAfterMs: number,
+): Promise<boolean> {
+  if (!parent_asin || !containerKey) return false
+  try {
+    const supabase = await createAdminClient()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
+    const cutoff = new Date(Date.now() - staleAfterMs).toISOString()
+    const { data } = await db.from('push_verification_tasks')
+      .select('id, heal_payload')
+      .eq('parent_asin', parent_asin)
+      .eq('field', 'heal:manual')
+      .eq('status', 'needs_attention')
+      .lt('updated_at', cutoff)
+    const rows = (data ?? []) as { id: string; heal_payload?: HealPayload | null }[]
+    const stale = rows.filter((r) => (r.heal_payload?.missingAttrKeys ?? []).includes(containerKey))
+    if (stale.length === 0) return false
+    const ids = stale.map((r) => r.id)
+    await db.from('push_verification_tasks')
+      .update({ status: 'abandoned', updated_at: new Date().toISOString(), last_error: 'auto-cleared: stale manual-heal flag superseded by fresh Amazon-side rejection evidence — composite heal will retry' })
+      .in('id', ids)
+    console.log(`[verification-queue] clearManualHealFlagIfStale: cleared ${ids.length} stale heal:manual row(s) for ${parent_asin}/${containerKey} (age >= ${Math.round(staleAfterMs / 60000)}m) — composite heal is free to re-enqueue`)
+    return true
+  } catch (e) {
+    console.warn('[verification-queue] clearManualHealFlagIfStale failed (non-fatal):', e instanceof Error ? e.message : e)
+    return false
+  }
+}
+
 /** FIX 3 (adversarial review): has a prior composite read-back ALREADY GIVEN UP on this parent+container?
  *  When healParentComposite's read-back mismatches it writes a DURABLE heal:manual needs_attention row
  *  (via flagParentAttrsNeedAttention) carrying the container in heal_payload.missingAttrKeys. Every later

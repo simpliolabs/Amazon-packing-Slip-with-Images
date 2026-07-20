@@ -2763,7 +2763,7 @@ async function maybeEnqueueParentHeal(
     const nonHealable = rejectedAttrs.filter(
       (k) => !BROADCAST_HEALABLE.has(k) && !compositeSpecForRejectedAttr(k),
     )
-    const { enqueueHeal, flagParentAttrsNeedAttention, hasActiveManualHealFlag, hasActiveHealTask } = await import('@/lib/fba/verificationQueue')
+    const { enqueueHeal, flagParentAttrsNeedAttention, hasActiveManualHealFlag, hasActiveHealTask, clearManualHealFlagIfStale } = await import('@/lib/fba/verificationQueue')
     let healScheduled = false
     const healAttrs: string[] = []
     // Auto-heal the flat-scalar broadcast attrs (needs a resolved productType to schedule the heal).
@@ -2786,8 +2786,17 @@ async function maybeEnqueueParentHeal(
         // needs_attention row). Re-enqueuing would reset the 3-attempt budget every push instead of
         // letting the standing alert stand — SKIP if that durable signal already exists for this
         // parent+container. Best-effort (a failed check falls through to enqueue — safe default).
+        //
+        // STALE-FLAG RETRY (2026-07-20, Path X): the parent-baseline PATCH now surfaces the REAL
+        // Amazon rejection (composite subKeys) instead of silent-dropping — genuinely fresh evidence
+        // the composite heal deserves another attempt on. If the flag is >=1 hour old, CLEAR it and
+        // let the enqueue proceed. Bounded by the composite heal's own 3-attempt budget per task; a
+        // rapid-fire re-push within the hour still respects the standing flag (no attempt-reset loop).
         try {
-          if (await hasActiveManualHealFlag(parent_asin, spec.containerKey)) continue
+          if (await hasActiveManualHealFlag(parent_asin, spec.containerKey)) {
+            const cleared = await clearManualHealFlagIfStale(parent_asin, spec.containerKey, 60 * 60 * 1000)
+            if (!cleared) continue   // flag is fresh — respect the guard
+          }
         } catch { /* non-fatal — fall through to enqueue */ }
         // RE-PUSH GUARD (live-notice): same as the flat path — protect an in-flight composite heal's
         // attempts/next_check_at from being reset by a user re-push, but still count it as scheduled.
