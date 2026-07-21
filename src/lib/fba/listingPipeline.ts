@@ -1490,13 +1490,14 @@ export function validateBullets(
     return problems
   }
 
-  // Length: bullets <100 chars get docked by the scorer.
+  // Length: bullets <BULLET_MIN_CHARS get docked by the validator's problem message (drives runBulletsAgent
+  // retry prompt). Raised from 100→150 (2026-07-21) — see BULLET_MIN_CHARS declaration.
   const shortBullets = bullets
     .map((b, i) => ({ i, b, len: b.length }))
-    .filter((x) => x.len < 100)
+    .filter((x) => x.len < BULLET_MIN_CHARS)
   if (shortBullets.length > 0) {
     const names = shortBullets.map((x) => `bullet ${x.i + 1} (${x.len} chars)`).join(', ')
-    problems.push(`${shortBullets.length} bullet${shortBullets.length === 1 ? '' : 's'} under 100 chars: ${names}. Expand each to 100-200 chars with a "so that" benefit, a compatible-device example, and a long-tail keyword.`)
+    problems.push(`${shortBullets.length} bullet${shortBullets.length === 1 ? '' : 's'} under ${BULLET_MIN_CHARS} chars: ${names}. Expand each to ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} chars with a "so that" benefit, a compatible-device example, and a long-tail keyword.`)
   }
 
   // CAPS-hook check (live-verified bug at B0G884ZJ27: bullets opened with sentence prose
@@ -2970,7 +2971,7 @@ Rules per bullet:
 - 🚫 FIT IS NOT GENDERED: the blank (e.g. Comfort Colors, Bella Canvas, Gildan) is a UNISEX relaxed-fit garment. NEVER claim a "womens fit", "mens fit", "womens style", or "mens cut" — that fabricates a gender the garment doesn't have. Describe the FIT neutrally ("relaxed fit", "classic unisex fit", "easygoing cut"). You MAY still target the buyer audience ("for women", "great gift for her") — that's marketing, not a fit claim.` : ''}
 - NO PHRASE OVERUSE: do NOT repeat any single brand or material name (e.g. "Comfort Colors", "ring-spun", "garment-dyed") more than TWICE across the 5 bullets — vary the wording. And NEVER include misspellings (e.g. "confort colors") in customer-facing bullets — spell every word correctly.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
-- 80-200 characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
+- ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
 - 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}
 - Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.${compatibilityBrands.length > 0 ? `
 - 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands shoppers search for. Devote ONE bullet to compatibility using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example hook: "WIDE COMPATIBILITY - Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras and more...".` : ''}${giftAudiences.length > 0 ? `
@@ -3072,7 +3073,7 @@ Problems:
 - ${bProblems.join('\n- ')}
 
 Rules to honor on rewrite:
-- Each bullet 100-200 chars, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ". The hook is a real BENEFIT ("HIGH-SPEED PERFORMANCE", "DURABLE DESIGN") — never a pipeline label like "CRITICAL UPGRADE" or "KEYWORD".
+- Each bullet ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} chars, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ". The hook is a real BENEFIT ("HIGH-SPEED PERFORMANCE", "DURABLE DESIGN") — never a pipeline label like "CRITICAL UPGRADE" or "KEYWORD".
 - Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${brandName}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capacityClause}
 - Weave in any missing opportunity keywords listed above where they fit naturally.
 Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
@@ -3161,7 +3162,7 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite ALL 5 bullets. ${instructions} The product is "${finalTitle}" — describe ONLY that. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet 100-200 chars. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+            { role: 'user', content: `Rewrite ALL 5 bullets. ${instructions} The product is "${finalTitle}" — describe ONLY that. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} chars. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
           ],
           temperature: 0.3,
           max_tokens: 1200,
@@ -4827,7 +4828,7 @@ function scoreBulletsMetric(bs: string[], brandName: string, designName: string)
   // (2) COHERENCE — deterministic, no LLM.
   const co = 1 - bs.filter(bulletHasCoherenceDefect).length / n
   // (3) STRUCTURE — validateBullets with EMPTY oppKw (its coverage block no-ops), <100-char dock removed.
-  const structProblems = validateBullets(bs, brandName, [], []).filter((p) => !/under 100 chars/.test(p))
+  const structProblems = validateBullets(bs, brandName, [], []).filter((p) => !/under \d+ chars/.test(p))
   // LENGTH (PO 2026-07-16 "not good length"): the scorer docks bullets under 80 chars (#3). The <100
   // validateBullets dock is filtered out above (anti-Goodhart, scope B), so add the scorer's 80-char
   // floor here as SUBSTANCE — never keyword coverage, which stays backend's job (excluded by
@@ -4856,7 +4857,7 @@ async function callBulletsModel(openai: OpenAI, system: string, user: string, mo
   } catch { return [] }
 }
 
-const BULLETS_RESYNTH_SYS = 'You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence of 100-200 characters ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY {"bullets":[5 strings]}.'
+const bulletsResynthSys = (): string => `You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence of ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY {"bullets":[5 strings]}.`
 function bulletsResynthUser(title: string, designName: string, bullets: string[], critique: string): string {
   return `PRODUCT TITLE: ${title}\nDESIGN IDENTITY (must appear in >=1 bullet): ${designName || '(none)'}\n\nCURRENT BULLETS:\n${bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')}\n\nCRITIQUE TO FIX:\n${critique}\n\nReturn ONLY {"bullets":[5 strings]}.`
 }
@@ -4866,8 +4867,11 @@ function bulletsCritique(m: BulletMetric, bullets: string[], designName: string)
   if (m.di < 1 && designName.trim()) notes.push(`The design identity "${designName}" is missing — weave it naturally into at least one bullet.`)
   const defective = bullets.map((b, i) => (bulletHasCoherenceDefect(b) ? i + 1 : 0)).filter(Boolean)
   if (defective.length) notes.push(`Bullet(s) ${defective.join(', ')} read incoherently (a dangling raw-token tail, or one concept repeated 3+ times) — rewrite them as clean sentences.`)
-  const tooShort = bullets.map((b, i) => (b.trim().length < 80 ? i + 1 : 0)).filter(Boolean)
-  if (tooShort.length) notes.push(`Bullet(s) ${tooShort.join(', ')} are too short (under 80 characters) — expand each into a full 100-200 character benefit sentence with real product substance (never padded keywords).`)
+  // Fork 3 (2026-07-21): critique text (LLM-visible) uses BULLET_MIN_CHARS; the metric dock at
+  // scoreBulletsMetric.tooShort (line ~4835) intentionally stays at <80 so the gpt-5 loop doesn't
+  // cascade — the terminal expandShortBulletsTerminal (added below) is the real 150-floor enforcer.
+  const tooShort = bullets.map((b, i) => (b.trim().length < BULLET_MIN_CHARS ? i + 1 : 0)).filter(Boolean)
+  if (tooShort.length) notes.push(`Bullet(s) ${tooShort.join(', ')} are too short (under ${BULLET_MIN_CHARS} characters) — expand each into a full ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} character benefit sentence with real product substance (never padded keywords).`)
   if (m.st < 1) notes.push('Fix weak structure: every bullet needs an ALL-CAPS 2-3 word benefit hook, then " - ", then one complete grammatical sentence.')
   return notes.length ? notes.join('\n') : 'Tighten wording and improve clarity while keeping every bullet accurate.'
 }
@@ -4903,7 +4907,7 @@ async function metricGatedBulletsLoop(
     const MAX_ITERS = 2                                           // <= 2 extra council calls
     for (let i = 0; i < MAX_ITERS; i++) {
       const critique = bulletsCritique(bestScore, best, ctx.designName)
-      const cand = await callBulletsModel(openai, BULLETS_RESYNTH_SYS, bulletsResynthUser(ctx.title, ctx.designName, best, critique), model)
+      const cand = await callBulletsModel(openai, bulletsResynthSys(), bulletsResynthUser(ctx.title, ctx.designName, best, critique), model)
       if (cand.length < 5) break                                  // LENGTH GUARD before any compare
       const candScore = scoreBulletsMetric(shipView(cand), ctx.brandName, ctx.designName)
       if (bestScore.total < candScore.total) {                    // STRICT '<' keep-best
@@ -5907,7 +5911,107 @@ function scrubFitClaims(s: string, fit: string): string {
 //     with "printed". Extend UNSUPPORTED_PRODUCTION_METHODS deliberately when a new false claim shows up.
 // Idempotent by regex construction (running twice = running once). Whitespace + possessive cleanup baked
 // in so `THE CEO's Christian` doesn't leave `'s Christian` on the shelf.
+// Bullet char-budget invariants (2026-07-21, INVARIANT 5 — ONE source of truth per byte budget). PO
+// SEO/conversion target: each bullet 150-200 chars (previously 100-200 across scattered prompts, leaving
+// the LLM to land at the 100 floor and ship 500-char totals when 1000 hits the shopper better).
+export const BULLET_MIN_CHARS = 150
+export const BULLET_MAX_CHARS = 200
+// Description char-budget floor (mirrors existing 900-980 target). Exported so the terminal re-expand
+// (INVARIANT 3, added 2026-07-21) can re-check length AFTER scrubDescriptionBody trimmed brand/screen-
+// print mentions and pushed the audit output below the floor on B0FKKN8XKV live regen.
+export const DESC_MIN_CHARS = 900
 export const UNSUPPORTED_PRODUCTION_METHODS = ['screen[- ]?print(ed|ing)?', 'silk[- ]?screen(ed|ing)?']
+
+// TERMINAL bullets expander (INVARIANT 2 — deterministic net on shipped bytes; INVARIANT 3 — must fire
+// on section-regen + per-child fan-out, not just the full-pipeline path). For each shipped bullet under
+// BULLET_MIN_CHARS, rewrites ONLY that bullet with a targeted gpt-4.1-mini call (cheapest compliant model
+// already used at other in-pipeline retry sites, per assumption 5 of the C+D plan). Per-bullet, not
+// all-5-at-once — cheaper AND monotonic (keeps every already-passing bullet byte-identical). 1 retry
+// with an "expand further" nudge; keep-best on distance-to-target so we NEVER regress a passing bullet.
+// Post-scrub every rewrite through the same deterministic gates existing bullets already pass
+// (deDangle, scrubFitClaims, dup-word collapse, normalizeBrandInBullet, capBulletLen at BULLET_MAX_CHARS).
+export async function expandShortBulletsTerminal(
+  openai: OpenAI,
+  bullets: string[],
+  ctx: { title: string; designName?: string; fit?: string; garmentBrand?: string },
+): Promise<string[]> {
+  if (!Array.isArray(bullets) || bullets.length !== 5) return bullets
+  const needs = bullets.some((b) => (b?.trim().length ?? 0) < BULLET_MIN_CHARS)
+  if (!needs) return bullets                                   // IDEMPOTENT no-op — bullets already pass
+  const gate = (b: string): string => {
+    let s = ctx.fit ? scrubFitClaims(deDangle(b), ctx.fit) : deDangle(b)
+    s = s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')                  // parity with per-child truth gate
+    if (ctx.garmentBrand) s = normalizeBrandInBullet(s, ctx.garmentBrand)
+    return capBulletLen(s, BULLET_MAX_CHARS)
+  }
+  const out = [...bullets]
+  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters long. Keep its exact ALL-CAPS 2-3 word BENEFIT HOOK and " - " prefix. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY {"bullet":"..."}.`
+  for (let i = 0; i < out.length; i++) {
+    const original = (out[i] ?? '').trim()
+    if (original.length >= BULLET_MIN_CHARS) continue
+    let best = original
+    let bestDist = Math.abs(BULLET_MIN_CHARS - original.length)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const nudge = attempt === 0 ? '' : ` The previous rewrite was ${best.length} chars — expand further to reach at least ${BULLET_MIN_CHARS}.`
+        const resp = await openai.chat.completions.create({
+          model: 'gpt-4.1-mini', temperature: 0.4, max_tokens: 400, response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: sys },
+            { role: 'user', content: `PRODUCT: "${ctx.title}"${ctx.designName ? ` — design "${ctx.designName}"` : ''}\nCURRENT BULLET (too short at ${original.length} chars):\n${original}${nudge}\nRewrite it now.` },
+          ],
+        })
+        const parsed = JSON.parse(resp.choices[0]?.message?.content || '{}') as { bullet?: unknown }
+        const raw = typeof parsed.bullet === 'string' ? parsed.bullet.trim() : ''
+        const gated = raw ? gate(raw) : ''
+        if (!gated) continue
+        const dist = gated.length < BULLET_MIN_CHARS ? BULLET_MIN_CHARS - gated.length
+          : gated.length > BULLET_MAX_CHARS ? gated.length - BULLET_MAX_CHARS
+            : 0
+        // Keep-best: prefer smaller distance-to-band; on ties prefer longer (over the floor is better UX).
+        if (dist < bestDist || (dist === bestDist && gated.length > best.length)) {
+          best = gated
+          bestDist = dist
+          if (dist === 0) break                                // in-band hit → stop retrying
+        }
+      } catch { /* keep best-so-far; fall through to next attempt or bullet */ }
+    }
+    out[i] = best
+  }
+  return out
+}
+
+// TERMINAL description re-expand (INVARIANT 3 — pairs with scrubDescriptionBody, which strips 40-60 chars
+// on B0FKKN8XKV and pushes the shipped bytes below DESC_MIN_CHARS after the audit's own expand-pass at
+// runDescriptionAgent line ~4200 has already run). Fires ONLY if plainLen < DESC_MIN_CHARS; extends via
+// gpt-4.1-mini with an explicit "no brand mentions, no screen-print claims" instruction; re-runs
+// scrubDescriptionBody + capDescriptionVisible on the extended output so the LLM CAN'T re-inject either
+// violation.
+export async function reExpandDescriptionIfShort(
+  openai: OpenAI,
+  description: string,
+  opts: { finalTitle: string; brand?: string; garmentBrand?: string },
+): Promise<string> {
+  if (!description) return description
+  const plainLen = (d: string): number => d.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().length
+  const preLen = plainLen(description)
+  if (preLen >= DESC_MIN_CHARS) return description                // IDEMPOTENT — already in band
+  try {
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini', temperature: 0.5, max_tokens: 1200,
+      messages: [
+        { role: 'system', content: `You are an Amazon apparel copy editor. Extend the given HTML product description to 920-970 visible characters (~165 words). ADD 1-2 sentences of real substance about fabric feel, fit, styling, care, or gift suggestions. Keep clean HTML (<p>, <b>, <ul>, <li>) — never flatten to plain prose. Do NOT invent facts, audiences, or professions not already implied. Do NOT mention the seller brand in body prose (the brand attribute already carries it). Do NOT add screen-printed / silk-screen claims. Return ONLY the expanded HTML.` },
+        { role: 'user', content: `Product: "${opts.finalTitle}". Current description (${preLen} chars, too short — target 920-970):\n${description}` },
+      ],
+    })
+    const raw = (resp.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
+    if (!raw || plainLen(raw) <= preLen) return description         // never regress
+    // BELT-AND-SUSPENDERS: LLM instructions can't be trusted (INVARIANT 2). Re-run the scrub on the
+    // extended output so an accidental "THE CEO" or "screen-printed" re-injection gets caught here too.
+    const scrubbed = scrubDescriptionBody(capDescriptionVisible(raw), { brand: opts.brand ?? '', garmentBrand: opts.garmentBrand })
+    return plainLen(scrubbed) > preLen ? scrubbed : description
+  } catch { return description }                                    // fail-open — keep pre-expand copy
+}
 export function scrubDescriptionBody(html: string, opts: { brand?: string; garmentBrand?: string }): string {
   if (!html) return html
   let out = html
@@ -6129,7 +6233,15 @@ BACKEND STRING: ${backendSample}`
     // TERMINAL brand-strip + production-method scrub (INVARIANT 2). Runs AFTER the audit LLM (which
     // hallucinates "THE CEO" prepends and "Screen-printed design" claims — B0FKKN8XKV, 2026-07-21).
     // No-op if brandFront/garmentBrand absent.
-    const outDesc = scrubDescriptionBody(brandNormalizedDesc, { brand: ctx.brandFront, garmentBrand: ctx.garmentBrand })
+    const scrubbedDesc = scrubDescriptionBody(brandNormalizedDesc, { brand: ctx.brandFront, garmentBrand: ctx.garmentBrand })
+    // TERMINAL length re-expand (INVARIANT 3 — bundled with Item C, 2026-07-21). The scrub above trimmed
+    // ~40-60 chars on B0FKKN8XKV live regen and pushed the audit output from 883→841, below DESC_MIN_CHARS.
+    // Re-check and extend if now short; re-scrubs the extension so the LLM can't re-inject.
+    const outDesc = await reExpandDescriptionIfShort(openai, scrubbedDesc, {
+      finalTitle: ctx.referenceTitle ?? title,
+      brand: ctx.brandFront,
+      garmentBrand: ctx.garmentBrand,
+    })
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
@@ -6915,6 +7027,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // (captured from outer scope) for the strip — the local `brand` param is the GARMENT brand for
       // casing. No-op if brandName absent or gd empty.
       if (gd && brandName) gd = scrubDescriptionBody(gd, { brand: brandName, garmentBrand: brand })
+      // TERMINAL per-child length re-expand (INVARIANT 3 — bundled with Item C, 2026-07-21).
+      if (gd) gd = await reExpandDescriptionIfShort(input.openai, gd, { finalTitle: ctx.title, brand: brandName, garmentBrand: brand })
+      // TERMINAL per-child bullets expander (INVARIANT 2 + 3 — bundled with Item C). Rewrites any
+      // per-child bullet under BULLET_MIN_CHARS via gpt-4.1-mini, keeping the ALL-CAPS hook and
+      // running the same deterministic post-scrub as existing bullets.
+      if (gb.length === 5) gb = await expandShortBulletsTerminal(input.openai, gb, {
+        title: ctx.title, designName: ctx.designName, fit, garmentBrand: brand,
+      })
       // 3) Broadcast the gated copy back to EVERY SKU in the group by ctx.skus membership (authoritative —
       //    the per-child designKey is optional and may be unset). They shared one set, so this is free.
       //    Guard on non-empty content: if the rep SKU wasn't found (gb/gd empty), NEVER overwrite the
@@ -7970,6 +8090,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // was skipped (audit fires only when useCouncil=true). B0FKKN8XKV verified failing case: audit
   // reintroduced "THE CEO" and "Screen-printed" between runDescriptionAgent and this line.
   if (description && brandName) description = scrubDescriptionBody(description, { brand: brandName, garmentBrand: blankSpec?.brand })
+  // TERMINAL broadcast length re-expand (INVARIANT 3 — Item C bundle). Pairs with the scrub above:
+  // if scrub trimmed below DESC_MIN_CHARS, re-extend once. Same re-scrub-inside-expander guarantee.
+  if (description && brandName) description = await reExpandDescriptionIfShort(input.openai, description, { finalTitle, brand: brandName, garmentBrand: blankSpec?.brand })
+  // TERMINAL broadcast bullets expander (INVARIANT 2 + 3 — Item C). Rewrites any broadcast bullet
+  // under BULLET_MIN_CHARS. Apparel-only gate per PO fork 2 (2026-07-21) — matches existing
+  // enableBulletsLoop scope, same SD-card/memory-card carve-out.
+  if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
+    bullets = await expandShortBulletsTerminal(input.openai, bullets, {
+      title: finalTitle,
+      designName: effectiveDesignName || '',
+      fit: truthFit,
+      garmentBrand: blankSpec?.brand,
+    })
+  }
 
   // D — per-child + broadcast bullets metric loops (2026-07-16/17). Runs BEFORE gatePerChildMultiDesign so
   // the looped per-child bytes still receive the per-child truth/audit scrub (INVARIANT 5). enableBulletsLoop
