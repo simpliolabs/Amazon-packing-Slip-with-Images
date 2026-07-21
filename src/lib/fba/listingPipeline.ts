@@ -21,6 +21,7 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
+import { garmentNounFor, SHIRT_BASE, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
 import { isOffNicheKeyword, isForeignKeyword } from '@/lib/keyword-engine/nicheGuards'
@@ -994,12 +995,22 @@ function ownBrandTokenSet(brandName: string): Set<string> {
 // has them from the title; >2 is the "shirt ×7" waste the PO flagged).
 const PRODUCT_TYPE_WORDS = new Set(['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'])
 
-// Amazon Listings-Items productTypes that ARE clothing (worn on the body) — the only families
-// where shirt/tee framing, garment blank-brands, and fit/fabric specs make sense. Matched on
-// _-delimited tokens so SWEATSHIRT hits but ADDRESS_LABEL / MEMORY_CARD never can.
-// Exported: keyword research seeds NON-apparel from the productType (category seed) and needs
-// the same ground-truth apparel gate (syncKeywordIntelligence).
-export const APPAREL_PRODUCT_TYPES = /(?:^|_)(SHIRT|SWEATSHIRT|SWEATER|HOODIE|DRESS|SKIRT|PANTS|SHORTS|SOCKS|HAT|COAT|JACKET|UNDERPANTS|UNDERWEAR|BRA|PAJAMAS|SLEEPWEAR|SWIMWEAR|LEOTARD|TIGHTS|LEGGINGS|BODYSUIT|ONESIE|ROMPER|BLOUSE|CARDIGAN|VEST|ROBE|COSTUME|OUTFIT|TRACKSUIT|OVERALLS|SUIT|KURTA|SAREE|SALWAR_SUIT_SET|APPAREL)(?:_|$)/
+// Amazon Listings-Items productTypes that ARE clothing (worn on the body). MOVED to the shared
+// garmentNoun.ts leaf (2026-07-21) so the apparel gate and the garment-noun resolver read ONE
+// source; re-exported here byte-identical for back-compat (syncKeywordIntelligence + others import
+// it from listingPipeline).
+export const APPAREL_PRODUCT_TYPES = APPAREL_PRODUCT_TYPES_SHARED
+
+// GARMENT_NOUN feature flag (2026-07-21, workflow w6728l4wz) — mirrors keywordResearcher's gate.
+// off/shadow → shirt-defaulted (byte-identical to today); on → real per-family garment nouns in the
+// title/highlights/backend producers. Each call site keeps its EXACT legacy expression when off.
+const GARMENT_NOUN_ON = (process.env.GARMENT_NOUN || 'off').toLowerCase() === 'on'
+/** Flag-gated resolver: real garment noun when on, else the frozen shirt base (so every consumer's
+ *  `off` branch is byte-identical). Callers still guard their site with GARMENT_NOUN_ON to preserve
+ *  each site's exact legacy literal (which differs — 't-shirt' vs 'shirt' vs 'Tee Shirt'). */
+function garmentFor(productType?: string | null, title?: string | null): GarmentNoun {
+  return GARMENT_NOUN_ON ? garmentNounFor(productType, title) : SHIRT_BASE
+}
 
 // Is this an APPAREL product? The title/bullet/description framing (graphic tee, shirt, garment
 // brand, men/women audience, fabric/fit specs) only makes sense for clothing. For non-apparel
@@ -1195,8 +1206,13 @@ export function buildHighlightsFallback(
   const neck = val(/neck|collar/i)
   const sleeve = val(/sleeve/i)
   const dept = val(/^department$/i).toLowerCase()
+  // Flag ON → also match non-shirt garment words in the title (cap/hat/snapback/beanie/…) so a hat's
+  // highlights say "cap" not the "shirt" fallback. OFF → the exact original shirt-family regex.
+  const garmentRe = GARMENT_NOUN_ON
+    ? /\bt[-\s]?shirts?\b|\btees?\b|\bhoodies?\b|\bsweatshirts?\b|\btank tops?\b|\bsnapback\b|\bcaps?\b|\bhats?\b|\bbeanies?\b|\bdress(?:es)?\b|\bleggings\b|\bsocks?\b|\bjackets?\b|\bshirts?\b/i
+    : /\bt[-\s]?shirts?\b|\btees?\b|\bhoodies?\b|\bsweatshirts?\b|\btank tops?\b|\bshirts?\b/i
   const garment = apparelProduct
-    ? (finalTitle.match(/\bt[-\s]?shirts?\b|\btees?\b|\bhoodies?\b|\bsweatshirts?\b|\btank tops?\b|\bshirts?\b/i)?.[0] ?? 'shirt').toLowerCase().replace(/\s{2,}/g, ' ').replace(/s$/, '')
+    ? (finalTitle.match(garmentRe)?.[0] ?? 'shirt').toLowerCase().replace(/\s{2,}/g, ' ').replace(/s$/, '')
     : ''
   const candidates: string[] = []
   if (material) candidates.push(garment ? `${material} ${garment}` : material)
@@ -2105,7 +2121,10 @@ async function expandDesignNiche(
 ): Promise<string[]> {
   const anchor = [designName, ...secondaryPhrases, visionDesign?.designTheme, ...(visionDesign?.visualElements || [])].filter(Boolean).join(' | ')
   if (!anchor.trim()) return []
-  const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 't-shirt' : 'shirt'
+  // Flag ON → real family word (HAT → "hat"/"cap"); OFF → EXACT legacy expression (byte-identical).
+  const ptWord = GARMENT_NOUN_ON
+    ? garmentNounFor(productType, anchor).ptWord
+    : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 't-shirt' : 'shirt')
   try {
     const r = await openai.chat.completions.create({
       model: process.env.NICHE_SEED_MODEL || 'gpt-4.1-mini',
@@ -2703,7 +2722,10 @@ Rules:
   // design-niche seeds (now fed by the vision→universe wire) + the upgrade keywords.
   if (apparel && title.length < 68) {
     const aud = preferredAudience || 'Men and Women'
-    const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'Tee Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt')
+    // Flag ON → title-aware family display (HAT + "Snapback Cap" title → "Snapback Cap"); OFF → exact legacy.
+    const ptWord = GARMENT_NOUN_ON
+      ? garmentNounFor(productType, title).display
+      : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'Tee Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt'))
     const nichePool = [...new Set([...(input.nicheSeeds || []), ...upgradeKws].map((s) => (s || '').trim()).filter(Boolean))]
     const sdSystem = `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title. Lead with the brand, then the design/niche, then the product type, then supporting niche keyphrases a real shopper types, then "for ${aud}". Write like a human — never keyword soup.`
     const sdUser = `Brand: ${brandName}
@@ -5404,9 +5426,12 @@ async function buildNicheParentTitle(
   // for the deterministic leak net). Null/absent → the brief and the net both no-op (fail-open).
   competitorSeo?: (CompetitorSeoSnapshot & { brand: string }) | null,
 ): Promise<string> {
-  const ptWord = /T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'T-Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt')
-  const aud = preferredAudience || 'Men and Women'
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
+  // Flag ON → title-aware family display; OFF → exact legacy ('T-Shirt' for shirt else Titlecase(pt)).
+  const ptWord = GARMENT_NOUN_ON
+    ? garmentNounFor(productType, designNameList).display
+    : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'T-Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt'))
+  const aud = preferredAudience || 'Men and Women'
   const upgradeList = topUpgradeKws.slice(0, 8).join(', ') || '(none)'
   const compatList = compatibilityBrands.length > 0 ? compatibilityBrands.slice(0, 3).join(', ') : ''
   // FAMILY-NICHE ANCHOR (H "Seam 2"). familyNiche is the POSITIVE niche the whole family shares
