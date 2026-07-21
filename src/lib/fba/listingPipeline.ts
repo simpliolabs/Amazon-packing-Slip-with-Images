@@ -8093,17 +8093,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // TERMINAL broadcast length re-expand (INVARIANT 3 — Item C bundle). Pairs with the scrub above:
   // if scrub trimmed below DESC_MIN_CHARS, re-extend once. Same re-scrub-inside-expander guarantee.
   if (description && brandName) description = await reExpandDescriptionIfShort(input.openai, description, { finalTitle, brand: brandName, garmentBrand: blankSpec?.brand })
-  // TERMINAL broadcast bullets expander (INVARIANT 2 + 3 — Item C). Rewrites any broadcast bullet
-  // under BULLET_MIN_CHARS. Apparel-only gate per PO fork 2 (2026-07-21) — matches existing
-  // enableBulletsLoop scope, same SD-card/memory-card carve-out.
-  if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
-    bullets = await expandShortBulletsTerminal(input.openai, bullets, {
-      title: finalTitle,
-      designName: effectiveDesignName || '',
-      fit: truthFit,
-      garmentBrand: blankSpec?.brand,
-    })
-  }
 
   // D — per-child + broadcast bullets metric loops (2026-07-16/17). Runs BEFORE gatePerChildMultiDesign so
   // the looped per-child bytes still receive the per-child truth/audit scrub (INVARIANT 5). enableBulletsLoop
@@ -8113,6 +8102,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     title: finalTitle, brandName: brandName || 'THE CEO', designName: effectiveDesignName || '',
     fit: truthFit, onProgress,
   }, enableBulletsLoop)
+
+  // TERMINAL broadcast bullets expander (INVARIANT 2 + 3 — Item C, 2026-07-21). MUST run AFTER
+  // runBulletsMetricLoops (which enforces <80 dock only per Fork 3) — first live regen showed the
+  // metric loop returned bullets at 111-130 chars, all below BULLET_MIN_CHARS. This is the actual
+  // enforcer of the 150 floor on shipped broadcast bytes. Apparel-only gate per PO fork 2.
+  if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
+    bullets = await expandShortBulletsTerminal(input.openai, bullets, {
+      title: finalTitle,
+      designName: effectiveDesignName || '',
+      fit: truthFit,
+      garmentBrand: blankSpec?.brand,
+    })
+  }
 
   // Per-child multi-design copy (the bytes the push actually PATCHes) gets the SAME audit + truth/brand
   // gate as the broadcast copy above — closes the R4/#61 leak where multi-design shipped unscrubbed.
