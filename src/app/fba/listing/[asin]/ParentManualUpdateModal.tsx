@@ -24,6 +24,8 @@ import { useState } from 'react'
 
 interface Props {
   parentAsin: string
+  parentSku?: string
+  productType?: string
   containers: string[]
   storedTitle: string
   storedBullets: string[]
@@ -47,7 +49,13 @@ const CONTAINER_LABELS: Record<string, string> = {
 export function ParentManualUpdateModal(props: Props) {
   const [copied, setCopied] = useState<string | null>(null)
   const [reVerifying, setReVerifying] = useState(false)
-  const sellerCentralUrl = `https://sellercentral.amazon.com/abis/listing/edit?asin=${props.parentAsin}&ref_=xx_addlisting_dnav_xx`
+  // Deep-link to the Variations tab (not the generic edit page) — that's where the operator actually
+  // completes the composite the popup exists for. PO verified 2026-07-21 that /abis/listing/edit
+  // opens a stub without the composite fields. Requires parentSku + productType; if either is absent,
+  // fall back to the generic edit page (Amazon will show the SKU picker).
+  const sellerCentralUrl = props.parentSku && props.productType
+    ? `https://sellercentral.amazon.com/abis/listing/edit/variations?sku=${encodeURIComponent(props.parentSku)}&asin=${props.parentAsin}&productType=${encodeURIComponent(props.productType)}&marketplaceID=ATVPDKIKX0DER&isVariationParent=true&ref_=myp_1x1#variations`
+    : `https://sellercentral.amazon.com/abis/listing/edit?asin=${props.parentAsin}&ref_=xx_addlisting_dnav_xx`
   const primaryContainer = props.containers[0] ?? 'shirt_size'
   const bulletsAsText = (arr: string[]): string => arr.map((b, i) => `${i + 1}. ${b}`).join('\n')
 

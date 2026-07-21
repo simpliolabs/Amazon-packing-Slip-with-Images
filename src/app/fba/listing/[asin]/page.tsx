@@ -379,7 +379,7 @@ export default function ListingDetailPage() {
   // seller knows the system is watching their pushes and which (if any) need their attention.
   // `healing` (kind='heal' pending/running) drives the violet "self-heal in progress - do not
   // re-push" banner; `tasks` carries heal_payload.missingAttrKeys + next_check_at for its copy.
-  interface VerifyQueueTask { id?: string; field?: string; kind?: string | null; status?: string; next_check_at?: string | null; last_error?: string | null; heal_payload?: { missingAttrKeys?: string[] } | null; updated_at?: string | null }
+  interface VerifyQueueTask { id?: string; field?: string; kind?: string | null; status?: string; next_check_at?: string | null; last_error?: string | null; heal_payload?: { missingAttrKeys?: string[]; parentSku?: string; productType?: string } | null; updated_at?: string | null }
   const [verifyQueue, setVerifyQueue] = useState<{ pending: number; healing: number; needs_attention: number; tasks: VerifyQueueTask[] }>({ pending: 0, healing: 0, needs_attention: 0, tasks: [] })
   const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
@@ -389,7 +389,7 @@ export default function ListingDetailPage() {
   // parentManualRequired:true AND the seller hasn't dismissed the most recent heal:manual flag.
   // Dismiss key = heal:manual row.id (server-provided, stable) → a NEW heal:manual row (different id)
   // re-fires the popup, but re-pushing while the SAME flag stands stays quiet after one dismiss.
-  const [showParentManual, setShowParentManual] = useState<{ containers: string[] } | null>(null)
+  const [showParentManual, setShowParentManual] = useState<{ containers: string[]; parentSku?: string; productType?: string } | null>(null)
   // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
   // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
   // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
@@ -1044,7 +1044,14 @@ export default function ListingDetailPage() {
     const dismissKey = `fba.parentManualPopup.dismissed.${asin}.${manualTask.id ?? 'no-id'}`
     if (typeof window !== 'undefined' && window.localStorage.getItem(dismissKey)) return
     if (showParentManual) return   // already open — don't re-mount
-    setShowParentManual({ containers })
+    // heal:manual payload has empty parentSku/productType — pull them from the sibling heal:composite
+    // task (its payload has valid values). Falls back to modal generic-edit URL if neither is present.
+    const compTask = verifyQueue.tasks.find((t) => t.kind === 'heal' && t.field === 'heal:composite' && t.heal_payload?.parentSku)
+    setShowParentManual({
+      containers,
+      parentSku: compTask?.heal_payload?.parentSku,
+      productType: compTask?.heal_payload?.productType,
+    })
   }, [asin, verifyQueue.tasks, pushResults?.parentManualRequired, pushResults?.parentManualContainers, showParentManual])
 
   const refreshKwData = useCallback(async (opts?: { triggerSync?: boolean }) => {
@@ -5525,6 +5532,8 @@ export default function ListingDetailPage() {
       {showParentManual && aiRecs && (
         <ParentManualUpdateModal
           parentAsin={asin}
+          parentSku={showParentManual.parentSku}
+          productType={showParentManual.productType}
           containers={showParentManual.containers}
           // Stored parent values are surfaced from score.children when available (Karpathy simple: no
           // extra probe just for a nice-to-have side-by-side). The RECOMMENDED side is the one that
