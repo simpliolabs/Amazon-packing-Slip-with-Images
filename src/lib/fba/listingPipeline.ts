@@ -5892,6 +5892,46 @@ function scrubFitClaims(s: string, fit: string): string {
   return out.replace(/\s{2,}/g, ' ').replace(/\s+([.,;!?])/g, '$1').trim()
 }
 
+// Description-body scrubber (PO 2026-07-21, INVARIANT 2 terminal net). Two rules that run on the FINAL
+// shipped bytes, AFTER runFinalEditorialAudit + per-design fan-out (the last LLM stages that could
+// re-inject either violation). Both callers already sit in the existing scrub chain around tidyDescription
+// / scrubFitClaims — this appends one more link so nothing that ships escapes the net.
+//   RULE 1 — brand-strip: sellers put the brand in the `brand` attribute + title; repeating it in the
+//     description body prose is redundant + eats real estate + AI-hallucinated (verified 2026-07-21:
+//     B0FKKN8XKV description body contained two "THE CEO" mentions the generator invented; nothing
+//     downstream stripped them). We strip STANDALONE "THE CEO" including inside a quoted phrase per PO
+//     policy ("STRIP inside quotes" fork, 2026-07-21) — the failing case was `"THE CEO I Will Praise
+//     Him in Every Season"` where the brand was clearly a prepend, not authorial quotation.
+//   RULE 2 — production-method scrub: PO ships PRINTED tees (DTG-style), never screen-print. Any
+//     "Screen-printed" / "screen printed" / "silk-screened" claim is factually wrong on the PDP; replace
+//     with "printed". Extend UNSUPPORTED_PRODUCTION_METHODS deliberately when a new false claim shows up.
+// Idempotent by regex construction (running twice = running once). Whitespace + possessive cleanup baked
+// in so `THE CEO's Christian` doesn't leave `'s Christian` on the shelf.
+export const UNSUPPORTED_PRODUCTION_METHODS = ['screen[- ]?print(ed|ing)?', 'silk[- ]?screen(ed|ing)?']
+export function scrubDescriptionBody(html: string, opts: { brand?: string; garmentBrand?: string }): string {
+  if (!html) return html
+  let out = html
+  // Rule 1 — brand-strip. Only STANDALONE seller-brand mentions; the `brand` attribute + title carry
+  // it authoritatively. Also strip the possessive `THE CEO's` → drop the possessive fragment so we
+  // don't leave "'s Christian shirt" hanging (rare but proven-possible generator output).
+  const brand = (opts.brand ?? '').trim()
+  if (brand && brand.length >= 2) {
+    const esc = brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    out = out.replace(new RegExp(`\\b${esc}(?:'s)?\\s+`, 'gi'), '')   // "THE CEO Christian" → "Christian"; "THE CEO's Christian" → "Christian"
+    out = out.replace(new RegExp(`\\s+\\b${esc}\\b`, 'gi'), '')       // trailing " THE CEO" — rare
+  }
+  // Rule 2 — production-method scrub. Replace each disallowed method with "printed" (word-boundary
+  // matched, case-preserving isn't necessary because "printed" is always lowercase in body prose).
+  for (const pattern of UNSUPPORTED_PRODUCTION_METHODS) {
+    out = out.replace(new RegExp(`\\b${pattern}\\b`, 'gi'), 'printed')
+  }
+  // Post-scrub cleanup: collapse doubled spaces, strip space-before-punctuation, remove empty
+  // parenthetical/brace remnants a strip may leave (e.g. "(THE CEO)" → "()"). Idempotent.
+  out = out.replace(/\(\s*\)|\[\s*\]|\{\s*\}/g, '')
+  out = out.replace(/\s{2,}/g, ' ').replace(/\s+([.,;:!?])/g, '$1')
+  return out.trim()
+}
+
 // GROUND-TRUTH blank specs — authoritative garment facts per blank brand/style, so the pipeline stops
 // GUESSING fit/sleeve/neck from the SEARCH keyword pool (which is full of "oversized tshirt" search DEMAND,
 // not product facts) and mislabelling a relaxed Comfort Colors tee as "Oversized"/"Cap Sleeve". These
@@ -6080,7 +6120,11 @@ BACKEND STRING: ${backendSample}`
       : (introducesInternalJargon(description, auditedDesc) || degradesDescription(description, auditedDesc))
         ? preAuditDesc
         : auditedDesc
-    const outDesc = ctx.garmentBrand ? normalizeBrandCase(chosenDesc, ctx.garmentBrand) : chosenDesc
+    const brandNormalizedDesc = ctx.garmentBrand ? normalizeBrandCase(chosenDesc, ctx.garmentBrand) : chosenDesc
+    // TERMINAL brand-strip + production-method scrub (INVARIANT 2). Runs AFTER the audit LLM (which
+    // hallucinates "THE CEO" prepends and "Screen-printed design" claims — B0FKKN8XKV, 2026-07-21).
+    // No-op if brandFront/garmentBrand absent.
+    const outDesc = scrubDescriptionBody(brandNormalizedDesc, { brand: ctx.brandFront, garmentBrand: ctx.garmentBrand })
     const drop = new Set<string>(Array.isArray(p.backend_drop)
       ? (p.backend_drop as unknown[]).filter((t): t is string => typeof t === 'string').map((t) => t.toLowerCase().trim()).filter((t) => t.length > 0)
       : [])
@@ -6861,6 +6905,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         gb = gb.map((b) => normalizeBrandInBullet(b, brand))
         if (gd) gd = normalizeBrandCase(gd, brand)
       }
+      // TERMINAL per-child brand-strip + production-method scrub (INVARIANT 2 + INVARIANT 3 — must run
+      // on the per-child bytes the push actually PATCHes, not just the broadcast). Uses seller brandName
+      // (captured from outer scope) for the strip — the local `brand` param is the GARMENT brand for
+      // casing. No-op if brandName absent or gd empty.
+      if (gd && brandName) gd = scrubDescriptionBody(gd, { brand: brandName, garmentBrand: brand })
       // 3) Broadcast the gated copy back to EVERY SKU in the group by ctx.skus membership (authoritative —
       //    the per-child designKey is optional and may be unset). They shared one set, so this is free.
       //    Guard on non-empty content: if the rep SKU wasn't found (gb/gd empty), NEVER overwrite the
@@ -7911,6 +7960,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     bullets = bullets.map((b) => collapseDup(scrubFitClaims(deDangle(b), truthFit)))
     description = collapseDup(scrubFitClaims(tidyDescription(description), truthFit))
   }
+  // TERMINAL broadcast description scrub — RUNS ON THE FINAL SHIPPED BYTES (INVARIANT 2 + 6, per
+  // pre-done check). Belt-and-suspenders for the broadcast/section-regen path even if the audit above
+  // was skipped (audit fires only when useCouncil=true). B0FKKN8XKV verified failing case: audit
+  // reintroduced "THE CEO" and "Screen-printed" between runDescriptionAgent and this line.
+  if (description && brandName) description = scrubDescriptionBody(description, { brand: brandName, garmentBrand: blankSpec?.brand })
 
   // D — per-child + broadcast bullets metric loops (2026-07-16/17). Runs BEFORE gatePerChildMultiDesign so
   // the looped per-child bytes still receive the per-child truth/audit scrub (INVARIANT 5). enableBulletsLoop
