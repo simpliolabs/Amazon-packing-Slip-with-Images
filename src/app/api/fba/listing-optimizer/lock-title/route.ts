@@ -52,7 +52,44 @@ export async function POST(req: NextRequest) {
     .eq('parent_asin', parentAsin)
     .maybeSingle()
   if (readErr) return NextResponse.json({ error: readErr.message }, { status: 500 })
-  if (!cur) return NextResponse.json({ error: 'No recommendation row for this parent_asin' }, { status: 404 })
+
+  // LOCK-BEFORE-GENERATION (PO 2026-07-21, B0H9VDCBZJ): a listing that has never been generated has no
+  // recommendation row, so the seller could not lock their title FIRST and then generate around it. When
+  // the seller locks a NON-EMPTY typed title and no row exists yet, SEED a minimal row (title + empties)
+  // stamped 'manual' — the next Regenerate then PRESERVES this title (the lock guard in the regen POST).
+  // Unlock-with-no-row, or lock-with-no-title-and-no-row, still 404 (nothing to seed/release).
+  if (!cur) {
+    if (action === 'lock' && title) {
+      const { error: insErr } = await db
+        .from('listing_seo_recommendations')
+        .upsert({
+          parent_asin: parentAsin,
+          recommended_title: title,
+          title_source: 'manual',
+          // Empty placeholders for the NOT-NULL core columns (mirrors the generation route's minimal
+          // upsert shape) — the seller's Regenerate fills bullets/description/keywords, preserving the title.
+          recommended_bullets: [],
+          recommended_keywords: '[]',
+          recommended_description: '',
+          generated_at: new Date().toISOString(),
+        }, { onConflict: 'parent_asin' })
+      if (insErr) {
+        console.error('[lock-title] seed-row insert failed:', insErr.message)
+        return NextResponse.json({ error: `Could not seed a recommendation row to hold the locked title: ${insErr.message}` }, { status: 500 })
+      }
+      // Best-effort audit log for the seed, then return.
+      try {
+        const myName = await resolveUserName(user.id, user.email)
+        await db.from('listing_change_log').insert({
+          parent_asin: parentAsin, sku: null, field: 'title (locked)', action: 'edit',
+          before_value: '', after_value: title, changed_by: user.id, changed_by_name: myName, source: 'manual_edit',
+        })
+      } catch (e) { console.warn('[lock-title] seed change-log insert failed:', e instanceof Error ? e.message : e) }
+      return NextResponse.json({ ok: true, title_source: 'manual', recommended_title: title, seeded: true })
+    }
+    return NextResponse.json({ error: 'No recommendation row yet — type a title in the Lock field and lock it, or Regenerate first.' }, { status: 404 })
+  }
+
   const before = (cur as { recommended_title?: string }).recommended_title ?? ''
 
   // Build the update. LOCK: stamp 'manual' + (if the seller typed a title) make it the recommendation so
