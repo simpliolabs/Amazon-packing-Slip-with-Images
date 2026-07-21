@@ -69,6 +69,10 @@ export interface JungleScoutKeywordRow {
                                  // EXEMPT from the relevance gate — these are rule-generated on-product
                                  // angles (e.g. "graphic tees for women") the gate's token-overlap would
                                  // wrongly strip as "generic". The niche path stays fully gated.
+  nicheHead?: boolean;           // set ONLY for broadNicheSeed single-token category heads ("christian
+                                 // shirt", "cashflow cap") — NOT broad-category/garment-brand mega-heads.
+                                 // Exempt from the #280 x0.7 opportunity demotion (flag-gated) so the
+                                 // winnable niche head reaches CRITICAL/title (workflow w6728l4wz C3).
 }
 
 /** Union type for any keyword source */
@@ -258,6 +262,8 @@ export function runKeywordEngine(
       // #280 universe terms (JS-only) are demoted in scoring so a design's niche terms out-rank the
       // broad-category heads. SQP rows have no fromUniverse → undefined → false (full weight).
       fromUniverse: (rawRow as JungleScoutKeywordRow).fromUniverse === true,
+      // C3: broadNicheSeed heads carry nicheHead → exempt from the x0.7 demotion (flag-gated).
+      nicheHead: (rawRow as JungleScoutKeywordRow).nicheHead === true,
     };
     const score = calculateScore(scoringInputs);
 

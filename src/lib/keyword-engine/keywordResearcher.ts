@@ -299,15 +299,18 @@ export async function researchKeywords(
     .map((s) => scrubTrademarks(s).trim())
     .filter((s) => s && !hasTrademark(s));
   if (visionNicheSeeds.length) console.log(`[keywordResearcher] Vision niche universes: [${visionNicheSeeds.join(' | ')}]`);
-  const extraUniverses = [
-    ...visionNicheSeeds,                                        // U1.x — FULL vision niche set (bypasses title-only validateSeeds)
-    broadNicheSeed(seed, listingTitle, visionIdentity, g),      // U1.5 — BROAD NICHE HEAD (e.g. "christian shirt"/"cashflow cap")
-    broadCategorySeed(seed, listingTitle, g),                   // U2 — broad category, e.g. "graphic tees for women"/"hats for men"
-    garmentBrandSeed(seed, listingTitle, g),                    // U3 — garment brand, e.g. "comfort colors shirt"
-  ].filter((s): s is string => !!s);
+  // C3 (workflow w6728l4wz): carry each universe's KIND so the broadNicheSeed HEAD can be tagged
+  // nicheHead → exempt from the x0.7 opportunity demotion (flag-gated), while the mega-broad
+  // category/brand heads stay demoted. vision-niche universes are also winnable heads → nicheHead.
+  const extraUniverses: { seed: string; nicheHead: boolean }[] = [
+    ...visionNicheSeeds.map((seed) => ({ seed, nicheHead: true })),          // U1.x — vision niche heads
+    ...([broadNicheSeed(seed, listingTitle, visionIdentity, g)].filter((s): s is string => !!s).map((seed) => ({ seed, nicheHead: true }))),  // U1.5 — BROAD NICHE HEAD
+    ...([broadCategorySeed(seed, listingTitle, g)].filter((s): s is string => !!s).map((seed) => ({ seed, nicheHead: false }))),              // U2 — broad category (demoted)
+    ...([garmentBrandSeed(seed, listingTitle, g)].filter((s): s is string => !!s).map((seed) => ({ seed, nicheHead: false }))),               // U3 — garment brand (demoted)
+  ];
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
-  for (const us of extraUniverses) {
+  for (const { seed: us, nicheHead: uNicheHead } of extraUniverses) {
     const uk = normalizeSeedKey(us);
     if (!uk || universeSeen.has(uk)) continue;
     universeSeen.add(uk);
@@ -339,7 +342,12 @@ export async function researchKeywords(
       // ⊆ CATEGORY_GENERIC_HEADS ∪ APPAREL_WORDS ∪ SEED_GENERIC — keeps legit niche siblings
       // ("jesus shirt", "faith shirt") which carry non-generic tokens.
       if (isCategoryGenericOnly(k)) continue;
-      nicheKeywords.push({ ...r, organicRank: undefined, fromUniverse: true }); mergedKw.add(k);
+      // C3: tag the winnable niche-head universes (vision-niche + broadNicheSeed) so scoring exempts
+      // them from the x0.7 demotion. Flag OFF → nicheHead omitted entirely (pool byte-identical).
+      const row = GARMENT_NOUN_ON && uNicheHead
+        ? { ...r, organicRank: undefined, fromUniverse: true, nicheHead: true }
+        : { ...r, organicRank: undefined, fromUniverse: true };
+      nicheKeywords.push(row); mergedKw.add(k);
     }
   }
 

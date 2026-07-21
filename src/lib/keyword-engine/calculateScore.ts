@@ -44,6 +44,10 @@ export interface ScoringInputs {
    *  deliberate high-VOLUME category angles kept for backend coverage, but they must NOT out-rank a
    *  design's own winnable niche terms in the opportunity view — so their score is modestly demoted. */
   fromUniverse?: boolean;
+  /** Set ONLY for broadNicheSeed single-token category heads ("christian shirt", "cashflow cap") —
+   *  the WINNABLE niche head, not a mega-broad category/brand head. EXEMPT from the x0.7 demotion
+   *  (flag-gated) so it reaches CRITICAL and the title front-load (workflow w6728l4wz C3). */
+  nicheHead?: boolean;
 }
 
 export interface ScoreResult {
@@ -182,7 +186,12 @@ export function calculateScore(inputs: ScoringInputs): ScoreResult {
   // #280 universe demotion (niche-priority): modestly down-weight broad-category / garment-brand universe
   // heads so a design's winnable niche terms out-rank them in the opportunity view. Applied before
   // deriveActionType so the CRITICAL tier and the stored opportunityScore agree.
-  const finalScore = inputs.fromUniverse
+  // C3 EXEMPTION (workflow w6728l4wz, flag-gated): a broadNicheSeed HEAD ("christian shirt" ~45k) is
+  // the WINNABLE niche head the PO wants front-loaded — NOT a mega-broad category/brand head. When
+  // GARMENT_NOUN=on, skip the x0.7 for nicheHead rows so they keep their real (CRITICAL-tier) score.
+  // Flag off → the demotion applies to ALL fromUniverse rows exactly as before (byte-identical).
+  const nicheHeadExempt = inputs.nicheHead === true && (process.env.GARMENT_NOUN || 'off').toLowerCase() === 'on';
+  const finalScore = (inputs.fromUniverse && !nicheHeadExempt)
     ? Math.round(adjustedScore * UNIVERSE_OPPORTUNITY_WEIGHT)
     : adjustedScore;
 
