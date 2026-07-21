@@ -289,9 +289,10 @@ export async function researchKeywords(
     .filter((s) => s && !hasTrademark(s));
   if (visionNicheSeeds.length) console.log(`[keywordResearcher] Vision niche universes: [${visionNicheSeeds.join(' | ')}]`);
   const extraUniverses = [
-    ...visionNicheSeeds,                    // U1.x — FULL vision niche set (bypasses the title-only validateSeeds gate)
-    broadCategorySeed(seed, listingTitle),  // U2 — broad category, e.g. "graphic tees for women"
-    garmentBrandSeed(seed, listingTitle),   // U3 — garment brand, e.g. "comfort colors shirt"
+    ...visionNicheSeeds,                                        // U1.x — FULL vision niche set (bypasses title-only validateSeeds)
+    broadNicheSeed(seed, listingTitle, visionIdentity),         // U1.5 — BROAD NICHE HEAD (e.g. "christian shirt") — workflow woacqkm0s
+    broadCategorySeed(seed, listingTitle),                      // U2 — broad category, e.g. "graphic tees for women"
+    garmentBrandSeed(seed, listingTitle),                       // U3 — garment brand, e.g. "comfort colors shirt"
   ].filter((s): s is string => !!s);
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
@@ -320,6 +321,13 @@ export async function researchKeywords(
       // para hombres"). Those an English listing can never index, so drop them at the SOURCE before they
       // enter the pool / rank snapshots. The exemption is for genericness, never for contamination (2026-07-17).
       if (isForeignKeyword(k)) continue;
+      // Category-generic drop (PO 2026-07-21, workflow woacqkm0s bundled fix): "custom t shirts"
+      // (223k vol) rides in on JS's related expansion of ANY tee-family universe head. This tee
+      // is a FIXED-DESIGN Christian shirt, not customizable — "custom/personalized/funny/cool/cute"
+      // heads are noise regardless of the source universe. Drops rows whose whole token set is
+      // ⊆ CATEGORY_GENERIC_HEADS ∪ APPAREL_WORDS ∪ SEED_GENERIC — keeps legit niche siblings
+      // ("jesus shirt", "faith shirt") which carry non-generic tokens.
+      if (isCategoryGenericOnly(k)) continue;
       nicheKeywords.push({ ...r, organicRank: undefined, fromUniverse: true }); mergedKw.add(k);
     }
   }
@@ -601,6 +609,67 @@ function garmentBrandSeed(seed: string, listingTitle?: string | null): string | 
   const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
   const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'shirt'
   return `${brand} ${productWord}`
+}
+
+/**
+ * BROAD-NICHE HEAD universe seed (PO 2026-07-21, workflow woacqkm0s). Fixes the "no high-vol
+ * Christian keywords in Intelligence" class: the Seed Agent picks 3-token narrow phrases
+ * ("christian faith shirt") so JS `keywords_by_keyword` returns 15-176 vol long-tail. The BROAD
+ * single-token niche head ("christian shirt" ~40-50k) is what unlocks the head family via JS's
+ * related-term expansion — jesus shirt, faith shirt, religious shirts, bible verse shirt. But
+ * `deriveNicheSeeds`' novel-token gate (:1102) REJECTS it because "christian" is already in the
+ * primary. This emits the head as its OWN universe, tagged fromUniverse:true so it bypasses the
+ * title-only relevance gate. Amortized: one JS credit per niche the first time, then reused
+ * across every listing of that niche via keyword_seed_pool.
+ *
+ * Seeded from the strongest non-generic token in {primary, vision.designTheme, vision.seedKeywords[0..2]}.
+ * Apparel-only. Returns null if the top token is a blank brand (garmentBrandSeed owns that) OR
+ * the derived head equals the primary (no point re-researching).
+ */
+function broadNicheSeed(
+  seed: string,
+  listingTitle: string | null | undefined,
+  visionIdentity: { designTheme?: string; seedKeywords?: string[] } | null | undefined,
+): string | null {
+  const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
+  if (!/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
+  const tokenSources = [
+    seed,
+    visionIdentity?.designTheme || '',
+    ...((visionIdentity?.seedKeywords || []).slice(0, 3)),
+  ].join(' ').toLowerCase()
+  const productWord = 'shirt'
+  const seen = new Set<string>()
+  for (const raw of tokenSources.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
+    const w = raw.replace(/s$/, '')
+    if (w.length <= 3) continue
+    if (seen.has(w)) continue
+    seen.add(w)
+    if (SEED_GENERIC.has(w) || APPAREL_WORDS.has(w) || NICHE_GENERIC.has(w)) continue
+    if (FALLBACK_BLANK_BRANDS.includes(w)) continue        // garmentBrandSeed owns this universe
+    if (FALLBACK_TONE_WORDS.has(w)) continue               // tone words are universe-agnostic
+    if (/^\d+$/.test(w)) continue
+    const head = `${w} ${productWord}`
+    if (normalizeSeedKey(head) === normalizeSeedKey(seed)) continue  // don't re-research primary
+    return head
+  }
+  return null
+}
+
+/**
+ * Category-generic single-word intents (PO 2026-07-21, workflow woacqkm0s bundled fix). These
+ * describe the LISTING FORMAT ("custom"/"personalized" = made-to-order) or generic sentiment
+ * ("funny"/"cool"/"cute") — irrelevant to any specific niche. Drop any universe row whose token
+ * set is a strict subset of CATEGORY_GENERIC_HEADS ∪ APPAREL_WORDS ∪ SEED_GENERIC so a JS
+ * expansion off a niche head like "christian shirt" cannot drag in "custom t shirts" (223k vol,
+ * misleading — our tees are fixed-design not customizable). Preserves legitimate niche siblings
+ * (jesus shirt, faith shirt) because they carry non-generic tokens.
+ */
+const CATEGORY_GENERIC_HEADS = new Set(['custom', 'customized', 'customizable', 'personalized', 'personalised', 'monogrammed', 'funny', 'cool', 'cute', 'plain', 'blank', 'unprinted'])
+function isCategoryGenericOnly(keyword: string): boolean {
+  const toks = keyword.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean).map((t) => t.replace(/s$/, ''))
+  if (toks.length === 0) return false
+  return toks.every((t) => CATEGORY_GENERIC_HEADS.has(t) || APPAREL_WORDS.has(t) || APPAREL_WORDS.has(t + 's') || SEED_GENERIC.has(t))
 }
 
 // ─── Pool-entry relevance gate (anti-pollution) ─────────────────────────────────────
