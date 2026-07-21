@@ -10,6 +10,7 @@ import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // 
 import { groupByDesign, isMultiDesign, resolveMultiDesign, perChildValueResolver, perDesignEntries, type PerDesignGroup } from '@/lib/fba/perDesign'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
+import { ParentManualUpdateModal } from './ParentManualUpdateModal'
 import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSparkline'
@@ -378,12 +379,17 @@ export default function ListingDetailPage() {
   // seller knows the system is watching their pushes and which (if any) need their attention.
   // `healing` (kind='heal' pending/running) drives the violet "self-heal in progress - do not
   // re-push" banner; `tasks` carries heal_payload.missingAttrKeys + next_check_at for its copy.
-  interface VerifyQueueTask { id?: string; field?: string; kind?: string | null; status?: string; next_check_at?: string | null; last_error?: string | null; heal_payload?: { missingAttrKeys?: string[] } | null }
+  interface VerifyQueueTask { id?: string; field?: string; kind?: string | null; status?: string; next_check_at?: string | null; last_error?: string | null; heal_payload?: { missingAttrKeys?: string[] } | null; updated_at?: string | null }
   const [verifyQueue, setVerifyQueue] = useState<{ pending: number; healing: number; needs_attention: number; tasks: VerifyQueueTask[] }>({ pending: 0, healing: 0, needs_attention: 0, tasks: [] })
   const [cancelRequested, setCancelRequested] = useState(false)
   const [pushLoading, setPushLoading] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
-  const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; healScheduled?: boolean; healAttrs?: string[] } | null>(null)
+  const [pushResults, setPushResults] = useState<{ field?: PushField; pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; healScheduled?: boolean; healAttrs?: string[]; parentManualRequired?: boolean; parentManualContainers?: string[] } | null>(null)
+  // Item A (2026-07-21): parent-hub manual-completion popup state. Fires when a push completes with
+  // parentManualRequired:true AND the seller hasn't dismissed the most recent heal:manual flag.
+  // Dismiss key = heal:manual row.id (server-provided, stable) → a NEW heal:manual row (different id)
+  // re-fires the popup, but re-pushing while the SAME flag stands stays quiet after one dismiss.
+  const [showParentManual, setShowParentManual] = useState<{ containers: string[] } | null>(null)
   // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
   // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
   // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
@@ -1021,6 +1027,26 @@ export default function ListingDetailPage() {
     return () => clearInterval(id)
   }, [asin, refreshVerifyQueue])
 
+  // Item A (2026-07-21): parent-manual popup trigger. Fires from BOTH sources per Fork 4:
+  //   1) push-executor emit (pushResults.parentManualRequired) — the per-field path fires here.
+  //   2) verifyQueue.tasks (proactive) — bulk/Ship-all-core paths where the parent isn't in the diff,
+  //      or first-visit to a listing that already has an active heal:manual flag.
+  // Dismiss key: heal:manual row.id (server-provided, stable across polls). A NEW heal:manual row (a
+  // fresh Amazon rejection after the seller thought they'd fixed it) has a new id → popup re-fires.
+  useEffect(() => {
+    if (!asin) return
+    const manualTask = verifyQueue.tasks.find((t) => t.field === 'heal:manual' && t.status === 'needs_attention')
+    if (!manualTask) return
+    // Prefer server-provided flag list; fall back to the task's containers if the push emit didn't carry them.
+    const containers = pushResults?.parentManualContainers
+      ?? (manualTask.heal_payload?.missingAttrKeys ?? [])
+    if (containers.length === 0) return
+    const dismissKey = `fba.parentManualPopup.dismissed.${asin}.${manualTask.id ?? 'no-id'}`
+    if (typeof window !== 'undefined' && window.localStorage.getItem(dismissKey)) return
+    if (showParentManual) return   // already open — don't re-mount
+    setShowParentManual({ containers })
+  }, [asin, verifyQueue.tasks, pushResults?.parentManualRequired, pushResults?.parentManualContainers, showParentManual])
+
   const refreshKwData = useCallback(async (opts?: { triggerSync?: boolean }) => {
     if (!asin) return
     try {
@@ -1489,7 +1515,7 @@ export default function ListingDetailPage() {
     const cancelToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `p${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
     pushCancelTokenRef.current = cancelToken
     setCancelRequested(false)
-    let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[] } | null = null
+    let finalResult: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[]; parentManualRequired?: boolean; parentManualContainers?: string[] } | null = null
     let streamError: string | null = null
     const skuStatus = new Map<string, string>()   // latest status per SKU — rebuilds a partial result if the stream drops
     let serverTotal = 0                            // real diff size from the 'started' event (NOT just SKUs-seen-before-drop)
@@ -1516,7 +1542,7 @@ export default function ListingDetailPage() {
       let buffer = ''
       const handleLine = (line: string) => {
         if (!line.trim()) return
-        let msg: { type?: string; sku?: string; status?: string; error?: string; submissionId?: string | null; pushed?: number; failed?: number; total?: number; message?: string; results?: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[] }
+        let msg: { type?: string; sku?: string; status?: string; error?: string; submissionId?: string | null; pushed?: number; failed?: number; total?: number; message?: string; results?: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[]; parentManualRequired?: boolean; parentManualContainers?: string[] }
         try { msg = JSON.parse(line) } catch { return }
         if (msg.type === 'started') {
           setPushPhase('pushing')
@@ -1543,6 +1569,8 @@ export default function ListingDetailPage() {
             results: msg.results ?? [],
             healScheduled: msg.healScheduled,
             healAttrs: msg.healAttrs,
+            parentManualRequired: msg.parentManualRequired,
+            parentManualContainers: msg.parentManualContainers,
           }
         } else if (msg.type === 'error') {
           streamError = msg.error || 'Push failed mid-stream.'
@@ -1564,7 +1592,7 @@ export default function ListingDetailPage() {
 
       if (streamError) throw new Error(streamError)
       // TS loses narrowing across the closure-mutated `finalResult` — re-assert the shape.
-      let data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[] }
+      let data: { pushed: number; failed: number; total: number; message: string; results: PushResultRow[]; field?: PushField; healScheduled?: boolean; healAttrs?: string[]; parentManualRequired?: boolean; parentManualContainers?: string[] }
       if (finalResult) {
         data = finalResult
       } else {
@@ -5493,6 +5521,40 @@ export default function ListingDetailPage() {
             </div>
           </div>
         </div>
+      )}
+      {showParentManual && aiRecs && (
+        <ParentManualUpdateModal
+          parentAsin={asin}
+          containers={showParentManual.containers}
+          // Stored parent values are surfaced from score.children when available (Karpathy simple: no
+          // extra probe just for a nice-to-have side-by-side). The RECOMMENDED side is the one that
+          // matters — that's what the operator copy-pastes into Seller Central.
+          storedTitle=""
+          storedBullets={[]}
+          storedDescription=""
+          storedKeywords=""
+          recommendedTitle={aiRecs.recommended_title ?? ''}
+          recommendedBullets={aiRecs.recommended_bullets ?? []}
+          recommendedDescription={aiRecs.recommended_description ?? ''}
+          recommendedKeywords={aiRecs.recommended_keywords ?? ''}
+          onDismiss={() => {
+            const manualTask = verifyQueue.tasks.find((t) => t.field === 'heal:manual' && t.status === 'needs_attention')
+            if (typeof window !== 'undefined' && manualTask?.id) {
+              window.localStorage.setItem(`fba.parentManualPopup.dismissed.${asin}.${manualTask.id}`, String(Date.now()))
+            }
+            setShowParentManual(null)
+          }}
+          onReVerify={async (containerKey) => {
+            try {
+              await fetch('/api/fba/listing-optimizer/heal-state', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ parent_asin: asin, container_key: containerKey, confirm: true }),
+              })
+              await refreshVerifyQueue()
+            } catch { /* silent — the queue poll will catch up */ }
+          }}
+        />
       )}
     </div>
     </div>

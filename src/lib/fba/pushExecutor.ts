@@ -1276,6 +1276,27 @@ interface CompositeHealSpec { containerKey: string; subKeys: string[]; perVarian
 const COMPOSITE_HEAL_SPECS: CompositeHealSpec[] = [
   { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'], perVariantField: 'size' },
 ]
+/** Item A (2026-07-21, PO approved): return the FIRST composite container this parent has been flagged
+ *  needs_attention on, or null if no active flag stands. When non-null, the content + details push
+ *  loops SKIP the parent-hub PATCH (which is doomed to silent-drop after Amazon rule 99022 traps the
+ *  composite — verified live on PHE-STS-P B0FKKN8XKV, workflow wob0iqomq exhausted every API path) and
+ *  emit a `skipped_manual_parent` row instead of a `failed` row. The frontend popup uses the returned
+ *  container(s) to render the exact fields the operator needs to complete in Seller Central.
+ *  Best-effort — DB error → bypass:false so a transient blip never silences a legitimate parent push. */
+async function shouldBypassParentPush(parent_asin: string): Promise<{ bypass: boolean; containers: string[] }> {
+  try {
+    const { hasActiveManualHealFlag } = await import('@/lib/fba/verificationQueue')
+    const hits: string[] = []
+    for (const spec of COMPOSITE_HEAL_SPECS) {
+      if (await hasActiveManualHealFlag(parent_asin, spec.containerKey)) hits.push(spec.containerKey)
+    }
+    return { bypass: hits.length > 0, containers: hits }
+  } catch (e) {
+    console.warn('[push] shouldBypassParentPush check failed (non-fatal, proceeding with parent PATCH):', e instanceof Error ? e.message : e)
+    return { bypass: false, containers: [] }
+  }
+}
+
 /** Rejected-attribute name → the composite spec that heals it (container name OR any of its subKeys). */
 function compositeSpecForRejectedAttr(attr: string): CompositeHealSpec | null {
   for (const spec of COMPOSITE_HEAL_SPECS) {
@@ -2795,7 +2816,9 @@ function summarizePush(results: { status: string; isParent?: boolean }[]): {
   const parentNote =
     parent?.status === 'accepted'
       ? ' (Variation parent hub also updated.)'
-      : parent?.status === 'failed'
+      : parent?.status === 'skipped_manual_parent'
+        ? ' (Parent hub skipped — manual completion required in Seller Central; a popup is showing you the exact fields. Children still shipped.)'
+        : parent?.status === 'failed'
         ? ' (The variation parent hub was rejected — usually an incomplete required attribute like its Shirt Size System/Class; complete it in Seller Central. The buyable variants shoppers see were updated.)'
         : ''
   return { accepted, failed, childTotal: children.length, parentNote }
@@ -3146,9 +3169,18 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
 
           const results: PushResultRow[] = []
           let cancelled = false
+          // Item A (2026-07-21): parent-hub bypass symmetry — details branch also PATCHes the parent hub,
+          // and hits the same silent-drop wall when its composite is orphaned.
+          const parentBypass = await shouldBypassParentPush(parent_asin)
           for (const item of workingDiff) {
             if (pushCancelled(params.cancel_token)) { cancelled = true; break }
             const isParent = item.asin === parent_asin
+            if (isParent && parentBypass.bypass) {
+              const reason = `Parent-hub write skipped — composite still needs manual completion in Seller Central (${parentBypass.containers.join(', ')}). Children will still push.`
+              results.push({ sku: item.sku, status: 'skipped_manual_parent', submissionId: null, error: reason, isParent: true })
+              emit({ type: 'progress', sku: item.sku, status: 'skipped_manual_parent', error: reason })
+              continue
+            }
             const newValueStr = ctx.recommendedValue
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
             let preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape, calibratedValueFor(newValueStr))
@@ -3318,11 +3350,17 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             })
           }
 
+          // Item A (2026-07-21): details-branch parent-bypass surfacing (mirrors content-branch).
+          const parentManualRow = results.find((r) => r.isParent && r.status === 'skipped_manual_parent')
+          const parentManualRequired = Boolean(parentManualRow)
+          const parentManualContainers = parentBypass.bypass ? parentBypass.containers : undefined
           emit({
             type: 'result',
             parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
             pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
             healScheduled: heal.healScheduled, healAttrs: heal.healAttrs,
+            parentManualRequired: parentManualRequired || undefined,
+            parentManualContainers,
             message: cancelled
               ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
               : `Pushed ${ctx.detailField} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNoteFinal} Changes typically reflect in 15-30 minutes.`,
@@ -3436,9 +3474,21 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
 
         const results: PushResultRow[] = []
         let cancelled = false
+        // Item A (2026-07-21): compute the parent-bypass ONCE up-front — the flag doesn't change during a
+        // single push. If the parent has an active heal:manual on any composite container, its PATCH is
+        // doomed to silent-drop; skip it and surface a "manual required" note instead of a red "failed".
+        const parentBypass = await shouldBypassParentPush(parent_asin)
         for (const item of diff) {
           if (pushCancelled(params.cancel_token)) { cancelled = true; break }
           const isParent = item.asin === parent_asin
+          // Item A parent-hub bypass — BEFORE the prefill block so we don't waste an SP-API preview call
+          // resolving broadcast attrs for a parent we're going to skip anyway.
+          if (isParent && parentBypass.bypass) {
+            const reason = `Parent-hub write skipped — composite still needs manual completion in Seller Central (${parentBypass.containers.join(', ')}). Children will still push.`
+            results.push({ sku: item.sku, status: 'skipped_manual_parent', submissionId: null, error: reason, isParent: true })
+            emit({ type: 'progress', sku: item.sku, status: 'skipped_manual_parent', error: reason })
+            continue
+          }
           // TIER-2 PRE-FILL: complete the parent hub's known-missing broadcast attributes (learned in
           // push_heal_rules) BEFORE the content PATCH, so the hub's re-validation no longer trips the
           // rejection. RESOLUTION IS LAZY HERE (adversarial review 2026-06-28): loadDiff (the GET preview)
@@ -3667,11 +3717,18 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           ? ` ${skippedNotLive.length} skipped (not a live Amazon listing yet — Missing offer/incomplete; complete their offer in Seller Central, then re-push).`
           : ''
         const skippedResults: typeof results = skippedNotLive.map((d) => ({ sku: d.sku, status: 'skipped', submissionId: null, error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped so the push cannot create a phantom. Complete its offer in Seller Central, then re-push.' }))
+        // Item A (2026-07-21): surface the parent-bypass event so the frontend popup fires. The popup
+        // uses `parentManualContainers` to render the exact fields the operator needs to fix in SC.
+        const parentManualRow = results.find((r) => r.isParent && r.status === 'skipped_manual_parent')
+        const parentManualRequired = Boolean(parentManualRow)
+        const parentManualContainers = parentBypass.bypass ? parentBypass.containers : undefined
         emit({
           type: 'result',
           parent_asin, field,
           pushed: accepted, failed, total: childTotal, cancelled: cancelled || undefined,
           healScheduled: heal.healScheduled, healAttrs: heal.healAttrs,
+          parentManualRequired: parentManualRequired || undefined,
+          parentManualContainers,
           message: cancelled
             ? `Stopped by you — ${accepted}/${childTotal} accepted before the stop stay pushed; ${diff.length - results.length} SKU${diff.length - results.length === 1 ? '' : 's'} untouched.`
             : `Pushed ${label} for ${accepted}/${childTotal} variant${childTotal === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.${parentNoteFinal}${skippedNote} Changes typically reflect in 15-30 minutes.`,
