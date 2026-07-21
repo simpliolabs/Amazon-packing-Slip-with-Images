@@ -5917,6 +5917,11 @@ export function scrubDescriptionBody(html: string, opts: { brand?: string; garme
   const brand = (opts.brand ?? '').trim()
   if (brand && brand.length >= 2) {
     const esc = brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // PREP-PREFIX strip FIRST: "tee from THE CEO." → "tee." (drops the preposition too so we don't
+    // leave "tee from." dangling — verified failing 2026-07-21 on B0FKKN8XKV first regen after the
+    // net's initial deploy). Covers common patterns before + after nouns.
+    out = out.replace(new RegExp(`\\s+\\b(?:from|by|with|for|of|at|in|on|to)\\s+${esc}(?:'s)?\\b`, 'gi'), '')
+    // Then standalone-strip whatever brand mentions remain.
     out = out.replace(new RegExp(`\\b${esc}(?:'s)?\\s+`, 'gi'), '')   // "THE CEO Christian" → "Christian"; "THE CEO's Christian" → "Christian"
     out = out.replace(new RegExp(`\\s+\\b${esc}\\b`, 'gi'), '')       // trailing " THE CEO" — rare
   }
