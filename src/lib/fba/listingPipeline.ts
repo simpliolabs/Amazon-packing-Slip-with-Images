@@ -6462,9 +6462,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Seller-declared lean OVERRIDES the keyword-derived audience: hard male/female narrows
   // the title tail outright (their explicit choice); lean_*/unisex keeps the broad tail
   // (lean already re-weighted the pools above).
+  // GENDER LEAN (PO 2026-07-21, flag-gated): a seller who set "Lean Male"/"Lean Female" wants the
+  // title to READ male/female — the hat shipped "for Men and Women" despite a Lean-Male setting
+  // because lean_male fell into the broad `lean ? 'Men and Women'` branch. When GARMENT_NOUN=on, a
+  // SOFT lean also narrows the tail (lean_male → 'Men'); only explicit 'unisex' stays dual. Flag OFF
+  // → the exact prior behavior (soft lean keeps 'Men and Women'). Hard male/female already narrowed.
   const preferredAudience = !apparelProduct ? ''
     : lean === 'male' ? 'Men'
     : lean === 'female' ? 'Women'
+    : (GARMENT_NOUN_ON && lean === 'lean_male') ? 'Men'
+    : (GARMENT_NOUN_ON && lean === 'lean_female') ? 'Women'
     : lean ? 'Men and Women'
     : /\bunisex\b/.test(audienceText) || (mentionsWomen && mentionsMen) ? 'Men and Women'
     : mentionsWomen ? 'Women'

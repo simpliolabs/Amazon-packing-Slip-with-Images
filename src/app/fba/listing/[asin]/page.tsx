@@ -1058,15 +1058,26 @@ export default function ListingDetailPage() {
     if (!asin) return
     try {
       if (opts?.triggerSync) {
+        // Capture the CURRENT analyzedAt so we can poll until the sync produces a NEWER one — the old
+        // poll returned on `totalKeywordsAnalyzed > 0`, which is true IMMEDIATELY, so it grabbed the
+        // STALE pre-sync data and the seller had to hard-refresh to see the updated universe (PO
+        // 2026-07-21). Now we wait for the analyzedAt timestamp to actually advance.
+        let baselineAnalyzedAt: string | null = null
+        try {
+          const b = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
+          if (b.ok) baselineAnalyzedAt = (await b.json())?.analyzedAt ?? null
+        } catch { /* no baseline — any non-empty result will do */ }
         await fetch(`/api/fba/intelligence/${asin}`, { method: 'POST', cache: 'no-store' }).catch(() => {})
-        for (let attempt = 0; attempt < 10; attempt++) {
+        for (let attempt = 0; attempt < 12; attempt++) {
           await new Promise(r => setTimeout(r, 3000))
           const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
           if (resp.ok) {
             const data = await resp.json()
-            if (data.totalKeywordsAnalyzed > 0) { setKwData(data); return }
+            const advanced = data.analyzedAt && data.analyzedAt !== baselineAnalyzedAt
+            if (data.totalKeywordsAnalyzed > 0 && (advanced || !baselineAnalyzedAt)) { setKwData(data); return }
           }
         }
+        // Poll exhausted — still show the latest we can get rather than nothing.
       }
       const resp = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
       if (resp.ok) { setKwData(await resp.json()) }
