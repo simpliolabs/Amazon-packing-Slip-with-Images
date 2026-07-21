@@ -25,6 +25,7 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
 import { scrubTrademarks, hasTrademark } from '../fba/trademarkGuard';
+import { garmentNounFor, SHIRT_BASE, ALL_GARMENT_ALIAS_WORDS, type GarmentNoun } from '../fba/garmentNoun';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -104,9 +105,19 @@ export async function researchKeywords(
      *  that narrow query — never the category winner whose keywords we need. Supplied by the
      *  caller for NON-apparel only (apparel niches are design-led; vision seeds them better). */
     categorySeed?: string;
+    /** SP-API productType (SHIRT/HAT/SWEATSHIRT/…) — drives the shared garment-noun resolver so a
+     *  HAT stops being seeded as a t-shirt. Flag-gated (GARMENT_NOUN); off → shirt-defaulted. */
+    productType?: string;
   } = {}
 ): Promise<KeywordResearchResult> {
-  const { forceRefresh = false, listingTitle, manualSeed, categorySeed } = options;
+  const { forceRefresh = false, listingTitle, manualSeed, categorySeed, productType } = options;
+  // Shared garment-noun resolver, flag-gated. Flag off/shadow → SHIRT_BASE (byte-identical to the
+  // legacy shirt defaults). Flag on → real per-family resolution. Shadow mode logs the delta.
+  const gReal = garmentNounFor(productType, listingTitle);
+  const g: GarmentNoun = GARMENT_NOUN_ON ? gReal : SHIRT_BASE;
+  if (GARMENT_NOUN_MODE === 'shadow' && gReal.family !== 'shirt') {
+    console.log(`[GARMENT_DIFF] ${asin} pt=${productType ?? '(none)'}: garment shirt→${gReal.family} | seedNoun ${SHIRT_BASE.seedNoun}→${gReal.seedNoun} | categoryHead "${SHIRT_BASE.categoryHead('women')}"→"${gReal.categoryHead('women')}"`);
+  }
 
   // Check cache first
   if (!forceRefresh) {
@@ -120,7 +131,7 @@ export async function researchKeywords(
   // ── Phase 1: Seed selection — Seed Agent (identity-validated) → rules failover ────────────
   // (was: rules-only "first 3 words" → the soccer-pollution bug. The agent reads the design's
   // real niche; manual/category seeds still bypass it; vision feeds the agent as context.)
-  const seedSel = await selectSeeds({ asin, parentAsin, listingTitle, manualSeed, categorySeed });
+  const seedSel = await selectSeeds({ asin, parentAsin, listingTitle, manualSeed, categorySeed, g });
   if (seedSel.seeds.length === 0) {
     console.warn(`[keywordResearcher] No seed available for ${asin}. Cannot research.`);
     return emptyResult();
@@ -187,7 +198,7 @@ export async function researchKeywords(
   // Fires ONLY on the low-data case (well-seeded listings like the soccer tee skip it). +1 credit.
   const EMPTY_POOL_THRESHOLD = 10;
   if (nicheKeywords.length < EMPTY_POOL_THRESHOLD) {
-    const fallbackSeed = buildFallbackSeed(seed, listingTitle);
+    const fallbackSeed = buildFallbackSeed(seed, listingTitle, g);
     const already = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
     if (fallbackSeed && !already.has(fallbackSeed)) {
       const before = nicheKeywords.length;
@@ -290,9 +301,9 @@ export async function researchKeywords(
   if (visionNicheSeeds.length) console.log(`[keywordResearcher] Vision niche universes: [${visionNicheSeeds.join(' | ')}]`);
   const extraUniverses = [
     ...visionNicheSeeds,                                        // U1.x — FULL vision niche set (bypasses title-only validateSeeds)
-    broadNicheSeed(seed, listingTitle, visionIdentity),         // U1.5 — BROAD NICHE HEAD (e.g. "christian shirt") — workflow woacqkm0s
-    broadCategorySeed(seed, listingTitle),                      // U2 — broad category, e.g. "graphic tees for women"
-    garmentBrandSeed(seed, listingTitle),                       // U3 — garment brand, e.g. "comfort colors shirt"
+    broadNicheSeed(seed, listingTitle, visionIdentity, g),      // U1.5 — BROAD NICHE HEAD (e.g. "christian shirt"/"cashflow cap")
+    broadCategorySeed(seed, listingTitle, g),                   // U2 — broad category, e.g. "graphic tees for women"/"hats for men"
+    garmentBrandSeed(seed, listingTitle, g),                    // U3 — garment brand, e.g. "comfort colors shirt"
   ].filter((s): s is string => !!s);
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
@@ -508,14 +519,27 @@ const SEED_GENERIC = new Set([
   // minor / structural
   'for','and','with','the','a','an','of','to','in','on','at','by','or',
 ])
-const APPAREL_WORDS = new Set(['shirt','shirts','tshirt','tshirts','t-shirt','tee','tees','top','tops','hoodie','sweatshirt','tank'])
+// GARMENT_NOUN feature flag (2026-07-21, workflow w6728l4wz). 'on' activates real per-family
+// garment-noun resolution; 'shadow' logs [GARMENT_DIFF] (what WOULD change) without changing
+// behavior; off/unset = 100% current shirt-defaulted behavior. The 95% shirt catalog is
+// byte-identical until the PO flips this on after reviewing the shadow diff.
+const GARMENT_NOUN_MODE = (process.env.GARMENT_NOUN || 'off').toLowerCase()
+const GARMENT_NOUN_ON = GARMENT_NOUN_MODE === 'on'
+// Shirt-family words; when the flag is ON, PLUS the union of all garment-family aliases (hat/cap/
+// snapback/beanie/hoodie/sweatshirt/tank/dress/leggings/socks/…) so "find the garment word in the
+// title" scans stop missing non-shirt garments. Flag OFF → the exact original shirt-only set, so
+// shirt (and every not-yet-flipped) listing is byte-identical.
+const APPAREL_WORDS = new Set<string>([
+  'shirt','shirts','tshirt','tshirts','t-shirt','tee','tees','top','tops','hoodie','sweatshirt','tank',
+  ...(GARMENT_NOUN_ON ? ALL_GARMENT_ALIAS_WORDS.flatMap((w) => w.split(/\s+/)) : []),
+])
 
 /**
  * Build a concise, design-led seed from the title. Drop generic words (year, "personalized",
  * size, color, audience, blank-brand) BEFORE picking the seed — so the design's distinctive
  * tokens lead, not the qualifiers. Falls back gracefully when nothing distinctive remains.
  */
-export function buildSeedFromTitle(title: string): string {
+export function buildSeedFromTitle(title: string, g: GarmentNoun = SHIRT_BASE): string {
   // Strip brand prefix (everything before first dash or colon) — keep only the lead segment.
   const firstSegment = title.split(/\s*[-–—:]\s*/)[0].trim()
   // Tokenize: lowercase, strip punctuation, split on whitespace.
@@ -526,7 +550,7 @@ export function buildSeedFromTitle(title: string): string {
   // distinctive words in the seller's own title are almost always the design tokens.
   const lead = distinctive.slice(0, 2)
   // Add an apparel word so JS returns product keywords, not general subject queries.
-  const apparelInTitle = all.find((w) => APPAREL_WORDS.has(w)) || 'tshirt'
+  const apparelInTitle = all.find((w) => APPAREL_WORDS.has(w)) || g.seedNoun
   const seed = lead.length > 0 ? `${lead.join(' ')} ${apparelInTitle}` : `${all.slice(0, 2).join(' ')} ${apparelInTitle}`.trim()
   return seed.replace(/\s{2,}/g, ' ').trim()
 }
@@ -558,10 +582,10 @@ const FALLBACK_BLANK_BRANDS = [
  * The downstream relevance gate + never-collapse floor still filter/keep results appropriately.
  * Returns null when nothing usable exists.
  */
-export function buildFallbackSeed(seed: string, listingTitle?: string | null): string | null {
+export function buildFallbackSeed(seed: string, listingTitle?: string | null, g: GarmentNoun = SHIRT_BASE): string | null {
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
   const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
-  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'shirt'
+  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || g.noun
 
   // 1) TONE — how shoppers actually search for novelty/slogan tees.
   const tone = toks.find((t) => FALLBACK_TONE_WORDS.has(t))
@@ -586,11 +610,13 @@ export function buildFallbackSeed(seed: string, listingTitle?: string | null): s
  * Tees only; audience inferred from the title ("for Women"/"for Men"), default women (the larger
  * graphic-tee market). Returns null for non-tees (non-apparel uses the PT-derived categorySeed).
  */
-function broadCategorySeed(seed: string, listingTitle?: string | null): string | null {
+function broadCategorySeed(seed: string, listingTitle?: string | null, g: GarmentNoun = SHIRT_BASE): string | null {
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
-  if (!/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
+  // Flag OFF (g=SHIRT_BASE): tee-only gate + "graphic tees for {aud}" — byte-identical to legacy.
+  // Flag ON: gate on apparel family (not just tee) so a hat/sweatshirt emits its own category head.
+  if (g.family === 'shirt' && !/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
   const aud = /\bwom[ae]n\b|\bladies\b/.test(src) ? 'women' : /\bmen\b/.test(src) ? 'men' : 'women'
-  return `graphic tees for ${aud}`
+  return g.categoryHead(aud)
 }
 
 /**
@@ -602,12 +628,12 @@ function broadCategorySeed(seed: string, listingTitle?: string | null): string |
  * null when no known brand is present. (Reuses FALLBACK_BLANK_BRANDS — the same list buildFallbackSeed
  * already trusts as on-product blank brands.)
  */
-function garmentBrandSeed(seed: string, listingTitle?: string | null): string | null {
+function garmentBrandSeed(seed: string, listingTitle?: string | null, g: GarmentNoun = SHIRT_BASE): string | null {
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
   const brand = FALLBACK_BLANK_BRANDS.find((b) => src.includes(b))
   if (!brand) return null
   const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
-  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || 'shirt'
+  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || g.noun
   return `${brand} ${productWord}`
 }
 
@@ -630,15 +656,18 @@ function broadNicheSeed(
   seed: string,
   listingTitle: string | null | undefined,
   visionIdentity: { designTheme?: string; seedKeywords?: string[] } | null | undefined,
+  g: GarmentNoun = SHIRT_BASE,
 ): string | null {
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
-  if (!/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
+  // Flag OFF (g=SHIRT_BASE): tee-only gate — byte-identical to legacy (shirts only get the head).
+  // Flag ON: allow any apparel family (a hat/sweatshirt gets "cashflow cap"/"faith sweatshirt").
+  if (g.family === 'shirt' && !/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
   const tokenSources = [
     seed,
     visionIdentity?.designTheme || '',
     ...((visionIdentity?.seedKeywords || []).slice(0, 3)),
   ].join(' ').toLowerCase()
-  const productWord = 'shirt'
+  const productWord = g.noun
   const seen = new Set<string>()
   for (const raw of tokenSources.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
     const w = raw.replace(/s$/, '')
@@ -801,8 +830,9 @@ export async function selectSeeds(opts: {
   listingTitle?: string | null
   manualSeed?: string
   categorySeed?: string
+  g?: GarmentNoun
 }): Promise<SeedSelection> {
-  const { asin, parentAsin, listingTitle, manualSeed, categorySeed } = opts
+  const { asin, parentAsin, listingTitle, manualSeed, categorySeed, g = SHIRT_BASE } = opts
   // Scrub seeds too — never spend a JS credit RESEARCHING a trademark ("world cup" → "world soccer cup").
   if (manualSeed) return { seeds: [scrubTrademarks(manualSeed)], source: 'manual', escalate: { suggested: false, reason: '' } }
   if (categorySeed) return { seeds: [scrubTrademarks(categorySeed)], source: 'category', escalate: { suggested: false, reason: '' } }
@@ -819,10 +849,10 @@ export async function selectSeeds(opts: {
   } catch { /* pre-migration / no row — fall back to listingTitle */ }
   const identitySrc = canonicalTitle || listingTitle || ''
   const identity = identityTokensOf(canonicalTitle, designOverride, listingTitle)
-  const productWord = (identitySrc.toLowerCase().match(/\b(t-?shirt|tshirt|tee|hoodie|sweatshirt|tank|top)\b/) || [])[0]?.replace(/[^a-z]/g, '') || 'tshirt'
+  const productWord = (identitySrc.toLowerCase().match(/\b(t-?shirt|tshirt|tee|hoodie|sweatshirt|tank|top)\b/) || [])[0]?.replace(/[^a-z]/g, '') || g.seedNoun
 
   // Rules failover (always computable) — used if the agent is unavailable or returns nothing valid.
-  const rulesSeed = scrubTrademarks(buildSeedFromTitle(canonicalTitle || listingTitle || ''))
+  const rulesSeed = scrubTrademarks(buildSeedFromTitle(canonicalTitle || listingTitle || '', g))
 
   // ── The Seed AGENT ──
   try {
@@ -1122,7 +1152,12 @@ function emptyResult(): KeywordResearchResult {
 // storage-first per universe, capped at 2 niche credits (3 universes total incl. the primary).
 // Does NOT touch researchKeywords — this is purely additive.
 
-const NICHE_APPAREL_RE = /\b(shirt|shirts|tee|tees|tshirt|tshirts|t-shirt|hoodie|sweatshirt|tank|top|tops)\b/i
+// Recognizes a garment word already present in a phrase. Flag OFF → the exact original shirt-family
+// set (byte-identical). Flag ON → also matches non-shirt families (hat/cap/snapback/beanie/dress/…)
+// so "cashflow cap" isn't re-suffixed to "cashflow cap cap".
+const NICHE_APPAREL_RE = GARMENT_NOUN_ON
+  ? new RegExp(`\\b(shirt|shirts|tee|tees|tshirt|tshirts|t-shirt|hoodie|sweatshirt|tank|top|tops|${ALL_GARMENT_ALIAS_WORDS.flatMap((w) => w.split(/\s+/)).filter((w) => w.length > 2).join('|')})\\b`, 'i')
+  : /\b(shirt|shirts|tee|tees|tshirt|tshirts|t-shirt|hoodie|sweatshirt|tank|top|tops)\b/i
 // Words that never constitute a "niche" on their own (so the blank/product itself is never
 // mistaken for a design theme).
 const NICHE_GENERIC = new Set([
@@ -1151,7 +1186,10 @@ export function deriveNicheSeeds(
 ): string[] {
   if (!identity) return []
   const primaryToks = new Set(nicheTokens(primarySeed))
-  const productWord = NICHE_APPAREL_RE.test(identity.productType || '') ? (identity.productType || '').toLowerCase() : 'tshirt'
+  // Flag-gated garment word: OFF → legacy ('tshirt' unless the productType itself is a shirt word);
+  // ON → the resolved family seedNoun (hat/cap) so a hat niche seed gets "faith cap" not "faith tshirt".
+  const gDerive = GARMENT_NOUN_ON ? garmentNounFor(identity.productType, null) : SHIRT_BASE
+  const productWord = NICHE_APPAREL_RE.test(identity.productType || '') ? (identity.productType || '').toLowerCase() : gDerive.seedNoun
   const candidates: string[] = [
     ...((identity.suggestedSearchTerms || []).slice(1)), // [0] is (or seeds) the primary
     ...(identity.seedKeywords || []),

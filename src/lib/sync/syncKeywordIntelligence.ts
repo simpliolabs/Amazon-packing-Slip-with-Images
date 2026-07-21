@@ -184,6 +184,11 @@ export async function syncKeywordIntelligence(
       // the category winner. SELF_STICK_NOTE → "self stick notes" finds the Mr.-Pen-class niche.
       // Apparel keeps vision/title seeds (design-led niches). Best-effort: any failure → undefined.
       let categorySeed: string | undefined;
+      // Hoisted (2026-07-21): the live SP-API productType is resolved here anyway for the category
+      // seed — pass it to researchKeywords too so the shared garment-noun resolver (GARMENT_NOUN
+      // flag) can seed a HAT as a hat instead of a t-shirt. Apparel keeps vision/title seeds
+      // (categorySeed stays undefined for apparel), but productType is threaded for ALL types.
+      let resolvedProductType: string | undefined;
       try {
         const { getProductType } = await import('../amazon/productType');
         const { getAccessToken } = await import('../amazon/auth');
@@ -198,6 +203,7 @@ export async function syncKeywordIntelligence(
             || process.env.AMAZON_MERCHANT_TOKEN || process.env.AMAZON_SELLER_ID;
           if (sellerId) {
             const pt = await getProductType(sellerId, await getAccessToken(), sku);
+            resolvedProductType = pt || undefined;
             if (pt && pt !== 'PRODUCT' && !APPAREL_PRODUCT_TYPES.test(pt.toUpperCase())) {
               const words = pt.toLowerCase().split('_');
               // Naive pluralize the head noun ("self stick note" → "self stick notes") — matches
@@ -216,6 +222,7 @@ export async function syncKeywordIntelligence(
         listingTitle,
         manualSeed,
         categorySeed,
+        productType: resolvedProductType,
       });
 
       // Instrument the research pool size so an empty/thin pool is VISIBLE in prod logs — the
