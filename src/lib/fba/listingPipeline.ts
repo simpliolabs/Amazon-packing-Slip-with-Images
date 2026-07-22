@@ -32,6 +32,7 @@ import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/compe
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
+import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -1005,6 +1006,18 @@ export const APPAREL_PRODUCT_TYPES = APPAREL_PRODUCT_TYPES_SHARED
 // off/shadow → shirt-defaulted (byte-identical to today); on → real per-family garment nouns in the
 // title/highlights/backend producers. Each call site keeps its EXACT legacy expression when off.
 const GARMENT_NOUN_ON = (process.env.GARMENT_NOUN || 'off').toLowerCase() === 'on'
+// BACKEND_CRITICAL_KEYWORDS (2026-07-21, PO "words vs search terms"): a CRITICAL keyword is a SEARCH
+// TERM, not a generic auto-indexed title word. The title-echo strip (~:3493) + the LLM relevance gate
+// (~:4410) were dropping CRITICAL money terms (spain jersey 416K, spain world cup jersey 2026 382K, …)
+// from the backend because their tokens also sit in the title. This flag (a) exempts CRITICAL pool
+// tokens from title-echo, (b) fences the relevance gate from ever demoting a CRITICAL term to noise,
+// (c) sorts CRITICAL-first for byte priority. It REVERSES the 2026-07-08 title-echo approval for
+// CRITICAL search terms ONLY — generic title words (the/tee/2026) still dedupe, so no bytes are wasted.
+// off=legacy; shadow=log [BACKEND_CRIT_DIFF] without changing bytes; on=apply. Roll out shadow → verify
+// diff → on, per COVERAGE_CORE / GARMENT_NOUN.
+const BACKEND_CRIT_MODE = (process.env.BACKEND_CRITICAL_KEYWORDS || 'off').toLowerCase()
+const BACKEND_CRIT_ON = BACKEND_CRIT_MODE === 'on'
+const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
 /** Flag-gated resolver: real garment noun when on, else the frozen shirt base (so every consumer's
  *  `off` branch is byte-identical). Callers still guard their site with GARMENT_NOUN_ON to preserve
  *  each site's exact legacy literal (which differs — 't-shirt' vs 'shirt' vs 'Tee Shirt'). */
@@ -1176,7 +1189,7 @@ export function validateItemHighlights(s: string, brandName: string, capacityFam
   }
   const repeated = [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
   if (repeated.length) problems.push(`these words appear more than once: ${repeated.join(', ')} — no non-trivial word may repeat`)
-  if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Soccer Cup")')
+  if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Futbol Cup")')
   const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
   if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
   const lc = s.toLowerCase()
@@ -3442,6 +3455,22 @@ async function runBackendAgent(
   // The seller's DESIGN NAME is identity, not a generic auto-indexed title word — exempt its tokens
   // from the exclusion so the fill/dedup can't strip "later"/"gator" out of backend (#91/#92 parity).
   ;(designName || '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).forEach((w) => excludeWords.delete(w))
+  // BACKEND_CRITICAL_KEYWORDS (PO "words vs search terms", 2026-07-21): a CRITICAL keyword is a SEARCH
+  // TERM, not a generic auto-indexed title word — it belongs in the backend even when its tokens also
+  // appear in the title. Exempt CRITICAL pool tokens from title-echo exactly the way the design tokens
+  // are exempted above, so spain/jersey/football/cup (the 400K money terms the seller front-loaded into
+  // the title) survive. Generic title words (the/tee/2026) are NOT CRITICAL, so they still echo-dedupe
+  // (no wasted bytes). Mutating this shared set propagates to the core loop, gap-close, council-fill,
+  // AND scoreBackend's scoreExclude — so the self-heal stops flagging these tokens as "wasted bytes".
+  const critEchoTokens = remaining
+    .filter((k) => k.actionType === 'CRITICAL')
+    .flatMap((k) => k.keyword.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean))
+  if (BACKEND_CRIT_ON) {
+    critEchoTokens.forEach((w) => excludeWords.delete(w))
+  } else if (BACKEND_CRIT_SHADOW) {
+    const recover = [...new Set(critEchoTokens.filter((w) => excludeWords.has(w)))]
+    if (recover.length) console.log(`[BACKEND_CRIT_DIFF] ${children[0]?.asin ?? ''} title-echo would-recover CRITICAL: ${recover.join(' ')}`)
+  }
   // Title-only word set. The role-word exception ("keep 'teacher' only if this IS a teacher
   // product") must check the TITLE, not bullets — a bullet that wrongly slips "teacher" must
   // not license it back into the backend.
@@ -3464,6 +3493,44 @@ async function runBackendAgent(
   const corePhrases: string[] = []
   const coreWordSet = new Set<string>()
   let productTypeCount = 0
+  // BACKEND_CRITICAL_KEYWORDS Edit 5 (PO 2026-07-21 "TOP opportunities WEAVED in"): the shopper's real
+  // multi-word queries ("spain jersey women", "spain soccer jersey", "spain world futbol cup jersey
+  // 2026") index MUCH stronger as WHOLE PHRASES than as scattered tokens 50 chars apart. Pack the top
+  // ~15 CRITICAL phrases verbatim (post-scrubTrademarks so "world cup"→"world futbol cup" keeps 'cup')
+  // as the LEAD of corePhrases before the generic token pack runs. Every phrase still faces the same
+  // per-token safety gates (banTok/JUNK/3P-brand/kids-audience/own-brand) so a genuine infringer can
+  // never ride the phrase-lead into backend. Stops at ~180 bytes to leave the byte budget's tail for
+  // the generic gap-closing pack that follows. Deduped against coreWordSet as it grows.
+  if (BACKEND_CRIT_ON) {
+    const critLead = remaining.filter((k) => k.actionType === 'CRITICAL').slice(0, 20)
+    for (const k of critLead) {
+      const scrubbed = scrubTrademarks(k.keyword || '')
+      const raw = scrubbed.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
+      if (!raw || isAllJunk(raw)) continue
+      const toks: string[] = []
+      let dropPhrase = false
+      let ptc = 0
+      for (const w of raw.split(' ')) {
+        if (!w || w.length <= 1) continue
+        if (JUNK_WORDS.has(w) || banTok(w) || ownBrandsForBackend.has(w) || (kidsWords.has(w) && !titleWords.has(w))) { dropPhrase = true; break }
+        if (THIRD_PARTY_BRANDS.has(w) && !ownBrandsForBackend.has(w)) { dropPhrase = true; break }
+        if (MINOR_WORDS.has(w)) { toks.push(w); continue }
+        if (PRODUCT_TYPE_WORDS.has(w)) { ptc++; if (productTypeCount + ptc > 2) continue; toks.push(w); continue }
+        if (coreWordSet.has(w)) continue
+        toks.push(w)
+      }
+      if (dropPhrase) continue
+      const contentToks = toks.filter((w) => !MINOR_WORDS.has(w) && !PRODUCT_TYPE_WORDS.has(w))
+      if (contentToks.length === 0) continue
+      const phrase = toks.join(' ')
+      if (!phrase) continue
+      const prospective = [...corePhrases, phrase].join(' ')
+      if (getByteLength(prospective) > 180) break
+      corePhrases.push(phrase)
+      productTypeCount += ptc
+      for (const w of toks) if (!MINOR_WORDS.has(w)) coreWordSet.add(w)
+    }
+  }
   for (const k of remaining) {
     // Apostrophes collapse by DELETION ("he's" → "hes", matching normTok/dedupeTokenSoup), never
     // to a space — the old space-split shipped "he s" fragments to backend (PO-caught 2026-07-08).
@@ -4407,7 +4474,17 @@ KEEP anything plausibly about this product, including broad descriptors, audienc
       response_format: { type: 'json_object' },
     })
     const parsed = parseJsonLoose<{ drop?: number[] }>(completion.choices[0]?.message?.content || '{}')
-    const drop = new Set((parsed.drop ?? []).filter((n) => Number.isInteger(n)))
+    const rawDrop = new Set((parsed.drop ?? []).filter((n) => Number.isInteger(n)))
+    // BACKEND_CRITICAL_KEYWORDS: never let the non-deterministic LLM gate demote a CRITICAL SEARCH TERM
+    // (it reads "spain jersey" as a sports-team / "different physical product"). The deterministic
+    // dropJunkAndTrademarks below STILL removes genuine trademarks/3P-brands/off-niche even when CRITICAL,
+    // so real infringers still go. This also prevents the IRRELEVANT ratchet (ai-recommendations route
+    // ~:885) from permanently demoting the seller's top money keywords out of every future backend pool.
+    const critDropped = [...rawDrop].filter((n) => analysis[n]?.actionType === 'CRITICAL')
+    if (BACKEND_CRIT_SHADOW && critDropped.length) {
+      console.log(`[BACKEND_CRIT_DIFF] relevance gate would-drop CRITICAL: ${critDropped.map((n) => analysis[n]?.keyword).join(' | ')}`)
+    }
+    const drop = BACKEND_CRIT_ON ? new Set([...rawDrop].filter((n) => analysis[n]?.actionType !== 'CRITICAL')) : rawDrop
     const filtered = analysis.filter((_, i) => !drop.has(i))
     // Fail-open: if the gate dropped (nearly) everything it likely misfired — keep the original pool.
     if (filtered.length < Math.max(3, Math.floor(analysis.length * 0.3))) return dropJunkAndTrademarks(analysis)
@@ -7526,6 +7603,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       return lean === 'female' ? !(masc && !fem) : !(fem && !masc)
     })
     .sort((a, b) =>
+      // BACKEND_CRITICAL_KEYWORDS: CRITICAL search terms claim backend bytes before generic gift filler
+      // (spain jersey 416K has ~0 historical sales as a new 2026 term, so sales-primary sort buried it).
+      // CRITICAL decays to OPTIMIZED once pushed, so this self-releases — the push-starvation defense
+      // documented above stays intact.
+      (BACKEND_CRIT_ON ? ((b.actionType === 'CRITICAL' ? 1 : 0) - (a.actionType === 'CRITICAL' ? 1 : 0)) : 0) ||
       (b.keywordSales || 0) - (a.keywordSales || 0) ||
       (b.searchVolume || 0) - (a.searchVolume || 0) ||
       b.opportunityScore - a.opportunityScore)
@@ -7608,6 +7690,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (w.length === 1 && !/\d/.test(w)) return true
     if (AMZ_BACKEND_STOPWORDS.has(w)) return true
     if (FOREIGN_FUNCTION_WORDS.has(w)) return true   // ES/PT function words carry no search value (2026-07-09)
+    if (isCelebrityToken(w)) return true             // living person's name — never in a published field (2026-07-21 lamine)
     if (BACKEND_GENERIC_FILLER.has(w) && !poolToksForBackend.has(w)) return true   // catalog-speak — unless the demand data says buyers type it
     if (brandToksForBackend.has(w)) return true
     if (colorNeutralFamily && BASIC_COLOR_RE.test(w)) return true
@@ -7638,6 +7721,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     for (const t of `${title} ${brandName}`.split(/\s+/)) { const n = normIdxTok(t); if (n) s.add(n) }
     for (const c of input.children) { const n = normIdxTok(c.color || ''); if (n) s.add(n) }
     for (const t of (dn ?? (effectiveDesignName || designName || '')).split(/\s+/)) s.delete(normIdxTok(t))
+    // BACKEND_CRITICAL_KEYWORDS: mirror the title-echo CRITICAL exemption on the byte-fill echo set so
+    // fillBackendToBudget can re-add CRITICAL search terms (spain/jersey/cup) instead of skipping them as
+    // alreadyIndexed. Uses the family backendPool (echo-set only; groupBan + siblingNameToks still enforce
+    // per-design fill safety), so an over-exemption here cannot cross a design's real content.
+    if (BACKEND_CRIT_ON) {
+      for (const k of backendPool) if (k.actionType === 'CRITICAL') for (const t of k.keyword.split(/\s+/)) s.delete(normIdxTok(t))
+    }
     return s
   }
   // ── PER-DESIGN BACKEND (parity-audit BLOCKER #12, + #13/#14) ──────────────────────────────────
