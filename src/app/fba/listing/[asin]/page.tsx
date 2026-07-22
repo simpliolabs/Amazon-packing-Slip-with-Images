@@ -235,6 +235,55 @@ export default function ListingDetailPage() {
   const router = useRouter()
   const asin = params.asin as string
 
+  // ── CHILD → PARENT AUTO-RESOLVE (PO 2026-07-22 B0GML74MJQ incident) ────────────────────────
+  // A seller who scans/enters a CHILD ASIN wants the parent's family view — not the child in
+  // isolation. Standing on a child causes: family_skus shows 1 row, push modal reads "0/0 SKUs",
+  // AI regen runs on a starved single-SKU pool, and the whole optimizer output is degraded.
+  // On mount, look up the input ASIN in listing_content. If it has a parent_asin that differs,
+  // redirect to /fba/listing/{parent_asin} with ?resolvedFrom={inputAsin} for the toast below.
+  // Uses replace() so back-button returns the seller to wherever they came from, not the child.
+  // Toast when this page-load is the redirect target (someone scanned a child, we brought them here).
+  const [resolvedFromChild, setResolvedFromChild] = useState<string | null>(null)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    const from = url.searchParams.get('resolvedFrom')
+    if (from) {
+      setResolvedFromChild(from)
+      // Strip the query param so a refresh doesn't re-show the toast.
+      url.searchParams.delete('resolvedFrom')
+      window.history.replaceState({}, '', url.toString())
+      // Auto-dismiss after 8s so it doesn't linger; seller can still see they're on the parent.
+      const t = setTimeout(() => setResolvedFromChild(null), 8000)
+      return () => clearTimeout(t)
+    }
+  }, [])
+  useEffect(() => {
+    if (!asin) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const supabase = createClient()
+        const { data } = await supabase
+          .from('listing_content')
+          .select('asin, parent_asin')
+          .eq('asin', asin)
+          .limit(1)
+          .maybeSingle()
+        if (cancelled) return
+        const row = data as { asin: string; parent_asin: string | null } | null
+        // Redirect only when the ASIN is a child (row exists AND parent_asin differs AND is non-null).
+        // Parents / standalone ASINs typically have no listing_content row (only children do) — no redirect.
+        if (row?.parent_asin && row.parent_asin !== asin) {
+          router.replace(`/fba/listing/${row.parent_asin}?resolvedFrom=${asin}`)
+        }
+      } catch (e) {
+        console.warn('[child-redirect] resolver failed (non-fatal):', e instanceof Error ? e.message : e)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [asin, router])
+
   // Resolve the Supabase access token for MUTATING calls (AI-recs regen, push-content, claim).
   // The server routes resolve the acting user from this Bearer JWT (work-log getAuthUser pattern)
   // to stamp keyword_push_log.pushed_by + listing_change_log.changed_by — without it those rows
@@ -2440,6 +2489,23 @@ export default function ListingDetailPage() {
     )}
 
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
+
+      {/* Child→Parent auto-redirect toast (PO 2026-07-22): appears when the seller scanned/entered
+          a child ASIN and the app brought them here to the parent's family view. Auto-dismisses in 8s. */}
+      {resolvedFromChild && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center justify-between gap-3">
+          <div className="text-sm text-amber-900">
+            <span className="font-semibold">Loaded parent {asin}</span> — you searched the child ASIN {resolvedFromChild}. Working on the family view instead so the AI, family SKUs, and push all operate on the full parent listing.
+          </div>
+          <button
+            onClick={() => setResolvedFromChild(null)}
+            className="text-amber-700 hover:text-amber-900 text-sm font-medium px-2 py-1"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* ── Back link ── */}
       <button onClick={() => router.push('/fba')} className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-800 transition-colors cursor-pointer">

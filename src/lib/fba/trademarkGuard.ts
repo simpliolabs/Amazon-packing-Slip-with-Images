@@ -1,6 +1,8 @@
 /**
- * Trademark output scrub (PO 2026-06-15). Protected marks must NEVER be PUBLISHED to a listing —
- * "World Cup" is FIFA's registered trademark; the seller's safe convention is "World Soccer Cup".
+ * Trademark output scrub (PO 2026-06-15, updated 2026-07-21). Protected marks must NEVER be PUBLISHED
+ * to a listing — "World Cup" is FIFA's registered trademark; the seller's safe convention is
+ * "World Futbol Cup" (PO 2026-07-21: matches bilingual/Spanish design language and preserves the
+ * "cup" token for coverage; prior "world soccer cup" is also safe but "futbol" is preferred).
  * Publishing an infringing mark risks Amazon listing suppression + an IP/account-health strike, so
  * this is the legal safety net applied to every GENERATED published field (title/bullets/description/
  * backend) + the research seeds. Scope A (minimal, approved): substitute to safe phrasing where one
@@ -13,8 +15,8 @@
 // Order matters: more-specific marks first so "FIFA World Cup" collapses cleanly to one safe phrase.
 // `sub: ''` = no safe synonym → drop the mark. Extend this list here (or lift to per-seller config, scope C).
 const TRADEMARK_RULES: { mark: string; sub: string }[] = [
-  { mark: 'fifa\\s+world\\s+cup', sub: 'world soccer cup' },
-  { mark: 'world\\s+cup', sub: 'world soccer cup' }, // the PO's primary case
+  { mark: 'fifa\\s+world\\s+cup', sub: 'world futbol cup' },
+  { mark: 'world\\s+cup', sub: 'world futbol cup' }, // the PO's primary case (2026-07-21: futbol > soccer)
   { mark: 'super\\s*bowl', sub: 'big game' },
   { mark: 'fifa', sub: '' },
   { mark: 'olympics?', sub: '' },

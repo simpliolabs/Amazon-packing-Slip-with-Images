@@ -49,6 +49,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
+import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 import { logAudit } from '@/lib/audit'
 import { fingerprintOf } from '@/lib/keyword-engine/shareSnapshots'  // VERBATIM — outcome-epoch fingerprint
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'
@@ -3526,7 +3527,12 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // Cup" → "World Soccer Cup"). Idempotent — already-scrubbed generated content is unchanged.
           // Applied to both shapes: title/description/keywords (string) + bullets (string[]).
           const rawValue = item.raw as string | string[]
-          const value = Array.isArray(rawValue) ? rawValue.map(scrubTrademarks) : scrubTrademarks(rawValue)
+          // Celebrity/proper-noun scrub (2026-07-21, B0H9VDCBZJ lamine-in-backend incident): a living
+          // person's name in a published apparel field is a personality-rights strike and Amazon takedown
+          // vector. Applied after scrubTrademarks in the same terminal-net position — idempotent, logs
+          // every strip. Seed list in celebrityGuard.ts; task #104 to grow from PO-flagged drops.
+          const scrubOne = (s: string) => scrubCelebrityNames(scrubTrademarks(s), `push:${field}:${item.sku}`)
+          const value = Array.isArray(rawValue) ? rawValue.map(scrubOne) : scrubOne(rawValue)
           const newValueStr = asCompare(value)
           emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
           // PARENT-HUB path: augment the PATCH with the family baseline (parentage_level,
@@ -4067,8 +4073,11 @@ export async function executeBulkCorePush(params: PushParams, emit: PushEmit): P
         fieldHasChange = true
         // SCRUB-AT-PUSH backstop (mirror executePush): trademark-scrub the value at publish time so a
         // manually-typed or stale mark can never be written to Amazon. Idempotent on generated copy.
+        // Celebrity-scrub mirrored here too (2026-07-21) — the bulk-push path must not become a
+        // policy-scrub gap. Idempotent, logs every strip.
         const raw = d.raw as string | string[]
-        const value = Array.isArray(raw) ? raw.map(scrubTrademarks) : scrubTrademarks(raw)
+        const scrubOne = (s: string) => scrubCelebrityNames(scrubTrademarks(s), `bulk-push:${field}:${d.sku}`)
+        const value = Array.isArray(raw) ? raw.map(scrubOne) : scrubOne(raw)
         let plan = bySku.get(d.sku)
         if (!plan) { plan = { sku: d.sku, asin: d.asin, rows: [] }; bySku.set(d.sku, plan) }
         plan.rows.push({ field, value, current: d.current })
