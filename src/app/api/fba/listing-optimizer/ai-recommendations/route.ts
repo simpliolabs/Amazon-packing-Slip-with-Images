@@ -20,7 +20,10 @@ import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
-import { BACKEND_DEGRADE_STRICT_ON, tryParsePriorKeywords } from '@/lib/fba/backendDegradeGate'
+// BACKEND_DEGRADE_STRICT import intentionally omitted: adversarial review 2026-07-22 confirmed the
+// keywords-only partial path already throws 'aiKind=degraded' at listingPipeline.ts:8168 in all
+// modes, so an explicit preserve gate here would be dead code. The flag's route-side effect is via
+// the outer catch at :1392-1408 which is aiKind-generic — no branch-specific handling needed here.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -796,28 +799,15 @@ export async function POST(req: NextRequest) {
               if (result.per_child_descriptions) upd.per_child_descriptions = result.per_child_descriptions
               patchItem((el) => el === 'description', result.recommended_description)
             } else {
-              // BACKEND_DEGRADE_STRICT (Task #103, 2026-07-22): the partial keywords section-regen
-              // path had NO degradedSections+preserve check — the dual-write-path invariant break
-              // ([[ai-recommendations-dual-write-path]]) that let B0H9VDCBZJ's 70B garbage-floor
-              // regen persist over the prior 207B. Full path has the block at ~:1246; partial had
-              // none. Under strict mode: if the pipeline flagged degradedSections (or, under strict,
-              // it threw and we never reach here — so flagged means legacy off/shadow mode), AND a
-              // valid prior is parseable, preserve the prior instead of persisting the new degraded
-              // per_child_keywords. Under off/shadow: no preserve — this preserves the missing-
-              // feature legacy behavior, so the flag rollout is completely reversible.
-              const partialDegraded = (result as { degradedSections?: string[] }).degradedSections?.includes('backend_keywords')
-              const partialPriorKw = storedRec ? (storedRec.recommended_keywords as string | null) : null
-              const partialPrior = (BACKEND_DEGRADE_STRICT_ON && partialDegraded)
-                ? tryParsePriorKeywords(partialPriorKw)
-                : null
-              if (partialPrior) {
-                upd.recommended_keywords = JSON.stringify(partialPrior)
-                patchItem((el) => el === 'backend_keywords', partialPrior[0]?.keywords ?? '')
-                console.warn(`[ai-recommendations] partial keywords regen degraded for ${parent_asin} — preserved the stored set instead of persisting the degraded one`)
-              } else {
-                upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
-                patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
-              }
+              // Task #103 note: this branch used to be considered a dual-write-path gap because the
+              // full path has an explicit preserve block at ~:1267 while this one didn't. Adversarial
+              // review 2026-07-22 caught it: the KEYWORDS-ONLY PARTIAL path already throws with
+              // aiKind='degraded' UNCONDITIONALLY at listingPipeline.ts:8168 ("HONEST FAILURE"
+              // comment at :8161), so a degraded keywords partial NEVER reaches this branch —
+              // the outer catch at :1392-1408 fires first, no DB write happens, prior is preserved
+              // by absence-of-write. So an explicit preserve here would be dead code in every mode.
+              upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
+              patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
             }
             upd.action_plan = actionPlan
             let { error: updErr } = await supabase

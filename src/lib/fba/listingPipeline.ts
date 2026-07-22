@@ -593,7 +593,13 @@ function backendOutputProblems(
   // prior 207B. Shadow mode: log a [BACKEND_STRICT_DIFF] breadcrumb when the fresh regen lands in
   // the 190-219 range so the runbook can measure the ON-flip blast radius before flipping.
   const floor = backendMinBytesFloor()
-  if (minBytes < floor) problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill (< ${floor} floor)`)
+  // Message text: keep the pre-diff wording verbatim under legacy (off) so the SSE error frame at
+  // route.ts:1403 is byte-identical to today. Under shadow/on, append the floor number so the
+  // seller sees which mode fired the gate — helpful for the flip runbook.
+  if (minBytes < floor) {
+    const suffix = BACKEND_DEGRADE_STRICT_ON ? ` (< ${floor} floor)` : ''
+    problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill${suffix}`)
+  }
   logShadowDiff('generator-output', minBytes, { children: perChild.length })
   // DECODED colors (real, non-empty) vs UNdecodable children, counted separately (2026-07-15).
   const decodedColors = children.map((c) => (c.color || '').toLowerCase()).filter(Boolean)
@@ -8258,11 +8264,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (problems.length > 0) {
         console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
         // BACKEND_DEGRADE_STRICT (Task #103, 2026-07-22): under strict mode, mirror the keywords-only
-        // partial path at ~:8156-8164 — THROW with aiKind='degraded' so the route's preserve block
-        // (route.ts:1246) fires deterministically and the seller sees a clear "kept your previous
-        // keywords" banner instead of the current silent-persist. Under off/shadow keep the legacy
-        // flag-not-throw path so behavior is byte-identical (the route still has 4 silent-fail modes
-        // that mostly persist the degraded output — that's the exact bug the flip cures).
+        // partial path at ~:8161-8168 — THROW with aiKind='degraded'. The route's outer error catch
+        // at ai-recommendations/route.ts:1392-1408 handles it (emits {type:'error', kind:'degraded'}
+        // to the SSE client and short-circuits BEFORE any DB write), so the stored recommendation
+        // stays exactly as approved and the seller sees the amber "content preserved" banner.
+        // Under off/shadow keep the legacy flag-not-throw so behavior is byte-identical (the full-
+        // path preserve block at route.ts:~:1267 catches the returned degradedSections and, if a
+        // valid prior parses, swaps it in — otherwise persists what we generated).
         if (BACKEND_DEGRADE_STRICT_ON) {
           const hard = (input.openai as { __aiHardError?: string }).__aiHardError
           const e = new Error(`Backend regen came back degraded after retry (${problems.join('; ')}). Your previous keywords are untouched — run Regenerate again in a minute.`) as Error & { aiKind?: string }

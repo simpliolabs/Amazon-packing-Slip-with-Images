@@ -34,9 +34,11 @@ export function backendMinBytesFloor(): number {
   return BACKEND_DEGRADE_STRICT_ON ? BACKEND_MIN_STRICT : BACKEND_MIN_LEGACY
 }
 
-/** Log a would-preserve breadcrumb from shadow mode. Called from backendOutputProblems and from the
- *  partial keywords section-regen preserve check. One line per event so logs stay clean.
- *  ctx = 'full' | 'partial' | 'per-design'. */
+/** Log a would-preserve breadcrumb from shadow mode. Called from backendOutputProblems in
+ *  listingPipeline.ts (the shared helper that runs for full-regen, keywords-only partial, and
+ *  per-design branches — so path attribution isn't distinguishable here, only the family width).
+ *  One line per event so logs stay clean. ctx is a caller-supplied label; today the only caller
+ *  passes 'generator-output'. */
 export function logShadowDiff(ctx: string, minBytes: number, extra?: Record<string, string | number>): void {
   if (!BACKEND_DEGRADE_STRICT_SHADOW) return
   if (minBytes >= BACKEND_MIN_STRICT) return   // healthy under strict too — nothing to report
