@@ -20,6 +20,10 @@ import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
+// BACKEND_DEGRADE_STRICT import intentionally omitted: adversarial review 2026-07-22 confirmed the
+// keywords-only partial path already throws 'aiKind=degraded' at listingPipeline.ts:8168 in all
+// modes, so an explicit preserve gate here would be dead code. The flag's route-side effect is via
+// the outer catch at :1392-1408 which is aiKind-generic — no branch-specific handling needed here.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -795,6 +799,13 @@ export async function POST(req: NextRequest) {
               if (result.per_child_descriptions) upd.per_child_descriptions = result.per_child_descriptions
               patchItem((el) => el === 'description', result.recommended_description)
             } else {
+              // Task #103 note: this branch used to be considered a dual-write-path gap because the
+              // full path has an explicit preserve block at ~:1267 while this one didn't. Adversarial
+              // review 2026-07-22 caught it: the KEYWORDS-ONLY PARTIAL path already throws with
+              // aiKind='degraded' UNCONDITIONALLY at listingPipeline.ts:8168 ("HONEST FAILURE"
+              // comment at :8161), so a degraded keywords partial NEVER reaches this branch —
+              // the outer catch at :1392-1408 fires first, no DB write happens, prior is preserved
+              // by absence-of-write. So an explicit preserve here would be dead code in every mode.
               upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
               patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
             }
