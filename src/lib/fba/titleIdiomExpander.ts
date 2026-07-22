@@ -60,18 +60,21 @@ const IDIOM_SOURCE_PHRASES: Record<string, string> = {
 
 /** Returns the expanded source phrase if the design name matches a curated idiom; else the original
  *  design name unchanged. Case-insensitive; whitespace-trimmed. Never returns empty on a non-empty
- *  input — falls back to the verbatim name. */
+ *  input — falls back to the verbatim name.
+ *  Object.hasOwn (2026-07-22 review): use hasOwn instead of `[key]` to avoid Object.prototype walk —
+ *  a design named "toString" or "constructor" would otherwise wrongly hit Function.prototype. */
 export function expandIdiomDesignName(designName: string | null | undefined): string {
   const raw = (designName || '').trim()
   if (!raw) return ''
   const key = raw.toLowerCase().replace(/\s+/g, ' ')
-  const hit = IDIOM_SOURCE_PHRASES[key]
-  return hit || raw
+  return Object.hasOwn(IDIOM_SOURCE_PHRASES, key) ? IDIOM_SOURCE_PHRASES[key] : raw
 }
 
 /** True when the design name mapped to a curated idiom (i.e. expansion is a real change, not a pass-through).
- *  The title council can use this signal to decide whether to lean on the source phrase in the title. */
+ *  The title council can use this signal to decide whether to lean on the source phrase in the title.
+ *  Object.hasOwn (2026-07-22 review): `raw in IDIOM_SOURCE_PHRASES` walks Object.prototype, so 'toString'
+ *  or 'constructor' would false-hit. hasOwn is exact — own properties only. */
 export function isIdiomDesign(designName: string | null | undefined): boolean {
   const raw = (designName || '').trim().toLowerCase().replace(/\s+/g, ' ')
-  return raw in IDIOM_SOURCE_PHRASES
+  return Object.hasOwn(IDIOM_SOURCE_PHRASES, raw)
 }
