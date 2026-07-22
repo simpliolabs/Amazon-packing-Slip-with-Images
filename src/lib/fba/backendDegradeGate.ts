@@ -19,15 +19,16 @@
  *
  * Related: memory fba-backend-degrade-gate-silent-preserve, fba-generation-invariants INVARIANT 2/3.
  */
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 
 const MODE = (process.env.BACKEND_DEGRADE_STRICT || 'off').toLowerCase()
 export const BACKEND_DEGRADE_STRICT_ON = MODE === 'on'
 export const BACKEND_DEGRADE_STRICT_SHADOW = MODE === 'shadow'
 
 /** Legacy floor — kept as the default so flag=off is byte-identical. */
-export const BACKEND_MIN_LEGACY = 190
+export const BACKEND_MIN_LEGACY = CONTENT_CONTRACT.keywords.minLegacy
 /** Doctrine floor per fba-generation-invariants — the golden band is 240-250, floor is 220. */
-export const BACKEND_MIN_STRICT = 220
+export const BACKEND_MIN_STRICT = CONTENT_CONTRACT.keywords.minStrict
 
 /** Effective minimum-byte threshold — 220 when flag on, 190 otherwise (legacy + shadow). */
 export function backendMinBytesFloor(): number {

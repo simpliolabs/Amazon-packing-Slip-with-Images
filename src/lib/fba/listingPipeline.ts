@@ -35,6 +35,7 @@ import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -1029,6 +1030,13 @@ const GARMENT_NOUN_ON = (process.env.GARMENT_NOUN || 'off').toLowerCase() === 'o
 const BACKEND_CRIT_MODE = (process.env.BACKEND_CRITICAL_KEYWORDS || 'off').toLowerCase()
 const BACKEND_CRIT_ON = BACKEND_CRIT_MODE === 'on'
 const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
+// CONTENT_SPINE (2026-07-22, spine Step 3): route the leaky section-regen returns through the shared
+// applyTerminalNets so "Regenerate bullets"/"Regenerate description" get the SAME terminal net the full
+// path runs. off=legacy (byte-identical); shadow=log [SPINE_DIFF] which would-change, ship legacy;
+// on=apply the terminal net.
+const CONTENT_SPINE_MODE = (process.env.CONTENT_SPINE || 'off').toLowerCase()
+const CONTENT_SPINE_ON = CONTENT_SPINE_MODE === 'on'
+const CONTENT_SPINE_SHADOW = CONTENT_SPINE_MODE === 'shadow'
 // TITLE_QUALITY_V2 (2026-07-22, PO "8 golds from 100+ deploys, council still gets it wrong"): the
 // title council was trained for LENGTH (70-75 chars, 50+ commits) but never for FORMAT — sellers
 // still get "THE CEO Later Gator Comfort Colors Long Sleeve Shirt for Women" instead of the gold
@@ -6279,14 +6287,12 @@ function scrubFitClaims(s: string, fit: string): string {
 // Idempotent by regex construction (running twice = running once). Whitespace + possessive cleanup baked
 // in so `THE CEO's Christian` doesn't leave `'s Christian` on the shelf.
 // Bullet char-budget invariants (2026-07-21, INVARIANT 5 — ONE source of truth per byte budget). PO
-// SEO/conversion target: each bullet 150-200 chars (previously 100-200 across scattered prompts, leaving
-// the LLM to land at the 100 floor and ship 500-char totals when 1000 hits the shopper better).
-export const BULLET_MIN_CHARS = 150
-export const BULLET_MAX_CHARS = 200
-// Description char-budget floor (mirrors existing 900-980 target). Exported so the terminal re-expand
-// (INVARIANT 3, added 2026-07-21) can re-check length AFTER scrubDescriptionBody trimmed brand/screen-
-// print mentions and pushed the audit output below the floor on B0FKKN8XKV live regen.
-export const DESC_MIN_CHARS = 900
+// SEO/conversion target: each bullet 150-200 chars. Values now live in contentContract.ts (spine Step 1).
+export const BULLET_MIN_CHARS = CONTENT_CONTRACT.bullets.min
+export const BULLET_MAX_CHARS = CONTENT_CONTRACT.bullets.max
+// Description char-budget floor (mirrors existing 900-980 target). Value now lives in contentContract.ts
+// (spine Step 1). Exported so the terminal re-expand can re-check length after scrubDescriptionBody.
+export const DESC_MIN_CHARS = CONTENT_CONTRACT.description.floor
 export const UNSUPPORTED_PRODUCTION_METHODS = ['screen[- ]?print(ed|ing)?', 'silk[- ]?screen(ed|ing)?']
 
 // Deterministic apparel pad pool (2026-07-21, judge workflow wg9bftozi). Terminal 100% floor guarantee
@@ -6405,6 +6411,45 @@ export async function expandShortBulletsTerminal(
 // gpt-4.1-mini with an explicit "no brand mentions, no screen-print claims" instruction; re-runs
 // scrubDescriptionBody + capDescriptionVisible on the extended output so the LLM CAN'T re-inject either
 // violation.
+/**
+ * Terminal deterministic net — content-spine Step 2 (2026-07-22). ONE function that runs a field's
+ * terminal passes in the exact order + with the exact arguments the FULL regen path uses today:
+ *   bullets      → expandShortBulletsTerminal (the 150-floor enforcer; idempotent, apparel-gated by caller)
+ *   description  → scrubDescriptionBody (brand/screen-print strip) → reExpandDescriptionIfShort (re-fill <900)
+ * Idempotent by construction (each underlying pass no-ops when already in band), so it is safe to call
+ * on any path. Step 3 wires it into the section-regen returns; the full-path call sites are swapped in
+ * Step 6. Keywords are intentionally NOT handled here (the keywords-only path already runs its chain).
+ */
+export async function applyTerminalNets(
+  field: 'bullets' | 'description',
+  value: string[] | string,
+  ctx: {
+    openai: OpenAI
+    finalTitle: string
+    designName: string
+    fit: string | undefined
+    brandName: string
+    garmentBrand: string | undefined
+  },
+): Promise<string[] | string> {
+  if (field === 'bullets') {
+    const bullets = value as string[]
+    if (!Array.isArray(bullets) || bullets.length !== 5) return bullets
+    return expandShortBulletsTerminal(ctx.openai, bullets, {
+      title: ctx.finalTitle,
+      designName: ctx.designName,
+      fit: ctx.fit,
+      garmentBrand: ctx.garmentBrand,
+    })
+  }
+  // description
+  let d = value as string
+  if (!d) return d
+  if (ctx.brandName) d = scrubDescriptionBody(d, { brand: ctx.brandName, garmentBrand: ctx.garmentBrand })
+  if (ctx.brandName) d = await reExpandDescriptionIfShort(ctx.openai, d, { finalTitle: ctx.finalTitle, brand: ctx.brandName, garmentBrand: ctx.garmentBrand })
+  return d
+}
+
 export async function reExpandDescriptionIfShort(
   openai: OpenAI,
   description: string,
@@ -7826,6 +7871,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       title: finalTitle, brandName: brandName || 'THE CEO', designName: effectiveDesignName || '',
       fit: truthFitEarly, onProgress,
     }, enableBulletsLoop)
+    // CONTENT_SPINE Step 3: the FULL path runs the terminal 150-floor bullets expander after the metric
+    // loop; the bullets-only path never did, so a section-regen could ship broadcast bullets < 150. Wire
+    // the SAME terminal net here. apparel-gated to match the full-path guard.
+    if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand }
+      if (CONTENT_SPINE_ON) {
+        bullets = await applyTerminalNets('bullets', bullets, spineCtx) as string[]
+      } else if (CONTENT_SPINE_SHADOW) {
+        const short = bullets.filter((b) => b.length < BULLET_MIN_CHARS).length
+        if (short) console.log(`[SPINE_DIFF] bullets-only: ${short}/5 broadcast bullets < ${BULLET_MIN_CHARS} — terminal net would expand`)
+      }
+    }
     // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
     // former "per_child_bullets are ungated on both paths" gap. Deterministic scrub always; audit capped.
     await gatePerChildMultiDesign(perChildBullets, undefined, truthFitEarly, garmentBrandCanonical || '')
@@ -8193,6 +8250,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // unchanged for us (we take only the description back). Fail-open; empty-only abort re-checked.
     ;({ description: descriptionOnly } = await applyEditorialGates(bullets, descriptionOnly))
     assertCoreHealthy(input.openai, null, null, descriptionOnly)
+    // CONTENT_SPINE Step 3: the FULL path runs scrubDescriptionBody + reExpandDescriptionIfShort on the
+    // BROADCAST description; the description-only path never did (only per-child got them via the gate),
+    // so a section-regen could ship brand-in-body / "screen-printed" / sub-900 broadcast copy. Wire the
+    // SAME terminal net here, before the per-design fan-out and the existing capDescriptionVisible below.
+    {
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand }
+      if (CONTENT_SPINE_ON && descriptionOnly && brandName) {
+        descriptionOnly = await applyTerminalNets('description', descriptionOnly, spineCtx) as string
+      } else if (CONTENT_SPINE_SHADOW && descriptionOnly) {
+        const plain = descriptionOnly.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+        const wouldScrub = brandName ? scrubDescriptionBody(descriptionOnly, { brand: brandName, garmentBrand: blankSpec?.brand }) !== descriptionOnly : false
+        if (plain.length < DESC_MIN_CHARS || wouldScrub) console.log(`[SPINE_DIFF] description-only: len=${plain.length} (floor ${DESC_MIN_CHARS}) wouldScrubBrand=${wouldScrub} — terminal net would fix`)
+      }
+    }
     // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
     // previously only the broadcast updated and the regenerated copy never reached the children.
     // Runs AFTER the gates so the single-design BROADCAST copy is gated.
