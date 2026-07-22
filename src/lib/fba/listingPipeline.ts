@@ -33,6 +33,7 @@ import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
+import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -1018,6 +1019,112 @@ const GARMENT_NOUN_ON = (process.env.GARMENT_NOUN || 'off').toLowerCase() === 'o
 const BACKEND_CRIT_MODE = (process.env.BACKEND_CRITICAL_KEYWORDS || 'off').toLowerCase()
 const BACKEND_CRIT_ON = BACKEND_CRIT_MODE === 'on'
 const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
+// TITLE_QUALITY_V2 (2026-07-22, PO "8 golds from 100+ deploys, council still gets it wrong"): the
+// title council was trained for LENGTH (70-75 chars, 50+ commits) but never for FORMAT — sellers
+// still get "THE CEO Later Gator Comfort Colors Long Sleeve Shirt for Women" instead of the gold
+// "THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt". This flag switches
+// runTitleAgent + buildNicheParentTitle to a new prompt with (a) idiom expansion via
+// titleIdiomExpander, (b) PATTERN A (pipe format, low-search designs) or PATTERN B (front-load,
+// high-search categories), (c) 8 PO golds as few-shot exemplars, (d) BAN-list on modifier stuffing
+// (funny/novelty/graphic/retro/cute/vintage as decorators), (e) gender-conservative default, and
+// (f) a deterministic titleQualityJudge that widens the humanizer adopt gate to accept same-length
+// rewrites when they score higher on the pattern. off=legacy prompt; shadow=log [TITLE_V2_DIFF]
+// without changing shipped bytes; on=apply. Roll out shadow → verify diff → on. Both branches
+// (single-design runTitleAgent AND multi-design buildNicheParentTitle) share the same shape rule.
+const TITLE_V2_MODE = (process.env.TITLE_QUALITY_V2 || 'off').toLowerCase()
+const TITLE_V2_ON = TITLE_V2_MODE === 'on'
+const TITLE_V2_SHADOW = TITLE_V2_MODE === 'shadow'
+/** PO gold examples (2026-07-22, provided verbatim). Used as FEW-SHOT in both title branches when
+ *  TITLE_QUALITY_V2 is on. Rank order = PO's original list, deduped by exact string. Extend via a
+ *  future auto-miner over listing_change_log title edits (memory: title-po-gold-pattern). */
+const PO_GOLD_TITLES = [
+  'THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt',                    // 72 — Pattern A, idiom expanded
+  'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',                 // 75 — Pattern B, high-search category
+  'THE CEO Cashflow Cap | Puff Embroidery Cotton Twill Snapback Hat for Men',                    // 72 — Pattern A, headwear + gender
+  'THE CEO Don’t Quit Tee Shirt | Bold Motivational tShirt for Men & Women',                     // 71 — Pattern A, motivational
+  'THE CEO Christian Tee Shirt Comfort Color I Will Praise Him in Every Season',                 // 75 — Pattern B, faith category
+  'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women',                   // 73 — Pattern A, idiom kept short
+  'THE CEO I Could Be Meaner Tee Shirt | Comfort Color Graphic Shirt for Women',                 // 75 — Pattern A, statement
+  'THE CEO Ocean Life Sea Animals Tee Shirt | Comfort Colors Tshirt for Women',                  // 74 — Pattern A, theme
+] as const
+/** Deterministic title QUALITY judge — scores a title against PO_GOLD_TITLES pattern rules.
+ *  Returns {score 0-100, problems: string[]}. Used by the humanizer adopt gate: when the retry
+ *  scores higher than the current, adopt it EVEN IF same length (fixing the strict len> gate at
+ *  5473 that discards format wins). Only rejects on trademark/brand-front safety, per Karpathy:
+ *  the judge scores QUALITY, the trademark/brand-front nets are separate SAFETY gates. */
+const TITLE_V2_BANNED_MODIFIERS = new Set([
+  'funny', 'novelty', 'graphic', 'retro', 'cute', 'vintage', 'farewell', 'goodbye',
+  'going', 'away',
+])
+/** Product-noun tokens that a banned decorator becomes ALLOWED against — i.e. "Graphic Shirt" is a
+ *  legit attribute-pair (matches PO golds #6/#7 both using "Graphic Shirt"), while a bare "Graphic"
+ *  or "Graphic Design" reads as stuffing. Same principle allows "Long Sleeve", "Bold Motivational",
+ *  "Puff Embroidery" — the modifier stands in for an attribute of the product-noun. */
+const TITLE_V2_ATTR_PAIR_NOUNS = new Set([
+  'shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees', 't-shirt', 't-shirts',
+  'cap', 'hat', 'hoodie', 'sweatshirt', 'tank', 'polo', 'dress', 'jacket', 'beanie',
+  'motivational', 'embroidery', 'sleeve', 'fit', 'style',
+])
+export function titleQualityJudge(title: string, opts: {
+  brandName: string
+  productType?: string | null
+  aud?: string
+  designName?: string
+} = {} as never): { score: number; problems: string[] } {
+  if (!title) return { score: 0, problems: ['empty'] }
+  const problems: string[] = []
+  let score = 100
+  const t = title.trim()
+  const len = t.length
+
+  // LENGTH BAND (70-75 hard goal, 50-75 acceptable)
+  // Review 2026-07-22: previous dock was too weak — 62-char generics scored 75 (target ≤60). Stiffen
+  // the sub-70 dock so the discrimination target holds: 62 chars = 100 - 30 = 70, plus other docks.
+  if (len < 50) { score -= 45; problems.push(`length ${len} < 50 floor`) }
+  else if (len < 65) { score -= 30; problems.push(`length ${len} well under 70 golden`) }
+  else if (len < 70) { score -= 15; problems.push(`length ${len} under 70 golden`) }
+  else if (len > 75) { score -= 45; problems.push(`length ${len} > 75 Amazon cap`) }
+
+  // FORMAT: Pattern A (pipe) gets +5 as a positive structure signal for match to PO golds 1/3/4/6/7/8.
+  // Review 2026-07-22: previously hasPipe was DEAD CODE — computed then read only inside an empty
+  // `if (!hasPipe)` block. Now it's the actual Pattern-A bonus that lets the humanizer adopt a
+  // same-length pipe rewrite over a legacy comma-string via the widened adopt gate at :5473.
+  // Pattern B (front-load, no pipe) is judged by rule presence — no synthetic bonus (matches golds 2/5).
+  const hasPipe = / \| /.test(t)
+  if (hasPipe) score += 5
+
+  // PRODUCT NOUN ANCHOR — twice preferred (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
+  const nounRegex = /\b(shirt|shirts|tshirt|tee|tees|cap|hat|hoodie|sweatshirt|tank|polo|dress|jacket|beanie)\b/gi
+  const nounHits = (t.match(nounRegex) || []).length
+  if (nounHits < 2) { score -= 10; problems.push(`product noun appears ${nounHits} time(s); PO gold repeats it (Shirt … Shirt, Tee … Tshirt)`) }
+
+  // BAN LIST — modifier stuffing. Attribute-pair exemption (review 2026-07-22): a banned modifier is
+  // EXEMPT if immediately followed by a product-noun (or attribute noun) — "Graphic Shirt" / "Long
+  // Sleeve" / "Bold Motivational" / "Puff Embroidery" — because it's functioning as an attribute
+  // descriptor for the noun, not a standalone decorator. This fixes the false-fail on PO golds #6/#7
+  // (both use "Graphic Shirt" legitimately).
+  const bannedFound: string[] = []
+  const toks = t.toLowerCase().split(/[\s,|]+/).filter(Boolean)
+  for (let i = 0; i < toks.length; i++) {
+    const tok = toks[i]
+    if (!TITLE_V2_BANNED_MODIFIERS.has(tok)) continue
+    const next = toks[i + 1]
+    if (next && TITLE_V2_ATTR_PAIR_NOUNS.has(next)) continue   // attribute-pair exemption
+    bannedFound.push(tok)
+  }
+  if (bannedFound.length) { score -= 5 * bannedFound.length; problems.push(`banned decorator(s): ${bannedFound.join(', ')}`) }
+
+  // FORCED GENDER — if title has "for Men and Women" but audience is universal, gently dock.
+  // (Cannot know design gender-specificity deterministically; soft signal only.)
+  if (/\bfor men and women\b/i.test(t)) { score -= 3; problems.push('force-added "for Men and Women"; skip when design is universal') }
+
+  // BRAND FRONT — hard requirement, safety-adjacent.
+  if (opts.brandName && !t.toLowerCase().startsWith(opts.brandName.trim().toLowerCase())) {
+    score -= 20; problems.push(`brand "${opts.brandName}" not at position 0`)
+  }
+
+  return { score: Math.min(100, Math.max(0, score)), problems }
+}
 /** Flag-gated resolver: real garment noun when on, else the frozen shirt base (so every consumer's
  *  `off` branch is byte-identical). Callers still guard their site with GARMENT_NOUN_ON to preserve
  *  each site's exact legacy literal (which differs — 't-shirt' vs 'shirt' vs 'Tee Shirt'). */
@@ -2519,8 +2626,50 @@ async function runTitleAgent(
     ? `\n🟢 DESIGN-NICHE KEYPHRASES — these ARE about your design (not generic filler). USE THEM to fill the title toward the full 68-75 char budget, woven as natural language after the design phrase. A short title wastes half your search real estate; keep adding these until you are near 72 chars:\n  ${nicheSeedList.map((s) => `"${s}"`).join(', ')}\n`
     : ''
 
-  const system = `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`
-  const user = `Brand: ${brandName}
+  // TITLE_QUALITY_V2 primary-council brief (review 2026-07-22): the humanizer sub-branch V2 at
+  // ~:2837-2867 only fires when title.length < 68 — but the primary council usually lands 70-75, so
+  // the V2 flag was a no-op on the dominant single-design hit rate (INVARIANT 1 violation vs the
+  // multi-design branch which is V2-gated at the PRIMARY). This wires V2 into the primary council
+  // brief here too. Legacy prompt is preserved verbatim when off (byte-identical).
+  const v2ExpandedDesign = TITLE_V2_ON && apparel ? expandIdiomDesignName(designName) : (designName || '')
+  const v2IsKnownIdiom = TITLE_V2_ON && apparel && isIdiomDesign(designName)
+  const [system, user] = (TITLE_V2_ON && apparel) ? (() => {
+    const goldsBlock = PO_GOLD_TITLES.map((g, i) => `${i + 1}. ${g}`).join('\n')
+    const audOpt = preferredAudience || 'Men and Women'
+    const sys = `You are an Amazon SEO title writer specializing in apparel in THE CEO's house style. Match the PATTERN of the PO's approved gold titles exactly. NEVER stuff modifier decorators. Output ONLY the final title string — no quotes, no markdown, no explanation.`
+    const usr = `PO GOLD TITLES (match this pattern — includes both idiom-expansion and category-front-load examples):
+${goldsBlock}
+
+PATTERN A (DEFAULT — pipe format for pun/idiom/statement/theme designs):
+  ${brandName} [Design Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${audOpt && !/^unisex$/i.test(audOpt) ? ` [for ${audOpt}?]` : ''}
+  - Product noun repeats TWICE with SEO variety: "Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat".
+  - Category brand goes AFTER the pipe (e.g. Comfort Colors, Cotton Twill Snapback).
+  - Audience is OPTIONAL — include ONLY when the design is genuinely gender-specific or the space fits naturally. NEVER force "for Men and Women".
+
+PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Christian, Spain/Championship, Fathers Day):
+  ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Design Phrase LAST]
+  - Category keywords LEAD; design phrase comes at the END.
+  - Use Pattern B ONLY when at least one keyphrase below has category-head volume that's higher than the design phrase's search intent.
+
+INPUT FOR THIS TITLE:
+Brand: ${brandName}
+Category: ${category}
+${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}Audience (skip in title unless design is gender-specific): ${audOpt}
+Design phrase (identity — KEEP this exact phrase somewhere in the title): ${v2ExpandedDesign || '(none)'}${v2IsKnownIdiom ? `\n  ↑ this design is a known idiom/pun; the expansion above IS the source phrase — prefer it over the short design tag.` : ''}
+${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInclude}\n` : ''}${nicheSeedList.length ? `Design-niche keyphrases (weave those that fit): ${nicheSeedList.map((s) => `"${s}"`).join(', ')}\n` : ''}Pre-filtered keyword candidates:
+${candidateList}
+
+RULES (deterministic — checked by title QUALITY judge):
+- Target 70-75 characters (hard goal — never below 70, hard cap 75).
+- Product noun MUST appear TWICE with SEO variety (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
+- NEVER decorate with these words as standalone: Funny, Novelty, Graphic, Retro, Cute, Vintage, Farewell, Goodbye, Going, Away. These belong in the BACKEND, not the title. HOWEVER you MAY use them AS PART OF an attribute descriptor pair — "Graphic Shirt", "Bold Motivational Tshirt", "Puff Embroidery Cap", "Long Sleeve Shirt" — those are legitimate attribute descriptors, not decorators.
+- NEVER force "for Men and Women" — omit gender entirely if the design is universal (idiom / motivational / theme designs are usually universal).
+- NEVER repeat a significant word (other than the product noun once, per rule above).
+${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the #1 ranking keyword.\n` : ''}- Read like a human wrote it. Return ONLY the final title string.`
+    return [sys, usr]
+  })() : [
+    `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`,
+    `Brand: ${brandName}
 Category: ${category}
 ${designLine}${mustLine}${attrPinLine}${nicheLine}${upgradeLine}
 Pre-filtered keyword candidates (already de-duplicated and seasonal-stripped — the title is capped at 75 chars, so ${apparel ? 'at most ONE beyond the mandatory keyword' : 'only 1-2 of these fit alongside the mandatory keyword; the rest rank via bullets/backend'}):
@@ -2542,7 +2691,8 @@ Rules:
 - 🚫 BRAND-NAME SAFETY (Amazon Jan 2025 policy — bare brand references SUPPRESS listings): If any keyword above is a third-party brand name (e.g. Canon, Nikon, Sony, GoPro, SanDisk, Kingston, Lexar, Samsung, Apple, iPhone, Galaxy, DJI, Bose, etc. — anything that isn't your own brand "${brandName}"), use it ONLY in 'for [Brand]' or 'compatible with [Brand]' phrasing. Examples: ✓ 'for GoPro Hero', ✓ 'compatible with Canon EOS', ✗ 'GoPro SD Card' (bare reference — listing gets suppressed). Same rule for model names (iPhone 14, DSLR camera brands, etc.).
 - ${apparel ? '' : 'PREFER concrete keyphrases over filler descriptors. NEVER add empty marketing words like "Durable", "Reliable", "Solution", "Premium", "High-Quality", "Versatile", "Versatile Options" — every word should be either a search term, a real product attribute shoppers type, or an essential connector. If you have budget left, add another keyphrase from the candidate pool, not filler.'}${compatibilityBrands.length > 0 ? `
 - 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands and shoppers search for them. Weave the top 2-3 in using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example: "...Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')}". This is legal referential use and captures real buyer traffic.` : ''}
-- Must read like a human wrote it. Return ONLY the title.`
+- Must read like a human wrote it. Return ONLY the title.`,
+  ]
 
   // COUNCIL (PO directive: big decisions DEBATE, not one agent). Apparel/design titles — where the
   // keyword-stuffing problem lives — run the 3-persona debate -> adversary -> judge over the SAME
@@ -2559,6 +2709,15 @@ Rules:
       max_tokens: 120,
     })
     title = (completion.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+  }
+  // TITLE_V2_SHADOW: log the deterministic judge score of the primary council output on every apparel
+  // run when shadow mode is set. This is the missing shadow signal — without it, TITLE_V2=shadow was a
+  // no-op with no observable diff. Now the runbook step "verify shadow diff on 3 diverse listings"
+  // produces real numbers. Only apparel (V2 targets apparel); only when shadow explicitly set to keep
+  // logs clean; capped at one line per regen. When TITLE_V2_ON the mode is a real run so no shadow log.
+  if (apparel && TITLE_V2_SHADOW && title) {
+    const jv = titleQualityJudge(title, { brandName })
+    console.log(`[TITLE_V2_DIFF] single-design primary produced score=${jv.score}/100 (${title.length} chars) title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
   }
   let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) : ['No title generated.']
   let retried = false
@@ -2740,8 +2899,49 @@ Rules:
       ? garmentNounFor(productType, title).display
       : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'Tee Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt'))
     const nichePool = [...new Set([...(input.nicheSeeds || []), ...upgradeKws].map((s) => (s || '').trim()).filter(Boolean))]
-    const sdSystem = `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title. Lead with the brand, then the design/niche, then the product type, then supporting niche keyphrases a real shopper types, then "for ${aud}". Write like a human — never keyword soup.`
-    const sdUser = `Brand: ${brandName}
+    // TITLE_QUALITY_V2 (2026-07-22): when ON, rewrite the prompt to encode PO gold pattern —
+    // idiom expansion via titleIdiomExpander (Later Gator → See You Later Alligator when curated),
+    // Pattern A (pipe format) as default, 8 golds as few-shot, BAN-list on modifier stuffing,
+    // gender-conservative. When OFF, keep the exact legacy prompt (byte-identical to today).
+    // The expanded design name is passed as the identity ONLY when the flag is on — never leaks
+    // a truncated tag into the shipped title when off.
+    const displayDesignName = TITLE_V2_ON ? expandIdiomDesignName(designName) : (designName || '')
+    const isKnownIdiom = TITLE_V2_ON && isIdiomDesign(designName)
+    const [sdSystem, sdUser] = TITLE_V2_ON ? (() => {
+      const goldsBlock = PO_GOLD_TITLES.map((g, i) => `${i + 1}. ${g}`).join('\n')
+      const sys = `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title in THE CEO's house style. Match the PATTERN of the PO's approved gold titles (below) exactly. NEVER stuff modifier decorators. Return ONLY the final title string.`
+      const usr = `PO GOLD TITLES (match this pattern):
+${goldsBlock}
+
+PATTERN A (DEFAULT — pipe format for pun/idiom/statement/theme designs):
+  ${brandName} [Design Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${aud && !/^unisex$/i.test(aud) ? ` [for ${aud}?]` : ''}
+  - Product noun repeats TWICE with SEO variety: "Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat".
+  - Category brand goes AFTER the pipe (e.g. Comfort Colors, Cotton Twill Snapback).
+  - Audience is OPTIONAL — include ONLY when the design is genuinely gender-specific or the space fits naturally. NEVER force "for Men and Women".
+
+PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Christian, Spain/Championship, Fathers Day):
+  ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Design Phrase LAST]
+  - Category keywords LEAD (Spain Jersey / Christian / Fathers Day). Design phrase comes at the END.
+  - Use Pattern B ONLY when at least one keyphrase below has category-head volume that's higher than the design phrase's search intent.
+
+INPUT FOR THIS TITLE:
+Brand: ${brandName}
+${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}Product type: ${ptWord}
+Audience (skip in title unless design is gender-specific): ${aud}
+Design phrase (identity — KEEP this exact phrase somewhere in the title): ${displayDesignName || '(none)'}${isKnownIdiom ? `\n  ↑ this design is a known idiom/pun; the expansion above IS the source phrase — prefer it over the short design tag.` : ''}
+Niche keyphrases (weave those that fit — occasion, subject, recipient): ${nichePool.slice(0, 10).join(' | ') || '(none)'}
+
+RULES (deterministic — checked by title QUALITY judge):
+- Target 70-75 characters (hard goal — never below 70, hard cap 75).
+- Product noun MUST appear TWICE with SEO variety (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
+- NEVER decorate with these words as standalone: Funny, Novelty, Graphic, Retro, Cute, Vintage, Farewell, Goodbye, Going, Away. These belong in the BACKEND, not the title. HOWEVER you MAY use them AS PART OF an attribute descriptor pair — "Graphic Shirt", "Bold Motivational Tshirt", "Puff Embroidery Cap", "Long Sleeve Shirt" — those are legitimate attribute descriptors, not decorators.
+- NEVER force "for Men and Women" — omit gender if the design is universal.
+- NEVER repeat a significant word (other than the product noun once, per rule above).
+${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the #1 ranking keyword.\n` : ''}- Read like a human wrote it. Return ONLY the final title string.`
+      return [sys, usr]
+    })() : [
+      `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title. Lead with the brand, then the design/niche, then the product type, then supporting niche keyphrases a real shopper types, then "for ${aud}". Write like a human — never keyword soup.`,
+      `Brand: ${brandName}
 ${attributePin ? `Blank/garment brand: ${attributePin}\n` : ''}Product type: ${ptWord}
 Audience: ${aud}
 Design name (KEEP verbatim — the product's identity): ${designName || '(none)'}
@@ -2752,7 +2952,8 @@ Rules:
 ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the #1 ranking keyword; never paraphrase it away.\n` : ''}- TARGET LENGTH 70-75 characters (hard goal — a short title wastes ranking budget).
 - Use a garment structure like "Tee Shirt | ... TShirt" — keep "Shirt" and "Tee/TShirt" as DISTINCT indexable variants; never collapse to one, never pluralize into "Shirts ... Shirts".
 - Do NOT repeat any significant word. No generic category filler ("Graphic Shirts for Women").
-- Read like a human wrote it. Return ONLY the final title string.`
+- Read like a human wrote it. Return ONLY the final title string.`,
+    ]
     const extended = await humanizeTitleTo75(openai, title, {
       baseSystem: sdSystem, baseUser: sdUser,
       pool: nichePool,
@@ -5470,11 +5671,21 @@ Return ONLY the extended title string.` },
           continue
         }
         const retryTitle = titleCaseRetry(postProcess(raw))
-        const clean = retryTitle.length > title.length
-          && findTrademarkPhrases(retryTitle).length === 0
+        const safetyOk = findTrademarkPhrases(retryTitle).length === 0
           && (!brandName || retryTitle.toLowerCase().startsWith(brandName.trim().toLowerCase()))
+        // TITLE_QUALITY_V2 (2026-07-22): the historical adopt gate rejected a same-length rewrite
+        // (strict `length >`), which silently discarded a FORMAT win when the LLM landed a better-
+        // structured title at the same char count. When the V2 flag is on, adopt a same-length or
+        // shorter rewrite if it scores strictly higher on the deterministic titleQualityJudge —
+        // safety gates (trademark + brand-front) still enforced. When off, behavior is identical
+        // to legacy (byte-identical). Longer-than-current is still always adopted when safe.
+        const currentScore = TITLE_V2_ON ? titleQualityJudge(title, { brandName }).score : 0
+        const retryScore = TITLE_V2_ON ? titleQualityJudge(retryTitle, { brandName }).score : 0
+        const cleanLegacy = retryTitle.length > title.length && safetyOk
+        const cleanV2 = TITLE_V2_ON && safetyOk && retryScore > currentScore
+        const clean = cleanLegacy || cleanV2
         if (clean) {
-          onProgress?.(`${label} retry ${attempt}: len ${title.length}→${retryTitle.length}`)
+          onProgress?.(`${label} retry ${attempt}: len ${title.length}→${retryTitle.length}${TITLE_V2_ON ? ` score ${currentScore}→${retryScore}` : ''}`)
           title = retryTitle
         } else {
           onProgress?.(`${label} retry ${attempt}: len ${title.length}→${title.length} (kept best; retry was ${retryTitle.length} chars${retryTitle.length > title.length ? ', unclean' : ''})`)
@@ -5521,7 +5732,13 @@ async function buildNicheParentTitle(
     const s = scrubTrademarks((familyNiche || '').trim())
     return s && findTrademarkPhrases(s).length === 0 ? s : ''
   })()
-  const baseSystem = `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family where the children carry distinct DESIGNS that share a NICHE. The parent title is the variation hub shoppers see in search results BEFORE picking a specific design — it must capture the NICHE and product type but MUST NOT name any specific design.`
+  // TITLE_QUALITY_V2 (2026-07-22): when ON, the multi-design branch uses the same PO gold pattern
+  // as single-design (INVARIANT 1: fix on BOTH producers so no branch ships a stale format). The
+  // family niche anchor still leads; the PO golds show BOTH single- and multi-design examples so
+  // the model sees the shape both ways. When OFF, the legacy prompt runs verbatim.
+  const baseSystem = TITLE_V2_ON
+    ? `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family in THE CEO's house style. Match the PATTERN of the PO's approved gold titles exactly. The parent title captures the FAMILY NICHE and product type; MUST NOT name any specific child design. NEVER stuff modifier decorators. Return ONLY the final title string.`
+    : `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family where the children carry distinct DESIGNS that share a NICHE. The parent title is the variation hub shoppers see in search results BEFORE picking a specific design — it must capture the NICHE and product type but MUST NOT name any specific design.`
   // COMPETITOR SEO SNAPSHOT (fallback chain Part 1) — CONSTRAINTS-NOT-EXEMPLARS (prompt-leak
   // history #365/#367: instruction text the model can echo becomes product copy). The snapshot is
   // framed as a strategy REFERENCE with explicit prohibitions; every field is trademark-scrubbed
@@ -5538,7 +5755,39 @@ TOP-RANKING COMPETITOR SNAPSHOT (study HOW they rank — use their KEYWORD STRAT
 Their title: ${compTitle || '(none)'}
 Their bullets: ${compBullets.length ? compBullets.join(' | ') : '(none)'}`
   })()
-  const baseUser = `Brand: ${brandName}
+  const baseUser = TITLE_V2_ON ? (() => {
+    const goldsBlock = PO_GOLD_TITLES.map((g, i) => `${i + 1}. ${g}`).join('\n')
+    return `PO GOLD TITLES (match this pattern — includes single AND multi-design examples):
+${goldsBlock}
+
+PATTERN A (DEFAULT — pipe format):
+  ${brandName} [Family Niche Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${aud ? ` [for ${aud}?]` : ''}
+  - Product noun repeats TWICE with SEO variety ("Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat").
+  - Category brand goes AFTER the pipe (e.g. Comfort Colors).
+  - Audience is OPTIONAL — include ONLY when the family is genuinely gender-specific.
+
+PATTERN B (when the family category has HIGH-SEARCH volume category keywords):
+  ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Niche Phrase LAST]
+  - Category keywords LEAD (Christian / Spain Championship / Fathers Day).
+
+INPUT FOR THIS PARENT TITLE:
+Brand: ${brandName}
+${blankBrand ? `Category brand (garment brand): ${blankBrand}\n` : ''}Product type: ${ptWord}
+Audience (skip in title unless family is gender-specific): ${aud}
+Family niche anchor (LEAD the title with THIS niche phrase; broadcasts to EVERY design; NEVER a specific design name): ${familyNicheClean || '(infer the shared niche from the design names + keywords below)'}
+Child design names (DO NOT name any specifically — they belong to individual children): ${designNameList}
+High-value niche keywords (use the niche-wide ones only, skip design-specific motifs): ${upgradeList}${compatList ? `
+Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapshotBlock}
+
+RULES (deterministic — checked by title QUALITY judge):
+- Target 70-75 characters (hard goal — never below 70, hard cap 75).
+- Product noun MUST appear TWICE with SEO variety.
+- NEVER decorate with these words as standalone: Funny, Novelty, Graphic, Retro, Cute, Vintage, Farewell, Goodbye, Going, Away. These belong in the BACKEND, not the title. HOWEVER you MAY use them AS PART OF an attribute descriptor pair — "Graphic Shirt", "Bold Motivational Tshirt", "Puff Embroidery Cap", "Long Sleeve Shirt" — those are legitimate attribute descriptors, not decorators.
+- NEVER force "for Men and Women" — omit gender if the family is universal.
+- NO design names in the parent title — only the shared niche.
+- NEVER repeat a significant word (other than the product noun per rule above).
+- Read like a human wrote it. Return ONLY the final title string.`
+  })() : `Brand: ${brandName}
 Blank brand (if any): ${blankBrand ?? '(none)'}
 Product type: ${ptWord}
 Audience: ${aud}
@@ -5556,6 +5805,12 @@ Rules:
 - Read like a human wrote it. Return ONLY the final title string.`
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress)
   let title = (judged || '').trim()
+  // TITLE_V2_SHADOW: mirror the single-design shadow-log at the multi-design primary council so the
+  // runbook step "verify shadow diff on 3 diverse listings" produces real numbers on BOTH branches.
+  if (TITLE_V2_SHADOW && title) {
+    const jv = titleQualityJudge(title, { brandName })
+    console.log(`[TITLE_V2_DIFF] multi-design primary produced score=${jv.score}/100 (${title.length} chars) title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
+  }
   // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
   // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
   // right after the brand, BEFORE capTitle75 + every dedup/cap guard below, so they all run on it.
