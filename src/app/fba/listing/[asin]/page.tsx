@@ -243,6 +243,9 @@ export default function ListingDetailPage() {
   // redirect to /fba/listing/{parent_asin} with ?resolvedFrom={inputAsin} for the toast below.
   // Uses replace() so back-button returns the seller to wherever they came from, not the child.
   // Toast when this page-load is the redirect target (someone scanned a child, we brought them here).
+  // Depends on `asin` so it re-fires after router.replace() lands the parent page — Next.js App Router
+  // keeps the same component instance across the redirect, so an empty-deps effect would never see
+  // the ?resolvedFrom= param that only appears AFTER the child→parent replace (live-verified 2026-07-22).
   const [resolvedFromChild, setResolvedFromChild] = useState<string | null>(null)
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -257,7 +260,7 @@ export default function ListingDetailPage() {
       const t = setTimeout(() => setResolvedFromChild(null), 8000)
       return () => clearTimeout(t)
     }
-  }, [])
+  }, [asin])
   useEffect(() => {
     if (!asin) return
     let cancelled = false
