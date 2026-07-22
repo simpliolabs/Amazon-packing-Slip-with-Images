@@ -1,6 +1,6 @@
 'use client'
 
-import { useParams, useRouter } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { isPushableDetail, unpushableReason, isItemHighlightsField, isSingleDesignOnlyKey, isSingleDesignOnlyDetail, SINGLE_DESIGN_ONLY_LEAK_REASON } from '@/lib/fba/productDetailAttrs'
@@ -243,24 +243,22 @@ export default function ListingDetailPage() {
   // redirect to /fba/listing/{parent_asin} with ?resolvedFrom={inputAsin} for the toast below.
   // Uses replace() so back-button returns the seller to wherever they came from, not the child.
   // Toast when this page-load is the redirect target (someone scanned a child, we brought them here).
-  // Depends on `asin` so it re-fires after router.replace() lands the parent page — Next.js App Router
-  // keeps the same component instance across the redirect, so an empty-deps effect would never see
-  // the ?resolvedFrom= param that only appears AFTER the child→parent replace (live-verified 2026-07-22).
-  const [resolvedFromChild, setResolvedFromChild] = useState<string | null>(null)
+  // 2nd attempt (2026-07-22): first attempt with useState+history.replaceState silently failed on prod —
+  // stripping the URL from inside useEffect caused Next.js App Router to soft-remount the component,
+  // resetting the state before the toast could render. Idiomatic fix: read the query reactively via
+  // useSearchParams (no history manipulation) and track dismissal in local state. URL param lingers
+  // in the address bar until dismissed or auto-dismissed (harmless — cannot re-trigger anything).
+  const searchParams = useSearchParams()
+  const resolvedFromChild = searchParams?.get('resolvedFrom') || null
+  const [toastDismissed, setToastDismissed] = useState(false)
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    const url = new URL(window.location.href)
-    const from = url.searchParams.get('resolvedFrom')
-    if (from) {
-      setResolvedFromChild(from)
-      // Strip the query param so a refresh doesn't re-show the toast.
-      url.searchParams.delete('resolvedFrom')
-      window.history.replaceState({}, '', url.toString())
-      // Auto-dismiss after 8s so it doesn't linger; seller can still see they're on the parent.
-      const t = setTimeout(() => setResolvedFromChild(null), 8000)
-      return () => clearTimeout(t)
-    }
-  }, [asin])
+    if (!resolvedFromChild || toastDismissed) return
+    const t = setTimeout(() => setToastDismissed(true), 8000)
+    return () => clearTimeout(t)
+  }, [resolvedFromChild, toastDismissed])
+  // Reset the dismissed flag if a NEW redirect param appears (seller navigates to another child).
+  useEffect(() => { setToastDismissed(false) }, [resolvedFromChild])
+  const showRedirectToast = !!resolvedFromChild && !toastDismissed
   useEffect(() => {
     if (!asin) return
     let cancelled = false
@@ -2495,13 +2493,13 @@ export default function ListingDetailPage() {
 
       {/* Child→Parent auto-redirect toast (PO 2026-07-22): appears when the seller scanned/entered
           a child ASIN and the app brought them here to the parent's family view. Auto-dismisses in 8s. */}
-      {resolvedFromChild && (
+      {showRedirectToast && (
         <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-center justify-between gap-3">
           <div className="text-sm text-amber-900">
             <span className="font-semibold">Loaded parent {asin}</span> — you searched the child ASIN {resolvedFromChild}. Working on the family view instead so the AI, family SKUs, and push all operate on the full parent listing.
           </div>
           <button
-            onClick={() => setResolvedFromChild(null)}
+            onClick={() => setToastDismissed(true)}
             className="text-amber-700 hover:text-amber-900 text-sm font-medium px-2 py-1"
             aria-label="Dismiss"
           >
