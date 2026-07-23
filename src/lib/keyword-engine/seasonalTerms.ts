@@ -84,10 +84,22 @@ export function seasonsIn(text: string): string[] {
 }
 
 /** Back-compat with the historical predicate: does this keyword name ANY holiday?
- *  Deliberately identical in outcome to `SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))`
- *  (listingPipeline.ts:1271) apart from apostrophe normalisation, which only ever adds matches. */
+ *  NOT byte-identical to the historical rule — `seasonsIn` normalises apostrophes, so this matches
+ *  STRICTLY MORE ("mother's day gift shirt": historical false, this true). Use
+ *  `isSeasonalKeywordLegacy` on any path that must stay byte-identical at KEYWORD_TARGET_SET=off. */
 export function isSeasonalKeyword(keyword: string): boolean {
   return seasonsIn(keyword).length > 0
+}
+
+/** The EXACT historical predicate — `SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))`, as
+ *  it stood at listingPipeline.ts:1271 and syncListingContent.ts:726. No apostrophe normalisation,
+ *  no canonicalisation. This is what `off` and `shadow` must run so a flag that is supposed to
+ *  change nothing genuinely changes nothing; the apostrophe delta is surfaced in the shadow log as
+ *  `newlyStrippedUnderNew` so flipping is a decision rather than a surprise. */
+export function isSeasonalKeywordLegacy(keyword: string): boolean {
+  const lc = (keyword || '').toLowerCase()
+  if (!lc) return false
+  return SEASONAL_TERMS.some((t) => lc.includes(t))
 }
 
 export type SeasonRelation = 'not-seasonal' | 'on-season' | 'off-season'

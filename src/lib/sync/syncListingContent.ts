@@ -40,7 +40,8 @@ import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
 // seasonalTerms is a ZERO-IMPORT leaf, so importing it here cannot create the scorer→pipeline cycle
 // that the deleted local BULLET_SEASONAL_TERMS copy existed to avoid.
-import { seasonsIn, isOffSeasonKeyword } from '@/lib/keyword-engine/seasonalTerms'
+import { seasonsIn, isOffSeasonKeyword, isSeasonalKeywordLegacy } from '@/lib/keyword-engine/seasonalTerms'
+import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { isWriteBlockedPreLaunch, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
@@ -932,12 +933,19 @@ export function scoreListingContent(
     const colorRe = /\b(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)\b/i
     const isColorNeutralFamily = apparel && childContents.length > 1
     // ONE seasonal predicate, shared with the generators (seasonalTerms.ts, a zero-import leaf).
-    // Scoped to the DESIGN's own occasion: a Valentine design's `valentine*` keywords are now
-    // placeable by the generators, so the scorer must CREDIT them rather than skipping them —
-    // otherwise the copy contains a keyword the score refuses to count. An empty `designSeasons`
-    // (no design-name signal) reproduces the historical blanket rule byte-for-byte.
-    const bulletDesignSeasons = seasonsIn(scoringCtx.planDesignName ?? '')
-    const isSeasonalKw = (kw: string) => isOffSeasonKeyword(kw, bulletDesignSeasons)
+    // Scoped to the DESIGN's own occasion: a Valentine design's `valentine*` keywords are placeable
+    // by the generators once KEYWORD_TARGET_SET=on, so the scorer must CREDIT them rather than
+    // skipping them — otherwise the shipped copy contains a keyword the score refuses to count.
+    //
+    // FLAG-GATED, and gated on the SAME flag as the generator side so the two can never disagree.
+    // `off`/`shadow` run `isSeasonalKeywordLegacy`, the byte-exact historical predicate — NOT
+    // `isOffSeasonKeyword(kw, [])`, which normalises apostrophes and therefore strips strictly MORE
+    // ("mother's day gift shirt"). A flag that is supposed to change nothing must change nothing.
+    const ktsOn = selectionMode() === 'on'
+    const bulletDesignSeasons = ktsOn ? seasonsIn(scoringCtx.planDesignName ?? '') : []
+    const isSeasonalKw = ktsOn
+      ? (kw: string) => isOffSeasonKeyword(kw, bulletDesignSeasons)
+      : (kw: string) => isSeasonalKeywordLegacy(kw)
     const bulletOppKw = ((scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
       ? scoringCtx.bulletPlanKeywords.filter((k) => !isSeasonalKw(k))
       : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
