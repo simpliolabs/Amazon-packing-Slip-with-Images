@@ -295,7 +295,7 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = supabase as any;
     const { data: scoreRow } = await db.from('listing_seo_scores')
-      .select('product_title, design_name_override').eq('parent_asin', resolvedParent).maybeSingle();
+      .select('product_title, design_name_override, audience_lean').eq('parent_asin', resolvedParent).maybeSingle();
     const childTitles = (listingRows ?? []).map((r) => r.title).filter(Boolean) as string[];
     const identity = identityTokensOf(scoreRow?.product_title, scoreRow?.design_name_override, listingTitle, ...childTitles);
     if (identity.size === 0) {
@@ -362,9 +362,19 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       // Deterministic apparel off-niche net (foreign / competitor-blank / wholesale / gear) — universe rows too.
       for (const k of kept) if (isOffNicheKeyword(k.keyword, { context: apparelCtx })) offNiche.add(k.keyword);
     }
+    // RELEVANCE_THEME_V2 (2026-07-23): thread designTheme + audienceLean into the classifier so it
+    // can reject wrong-theme merch (art teacher / nurse / basketball / …) that the pre-V2 title-only
+    // prompt kept on ambiguous designs like B0GF49RLDL ("Pixel Art Tee" reading as art theme). Flag
+    // lives inside classifyOffNicheKeywords — this call site passes the signals in every mode; the
+    // flag decides whether they land in the prompt (on/shadow) or get ignored (off, byte-identical).
     const llmDrop = await classifyOffNicheKeywords(
       candidates.map((k) => k.keyword),
-      { title: scoreRow?.product_title || listingTitle, category: isApparelPool ? 'apparel / graphic t-shirt' : null },
+      {
+        title: scoreRow?.product_title || listingTitle,
+        category: isApparelPool ? 'apparel / graphic t-shirt' : null,
+        designTheme: (scoreRow as { design_name_override?: string | null } | null)?.design_name_override ?? null,
+        audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
+      },
     );
     for (const kw of llmDrop) offNiche.add(kw);
     if (offNiche.size === 0) return addSynonyms(kept);
