@@ -1066,6 +1066,37 @@ const TITLE_V2_SHADOW = TITLE_V2_MODE === 'shadow'
 const TITLE_V3_MODE = (process.env.TITLE_COUNCIL_V3 || 'off').toLowerCase()
 const TITLE_V3_ON = TITLE_V3_MODE === 'on'
 const TITLE_V3_SHADOW = TITLE_V3_MODE === 'shadow'
+
+/** Audience-lean signal type — mirrors PipelineInput.audienceLean at :146. */
+type AudienceLean = 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null | undefined
+
+/** Derive the AUDIENCE MODE flag the title-council briefs + Persona 3 read (TITLE_COUNCIL_V3.1a).
+ *  Any non-null non-'unisex' lean (male / female / lean_male / lean_female) → REQUIRED. Anything else → OPTIONAL.
+ *  Derived from RAW lean, NOT from the collapsed preferredAudience string, so Fix D's dock has hard/soft visibility. */
+function deriveAudienceMode(lean: AudienceLean): 'REQUIRED' | 'OPTIONAL' {
+  if (lean === 'male' || lean === 'female' || lean === 'lean_male' || lean === 'lean_female') return 'REQUIRED'
+  return 'OPTIONAL'
+}
+
+/** Persona 3 / terminal-net closed-lexicon carriers (2026-07-23, PO Q1). A design phrase whose tokens
+ *  literally contain one of these signals the wearer's gender unambiguously — used to (a) exempt persona 3
+ *  from forcing the audience tail when the phrase already carries the signal, and (b) trigger the
+ *  ANTI-LEAN OVERRIDE when the phrase carrier disagrees with the pipeline's lean (e.g. "Best Dad Ever"
+ *  printed on a Ladies-cut shirt). Closed and small — LLM never infers. */
+const DESIGN_GENDER_CARRIERS_FEMALE = new Set(['she', 'her', 'hers', 'girl', 'girls', 'wife', 'girlfriend'])
+const DESIGN_GENDER_CARRIERS_MALE = new Set(['he', 'his', 'him', 'guy', 'guys', 'dude', 'husband', 'boyfriend'])
+
+function designPhraseCarriesGender(designPhrase: string): { female: boolean; male: boolean } {
+  const toks = (designPhrase || '').toLowerCase().replace(/[^a-z0-9\s'’]/g, ' ').split(/\s+/).filter(Boolean)
+  let female = false
+  let male = false
+  for (const t of toks) {
+    const norm = t.replace(/['’]s?$/, '')
+    if (DESIGN_GENDER_CARRIERS_FEMALE.has(norm)) female = true
+    if (DESIGN_GENDER_CARRIERS_MALE.has(norm)) male = true
+  }
+  return { female, male }
+}
 /** PO gold examples (2026-07-22, provided verbatim). Used as FEW-SHOT in both title branches when
  *  TITLE_QUALITY_V2 is on. Rank order = PO's original list, deduped by exact string. Extend via a
  *  future auto-miner over listing_change_log title edits (memory: title-po-gold-pattern). */
@@ -1102,6 +1133,10 @@ export function titleQualityJudge(title: string, opts: {
   productType?: string | null
   aud?: string
   designName?: string
+  /** TITLE_COUNCIL_V3.1a Fix D (2026-07-23, PO Q2 single-tier): RAW audience lean forwarded from
+   *  PipelineInput.audienceLean → runTitleAgent (single-design) / parent-lean via UNANIMITY (multi-design).
+   *  Undefined/null = caller didn't classify → no audience dock (backward-compatible fail-open). */
+  lean?: AudienceLean
 } = {} as never): { score: number; problems: string[] } {
   if (!title) return { score: 0, problems: ['empty'] }
   const problems: string[] = []
@@ -1149,6 +1184,24 @@ export function titleQualityJudge(title: string, opts: {
   // FORCED GENDER — if title has "for Men and Women" but audience is universal, gently dock.
   // (Cannot know design gender-specificity deterministically; soft signal only.)
   if (/\bfor men and women\b/i.test(t)) { score -= 3; problems.push('force-added "for Men and Women"; skip when design is universal') }
+
+  // AUDIENCE-WHEN-LEAN DOCK (Fix D, PO Q2 = single-tier -10, PO Q7 = widened regex accepts Women's/Ladies/Men's).
+  // Complements Fix A's persona pin. Sized > +5 pipe bonus so it strictly beats Pattern-A tiebreak, < -20
+  // brand-front so brand-front safety still dominates. Silently no-ops when opts.lean is null/undefined
+  // (backward-compatible — every existing testcase passes without change).
+  const lean = opts.lean
+  if (lean === 'male' || lean === 'female' || lean === 'lean_male' || lean === 'lean_female') {
+    const hasForWomen = /\bfor\s+women\b/i.test(t) || /\bwomen['’]?s\b/i.test(t) || /\bladies\b/i.test(t)
+    const hasForMen = (/\bfor\s+men\b/i.test(t) && !/\bfor\s+men\s+and\s+women\b/i.test(t))
+      || (/\bmen['’]?s\b/i.test(t) && !/\bmen['’]?s\s+and\s+women['’]?s\b/i.test(t))
+    if ((lean === 'male' || lean === 'lean_male') && !hasForMen) {
+      score -= 10
+      problems.push(`audience "for Men" absent; design lean=${lean} (-10)`)
+    } else if ((lean === 'female' || lean === 'lean_female') && !hasForWomen) {
+      score -= 10
+      problems.push(`audience "for Women" absent; design lean=${lean} (-10)`)
+    }
+  }
 
   // BRAND FRONT — hard requirement, safety-adjacent.
   if (opts.brandName && !t.toLowerCase().startsWith(opts.brandName.trim().toLowerCase())) {
@@ -2423,7 +2476,7 @@ async function runTitleCouncilLegacy(openai: OpenAI, baseSystem: string, baseUse
  *      hardcode — TRADEMARK_RULES now says "world futbol cup");
  *  (5) fail-open uses titleQualityJudge score to pick the best draft, not `drafts[1] || drafts[0]` (the
  *      silent SEO-persona array-index bias). */
-async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string }): Promise<string> {
+async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean }): Promise<string> {
   // Model env split — spec §4.3. Adversary MUST differ from judge (anti-echo). Default adversary =
   // gpt-4o-mini (different family from gpt-5) so an unconfigured deploy still respects the ≠ rule;
   // if operator overrides both to the same model, we log a warning but still run — the ≠ rule is
@@ -2449,7 +2502,18 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
       temp: 0.3,
     },
     {
-      sys: `You are the COMPLIANCE & CONVERSION EDITOR. You OWN the right side of the pipe: variant + category brand + noun 2 + optional audience. You are grounded in the seller's actual product FACTS (never invent motifs, materials, audiences, occasions). Pick the pattern that best fits the design phrase's search-demand as described in the brief. Follow every other rule in the brief below.\n\n${baseSystem}`,
+      sys: `You are the COMPLIANCE & CONVERSION EDITOR. You OWN the right side of the pipe: variant + category brand + noun 2 + audience.
+
+AUDIENCE RULE — READ THE BRIEF'S "AUDIENCE MODE" LINE:
+- AUDIENCE MODE: REQUIRED — a gender lean is set. You MUST keep the audience tail "for Women" or "for Men" matching the brief's Audience: value. If length is tight, TRIM FROM THE RIGHT (variant slot > category-brand slot > secondary category noun) — NEVER trim from the LEFT (brand + primary category + design phrase). NEVER pad to reach the tail. NEVER emit "for Men and Women" — that is a universal tail, not a lean one.
+- AUDIENCE MODE: OPTIONAL — universal/unisex. Audience tail is a filler slot only; include ONLY if the design is genuinely gender-specific AND it does not crowd out a higher-value candidate. Do NOT force "for Men and Women" onto a universal design.
+- DESIGN-PHRASE-CARRIES-SIGNAL EXEMPTION (closed lexicon, DO NOT INFER): a design phrase is "unambiguously gendered" ONLY if it literally contains one of these tokens (case-insensitive) — FEMALE = {she, her, hers, girl, girls, wife, girlfriend}; MALE = {he, his, him, guy, guys, dude, husband, boyfriend}. Anything not on this list is NOT a carrier. When the phrase IS a carrier matching the mode, you MAY drop the audience tail — but ONLY when doing so frees space for a HIGHER-VALUE candidate (a nicheSeeds compound or a top opportunity keyphrase), NEVER for a variant descriptor.
+- ANTI-LEAN CARRIER OVERRIDE: if the design phrase contains a MALE carrier while AUDIENCE MODE=REQUIRED with "Women", TREAT AS OPTIONAL (and symmetric for female carrier + male mode). This handles the gift-SKU case (e.g. "Best Dad Ever" printed on a Ladies-cut shirt).
+- If the AUDIENCE MODE line is missing from the brief, default to OPTIONAL (safe: no forced tail).
+
+You are grounded in the seller's actual product FACTS (never invent motifs, materials, audiences, occasions). Pick the pattern that best fits the design phrase's search-demand as described in the brief. Follow every other rule in the brief below.
+
+${baseSystem}`,
       temp: 0.4,
     },
   ]
@@ -2467,7 +2531,10 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
 
   const critique = await titleCouncilAsk(
     openai,
-    `You are a ruthless Amazon listing critic AND a skeptical shopper reviewing candidate titles. Attack each for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from 2026-07-27), brand not at position 0, and weak click appeal. (a) The audience suffix ("for Men and Women", "for Men", "for Women") is OPTIONAL — REJECT any title that FORCES it when the design is universal AND a higher-value product-specific keyphrase from the brief is unused. (b) ${tmClause} Be specific per candidate. Do NOT tell the judge to pick a particular one — just critique.`,
+    // TITLE_COUNCIL_V3.1a Step 10 (PO Q6): adversary honors AUDIENCE MODE. Legacy critique blanket-said
+    // audience is optional — this pressures personas to drop the tail on lean designs. V3.1a distinguishes:
+    // OPTIONAL → drop is fine; REQUIRED → the tail is a lean-appropriate signal and MUST be preserved.
+    `You are a ruthless Amazon listing critic AND a skeptical shopper reviewing candidate titles. Attack each for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from 2026-07-27), brand not at position 0, and weak click appeal. (a) AUDIENCE MODE=OPTIONAL — the audience suffix ("for Men and Women", "for Men", "for Women") is optional; REJECT any title that FORCES it AND a higher-value product-specific keyphrase from the brief is unused. (b) AUDIENCE MODE=REQUIRED — the tail matching the brief's Audience: value MUST be preserved; REJECT any title that DROPS it (unless the design phrase itself is an unambiguous gender carrier per the brief's closed lexicon). NEVER accept "for Men and Women" on a REQUIRED mode — that is a universal tail, not a lean one. (c) ${tmClause} Be specific per candidate. Do NOT tell the judge to pick a particular one — just critique.`,
     `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH candidate, then list the strongest element from each.`,
     0.3, 400, ADVERSARY_MODEL, 60_000,
   )
@@ -2476,9 +2543,11 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
 
   // Judge sees the critique but the fail-open below scores candidates deterministically so a bad
   // judge round can't silently ship a Pattern A when Pattern B would score higher.
+  // TITLE_COUNCIL_V3.1a Step 7: judge-synth honors AUDIENCE MODE. Without this the synth path can
+  // rewrite from scratch and silently unwind Persona 3's audience pin (spec §Fix D verdict refinement #3).
   const judged = await titleCouncilAsk(
     openai,
-    `${baseSystem} You are the JUDGE. Read the brief, the candidates, and the critic review. Pick THE SINGLE PATTERN (A or B) that best matches this design's search-demand profile per the brief, then synthesize the strongest COMPLIANT title in that pattern — you MAY rewrite from scratch. Output ONLY the final title string — no quotes, no explanation.`,
+    `${baseSystem} You are the JUDGE. Read the brief, the candidates, and the critic review. Pick THE SINGLE PATTERN (A or B) that best matches this design's search-demand profile per the brief, then synthesize the strongest COMPLIANT title in that pattern — you MAY rewrite from scratch. AUDIENCE-MODE CONTRACT: when AUDIENCE MODE=REQUIRED in the brief, you MUST preserve the audience tail matching the Audience: value — even when rewriting from scratch. Only drop the tail if the length budget would push over 75c AND the freed space carries a HIGHER-VALUE candidate. NEVER emit "for Men and Women". When AUDIENCE MODE=OPTIONAL, do NOT force any gendered tail. Output ONLY the final title string — no quotes, no explanation.`,
     `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
     0.2, 120, JUDGE_MODEL, 60_000,
   )
@@ -2486,13 +2555,15 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
   // Deterministic fail-open (spec §4.4): score every non-empty draft on titleQualityJudge; pick the
   // highest. Kills the silent `drafts[1] || drafts[0]` SEO-persona bias. Judge score included so the
   // judge doesn't need to win a coin-flip against a legitimately better proposer draft.
+  // TITLE_COUNCIL_V3.1a Fix D: forward opts.lean so the AUDIENCE-WHEN-LEAN dock (-10) shapes the pick.
   const brandName = opts?.brandName || 'THE CEO'
+  const lean = opts?.lean
   const candidates = [judged, ...drafts].filter(Boolean)
   if (candidates.length === 0) return ''
   let best = candidates[0]
-  let bestScore = titleQualityJudge(best, { brandName }).score
+  let bestScore = titleQualityJudge(best, { brandName, lean }).score
   for (const c of candidates.slice(1)) {
-    const s = titleQualityJudge(c, { brandName }).score
+    const s = titleQualityJudge(c, { brandName, lean }).score
     if (s > bestScore) { best = c; bestScore = s }
   }
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
@@ -2511,7 +2582,7 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
  *  In shadow mode we run BOTH councils (~2x cost) for the window it takes to validate — after flip
  *  it's a single V3 run. Applies to both title paths (single-design and multi-design), both call
  *  this function (INVARIANT 1 parity). */
-async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string }): Promise<string> {
+async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean }): Promise<string> {
   if (TITLE_V3_ON) return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
   const legacy = await runTitleCouncilLegacy(openai, baseSystem, baseUser, onProgress)
   if (TITLE_V3_SHADOW) {
@@ -2519,9 +2590,11 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
     // keepalive spacing on the SSE stream). Judge scores logged so PO can see the delta before flip.
     const v3 = await runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
     const brandName = opts?.brandName || 'THE CEO'
-    const jl = titleQualityJudge(legacy, { brandName })
-    const jv = titleQualityJudge(v3, { brandName })
-    console.log(`[COUNCIL_V3_DIFF] legacy=${jl.score}/100 (${legacy.length}c) "${legacy.slice(0, 80)}" | v3=${jv.score}/100 (${v3.length}c) "${v3.slice(0, 80)}"`)
+    const lean = opts?.lean
+    // TITLE_COUNCIL_V3.1a: judge scores now respect lean-appropriate audience — logs make the delta visible.
+    const jl = titleQualityJudge(legacy, { brandName, lean })
+    const jv = titleQualityJudge(v3, { brandName, lean })
+    console.log(`[COUNCIL_V3_DIFF] lean=${lean ?? 'none'} legacy=${jl.score}/100 (${legacy.length}c) "${legacy.slice(0, 80)}" ${jl.problems.length ? `probs=[${jl.problems.join('; ')}]` : ''} | v3=${jv.score}/100 (${v3.length}c) "${v3.slice(0, 80)}" ${jv.problems.length ? `probs=[${jv.problems.join('; ')}]` : ''}`)
   }
   return legacy
 }
@@ -2614,6 +2687,12 @@ async function runTitleAgent(
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
+  // TITLE_COUNCIL_V3.1a: RAW audience lean (apparel-only, null for non-apparel or unset). Reaches the
+  // council brief as an explicit AUDIENCE MODE line + is forwarded to titleQualityJudge for the dock.
+  // Preserves hard/soft distinction (male/female vs lean_male/lean_female) — collapsing to preferredAudience
+  // string would lose that. Local, not param, because runTitleAgent already receives input: PipelineInput.
+  const lean: AudienceLean = apparel ? (input.audienceLean ?? null) : null
+  const audienceMode = deriveAudienceMode(lean)
 
   // 🎯 DESIGN-GROUNDED TITLE (apparel) — the root fix for keyword-stuffed titles. The TITLE may only
   // carry keywords GROUNDED in the actual design: the design name, what the image scan literally sees,
@@ -2764,8 +2843,12 @@ async function runTitleAgent(
       : upgradeKws.length >= 3
         ? `\n🟡 MANDATORY #3 — these UPGRADE keywords already drive your bullets' search traffic but are MISSING from your live title. Amazon weights title keywords 3-5× more than bullets — folding them into the title is your single highest-leverage SEO move. Include AT LEAST ${Math.max(3, upgradeKws.length - 2)} of these (more is better, fit as many as the budget allows):\n  ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
         : `\nTry to include these UPGRADE keywords too (they drive bullet traffic but are missing from the title): ${upgradeKws.map((k) => `"${k}"`).join(', ')}\n`
+  // TITLE_COUNCIL_V3.1a Step 2 (PO Q8, deletion of retired "DROP the audience" clause): legacy path
+  // now respects AUDIENCE MODE too — REQUIRED = a gender lean is set, keep the tail; OPTIONAL = universal,
+  // include only if the design is genuinely gender-specific. Strict improvement over pre-7.1a legacy
+  // behavior; V3=off rollback surfaces this same rule (safe, no widened blast radius).
   const audienceLine = preferredAudience
-    ? `\nAUDIENCE (LOWEST-PRIORITY, OPTIONAL tail): you MAY end with "for ${preferredAudience}" if it fits — but it is the lowest-value part of the title. If including it would crowd out a higher-value PRODUCT-SPECIFIC keyphrase from the candidates, DROP the audience and use that keyphrase instead. If you keep it, never narrow "${preferredAudience}" to a single gender.\n`
+    ? `\nAUDIENCE MODE: ${audienceMode}\nAUDIENCE: ${preferredAudience}\n- REQUIRED = a gender lean is set. KEEP the "for ${preferredAudience}" tail; trim a LOWER-value candidate from the RIGHT rather than pad. NEVER emit "for Men and Women" (universal tail on a lean design).\n- OPTIONAL = universal/unisex. Audience is a filler slot; include ONLY if the design is genuinely gender-specific AND it does not crowd out a higher-value keyphrase.\n`
     : ''
   // NICHE line (council 2026-07-03): design-grounded niche keyphrases the council SHOULD use to fill
   // the budget. Unlike generic keywords (deliberately kept minimal above), these ARE about the
@@ -2803,7 +2886,10 @@ PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.
 INPUT FOR THIS TITLE:
 Brand: ${brandName}
 Category: ${category}
-${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}Audience (skip in title unless design is gender-specific): ${audOpt}
+${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}AUDIENCE MODE: ${audienceMode}
+Audience: ${audOpt}
+// REQUIRED = a gender lean is set (male/female/lean_male/lean_female). KEEP the 'for Women' or 'for Men' tail; trim a LOWER-value candidate from the RIGHT (variant slot > category-brand slot > secondary category noun) rather than pad. NEVER emit 'for Men and Women' — that is a universal tail, not a lean one.
+// OPTIONAL = universal/unisex. Include a tail ONLY if the design is genuinely gender-specific AND it does not crowd out a higher-value candidate. Do NOT force 'for Men and Women' onto a universal design.
 Design phrase (identity — KEEP this exact phrase somewhere in the title): ${v2ExpandedDesign || '(none)'}${v2IsKnownIdiom ? `\n  ↑ this design is a known idiom/pun; the expansion above IS the source phrase — prefer it over the short design tag.` : ''}
 ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInclude}\n` : ''}${nicheSeedList.length ? `Design-niche keyphrases (weave those that fit): ${nicheSeedList.map((s) => `"${s}"`).join(', ')}\n` : ''}Pre-filtered keyword candidates:
 ${candidateList}
@@ -2849,7 +2935,7 @@ Rules:
   // flows through the validate + deterministic backstops below, so the hard rules still hold.
   let title: string
   if (apparel) {
-    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName })
+    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean })
   } else {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -2865,8 +2951,8 @@ Rules:
   // produces real numbers. Only apparel (V2 targets apparel); only when shadow explicitly set to keep
   // logs clean; capped at one line per regen. When TITLE_V2_ON the mode is a real run so no shadow log.
   if (apparel && TITLE_V2_SHADOW && title) {
-    const jv = titleQualityJudge(title, { brandName })
-    console.log(`[TITLE_V2_DIFF] single-design primary produced score=${jv.score}/100 (${title.length} chars) title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
+    const jv = titleQualityJudge(title, { brandName, lean })
+    console.log(`[TITLE_V2_DIFF] single-design primary produced score=${jv.score}/100 (${title.length} chars) lean=${lean ?? 'none'} title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
   }
   let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) : ['No title generated.']
   let retried = false
@@ -3085,7 +3171,10 @@ PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.
 INPUT FOR THIS TITLE:
 Brand: ${brandName}
 ${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}Product type: ${ptWord}
-Audience (skip in title unless design is gender-specific): ${aud}
+AUDIENCE MODE: ${audienceMode}
+Audience: ${aud}
+// REQUIRED = a gender lean is set. KEEP the 'for Women'/'for Men' tail; trim from the RIGHT (variant/category-brand slot) rather than pad. NEVER emit 'for Men and Women'.
+// OPTIONAL = universal. Include audience tail ONLY if design is genuinely gender-specific AND it does not crowd out a higher-value candidate.
 Design phrase (identity — KEEP this exact phrase somewhere in the title): ${displayDesignName || '(none)'}${isKnownIdiom ? `\n  ↑ this design is a known idiom/pun; the expansion above IS the source phrase — prefer it over the short design tag.` : ''}
 Niche keyphrases (weave those that fit — occasion, subject, recipient): ${nichePool.slice(0, 10).join(' | ') || '(none)'}
 
@@ -3120,6 +3209,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
       onProgress: input.onProgress,   // SSE keepalive parity with the parent call — the 1-2 gpt-5 extension calls must not run the stream silent (stream-idle-drop risk)
       trigger: 68,
       label: 'Title',
+      lean,   // Fix D: adopt-gate scores retry with the lean-aware dock so a rewrite can't silently drop the tail
     })
     if (extended && extended !== title) {
       title = extended
@@ -5779,9 +5869,13 @@ async function humanizeTitleTo75(
     onProgress?: (m: string) => void
     trigger?: number
     label?: string
+    /** TITLE_COUNCIL_V3.1a Fix D: RAW audience lean. When passed, the V2 adopt gate scores current-vs-retry
+     *  with the lean-aware dock so a humanizer rewrite that DROPS a lean-appropriate tail cannot silently
+     *  replace a good one at the same score. Undefined = pre-Fix-D scoring (backward-compatible). */
+    lean?: AudienceLean
   },
 ): Promise<string> {
-  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title' } = opts
+  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean } = opts
   // RETRY-CASING NORMALIZER: the LLM ships raw casing (live: "THE CEO fishing humor funny t-shirt…" —
   // correct content, lowercase niche). Title-Case only FULLY-LOWERCASE words; any word already carrying
   // an uppercase letter is preserved verbatim ("THE CEO", "T-shirt"); minor connectors stay lowercase
@@ -5837,8 +5931,8 @@ Return ONLY the extended title string.` },
         // shorter rewrite if it scores strictly higher on the deterministic titleQualityJudge —
         // safety gates (trademark + brand-front) still enforced. When off, behavior is identical
         // to legacy (byte-identical). Longer-than-current is still always adopted when safe.
-        const currentScore = TITLE_V2_ON ? titleQualityJudge(title, { brandName }).score : 0
-        const retryScore = TITLE_V2_ON ? titleQualityJudge(retryTitle, { brandName }).score : 0
+        const currentScore = TITLE_V2_ON ? titleQualityJudge(title, { brandName, lean }).score : 0
+        const retryScore = TITLE_V2_ON ? titleQualityJudge(retryTitle, { brandName, lean }).score : 0
         const cleanLegacy = retryTitle.length > title.length && safetyOk
         const cleanV2 = TITLE_V2_ON && safetyOk && retryScore > currentScore
         const clean = cleanLegacy || cleanV2
@@ -5871,7 +5965,12 @@ async function buildNicheParentTitle(
   // Title-council fallback chain Part 1: the seller-named competitor's live SEO snapshot (+brand
   // for the deterministic leak net). Null/absent → the brief and the net both no-op (fail-open).
   competitorSeo?: (CompetitorSeoSnapshot & { brand: string }) | null,
+  // TITLE_COUNCIL_V3.1a: parent-lean derived by caller via UNANIMITY predicate — REQUIRED only when every
+  // live child shares the same non-unisex lean; any mismatch OR any unisex/null child forces the parent
+  // to 'unisex' so the broadcast title never mis-genders a mixed-lean family (Q4 answer: UNANIMITY).
+  parentLean: AudienceLean = null,
 ): Promise<string> {
+  const audienceMode = deriveAudienceMode(parentLean)
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
   // Flag ON → title-aware family display; OFF → exact legacy ('T-Shirt' for shirt else Titlecase(pt)).
   const ptWord = GARMENT_NOUN_ON
@@ -5931,7 +6030,10 @@ PATTERN B (when the family category has HIGH-SEARCH volume category keywords):
 INPUT FOR THIS PARENT TITLE:
 Brand: ${brandName}
 ${blankBrand ? `Category brand (garment brand): ${blankBrand}\n` : ''}Product type: ${ptWord}
-Audience (skip in title unless family is gender-specific): ${aud}
+AUDIENCE MODE: ${audienceMode}
+Audience: ${aud}
+// REQUIRED = every live child in the family shares a gender lean (UNANIMITY predicate). KEEP the "for ${aud}" tail on the broadcast parent title; trim a LOWER-value candidate from the RIGHT rather than pad. NEVER emit "for Men and Women" on the lean broadcast.
+// OPTIONAL = children disagree OR at least one is unisex/unknown → parent is universal for search-card purposes. Include audience tail ONLY if the family is genuinely gender-specific AND the tail does not crowd out a higher-value niche keyphrase.
 Family niche anchor (LEAD the title with THIS niche phrase; broadcasts to EVERY design; NEVER a specific design name): ${familyNicheClean || '(infer the shared niche from the design names + keywords below)'}
 Child design names (DO NOT name any specifically — they belong to individual children): ${designNameList}
 High-value niche keywords (use the niche-wide ones only, skip design-specific motifs): ${upgradeList}${compatList ? `
@@ -5961,13 +6063,13 @@ Rules:
 - Use the product-type word ONCE and SINGULAR ("Shirt"/"Tee", never "T-Shirts, ... Shirts"). No generic category filler ("Graphic Shirts for Men") — spend the budget on real niche keyphrases.
 - TARGET LENGTH 70-75 characters (hard goal — a short title wastes ranking budget). If the keyword list runs thin, act as a HUMAN COPYWRITER who knows this product (its designs, its niche, its buyer): extend with natural niche phrasing a real shopper types — the occasion ("Fathers Day"), the recipient ("Gift for Dad", "for Grandpa"), the design subject — the way top competitor titles do. NEVER pad with generic category words and NEVER repeat a significant word.
 - Read like a human wrote it. Return ONLY the final title string.`
-  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName })
+  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean })
   let title = (judged || '').trim()
   // TITLE_V2_SHADOW: mirror the single-design shadow-log at the multi-design primary council so the
   // runbook step "verify shadow diff on 3 diverse listings" produces real numbers on BOTH branches.
   if (TITLE_V2_SHADOW && title) {
-    const jv = titleQualityJudge(title, { brandName })
-    console.log(`[TITLE_V2_DIFF] multi-design primary produced score=${jv.score}/100 (${title.length} chars) title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
+    const jv = titleQualityJudge(title, { brandName, lean: parentLean })
+    console.log(`[TITLE_V2_DIFF] multi-design primary produced score=${jv.score}/100 (${title.length} chars) parentLean=${parentLean ?? 'none'} title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
   }
   // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
   // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
@@ -6295,6 +6397,7 @@ Rules:
     onProgress,
     trigger: 68,
     label: 'Parent title',
+    lean: parentLean,   // Fix D: same adopt-gate discipline as single-design (INVARIANT-1 parity)
   })
   return title
 }
@@ -7513,7 +7616,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           console.warn('[TITLE] competitor snapshot failed (non-fatal):', e instanceof Error ? e.message : e)
         }
       }
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo)
+      // TITLE_COUNCIL_V3.1a: parent-lean uses the family-level seller-declared audienceLean (PO Q4 = UNANIMITY —
+      // a truly mixed-lean family should have audienceLean='unisex' set on the parent; a lean_female/lean_male
+      // family value means the seller has already asserted family-level unanimity). Fallback null on non-apparel.
+      const parentLean: AudienceLean = apparelProduct ? (input.audienceLean ?? null) : null
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
