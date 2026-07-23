@@ -1078,13 +1078,19 @@ function deriveAudienceMode(lean: AudienceLean): 'REQUIRED' | 'OPTIONAL' {
   return 'OPTIONAL'
 }
 
-/** Persona 3 / terminal-net closed-lexicon carriers (2026-07-23, PO Q1). A design phrase whose tokens
- *  literally contain one of these signals the wearer's gender unambiguously — used to (a) exempt persona 3
- *  from forcing the audience tail when the phrase already carries the signal, and (b) trigger the
- *  ANTI-LEAN OVERRIDE when the phrase carrier disagrees with the pipeline's lean (e.g. "Best Dad Ever"
- *  printed on a Ladies-cut shirt). Closed and small — LLM never infers. */
-const DESIGN_GENDER_CARRIERS_FEMALE = new Set(['she', 'her', 'hers', 'girl', 'girls', 'wife', 'girlfriend'])
-const DESIGN_GENDER_CARRIERS_MALE = new Set(['he', 'his', 'him', 'guy', 'guys', 'dude', 'husband', 'boyfriend'])
+/** Persona 3 / terminal-net closed-lexicon carriers (2026-07-23, PO Q1 verbatim: "Wife, Girlfriend"). A
+ *  design phrase whose tokens literally contain one of these signals the WEARER's gender unambiguously —
+ *  used to (a) exempt persona 3 from forcing the audience tail when the phrase already carries the
+ *  signal, and (b) trigger the ANTI-LEAN OVERRIDE when the phrase carrier disagrees with the pipeline's
+ *  lean (e.g. "Best Husband Ever" printed on a Ladies-cut shirt).
+ *
+ *  DELIBERATELY NARROW — the PO's answer was literally "Wife, Girlfriend" for FEMALE (symmetric MALE =
+ *  "Husband, Boyfriend"). Pronouns (she/he/her/his) are NOT carriers under this interpretation because
+ *  "He's Golfing" (Golf Widow shirt for women) would otherwise anti-lean-trigger and BLOCK the terminal
+ *  net from appending "for Women" — the exact regression PO called out. Widen later based on shadow data
+ *  if gift-SKU (e.g. "Best Dad Ever" on Ladies-cut) shadow signal proves problematic. */
+const DESIGN_GENDER_CARRIERS_FEMALE = new Set(['wife', 'girlfriend'])
+const DESIGN_GENDER_CARRIERS_MALE = new Set(['husband', 'boyfriend'])
 
 function designPhraseCarriesGender(designPhrase: string): { female: boolean; male: boolean } {
   const toks = (designPhrase || '').toLowerCase().replace(/[^a-z0-9\s'’]/g, ' ').split(/\s+/).filter(Boolean)
@@ -2498,7 +2504,23 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
       temp: 0.8,
     },
     {
-      sys: `You are the DEMAND-CAPTURE STRATEGIST. Your job is to LEAD with the highest-search category keywords when the design phrase itself has thin search demand (e.g. "I Will Praise Him in Every Season" has no search but "Christian Tee Shirt" does). Always draft PATTERN B (Brand [Major Category Keywords] Noun [Category Brand?] [Design Phrase LAST]). No pipe. The design phrase closes the title. Follow every other rule in the brief below.\n\n${baseSystem}`,
+      sys: `You are the DEMAND-CAPTURE STRATEGIST. Your job is to LEAD with the highest-value NICHE-THEME phrase that is actually present in the candidate pool the brief gives you. Precedence — you MUST pick your lead phrase in this order:
+
+1. COMPOUND NICHE-THEME PHRASE FIRST. A compound niche-theme phrase is a 2–4 word phrase from the brief's CANDIDATES / SEEDS / NICHE lists whose non-brand tokens include AT LEAST ONE audience-relational or occasion-relational token: {widow, mom, dad, wife, husband, retirement, birthday, memorial, wedding, anniversary, godmother, godfather, in-law, veteran, bachelorette, mama, papa, grandpa, grandma, hubby, teacher, nurse, coach}. A phrase whose non-brand tokens are ALL in {subject, garment noun, color, fit} (e.g. "Golf Shirt", "Comfort Colors Tee") is NOT a compound niche-theme phrase — it is a raw category head; use step 2.
+
+VISION-OVERLAP FLOOR — the compound phrase you pick MUST share at least ONE distinctive non-brand, non-garment token with the design phrase OR the brief's Design-niche keyphrases / Family niche anchor / seedKeywords. If NO compound phrase in the pool clears this floor, fall through to step 2. Do NOT lead with an off-theme compound just because it is in the pool.
+
+DESIGN-PHRASE-ECHO GUARD — if the compound phrase's non-brand tokens are a SUBSET of the design phrase's tokens (majority overlap), skip it and fall through to step 2 — the design phrase already carries that content in the tail.
+
+TIE-BREAK when multiple compound phrases clear the floor: (a) more vision-overlap tokens wins; (b) higher search-volume rank in the brief wins; (c) shorter phrase wins.
+
+2. RAW CATEGORY HEAD FALLBACK. Only when NO compound niche-theme phrase clears step 1, fall back to the highest-search raw category head (e.g. "Christian Tee Shirt", "Spain Championship Jersey", "Fathers Day Shirt").
+
+HARD RULE — you may ONLY lead with phrases that literally appear in the brief's CANDIDATES / SEEDS / NICHE lists. NEVER invent a theme, audience, or compound phrase not in the brief.
+
+Always draft PATTERN B (Brand [Compound Niche-Theme Phrase OR Major Category Keywords] Noun [Category Brand?] [Design Phrase LAST]). No pipe. The design phrase closes the title. The compound theme sits in the [Major Category Keywords] slot BEFORE the noun; it NEVER displaces the design phrase from the tail. Follow every other rule in the brief below.
+
+${baseSystem}`,
       temp: 0.3,
     },
     {
@@ -2507,8 +2529,8 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
 AUDIENCE RULE — READ THE BRIEF'S "AUDIENCE MODE" LINE:
 - AUDIENCE MODE: REQUIRED — a gender lean is set. You MUST keep the audience tail "for Women" or "for Men" matching the brief's Audience: value. If length is tight, TRIM FROM THE RIGHT (variant slot > category-brand slot > secondary category noun) — NEVER trim from the LEFT (brand + primary category + design phrase). NEVER pad to reach the tail. NEVER emit "for Men and Women" — that is a universal tail, not a lean one.
 - AUDIENCE MODE: OPTIONAL — universal/unisex. Audience tail is a filler slot only; include ONLY if the design is genuinely gender-specific AND it does not crowd out a higher-value candidate. Do NOT force "for Men and Women" onto a universal design.
-- DESIGN-PHRASE-CARRIES-SIGNAL EXEMPTION (closed lexicon, DO NOT INFER): a design phrase is "unambiguously gendered" ONLY if it literally contains one of these tokens (case-insensitive) — FEMALE = {she, her, hers, girl, girls, wife, girlfriend}; MALE = {he, his, him, guy, guys, dude, husband, boyfriend}. Anything not on this list is NOT a carrier. When the phrase IS a carrier matching the mode, you MAY drop the audience tail — but ONLY when doing so frees space for a HIGHER-VALUE candidate (a nicheSeeds compound or a top opportunity keyphrase), NEVER for a variant descriptor.
-- ANTI-LEAN CARRIER OVERRIDE: if the design phrase contains a MALE carrier while AUDIENCE MODE=REQUIRED with "Women", TREAT AS OPTIONAL (and symmetric for female carrier + male mode). This handles the gift-SKU case (e.g. "Best Dad Ever" printed on a Ladies-cut shirt).
+- DESIGN-PHRASE-CARRIES-SIGNAL EXEMPTION (closed lexicon, DO NOT INFER): a design phrase is "unambiguously gendered" ONLY if it literally contains one of these tokens (case-insensitive) — FEMALE = {wife, girlfriend}; MALE = {husband, boyfriend}. Anything not on this list is NOT a carrier. When the phrase IS a carrier matching the mode, you MAY drop the audience tail — but ONLY when doing so frees space for a HIGHER-VALUE candidate, NEVER for a variant descriptor.
+- ANTI-LEAN CARRIER OVERRIDE: if the design phrase contains a MALE carrier ({husband, boyfriend}) while AUDIENCE MODE=REQUIRED with "Women", TREAT AS OPTIONAL (and symmetric for female carrier + male mode). This handles the gift-SKU case (e.g. "Best Husband Ever" printed on a Ladies-cut shirt).
 - If the AUDIENCE MODE line is missing from the brief, default to OPTIONAL (safe: no forced tail).
 
 You are grounded in the seller's actual product FACTS (never invent motifs, materials, audiences, occasions). Pick the pattern that best fits the design phrase's search-demand as described in the brief. Follow every other rule in the brief below.
@@ -2567,6 +2589,52 @@ ${baseSystem}`,
     if (s > bestScore) { best = c; bestScore = s }
   }
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
+
+  // TITLE_COUNCIL_V3.1a Step 8 — TERMINAL SAFETY NET at council exit (PO Q5 = YES).
+  // Two tiny rules applied in order to the fail-open winner:
+  //   Rule 1: universal-tail strip — if lean is set (not 'unisex'/null), remove any "for Men and Women"
+  //           clause. It is never lean-appropriate. Sized narrow: only strips the exact clause.
+  //   Rule 2: deterministic tail-append — if AUDIENCE MODE=REQUIRED AND winner has no lean-appropriate
+  //           tail AND (winner+tail) <= 75 AND the title itself contains no ANTI-LEAN carrier (Q1 closed
+  //           lexicon), append " for Women" / " for Men". This is the string change that guarantees the
+  //           audience win even when all persona drafts + the judge synth drop the tail. Length gate
+  //           blocks overflow (per Fix D verdict refinement #7 mitigation: on overflow, return
+  //           UNMODIFIED). Anti-lean guard: if lean=female but title contains "Dad/Husband/etc" (MALE
+  //           carrier), do NOT append "for Women" — the gift-SKU case (per plan risk register #3).
+  const mode = deriveAudienceMode(lean)
+  const rule1Before = best
+  if (lean && lean !== 'unisex' && /\bfor\s+men\s+and\s+women\b/i.test(best)) {
+    best = best.replace(/\s*\bfor\s+men\s+and\s+women\b\s*/i, ' ').replace(/\s{2,}/g, ' ').replace(/\s+[,;.]/g, m => m.trim()).trim()
+  }
+  const stripped = rule1Before !== best
+  const hasLeanTail = (() => {
+    if (lean === 'female' || lean === 'lean_female') {
+      return /\bfor\s+women\b/i.test(best) || /\bwomen['’]?s\b/i.test(best) || /\bladies\b/i.test(best)
+    }
+    if (lean === 'male' || lean === 'lean_male') {
+      return /\bfor\s+men\b/i.test(best) || /\bmen['’]?s\b/i.test(best)
+    }
+    return true
+  })()
+  let appended = false
+  if (mode === 'REQUIRED' && !hasLeanTail) {
+    const targetAud = (lean === 'male' || lean === 'lean_male') ? 'Men' : 'Women'
+    const wantFemale = targetAud === 'Women'
+    const wantMale = targetAud === 'Men'
+    const carriers = designPhraseCarriesGender(best)
+    // Anti-lean: only block append when the title carries the OPPOSITE gender's carrier tokens.
+    const antiLean = (wantFemale && carriers.male && !carriers.female) || (wantMale && carriers.female && !carriers.male)
+    const tail = ` for ${targetAud}`
+    if (!antiLean && (best.length + tail.length) <= 75) {
+      const preAppend = best
+      best = `${best}${tail}`
+      appended = true
+      console.log(`[COUNCIL_V3_TAIL_APPEND] lean=${lean} pre="${preAppend.slice(0, 80)}" (${preAppend.length}c) post="${best.slice(0, 80)}" (${best.length}c)`)
+    }
+  }
+  if (stripped || appended) {
+    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean }).score}/100`)
+  }
   return best
 }
 
@@ -2591,10 +2659,37 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
     const v3 = await runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
     const brandName = opts?.brandName || 'THE CEO'
     const lean = opts?.lean
-    // TITLE_COUNCIL_V3.1a: judge scores now respect lean-appropriate audience — logs make the delta visible.
+    // TITLE_COUNCIL_V3.1a Step 9: structured JSON emit so shadow metrics are grep-jq-derivable.
+    // audienceComplianceRate / requiredButDropped / universalForcedTail / mixedLeanParentForcedTail
+    // are all computable from ONE line. Kept compact — no per-persona breakdown (that would need
+    // exposing the internals of runTitleCouncilV3; deferred to a follow-up when the shadow signal
+    // shows more per-persona forensics are needed).
     const jl = titleQualityJudge(legacy, { brandName, lean })
     const jv = titleQualityJudge(v3, { brandName, lean })
-    console.log(`[COUNCIL_V3_DIFF] lean=${lean ?? 'none'} legacy=${jl.score}/100 (${legacy.length}c) "${legacy.slice(0, 80)}" ${jl.problems.length ? `probs=[${jl.problems.join('; ')}]` : ''} | v3=${jv.score}/100 (${v3.length}c) "${v3.slice(0, 80)}" ${jv.problems.length ? `probs=[${jv.problems.join('; ')}]` : ''}`)
+    const mode = deriveAudienceMode(lean)
+    const hasTail = (title: string): 'women' | 'men' | 'men-and-women' | 'none' => {
+      if (/\bfor\s+men\s+and\s+women\b/i.test(title)) return 'men-and-women'
+      if (/\bfor\s+women\b/i.test(title) || /\bwomen['’]?s\b/i.test(title) || /\bladies\b/i.test(title)) return 'women'
+      if (/\bfor\s+men\b/i.test(title) || /\bmen['’]?s\b/i.test(title)) return 'men'
+      return 'none'
+    }
+    const legacyTail = hasTail(legacy)
+    const v3Tail = hasTail(v3)
+    const tailMatchesLean = (tail: ReturnType<typeof hasTail>): boolean => {
+      if (!lean || lean === 'unisex') return tail === 'none'
+      if (lean === 'female' || lean === 'lean_female') return tail === 'women'
+      if (lean === 'male' || lean === 'lean_male') return tail === 'men'
+      return false
+    }
+    console.log(JSON.stringify({
+      tag: 'COUNCIL_V3_DIFF',
+      audienceLean: lean ?? null,
+      audienceMode: mode,
+      legacy: { score: jl.score, len: legacy.length, tail: legacyTail, matchesLean: tailMatchesLean(legacyTail), problems: jl.problems, text: legacy.slice(0, 120) },
+      v3: { score: jv.score, len: v3.length, tail: v3Tail, matchesLean: tailMatchesLean(v3Tail), problems: jv.problems, text: v3.slice(0, 120) },
+      requiredButDropped: mode === 'REQUIRED' && !tailMatchesLean(v3Tail),
+      universalForcedTail: mode === 'OPTIONAL' && v3Tail !== 'none',
+    }))
   }
   return legacy
 }
