@@ -38,6 +38,27 @@ function matchCase(sub: string, matched: string): string {
   return sub
 }
 
+/** Build the trademark clause used by the title-council adversary prompt (spec §5.4 / TITLE_COUNCIL_V3):
+ *  the adversary used to hardcode "World Cup -> World Soccer Cup" — stale since the 2026-07-21 PO flip
+ *  to "World Futbol Cup". Generating the clause from TRADEMARK_RULES keeps prompt text in sync with the
+ *  runtime scrub so an adversary can NEVER instruct the judge to use a substitution the scrub then
+ *  overwrites. Marks with a safe substitute render as `"foo" -> "bar"`; marks that must be dropped
+ *  render as `"foo"` in the drop list. */
+export function buildAdversaryTrademarkClause(): string {
+  const subs: string[] = []
+  const drops: string[] = []
+  for (const { mark, sub } of TRADEMARK_RULES) {
+    // Regex-escaped mark -> a display form the model can read (`world\s+cup` -> `world cup`).
+    const display = mark.replace(/\\s\+/g, ' ').replace(/\\s\*/g, ' ').replace(/\\/g, '').replace(/\?$/, '').trim()
+    if (sub) subs.push(`"${display}" -> "${sub}"`)
+    else drops.push(`"${display}"`)
+  }
+  const parts: string[] = []
+  if (subs.length) parts.push(`Substitute: ${subs.join('; ')}`)
+  if (drops.length) parts.push(`Drop: ${drops.join(', ')}`)
+  return `FLAG any trademarked phrase (sports teams, leagues, universities, media franchises) and REQUIRE the safe swap. ${parts.join('. ')}.`
+}
+
 /** Replace every protected mark with its safe substitution (or drop it), then tidy the artifacts
  *  a drop/substitution leaves behind (doubled spaces, space-before-punct, dangling commas). Idempotent:
  *  the safe phrasing "World Soccer Cup" contains no protected mark, so re-running is a no-op. */
