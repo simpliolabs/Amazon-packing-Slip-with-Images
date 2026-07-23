@@ -32,6 +32,7 @@ import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/compe
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
+import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
@@ -1066,6 +1067,19 @@ const TITLE_V2_SHADOW = TITLE_V2_MODE === 'shadow'
 const TITLE_V3_MODE = (process.env.TITLE_COUNCIL_V3 || 'off').toLowerCase()
 const TITLE_V3_ON = TITLE_V3_MODE === 'on'
 const TITLE_V3_SHADOW = TITLE_V3_MODE === 'shadow'
+// FIX_C_NICHE_POOL (2026-07-23, PO Q3 = greenlit immediate follow-up): completes V3.1a by surfacing
+// AUDIENCE-RELATIONAL COMPOUND SEEDS (e.g. "golf widow shirt" for a design named "He's Golfing" with
+// lean=lean_female) into input.nicheSeeds so Persona 2's compound-niche-first precedence has something
+// to fire on. Deterministic — no LLM. Detection: female lean + male-pronoun hint in designName → emit
+// widow/wife compounds; symmetric for male lean + female-pronoun hint. Skips gift-SKU patterns where a
+// relational carrier noun (husband/boyfriend/wife/girlfriend) is already present in designName —
+// that case is the anti-lean carrier override territory in Persona 3 (7.1a), not a widow-niche.
+// off = legacy behavior (byte-identical). shadow = log [FIX_C_SEEDS] with what WOULD be injected,
+// don't inject. on = inject compounds into input.nicheSeeds; groundVocab widens automatically because
+// input.nicheSeeds already feeds groundVocab construction (listingPipeline.ts:2824).
+const FIX_C_MODE = (process.env.FIX_C_NICHE_POOL || 'off').toLowerCase()
+const FIX_C_ON = FIX_C_MODE === 'on'
+const FIX_C_SHADOW = FIX_C_MODE === 'shadow'
 
 /** Audience-lean signal type — mirrors PipelineInput.audienceLean at :146. */
 type AudienceLean = 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null | undefined
@@ -7376,6 +7390,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // follow as secondary candidates. Deduped; the fill's novelty + 2x + 75 guards bound the result.
       const fillSeeds = [...new Set([...secondaryPhrases, ...grounded])]
       if (fillSeeds.length) { input.nicheSeeds = fillSeeds; onProgress(`Seeded ${fillSeeds.length} design-niche keyword(s).`) }
+    }
+  }
+
+  // FIX_C_NICHE_POOL (2026-07-23): audience-relational compound seed injection. Fires ONLY when
+  // deriveAudienceRelationalCompounds detects a real signal (spouse-gender hint + wearer lean set +
+  // no relational carrier already in designName). Deterministic; no LLM. Compounds get added to
+  // input.nicheSeeds AFTER the standard fillSeeds assignment above so they flow through the same
+  // downstream path (groundVocab at :2824, brief at :2951, humanizer pool at :3240, fill pool at
+  // :5906). Persona 2's compound-niche-first precedence (V3.1a) will lead with them; if the design
+  // has no compound signal, the helper returns [] and the flag is a no-op.
+  if (FIX_C_ON || FIX_C_SHADOW) {
+    const compounds = deriveAudienceRelationalCompounds(designName, apparelProduct ? (input.audienceLean ?? null) : null, input.productType ?? null)
+    if (compounds.length > 0) {
+      if (FIX_C_ON) {
+        input.nicheSeeds = [...new Set([...(input.nicheSeeds ?? []), ...compounds])]
+        onProgress(`Fix C: injected ${compounds.length} audience-relational compound(s).`)
+        console.log(`[FIX_C_SEEDS] mode=on lean=${input.audienceLean ?? 'none'} designName="${designName}" compounds=${JSON.stringify(compounds)}`)
+      } else {
+        // shadow: log what would have been injected without changing the pool
+        console.log(`[FIX_C_SEEDS] mode=shadow lean=${input.audienceLean ?? 'none'} designName="${designName}" wouldInject=${JSON.stringify(compounds)}`)
+      }
     }
   }
 
