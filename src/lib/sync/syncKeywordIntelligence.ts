@@ -32,7 +32,7 @@ import { captureRankSnapshots } from '../keyword-engine/cacheService';
 import { researchKeywords, getCachedResearch } from '../keyword-engine/keywordResearcher';
 import { loadListingRowsForPresence } from '../keyword-engine/loadListingContent';
 import { isOffNicheKeyword, isForeignKeyword } from '../keyword-engine/nicheGuards';
-import { classifyOffNicheKeywords } from '../keyword-engine/relevanceClassifier';
+import { classifyOffNicheKeywords, classifyWrongThemeUniverseKeywords } from '../keyword-engine/relevanceClassifier';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -377,6 +377,27 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       },
     );
     for (const kw of llmDrop) offNiche.add(kw);
+
+    // RELEVANCE_THEME_V2 universe pass (Option 1, 2026-07-23): universe-flagged terms bypass the main
+    // LLM classifier by design (PO 2026-07-17: exemption keeps legit broad angles). But WRONG-THEME
+    // merch entering via #280 universe expansion (e.g. "art teacher clothes" surfacing under a Cupid
+    // Valentine design's "graphic tees for women" universe) still contaminates CRITICAL. This second
+    // classifier applies Rule 6 (WRONG-THEME) ONLY to universe terms — respecting the original
+    // exemption for Rules 1–5. Flag-gated inside classifyWrongThemeUniverseKeywords: no-op when off.
+    const universeCandidates = kept.filter((k) => (k as { fromUniverse?: boolean }).fromUniverse);
+    if (universeCandidates.length > 0) {
+      const universeDrop = await classifyWrongThemeUniverseKeywords(
+        universeCandidates.map((k) => k.keyword),
+        {
+          title: scoreRow?.product_title || listingTitle,
+          category: isApparelPool ? 'apparel / graphic t-shirt' : null,
+          designTheme: (scoreRow as { design_name_override?: string | null } | null)?.design_name_override ?? null,
+          audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
+        },
+      );
+      for (const kw of universeDrop) offNiche.add(kw);
+    }
+
     if (offNiche.size === 0) return addSynonyms(kept);
     const kept2 = kept.filter((k) => !offNiche.has(k.keyword));
     if (kept2.length === 0 && before > 0) {
