@@ -31,7 +31,7 @@ import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey, deriveNicheS
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
-import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
+import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
@@ -1052,6 +1052,20 @@ const CONTENT_SPINE_SHADOW = CONTENT_SPINE_MODE === 'shadow'
 const TITLE_V2_MODE = (process.env.TITLE_QUALITY_V2 || 'off').toLowerCase()
 const TITLE_V2_ON = TITLE_V2_MODE === 'on'
 const TITLE_V2_SHADOW = TITLE_V2_MODE === 'shadow'
+// TITLE_COUNCIL_V3 (2026-07-23, PO "greenlight GO"): Step 7 of the content spine. V2 shipped the RIGHT
+// BRIEF (PO golds + Pattern A/B rules) — but the COUNCIL ARCHITECTURE below still (a) prepends persona
+// text so all 3 proposers draft one shape, (b) uses ONE model env for adversary+judge (correlated
+// verdicts), (c) hardcodes "World Soccer Cup" (stale — TRADEMARK_RULES now says "world futbol cup"),
+// (d) fail-opens by array index (silent SEO bias). V3 flips these one-by-one, plus flag-gates two
+// always-on deterministic gates that fight V2's brief today: the corrective-retry pipe ban (single-
+// design retry loop) and the widen guard that force-injects "for Men and Women".
+// off = legacy runTitleCouncil; shadow = run V3 alongside legacy, log [COUNCIL_V3_DIFF] with both
+// judge scores, ship legacy; on = ship V3 output. Applies to BOTH title paths (single-design via
+// runTitleAgent AND multi-design via buildNicheParentTitle) — INVARIANT 1 parity because both call
+// the same runTitleCouncil.
+const TITLE_V3_MODE = (process.env.TITLE_COUNCIL_V3 || 'off').toLowerCase()
+const TITLE_V3_ON = TITLE_V3_MODE === 'on'
+const TITLE_V3_SHADOW = TITLE_V3_MODE === 'shadow'
 /** PO gold examples (2026-07-22, provided verbatim). Used as FEW-SHOT in both title branches when
  *  TITLE_QUALITY_V2 is on. Rank order = PO's original list, deduped by exact string. Extend via a
  *  future auto-miner over listing_change_log title edits (memory: title-po-gold-pattern). */
@@ -2338,53 +2352,54 @@ function dedupeAudiencePhrases(title: string): string {
 
 // ─── Stage 1 — Title Agent ─────────────────────────────────────────────────────
 
-/** COUNCIL for the title (PO directive: big decisions DEBATE instead of one agent). Reuses the
- *  fully-built title brief (system+user) so every hard constraint still applies, then runs:
- *  3 persona proposers (creative / SEO / conversion) -> a ruthless adversary critique -> a judge that
- *  synthesizes the single best title. The judge's output flows through runTitleAgent's existing
- *  validate + deterministic backstops (brand-lead, design-name lead, gender de-dup, Title-Case), so
- *  the council is additive, not a new failure mode. Fails open to a single agent if all drafts error. */
-async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string> {
-  // The 3 proposers stay on fast gpt-4.1-mini (cheap, diverse drafts). The adversary + judge — where
-  // judgment decides the title — run on GPT-5 (PO directive). GPT-5 reasoning models REJECT
-  // `temperature` and use `max_completion_tokens` (not `max_tokens`), so the params branch by model.
-  // Per-call timeout + NO retries: a hung call must not stall the keepalive-less title stage past
-  // Cloudflare's ~100s idle window (a keepalive fires between stages, not during a call, so each call
-  // must finish under that on its own). GPT-5 reasons slower, so it gets 60s; gpt-4.1-mini gets 20s.
-  const ask = async (system: string, user: string, temperature: number, max_tokens = 120, model = 'gpt-4.1-mini', timeoutMs = 20_000): Promise<string> => {
-    try {
-      const isGpt5 = /^(gpt-5|o\d)/.test(model)
-      const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
-      const r = await openai.chat.completions.create(
-        isGpt5
-          // reasoning tokens count against max_completion_tokens — a tight cap returns an EMPTY title
-          // (finish_reason 'length') and silently fails open. Generous floor + 'low' effort keeps the
-          // synthesis fast AND non-empty (adversarial review caught the truncation→empty→fallback trap).
-          ? { model, messages, max_completion_tokens: Math.max(max_tokens, 4000), reasoning_effort: 'low' }
-          : { model, messages, temperature, max_tokens },
-        { timeout: timeoutMs, maxRetries: 0 },
-      )
-      return (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-    } catch { return '' }
-  }
+/** Shared LLM call helper used by both legacy and V3 council. GPT-5 reasoning models REJECT
+ *  `temperature` and use `max_completion_tokens` (not `max_tokens`), so the params branch by model.
+ *  Per-call timeout + NO retries: a hung call must not stall the keepalive-less title stage past
+ *  Cloudflare's ~100s idle window. GPT-5 reasons slower, so it gets 60s; gpt-4.1-mini gets 20s. */
+async function titleCouncilAsk(
+  openai: OpenAI, system: string, user: string, temperature: number,
+  max_tokens = 120, model = 'gpt-4.1-mini', timeoutMs = 20_000,
+): Promise<string> {
+  try {
+    const isGpt5 = /^(gpt-5|o\d)/.test(model)
+    const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
+    const r = await openai.chat.completions.create(
+      isGpt5
+        // reasoning tokens count against max_completion_tokens — a tight cap returns an EMPTY title
+        // (finish_reason 'length') and silently fails open. Generous floor + 'low' effort keeps the
+        // synthesis fast AND non-empty (adversarial review caught the truncation→empty→fallback trap).
+        ? { model, messages, max_completion_tokens: Math.max(max_tokens, 4000), reasoning_effort: 'low' }
+        : { model, messages, temperature, max_tokens },
+      { timeout: timeoutMs, maxRetries: 0 },
+    )
+    return (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+  } catch { return '' }
+}
+
+/** LEGACY title council (pre-V3). Kept as the default so TITLE_COUNCIL_V3=off is byte-identical to
+ *  pre-Step-7. Called by runTitleCouncil() when V3 is off OR when V3 shadow needs the legacy output
+ *  for [COUNCIL_V3_DIFF] logging. See runTitleCouncilV3 for the redesigned architecture. */
+async function runTitleCouncilLegacy(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string> {
   const COUNCIL_MODEL = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'   // adversary + judge model (PR: title-council GPT-5)
   const personas: { sys: string; temp: number }[] = [
     { sys: 'You are an award-winning apparel brand COPYWRITER. Write the most compelling, human, DESIGN-LED title — the kind a shopper stops and clicks. ', temp: 0.6 },
     { sys: 'You are an Amazon SEO STRATEGIST. Capture the most legitimate search value WITHOUT stuffing: the design name leads, then only the highest-value real terms that fit naturally — the rest belongs in bullets/backend. ', temp: 0.3 },
     { sys: 'You are a CONVERSION strategist focused on trust + click-through. Write a CLEAN, professional title — design name + product type up front, clear audience, nothing that reads like spam. ', temp: 0.4 },
   ]
-  const drafts = (await Promise.all(personas.map((p) => ask(p.sys + baseSystem, baseUser, p.temp)))).filter(Boolean)
-  if (drafts.length === 0) return ask(baseSystem, baseUser, 0.3)            // fail open: single agent
+  const drafts = (await Promise.all(personas.map((p) => titleCouncilAsk(openai, p.sys + baseSystem, baseUser, p.temp)))).filter(Boolean)
+  if (drafts.length === 0) return titleCouncilAsk(openai, baseSystem, baseUser, 0.3)            // fail open: single agent
   if (drafts.length === 1) return drafts[0]
   onProgress?.('Title council: drafts in, adversary reviewing...')          // keepalive (resets idle timer)
   const numbered = drafts.map((t, i) => `${i + 1}. ${t}`).join('\n')
-  const critique = await ask(
+  const critique = await titleCouncilAsk(
+    openai,
     'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from July 27, 2026), brand not first, and weak click appeal. (a) REJECT any title that spends scarce 75-char budget on a GENERIC audience phrase ("for Men and Women", "for Men", "for Women") when a higher-value PRODUCT-SPECIFIC keyword from the brief is available but unused — the audience suffix is OPTIONAL and droppable; the product-specific keyword wins. (b) FLAG any trademarked phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") and REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or its removal. Be specific.',
     `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
     0.3, 400, COUNCIL_MODEL, 60_000,
   )
   onProgress?.('Title council: judge synthesizing the winner...')           // keepalive
-  const judged = await ask(
+  const judged = await titleCouncilAsk(
+    openai,
     baseSystem + ' You are the JUDGE: merge the strongest, COMPLIANT elements into ONE final title that satisfies every rule in the brief. Output ONLY the final title string — no quotes, no explanation.',
     `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
     0.2, 120, COUNCIL_MODEL, 60_000,
@@ -2393,6 +2408,122 @@ async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: str
   // judge errors or returns empty, the leanest draft is the safest fallback. Logged so it's visible.
   if (!judged) console.warn('[title-council] judge returned empty — failing open to the SEO/anti-stuffing draft')
   return judged || drafts[1] || drafts[0]
+}
+
+/** V3 title council (2026-07-23, Step 7). Same 3-persona-adversary-judge shape as legacy, but:
+ *  (1) each persona is the ENTIRE system message (not `p.sys + baseSystem`) — the personas told the model
+ *      one shape while baseSystem told it another, and three "design-led" prepends made all three
+ *      proposers draft Pattern A;
+ *  (2) proposer 1 always drafts Pattern A, proposer 2 always drafts Pattern B, proposer 3 flexes — so the
+ *      judge actually adjudicates shape choice instead of picking among near-clones;
+ *  (3) adversary and judge use DIFFERENT model env vars (TITLE_ADVERSARY_MODEL, TITLE_JUDGE_MODEL) so
+ *      their verdicts are not correlated — the PO's directive after "even on top models we cant get it
+ *      right as set up is wrong somewhere";
+ *  (4) adversary trademark clause is GENERATED from TRADEMARK_RULES (kills the stale "World Soccer Cup"
+ *      hardcode — TRADEMARK_RULES now says "world futbol cup");
+ *  (5) fail-open uses titleQualityJudge score to pick the best draft, not `drafts[1] || drafts[0]` (the
+ *      silent SEO-persona array-index bias). */
+async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string }): Promise<string> {
+  // Model env split — spec §4.3. Adversary MUST differ from judge (anti-echo). Default adversary =
+  // gpt-4o-mini (different family from gpt-5) so an unconfigured deploy still respects the ≠ rule;
+  // if operator overrides both to the same model, we log a warning but still run — the ≠ rule is
+  // architecturally intended, not safety-critical.
+  const PROPOSER_MODEL = process.env.TITLE_PROPOSER_MODEL || 'gpt-4.1-mini'
+  const ADVERSARY_MODEL = process.env.TITLE_ADVERSARY_MODEL || 'gpt-4o-mini'
+  const JUDGE_MODEL = process.env.TITLE_JUDGE_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+  if (ADVERSARY_MODEL === JUDGE_MODEL) {
+    console.warn(`[title-council-v3] adversary and judge resolved to the SAME model (${JUDGE_MODEL}) — anti-echo diversity is lost; set TITLE_ADVERSARY_MODEL to a different family`)
+  }
+
+  // 3 personas as FULL system messages (spec §4.2). Each names the pattern it must produce so the
+  // proposers cover the shape space between them. baseSystem is embedded so every hard constraint
+  // (brand/audience/apparel gates already built in caller) still holds — but the persona OWNS the
+  // ordering directive, so the "design-led" default is no longer echoed 3x.
+  const personas: { sys: string; temp: number }[] = [
+    {
+      sys: `You are the IDIOM COPYWRITER for THE CEO's apparel line. You OWN the left side of the pipe: brand + design phrase + product noun 1. When the design tag is a known idiom or pun (e.g. "Later Gator" -> "See You Later Alligator"), you MUST use the FULL source phrase, not the tag. Always draft PATTERN A (Brand [Design Phrase] Noun | [Variant] [Category Brand] Noun [audience?]). No modifier stuffing (funny/novelty/graphic/retro/cute/vintage as standalones). Follow every other rule in the brief below.\n\n${baseSystem}`,
+      temp: 0.8,
+    },
+    {
+      sys: `You are the DEMAND-CAPTURE STRATEGIST. Your job is to LEAD with the highest-search category keywords when the design phrase itself has thin search demand (e.g. "I Will Praise Him in Every Season" has no search but "Christian Tee Shirt" does). Always draft PATTERN B (Brand [Major Category Keywords] Noun [Category Brand?] [Design Phrase LAST]). No pipe. The design phrase closes the title. Follow every other rule in the brief below.\n\n${baseSystem}`,
+      temp: 0.3,
+    },
+    {
+      sys: `You are the COMPLIANCE & CONVERSION EDITOR. You OWN the right side of the pipe: variant + category brand + noun 2 + optional audience. You are grounded in the seller's actual product FACTS (never invent motifs, materials, audiences, occasions). Pick the pattern that best fits the design phrase's search-demand as described in the brief. Follow every other rule in the brief below.\n\n${baseSystem}`,
+      temp: 0.4,
+    },
+  ]
+
+  const drafts = (await Promise.all(personas.map((p) => titleCouncilAsk(openai, p.sys, baseUser, p.temp, 120, PROPOSER_MODEL, 20_000)))).filter(Boolean)
+  if (drafts.length === 0) return titleCouncilAsk(openai, baseSystem, baseUser, 0.3)  // fail open: single agent
+  if (drafts.length === 1) return drafts[0]
+
+  onProgress?.('Title council V3: drafts in, adversary reviewing...')
+  const numbered = drafts.map((t, i) => `${i + 1}. ${t}`).join('\n')
+
+  // Trademark clause generated from TRADEMARK_RULES so "World Cup -> world futbol cup" (2026-07-21
+  // PO flip) is always in sync. The stale hardcoded "World Soccer Cup" is retired here.
+  const tmClause = buildAdversaryTrademarkClause()
+
+  const critique = await titleCouncilAsk(
+    openai,
+    `You are a ruthless Amazon listing critic AND a skeptical shopper reviewing candidate titles. Attack each for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from 2026-07-27), brand not at position 0, and weak click appeal. (a) The audience suffix ("for Men and Women", "for Men", "for Women") is OPTIONAL — REJECT any title that FORCES it when the design is universal AND a higher-value product-specific keyphrase from the brief is unused. (b) ${tmClause} Be specific per candidate. Do NOT tell the judge to pick a particular one — just critique.`,
+    `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH candidate, then list the strongest element from each.`,
+    0.3, 400, ADVERSARY_MODEL, 60_000,
+  )
+
+  onProgress?.('Title council V3: judge synthesizing the winner...')
+
+  // Judge sees the critique but the fail-open below scores candidates deterministically so a bad
+  // judge round can't silently ship a Pattern A when Pattern B would score higher.
+  const judged = await titleCouncilAsk(
+    openai,
+    `${baseSystem} You are the JUDGE. Read the brief, the candidates, and the critic review. Pick THE SINGLE PATTERN (A or B) that best matches this design's search-demand profile per the brief, then synthesize the strongest COMPLIANT title in that pattern — you MAY rewrite from scratch. Output ONLY the final title string — no quotes, no explanation.`,
+    `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
+    0.2, 120, JUDGE_MODEL, 60_000,
+  )
+
+  // Deterministic fail-open (spec §4.4): score every non-empty draft on titleQualityJudge; pick the
+  // highest. Kills the silent `drafts[1] || drafts[0]` SEO-persona bias. Judge score included so the
+  // judge doesn't need to win a coin-flip against a legitimately better proposer draft.
+  const brandName = opts?.brandName || 'THE CEO'
+  const candidates = [judged, ...drafts].filter(Boolean)
+  if (candidates.length === 0) return ''
+  let best = candidates[0]
+  let bestScore = titleQualityJudge(best, { brandName }).score
+  for (const c of candidates.slice(1)) {
+    const s = titleQualityJudge(c, { brandName }).score
+    if (s > bestScore) { best = c; bestScore = s }
+  }
+  if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
+  return best
+}
+
+/** COUNCIL for the title (PO directive: big decisions DEBATE instead of one agent). Reuses the
+ *  fully-built title brief (system+user) so every hard constraint still applies, then runs:
+ *  3 persona proposers -> a ruthless adversary critique -> a judge that synthesizes the single
+ *  best title. The judge's output flows through runTitleAgent's existing validate + deterministic
+ *  backstops (brand-lead, design-name lead, gender de-dup, Title-Case), so the council is additive,
+ *  not a new failure mode. Fails open to a single agent if all drafts error.
+ *
+ *  TITLE_COUNCIL_V3 gate: off (default) = legacy council byte-identical to pre-Step-7. shadow = run
+ *  V3 alongside legacy, log [COUNCIL_V3_DIFF] with both judge scores, ship LEGACY. on = ship V3.
+ *  In shadow mode we run BOTH councils (~2x cost) for the window it takes to validate — after flip
+ *  it's a single V3 run. Applies to both title paths (single-design and multi-design), both call
+ *  this function (INVARIANT 1 parity). */
+async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string }): Promise<string> {
+  if (TITLE_V3_ON) return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
+  const legacy = await runTitleCouncilLegacy(openai, baseSystem, baseUser, onProgress)
+  if (TITLE_V3_SHADOW) {
+    // Extra V3 call for observability. Sequential (parallel would spike token/latency AND lose
+    // keepalive spacing on the SSE stream). Judge scores logged so PO can see the delta before flip.
+    const v3 = await runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
+    const brandName = opts?.brandName || 'THE CEO'
+    const jl = titleQualityJudge(legacy, { brandName })
+    const jv = titleQualityJudge(v3, { brandName })
+    console.log(`[COUNCIL_V3_DIFF] legacy=${jl.score}/100 (${legacy.length}c) "${legacy.slice(0, 80)}" | v3=${jv.score}/100 (${v3.length}c) "${v3.slice(0, 80)}"`)
+  }
+  return legacy
 }
 
 /** Bullets COUNCIL (PR: bullets-council) — mirrors runTitleCouncil for the 5-bullet ARRAY. Bullets are
@@ -2718,7 +2849,7 @@ Rules:
   // flows through the validate + deterministic backstops below, so the hard rules still hold.
   let title: string
   if (apparel) {
-    title = await runTitleCouncil(openai, system, user, input.onProgress)
+    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName })
   } else {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -2747,7 +2878,11 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: `You are an Amazon SEO title editor${apparel ? ' for apparel' : ''}. Output ONLY the corrected title string.` },
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language (NO " - " dashes or pipes): ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
+        // TITLE_COUNCIL_V3: the corrective-retry pipe ban is un-flagged legacy — it fights every PO gold
+        // that uses ` | ` (6 of 8 golds). When V3 is on we drop that clause so Pattern A retries can
+        // still ship the pipe format the brief demands. Non-pipe rules stay because they're safety, not
+        // format opinions. See docs/title-council-v3-spec.md §5.3.
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language${TITLE_V3_ON ? '' : ' (NO " - " dashes or pipes)'}: ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -2769,7 +2904,12 @@ Rules:
   }
 
   // Audience guarantee: never silently narrow a unisex product to one gender.
-  if (preferredAudience === 'Men and Women' && title) {
+  // TITLE_COUNCIL_V3: the PO gold pattern says NEVER FORCE "for Men and Women" when the design is
+  // universal — this widen guard used to run un-flagged, contradicting the V2 prompt clause "NEVER
+  // force 'for Men and Women'". When V3 is on we skip it so a universal design that the council
+  // (correctly) titled without gender doesn't get its clean tail rewritten into forced dual gender.
+  // (Under V3 the council itself decides — if a design IS gender-specific the persona will emit it.)
+  if (!TITLE_V3_ON && preferredAudience === 'Men and Women' && title) {
     const lc = title.toLowerCase()
     if (/\bm[ae]n\b/.test(lc) && !/\bwom[ae]n\b/.test(lc)) {
       const swapped = title
@@ -5821,7 +5961,7 @@ Rules:
 - Use the product-type word ONCE and SINGULAR ("Shirt"/"Tee", never "T-Shirts, ... Shirts"). No generic category filler ("Graphic Shirts for Men") — spend the budget on real niche keyphrases.
 - TARGET LENGTH 70-75 characters (hard goal — a short title wastes ranking budget). If the keyword list runs thin, act as a HUMAN COPYWRITER who knows this product (its designs, its niche, its buyer): extend with natural niche phrasing a real shopper types — the occasion ("Fathers Day"), the recipient ("Gift for Dad", "for Grandpa"), the design subject — the way top competitor titles do. NEVER pad with generic category words and NEVER repeat a significant word.
 - Read like a human wrote it. Return ONLY the final title string.`
-  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress)
+  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName })
   let title = (judged || '').trim()
   // TITLE_V2_SHADOW: mirror the single-design shadow-log at the multi-design primary council so the
   // runbook step "verify shadow diff on 3 diverse listings" produces real numbers on BOTH branches.
