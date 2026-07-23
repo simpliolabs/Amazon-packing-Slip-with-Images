@@ -81,7 +81,10 @@ const UNIVERSE_OPPORTUNITY_WEIGHT = 0.7;
  * log10(1) = 0, log10(10) = 1, log10(100) = 2, log10(1000) = 3
  * We cap at log10(1,000,000) = 6 → normalized to 1.0
  */
-function logNorm(value: number, maxLog = 6): number {
+// EXPORTED for selection-core.ts (KEYWORD_TARGET_SET). The target selector needs the EXACT same
+// volume curve this scorer uses; a second copy of it is precisely how this repo grew seven
+// disagreeing definitions of "covered". Export only — no behaviour change.
+export function logNorm(value: number, maxLog = 6): number {
   if (value <= 0) return 0;
   return Math.min(Math.log10(value) / maxLog, 1);
 }
@@ -101,7 +104,7 @@ function linearNorm(value: number, max: number): number {
  * 10,000 competing products → ~0.3 (high competition, tough)
  * 80,000 competing products → ~0.1 (bloodbath)
  */
-function competitionScore(competingProducts: number): number {
+export function competitionScore(competingProducts: number): number {
   if (competingProducts <= 0) return 0.5; // unknown → neutral
   // Inverse log scale: fewer = better
   const logComp = Math.log10(Math.max(competingProducts, 1));

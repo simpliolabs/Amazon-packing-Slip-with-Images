@@ -38,6 +38,9 @@ import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bullet
 import { coverageMode, coveredVerdict, missingVerdict, coverageTokens } from '@/lib/keyword-engine/coverage-core'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
+// seasonalTerms is a ZERO-IMPORT leaf, so importing it here cannot create the scorer→pipeline cycle
+// that the deleted local BULLET_SEASONAL_TERMS copy existed to avoid.
+import { seasonsIn, isOffSeasonKeyword } from '@/lib/keyword-engine/seasonalTerms'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { isWriteBlockedPreLaunch, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
@@ -710,20 +713,22 @@ function titleLooksApparel(title: string): boolean {
   return /\b(shirt|t-?shirt|tee|tees|hoodie|sweatshirt|sweater|tank|crewneck|pullover|apparel|hat|cap|beanie|socks?|leggings|joggers|shorts|dress|jacket)\b/i.test(title)
 }
 
-// Seasonal terms — keep in sync with listingPipeline.ts:100 (SEASONAL_TERMS). The bullet-coverage
-// check excludes these: per the product strategy, seasonal keywords belong in BACKEND terms, not
-// bullets/title (unless the design itself is seasonal), so docking the bullets for lacking them is
-// wrong (it fights the strategy). Duplicated, not imported, to avoid a scorer→pipeline circular dep.
-const BULLET_SEASONAL_TERMS = [
-  'christmas', 'xmas', 'halloween', 'valentines', 'valentine', 'easter',
-  'thanksgiving', 'mothers day', 'mother day', 'fathers day', 'father day',
-  'back to school', 'last day of school', 'schools out', 'school out',
-  'independence day', '4th of july', 'fourth of july', 'july 4th',
-  'st patrick', 'new year', 'new years', 'memorial day', 'labor day',
-  'spring break', 'summer break', 'winter break', 'black friday',
-  'cyber monday', 'prime day', 'hanukkah',
-]
-const isSeasonalKw = (kw: string) => BULLET_SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
+// DELETED 2026-07-23 — this was a verbatim COPY of listingPipeline's SEASONAL_TERMS. Its own comment
+// justified the duplicate "to avoid a scorer→pipeline circular dep", and carved out the exact case
+// we have now implemented: "(unless the design itself is seasonal)".
+//
+// Both reasons are now gone. `seasonalTerms.ts` is a LEAF module with ZERO imports, so there is no
+// cycle to avoid, and it knows how to answer "is this the DESIGN's own occasion?".
+//
+// Keeping the copy would have shipped a generator↔scorer divergence: with KEYWORD_TARGET_SET=on the
+// generator places "valentine shirt women" in the bullets while a scorer using the blanket list
+// refuses to count it as covered — no dock, but no credit either. That is precisely the
+// "seven disagreeing definitions of covered" disease this whole PR exists to end, so it is fixed
+// here rather than deferred.
+// isSeasonalKw is now scoped to the DESIGN's own occasion. `designSeasons` comes from the plan's
+// design name (scoringCtx.planDesignName); an EMPTY array reproduces the historical blanket rule
+// exactly, so a listing with no design-name signal scores byte-identically to before.
+
 
 export function scoreListingContent(
   parentContent: ListingContentRow | null,
@@ -926,6 +931,13 @@ export function scoreListingContent(
     // keeps the color terms. KEEP IN SYNC with BASIC_COLOR_RE in listingPipeline.
     const colorRe = /\b(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)\b/i
     const isColorNeutralFamily = apparel && childContents.length > 1
+    // ONE seasonal predicate, shared with the generators (seasonalTerms.ts, a zero-import leaf).
+    // Scoped to the DESIGN's own occasion: a Valentine design's `valentine*` keywords are now
+    // placeable by the generators, so the scorer must CREDIT them rather than skipping them —
+    // otherwise the copy contains a keyword the score refuses to count. An empty `designSeasons`
+    // (no design-name signal) reproduces the historical blanket rule byte-for-byte.
+    const bulletDesignSeasons = seasonsIn(scoringCtx.planDesignName ?? '')
+    const isSeasonalKw = (kw: string) => isOffSeasonKeyword(kw, bulletDesignSeasons)
     const bulletOppKw = ((scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
       ? scoringCtx.bulletPlanKeywords.filter((k) => !isSeasonalKw(k))
       : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]

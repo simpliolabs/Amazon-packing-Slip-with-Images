@@ -25,6 +25,18 @@ import { garmentNounFor, SHIRT_BASE, type GarmentNoun, APPAREL_PRODUCT_TYPES as 
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
 import { isOffNicheKeyword, isForeignKeyword } from '@/lib/keyword-engine/nicheGuards'
+// SEASONAL — the ONE list + the ON/OFF-season predicate (PO 2026-07-23). This file used to carry its
+// OWN private copy of SEASONAL_TERMS (a `const` at :244) that no other module could reach, which is
+// exactly how seven disagreeing definitions of "covered" grew. seasonalTerms.ts is a zero-import leaf,
+// so importing it here cannot create a cycle. `isOffSeasonKeyword(kw, [])` is byte-identical to the
+// historical blanket `SEASONAL_TERMS.some(...)` strip, so every migrated site below degrades to
+// today's behaviour the moment designSeasons is empty (i.e. whenever KEYWORD_TARGET_SET is not 'on').
+import { SEASONAL_TERMS, seasonsIn, isOffSeasonKeyword } from '@/lib/keyword-engine/seasonalTerms'
+// selectionMode() — CALL-TIME env read of KEYWORD_TARGET_SET (never module scope: a module-scope read
+// freezes at import and a Coolify env flip would need a rebuild). Same flag that gates the target-set
+// selector, deliberately reused: the selector classifying a keyword CORE and the generators refusing
+// to place it is precisely the drift this migration exists to close.
+import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey, deriveNicheSeeds } from '@/lib/keyword-engine/keywordResearcher'
 // Competitor SEO snapshot (title-council fallback chain Part 1): the seller-named competitor's live
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
@@ -241,15 +253,9 @@ export interface PipelineResult {
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
 
-const SEASONAL_TERMS = [
-  'christmas', 'xmas', 'halloween', 'valentines', 'valentine', 'easter',
-  'thanksgiving', 'mothers day', 'mother day', 'fathers day', 'father day',
-  'back to school', 'last day of school', 'schools out', 'school out',
-  'independence day', '4th of july', 'fourth of july', 'july 4th',
-  'st patrick', 'new year', 'new years', 'memorial day', 'labor day',
-  'spring break', 'summer break', 'winter break', 'black friday',
-  'cyber monday', 'prime day', 'hanukkah',
-]
+// SEASONAL_TERMS now lives in keyword-engine/seasonalTerms.ts and is IMPORTED at the top of this file.
+// The private copy that used to sit here was deleted 2026-07-23: it made the generators' notion of
+// "seasonal" unreachable by the keyword selector, so the two could silently disagree.
 const MINOR_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'for', 'in', 'on', 'with', 'of', 'to', 'at', 'by'])
 const KIDS_AUDIENCE = ['kids', 'kid', 'toddler', 'toddlers', 'baby', 'babies', 'infant', 'youth', 'boys', 'girls', 'children']
 const ADULT_AUDIENCE = ['men', 'mens', 'women', 'womens', 'man', 'woman', 'adult', 'adults']
@@ -1268,7 +1274,126 @@ function capacityOf(s: string | null | undefined): string | null {
   return m ? `${m[1]}${m[2].toUpperCase()}B` : null
 }
 
-const isSeasonal = (kw: string) => SEASONAL_TERMS.some((t) => kw.toLowerCase().includes(t))
+/* ── SEASON POLICY (KEYWORD_TARGET_SET, PO 2026-07-23) ────────────────────────────────────────────
+ *
+ * THE PROBLEM. Six of the seven keyword consumers below used to BLANKET-strip every SEASONAL_TERM
+ * from customer-facing copy (`isSeasonal(kw)`). That rule is right for "a Golf Widow tee that happens
+ * to mention Christmas" — a holiday we are not about is off-theme traffic, and a holiday phrase the
+ * copy must never contain becomes a scoring dock no regenerate can clear. It MISFIRES when the
+ * design's OWN theme IS the holiday: on B0GF49RLDL (a Valentine Cupid tee) 8 of 22 pooled keywords
+ * are `valentine*` — the design's actual subject — and blanket stripping made them unplaceable, which
+ * is the PO's reported "Valentine never appears in the description".
+ *
+ * THE RULE. Not "is this word seasonal" but "is this keyword's season OUR season":
+ *   ON-SEASON  (the design's own occasion) → placeable in title/bullets/description/highlights.
+ *   OFF-SEASON (a DIFFERENT holiday)       → stripped, exactly as before.
+ * `isOffSeasonKeyword(kw, [])` === the historical blanket strip, so an EMPTY `effective` reproduces
+ * today's bytes exactly — which is what makes the flag-off path provably a no-op.
+ */
+export interface SeasonPolicy {
+  /** Canonical occasions the DESIGN is itself about, as DERIVED — flag-INDEPENDENT, so the shadow
+   *  diff can compare the two rules even while the shipped bytes still follow the old one. */
+  readonly derived: readonly string[]
+  /** What the generators actually strip against: `derived` only when KEYWORD_TARGET_SET=on, else
+   *  `[]` ⇒ blanket strip ⇒ byte-identical to today. */
+  readonly effective: readonly string[]
+  /** THE strip predicate every copy generator in this file calls. Replaces the old `isSeasonal`. */
+  isOffSeason(keyword: string): boolean
+  /** shadow/on forensics: ONE structured line per generator SITE naming the keywords the flip would
+   *  newly admit. Silent when the flag is off, when the design has no season, or when the two rules
+   *  agree — so a non-seasonal listing produces no log noise at all. */
+  diff(site: string, keywords: readonly string[]): void
+}
+
+/**
+ * The design's OWN theme text → canonical occasions.
+ *
+ * SOURCE PRIORITY (deliberately NOT the live listing title). The live title is seller-written and
+ * routinely carries an incidental "Christmas Gift for Golfers" tail; treating that as the design's
+ * theme would re-create the exact misfire the blanket strip was written to prevent. themeRater.ts
+ * makes the same call for the same reason ("EMPTY means there is no design signal at all — the caller
+ * must then skip the card rather than let a model guess a theme from a title"). So we read only:
+ *   1. `designNameOverride`        — the seller's authoritative scalar design name.
+ *   2. `designNameOverridesByKey`  — the seller's PER-DESIGN names. Folding all of them in is what
+ *                                    makes a 4-design parent's seasons the UNION of its designs'.
+ *   3. `visionDesign` designTheme / visualElements / seedKeywords — what is literally PRINTED on the
+ *                                    garment, read off the image. Safe by construction: vision says
+ *                                    "christmas" only when the artwork IS christmas.
+ *   4. the RESOLVED design name from extractDesignName (optional) — already required to be a real
+ *      substring of the title-or-vision text and to NAME the artwork, so it is a tight signal.
+ * DELIBERATELY EXCLUDED: `visionDesign.suggestedSearchTerms` and `input.nicheSeeds` — both are
+ * shopper-QUERY shaped ("valentines day gift for her"), so a generic gifting query would hand a
+ * non-seasonal design a season it does not have.
+ */
+export function deriveDesignSeasons(input: PipelineInput, resolvedDesignName?: string | null): string[] {
+  const parts: string[] = [
+    (input.designNameOverride ?? '').trim(),
+    ...Object.values(input.designNameOverridesByKey ?? {}).map((v) => (v ?? '').trim()),
+    (input.visionDesign?.designTheme ?? '').trim(),
+    ...(input.visionDesign?.visualElements ?? []),
+    ...(input.visionDesign?.seedKeywords ?? []),
+    (resolvedDesignName ?? '').trim(),
+  ].filter(Boolean)
+  // UNION across every design in the family, de-duplicated, insertion-ordered (stable logs).
+  return [...new Set(seasonsIn(parts.join(' | ')))]
+}
+
+/**
+ * The EXACT historical blanket predicate, character for character as it stood at :1271.
+ *
+ * WHY IT SURVIVES. seasonalTerms.ts ALSO normalises apostrophes, so `isOffSeasonKeyword(kw, [])`
+ * matches strictly MORE than the old rule did — "mother's day gift shirt" was silently allowed into
+ * customer copy before and is stripped now. That is a genuine improvement, but it is still a
+ * behaviour CHANGE, and flag-off must change nothing. So flag-off runs THIS, flag-on runs the new
+ * rule, and the shadow diff reports both directions so the flip is a decision, not a surprise.
+ * It reads the IMPORTED list — there is still exactly one SEASONAL_TERMS in the codebase.
+ */
+const historicalBlanketSeasonal = (keyword: string): boolean =>
+  SEASONAL_TERMS.some((t) => keyword.toLowerCase().includes(t))
+
+/** Build the per-regen policy. `derived` comes from deriveDesignSeasons; `asin` only tags the log. */
+export function makeSeasonPolicy(derived: readonly string[], asin: string | null): SeasonPolicy {
+  const mode = selectionMode()                                   // CALL-TIME read, never module scope
+  const effective: readonly string[] = mode === 'on' ? derived : []
+  const loggedSites = new Set<string>()                          // ONE line per site, not per keyword
+  return {
+    derived,
+    effective,
+    // off/shadow → the historical predicate verbatim (byte-identical output, provably).
+    // on         → strip only holidays that are NOT this design's.
+    isOffSeason: mode === 'on'
+      ? (keyword: string) => isOffSeasonKeyword(keyword, derived)
+      : historicalBlanketSeasonal,
+    diff: (site: string, keywords: readonly string[]) => {
+      if (mode === 'off' || loggedSites.has(site)) return
+      const strippedUnderOld = [...new Set(keywords.filter(historicalBlanketSeasonal))]
+      // What the flip would newly ADMIT — the design's own occasion. This is the number the PO cares
+      // about ("which keywords does the flip let into the copy?").
+      const keptUnderNew = strippedUnderOld.filter((k) => !isOffSeasonKeyword(k, derived))
+      // What the flip would newly STRIP — the apostrophe-normalisation delta ("mother's day …"),
+      // which the old rule let slip through. Small, but it must not be discovered in production.
+      const newlyStrippedUnderNew = [...new Set(
+        keywords.filter((k) => !historicalBlanketSeasonal(k) && isOffSeasonKeyword(k, derived)),
+      )]
+      if (keptUnderNew.length === 0 && newlyStrippedUnderNew.length === 0) return   // rules agree
+      loggedSites.add(site)
+      console.log(JSON.stringify({
+        tag: 'KW_ONSEASON_DIFF', mode, site, asin,
+        designSeasons: derived, keptUnderNew, newlyStrippedUnderNew, strippedUnderOld,
+      }))
+    },
+  }
+}
+
+/** The flag-OFF policy: no design seasons ⇒ historical blanket strip. Used as the default for the
+ *  EXPORTED generators, whose out-of-file callers (score-title/route.ts,
+ *  regenerate-item-highlight/route.ts) have no design-season context and must keep behaving exactly
+ *  as they do today. */
+const BLANKET_SEASON_POLICY: SeasonPolicy = {
+  derived: [], effective: [],
+  isOffSeason: historicalBlanketSeasonal,
+  diff: () => {},
+}
 
 function wordOverlapRatio(a: string, b: string): number {
   const wa = new Set(a.toLowerCase().split(/\s+/).filter(Boolean))
@@ -1385,7 +1510,12 @@ const normHighlightToken = (t: string): string => {
 /** Deterministic Item Highlights gates — ALL must pass. Returns the violations (empty = compliant).
  *  Callers scrub trademarks BEFORE validating (the scrubbed string is what ships), so the
  *  trademark gate only fires if a mark somehow survives the scrub. */
-export function validateItemHighlights(s: string, brandName: string, capacityFamily: boolean): string[] {
+export function validateItemHighlights(
+  s: string, brandName: string, capacityFamily: boolean,
+  /** Canonical occasions THIS design is about (deriveDesignSeasons). Default [] = the historical
+   *  blanket rule, which is what the out-of-file caller (regenerate-item-highlight) keeps. */
+  designSeasons: readonly string[] = [],
+): string[] {
   const problems: string[] = []
   // PO 2026-07-19: Item Highlights must be SHORT feature/benefit phrases (≤75 chars total), NOT a full
   // sentence — Amazon's field shows next to a ≤75-char title. Was a 125-char budget, which produced a
@@ -1405,7 +1535,9 @@ export function validateItemHighlights(s: string, brandName: string, capacityFam
   const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
   if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
   const lc = s.toLowerCase()
-  const season = SEASONAL_TERMS.find((t) => lc.includes(t))
+  // OFF-SEASON only (2026-07-23): "evergreen" means "not about a holiday we are not about". A Valentine
+  // design's own "Valentine" is its subject, not a seasonal claim, so it is no longer a violation.
+  const season = SEASONAL_TERMS.find((t) => lc.includes(t) && isOffSeasonKeyword(t, designSeasons))
   if (season) problems.push(`contains the seasonal term "${season}" — this is an evergreen field`)
   if (HIGHLIGHT_PROMO_RE.test(s)) problems.push('contains pricing/promotional language (sale/discount/cheap/free/deal/$/% off)')
   if (capacityFamily && CAPACITY_RE.test(s)) problems.push('hardcodes a storage capacity — the field is shared across all capacity variants')
@@ -1421,6 +1553,8 @@ export function validateItemHighlights(s: string, brandName: string, capacityFam
 export function buildHighlightsFallback(
   finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
   brandName: string, apparelProduct: boolean, capacityFamily: boolean,
+  /** See validateItemHighlights — default [] keeps the historical blanket strip. */
+  designSeasons: readonly string[] = [],
 ): string {
   const val = (re: RegExp): string => {
     const row = details.find((d) => re.test(d.field_name) && (d.recommended_value || '').trim().length > 0 && d.recommended_value.trim().length <= 40)
@@ -1460,7 +1594,7 @@ export function buildHighlightsFallback(
     if (!p) continue
     const lc = p.toLowerCase()
     if (findThirdPartyBrands(p, ownBrands).length > 0) continue
-    if (SEASONAL_TERMS.some((t) => lc.includes(t))) continue
+    if (SEASONAL_TERMS.some((t) => lc.includes(t) && isOffSeasonKeyword(t, designSeasons))) continue
     if (HIGHLIGHT_PROMO_RE.test(p)) continue
     if (capacityFamily && CAPACITY_RE.test(p)) continue
     const toks = highlightTokens(p).filter((t) => !HIGHLIGHT_STOPWORDS.has(t)).map(normHighlightToken)
@@ -1480,6 +1614,9 @@ export function buildHighlightsFallback(
 export async function buildItemHighlights(
   openai: OpenAI, finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
   pool: AnalyzedKeyword[], brandName: string, apparelProduct: boolean, capacityFamily: boolean,
+  /** Season policy for THIS regen (makeSeasonPolicy). Defaults to the blanket policy so the
+   *  out-of-file caller (regenerate-item-highlight/route.ts, 8 args) is byte-identical to today. */
+  season: SeasonPolicy = BLANKET_SEASON_POLICY,
 ): Promise<string> {
   // Product FACTS for the brief: the attribute rows the pipeline already computed (Material /
   // Fit Type / Neck / Sleeve / Department / Style / Target Gender). Keywords are CONTEXT only.
@@ -1492,10 +1629,11 @@ export async function buildItemHighlights(
     .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     .map((k) => scrubTrademarks((k.keyword || '').trim()).toLowerCase())
     .filter((kw) => kw
-      && !SEASONAL_TERMS.some((t) => kw.includes(t))
+      && !season.isOffSeason(kw)
       && findThirdPartyBrands(kw, ownBrands).length === 0
       && !(capacityFamily && CAPACITY_RE.test(kw)))
     .slice(0, 3)
+  season.diff('item-highlights', pool.map((k) => (k.keyword || '').trim()).filter(Boolean))
 
   // The PO's rules (2026-07-19), verbatim, as the brief's spine: ≤75 chars, short feature/benefit PHRASES
   // (NOT a full sentence), and do NOT repeat what the title already says (add NEW info — fabric/fit/feel/care).
@@ -1552,7 +1690,7 @@ export async function buildItemHighlights(
   }
   const gate = (s: string): string[] => {
     if (!s) return ['empty response']
-    const p = validateItemHighlights(s, brandName, capacityFamily)
+    const p = validateItemHighlights(s, brandName, capacityFamily, season.effective)
     if (isKeywordList(s)) p.push('reads as a keyword LIST (product-type permutations) — Item Highlights must name the MATERIAL, FIT, FEATURES + ONE use-case in human phrases grounded in the product facts, NEVER a search-keyword list')
     return p
   }
@@ -1570,12 +1708,17 @@ export async function buildItemHighlights(
   // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant AND
   // (via the keyword-list gate above) a real spec-grounded highlight, not a truncated keyword list.
   if (problems.length === 0) return capItemHighlightRepeats(out)
-  return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily))
+  return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective))
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
-export function validateTitle(title: string, brandName: string, mustInclude?: string, attributePin?: string, upgradeKws?: string[], designName?: string): string[] {
+export function validateTitle(
+  title: string, brandName: string, mustInclude?: string, attributePin?: string, upgradeKws?: string[], designName?: string,
+  /** Canonical occasions THIS design is about (deriveDesignSeasons). Default [] = the historical
+   *  blanket rule, which is what the out-of-file caller (score-title/route.ts) keeps. */
+  designSeasons: readonly string[] = [],
+): string[] {
   const problems: string[] = []
   const len = title.length
   if (len > 75) problems.push(`Title is ${len} characters; Amazon's NEW limit is 75 (effective July 27, 2026 — longer titles get AUTO-REWRITTEN by Amazon). Cut supporting keyphrases (they belong in backend keywords / Item Highlights), keep brand + design/product name + the money keyword.`)
@@ -1597,7 +1740,9 @@ export function validateTitle(title: string, brandName: string, mustInclude?: st
   if (repeated.length) problems.push(`These words appear more than twice (Amazon allows max 2 each): ${repeated.join(', ')}. Do NOT append "shirt"/"tee" to every keyphrase — name the product type once or twice total.`)
 
   const lc = title.toLowerCase()
-  const season = SEASONAL_TERMS.find((s) => lc.includes(s))
+  // OFF-SEASON only (2026-07-23): a Valentine design's "Valentine" is the design's SUBJECT and belongs
+  // in the title; "Christmas" on that same design is still off-theme traffic and still fails here.
+  const season = SEASONAL_TERMS.find((s) => lc.includes(s) && isOffSeasonKeyword(s, designSeasons))
   if (season) problems.push(`Remove the seasonal term "${season}" — evergreen product; seasonal keywords belong in backend terms.`)
 
   const words = new Set(lc.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/))
@@ -2100,7 +2245,7 @@ function extractProductNameTokens(repTitle: string | null): string[] {
     .slice(0, 3)
 }
 
-function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, outcomeSignals?: Record<string, OutcomeSignal>): TitleCandidate[] {
+function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, season: SeasonPolicy, outcomeSignals?: Record<string, OutcomeSignal>): TitleCandidate[] {
   const brandTokens = brandName.toLowerCase().split(/\s+/).filter(Boolean)
   const productTokens = extractProductNameTokens(repTitle)
 
@@ -2130,9 +2275,10 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
   const strikeRank = (k: AnalyzedKeyword): number =>
     k.organicRank != null && k.organicRank >= 11 && k.organicRank <= 30 ? 1 : 0
 
+  season.diff('title-candidates', analysis.map((k) => k.keyword))
   const eligible = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
-    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => !season.isOffSeason(k.keyword))
     .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (tdRank(b) - tdRank(a)) || (strikeRank(b) - strikeRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
 
   // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
@@ -2793,6 +2939,11 @@ async function runTitleAgent(
   /** Seller's DESIGN/SLOGAN name ("Later Gator") that MUST survive verbatim — the product's
    *  identity. Mandated + validated like the money keyword. PR #91. */
   designName = '',
+  /** Season policy for THIS regen. Reaches validateTitle so a Valentine design's OWN "Valentine"
+   *  is no longer a title violation while another design's Christmas still is. Default = blanket
+   *  (historical). BOTH title producers reach validateTitle through here: single-design and
+   *  per-design multi-design both call buildTitleFor → runTitleAgent (INVARIANT 1 parity). */
+  season: SeasonPolicy = BLANKET_SEASON_POLICY,
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
@@ -3063,7 +3214,7 @@ Rules:
     const jv = titleQualityJudge(title, { brandName, lean })
     console.log(`[TITLE_V2_DIFF] single-design primary produced score=${jv.score}/100 (${title.length} chars) lean=${lean ?? 'none'} title="${title.slice(0, 90)}" problems=${jv.problems.join('; ') || '(none)'}`)
   }
-  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) : ['No title generated.']
+  let problems = title ? validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective) : ['No title generated.']
   let retried = false
 
   // Up to 2 corrective passes — the mandatory-keyword + max-2 rules are non-negotiable.
@@ -3084,7 +3235,7 @@ Rules:
     })
     const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
     if (corrected) {
-      const cp = validateTitle(corrected, brandName, mustInclude, attributePin, upgradeKws, designName)
+      const cp = validateTitle(corrected, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
       // Require a STRICT improvement (fewer problems) to replace — otherwise a same-count single-agent
       // rewrite could silently discard a clean, debated council title (adversarial review caught this).
       if (cp.length < problems.length) { title = corrected; problems = cp }
@@ -3095,7 +3246,7 @@ Rules:
   // end trims the TAIL, so adding the brand up front can never be the thing that gets cut.
   if (title && brandName && !title.toLowerCase().includes(brandName.toLowerCase())) {
     title = `${brandName} ${title}`.trim()
-    problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
   }
 
   // Audience guarantee: never silently narrow a unisex product to one gender.
@@ -3112,7 +3263,7 @@ Rules:
         .replace(/\bMen'?s\b/i, "Men's and Women's")
       // No length gate: widening the audience is a compliance fix; the 75-char backstop below
       // protects length (and knows to drop a truncation-mangled audience rather than narrow it).
-      if (swapped !== title) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName) }
+      if (swapped !== title) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective) }
     }
   }
 
@@ -3143,7 +3294,7 @@ Rules:
       const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
       if (corrected && corrected.length <= 200) {
         title = corrected
-        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
       }
     }
   } catch { /* fail-open */ }
@@ -3156,7 +3307,7 @@ Rules:
     const stripped = title.replace(new RegExp(`\\bfor\\s+(${pin})\\b`, 'i'), '$1').replace(/\s{2,}/g, ' ').trim()
     if (stripped !== title) {
       title = stripped
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3167,7 +3318,7 @@ Rules:
     const tidied = dedupeAudiencePhrases(title)
     if (tidied && tidied !== title) {
       title = tidied
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3185,7 +3336,7 @@ Rules:
     })
     if (destuttered !== title) {
       title = destuttered.replace(/\s{2,}/g, ' ').trim()
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3205,7 +3356,7 @@ Rules:
     )
     if (welded !== title) {
       title = welded.replace(/\s{2,}/g, ' ').trim()
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3233,7 +3384,7 @@ Rules:
       const deduped = `${prefix} ${tail}`.replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ').trim()
       if (deduped !== title) {
         title = deduped
-        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
       }
     }
   }
@@ -3322,7 +3473,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
     })
     if (extended && extended !== title) {
       title = extended
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3342,7 +3493,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
       const padded = `${title.slice(0, m.index)}${mod} ${title.slice(m.index)}`.replace(/\s{2,}/g, ' ').trim()
       if (padded.length <= 75) {
         title = padded
-        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
       }
     }
   }
@@ -3353,7 +3504,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
     const cleaned = collapseProductPhrases(title)
     if (cleaned && cleaned !== title && cleaned.length >= 40) {
       title = cleaned
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3389,7 +3540,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
     rebuilt = rebuilt.replace(/\s{2,}/g, ' ').trim()
     if (rebuilt && rebuilt !== title && rebuilt.length <= 200) {
       title = rebuilt
-      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+      problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
     }
   }
 
@@ -3426,7 +3577,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
   // tail at a word boundary and never leaves a narrowed audience fragment.
   if (title.length > 75) {
     title = capTitle75(title)
-    problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName)
+    problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
   }
 
   return { title, problems, retried }
@@ -5717,9 +5868,13 @@ async function buildTitleFor(
   lean: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null,
   apparelProduct: boolean,
   brandName: string,
+  /** Season policy for THIS regen — forwarded to runTitleAgent → validateTitle. Threaded (not
+   *  re-derived) so the single-design branch and each per-design multi-design branch strip against
+   *  the SAME occasions the bullets/description/backend pools were built with. */
+  season: SeasonPolicy = BLANKET_SEASON_POLICY,
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
-  const t = await runTitleAgent(input, candidates, searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName)
+  const t = await runTitleAgent(input, candidates, searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, season)
   const titleProblems = t.problems
   const retried = t.retried
   // 1. Vision-hallucination backstop.
@@ -7184,11 +7339,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   }
 
+  // Design-name anchor (PR #91): the seller's distinctive design/slogan ("Later Gator") that MUST
+  // survive into the title verbatim — the agent kept paraphrasing it away.
+  // HOISTED 2026-07-23 from just below the compatibility-brand block: `designSeasons` is derived from
+  // the design's own theme text and MUST exist before the very first seasonal strip (mustIncludeKw,
+  // immediately below). extractDesignName reads only `input` and there is no other `await` between
+  // the old and new position, so hoisting it changes no ordering that anything observes.
+  const { name: designName, source: designSource } = await extractDesignName(input)
+
+  // ── SEASON POLICY — derived ONCE per regen, threaded everywhere (KEYWORD_TARGET_SET) ───────────
+  // Every seasonal strip in this orchestrator (title candidates, mustInclude pin, top-UPGRADE set,
+  // compatibility-brand ranking, bullets pool, bullets opportunity plan) reads THIS one object, so
+  // they cannot drift the way seven private copies of "covered" did. It sits ABOVE the `only ===
+  // 'title'` early return and above the multi-design fan-out, so full regens, per-section regens and
+  // per-child fan-outs all strip against the identical occasion set.
+  // MULTI-DESIGN = UNION: deriveDesignSeasons folds designNameOverridesByKey (every design's seller
+  // name) plus the family vision read, so a Valentine+Christmas parent carries BOTH occasions. Per-
+  // GROUP scoping is not applied here because these pools are filtered UPSTREAM of scopeKwsToGroup —
+  // the group scoping (foreign design tokens, own-title coverage) then narrows the union per design.
+  const designSeasons = deriveDesignSeasons(input, designName)
+  const season = makeSeasonPolicy(designSeasons, input.children[0]?.asin ?? null)
+
   const mustIncludeKw = cleanGated
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
-    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)
     .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0) || (b.opportunityScore || 0) - (a.opportunityScore || 0))[0]
+  season.diff('title-must-include', cleanGated.map((k) => k.keyword))
   const mustInclude = mustIncludeKw?.keyword
 
   // Determine the product's true audience from the existing listing + specs, so the title
@@ -7248,7 +7425,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const titleNicheCtx = [repTitle, brandName, ...(input.children || []).map((c) => c.title)].filter(Boolean).join(' ')
   const titleIsApparel = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(titleNicheCtx)
   const notOffNiche = (kw: string) => !titleIsApparel || !isOffNicheKeyword(kw, { context: titleNicheCtx })
-  const candidates = selectTitleCandidates(analysis, brandName, repTitle, input.outcomeSignals)
+  const candidates = selectTitleCandidates(analysis, brandName, repTitle, season, input.outcomeSignals)
     .filter((c) => !colorNeutralFamily || !BASIC_COLOR_RE.test(c.keyword))
     .filter((c) => notOffNiche(c.keyword))
 
@@ -7258,9 +7435,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // miss). We feed them to the title agent as MANDATORY #3 and fail validation when
   // 3+ still aren't in the title, so the existing retry loop is on the hook for
   // covering them — not the seller.
+  season.diff('title-upgrade-set', cleanGated.filter((k) => k.actionType === 'UPGRADE').map((k) => k.keyword))
   const topUpgradeKws = cleanGated
     .filter((k) => k.actionType === 'UPGRADE')
-    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => notOffNiche(k.keyword))                                  // off-niche can't reach the title
     .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword))  // color-neutral broadcast title
     .filter((k) => k.keyword.split(/\s+/).length <= 6)  // skip long-tail phrases that wouldn't fit
@@ -7285,7 +7463,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // pool still has 'sd card for canon camera', 'sd card for sony camera', etc. (Live-
     // verified: first #86 deploy surfaced ZERO brands because it read cleanGated.)
     const ranked = [...input.analysis]
-      .filter((k) => !isSeasonal(k.keyword))
+      .filter((k) => !season.isOffSeason(k.keyword))
       .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
     for (const k of ranked) {
       for (const brand of findThirdPartyBrands(k.keyword, ownB)) {
@@ -7297,9 +7475,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   }
 
-  // Design-name anchor (PR #91): the seller's distinctive design/slogan ("Later Gator")
-  // that MUST survive into the title verbatim — the agent kept paraphrasing it away.
-  const { name: designName, source: designSource } = await extractDesignName(input)
+  // (Design-name anchor — extractDesignName — was HOISTED above the first seasonal strip; see the
+  // SEASON POLICY block. `designName` / `designSource` are already in scope here.)
 
   // Phase 1 multi-design detection (DEBUG-only here — Commit 1). When the family carries ≥2 distinct
   // designs (SKU-prefix groups), the next commit branches title generation per design + per-design
@@ -7639,7 +7816,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       coupleConcept = (conceptBase ? `${conceptBase} ` : '') + 'Couple Matching'
       // ONE shared title — buildTitleFor with coupleConcept AS the designName, so it leads the title
       // and the design-name backstop (guard 6) re-inserts it verbatim if the council drops it.
-      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName)
+      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName, season)
       finalTitle = r.title
       titleProblems = r.problems
       retried = r.retried
@@ -7651,7 +7828,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       perChildTitles = []
       const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
         const { groupInput, groupDesignName } = await resolveGroupDesignName(group)
-        const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName)
+        const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName, season)
         // groupInput is returned so the bullets/description stages can reuse the resolved per-group
         // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
         return { group, groupInput, groupDesignName, ...r }
@@ -7754,7 +7931,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
-    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName)
+    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName, season)
     finalTitle = r.title
     titleProblems = r.problems
     retried = r.retried
@@ -7970,15 +8147,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     })
   }
 
-  // Bullets pool (PR15): critical/upgrade/reinforce, not in title, NO seasonal (bullets are
-  // customer-facing — a seasonal claim off-season misleads and mis-describes the product),
-  // no awkward >5-word composites, deduped. This is the same discipline the title gets.
+  // Bullets pool (PR15): critical/upgrade/reinforce, not in title, no OFF-season (bullets are
+  // customer-facing — a claim about a holiday this design is NOT about misleads and mis-describes
+  // the product; the design's OWN occasion is its subject and belongs here), no awkward >5-word
+  // composites, deduped. This is the same discipline the title gets.
+  // This pool is ALSO the source the per-design fan-out narrows via scopeKwsToGroup, so migrating
+  // it here reaches the per-child bullets that actually PATCH Amazon — not just the broadcast copy.
   const titleLc = finalTitle.toLowerCase()
+  season.diff('bullets', analysis.map((k) => k.keyword))
   const remainingForBullets: AnalyzedKeyword[] = []
   for (const k of analysis) {
     if (!['CRITICAL', 'UPGRADE', 'REINFORCE'].includes(k.actionType)) continue
     if (titleLc.includes(k.keyword.toLowerCase())) continue
-    if (isSeasonal(k.keyword)) continue
+    if (season.isOffSeason(k.keyword)) continue
     if (k.keyword.split(/\s+/).length > 5) continue
     if (remainingForBullets.some((d) => wordOverlapRatio(d.keyword, k.keyword) >= 0.6)) continue
     remainingForBullets.push(k)
@@ -8002,9 +8183,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // discipline title gets in Stage 0c, but for bullets we keep BOTH tiers since the bullets
   // scorer penalizes when 2+ CRITICAL-or-UPGRADE keywords are missing across all 5 bullets).
   // Sorted by opportunity, deduped against title (those don't count as bullet gaps).
+  // Same season policy as the bullets pool above — and this set is ALSO persisted as keywordPlan.bullets,
+  // which the SCORER reads (#92/#93). Migrating it keeps generator↔scorer parity: a keyword the bullets
+  // may now carry is a keyword the plan may now demand.
+  season.diff('bullets-opportunity-plan', cleanGated.filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE').map((k) => k.keyword))
   const topOppGated = cleanGated
     .filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE')
-    .filter((k) => !isSeasonal(k.keyword))
+    .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)   // match the scorer (no word cap on its set); 6 = title pin's safe ceiling
     .filter((k) => !titleLc.includes(k.keyword.toLowerCase()))   // already in title → not a bullet gap
     // Role-word keywords (e.g. "later gator TEACHER shirt") belong in BACKEND, not bullets: the bullet agent's
@@ -8934,7 +9119,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // broadcastDesignAnchor (parity-audit): identical to effectiveDesignName for single-design ('')
     // and per-design multi-design families, but a unified-set (couple) family keeps its shared
     // concept in the highlight instead of losing it to the zeroed multi-design name.
-    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2)
+    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season)
     // The highlight LLM can still echo "oversized" from its context keywords even with the corrected Fit
     // factRow; scrub it to the true fit and collapse any duplicate word it creates ("oversized relaxed" →
     // "relaxed relaxed" → "relaxed") so the pushable Item Highlight can't ship a fit contradiction.
