@@ -36,7 +36,7 @@ import { SEASONAL_TERMS, seasonsIn, isOffSeasonKeyword } from '@/lib/keyword-eng
 // freezes at import and a Coolify env flip would need a rebuild). Same flag that gates the target-set
 // selector, deliberately reused: the selector classifying a keyword CORE and the generators refusing
 // to place it is precisely the drift this migration exists to close.
-import { selectionMode, type SelectionContext } from '@/lib/keyword-engine/selection-core'
+import { selectionMode, isRankingTarget, selectionSha, type SelectionContext } from '@/lib/keyword-engine/selection-core'
 // deriveSeasonsFrom — THE one design→occasion derivation, shared with the seven keyword-side callers
 // that cannot build a PipelineInput. selectionContext.ts imports seasonalTerms/selection-core/
 // loadListingContent only, so importing it here creates no cycle.
@@ -248,7 +248,12 @@ export interface PipelineResult {
    *  targeted (killing the source/relevance-gate/title-exclusion divergence the shared predicate alone
    *  couldn't close) and can enforce cross-section design-name cohesion off the REAL design name — not a
    *  capacity-unsafe title heuristic. */
-  keywordPlan: { bullets: string[]; designName: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[] }
+  /** KEYWORD_TARGET_SET (#143): `selected` is a DERIVED MIRROR of the 30 ranking targets, persisted
+   *  for scorer/provenance parity only — keyword_analysis.selection_rank remains the single source of
+   *  truth (migration 049's header explicitly rejects keyword_plan as selection's home: it is keyed on
+   *  parent_asin, while both the Intelligence tab and the RANK panel resolve to a CHILD).
+   *  `selectionSha` lets a later reader prove which selection a stored plan was built from. */
+  keywordPlan: { bullets: string[]; designName: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[]; selected?: string[]; selectionSha?: string }
   debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
@@ -1424,6 +1429,71 @@ const BLANKET_SEASON_POLICY: SeasonPolicy = {
   diff: () => {},
 }
 
+/* ── TARGET POLICY (KEYWORD_TARGET_SET #143) ──────────────────────────────────────────────────── */
+
+/**
+ * The generator-side gate on the ranking-target set. Deliberately the SAME SHAPE as SeasonPolicy:
+ * one object, built once per regen, threaded to every producer — because eighteen inline
+ * `selectionMode() === 'on' && ...` checks is how a subsystem grows eighteen slightly-different
+ * rules, which is the disease this whole line of work exists to cure.
+ *
+ * At off/shadow EVERY method is the identity function, so the generators are byte-identical.
+ */
+export interface TargetPolicy {
+  /** True only at `on` AND when the pool actually carries persisted ranks. */
+  live: boolean
+  /** Keep only ranking targets. Identity when not live. */
+  keep: <T extends { selectionRank?: number | null }>(rows: readonly T[]) => T[]
+  /** Keep only CORE-slot targets — the title pin (PO-locked 2026-07-23: "CORE-slot only"). */
+  core: <T extends { selectionRank?: number | null; selectionSlot?: string | null }>(rows: readonly T[]) => T[]
+  /** Rank for comparator use. Infinity for a non-target; Infinity for EVERY row when not live, so
+   *  `targetRankGap` returns 0 and the caller's legacy ordering is untouched. */
+  rankOf: (k: { selectionRank?: number | null }) => number
+}
+
+/** A comparator FRAGMENT (`a || b || c` style) that sorts targets first. Must be composed INSIDE the
+ *  call site's existing .sort(), never as a preceding .sort() — a pre-pass is fully overridden by
+ *  any later comparator that can order the pair, so it would be silently inert. */
+function targetRankGap(
+  policy: TargetPolicy,
+  a: { selectionRank?: number | null },
+  b: { selectionRank?: number | null },
+): number {
+  if (!policy.live) return 0
+  const ra = policy.rankOf(a), rb = policy.rankOf(b)
+  return ra === rb ? 0 : ra - rb
+}
+
+const INERT_TARGET_POLICY: TargetPolicy = {
+  live: false,
+  keep: (rows) => [...rows],
+  core: (rows) => [...rows],
+  rankOf: () => Infinity,
+}
+
+/**
+ * @param analysis the pool this regen will generate from — used only to decide `live`.
+ *
+ * WHY `live` ALSO REQUIRES A NON-EMPTY RANK: at `on`, but before migration 049 has been applied or
+ * before this ASIN has ever been through a rating run, every row carries `selectionRank: undefined`.
+ * A naive `keep` would then filter the pool to ZERO and the generators would produce a title with no
+ * keywords at all. Fail-open: no ranks ⇒ inert policy ⇒ exactly today's behaviour.
+ */
+function makeTargetPolicy(analysis: readonly { selectionRank?: number | null }[], asin: string | null): TargetPolicy {
+  if (selectionMode() !== 'on') return INERT_TARGET_POLICY
+  const ranked = analysis.filter((k) => isRankingTarget(k)).length
+  if (ranked === 0) {
+    console.log(`[KW_TARGET_GEN] asin=${asin ?? '?'} INERT — no persisted selection_rank in the pool (pre-049 or never rated); generators run unchanged`)
+    return INERT_TARGET_POLICY
+  }
+  return {
+    live: true,
+    keep: (rows) => rows.filter((k) => isRankingTarget(k)),
+    core: (rows) => rows.filter((k) => isRankingTarget(k) && k.selectionSlot === 'CORE'),
+    rankOf: (k) => (typeof k.selectionRank === 'number' && Number.isFinite(k.selectionRank) ? k.selectionRank : Infinity),
+  }
+}
+
 function wordOverlapRatio(a: string, b: string): number {
   const wa = new Set(a.toLowerCase().split(/\s+/).filter(Boolean))
   const wb = new Set(b.toLowerCase().split(/\s+/).filter(Boolean))
@@ -2274,7 +2344,10 @@ function extractProductNameTokens(repTitle: string | null): string[] {
     .slice(0, 3)
 }
 
-function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, season: SeasonPolicy, outcomeSignals?: Record<string, OutcomeSignal>): TitleCandidate[] {
+function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, season: SeasonPolicy, outcomeSignals?: Record<string, OutcomeSignal>, targets: TargetPolicy = INERT_TARGET_POLICY): TitleCandidate[] {
+  // KEYWORD_TARGET_SET (#143): the title draws from the ranking targets only. Defaulted to the
+  // inert policy so any caller that does not pass one is byte-identical to today.
+  analysis = targets.keep(analysis)
   const brandTokens = brandName.toLowerCase().split(/\s+/).filter(Boolean)
   const productTokens = extractProductNameTokens(repTitle)
 
@@ -7388,8 +7461,35 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // the group scoping (foreign design tokens, own-title coverage) then narrows the union per design.
   const designSeasons = deriveDesignSeasons(input, designName)
   const season = makeSeasonPolicy(designSeasons, input.children[0]?.asin ?? null)
+  // KEYWORD_TARGET_SET (#143): built ONCE beside the season policy and threaded to every producer.
+  // Inert at off/shadow, and inert at `on` when the pool carries no persisted ranks (pre-049 /
+  // never rated) — so it can never filter a pool to zero.
+  const targets = makeTargetPolicy(analysis, input.children[0]?.asin ?? null)
+  // Spread into every keywordPlan write. EMPTY at off/shadow, so the persisted jsonb is
+  // byte-identical and no consumer sees a new key until the flag is on.
+  const selectedKws = targets.live ? targets.keep(analysis).map((k) => k.keyword) : []
+  const selectedPlanFields = targets.live
+    ? { selected: selectedKws, selectionSha: selectionSha(selectedKws) }
+    : {}
 
-  const mustIncludeKw = cleanGated
+  // THE TITLE PIN. This is the single highest-value filter in the PR: the sort key is RAW
+  // searchVolume, so on a Valentine/Cupid tee it welds "summer tops for women" (821,120/mo) into the
+  // title as an UN-DROPPABLE pin that every downstream gate must then work around.
+  //
+  // PO-LOCKED 2026-07-23: CORE-slot ONLY. Not merely "a target" — a CATEGORY-slot target is
+  // universal garment revenue ("graphic tees for women"), legitimate in the title but wrong as the
+  // one mandatory anchor; and a BACKEND-slot target is an off-season holiday the copy must never
+  // contain, so pinning one would create a dock no regenerate can clear.
+  const pinPool = targets.core(cleanGated)
+  const pinFrom = pinPool.length > 0 ? pinPool
+    // FAIL-OPEN, and deliberately NOT to raw cleanGated[0]: if the design has no CORE target we fall
+    // back to any target, and only then to the legacy pool. Dropping straight to cleanGated would
+    // reinstate the exact volume-sorted pin this filter exists to remove.
+    : (targets.live ? (targets.keep(cleanGated).length > 0 ? targets.keep(cleanGated) : cleanGated) : cleanGated)
+  if (targets.live && pinPool.length === 0) {
+    console.log(`[KW_TARGET_PIN_FALLBACK] asin=${input.children[0]?.asin ?? '?'} no CORE-slot target; pinning from ${targets.keep(cleanGated).length > 0 ? 'any-target' : 'legacy'} pool`)
+  }
+  const mustIncludeKw = pinFrom
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)
@@ -7454,7 +7554,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const titleNicheCtx = [repTitle, brandName, ...(input.children || []).map((c) => c.title)].filter(Boolean).join(' ')
   const titleIsApparel = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(titleNicheCtx)
   const notOffNiche = (kw: string) => !titleIsApparel || !isOffNicheKeyword(kw, { context: titleNicheCtx })
-  const candidates = selectTitleCandidates(analysis, brandName, repTitle, season, input.outcomeSignals)
+  const candidates = selectTitleCandidates(analysis, brandName, repTitle, season, input.outcomeSignals, targets)
     .filter((c) => !colorNeutralFamily || !BASIC_COLOR_RE.test(c.keyword))
     .filter((c) => notOffNiche(c.keyword))
 
@@ -8187,6 +8287,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const remainingForBullets: AnalyzedKeyword[] = []
   for (const k of analysis) {
     if (!['CRITICAL', 'UPGRADE', 'REINFORCE'].includes(k.actionType)) continue
+    // KEYWORD_TARGET_SET (#143): bullets carry only ranking targets, and never a BACKEND-slot one —
+    // that slot exists precisely for terms customer-facing copy must not contain. Both no-ops at
+    // off/shadow (targets.live === false).
+    if (targets.live && !isRankingTarget(k)) continue
+    if (targets.live && k.selectionSlot === 'BACKEND') continue
     if (titleLc.includes(k.keyword.toLowerCase())) continue
     if (season.isOffSeason(k.keyword)) continue
     if (k.keyword.split(/\s+/).length > 5) continue
@@ -8216,7 +8321,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // which the SCORER reads (#92/#93). Migrating it keeps generator↔scorer parity: a keyword the bullets
   // may now carry is a keyword the plan may now demand.
   season.diff('bullets-opportunity-plan', cleanGated.filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE').map((k) => k.keyword))
-  const topOppGated = cleanGated
+  // TARGETS ONLY. This set is persisted as keywordPlan.bullets and READ BACK by the scorer, so a
+  // non-target here becomes a keyword the plan demands and the score docks for — reinstating the
+  // unclearable dock through the back door. Generator and scorer must want the same 30.
+  const topOppGated = targets.keep(cleanGated)
     .filter((k) => k.actionType === 'CRITICAL' || k.actionType === 'UPGRADE')
     .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)   // match the scorer (no word cap on its set); 6 = title pin's safe ceiling
@@ -8484,7 +8592,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // rebuilt from stored per-child titles above), so ship the fresh per-child sets too — the push
       // prefers them, and leaving them stale silently discarded the regen for every child.
       per_child_bullets: perChildBullets,
-      keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined },
+      keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined , ...selectedPlanFields },
     })
   }
 
@@ -8504,6 +8612,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // IRRELEVANT (noise-marked) stays excluded. Bullets/title pools keep gap-chasing —
   // placement decisions SHOULD prefer gaps; the backend hybrid should not.
   onProgress('Distributing backend keywords + writing description...')
+  // KEYWORD_TARGET_SET (#143): target rank is the PRIMARY SORT KEY below, and the pool is NEVER
+  // filtered. `targets.keep` here would cut it to 30 keywords, and the FULL pool only just reaches
+  // the 240-250 byte band today — the result would land under the 220-byte hard floor, trip
+  // backendDegradeGate, mark the section degraded and PRESERVE the prior string behind an HTTP 200.
+  // A silent no-op regen. Targets lead so they claim bytes first; everything else still fills.
   const backendPool = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'REINFORCE', 'DEFENDED', 'OPTIMIZED'].includes(k.actionType))
     // HARD lean (#203 symmetry): the scorer no longer counts opposite-gender keywords as gaps —
@@ -8516,6 +8629,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       return lean === 'female' ? !(masc && !fem) : !(fem && !masc)
     })
     .sort((a, b) =>
+      // KEYWORD_TARGET_SET (#143) is the PRIMARY key — a target outranks a non-target regardless of
+      // sales or volume, because it is a keyword we have actually decided to rank for. It must be
+      // INSIDE this comparator, not a pre-sort: a preceding .sort() is fully overridden by this one
+      // for every pair the comparator can order, so a pre-pass would have been silently inert.
+      // Returns 0 for every pair at off/shadow, leaving the legacy ordering byte-identical.
+      targetRankGap(targets, a, b) ||
       // BACKEND_CRITICAL_KEYWORDS: CRITICAL search terms claim backend bytes before generic gift filler
       // (spain jersey 416K has ~0 historical sales as a new 2026 term, so sales-primary sort buried it).
       // CRITICAL decays to OPTIMIZED once pushed, so this self-releases — the push-starvation defense
@@ -9148,7 +9267,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // broadcastDesignAnchor (parity-audit): identical to effectiveDesignName for single-design ('')
     // and per-design multi-design families, but a unified-set (couple) family keeps its shared
     // concept in the highlight instead of losing it to the zeroed multi-design name.
-    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, analysis, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season)
+    // KEYWORD_TARGET_SET (#143): highlights are customer-facing, so they draw from targets only and
+    // never a BACKEND-slot term. Filtered at the CALL SITE rather than inside buildItemHighlights so
+    // the exported signature stays stable for regenerate-item-highlight/route.ts, which resolves its
+    // own targets (that route bypasses this pipeline entirely).
+    const hlPool = targets.live
+      ? targets.keep(analysis).filter((k) => k.selectionSlot !== 'BACKEND')
+      : analysis
+    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, hlPool, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season)
     // The highlight LLM can still echo "oversized" from its context keywords even with the corrected Fit
     // factRow; scrub it to the true fit and collapse any duplicate word it creates ("oversized relaxed" →
     // "relaxed relaxed" → "relaxed") so the pushable Item Highlight can't ship a fit contradiction.
@@ -9267,7 +9393,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
-    keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined },
+    keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined , ...selectedPlanFields },
     debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [] },
   })
 }
