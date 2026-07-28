@@ -33,6 +33,12 @@ import { researchKeywords, getCachedResearch } from '../keyword-engine/keywordRe
 import { loadListingRowsForPresence } from '../keyword-engine/loadListingContent';
 import { isOffNicheKeyword, isForeignKeyword } from '../keyword-engine/nicheGuards';
 import { classifyOffNicheKeywords, classifyWrongThemeUniverseKeywords } from '../keyword-engine/relevanceClassifier';
+// KEYWORD_TARGET_SET (#143). selectionMode is a CALL-TIME env read, so a Coolify flip + restart
+// changes behaviour with no rebuild. loadSelectionContext short-circuits to zero queries at `off`.
+import { selectionMode, resolveRankingTargets, type SelectionContext } from '../keyword-engine/selection-core';
+import { loadSelectionContext, readWindow } from '../keyword-engine/selectionContext';
+import { buildThemeCard, rateThemeFit, newThemeRunId } from '../keyword-engine/themeRater';
+import type { ThemeRatings } from '../keyword-engine/cacheService';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -112,7 +118,7 @@ export async function syncKeywordIntelligence(
 
   // Path 1: Return stored analysis if available and not forcing refresh
   if (useStoredAnalysis && !forceRefresh) {
-    const stored = await getStoredAnalysis(asin, 100);
+    const stored = await getStoredAnalysis(asin, readWindow(100));
     if (stored && stored.length > 0) {
       return buildResultFromStored(asin, stored);
     }
@@ -121,8 +127,24 @@ export async function syncKeywordIntelligence(
   // On forceRefresh: clear only the ANALYSIS cache (keyword_analysis) so the engine re-runs.
   // Do NOT delete keyword_cache — that holds the raw JS API data which costs credits to re-fetch.
   if (forceRefresh) {
-    await supabase.from('keyword_analysis').delete().eq('asin', asin);
-    console.log(`[syncKeywordIntelligence] Cleared analysis cache for ${asin} (forceRefresh). Raw keyword_cache preserved.`);
+    // KEYWORD_TARGET_SET (#143, PO Q1 → gated, not unconditional). This delete is REDUNDANT with
+    // storeAnalysis's stale-prune (which drops native rows older than the run timestamp) and is
+    // strictly more destructive than it: the prune preserves `data_source='import'` rows — the
+    // seller's H10 competitor research (PR #176) — while this wipes them too.
+    //
+    // It is also a live pool-emptying hazard of exactly the 2026-06-17 shape: research runs for
+    // minutes between this DELETE and the eventual store, and a failure anywhere in between leaves
+    // keyword_analysis EMPTY rather than stale. Upsert-first + prune-after is interrupt-safe.
+    //
+    // Gated on `!== 'off'` rather than removed outright: dropping it changes what `off` persists on
+    // a forced re-research, and the off-parity contract is not worth breaking mid-flip for a bug
+    // that only bites on failure. Revisit as unconditional once the flag is fully rolled out.
+    if (selectionMode() === 'off') {
+      await supabase.from('keyword_analysis').delete().eq('asin', asin);
+      console.log(`[syncKeywordIntelligence] Cleared analysis cache for ${asin} (forceRefresh). Raw keyword_cache preserved.`);
+    } else {
+      console.log(`[syncKeywordIntelligence] forceRefresh for ${asin}: pre-research DELETE skipped (KEYWORD_TARGET_SET) — storeAnalysis's stale-prune handles it and imports survive.`);
+    }
   }
 
   // Path 2 & 3: Run SQP sync (handles cache check internally)
@@ -163,14 +185,27 @@ export async function syncKeywordIntelligence(
         // flag: the other half of the #283 miss). Raw JS rows carry .keyword + fromUniverse, so the
         // gate's universe exemption + never-collapse floor both apply.
         const gated = await applyRelevanceGate(asin, resolvedParent, poolRows, listingRows, listingTitle);
-        const jsResult = runKeywordEngine(asin, gated as import('../keyword-engine').RawKeywordRow[], listingRows, 'jungle_scout');
+        const jsResult = runKeywordEngine(asin, gated.keywords as import('../keyword-engine').RawKeywordRow[], listingRows, 'jungle_scout');
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
-        await storeAnalysis(asin, mergedKeywords);
+        // The gate's ctx/ratings ride along to the ONE place selection is computed. ctx null ⇒
+        // legacy 15-column write (see StoreAnalysisOpts.ctx).
+        await storeAnalysis(asin, mergedKeywords, { ctx: gated.ctx, ratings: gated.ratings, themeRunId: gated.themeRunId });
 
         return {
           ...sqpResult,
           allKeywords: mergedKeywords,
-          topOpportunities: mergedKeywords.slice(0, 25),
+          // These rows are FRESH from the engine and carry no selection_rank, so the resolver always
+          // RECOMPUTES here — which makes ctx load-bearing rather than a formality. With no context
+          // there is no honest recompute (an inert ctx would route the design's OWN season to
+          // BACKEND), so fall to the legacy list instead of guessing.
+          topOpportunities: gated.ctx
+            ? resolveRankingTargets(mergedKeywords, {
+                legacy: (r) => r.slice(0, 25),
+                site: 'syncKeywordIntelligence.cacheHit',
+                ctx: gated.ctx,
+                inputAsin: asin,
+              })
+            : mergedKeywords.slice(0, 25),
           totalKeywordsAnalyzed: mergedKeywords.length,
           summary: buildSummary(mergedKeywords),
           dataSource: 'jungle_scout',
@@ -234,14 +269,15 @@ export async function syncKeywordIntelligence(
 
         // Relevance gate + never-collapse floor (shared helper, applied identically to the cache-hit
         // path above so the two can't drift; gates BEFORE the engine + storage).
-        const filteredKeywords = await applyRelevanceGate(asin, resolvedParent, researchResult.allKeywords, listingRows, listingTitle);
+        const gatedFresh = await applyRelevanceGate(asin, resolvedParent, researchResult.allKeywords, listingRows, listingTitle);
+        const filteredKeywords = gatedFresh.keywords;
 
         // Run engine on research results (against OUR listing content)
         const jsResult = runKeywordEngine(asin, filteredKeywords, listingRows, 'jungle_scout');
 
         // Merge JS results into SQP results (SQP takes precedence for same keywords)
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
-        await storeAnalysis(asin, mergedKeywords);
+        await storeAnalysis(asin, mergedKeywords, { ctx: gatedFresh.ctx, ratings: gatedFresh.ratings, themeRunId: gatedFresh.themeRunId });
 
         // Rank tracker (PO: "track OUR ranking keywords over time"): snapshot our organic rank
         // per keyword from this FRESH Jungle Scout measurement. The cache-hit path deliberately
@@ -255,7 +291,18 @@ export async function syncKeywordIntelligence(
         return {
           ...sqpResult,
           allKeywords: mergedKeywords,
-          topOpportunities: mergedKeywords.slice(0, 25),
+          // These rows are FRESH from the engine and carry no selection_rank, so the resolver always
+          // RECOMPUTES here — which makes ctx load-bearing rather than a formality. With no context
+          // there is no honest recompute (an inert ctx would route the design's OWN season to
+          // BACKEND), so fall to the legacy list instead of guessing.
+          topOpportunities: gatedFresh.ctx
+            ? resolveRankingTargets(mergedKeywords, {
+                legacy: (r) => r.slice(0, 25),
+                site: 'syncKeywordIntelligence.research',
+                ctx: gatedFresh.ctx,
+                inputAsin: asin,
+              })
+            : mergedKeywords.slice(0, 25),
           totalKeywordsAnalyzed: mergedKeywords.length,
           summary: buildSummary(mergedKeywords),
           dataSource: 'jungle_scout',
@@ -283,13 +330,26 @@ export async function syncKeywordIntelligence(
  * to nothing is what starved Intelligence + the description-coverage dock. ALWAYS logs kept/before
  * (even when nothing dropped) so the gate's real effect on a listing is visible in prod logs.
  */
+/**
+ * What the gate returns. `ctx: null` is the load-bearing signal — see StoreAnalysisOpts.ctx: it
+ * tells storeAnalysis "no context was established, write the legacy payload", which is strictly
+ * different from an INERT context (that would persist a target set computed against
+ * `designSeasons: []` and route a Valentine design's own keywords to BACKEND as if that were truth).
+ */
+interface RelevanceGateResult<T> {
+  keywords: T[];
+  ctx: SelectionContext | null;
+  ratings: ThemeRatings | null;
+  themeRunId: string | null;
+}
+
 async function applyRelevanceGate<T extends { keyword: string }>(
   asin: string,
   resolvedParent: string,
   keywords: T[],
   listingRows: { title?: string | null }[] | null,
   listingTitle?: string,
-): Promise<T[]> {
+): Promise<RelevanceGateResult<T>> {
   try {
     const { identityTokensOf, keywordIsRelevant, guaranteedIdentitySynonyms } = await import('../keyword-engine/keywordResearcher');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -297,10 +357,73 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     const { data: scoreRow } = await db.from('listing_seo_scores')
       .select('product_title, design_name_override, audience_lean').eq('parent_asin', resolvedParent).maybeSingle();
     const childTitles = (listingRows ?? []).map((r) => r.title).filter(Boolean) as string[];
+
+    /* ── KEYWORD_TARGET_SET (#143) ─────────────────────────────────────────────────────────────
+     * HOISTED above the first early return. `apparelCtx` used to be computed at the off-niche
+     * layer, below three returns that can exit before it — so a gate that bailed early could not
+     * have built a context even if it wanted to.
+     *
+     * `rated()` is the OPT-OUT net: EVERY return inside this try goes through it, so a future
+     * early-exit added here inherits the rating by construction rather than by remembering. Nets
+     * that must be remembered are the ones that get forgotten — that is the section-regen lesson
+     * (d93f93d), applied structurally.
+     */
+    const apparelCtx = [scoreRow?.product_title, listingTitle, ...childTitles].filter(Boolean).join(' ');
+    const isApparelPool = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(apparelCtx);
+
+    let ratedOnce = false;
+    const rated = async (out: T[]): Promise<RelevanceGateResult<T>> => {
+      // Idempotence guard: rated() is called on exactly one return path per invocation, but a
+      // refactor that nested two of them would otherwise fire the rater twice and bill for it.
+      if (ratedOnce) return { keywords: out, ctx: null, ratings: null, themeRunId: null };
+      ratedOnce = true;
+
+      // `off` short-circuits BEFORE any await, so the flag genuinely costs zero network calls.
+      if (selectionMode() === 'off') return { keywords: out, ctx: null, ratings: null, themeRunId: null };
+
+      try {
+        const ctx = await loadSelectionContext({
+          supabase: db,
+          childAsin: asin,
+          parentAsin: resolvedParent,
+          scoreRow,
+          haystack: apparelCtx,
+          site: 'syncKeywordIntelligence.gate',
+        });
+        const card = await buildThemeCard({
+          asin,
+          parentAsin: resolvedParent,
+          designNameOverride: scoreRow?.design_name_override ?? null,
+          designNameOverrides: (scoreRow as { design_name_overrides?: Record<string, string> | null } | null)?.design_name_overrides ?? null,
+          audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
+          supabase: db,
+        });
+        // No card ⇒ no design signal ⇒ nothing trustworthy to rate against. The ctx still stands
+        // (it carries the haystack + apparel verdict + seasons), so selection still runs — every
+        // band is simply null, which the selector treats as 2 and never hard-gates.
+        const ratings = await rateThemeFit(out.map((k) => k.keyword), card, {
+          asin,
+          currentTitle: scoreRow?.product_title || listingTitle || null,
+          audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
+        });
+        return {
+          keywords: out,
+          ctx,
+          ratings: ratings.size > 0 ? ratings : null,
+          themeRunId: ratings.size > 0 ? newThemeRunId() : null,
+        };
+      } catch (e) {
+        // FAIL-OPEN: ctx null ⇒ storeAnalysis writes the legacy payload and preserves whatever
+        // signals are already stored. Never an INERT ctx, which would look like a real answer.
+        console.warn(`[syncKeywordIntelligence] theme rating failed for ${asin} (non-fatal; legacy write):`, e instanceof Error ? e.message : e);
+        return { keywords: out, ctx: null, ratings: null, themeRunId: null };
+      }
+    };
+
     const identity = identityTokensOf(scoreRow?.product_title, scoreRow?.design_name_override, listingTitle, ...childTitles);
     if (identity.size === 0) {
       console.log(`[syncKeywordIntelligence] relevance gate: no identity tokens for ${asin} — pool kept UNFILTERED (${keywords.length} kw)`);
-      return keywords;
+      return rated(keywords);
     }
     // IDENTITY-SYNONYM OPPORTUNITIES (2026-07-15): add the design's identity siblings (football/fútbol for a
     // soccer design) to the STORED pool so they surface as ranking OPPORTUNITIES in the RANK panel AND the
@@ -334,7 +457,7 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     const kept = keywords.filter((k) => (k as { fromUniverse?: boolean }).fromUniverse || keywordIsRelevant(k.keyword, identity));
     if (kept.length === 0 && before > 0) {
       console.warn(`[syncKeywordIntelligence] relevance gate would drop ALL ${before} kw for ${asin} (identity too narrow: [${[...identity].slice(0, 8).join(', ')}]) — keeping pool UNFILTERED (never-collapse floor)`);
-      return keywords;
+      return rated(keywords);
     }
     console.log(`[syncKeywordIntelligence] relevance gate for ${asin}: kept ${kept.length}/${before} (dropped ${before - kept.length} off-product)`);
 
@@ -344,8 +467,8 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     // pool and dock the score forever (an unfixable dock). Clean them at the SOURCE with the SAME
     // predicates the scoring seams use: the deterministic net (enumerable classes) + an LLM pass (the
     // semantic tail). Broad on-product category angles (fromUniverse) are exempt. Fail-open + floor.
-    const apparelCtx = [scoreRow?.product_title, listingTitle, ...childTitles].filter(Boolean).join(' ');
-    const isApparelPool = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(apparelCtx);
+    // apparelCtx / isApparelPool are HOISTED to the top of this try (KEYWORD_TARGET_SET #143) so the
+    // early returns above can build a SelectionContext. Same values, computed once.
     // #280 universe terms keep the TOKEN-OVERLAP exemption above (they are generic on-product category
     // angles keywordIsRelevant would wrongly strip) — but they are NOT exempt from CONTAMINATION. A broad
     // category universe's keywords_by_keyword expansion drags in foreign-language dupes ("camisas para
@@ -398,17 +521,19 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       for (const kw of universeDrop) offNiche.add(kw);
     }
 
-    if (offNiche.size === 0) return addSynonyms(kept);
+    if (offNiche.size === 0) return rated(addSynonyms(kept));
     const kept2 = kept.filter((k) => !offNiche.has(k.keyword));
     if (kept2.length === 0 && before > 0) {
       console.warn(`[syncKeywordIntelligence] off-niche gate would drop ALL for ${asin} — keeping ${kept.length} (never-collapse floor)`);
-      return addSynonyms(kept);
+      return rated(addSynonyms(kept));
     }
     console.log(`[syncKeywordIntelligence] off-niche gate for ${asin}: dropped ${offNiche.size} off-niche (${kept2.length}/${kept.length} kept)`);
-    return addSynonyms(kept2);
+    return rated(addSynonyms(kept2));
   } catch (e) {
     console.warn('[syncKeywordIntelligence] relevance gate failed (non-fatal; pool unfiltered):', e instanceof Error ? e.message : e);
-    return keywords;
+    // ctx:null — the OUTER catch cannot have established context, so storeAnalysis must write the
+    // legacy payload and preserve stored signals. An INERT ctx here would look like a real answer.
+    return { keywords, ctx: null, ratings: null, themeRunId: null };
   }
 }
 
@@ -455,7 +580,26 @@ function buildResultFromStored(
   asin: string,
   stored: ReturnType<typeof getStoredAnalysis> extends Promise<infer T> ? NonNullable<T> : never
 ): EngineResult {
-  const sorted = [...stored].sort((a, b) => b.opportunityScore - a.opportunityScore);
+  // KEYWORD_TARGET_SET (#143). `stored` arrives from getStoredAnalysis, which at `on` ALREADY
+  // ordered it selection_rank-first. Re-sorting by opportunityScore here would throw that away and
+  // hand back the gap-amplified ordering this PR exists to stop — so at `on` the incoming order is
+  // authoritative and only the pooled tail (rank NULL) needs the legacy sort.
+  //
+  // No `resolveRankingTargets` here, deliberately: this is a synchronous helper with no DB access,
+  // so it cannot build a real SelectionContext, and the recompute branch on a ≤30-keyword pool would
+  // then run against `designSeasons: []` — routing a Valentine design's own keywords to BACKEND.
+  // Reordering what the writer already decided is the correct scope for this site; deciding
+  // membership is not.
+  const targetsLive = selectionMode() === 'on';
+  const sorted = targetsLive
+    ? [...stored].sort((a, b) => {
+        const ar = typeof a.selectionRank === 'number' ? a.selectionRank : Infinity;
+        const br = typeof b.selectionRank === 'number' ? b.selectionRank : Infinity;
+        if (ar !== br) return ar - br;
+        if (b.opportunityScore !== a.opportunityScore) return b.opportunityScore - a.opportunityScore;
+        return a.keyword.localeCompare(b.keyword);
+      })
+    : [...stored].sort((a, b) => b.opportunityScore - a.opportunityScore);
   return {
     asin,
     analyzedAt: new Date().toISOString(),

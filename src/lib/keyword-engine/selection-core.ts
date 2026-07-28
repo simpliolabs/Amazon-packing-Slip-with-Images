@@ -134,14 +134,28 @@ export interface TargetInput {
   /** MARKET-wide sales for the keyword. Feeds `marketScore` ONLY — never the proven floor. */
   keywordSales: number
   competingProducts: number
-  /** THIS ASIN's organic rank. Feeds the 1→2 proven floor only. */
-  organicRank: number | null
+  /** THIS ASIN's organic rank. Feeds the 1→2 proven floor only.
+   *  OPTIONAL KEY (#143) for the same reason as `prevSelectionRank` below: `AnalyzedKeyword` declares
+   *  it `organicRank?: number | null` (it is null for native SQP/JS rows), and the sole read at :284
+   *  is already `typeof rank === 'number' && Number.isFinite(rank)`, so an absent key and an explicit
+   *  null are indistinguishable — both mean "not ranking / not measured", both skip the proven floor. */
+  organicRank?: number | null
   /** Read ONLY by the 1→2 proven floor (DEFENDED). Never rewritten by this module. */
   actionType: string
-  themeFit: ThemeBand | null
-  themeAbout: string | null
-  /** Previous selection_rank, for the incumbency damper only. */
-  prevSelectionRank: number | null | undefined
+  /** OPTIONAL KEYS (#143), same rationale as `organicRank`: the reader-facing `AnalyzedKeyword`
+   *  leaves these absent at off/shadow, and `effectiveBand` reads `k.themeFit ?? 2` — so absent and
+   *  explicit-null are already the same thing (unrated ⇒ band 2, never hard-gated). */
+  themeFit?: ThemeBand | null
+  themeAbout?: string | null
+  /** Previous selection_rank, for the incumbency damper only.
+   *
+   *  OPTIONAL KEY (#143, 2026-07-24). The value type always admitted `undefined`, but a required KEY
+   *  meant `AnalyzedKeyword` could not structurally satisfy `TargetInput` — and the alternative,
+   *  putting `prevSelectionRank` on the read type, would invite a READER to pass this run's rank as
+   *  the previous one and silently freeze the selection through the incumbency bonus. The only read
+   *  (:287) is `typeof k.prevSelectionRank === 'number'`, so an absent key behaves exactly as an
+   *  explicit `undefined` did: no incumbent, no bonus. The WRITE path still passes it explicitly. */
+  prevSelectionRank?: number | null
 }
 
 /** Listing-level context. `haystack` and `isApparel` are REQUIRED because `isOffNicheKeyword`
