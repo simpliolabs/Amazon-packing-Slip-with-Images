@@ -32,6 +32,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { syncKeywordIntelligence } from '@/lib/sync/syncKeywordIntelligence';
 import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
+// KEYWORD_TARGET_SET (#143). `targetSetLive` is computed SERVER-side and sent to the client: the
+// browser must never call selectionMode() (a non-NEXT_PUBLIC_ env var reads undefined there, so it
+// would always say 'off'), and gating the UI on payload row-shape instead would make a rollback
+// need data surgery rather than an env flip.
+import { selectionMode, resolveRankingTargets, legacyTierBuckets } from '@/lib/keyword-engine/selection-core';
+import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
 import { checkPresenceAny } from '@/lib/keyword-engine/checkPresence';
@@ -81,7 +87,9 @@ export async function GET(
 
     if (storedOnly) {
       // Fast path: return stored analysis without any API calls.
-      let stored = await getStoredAnalysis(childAsin, 100);
+      // readWindow widens to RANKING_CANDIDATE_POOL at `on` ONLY, so all 30 targets are inside
+      // the window (§P precondition). At off/shadow it returns 100 unchanged — byte-identical.
+      let stored = await getStoredAnalysis(childAsin, readWindow(100));
 
       // Real research timestamp (keyword_cache.fetched_at) — drives the self-heal below AND lets the
       // UI detect when a background re-research completed (auto-chain). analyzedAt is the RESPONSE
@@ -124,7 +132,7 @@ export async function GET(
               forceRefresh: false, includeJungleScout: true, useStoredAnalysis: false,
               parentAsin: parentAsin || undefined, listingTitle: promoteTitle,
             })
-            const promoted = await getStoredAnalysis(childAsin, 100)
+            const promoted = await getStoredAnalysis(childAsin, readWindow(100))
             if (promoted && promoted.length > (stored?.length ?? 0)) {
               stored = promoted
               console.log(`[intelligence] self-heal ${childAsin}: promoted to ${promoted.length} keywords`)
@@ -153,20 +161,31 @@ export async function GET(
       // Group by category and apply dynamic cap:
       // CRITICAL: 5-10 (show all scoring ≥50, min 5, max 10)
       // UPGRADE/REINFORCE/DEFENDED: top 10 each
-      const criticalAll = stored.filter(k => k.actionType === 'CRITICAL')
-        .sort((a, b) => b.opportunityScore - a.opportunityScore);
-      const criticalCapped = criticalAll.length <= 5
-        ? criticalAll
-        : criticalAll.filter(k => k.opportunityScore >= 50).slice(0, 10).length >= 5
-          ? criticalAll.filter(k => k.opportunityScore >= 50).slice(0, 10)
-          : criticalAll.slice(0, 5);
-
-      const upgradeTop = stored.filter(k => k.actionType === 'UPGRADE')
-        .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-      const reinforceTop = stored.filter(k => k.actionType === 'REINFORCE')
-        .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-      const defendedTop = stored.filter(k => k.actionType === 'DEFENDED')
-        .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+      // KEYWORD_TARGET_SET (#143). This was a VERBATIM copy of engine.ts's bucket arithmetic — two
+      // copies of one rule, which is how this codebase grew seven disagreeing definitions of
+      // "covered". Both now call the single `legacyTierBuckets`, and at `on` the resolver returns
+      // the 30 persisted targets instead (falling open to exactly this legacy list on any
+      // degenerate verdict).
+      //
+      // The ctx is loaded, not inert: the rows carry `selection_rank` at `on`, so the persisted
+      // branch normally answers without touching ctx — but the recompute fallback on a thin pool
+      // MUST see the real designSeasons or it routes the design's own occasion to BACKEND.
+      // summary.critical counted the UNCAPPED CRITICAL list, so it is captured BEFORE the buckets
+      // are replaced — the tier list changing must not silently change the badge above it.
+      const criticalCount = stored.filter(k => k.actionType === 'CRITICAL').length;
+      const selCtx = await loadSelectionContext({
+        supabase,
+        childAsin,
+        parentAsin,
+        site: 'intelligence.route',
+      });
+      const topOpportunities = resolveRankingTargets(stored, {
+        legacy: legacyTierBuckets,
+        site: 'intelligence.route',
+        ctx: selCtx,
+        inputAsin,
+        resolvedAsin: childAsin,
+      });
 
       result = {
         asin: childAsin,
@@ -175,10 +194,10 @@ export async function GET(
         researchedAt,
         dataSource: stored[0]?.dataSource ?? 'sqp',
         totalKeywordsAnalyzed: stored.length,
-        topOpportunities: [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop],
+        topOpportunities,
         allKeywords: stored,
         summary: {
-          critical: criticalAll.length,
+          critical: criticalCount,
           upgrade: stored.filter(k => k.actionType === 'UPGRADE').length,
           reinforce: stored.filter(k => k.actionType === 'REINFORCE').length,
           defended: stored.filter(k => k.actionType === 'DEFENDED').length,
@@ -319,6 +338,16 @@ export async function GET(
       apiUsage,
       jungleScoutEnabled: jsStatus.enabled,
       jungleScoutMessage: jsStatus.message,
+      // KEYWORD_TARGET_SET (#143). THE single switch the Intelligence tab gates every new UI branch
+      // on. Server-computed for two reasons, both load-bearing:
+      //   1. selectionMode() reads a non-NEXT_PUBLIC_ env var, so in the browser it is ALWAYS 'off'
+      //      (commit 8581e63: a build-time-inlined flag read ON in the UI while being dead-code-
+      //      eliminated from the bundle). The client cannot answer this question for itself.
+      //   2. Gating on payload row-shape instead (\"does this row have selectionRank?\") would keep
+      //      the new UI alive after a rollback, because the COLUMNS survive an env flip by design.
+      //      A boolean the server recomputes each request makes rollback env+restart with no data
+      //      surgery — which is the entire shadow/on contract.
+      targetSetLive: selectionMode() === 'on',
     });
 
   } catch (error) {

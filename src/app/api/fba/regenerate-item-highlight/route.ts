@@ -13,6 +13,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis } from '@/lib/keyword-engine'
+import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selection-core'
+import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { buildItemHighlights } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
@@ -57,7 +59,31 @@ export async function POST(req: NextRequest) {
     const designAnchor = designName || detailValueToString((scoreRow as { design_name_override?: string } | null)?.design_name_override)
 
     const resolved = await resolveToChildAsin(parent_asin.toUpperCase(), supabase)
-    const analysis = (resolved ? await getStoredAnalysis(resolved.childAsin, 100) : []) ?? []
+    const analysis = (resolved ? await getStoredAnalysis(resolved.childAsin, readWindow(100)) : []) ?? []
+    // KEYWORD_TARGET_SET (#143). This route BYPASSES runListingPipeline entirely, so it must resolve
+    // its own targets — buildItemHighlights sorts contextKws by opportunityScore, which is the
+    // gap-amplified score this PR exists to stop trusting. Without this, the one surface that skips
+    // the pipeline would keep feeding off-theme keywords to the highlight prompt after the flip.
+    //
+    // BACKEND-slot targets are excluded: an item highlight is customer-facing copy, and that slot
+    // exists precisely for terms it must never contain.
+    let hlAnalysis = analysis
+    if (selectionMode() === 'on' && resolved) {
+      const selCtx = await loadSelectionContext({
+        supabase,
+        childAsin: resolved.childAsin,
+        parentAsin: resolved.parentAsin ?? null,
+        site: 'regenerate-item-highlight',
+      })
+      const targeted = resolveRankingTargets(analysis, {
+        legacy: (r) => [...r],
+        site: 'regenerate-item-highlight',
+        ctx: selCtx,
+        inputAsin: resolved.childAsin,
+      }).filter((k) => k.selectionSlot !== 'BACKEND')
+      // Fail-open: an empty result would starve the prompt of context entirely.
+      if (targeted.length > 0) hlAnalysis = targeted
+    }
 
     // Facts the highlight grounds in: the stored detail rows (the DB lookup). Shape matches the
     // generator's `details` param exactly (Parameters<>[3]) so the compiler enforces it.
@@ -72,7 +98,7 @@ export async function POST(req: NextRequest) {
     const openai = await openaiClient()
     let hl = ''
     try {
-      hl = await buildItemHighlights(openai, title, designAnchor, factRows, analysis, 'THE CEO', apparel, false)
+      hl = await buildItemHighlights(openai, title, designAnchor, factRows, hlAnalysis, 'THE CEO', apparel, false)
     } catch (e) {
       return NextResponse.json({ error: 'Generation failed: ' + (e instanceof Error ? e.message : String(e)) }, { status: 500 })
     }

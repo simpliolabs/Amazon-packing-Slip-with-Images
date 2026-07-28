@@ -14,6 +14,9 @@
 import { checkPresence, checkPresenceAny, ListingContent } from './checkPresence';
 import { calculateScore, ScoringInputs } from './calculateScore';
 import { generateAction, prioritizeActions, KeywordAction, ActionContext } from './generateActions';
+// KEYWORD_TARGET_SET (#143): the ONE copy of the legacy 4-bucket tier arithmetic, previously
+// duplicated verbatim here and in the Intelligence route.
+import { legacyTierBuckets } from './selection-core';
 
 /**
  * Raw search-volume noise floor. Keywords below this monthly volume are dropped
@@ -110,6 +113,33 @@ export interface AnalyzedKeyword {
    *  null = not ranking / not measured. The rank tracker snapshots this over time. */
   organicRank?: number | null;
   scoreBreakdown?: object;
+
+  /* ── KEYWORD_TARGET_SET (#143, 2026-07-24) ────────────────────────────────────────────────────
+   * Populated by cacheService.getStoredAnalysis's mapper, and ONLY when selectionMode() === 'on'
+   * AND migration 049 has landed. At off/shadow these stay absent, which is what lets every
+   * consumer fall open to its legacy list without a second code path.
+   *
+   * ALL OPTIONAL, deliberately. Three reasons, each of which would otherwise be a build break:
+   *   1. `attributeAsKeyword` at listingPipeline.ts:5461 casts a hand-built literal with
+   *      `as AnalyzedKeyword` — required fields there would fail the assertion.
+   *   2. The client hand-mirrors this interface (KeywordIntelligencePanel.tsx:25,
+   *      OptimizerView.tsx:21). Optional fields keep those compiling untouched (PO Q3: defer).
+   *   3. Pre-migration rows genuinely lack these columns; `undefined` is the honest value, and
+   *      `selectRankingTargets` already treats a null band as 2 rather than hard-gating it.
+   *
+   * NOTE `prevSelectionRank` is deliberately NOT here. It is the selector's incumbency damper
+   * input, read from the PRIOR row inside storeAnalysis's readPriorSignals — a write-time
+   * concept. Putting it on the read type would invite a reader to pass this run's rank as the
+   * previous one and silently freeze the selection.
+   */
+  themeFit?: 0 | 1 | 2 | 3 | null;
+  themeAbout?: string | null;
+  themeRunId?: string | null;
+  /** THE membership predicate's backing column. NOT NULL = ranking target. Read via
+   *  `isRankingTarget(row)`, never by comparing to a literal — see selection-core.ts. */
+  selectionRank?: number | null;
+  selectionSlot?: 'CORE' | 'CATEGORY' | 'BACKEND' | null;
+  selectionReason?: string | null;
 }
 
 export interface EngineResult {
@@ -307,22 +337,19 @@ export function runKeywordEngine(
   // Group by category with dynamic cap:
   // CRITICAL: 5-10 (all scoring ≥50, min 5, max 10)
   // UPGRADE/REINFORCE/DEFENDED: top 10 each
-  const criticalAll = analyzed.filter(a => a.actionType === 'CRITICAL')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore);
-  const criticalCapped = criticalAll.length <= 5
-    ? criticalAll
-    : criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10).length >= 5
-      ? criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10)
-      : criticalAll.slice(0, 5);
-
-  const upgradeTop = analyzed.filter(a => a.actionType === 'UPGRADE')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-  const reinforceTop = analyzed.filter(a => a.actionType === 'REINFORCE')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-  const defendedTop = analyzed.filter(a => a.actionType === 'DEFENDED')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-
-  const topOpportunities = [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop];
+  //
+  // KEYWORD_TARGET_SET (#143). This arithmetic existed VERBATIM in two places — here and at
+  // intelligence/[asin]/route.ts — so a change to one silently disagreed with the other. It is now
+  // the single exported `legacyTierBuckets`, byte-for-byte identical (including the in-place-sort
+  // fix: the original `.filter().sort()` sorted the filtered copy, but `.slice()` before `.sort()`
+  // is now explicit so the caller's array can never be reordered underneath it).
+  //
+  // DELIBERATELY NOT `resolveRankingTargets` HERE. `runKeywordEngine` is called immediately BEFORE
+  // `storeAnalysis` in the same request, on rows that carry no `selection_rank` yet — so resolving
+  // here would recompute a selection that storeAnalysis is about to compute again from the merged
+  // pool, and the two could differ (this pool is pre-merge). One place computes selection: the
+  // write path. Everything else reads what it wrote.
+  const topOpportunities = legacyTierBuckets(analyzed);
 
   // Summary counts
   const summary = {

@@ -18,6 +18,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
+import { selectionMode } from '@/lib/keyword-engine/selection-core'
+import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 // BACKEND_DEGRADE_STRICT import intentionally omitted: adversarial review 2026-07-22 confirmed the
@@ -229,14 +231,14 @@ async function buildKeywordContext(
   }
 
   // Try the resolved ASIN first, then fallback to parent_asin, then children[0]
-  let analysis = await getStoredAnalysis(lookupAsin, 50)
+  let analysis = await getStoredAnalysis(lookupAsin, readWindow(50))
   if (!analysis || analysis.length === 0) {
-    analysis = await getStoredAnalysis(parentAsin, 50)
+    analysis = await getStoredAnalysis(parentAsin, readWindow(50))
   }
   if (!analysis || analysis.length === 0) {
     const firstChild = children[0]?.asin
     if (firstChild && firstChild !== lookupAsin) {
-      analysis = await getStoredAnalysis(firstChild, 50)
+      analysis = await getStoredAnalysis(firstChild, readWindow(50))
     }
   }
 
@@ -602,7 +604,9 @@ export async function POST(req: NextRequest) {
     // keywords the covered terms collapse to raw/3 and sink BELOW the top-50 cut — the
     // next regen then never even saw the listing's best (now-covered) terms. The pipeline's
     // own pools slice and byte-cap downstream; passing the full stored universe costs nothing.
-    const analysis = (await getStoredAnalysis(analysisAsin, 150)) ?? []
+    // Runs BEFORE onlySection is decided, so the FULL dbPayload path and every section-regen
+    // early-return inherit the same window (dual-write-path parity, structurally).
+    const analysis = (await getStoredAnalysis(analysisAsin, readWindow(150))) ?? []
 
     // ── #79 per-section regen: load the STORED recommendation — its title/bullets anchor the
     // partial run (bullets regenerate against the already-approved title). Row missing or
@@ -715,8 +719,23 @@ export async function POST(req: NextRequest) {
             console.warn('[ai-recommendations] vision scan failed (non-fatal):', err)
           }
 
+          // KEYWORD_TARGET_SET (#143). ONE ctx per request, hoisted above the pipeline call. This is
+          // the ONLY caller of runListingPipeline in the codebase (grep-verified), so threading it
+          // here covers 100% of pipeline invocations — which is what makes deriveDesignSeasons'
+          // UNION provably a superset of the selector's, the direction where a disagreement costs a
+          // missed placement rather than a dock no regenerate can clear.
+          // Zero queries at `off` (loadSelectionContext short-circuits before any await).
+          const pipelineSelCtx = await loadSelectionContext({
+            supabase,
+            childAsin: analysisAsin,
+            parentAsin: parent_asin,
+            scoreRow: pipelineScoreRow,
+            site: 'ai-recommendations.pipeline',
+          });
+
           const result = await runListingPipeline({
             openai,
+            selectionCtx: pipelineSelCtx,
             brandName,
             category: ptCategory ?? inputJson.category,
             productType: ptType,
@@ -774,7 +793,12 @@ export async function POST(req: NextRequest) {
           if (result.regeneratedSection && storedRec) {
             emit({ type: 'progress', message: 'Saving the regenerated section…' })
             const sec = result.regeneratedSection
-            const storedPlan = (storedRec.keyword_plan as { bullets?: string[]; designName?: string; coupleConcept?: string } | null) ?? {}
+            const storedPlan = (storedRec.keyword_plan as { bullets?: string[]; designName?: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[]; selected?: string[]; selectionSha?: string } | null) ?? {}
+            // KEYWORD_TARGET_SET (#143): carry the derived-mirror fields through every partial write
+            // so a section regen cannot silently drop them from the stored plan.
+            const planCarry = selectionMode() !== 'off'
+              ? { selected: result.keywordPlan.selected ?? storedPlan.selected, selectionSha: result.keywordPlan.selectionSha ?? storedPlan.selectionSha }
+              : {}
             let actionPlan = Array.isArray(storedRec.action_plan) ? [...(storedRec.action_plan as Record<string, unknown>[])] : []
             const patchItem = (match: (el: string) => boolean, content: string | string[]) => {
               actionPlan = actionPlan.map((it) => match(String(it.element ?? ''))
@@ -785,14 +809,29 @@ export async function POST(req: NextRequest) {
             if (sec === 'title') {
               upd.recommended_title = result.recommended_title
               if (result.per_child_titles) upd.per_child_titles = result.per_child_titles
-              upd.keyword_plan = { bullets: storedPlan.bullets ?? [], designName: result.keywordPlan.designName, coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept }
+              // LIVE DATA-LOSS FIX (#143, migration 049's header calls this out). This write omitted
+              // `perDesign`, so a TITLE-ONLY regen silently wiped the per-design bullet partition —
+              // the multi-design fan-out then had nothing to scope to, and every child fell back to
+              // broadcast copy. `bullets` was already preserved from storedPlan; perDesign was not.
+              //
+              // Gated on `!== 'off'` (PO Q1 → gated, not unconditional): repairing it changes what
+              // `off` persists, and the off-parity contract is not worth breaking mid-flip. The
+              // stored value is preserved rather than recomputed — a title regen has no new bullet
+              // partition to offer, so carrying the existing one forward is the honest merge.
+              upd.keyword_plan = {
+                bullets: storedPlan.bullets ?? [],
+                designName: result.keywordPlan.designName,
+                coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept,
+                ...(selectionMode() !== 'off' ? { perDesign: result.keywordPlan.perDesign ?? storedPlan.perDesign } : {}),
+                ...planCarry,
+              }
               patchItem((el) => el === 'title', result.recommended_title)
             } else if (sec === 'bullets') {
               upd.recommended_bullets = result.recommended_bullets
               // Multi-design coherence (parity-audit #3/#23): the per-design sets regenerate on
               // partials now — persist them, or the push keeps preferring the stale stored ones.
               if (result.per_child_bullets) upd.per_child_bullets = result.per_child_bullets
-              upd.keyword_plan = { bullets: result.keywordPlan.bullets, designName: result.keywordPlan.designName || storedPlan.designName || '', coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept, perDesign: result.keywordPlan.perDesign }
+              upd.keyword_plan = { bullets: result.keywordPlan.bullets, designName: result.keywordPlan.designName || storedPlan.designName || '', coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept, perDesign: result.keywordPlan.perDesign, ...planCarry }
               result.recommended_bullets.forEach((b, i) => patchItem((el) => el === `bullet_${i + 1}`, b))
             } else if (sec === 'description') {
               upd.recommended_description = result.recommended_description

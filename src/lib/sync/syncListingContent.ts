@@ -41,7 +41,8 @@ import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
 // seasonalTerms is a ZERO-IMPORT leaf, so importing it here cannot create the scorer→pipeline cycle
 // that the deleted local BULLET_SEASONAL_TERMS copy existed to avoid.
 import { seasonsIn, isOffSeasonKeyword, isSeasonalKeywordLegacy } from '@/lib/keyword-engine/seasonalTerms'
-import { selectionMode } from '@/lib/keyword-engine/selection-core'
+import { selectionMode, isRankingTarget } from '@/lib/keyword-engine/selection-core'
+import { readWindow } from '@/lib/keyword-engine/selectionContext'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
 import { isWriteBlockedPreLaunch, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
@@ -488,12 +489,24 @@ export async function fetchScoringContext(
     try {
       // Fetch top 10 CRITICAL + top 10 UPGRADE (ordered by opportunity_score)
       // This is the actionable working set — nobody optimizes for 42 keywords.
-      const { data: kwRows } = await supabase
+      // KEYWORD_TARGET_SET (#143). Widened IN PLACE rather than routed through getStoredAnalysis:
+      // this uses the request's own supabase client, and swapping it for cacheService's module-level
+      // service-role client would change WHICH client scores a listing (the cookies()-bound-client
+      // hazard, in reverse). Same §P precondition, applied locally.
+      //
+      // ORDER and LIMIT are both gated on `on`. At off/shadow this query is byte-identical — which
+      // matters more here than anywhere else: criticalSeen consumes this window IN ORDER and caps at
+      // 10, so reordering the rows moves ctx.criticalCount and therefore the keyword dock. A flag
+      // that is supposed to be silent must not move a seller's score.
+      const ktsOn = selectionMode() === 'on'
+      let kwQ = supabase
         .from('keyword_analysis')
-        .select('keyword, action_type, opportunity_score')
+        .select(ktsOn ? 'keyword, action_type, opportunity_score, selection_rank, selection_slot' : 'keyword, action_type, opportunity_score')
         .eq('asin', kwAsin)
-        .order('opportunity_score', { ascending: false })
-        .limit(100)
+      if (ktsOn) kwQ = kwQ.order('selection_rank', { ascending: true, nullsFirst: false })
+      kwQ = kwQ.order('opportunity_score', { ascending: false })
+      if (ktsOn) kwQ = kwQ.order('keyword', { ascending: true })
+      const { data: kwRows } = await kwQ.limit(readWindow(100))
 
       if (kwRows && kwRows.length > 0) {
         // CREDIT KEYWORDS ALREADY IN THE LIVE COPY. action_type (CRITICAL/UPGRADE) is a snapshot
@@ -560,6 +573,18 @@ export async function fetchScoringContext(
           ctx.totalKeywords++
           if (leanExcluded(String(r.keyword ?? ''))) continue  // the seller's audience choice bans it — not a gap
           if (nicheExcluded(String(r.keyword ?? ''))) continue // wrong-niche equipment keyword — never a gap on apparel
+          if (ktsOn) {
+            // NON-TARGETS ARE NOT GAPS. A keyword the selector did not pick is one we are not trying
+            // to rank for, so docking the score because our copy omits it is a dock the seller can
+            // never clear by regenerating — the "art teacher clothes on a Valentine tee" complaint,
+            // expressed as points.
+            if (!isRankingTarget({ selectionRank: r.selection_rank })) continue
+            // BACKEND-slot targets are EXEMPT for the same reason, one level down: they are
+            // structurally unplaceable in title/bullets/description (an off-season holiday the copy
+            // must never contain), so they live in backend bytes by design. Ranking for a phrase the
+            // customer-facing copy is forbidden to carry is not a gap either.
+            if (r.selection_slot === 'BACKEND') continue
+          }
           switch (r.action_type) {
             case 'CRITICAL':
               if (covered(r.keyword)) break  // already in the live copy — not a gap

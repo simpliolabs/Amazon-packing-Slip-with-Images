@@ -136,6 +136,12 @@ interface AnalyzedKeyword {
   organicRank?: number | null
   prevOrganicRank?: number | null
   dataSource: string
+  /** KEYWORD_TARGET_SET (#143). Present ONLY when the server says targetSetLive; all optional so
+   *  this mirror compiles unchanged against every pre-flip payload. */
+  selectionRank?: number | null
+  selectionSlot?: 'CORE' | 'CATEGORY' | 'BACKEND' | null
+  selectionReason?: string | null
+  themeAbout?: string | null
 }
 
 interface KeywordIntelligenceResult {
@@ -143,6 +149,11 @@ interface KeywordIntelligenceResult {
   totalKeywordsAnalyzed: number; topOpportunities: AnalyzedKeyword[]
   summary: { critical: number; upgrade: number; reinforce: number; defended: number; optimized: number }
   apiUsage?: { used: number; limit: number; remaining: number; provider: string }
+  /** SERVER-COMPUTED. The client must NEVER call selectionMode(): KEYWORD_TARGET_SET is not a
+   *  NEXT_PUBLIC_ var, so in the browser it always reads 'off' (the 8581e63 shape). Gating on row
+   *  shape instead would keep the new UI alive after a rollback, because the COLUMNS survive an env
+   *  flip by design — this boolean makes rollback a pure env change. */
+  targetSetLive?: boolean
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -4280,8 +4291,25 @@ export default function ListingDetailPage() {
                       (k.keywordSales ?? 0) * 2 + (k.searchVolume ?? 0) / 100 + ((k.titleDensity ?? 99) <= 2 ? 50 : 0)
                     const rows = [...all].sort((a, b) => prio(b) - prio(a))
                     const esc = (v: unknown) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s }
-                    const csv = ['Keyword,Match Type,Search Volume,Keyword Sales,Opportunity,Title Density,Our Rank,Action']
-                      .concat(rows.map((k) => [k.keyword, 'Exact', k.searchVolume ?? '', k.keywordSales ?? '', k.opportunityScore ?? '', k.titleDensity ?? '', k.organicRank ?? '', k.actionType].map(esc).join(',')))
+                    // KEYWORD_TARGET_SET (#143): targets sort FIRST and gain Slot / Ranking Target /
+                    // Why columns — but NO ROW IS DROPPED. A PPC seed list is the seller's own media
+                    // plan: a pooled keyword can still be worth bidding on even when we are not
+                    // writing copy for it, so this ANNOTATES rather than filters. Header and row
+                    // shape are byte-identical at off/shadow.
+                    const live = !!kwData.targetSetLive
+                    const ordered = live
+                      ? [...rows].sort((x, y) => ((x.selectionRank ?? Infinity) - (y.selectionRank ?? Infinity)) || (prio(y) - prio(x)))
+                      : rows
+                    const csv = [live
+                      ? 'Keyword,Match Type,Search Volume,Keyword Sales,Opportunity,Title Density,Our Rank,Action,Slot,Ranking Target,Why'
+                      : 'Keyword,Match Type,Search Volume,Keyword Sales,Opportunity,Title Density,Our Rank,Action']
+                      .concat(ordered.map((k) => {
+                        const base: unknown[] = [k.keyword, 'Exact', k.searchVolume ?? '', k.keywordSales ?? '', k.opportunityScore ?? '', k.titleDensity ?? '', k.organicRank ?? '', k.actionType]
+                        return (live
+                          ? base.concat([k.selectionRank == null ? 'POOLED' : (k.selectionSlot ?? 'TARGET'), k.selectionRank ?? '', k.selectionReason ?? ''])
+                          : base
+                        ).map(esc).join(',')
+                      }))
                       .join('\n')
                     const a = document.createElement('a')
                     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
@@ -4412,9 +4440,13 @@ export default function ListingDetailPage() {
                   <tr>
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Keyword</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500">Vol</th>
-                    <th className="text-right px-3 py-2 font-medium text-slate-500" title="Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is">Opp</th>
+                    <th className="text-right px-3 py-2 font-medium text-slate-500" title={kwData.targetSetLive
+                      ? 'Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is. NOTE: this score no longer decides which keywords we target — the gap term made it reward keywords we do NOT cover. Ranking targets are chosen by theme fit × raw market value; see the Slot and Why columns.'
+                      : 'Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is'}>Opp</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="YOUR organic rank for this keyword (Jungle Scout, measured on each Re-research). Arrow = movement vs the previous snapshot. — = not ranking.">Rank</th>
+                    {kwData.targetSetLive && <th className="text-left px-3 py-2 font-medium text-slate-500" title="CORE = this design's own subject. CATEGORY = universal garment revenue. BACKEND = a real target, but one your visible copy must not contain (an off-season holiday) — it lives in your search terms. POOLED = indexed, but not one of the 30 we are actively targeting.">Slot</th>}
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
+                    {kwData.targetSetLive && <th className="text-left px-3 py-2 font-medium text-slate-500" title="Why this keyword is (or is not) a ranking target. Written by the selector itself, not an AI — so a demotion is always answerable.">Why</th>}
                     <th className="text-left px-3 py-2 font-medium text-slate-500" title="Where this keyword appears in YOUR listing — T=Title, B=Bullets, D=Description, K=Backend keywords. Checked LIVE against your current content every time this tab loads (push content, reload, and the flags update — no re-research needed).">Present In</th>
                   </tr>
                 </thead>
@@ -4454,6 +4486,23 @@ export default function ListingDetailPage() {
                           </span>
                         )}
                       </td>
+                      {kwData.targetSetLive && (
+                        <td className="px-3 py-2">
+                          {/* POOLED reuses the EXISTING grey (same class as OFF-PRODUCT), never the
+                              blue DEFENDED palette — blue reads as "you're covered here, hold it",
+                              which is the opposite of "we are not targeting this". */}
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                            kw.selectionRank == null ? 'bg-slate-100 text-slate-500'
+                            : kw.selectionSlot === 'CORE' ? 'bg-violet-100 text-violet-700'
+                            : kw.selectionSlot === 'CATEGORY' ? 'bg-sky-100 text-sky-700'
+                            : 'bg-slate-100 text-slate-600'
+                          }`} title={kw.selectionRank == null
+                            ? 'Pooled — still indexed via your backend terms, but not one of the 30 keywords we are actively targeting for this design.'
+                            : `Ranking target #${kw.selectionRank} of 30${kw.themeAbout ? ` — shoppers searching this want: ${kw.themeAbout}` : ''}`}>
+                            {kw.selectionRank == null ? 'POOLED' : `${kw.selectionSlot ?? 'TARGET'} #${kw.selectionRank}`}
+                          </span>
+                        </td>
+                      )}
                       <td className="px-3 py-2">
                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                           kw.actionType === 'CRITICAL' ? 'bg-red-100 text-red-700'
@@ -4463,6 +4512,13 @@ export default function ListingDetailPage() {
                           : 'bg-blue-100 text-blue-700'
                         }`}>{kw.actionType === 'IRRELEVANT' ? 'OFF-PRODUCT' : kw.actionType}</span>
                       </td>
+                      {kwData.targetSetLive && (
+                        <td className="px-3 py-2 text-[11px] text-slate-500 max-w-[240px]">
+                          {/* Rendered for POOLED rows too — "why was this demoted?" must be
+                              answerable on screen, not only in a log. */}
+                          <span title={kw.selectionReason ?? ''}>{kw.selectionReason ?? '—'}</span>
+                        </td>
+                      )}
                       <td className="px-3 py-2">
                         <div className="flex gap-1">
                           {kw.inTitle && <span className="text-[9px] bg-blue-50 text-blue-600 px-1 rounded" title="In your Title (checked live against current content)">T</span>}

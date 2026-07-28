@@ -2273,3 +2273,62 @@ describe('§R selection context (haystack + isApparel)', () => {
     expect(a.eligibleCount).not.toBe(b.eligibleCount)
   })
 })
+
+/* ── §O OPTIONAL KEYS (#143 consumer wiring) ──────────────────────────────────────────────────
+ * organicRank / themeFit / themeAbout / prevSelectionRank became OPTIONAL KEYS so the reader-facing
+ * `AnalyzedKeyword` (which leaves them absent at off/shadow) can structurally satisfy TargetInput.
+ * The claim justifying that change is that an ABSENT key and an EXPLICIT null are indistinguishable
+ * to every read. That claim is load-bearing — if it is false, a consumer passing rows straight from
+ * getStoredAnalysis silently selects a DIFFERENT 30 than the writer did, and the parity oracle
+ * would not catch it because both sides would be equally wrong. So it is pinned, not asserted.
+ */
+describe('§O optional keys — absent behaves exactly as explicit null', () => {
+  /** Same row twice: once with the four keys explicitly null, once with them absent entirely. */
+  const explicitNulls = (): TargetInput[] => [
+    { keyword: 'cupid valentine shirt', searchVolume: 33_800, keywordSales: 40, competingProducts: 2_000,
+      organicRank: null, actionType: 'CRITICAL', themeFit: null, themeAbout: null, prevSelectionRank: null },
+    { keyword: 'comfort colors tshirt', searchVolume: 306_496, keywordSales: 900, competingProducts: 8_000,
+      organicRank: null, actionType: 'DEFENDED', themeFit: null, themeAbout: null, prevSelectionRank: null },
+    { keyword: 'art teacher clothes', searchVolume: 5_331, keywordSales: 10, competingProducts: 700,
+      organicRank: null, actionType: 'CRITICAL', themeFit: null, themeAbout: null, prevSelectionRank: null },
+  ]
+  const keysAbsent = (): TargetInput[] => [
+    { keyword: 'cupid valentine shirt', searchVolume: 33_800, keywordSales: 40, competingProducts: 2_000, actionType: 'CRITICAL' },
+    { keyword: 'comfort colors tshirt', searchVolume: 306_496, keywordSales: 900, competingProducts: 8_000, actionType: 'DEFENDED' },
+    { keyword: 'art teacher clothes', searchVolume: 5_331, keywordSales: 10, competingProducts: 700, actionType: 'CRITICAL' },
+  ]
+
+  it('produces a byte-identical sha, order, slots and reasons', () => {
+    const a = selectRankingTargets(explicitNulls(), CTX)
+    const b = selectRankingTargets(keysAbsent(), CTX)
+    expect(b.sha).toBe(a.sha)
+    expect(kwOf(b.targets)).toEqual(kwOf(a.targets))
+    expect([...b.slotOf.entries()]).toEqual([...a.slotOf.entries()])
+    expect([...b.reasonOf.entries()]).toEqual([...a.reasonOf.entries()])
+    expect(b.bands).toEqual(a.bands)
+  })
+
+  it('an absent organicRank does not trip the proven floor (undefined is not a rank)', () => {
+    // The floor is 1→2 for a row ranked within PROVEN_RANK_FLOOR. Absent must read as "not ranking",
+    // exactly as null does — otherwise every unrated row from a pre-049 read would be floored.
+    const band1 = { keyword: 'graphic tees for women', searchVolume: 90_000, keywordSales: 0,
+      competingProducts: 5_000, actionType: 'CRITICAL', themeFit: 1 as const }
+    expect(effectiveBand({ ...band1, organicRank: null })).toBe(1)
+    expect(effectiveBand(band1)).toBe(1)                       // key absent
+    expect(effectiveBand({ ...band1, organicRank: 12 })).toBe(2) // genuinely ranking ⇒ floored
+  })
+
+  it('an absent themeFit is band 2 (unrated is NOT off-theme) and is never hard-gated', () => {
+    expect(effectiveBand({ keyword: 'k', searchVolume: 1, keywordSales: 0, competingProducts: 1, actionType: 'CRITICAL' })).toBe(2)
+    const v = selectRankingTargets(keysAbsent(), CTX)
+    expect(v.bands.b0).toBe(0)
+    expect(v.targets.length).toBeGreaterThan(0)
+  })
+
+  it('an absent prevSelectionRank grants no incumbency bonus', () => {
+    const base = { keyword: 'cupid shirt', searchVolume: 10_000, keywordSales: 0, competingProducts: 1_000,
+      actionType: 'CRITICAL', themeFit: 3 as const }
+    expect(targetScore(base)).toBe(targetScore({ ...base, prevSelectionRank: null }))
+    expect(targetScore({ ...base, prevSelectionRank: 4 })).toBeGreaterThan(targetScore(base))
+  })
+})
