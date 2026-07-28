@@ -14,6 +14,9 @@
 import { checkPresence, checkPresenceAny, ListingContent } from './checkPresence';
 import { calculateScore, ScoringInputs } from './calculateScore';
 import { generateAction, prioritizeActions, KeywordAction, ActionContext } from './generateActions';
+// KEYWORD_TARGET_SET (#143): the ONE copy of the legacy 4-bucket tier arithmetic, previously
+// duplicated verbatim here and in the Intelligence route.
+import { legacyTierBuckets } from './selection-core';
 
 /**
  * Raw search-volume noise floor. Keywords below this monthly volume are dropped
@@ -334,22 +337,19 @@ export function runKeywordEngine(
   // Group by category with dynamic cap:
   // CRITICAL: 5-10 (all scoring ≥50, min 5, max 10)
   // UPGRADE/REINFORCE/DEFENDED: top 10 each
-  const criticalAll = analyzed.filter(a => a.actionType === 'CRITICAL')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore);
-  const criticalCapped = criticalAll.length <= 5
-    ? criticalAll
-    : criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10).length >= 5
-      ? criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10)
-      : criticalAll.slice(0, 5);
-
-  const upgradeTop = analyzed.filter(a => a.actionType === 'UPGRADE')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-  const reinforceTop = analyzed.filter(a => a.actionType === 'REINFORCE')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-  const defendedTop = analyzed.filter(a => a.actionType === 'DEFENDED')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
-
-  const topOpportunities = [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop];
+  //
+  // KEYWORD_TARGET_SET (#143). This arithmetic existed VERBATIM in two places — here and at
+  // intelligence/[asin]/route.ts — so a change to one silently disagreed with the other. It is now
+  // the single exported `legacyTierBuckets`, byte-for-byte identical (including the in-place-sort
+  // fix: the original `.filter().sort()` sorted the filtered copy, but `.slice()` before `.sort()`
+  // is now explicit so the caller's array can never be reordered underneath it).
+  //
+  // DELIBERATELY NOT `resolveRankingTargets` HERE. `runKeywordEngine` is called immediately BEFORE
+  // `storeAnalysis` in the same request, on rows that carry no `selection_rank` yet — so resolving
+  // here would recompute a selection that storeAnalysis is about to compute again from the merged
+  // pool, and the two could differ (this pool is pre-merge). One place computes selection: the
+  // write path. Everything else reads what it wrote.
+  const topOpportunities = legacyTierBuckets(analyzed);
 
   // Summary counts
   const summary = {
