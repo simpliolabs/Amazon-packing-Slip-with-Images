@@ -12,6 +12,8 @@
 import type OpenAI from 'openai'
 import { createHash } from 'node:crypto'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
+import { selectionMode, isRankingTarget } from '@/lib/keyword-engine/selection-core'
+import { readWindow } from '@/lib/keyword-engine/selectionContext'
 import { isWithinBudget } from '@/lib/keyword-engine/cacheService'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 // COHERENCE Invariant 2/6: at COVERAGE_CORE=on the RANK panel decides coverage LIVE from the child's
@@ -139,7 +141,7 @@ export interface FreeCore {
   baselineVerdict: RankVerdict
 }
 
-function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: boolean): string {
+function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: boolean, isTarget?: boolean, slot?: string | null): string {
   // IRRELEVANT first — the keyword was classified as off-product (different niche, e.g. Star Wars
   // father's-day terms surfacing under a retirement-tee research). Adding it dilutes relevance.
   // (PO 2026-06-14: the previous "OPTIONAL — weave into bullets/backend if natural" fallback was
@@ -148,6 +150,15 @@ function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: bo
   // not yet in the ActionType union here; extending the union is a wider refactor not needed for
   // this user-facing copy fix.
   if ((actionType as string) === 'IRRELEVANT') return 'SKIP — off-product (different niche). Do NOT add — it would dilute your relevance.'
+  // KEYWORD_TARGET_SET (#143). Two SKIP branches, both preventing advice the seller cannot act on:
+  //   - NOT A TARGET: the selector did not pick this keyword, so telling the seller to add it is
+  //     advice against our own ranking plan. The row stays VISIBLE (it is still indexed via backend
+  //     bytes) but it is never presented as a gap.
+  //   - BACKEND SLOT: a target that is structurally unplaceable in customer-facing copy (an
+  //     off-season holiday). An ADD here is a task no regenerate can ever complete — the exact
+  //     "regenerate that regeneration can't fix" anti-pattern the scorer was already cured of.
+  if (isTarget === false) return 'SKIP — not a ranking target for this design (still indexed via your backend terms)'
+  if (slot === 'BACKEND') return 'BACKEND — off-season for this design; it lives in your search terms, not the visible copy'
   if (actionType === 'CRITICAL' && !youCover) return 'ADD — high-opportunity term not yet in your copy'
   if (actionType === 'UPGRADE' && !inTitle) return 'PROMOTE — present, pull into the title (higher weight)'
   if (actionType === 'DEFENDED') return "DEFEND — you're covered here; hold it"
@@ -184,13 +195,56 @@ export async function buildHaystack(parentAsin: string | null, childAsin: string
   } catch { return '' }
 }
 
+/**
+ * THE fingerprint recipe. Extracted (#143) because it previously existed TWICE — here and inline in
+ * buildFreeCore — under a comment reading "MUST match contentFingerprint()". Two copies of a hash
+ * that must agree is a silent-drift hazard: if they diverge, every cached analysis reads stale
+ * forever (permanent recompute) or fresh forever (permanently stale advice), and neither shows an error.
+ *
+ * KEYWORD_TARGET_SET inputs are appended ONLY at `on`. At off/shadow the recipe reduces to exactly
+ * today's `sha1(coverageMode + haystack)`, so merely DEPLOYING this PR invalidates nothing — the
+ * one-shot catalogue-wide recompute is the price of the FLIP, not of the deploy.
+ *
+ * Why theme_run_id belongs in the hash: without it, flipping the flag leaves every cached playbook
+ * intact and the RANK panel keeps advising "ADD art teacher clothes" indefinitely after the selector
+ * stopped treating it as a target — confidently and permanently wrong, with nothing to notice it.
+ */
+async function fingerprintOf(haystack: string, themeRunId: string | null): Promise<string> {
+  const parts = [coverageMode(), haystack]
+  if (selectionMode() === 'on') parts.push(`kts:${themeRunId ?? 'none'}`)
+  return createHash('sha1').update(parts.join('\n')).digest('hex')
+}
+
+/** The ASIN's newest theme_run_id, or null. Best-effort by design: a pre-049 database, a missing
+ *  column or an unrated pool all yield null, which simply means the fingerprint carries no rating
+ *  generation. Never an error, and never a reason to fail a page load. */
+async function newestThemeRunId(childAsin: string, supabase: AdminClient): Promise<string | null> {
+  if (selectionMode() !== 'on') return null
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await (supabase as any)
+      .from('keyword_analysis')
+      .select('theme_run_id')
+      .eq('asin', childAsin)
+      .not('theme_run_id', 'is', null)
+      .order('theme_run_id', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    return (data as { theme_run_id?: string | null } | null)?.theme_run_id ?? null
+  } catch { return null }
+}
+
 /** sha1 of the live copy — the staleness key persisted with a cached analysis (cheap: 1 query + hash). */
 export async function contentFingerprint(parentAsin: string | null, childAsin: string, supabase: AdminClient): Promise<string> {
   // Tag the fingerprint with the coverage MODE so flipping COVERAGE_CORE invalidates every cached rank
   // analysis: the cached rows were computed under the OLD predicate, so on flip the stored fingerprint
   // mismatches and the GET recomputes live under the new mode (self-healing cutover — no manual
-  // "Re-check now" per listing). Rollback (on→off) re-invalidates the same way.
-  return createHash('sha1').update(`${coverageMode()}\n${await buildHaystack(parentAsin, childAsin, supabase)}`).digest('hex')
+  // "Re-check now" per listing). Rollback (on→off) re-invalidates the same way. KEYWORD_TARGET_SET
+  // rides that same mechanism rather than inventing a second one.
+  return fingerprintOf(
+    await buildHaystack(parentAsin, childAsin, supabase),
+    await newestThemeRunId(childAsin, supabase),
+  )
 }
 
 /** FREE stored-core: top opportunity keywords × content coverage. 0 credits, 0 OpenAI. */
@@ -202,9 +256,10 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
   // fallback than resolveToChildAsin — so the keyword SET can still differ on edge cases. Unifying those
   // resolvers is a tracked follow-up; this is NOT a byte-for-byte parity guarantee with the scorer.
   const haystack = await buildHaystack(parentAsin, childAsin, supabase)
-  const fingerprint = createHash('sha1').update(`${coverageMode()}\n${haystack}`).digest('hex')   // mode-tagged, MUST match contentFingerprint()
+  // ONE recipe, shared with contentFingerprint() — see fingerprintOf.
+  const fingerprint = await fingerprintOf(haystack, await newestThemeRunId(childAsin, supabase))
 
-  let kws = await getStoredAnalysis(childAsin, 100)
+  let kws = await getStoredAnalysis(childAsin, readWindow(100))
   if (!kws || kws.length === 0) {
     return { analyzed: false, reason: 'no_keywords', rows: [], top10: [], coverage: { covered: 0, total: 0 }, criticalGaps: 0, contentFingerprint: fingerprint, baselineVerdict: buildBaselineVerdict(0, 0, 0) }
   }
@@ -297,7 +352,13 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
       actionType,
       youCover,
       coveredIn,
-      contentAction: sanitize(contentActionFor(actionType, youCover, inTitleLive)),
+      // isTarget is passed as `undefined` at off/shadow so the new SKIP branch cannot fire — the
+      // panel's advice is byte-identical until the flag is on.
+      contentAction: sanitize(contentActionFor(
+        actionType, youCover, inTitleLive,
+        selectionMode() === 'on' ? isRankingTarget({ selectionRank: k.selectionRank }) : undefined,
+        selectionMode() === 'on' ? (k.selectionSlot ?? null) : null,
+      )),
       nonContentReality: '',
       topCompetitorBrand: null,
       theirShare: null,
