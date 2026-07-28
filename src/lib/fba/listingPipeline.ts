@@ -36,7 +36,11 @@ import { SEASONAL_TERMS, seasonsIn, isOffSeasonKeyword } from '@/lib/keyword-eng
 // freezes at import and a Coolify env flip would need a rebuild). Same flag that gates the target-set
 // selector, deliberately reused: the selector classifying a keyword CORE and the generators refusing
 // to place it is precisely the drift this migration exists to close.
-import { selectionMode } from '@/lib/keyword-engine/selection-core'
+import { selectionMode, type SelectionContext } from '@/lib/keyword-engine/selection-core'
+// deriveSeasonsFrom — THE one design→occasion derivation, shared with the seven keyword-side callers
+// that cannot build a PipelineInput. selectionContext.ts imports seasonalTerms/selection-core/
+// loadListingContent only, so importing it here creates no cycle.
+import { deriveSeasonsFrom } from '@/lib/keyword-engine/selectionContext'
 import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey, deriveNicheSeeds } from '@/lib/keyword-engine/keywordResearcher'
 // Competitor SEO snapshot (title-council fallback chain Part 1): the seller-named competitor's live
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
@@ -148,6 +152,12 @@ export interface PipelineInput {
    *  is fed into the group's designNameOverride ABOVE the Amazon Color attribute, so extractDesignName
    *  returns it verbatim for that design. Absent/empty key → fall back to the Color attr → heuristic chain. */
   designNameOverridesByKey?: Record<string, string>
+  /** The SelectionContext the calling route resolved for this regen (KEYWORD_TARGET_SET).
+   *  deriveDesignSeasons UNIONS its `designSeasons` with the live derivation so the generators'
+   *  season set is provably a SUPERSET of the selector's — the direction in which a disagreement
+   *  costs a missed placement instead of a dock no regenerate can clear. Absent ⇒ live-only
+   *  derivation, i.e. exactly today. */
+  selectionCtx?: SelectionContext | null
   /** Manual multi-design classification override (migration 041). true = force multi-design,
    *  false = force single-design, null/undefined = auto-detect via designKeyForSku. */
   isMultiDesignOverride?: boolean | null
@@ -1326,16 +1336,35 @@ export interface SeasonPolicy {
  * non-seasonal design a season it does not have.
  */
 export function deriveDesignSeasons(input: PipelineInput, resolvedDesignName?: string | null): string[] {
-  const parts: string[] = [
-    (input.designNameOverride ?? '').trim(),
-    ...Object.values(input.designNameOverridesByKey ?? {}).map((v) => (v ?? '').trim()),
-    (input.visionDesign?.designTheme ?? '').trim(),
-    ...(input.visionDesign?.visualElements ?? []),
-    ...(input.visionDesign?.seedKeywords ?? []),
-    (resolvedDesignName ?? '').trim(),
-  ].filter(Boolean)
-  // UNION across every design in the family, de-duplicated, insertion-ordered (stable logs).
-  return [...new Set(seasonsIn(parts.join(' | ')))]
+  // DELEGATES to the ONE derivation (selectionContext.ts). The body used to live here, which meant
+  // the seven keyword-side callers — none of which can build a PipelineInput — had to grow their own.
+  // The four sources are IDENTICAL; only their provenance differs (live input here, persisted rows
+  // there), which is what makes the generator's strip and the selector's slot the same rule.
+  const local = deriveSeasonsFrom({
+    designNameOverride: input.designNameOverride,
+    designNameOverridesByKey: input.designNameOverridesByKey,
+    visionDesign: input.visionDesign,
+    resolvedDesignName,
+  })
+  // MONOTONE UNION — the safety property, not a nicety.
+  //
+  // The selector reads the same four signals from the DB; this function reads them LIVE. Staleness
+  // can therefore make the DB set contain a season this run's live sources do not (a re-scan changed
+  // the artwork; extractDesignName resolved differently than the name the last regen persisted).
+  //
+  // The asymmetry is NOT symmetric (slotFor, selection-core.ts:308-316):
+  //   selector ⊋ generator ⇒ a keyword is classified CORE/placeable and then STRIPPED from copy by
+  //                          this file's SeasonPolicy ⇒ a dock no regenerate can clear.
+  //   selector ⊆ generator ⇒ a placeable keyword classifies BACKEND ⇒ dock-exempt, no ADD emitted
+  //                          ⇒ a missed placement that degrades to today's blanket behaviour.
+  // Unioning the ctx the caller resolved makes `generator ⊇ selector` true BY CONSTRUCTION, so the
+  // dangerous direction is unreachable rather than merely unlikely.
+  //
+  // Safe at off/shadow regardless of how `derived` grows: makeSeasonPolicy sets
+  // `effective = mode === 'on' ? derived : []`, so a wider set changes nothing until the flip.
+  const fromCtx = input.selectionCtx?.designSeasons ?? []
+  if (fromCtx.length === 0) return local
+  return [...new Set([...local, ...fromCtx])]
 }
 
 /**

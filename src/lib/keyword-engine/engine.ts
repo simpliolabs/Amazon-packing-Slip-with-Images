@@ -110,6 +110,33 @@ export interface AnalyzedKeyword {
    *  null = not ranking / not measured. The rank tracker snapshots this over time. */
   organicRank?: number | null;
   scoreBreakdown?: object;
+
+  /* ── KEYWORD_TARGET_SET (#143, 2026-07-24) ────────────────────────────────────────────────────
+   * Populated by cacheService.getStoredAnalysis's mapper, and ONLY when selectionMode() === 'on'
+   * AND migration 049 has landed. At off/shadow these stay absent, which is what lets every
+   * consumer fall open to its legacy list without a second code path.
+   *
+   * ALL OPTIONAL, deliberately. Three reasons, each of which would otherwise be a build break:
+   *   1. `attributeAsKeyword` at listingPipeline.ts:5461 casts a hand-built literal with
+   *      `as AnalyzedKeyword` — required fields there would fail the assertion.
+   *   2. The client hand-mirrors this interface (KeywordIntelligencePanel.tsx:25,
+   *      OptimizerView.tsx:21). Optional fields keep those compiling untouched (PO Q3: defer).
+   *   3. Pre-migration rows genuinely lack these columns; `undefined` is the honest value, and
+   *      `selectRankingTargets` already treats a null band as 2 rather than hard-gating it.
+   *
+   * NOTE `prevSelectionRank` is deliberately NOT here. It is the selector's incumbency damper
+   * input, read from the PRIOR row inside storeAnalysis's readPriorSignals — a write-time
+   * concept. Putting it on the read type would invite a reader to pass this run's rank as the
+   * previous one and silently freeze the selection.
+   */
+  themeFit?: 0 | 1 | 2 | 3 | null;
+  themeAbout?: string | null;
+  themeRunId?: string | null;
+  /** THE membership predicate's backing column. NOT NULL = ranking target. Read via
+   *  `isRankingTarget(row)`, never by comparing to a literal — see selection-core.ts. */
+  selectionRank?: number | null;
+  selectionSlot?: 'CORE' | 'CATEGORY' | 'BACKEND' | null;
+  selectionReason?: string | null;
 }
 
 export interface EngineResult {
