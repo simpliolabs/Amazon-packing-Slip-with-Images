@@ -1442,9 +1442,9 @@ const BLANKET_SEASON_POLICY: SeasonPolicy = {
 export interface TargetPolicy {
   /** True only at `on` AND when the pool actually carries persisted ranks. */
   live: boolean
-  /** Keep only ranking targets. Identity when not live. */
+  /** Keep ranking targets AND never-evaluated rows. See `wasEvaluated`. Identity when not live. */
   keep: <T extends { selectionRank?: number | null }>(rows: readonly T[]) => T[]
-  /** Keep only CORE-slot targets — the title pin (PO-locked 2026-07-23: "CORE-slot only"). */
+  /** Keep CORE-slot targets AND never-evaluated rows — the title pin (PO-locked: "CORE-slot only"). */
   core: <T extends { selectionRank?: number | null; selectionSlot?: string | null }>(rows: readonly T[]) => T[]
   /** Rank for comparator use. Infinity for a non-target; Infinity for EVERY row when not live, so
    *  `targetRankGap` returns 0 and the caller's legacy ordering is untouched. */
@@ -1462,6 +1462,26 @@ function targetRankGap(
   if (!policy.live) return 0
   const ra = policy.rankOf(a), rb = policy.rankOf(b)
   return ra === rb ? 0 : ra - rb
+}
+
+/**
+ * `null` and `undefined` MEAN DIFFERENT THINGS here, and the difference is load-bearing:
+ *
+ *   selectionRank === null       the selector SAW this keyword and did not pick it  ⇒ not a target
+ *   selectionRank === undefined  the row was never in the scored pool at all        ⇒ EXEMPT
+ *
+ * The exempt case is not hypothetical. `attributeAsKeyword` (:5548) mints synthetic rows that are
+ * injected straight into `cleanGated` for two PO-approved features: the seller's own secondary
+ * design phrase ("Too Many Books", PO 2026-07-03) and identity synonyms (football/fútbol,
+ * 2026-07-15). Those rows never went through research, so they carry no rank — and filtering them
+ * out would delete the seller's own typed design phrase from the title pin. Exactly the failure the
+ * target set exists to prevent, inflicted by the target set.
+ *
+ * Rows read from `getStoredAnalysis` always carry an EXPLICIT rank (the mapper emits `?? null`), so
+ * a genuine non-target is never confused with a synthetic one.
+ */
+function wasEvaluated(k: { selectionRank?: number | null }): boolean {
+  return k.selectionRank !== undefined
 }
 
 const INERT_TARGET_POLICY: TargetPolicy = {
@@ -1488,8 +1508,8 @@ function makeTargetPolicy(analysis: readonly { selectionRank?: number | null }[]
   }
   return {
     live: true,
-    keep: (rows) => rows.filter((k) => isRankingTarget(k)),
-    core: (rows) => rows.filter((k) => isRankingTarget(k) && k.selectionSlot === 'CORE'),
+    keep: (rows) => rows.filter((k) => !wasEvaluated(k) || isRankingTarget(k)),
+    core: (rows) => rows.filter((k) => !wasEvaluated(k) || (isRankingTarget(k) && k.selectionSlot === 'CORE')),
     rankOf: (k) => (typeof k.selectionRank === 'number' && Number.isFinite(k.selectionRank) ? k.selectionRank : Infinity),
   }
 }
@@ -8290,7 +8310,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // KEYWORD_TARGET_SET (#143): bullets carry only ranking targets, and never a BACKEND-slot one —
     // that slot exists precisely for terms customer-facing copy must not contain. Both no-ops at
     // off/shadow (targets.live === false).
-    if (targets.live && !isRankingTarget(k)) continue
+    if (targets.live && wasEvaluated(k) && !isRankingTarget(k)) continue
     if (targets.live && k.selectionSlot === 'BACKEND') continue
     if (titleLc.includes(k.keyword.toLowerCase())) continue
     if (season.isOffSeason(k.keyword)) continue
