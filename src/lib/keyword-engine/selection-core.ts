@@ -450,6 +450,30 @@ export function selectRankingTargets<T extends TargetInput>(
     .sort((a, b) => byScoreThenKeyword(a.row, b.row))
   for (const e of offSeasonByScore) place(e)
 
+  // CORE RESERVATION (2026-07-29, task #144 replay on B0GF49RLDL). Same disease as the BACKEND
+  // reservation above, same cure: the main pass below runs in GLOBAL score order and
+  // CASCADE.CATEGORY includes 'CORE', so a broad listing's 60+ high-volume CATEGORY rows drain
+  // their 10 buckets and then flood the 14 CORE buckets before a single 450/mo band-3 row is
+  // reached. Replayed on the real 92-row pool: 9 eligible CORE rows, 1 selected — the design's own
+  // subject locked out of its own reserved seats by `comfort colors tshirt` (215k) et al. That is
+  // the harvest bug's shape recurring one layer up: every volume-flavored contest buries the niche.
+  //
+  // CORE-classified rows claim CORE buckets FIRST, best-scored first. BOUNDED at TARGET_SLOTS.CORE
+  // by the `remaining.CORE` guard: while it holds, place() consumes CASCADE.CORE[0] = 'CORE'
+  // exactly, so this pass can never touch a CATEGORY or BACKEND bucket — overflow CORE rows (a
+  // listing with >14 band-3 terms) compete in the main pass on score like everyone else. Unfilled
+  // CORE seats still cascade to CATEGORY exactly as before, so a design with few or no band-3 rows
+  // is byte-identical to today — and the category head (PO 2026-07-29: "comfort colors should
+  // still be there and addressed in content") keeps every seat this pass does not explicitly hand
+  // to the design's own subject.
+  const coreByScore = eligible
+    .filter((e) => e.slot === 'CORE')
+    .sort((a, b) => byScoreThenKeyword(a.row, b.row))
+  for (const e of coreByScore) {
+    if (remaining.CORE <= 0) break
+    place(e)
+  }
+
   // Backstop members claim membership first so a misfiring rater run cannot cost the listing its
   // biggest legitimate traffic — but `chosen` is re-sorted by score below, so claiming membership
   // early never buys a better RANK than the score earns.
