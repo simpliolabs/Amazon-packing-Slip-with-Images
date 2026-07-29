@@ -367,14 +367,20 @@ describe('§A B0GF49RLDL acceptance — relevance must out-rank the presence pre
     expect(v.source).toBe('selector')
     expect(v.bands).toEqual({ b0: 4, b1: 2, b2: 7, b3: 9 })
     expect(v.bands.b0 + v.bands.b1 + v.bands.b2 + v.bands.b3).toBe(B0GF49RLDL().length)
-    expect(v.eligibleCount).toBe(18) // 22 rows − 4 band-0, none of which the backstop rescues
+    // 22 rows − 4 band-0 = 18, then §R's intent collapse folds the two variant pairs this pool
+    // carries: `womens valentines day shirt` → `valentines day shirts for women` (identical token
+    // set) and `tee shirts` → `shirt` (both are the bare garment noun after foldGarment) ⇒ 16
+    // DISTINCT eligible intents. The band census above stays pre-collapse — it counts rows.
+    expect(v.eligibleCount).toBe(16)
   })
 
-  it('selects ALL 18 eligible rows with dense ranks and honest slot counts', () => {
+  it('selects ALL 16 distinct eligible intents with dense ranks and honest slot counts', () => {
     const v = selectRankingTargets(B0GF49RLDL(), B0GF49RLDL_CTX)
-    expect(v.targets).toHaveLength(18)
-    expect(kwOf(v.targets).map((k) => v.rankOf.get(k))).toEqual(Array.from({ length: 18 }, (_, i) => i + 1))
-    expect(v.slotCounts).toEqual({ CORE: 9, CATEGORY: 8, BACKEND: 1 })
+    expect(v.targets).toHaveLength(16)
+    expect(kwOf(v.targets).map((k) => v.rankOf.get(k))).toEqual(Array.from({ length: 16 }, (_, i) => i + 1))
+    // One CORE variant (`womens valentines day shirt`) and one CATEGORY variant (`tee shirts`)
+    // collapsed into their kept forms, so each slot count drops by exactly one vs the pre-§R 9/8/1.
+    expect(v.slotCounts).toEqual({ CORE: 8, CATEGORY: 7, BACKEND: 1 })
     expect(SLOTS.reduce((n, s) => n + v.slotCounts[s], 0)).toBe(v.targets.length)
   })
 
@@ -420,16 +426,20 @@ describe('§A B0GF49RLDL acceptance — relevance must out-rank the presence pre
     // the field is required by the type, but `[]` is a legal, silent, wrong value.
     const v = selectRankingTargets(B0GF49RLDL(), CTX) // CTX.designSeasons === []
     expect(CTX.designSeasons).toEqual([])
-    expect(v.targets).toHaveLength(16)
-    expect(v.slotCounts).toEqual({ CORE: 2, CATEGORY: 8, BACKEND: 6 })
+    // §R note: the collapse folds `womens valentines day shirt` into `valentines day shirts for
+    // women`, shrinking the 8 seasonal contenders to 7 — so ONE seat frees up and `valentine shirt
+    // women` now squeaks into the 6-wide BACKEND bucket. The design's own subject still loses
+    // `pixel art valentine tee` outright, which is the disease this test preserves as evidence.
+    expect(v.targets).toHaveLength(15)
+    expect(v.slotCounts).toEqual({ CORE: 2, CATEGORY: 7, BACKEND: 6 })
     expect(v.slotCounts.BACKEND).toBe(TARGET_SLOTS.BACKEND)
-    for (const kw of ['valentine shirt women', 'pixel art valentine tee']) {
-      expect(kwOf(v.targets)).not.toContain(kw)
-      // The copy names the real cause — a 6-wide bucket, not a rank-30 cut (§H).
-      expect(v.reasonOf.get(kw)).toBe(
-        'eligible (BACKEND) but the BACKEND quota of 6 was already full — still indexed via backend terms',
-      )
-    }
+    expect(kwOf(v.targets)).toContain('valentine shirt women')
+    expect(v.slotOf.get('valentine shirt women')).toBe('BACKEND') // customer-facing copy still can't hold it
+    expect(kwOf(v.targets)).not.toContain('pixel art valentine tee')
+    // The copy names the real cause — a 6-wide bucket, not a rank-30 cut (§H).
+    expect(v.reasonOf.get('pixel art valentine tee')).toBe(
+      'eligible (BACKEND) but the BACKEND quota of 6 was already full — still indexed via backend terms',
+    )
     for (const t of v.targets) {
       if (isSeasonalKeyword(t.keyword)) expect(v.slotOf.get(t.keyword)).toBe('BACKEND')
       else expect(v.slotOf.get(t.keyword)).not.toBe('BACKEND')
@@ -1336,7 +1346,8 @@ describe('§J edge cases', () => {
     const v = selectRankingTargets([dupe, { ...dupe }, { ...dupe }], CTX)
     expect(v.targets).toHaveLength(1)
     expect(v.bands.b3).toBe(3) // …but the band census still counts all three rows
-    expect(v.eligibleCount).toBe(3)
+    // §R: three identical keywords are ONE search intent, so post-collapse eligibleCount is 1.
+    expect(v.eligibleCount).toBe(1)
   })
 })
 
@@ -1769,7 +1780,7 @@ describe('§P resolveRankingTargets', () => {
     expect(line.failOpen).toBe(false)
     expect(line.nPool).toBe(22)
     expect(line.nLegacy).toBe(4)
-    expect(line.nNext).toBe(16)
+    expect(line.nNext).toBe(15) // §R: 16 pre-collapse − the `tee shirts`→`shirt` merge (seasons [])
     expect(line.shaNext).toBe(selectRankingTargets(rows, CTX).sha)
     expect(line.shaLegacy).toBe(selectionSha(kwOf(legacyOf(rows))))
   })
@@ -1780,7 +1791,7 @@ describe('§P resolveRankingTargets', () => {
     const rows = pool()
     const out = resolveRankingTargets(rows, { legacy: legacyOf, site: 'test', ctx: CTX })
     expect(kwOf(out)).toEqual(kwOf(selectRankingTargets(rows, CTX).targets))
-    expect(out).toHaveLength(16)
+    expect(out).toHaveLength(15) // §R: see the CONSEQUENCE test — 16 → 15 under the collapse
   })
 
   it('on ⇒ still emits the parity line (unlike TITLE_COUNCIL_V3, it does not go dark after the flip)', () => {
@@ -2364,19 +2375,27 @@ describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
     themeAbout: (r.themeAbout ?? null) as string | null,
   }))
 
-  it('every eligible band-3 row wins a CORE seat (9/9), not 1/9', () => {
+  it('every eligible band-3 INTENT wins a CORE seat (7/7 post-collapse), not 1/9', () => {
     const v = selectRankingTargets(rows(), LIVE_CTX)
-    expect(v.slotCounts.CORE).toBe(9)
+    // §R folds the pool's 9 band-3 rows into 7 distinct intents: `adult valentines shirt` →
+    // `adult valentine shirt` and `black valentine shirt` → `black valentines shirt` (identical
+    // token sets after foldPlural). Every DISTINCT intent still wins its seat — the reservation's
+    // whole claim — and the collapsed spellings are covered by the kept forms.
+    expect(v.slotCounts.CORE).toBe(7)
     expect(v.targets.length).toBe(RANKING_TARGET_COUNT)
     for (const kw of ['adult valentine shirt', 'black valentines day shirt', 'bling valentine tops for women']) {
       expect(v.slotOf.get(kw)).toBe('CORE')
     }
+    expect(v.reasonOf.get('adult valentines shirt')).toMatch(/variant of "adult valentine shirt"/)
   })
 
-  it('the category head is NOT evicted — comfort colors stays at rank 1 with 21 seats (PO 2026-07-29)', () => {
+  it('the category head is NOT evicted — comfort colors stays at rank 1 with 23 seats (PO 2026-07-29)', () => {
     const v = selectRankingTargets(rows(), LIVE_CTX)
     expect(v.rankOf.get('comfort colors tshirt')).toBe(1)
-    expect(v.slotCounts.CATEGORY).toBe(21)
+    // 21 → 23: the two CORE seats freed by the band-3 collapse cascade to CATEGORY rows, so the
+    // category side GAINS from §R — the PO's "comfort colors should still be there" constraint
+    // is structurally safer than before.
+    expect(v.slotCounts.CATEGORY).toBe(23)
   })
 
   it('with no seasonal theme the verdict is unchanged from the pre-fix behaviour (0 CORE, 6 BACKEND)', () => {
@@ -2386,15 +2405,102 @@ describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
     expect(v.slotCounts).toEqual({ CORE: 0, CATEGORY: 24, BACKEND: 6 })
   })
 
+  /* ── §R INTENT COLLAPSE + LEAN (PO 2026-07-29: "content is terrible, from intelligence tab to
+   * KEYWORDS"). The live 72-row target set spent 17 of 30 slots on spelling variants of ONE search
+   * intent — comfort colors tshirt / t shirt / t-shirts / t -shirts / tshirts / shirts / tee /
+   * color comfort t shirts — including the MISSPELLING "confort colors t shirt" at CATEGORY #5 and
+   * "comfort colors tshirt men" at #10 on a Female-locked listing. Amazon indexes TOKENS and
+   * coverage-core folds plurals/hyphens/garment nouns, so covering the strongest form covers the
+   * family: every extra variant is a wasted seat. ONE SLOT PER INTENT, keyed by coverage-core's own
+   * tokens — never a new normalizer. PO constraint intact: the category head keeps its (one) seat.
+   */
+  describe('§R intent collapse + audience lean', () => {
+    it('spelling variants of one intent take ONE slot — the comfort colors family collapses', () => {
+      const fam = [
+        mk({ keyword: 'comfort colors tshirt', searchVolume: 215_806, keywordSales: 145 }),
+        mk({ keyword: 'comfort colors t shirt', searchVolume: 5_050, keywordSales: 161 }),
+        mk({ keyword: 'comfort colors t shirts', searchVolume: 4_951, keywordSales: 199 }),
+        mk({ keyword: 'comfort colors t-shirts', searchVolume: 4_636, keywordSales: 158 }),
+        mk({ keyword: 'comfort colors tee', searchVolume: 1_767, keywordSales: 15 }),
+        mk({ keyword: 'color comfort t shirts', searchVolume: 3_478, keywordSales: 104 }),
+        mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
+      ]
+      const v = selectRankingTargets(fam, CTX)
+      const kept = kwOf(v.targets)
+      expect(kept).toContain('comfort colors tshirt')      // strongest form keeps the seat
+      expect(kept).toContain('cupid shirt')
+      for (const variant of ['comfort colors t shirt', 'comfort colors t shirts', 'comfort colors t-shirts', 'comfort colors tee', 'color comfort t shirts']) {
+        expect(kept).not.toContain(variant)
+        expect(v.reasonOf.get(variant)).toMatch(/variant of/)
+      }
+    })
+
+    it('a one-letter typo of a kept intent is folded too (confort -> comfort)', () => {
+      const rows = [
+        mk({ keyword: 'comfort colors tshirt', searchVolume: 215_806, keywordSales: 145 }),
+        mk({ keyword: 'confort colors t shirt', searchVolume: 3_625, keywordSales: 45 }),
+        mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
+      ]
+      const v = selectRankingTargets(rows, CTX)
+      expect(kwOf(v.targets)).not.toContain('confort colors t shirt')
+      expect(v.reasonOf.get('confort colors t shirt')).toMatch(/variant of/)
+    })
+
+    it('distinct intents do NOT merge — a subset of tokens is a different search', () => {
+      const rows = [
+        mk({ keyword: 'comfort colors tshirt', searchVolume: 215_806 }),
+        mk({ keyword: 'comfort colors', searchVolume: 47_643 }),          // brand-only intent
+        mk({ keyword: 'comfort colors tshirt women', searchVolume: 15_729 }), // audience intent
+      ]
+      const v = selectRankingTargets(rows, CTX)
+      expect(kwOf(v.targets)).toEqual(expect.arrayContaining([
+        'comfort colors tshirt', 'comfort colors', 'comfort colors tshirt women',
+      ]))
+    })
+
+    it('a hard Female lean excludes men-only keywords from the target set', () => {
+      const rows = [
+        mk({ keyword: 'comfort colors tshirt women', searchVolume: 15_729 }),
+        mk({ keyword: 'comfort colors tshirt men', searchVolume: 11_573 }),
+        mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
+      ]
+      const v = selectRankingTargets(rows, { ...CTX, lean: 'female' })
+      expect(kwOf(v.targets)).not.toContain('comfort colors tshirt men')
+      expect(v.reasonOf.get('comfort colors tshirt men')).toMatch(/audience lean/)
+      // soft/absent lean keeps it — cross-gender traffic is the point of a soft lean
+      expect(selectedKeywords(rows, CTX)).toContain('comfort colors tshirt men')
+    })
+
+    it('a backstop-rescued variant passes its membership to the kept form of the intent', () => {
+      // Two band-0 variants of one huge intent, one inside the volume backstop: the INTENT must
+      // survive the band gate exactly as the single row would have — collapse must never turn the
+      // backstop off by picking the sibling.
+      const rows = [
+        mk({ keyword: 't shirts for women', searchVolume: 352_059, themeFit: 0 }),
+        mk({ keyword: 'womens t shirts', searchVolume: 250_559, themeFit: 0 }),
+        mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
+      ]
+      const v = selectRankingTargets(rows, CTX)
+      const kept = kwOf(v.targets).filter((k) => k !== 'cupid shirt')
+      expect(kept.length).toBe(1) // ONE seat for the intent, via backstop rescue
+    })
+  })
+
   it('the reservation is BOUNDED: >14 band-3 rows never steal CATEGORY seats out of score order', () => {
     // 20 low-volume CORE rows + 20 high-volume CATEGORY rows. Exactly 14 CORE seats may go to
     // CORE rows in the reservation; the 6 overflow CORE rows must compete on score in the main
     // pass, where every CATEGORY row outscores them -> CATEGORY keeps all 10 of its own buckets
     // AND wins the 6 spare BACKEND buckets, so the split is exactly 14/16.
+    // Suffixes are WORDS, not `${i}`: coverage-core drops 1-char tokens, so ` 0`..` 9` all shared
+    // one intent key and §R collapsed ten synthetic rows into one — the fixture must model twenty
+    // DISTINCT intents, which is what a real >14-band-3 pool is. (No pair is one edit apart, so
+    // the typo fold cannot re-fuse them either.)
+    const W = ['apple', 'beach', 'crane', 'dwarf', 'eagle', 'flame', 'grape', 'house', 'igloo', 'jolly',
+      'koala', 'lemon', 'mango', 'night', 'ocean', 'piano', 'queen', 'river', 'stone', 'tiger']
     const many: TargetInput[] = []
-    for (let i = 0; i < 20; i++) many.push({ keyword: `valentine niche term ${i}`, searchVolume: 450 + i,
+    for (let i = 0; i < 20; i++) many.push({ keyword: `valentine niche ${W[i]}`, searchVolume: 450 + i,
       keywordSales: 10, competingProducts: 5_000, actionType: 'UPGRADE', themeFit: 3 })
-    for (let i = 0; i < 20; i++) many.push({ keyword: `broad category term ${i}`, searchVolume: 200_000 + i,
+    for (let i = 0; i < 20; i++) many.push({ keyword: `broad category ${W[i]}`, searchVolume: 200_000 + i,
       keywordSales: 100, competingProducts: 80_000, actionType: 'UPGRADE', themeFit: 2 })
     const v = selectRankingTargets(many, LIVE_CTX)
     expect(v.slotCounts.CORE).toBe(14)

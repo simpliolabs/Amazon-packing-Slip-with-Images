@@ -112,16 +112,21 @@ export function deriveSeasonsFrom(src: DesignSeasonSources): string[] {
  * (seasonalTerms.ts:118-122). A degraded context can therefore only ever be MORE conservative than
  * today; it can never invent a season.
  */
-export const INERT_SELECTION_CONTEXT: SelectionContext = { haystack: '', isApparel: false, designSeasons: [] }
+export const INERT_SELECTION_CONTEXT: SelectionContext = { haystack: '', isApparel: false, designSeasons: [], lean: null }
 
 /** Pure assembly from pieces the caller already has. No I/O, no flag read — callers that hold every
  *  input (the scorer, the rank panel) use this and pay zero extra queries. */
-export function buildSelectionContext(parts: { haystack?: string | null } & DesignSeasonSources): SelectionContext {
+export function buildSelectionContext(
+  parts: { haystack?: string | null; audienceLean?: string | null } & DesignSeasonSources,
+): SelectionContext {
   const haystack = (parts.haystack ?? '').toLowerCase()
   // isApparel is DERIVED FROM the haystack, never supplied independently, so `{isApparel: true,
   // haystack: ''}` — the inverted-rescue case selection-core.ts:365-366 warns about — is
   // structurally unconstructible by any caller.
-  return { haystack, isApparel: isApparelPool(haystack), designSeasons: deriveSeasonsFrom(parts) }
+  // lean: only the two HARD values pass through (selection-core's contract); soft leans
+  // ('lean_female' etc.) and absence normalize to null = no exclusion, today's behaviour.
+  const lean = parts.audienceLean === 'female' || parts.audienceLean === 'male' ? parts.audienceLean : null
+  return { haystack, isApparel: isApparelPool(haystack), designSeasons: deriveSeasonsFrom(parts), lean }
 }
 
 /* ── PARITY ORACLE ───────────────────────────────────────────────────────────────────────────── */
@@ -136,7 +141,9 @@ export function buildSelectionContext(parts: { haystack?: string | null } & Desi
  * agreement at all.
  */
 export function ctxSha(c: SelectionContext): string {
-  return selectionSha([c.haystack, c.isApparel ? 'apparel' : 'non-apparel', ...c.designSeasons])
+  // `lean` is a selection input, so it MUST be in the sha: two sites disagreeing on the lean would
+  // pick different sets, and the oracle's whole job is to make that disagreement loud.
+  return selectionSha([c.haystack, c.isApparel ? 'apparel' : 'non-apparel', c.lean ?? 'no-lean', ...c.designSeasons])
 }
 
 /* ── READ WINDOW (§P PRECONDITION) ───────────────────────────────────────────────────────────── */
@@ -188,8 +195,9 @@ export interface SelectionContextRequest {
   /** The ASIN keyword_analysis rows are keyed on — the coverage haystack is this child's own twins. */
   childAsin: string
   parentAsin?: string | null
-  /** A pre-fetched listing_seo_scores row (any select that includes the two design-name columns). */
-  scoreRow?: { design_name_override?: string | null; design_name_overrides?: Record<string, string> | null } | null
+  /** A pre-fetched listing_seo_scores row (any select that includes the two design-name columns
+   *  and audience_lean — both current pre-supplying callers already select it). */
+  scoreRow?: { design_name_override?: string | null; design_name_overrides?: Record<string, string> | null; audience_lean?: string | null } | null
   /** Pre-computed coverage haystack (loadCoverageHaystack / rankAnalysis.buildHaystack output). */
   haystack?: string | null
   /** Pre-read listing_seo_recommendations.keyword_plan.designName. */
@@ -247,7 +255,7 @@ export async function loadSelectionContext(req: SelectionContextRequest): Promis
     try {
       const { data } = await supabase
         .from('listing_seo_scores')
-        .select('design_name_override, design_name_overrides')
+        .select('design_name_override, design_name_overrides, audience_lean')
         .eq('parent_asin', scoreKey)
         .maybeSingle()
       scoreRow = (data as SelectionContextRequest['scoreRow']) ?? null
@@ -289,6 +297,7 @@ export async function loadSelectionContext(req: SelectionContextRequest): Promis
     designNameOverridesByKey: scoreRow?.design_name_overrides ?? null,
     visionDesign,
     resolvedDesignName: planDesignName,
+    audienceLean: scoreRow?.audience_lean ?? null,
   })
 
   // ONE structured line per build. This is the forensic that answers "why did this listing route its
@@ -302,6 +311,7 @@ export async function loadSelectionContext(req: SelectionContextRequest): Promis
     ctxSha: ctxSha(ctx),
     designSeasons: ctx.designSeasons,
     isApparel: ctx.isApparel,
+    lean: ctx.lean ?? null,
     haystackLen: ctx.haystack.length,
     src: {
       override: Boolean(scoreRow?.design_name_override),

@@ -30,7 +30,8 @@
  */
 
 import { logNorm, competitionScore } from './calculateScore'
-import { isForeignKeyword, isOffNicheKeyword } from './nicheGuards'
+import { coverageTokens } from './coverage-core'
+import { isForeignKeyword, isOffNicheKeyword, leanExcludesKeyword } from './nicheGuards'
 import { seasonRelation } from './seasonalTerms'
 
 /* ── CONSTANTS (ONE home per budget — Invariant 5, no magic numbers at call sites) ────────────── */
@@ -178,6 +179,14 @@ export interface SelectionContext {
    * the historical blanket-strip behaviour preserved byte-for-byte.
    */
   designSeasons: readonly string[]
+  /**
+   * HARD audience lean from listing_seo_scores.audience_lean (PO 2026-07-29: `comfort colors tshirt
+   * men` held target seat #10 on a hard-Female listing). Only the exact values 'male' | 'female'
+   * exclude anything — soft leans and absence pass every keyword, so a caller that cannot know the
+   * lean simply omits the key and gets today's behaviour. OPTIONAL KEY for the same structural
+   * reason as prevSelectionRank (#143): existing callers must not be forced to fabricate a value.
+   */
+  lean?: 'female' | 'male' | null
 }
 
 export interface TargetVerdict<T extends TargetInput> {
@@ -319,6 +328,17 @@ function byVolumeThenKeyword(a: TargetInput, b: TargetInput): number {
   return a.keyword < b.keyword ? -1 : a.keyword > b.keyword ? 1 : 0
 }
 
+/** Levenshtein distance EXACTLY 1 — one substitution, insertion, or deletion. Used only by the
+ *  step-5b typo fold (`confort` → `comfort`); transpositions are deliberately out of scope. */
+function oneEditApart(a: string, b: string): boolean {
+  if (a === b) return false
+  const [s, l] = a.length <= b.length ? [a, b] : [b, a]
+  if (l.length - s.length > 1) return false
+  let i = 0
+  while (i < s.length && s[i] === l[i]) i++
+  return s.length === l.length ? s.slice(i + 1) === l.slice(i + 1) : s.slice(i) === l.slice(i + 1)
+}
+
 /**
  * CLASSIFICATION, not placement.
  *
@@ -340,13 +360,17 @@ function slotFor(keyword: string, band: ThemeBand, designSeasons: readonly strin
  * Pick the ranking targets. PURE, SYNCHRONOUS, TOTAL. Does not read env. Does not mutate `rows`.
  *
  * Order of operations (each step independently unit-tested):
- *   1. deterministic nets  — foreign / off-niche (apparel-gated, context-aware) ⇒ ineligible
+ *   1. deterministic nets  — foreign / off-niche (apparel-gated, context-aware) / hard audience
+ *                            lean ⇒ ineligible
  *   2. volume backstop     — top N by RAW volume among net-survivors, computed BEFORE the band gate
  *                            so a flatlined rater run still cannot strip the listing's best traffic
  *   3. band resolve        — themeFit ?? 2, then the 1→2 proven floor (never 0→2)
  *   4. band gate           — band 0 ⇒ ineligible, UNLESS the row is a backstop member
  *   5. classify slot       — OFF-season ⇒ BACKEND · band 3 ⇒ CORE · else CATEGORY. An ON-season row
  *                            (the design's OWN occasion) classifies CORE/CATEGORY and is placeable.
+ *   5b. intent collapse    — ONE target slot per search intent: eligible rows grouped by canonical
+ *                            coverage-token key (+ 1-edit typo fold); best-scored form keeps the
+ *                            seat, spelling variants are pooled with an honest reason.
  *   6. quota fill          — by targetScore desc with a lexicographic tiebreak; backstop members are
  *                            guaranteed MEMBERSHIP but never a better POSITION than their score earns
  *   7. reason              — deterministic prose from the path actually taken
@@ -382,6 +406,10 @@ export function selectRankingTargets<T extends TargetInput>(
       reasonOf.set(row.keyword, 'off-niche (equipment / wholesale / competitor blank) — not a ranking target')
       continue
     }
+    if (leanExcludesKeyword(row.keyword, ctx.lean)) {
+      reasonOf.set(row.keyword, `wrong audience lean (hard-${ctx.lean} listing) — pooled for backend indexing, not a ranking target`)
+      continue
+    }
     survivors.push(row)
   }
   if (survivors.length === 0) return degenerate('no-eligible')
@@ -405,6 +433,69 @@ export function selectRankingTargets<T extends TargetInput>(
     eligible.push({ row, band, slot: slotFor(row.keyword, band, ctx.designSeasons), rescued })
   }
   if (eligible.length === 0) return degenerate('no-eligible')
+
+  // ── step 5b: intent collapse — ONE target slot per search intent (PO 2026-07-29) ──
+  // The live B0GF49RLDL set spent 17 of 30 seats on spelling variants of ONE search — comfort
+  // colors tshirt / t shirt / t-shirts / tee / tshirts / color comfort t shirts, including the
+  // misspelling `confort colors t shirt` at seat #5. Amazon indexes TOKENS and coverage-core
+  // already folds plurals / hyphens / garment nouns, so ranking for the strongest form covers the
+  // family: every additional variant is a wasted seat. The canonical intent key is coverage-core's
+  // OWN tokens (Invariant 1 — never a second normalizer), sorted + deduped.
+  type Eligible = { row: T; band: ThemeBand; slot: TargetSlot; rescued: boolean }
+  const intentKeyOf = (kw: string): string => [...new Set(coverageTokens(kw))].sort().join(' ')
+  const families = new Map<string, Eligible[]>()
+  for (const e of eligible) {
+    const k = intentKeyOf(e.row.keyword)
+    const fam = families.get(k)
+    if (fam) fam.push(e)
+    else families.set(k, [e])
+  }
+
+  // TYPO FOLD. `confort colors t shirt` tokenizes to a DIFFERENT key than `comfort colors t shirt`,
+  // so the exact-key pass above cannot catch it. Merge two families when their keys differ by
+  // exactly ONE token pair a single edit apart — and only for tokens ≥5 chars, so short real-word
+  // neighbours (hat/cat, tee/ten) can never fuse two genuine intents. Keys are iterated SORTED so
+  // the merge order — and therefore the output sha — is independent of caller row order (the
+  // parity oracle demands every site compute the identical set from the identical pool).
+  const bestOf = (fam: Eligible[]): Eligible => fam.slice().sort((x, y) => byScoreThenKeyword(x.row, y.row))[0]
+  const famKeys = [...families.keys()].sort()
+  for (let i = 0; i < famKeys.length; i++) {
+    for (let j = i + 1; j < famKeys.length; j++) {
+      const a = families.get(famKeys[i])
+      const b = families.get(famKeys[j])
+      if (!a || !b) continue
+      const ta = famKeys[i].split(' ')
+      const tb = famKeys[j].split(' ')
+      if (Math.abs(ta.length - tb.length) > 0) continue
+      const onlyA = ta.filter((t) => !tb.includes(t))
+      const onlyB = tb.filter((t) => !ta.includes(t))
+      if (onlyA.length !== 1 || onlyB.length !== 1) continue
+      if (onlyA[0].length < 5 || onlyB[0].length < 5 || !oneEditApart(onlyA[0], onlyB[0])) continue
+      // The family whose best member scores higher absorbs the other.
+      if (byScoreThenKeyword(bestOf(a).row, bestOf(b).row) <= 0) {
+        a.push(...b)
+        families.delete(famKeys[j])
+      } else {
+        b.push(...a)
+        families.delete(famKeys[i])
+      }
+    }
+  }
+
+  // Keep the best-scored form per family; variants get an honest reason and stay pooled. Backstop
+  // MEMBERSHIP transfers to the kept form (a rescued sibling proves the INTENT is too large to
+  // abandon — collapsing must never turn the backstop off by preferring a non-member spelling).
+  const distinct: Eligible[] = []
+  const backstopIntents = new Set<string>()
+  for (const fam of families.values()) {
+    const kept = bestOf(fam)
+    distinct.push(kept)
+    if (fam.some((m) => backstop.has(m.row.keyword))) backstopIntents.add(kept.row.keyword)
+    for (const m of fam) {
+      if (m === kept) continue
+      reasonOf.set(m.row.keyword, `variant of "${kept.row.keyword}" — one target slot per search intent; ranking for it covers this spelling too`)
+    }
+  }
 
   // ── step 6: quota fill ──
   // The bucket a row CONSUMES is an internal counter; the slot we PERSIST is always the CLASSIFIED
@@ -445,7 +536,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // 6 BACKEND buckets on score alone and ends up with ZERO off-season targets — trading the only
   // slots those terms can ever occupy for a 25th keyword that is already eligible for title and
   // bullets. Reservation is bounded by TARGET_SLOTS.BACKEND, so it cannot starve the visible copy.
-  const offSeasonByScore = eligible
+  const offSeasonByScore = distinct
     .filter((e) => e.slot === 'BACKEND')
     .sort((a, b) => byScoreThenKeyword(a.row, b.row))
   for (const e of offSeasonByScore) place(e)
@@ -466,7 +557,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // is byte-identical to today — and the category head (PO 2026-07-29: "comfort colors should
   // still be there and addressed in content") keeps every seat this pass does not explicitly hand
   // to the design's own subject.
-  const coreByScore = eligible
+  const coreByScore = distinct
     .filter((e) => e.slot === 'CORE')
     .sort((a, b) => byScoreThenKeyword(a.row, b.row))
   for (const e of coreByScore) {
@@ -477,8 +568,8 @@ export function selectRankingTargets<T extends TargetInput>(
   // Backstop members claim membership first so a misfiring rater run cannot cost the listing its
   // biggest legitimate traffic — but `chosen` is re-sorted by score below, so claiming membership
   // early never buys a better RANK than the score earns.
-  const ordered = eligible.slice().sort((a, b) => byScoreThenKeyword(a.row, b.row))
-  for (const e of ordered) if (backstop.has(e.row.keyword)) place(e)
+  const ordered = distinct.slice().sort((a, b) => byScoreThenKeyword(a.row, b.row))
+  for (const e of ordered) if (backstopIntents.has(e.row.keyword)) place(e)
   for (const e of ordered) place(e)
 
   // ── step 7: rank by score (membership ≠ position), then slot + deterministic reason ──
@@ -504,7 +595,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // Distinguish the two very different ways a row can miss: the overall budget was spent, or its
   // OWN slot filled while budget remained. An off-season term that lost a 6-wide bucket is nowhere near
   // rank 30, and telling the seller it "ranked outside the top 30" would be simply false.
-  for (const e of eligible) {
+  for (const e of distinct) {
     if (taken.has(e.row.keyword)) continue
     const slotFull = remaining[e.slot] === 0
     reasonOf.set(
@@ -525,9 +616,11 @@ export function selectRankingTargets<T extends TargetInput>(
     guard: null,
     slotCounts,
     bands,
-    eligibleCount: eligible.length,
+    // Post-collapse on purpose: DISTINCT eligible intents / rescues that still hold a row. A
+    // collapsed-away variant is neither a missed selection nor a live rescue.
+    eligibleCount: distinct.length,
     backstopCount: backstop.size,
-    rescuedCount: eligible.filter((e) => e.rescued).length,
+    rescuedCount: distinct.filter((e) => e.rescued).length,
   }
 }
 
