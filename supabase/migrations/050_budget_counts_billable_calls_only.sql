@@ -31,6 +31,12 @@
 -- and burning nothing but noise. Existing readers select `calls_used` by name and are unaffected.
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 
+-- COLUMN ORDER IS LOAD-BEARING. `CREATE OR REPLACE VIEW` may only APPEND columns — it cannot
+-- reorder or rename existing ones (Postgres 42P16: "cannot change name of view column"). The live
+-- view is (provider, calls_used, month_start), so those three keep their positions and the two new
+-- diagnostics go at the END. `calls_used` keeps its name and type and only changes its EXPRESSION,
+-- which replace allows. This keeps the migration non-destructive: no DROP, so nothing that depends
+-- on the view is ever momentarily missing.
 CREATE OR REPLACE VIEW api_usage_this_month AS
 SELECT
   provider,
@@ -39,14 +45,14 @@ SELECT
     WHERE response_status IS NULL
        OR (response_status >= 200 AND response_status < 300)
   )::INTEGER AS calls_used,
+  DATE_TRUNC('month', NOW()) AS month_start,
   -- Every attempt, billable or not (the OLD definition of calls_used — kept for diagnosis).
   COUNT(*)::INTEGER AS calls_logged,
   -- Attempts the provider did not bill. A rising number here is a bug, not usage.
   COUNT(*) FILTER (
     WHERE response_status IS NOT NULL
       AND (response_status < 200 OR response_status >= 300)
-  )::INTEGER AS calls_unbilled,
-  DATE_TRUNC('month', NOW()) AS month_start
+  )::INTEGER AS calls_unbilled
 FROM api_usage_log
 WHERE called_at >= DATE_TRUNC('month', NOW())
 GROUP BY provider;
