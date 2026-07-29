@@ -2386,7 +2386,7 @@ describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
     for (const kw of ['adult valentine shirt', 'black valentines day shirt', 'bling valentine tops for women']) {
       expect(v.slotOf.get(kw)).toBe('CORE')
     }
-    expect(v.reasonOf.get('adult valentines shirt')).toMatch(/variant of "adult valentine shirt"/)
+    expect(v.reasonOf.get('adult valentines shirt')).toMatch(/same search intent as "adult valentine shirt"/)
   })
 
   it('the category head is NOT evicted — comfort colors stays at rank 1 with 23 seats (PO 2026-07-29)', () => {
@@ -2431,19 +2431,129 @@ describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
       expect(kept).toContain('cupid shirt')
       for (const variant of ['comfort colors t shirt', 'comfort colors t shirts', 'comfort colors t-shirts', 'comfort colors tee', 'color comfort t shirts']) {
         expect(kept).not.toContain(variant)
-        expect(v.reasonOf.get(variant)).toMatch(/variant of/)
+        expect(v.reasonOf.get(variant)).toMatch(/same search intent as "comfort colors tshirt"/)
       }
     })
 
-    it('a one-letter typo of a kept intent is folded too (confort -> comfort)', () => {
+    it('NEAR-miss spellings are NOT folded: a misspelling keeps its own honest seat', () => {
+      // A 1-edit "typo fold" was implemented and DELETED after adversarial review: foldGarment maps
+      // every tee/tshirt/shirts to the token `shirt`, one substitution from `skirt` and `short`, so
+      // "one edit apart" silently fused distinct garments. The residual — a misspelling holding one
+      // of 30 seats — is accepted and visible, which is strictly better than deleting real intents.
       const rows = [
         mk({ keyword: 'comfort colors tshirt', searchVolume: 215_806, keywordSales: 145 }),
         mk({ keyword: 'confort colors t shirt', searchVolume: 3_625, keywordSales: 45 }),
         mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
       ]
+      const kept = kwOf(selectRankingTargets(rows, CTX).targets)
+      expect(kept).toContain('comfort colors tshirt')
+      expect(kept).toContain('confort colors t shirt')
+    })
+
+    it('REGRESSION: distinct garments one letter apart never merge (shirt / skirt / shorts)', () => {
+      // The exact defect the deleted fold caused, reproduced by the reviewer: `valentine skirt
+      // women` was dropped as a "variant of" `valentine shirt women` with the false claim that
+      // ranking for the shirt covers the skirt. All three intents must survive as separate rows.
+      const rows = [
+        mk({ keyword: 'valentine shirt women', searchVolume: 215_806, themeFit: 3 }),
+        mk({ keyword: 'valentine skirt women', searchVolume: 8_000, themeFit: 3 }),
+        mk({ keyword: 'valentine shorts women', searchVolume: 6_000, themeFit: 3 }),
+      ]
       const v = selectRankingTargets(rows, CTX)
-      expect(kwOf(v.targets)).not.toContain('confort colors t shirt')
-      expect(v.reasonOf.get('confort colors t shirt')).toMatch(/variant of/)
+      expect(kwOf(v.targets)).toEqual(expect.arrayContaining([
+        'valentine shirt women', 'valentine skirt women', 'valentine shorts women',
+      ]))
+      for (const kw of ['valentine skirt women', 'valentine shorts women']) {
+        expect(v.reasonOf.get(kw)).not.toMatch(/search intent as/)
+      }
+    })
+
+    it('the kept spelling is the highest BAND then highest VOLUME — never a score artifact', () => {
+      // Rater noise across identical-token spellings must not decide the representative. The band-3
+      // form keeps the seat and stays CORE, so the CORE reservation (task #144) still holds the
+      // design's own subject; without band-first, the band-2 form won on score and the intent was
+      // reclassified CATEGORY and could fall out of the 30 entirely.
+      const rows = [
+        mk({ keyword: 'cupid valentine shirt women', searchVolume: 800, themeFit: 3 }),
+        mk({ keyword: 'cupid valentines shirts women', searchVolume: 15_000, themeFit: 2 }),
+      ]
+      const v = selectRankingTargets(rows, { ...CTX, designSeasons: ['valentine'] })
+      expect(kwOf(v.targets)).toEqual(['cupid valentine shirt women'])
+      expect(v.slotOf.get('cupid valentine shirt women')).toBe('CORE')
+      // …and among SAME-band spellings, volume decides (not band × market score).
+      const sameBand = [
+        mk({ keyword: 'comfort colors tshirt', searchVolume: 215_806, keywordSales: 10 }),
+        mk({ keyword: 'color comfort t shirts', searchVolume: 3_478, keywordSales: 900 }),
+      ]
+      expect(kwOf(selectRankingTargets(sameBand, CTX).targets)).toEqual(['comfort colors tshirt'])
+    })
+
+    it('collapses WITHIN the BACKEND ring-fence and keeps the classified slot', () => {
+      // The fence lives in the grouping KEY (`B|` vs `V|`), so a customer-facing row and an
+      // off-season row can never share one seat whose slot would then depend on which spelling won
+      // bestOf. With real words a cross-fence pair is unconstructible — identical token sets agree
+      // on seasonality, since seasonsIn matches the same surface both ways — which is exactly why
+      // the guard belongs in the key rather than in a downstream check nobody can trip. What IS
+      // observable: off-season spellings still collapse among themselves and stay BACKEND.
+      const rows = [
+        mk({ keyword: 'christmas gnome shirt', searchVolume: 5_000, themeFit: 3 }),
+        mk({ keyword: 'christmas gnome shirts', searchVolume: 4_000, themeFit: 3 }),
+      ]
+      const v = selectRankingTargets(rows, { ...CTX, designSeasons: ['valentine'] })
+      expect(v.targets).toHaveLength(1)
+      expect(v.slotOf.get('christmas gnome shirt')).toBe('BACKEND')
+      expect(v.reasonOf.get('christmas gnome shirts')).toMatch(/same search intent as "christmas gnome shirt"/)
+    })
+
+    it('a variant’s reason never claims ranking for a kept form that lost its seat', () => {
+      // 30 stronger CATEGORY intents crowd out a weak 2-member family: the kept form is honestly
+      // "outside the top 30", so the variant must NOT be told we rank for it.
+      const crowd = Array.from({ length: 30 }, (_, i) =>
+        mk({ keyword: `broad category ${['apple','beach','crane','dwarf','eagle','flame','grape','house','igloo','jolly','koala','lemon','mango','night','ocean','piano','queen','river','stone','tiger','umbra','vixen','wagon','xenon','yacht','zebra','amber','bloom','cedar','delta'][i]}`,
+          searchVolume: 500_000 - i, keywordSales: 900 }))
+      const rows = [...crowd,
+        // NON-seasonal on purpose: a seasonal pair would be OFF-season here (designSeasons []) and
+        // the BACKEND reservation would seat it ahead of the crowd, which is the opposite fixture.
+        mk({ keyword: 'oversized cotton crewneck tee', searchVolume: 300, keywordSales: 1, competingProducts: 400_000 }),
+        mk({ keyword: 'cotton oversized crewneck tees', searchVolume: 200, keywordSales: 1, competingProducts: 400_000 }),
+      ]
+      const v = selectRankingTargets(rows, CTX)
+      expect(v.rankOf.get('oversized cotton crewneck tee')).toBeUndefined()
+      expect(v.reasonOf.get('cotton oversized crewneck tees'))
+        .toBe('same search intent as "oversized cotton crewneck tee", which was not selected — still indexed via backend terms')
+    })
+
+    it('a selected kept form gives its variants a reason carrying the real rank', () => {
+      const rows = [
+        mk({ keyword: 'comfort colors tshirt', searchVolume: 215_806, keywordSales: 145 }),
+        mk({ keyword: 'comfort colors t shirts', searchVolume: 4_951, keywordSales: 199 }),
+      ]
+      const v = selectRankingTargets(rows, CTX)
+      expect(v.reasonOf.get('comfort colors t shirts'))
+        .toBe('same search intent as "comfort colors tshirt" (rank 1/30) — one target slot per intent, and ranking for it covers this spelling too')
+    })
+
+    it('rescuedCount counts rescued INTENTS, so a transferred rescue is never reported inert', () => {
+      // The band-0 volume giant collapses into its band-3 sibling, which carries rescued:false.
+      // Counting the kept row's flag reported 0 exactly when the transfer was load-bearing.
+      const rows = [
+        mk({ keyword: 'gnome christmas shirt', themeFit: 3, searchVolume: 500 }),
+        mk({ keyword: 'christmas gnome shirts', themeFit: 0, searchVolume: 900_000 }),
+        mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
+      ]
+      const v = selectRankingTargets(rows, CTX)
+      expect(v.targets).toHaveLength(2)
+      expect(v.rescuedCount).toBe(1)
+    })
+
+    it('the hard-lean reason does not promise backend bytes the generator also refuses', () => {
+      const v = selectRankingTargets([
+        mk({ keyword: 'comfort colors tshirt men', searchVolume: 11_573 }),
+        mk({ keyword: 'cupid shirt', themeFit: 3, searchVolume: 450 }),
+      ], { ...CTX, lean: 'female' })
+      const why = v.reasonOf.get('comfort colors tshirt men') ?? ''
+      expect(why).toBe('names the opposite audience on a female-only listing — excluded from ranking targets and from generated copy')
+      expect(why).not.toMatch(/pooled for backend/)
     })
 
     it('distinct intents do NOT merge — a subset of tokens is a different search', () => {
@@ -2466,7 +2576,7 @@ describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
       ]
       const v = selectRankingTargets(rows, { ...CTX, lean: 'female' })
       expect(kwOf(v.targets)).not.toContain('comfort colors tshirt men')
-      expect(v.reasonOf.get('comfort colors tshirt men')).toMatch(/audience lean/)
+      expect(v.reasonOf.get('comfort colors tshirt men')).toMatch(/opposite audience/)
       // soft/absent lean keeps it — cross-gender traffic is the point of a soft lean
       expect(selectedKeywords(rows, CTX)).toContain('comfort colors tshirt men')
     })

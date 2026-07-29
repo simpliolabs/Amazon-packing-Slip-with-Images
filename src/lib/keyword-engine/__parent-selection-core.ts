@@ -30,8 +30,7 @@
  */
 
 import { logNorm, competitionScore } from './calculateScore'
-import { coverageTokens } from './coverage-core'
-import { isForeignKeyword, isOffNicheKeyword, leanExcludesKeyword } from './nicheGuards'
+import { isForeignKeyword, isOffNicheKeyword } from './nicheGuards'
 import { seasonRelation } from './seasonalTerms'
 
 /* ── CONSTANTS (ONE home per budget — Invariant 5, no magic numbers at call sites) ────────────── */
@@ -179,14 +178,6 @@ export interface SelectionContext {
    * the historical blanket-strip behaviour preserved byte-for-byte.
    */
   designSeasons: readonly string[]
-  /**
-   * HARD audience lean from listing_seo_scores.audience_lean (PO 2026-07-29: `comfort colors tshirt
-   * men` held target seat #10 on a hard-Female listing). Only the exact values 'male' | 'female'
-   * exclude anything — soft leans and absence pass every keyword, so a caller that cannot know the
-   * lean simply omits the key and gets today's behaviour. OPTIONAL KEY for the same structural
-   * reason as prevSelectionRank (#143): existing callers must not be forced to fabricate a value.
-   */
-  lean?: 'female' | 'male' | null
 }
 
 export interface TargetVerdict<T extends TargetInput> {
@@ -349,18 +340,13 @@ function slotFor(keyword: string, band: ThemeBand, designSeasons: readonly strin
  * Pick the ranking targets. PURE, SYNCHRONOUS, TOTAL. Does not read env. Does not mutate `rows`.
  *
  * Order of operations (each step independently unit-tested):
- *   1. deterministic nets  — foreign / off-niche (apparel-gated, context-aware) / hard audience
- *                            lean ⇒ ineligible
+ *   1. deterministic nets  — foreign / off-niche (apparel-gated, context-aware) ⇒ ineligible
  *   2. volume backstop     — top N by RAW volume among net-survivors, computed BEFORE the band gate
  *                            so a flatlined rater run still cannot strip the listing's best traffic
  *   3. band resolve        — themeFit ?? 2, then the 1→2 proven floor (never 0→2)
  *   4. band gate           — band 0 ⇒ ineligible, UNLESS the row is a backstop member
  *   5. classify slot       — OFF-season ⇒ BACKEND · band 3 ⇒ CORE · else CATEGORY. An ON-season row
  *                            (the design's OWN occasion) classifies CORE/CATEGORY and is placeable.
- *   5b. intent collapse    — ONE target slot per search intent: rows whose coverage-token SETS are
- *                            equal (so `isCovered` provably transfers) keep a single seat, held by
- *                            the highest-band then highest-volume spelling; never across the
- *                            BACKEND ring-fence. Collapsed spellings are reasoned after step 6.
  *   6. quota fill          — by targetScore desc with a lexicographic tiebreak; backstop members are
  *                            guaranteed MEMBERSHIP but never a better POSITION than their score earns
  *   7. reason              — deterministic prose from the path actually taken
@@ -396,15 +382,6 @@ export function selectRankingTargets<T extends TargetInput>(
       reasonOf.set(row.keyword, 'off-niche (equipment / wholesale / competitor blank) — not a ranking target')
       continue
     }
-    if (leanExcludesKeyword(row.keyword, ctx.lean)) {
-      // NOT "pooled for backend indexing": under a hard lean the generator strips these from the
-      // BACKEND pool too (listingPipeline.ts:8645-8651, the #203 symmetry), the rank playbook drops
-      // them (rankAnalysis.ts:277-283) and the scorer stops docking for them
-      // (syncListingContent.ts:556/991). The keyword lands NOWHERE, and the Why column must say so
-      // rather than promise backend bytes the seller will never get.
-      reasonOf.set(row.keyword, `names the opposite audience on a ${ctx.lean}-only listing — excluded from ranking targets and from generated copy`)
-      continue
-    }
     survivors.push(row)
   }
   if (survivors.length === 0) return degenerate('no-eligible')
@@ -428,74 +405,6 @@ export function selectRankingTargets<T extends TargetInput>(
     eligible.push({ row, band, slot: slotFor(row.keyword, band, ctx.designSeasons), rescued })
   }
   if (eligible.length === 0) return degenerate('no-eligible')
-
-  // ── step 5b: intent collapse — ONE target slot per search intent (PO 2026-07-29) ──
-  // The live B0GF49RLDL set spent 17 of 30 seats on spelling variants of ONE search — comfort
-  // colors tshirt / t shirt / t-shirts / tee / tshirts / color comfort t shirts. Amazon indexes
-  // TOKENS and coverage-core already folds plurals / hyphens / garment nouns, so ranking for one
-  // form of an IDENTICAL token set covers every other form: each extra variant is a wasted seat.
-  //
-  // EXACT KEY ONLY, and the key is coverage-core's OWN tokens (Invariant 1 — never a second
-  // normalizer). Two rows collapse ONLY when `isCovered` provably transfers between them, which is
-  // exactly when their sorted token sets are equal. A near-miss fold was implemented and DELETED
-  // after adversarial review (2026-07-29): merging keys "one edit apart" fused genuinely distinct
-  // intents, because foldGarment canonicalizes every tee/tshirt/shirts to the single token `shirt`,
-  // which is one substitution from `skirt` (skirts) and `short` (shorts) — so `valentine skirt
-  // women` was deleted as a "variant of" `valentine shirt women` and told the seller that ranking
-  // for the shirt covers the skirt, which is false. Same class: women/woven, black/blank,
-  // sweat/sweet. The misspelling `confort colors t shirt` therefore still holds its own seat: one
-  // honest wasted seat is strictly better than silently deleting real intents, and killing
-  // uncoverable misspellings needs a lexicon, not a distance metric (task #146).
-  type Eligible = { row: T; band: ThemeBand; slot: TargetSlot; rescued: boolean }
-  const intentKeyOf = (e: Eligible): string =>
-    // RING-FENCE IN THE KEY: never collapse across the BACKEND boundary. An off-season row may
-    // never consume a customer-facing bucket (see the CASCADE asymmetry below), so an off-season
-    // and an on-season row must never merge into one seat whose slot depends on which spelling won.
-    `${e.slot === 'BACKEND' ? 'B' : 'V'}|${[...new Set(coverageTokens(e.row.keyword))].sort().join(' ')}`
-  const families = new Map<string, Eligible[]>()
-  for (const e of eligible) {
-    const k = intentKeyOf(e)
-    const fam = families.get(k)
-    if (fam) fam.push(e)
-    else families.set(k, [e])
-  }
-
-  // WHICH SPELLING KEEPS THE SEAT. Highest BAND first, then highest VOLUME — never the raw
-  // targetScore, which is band × market and would let rater noise pick the representative:
-  //   - BAND first because the band drives `slotFor`. Two identical-token rows rated 3 and 2 are
-  //     rater noise on ONE intent; keeping the band-2 form would reclassify the design's own
-  //     subject CORE → CATEGORY and forfeit the CORE reservation that task #144 exists to hold
-  //     (adversarial review 2026-07-29). Taking the max band is the same "most favourable rating
-  //     for the same thing" logic as effectiveBand's 1→2 proven floor.
-  //   - VOLUME, not score, decides between same-band forms: Amazon's own search volume is the
-  //     market's vote on the canonical spelling, and coverage transfers either way, so this costs
-  //     nothing and always seats the dominant form (`comfort colors tshirt`, not the 3,625/mo
-  //     `color comfort t shirts` a band artifact could otherwise promote).
-  // Shortest-then-alphabetical closes it, so the choice is total and order-independent.
-  const bestOf = (fam: Eligible[]): Eligible =>
-    fam.slice().sort((x, y) =>
-      y.band - x.band ||
-      num(y.row.searchVolume) - num(x.row.searchVolume) ||
-      x.row.keyword.length - y.row.keyword.length ||
-      (x.row.keyword < y.row.keyword ? -1 : x.row.keyword > y.row.keyword ? 1 : 0),
-    )[0]
-
-  // Keep one row per intent; the collapsed spellings are recorded and given their reason AFTER
-  // quota fill (a "we rank for X" claim is false until X actually wins a seat). Backstop
-  // MEMBERSHIP transfers to the kept form — a rescued sibling proves the INTENT is too large to
-  // abandon, so collapsing must never turn the backstop off by preferring a non-member spelling.
-  const distinct: Eligible[] = []
-  const backstopIntents = new Set<string>()
-  const variantsOf = new Map<string, string[]>()
-  let rescuedIntents = 0
-  for (const fam of families.values()) {
-    const kept = bestOf(fam)
-    distinct.push(kept)
-    if (fam.some((m) => backstop.has(m.row.keyword) && m.band === 0)) rescuedIntents++
-    if (fam.some((m) => backstop.has(m.row.keyword))) backstopIntents.add(kept.row.keyword)
-    const variants = fam.filter((m) => m !== kept).map((m) => m.row.keyword)
-    if (variants.length > 0) variantsOf.set(kept.row.keyword, variants)
-  }
 
   // ── step 6: quota fill ──
   // The bucket a row CONSUMES is an internal counter; the slot we PERSIST is always the CLASSIFIED
@@ -536,7 +445,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // 6 BACKEND buckets on score alone and ends up with ZERO off-season targets — trading the only
   // slots those terms can ever occupy for a 25th keyword that is already eligible for title and
   // bullets. Reservation is bounded by TARGET_SLOTS.BACKEND, so it cannot starve the visible copy.
-  const offSeasonByScore = distinct
+  const offSeasonByScore = eligible
     .filter((e) => e.slot === 'BACKEND')
     .sort((a, b) => byScoreThenKeyword(a.row, b.row))
   for (const e of offSeasonByScore) place(e)
@@ -557,7 +466,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // is byte-identical to today — and the category head (PO 2026-07-29: "comfort colors should
   // still be there and addressed in content") keeps every seat this pass does not explicitly hand
   // to the design's own subject.
-  const coreByScore = distinct
+  const coreByScore = eligible
     .filter((e) => e.slot === 'CORE')
     .sort((a, b) => byScoreThenKeyword(a.row, b.row))
   for (const e of coreByScore) {
@@ -568,8 +477,8 @@ export function selectRankingTargets<T extends TargetInput>(
   // Backstop members claim membership first so a misfiring rater run cannot cost the listing its
   // biggest legitimate traffic — but `chosen` is re-sorted by score below, so claiming membership
   // early never buys a better RANK than the score earns.
-  const ordered = distinct.slice().sort((a, b) => byScoreThenKeyword(a.row, b.row))
-  for (const e of ordered) if (backstopIntents.has(e.row.keyword)) place(e)
+  const ordered = eligible.slice().sort((a, b) => byScoreThenKeyword(a.row, b.row))
+  for (const e of ordered) if (backstop.has(e.row.keyword)) place(e)
   for (const e of ordered) place(e)
 
   // ── step 7: rank by score (membership ≠ position), then slot + deterministic reason ──
@@ -595,7 +504,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // Distinguish the two very different ways a row can miss: the overall budget was spent, or its
   // OWN slot filled while budget remained. An off-season term that lost a 6-wide bucket is nowhere near
   // rank 30, and telling the seller it "ranked outside the top 30" would be simply false.
-  for (const e of distinct) {
+  for (const e of eligible) {
     if (taken.has(e.row.keyword)) continue
     const slotFull = remaining[e.slot] === 0
     reasonOf.set(
@@ -604,23 +513,6 @@ export function selectRankingTargets<T extends TargetInput>(
         ? `eligible (${e.slot}) but the ${e.slot} quota of ${TARGET_SLOTS[e.slot]} was already full — still indexed via backend terms`
         : `eligible (${e.slot}) but outside the top ${RANKING_TARGET_COUNT} — still indexed via backend terms`,
     )
-  }
-
-  // COLLAPSED SPELLINGS, reasoned LAST — the claim "ranking for X covers this spelling" is only
-  // true once X actually holds a seat, and whether it does is not known until quota fill has run
-  // (adversarial review 2026-07-29: written at collapse time, the sentence survived even when the
-  // kept form itself ranked outside the top 30, so the Why column showed two adjacent rows
-  // contradicting each other). Both branches are honest, and both say where the keyword ended up.
-  for (const [keptKw, variants] of variantsOf) {
-    const rank = rankOf.get(keptKw)
-    for (const variant of variants) {
-      reasonOf.set(
-        variant,
-        rank === undefined
-          ? `same search intent as "${keptKw}", which was not selected — still indexed via backend terms`
-          : `same search intent as "${keptKw}" (rank ${rank}/${RANKING_TARGET_COUNT}) — one target slot per intent, and ranking for it covers this spelling too`,
-      )
-    }
   }
 
   return {
@@ -633,16 +525,9 @@ export function selectRankingTargets<T extends TargetInput>(
     guard: null,
     slotCounts,
     bands,
-    // Post-collapse on purpose: DISTINCT eligible intents, not rows. A collapsed-away variant is
-    // not a separate missed selection.
-    eligibleCount: distinct.length,
+    eligibleCount: eligible.length,
     backstopCount: backstop.size,
-    // Counted per INTENT, over family MEMBERS — not off the kept row's own flag. A band-0 row the
-    // backstop rescued can collapse into a band-1+ sibling that carries `rescued: false`, and
-    // counting the kept flag reported 0 in exactly the case where the backstop-membership transfer
-    // was doing live work — telling a reader watching nRescued for "is the backstop load-bearing?"
-    // that it was inert (adversarial review 2026-07-29).
-    rescuedCount: rescuedIntents,
+    rescuedCount: eligible.filter((e) => e.rescued).length,
   }
 }
 
