@@ -2332,3 +2332,72 @@ describe('§O optional keys — absent behaves exactly as explicit null', () => 
     expect(targetScore({ ...base, prevSelectionRank: 4 })).toBeGreaterThan(targetScore(base))
   })
 })
+
+/* ── §Q CORE RESERVATION — the live B0GF49RLDL replay, pinned verbatim ─────────────────────────
+ * 2026-07-29. The REAL 92-row production pool (keyword_analysis, theme_run kt_1785337462032),
+ * exported by the PO and replayed through this module. Before the CORE reservation the selector
+ * chose 29 CATEGORY + 1 CORE: the main pass runs in GLOBAL score order and CASCADE.CATEGORY
+ * includes 'CORE', so 63 high-volume category rows drained their 10 buckets and then flooded the
+ * 14 CORE buckets before a single 450/mo band-3 row was reached. The design's own subject was
+ * locked out of its own reserved seats by "comfort colors tshirt" (215k) — the harvest bug's
+ * shape recurring one layer up. The suite passed throughout, because no test ever mixed MANY
+ * high-volume CATEGORY rows with FEW low-volume CORE rows. This fixture closes that hole with
+ * production data, not a synthetic pool.
+ */
+import liveB0GF49RLDL from './__fixtures__/b0gf49rldl-pool-2026-07-29.json'
+
+describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
+  const LIVE_CTX: SelectionContext = {
+    // The gate's logged ctx: designSeasons ["valentine"], isApparel true, titles haystack.
+    haystack: 'the ceo cupid valentine tee shirt | pixel art comfort colors women tshirt',
+    isApparel: true,
+    designSeasons: ['valentine'],
+  }
+  const rows = (): TargetInput[] => (liveB0GF49RLDL as Array<Record<string, unknown>>).map((r) => ({
+    keyword: r.keyword as string,
+    searchVolume: r.searchVolume as number,
+    keywordSales: r.keywordSales as number,
+    competingProducts: r.competingProducts as number,
+    organicRank: (r.organicRank ?? null) as number | null,
+    actionType: r.actionType as string,
+    themeFit: (r.themeFit ?? null) as ThemeBand | null,
+    themeAbout: (r.themeAbout ?? null) as string | null,
+  }))
+
+  it('every eligible band-3 row wins a CORE seat (9/9), not 1/9', () => {
+    const v = selectRankingTargets(rows(), LIVE_CTX)
+    expect(v.slotCounts.CORE).toBe(9)
+    expect(v.targets.length).toBe(RANKING_TARGET_COUNT)
+    for (const kw of ['adult valentine shirt', 'black valentines day shirt', 'bling valentine tops for women']) {
+      expect(v.slotOf.get(kw)).toBe('CORE')
+    }
+  })
+
+  it('the category head is NOT evicted — comfort colors stays at rank 1 with 21 seats (PO 2026-07-29)', () => {
+    const v = selectRankingTargets(rows(), LIVE_CTX)
+    expect(v.rankOf.get('comfort colors tshirt')).toBe(1)
+    expect(v.slotCounts.CATEGORY).toBe(21)
+  })
+
+  it('with no seasonal theme the verdict is unchanged from the pre-fix behaviour (0 CORE, 6 BACKEND)', () => {
+    // designSeasons [] makes every valentine row off-season -> BACKEND-classified; the CORE
+    // reservation must be a no-op here, leaving the off-season reservation's shape untouched.
+    const v = selectRankingTargets(rows(), { ...LIVE_CTX, designSeasons: [] })
+    expect(v.slotCounts).toEqual({ CORE: 0, CATEGORY: 24, BACKEND: 6 })
+  })
+
+  it('the reservation is BOUNDED: >14 band-3 rows never steal CATEGORY seats out of score order', () => {
+    // 20 low-volume CORE rows + 20 high-volume CATEGORY rows. Exactly 14 CORE seats may go to
+    // CORE rows in the reservation; the 6 overflow CORE rows must compete on score in the main
+    // pass, where every CATEGORY row outscores them -> CATEGORY keeps all 10 of its own buckets
+    // AND wins the 6 spare BACKEND buckets, so the split is exactly 14/16.
+    const many: TargetInput[] = []
+    for (let i = 0; i < 20; i++) many.push({ keyword: `valentine niche term ${i}`, searchVolume: 450 + i,
+      keywordSales: 10, competingProducts: 5_000, actionType: 'UPGRADE', themeFit: 3 })
+    for (let i = 0; i < 20; i++) many.push({ keyword: `broad category term ${i}`, searchVolume: 200_000 + i,
+      keywordSales: 100, competingProducts: 80_000, actionType: 'UPGRADE', themeFit: 2 })
+    const v = selectRankingTargets(many, LIVE_CTX)
+    expect(v.slotCounts.CORE).toBe(14)
+    expect(v.slotCounts.CATEGORY).toBe(16)
+  })
+})
