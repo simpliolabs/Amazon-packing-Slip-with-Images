@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { enforceTitleBand, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
+import { enforceTitleBand, pickDistinctGarmentForm, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
 
 /* The LIVE failure this net exists to fix (B0GF49RLDL, 2026-07-29 21:03 regen). */
 const LIVE_66 = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women'
@@ -124,5 +124,58 @@ describe('garmentSecond must be a genuinely distinct surface form', () => {
     expect(v.title).toBe(LIVE)
     expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
     expect(v.notes[0]).toMatch(/NO product facts available to reach 70/)
+  })
+})
+
+/* ── pickDistinctGarmentForm — the function whose INLINE ancestor shipped dead code.
+ * The original lived inside listingPipeline.ts as six lines with a template-literal word-boundary
+ * escape one backslash short (it compiled to the BACKSPACE control character), so its containment
+ * check ALWAYS returned false, every title got `shirt`, the leaf rejected it as already-present, and
+ * the whole net silently no-opped on the exact case it was built for. CI, tsc and 15 tests were all
+ * green. These tests exist so that can never happen again — they would have failed immediately. */
+describe('pickDistinctGarmentForm', () => {
+  // The real SHIRT_BASE alias list from garmentNoun.ts.
+  const SHIRT = ['shirt', 't-shirt', 'tshirt', 'tee', 'graphic tee'] as const
+  const LIVE = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women'
+
+  it('THE REGRESSION: a title saying "Shirt" gets "Tee", never "shirt"/"T-Shirt"/"TShirt"', () => {
+    expect(pickDistinctGarmentForm(LIVE, SHIRT)).toBe('Tee')
+  })
+
+  it('a title saying "Tee" gets "Shirt" — symmetric', () => {
+    expect(pickDistinctGarmentForm('THE CEO Cupid Valentine Graphic Tee for Women', SHIRT)).toBe('Shirt')
+  })
+
+  it('hyphen and glued spellings both count as PRESENT (t-shirt / tshirt fold to shirt)', () => {
+    expect(pickDistinctGarmentForm('THE CEO Cupid T-Shirt for Women', SHIRT)).toBe('Tee')
+    expect(pickDistinctGarmentForm('THE CEO Cupid TShirt for Women', SHIRT)).toBe('Tee')
+  })
+
+  it('returns null when every single-word form is already present', () => {
+    expect(pickDistinctGarmentForm('Cupid Shirt Tee TShirt', SHIRT)).toBeNull()
+  })
+
+  it('never returns a multi-word alias (a title segment must stay tight)', () => {
+    expect(pickDistinctGarmentForm('Cupid Shirt Tee Tshirt', ['graphic tee'])).toBeNull()
+  })
+
+  it('Title-Cases the pick, including hyphenated forms', () => {
+    expect(pickDistinctGarmentForm('Cupid Tee', ['t-shirt'])).toBe('T-Shirt')
+    expect(pickDistinctGarmentForm('Cupid Tee', ['beanie'])).toBe('Beanie')
+  })
+
+  it('a non-shirt garment family works (headwear)', () => {
+    const HAT = ['hat', 'cap', 'snapback', 'visor']
+    expect(pickDistinctGarmentForm('THE CEO Cupid Valentine Dad Hat', HAT)).toBe('Cap')
+  })
+
+  it('regex metacharacters in the title or alias can never throw (no RegExp is built)', () => {
+    expect(() => pickDistinctGarmentForm('Cupid (Valentine) [*] +Shirt?', SHIRT)).not.toThrow()
+    expect(() => pickDistinctGarmentForm('Cupid Shirt', ['te(e']))
+      .not.toThrow()
+  })
+
+  it('is case-insensitive about what is already present', () => {
+    expect(pickDistinctGarmentForm('CUPID VALENTINE SHIRT FOR WOMEN', SHIRT)).toBe('Tee')
   })
 })

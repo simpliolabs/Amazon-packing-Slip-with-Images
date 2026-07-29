@@ -53,7 +53,7 @@ import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { enforceTitleBand, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -7673,28 +7673,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * title is a product claim (spec-grounding beats coverage). A missing fact contributes NO segment,
    * so a short-sleeve blank can never be padded with "Long Sleeve". */
   const bandGarment = garmentFor(input.productType, repTitle)
-  const titleBandCtx = (title: string): TitleBandCtx => {
-    const has = (w: string): boolean => new RegExp(`\b${w}\b`, 'i').test(title)
-    // The two surface forms Amazon indexes separately; keeping BOTH is the golden format. Pick from
-    // the garment's OWN alias list (never a literal) — but a form is only worth a slot if its
-    // coverage token is genuinely NEW. `t-shirt`/`tshirt` fold to the same token as `shirt`
-    // (coverage-core's foldGarment), so on a title that already says "Shirt" they buy nothing; only
-    // `tee` is a distinct surface form. Reject any alias whose letters CONTAIN a garment word the
-    // title already carries.
-    const bare = (w: string): string => w.toLowerCase().replace(/[^a-z0-9]/g, '')
-    const presentBare = bandGarment.aliases.filter((al) => has(al)).map(bare)
-    const second = bandGarment.aliases.find((al) => {
-      if (al.includes(' ') || has(al)) return false
-      const b = bare(al)
-      return !presentBare.some((p) => b.includes(p) || p.includes(b))
-    })
-    return {
-      apparel: apparelProduct,
-      garmentBrand: garmentBrandCanonical || null,
-      spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
-      garmentSecond: second ? second.replace(/\w/g, (c) => c.toUpperCase()) : null,
-    }
-  }
+  const titleBandCtx = (title: string): TitleBandCtx => ({
+    apparel: apparelProduct,
+    garmentBrand: garmentBrandCanonical || null,
+    spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
+    // Delegated to the TESTED leaf. This was six inline lines here and shipped two invisible escaping
+    // bugs: a word-boundary escape one backslash short inside a template literal (it compiled to the
+    // BACKSPACE control character, so the match ALWAYS failed), plus a literal backspace byte in a
+    // .replace regex that git diff renders invisibly. The filter was dead code -- green CI, green tsc,
+    // 15 green tests, and the net did NOTHING on the very 66-char case it was written for. An inline
+    // regex in a 9,400-line file is unreviewable; the leaf is unit-tested against real alias lists.
+    garmentSecond: pickDistinctGarmentForm(title, bandGarment.aliases),
+  })
 
   // Description SUBSTANCE = REAL product facts (blank spec + extracted specs), NEVER search keyphrases.
   // The description is a PROSE field; opportunity/search terms live in BACKEND (Content-step-2). Feeding
@@ -7803,8 +7793,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * then offer it for push. Only a run that actually PRODUCED a title may band-enforce it. */
   const bandTitle = (title: string, produced: boolean): string => {
     if (!produced || !title || (!SHIP_BAND_ON && !SHIP_BAND_SHADOW)) return title
-    const v = enforceTitleBand(title, titleBandCtx(title))
-    if (v.title === title) return title
+    // CAP FIRST, because this door now runs AFTER scrubTrademarks — whose substitutions LENGTHEN the
+    // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
+    // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
+    // at 200, not 75), which is the Amazon 100476 rejection class. Adversarial review, PR #450.
+    const capped = capTitle75(title)
+    const v = enforceTitleBand(capped, titleBandCtx(capped))
+    if (v.title === capped) return capped
     if (SHIP_BAND_SHADOW) {
       console.log(JSON.stringify({ tag: 'SHIP_BAND_DIFF', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '', next: v.title }))
       return title
@@ -7814,13 +7809,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   }
   const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => ({
     ...r,
-    recommended_title: scrubTrademarks(bandTitle(r.recommended_title, opts?.titleProduced !== false)),
+    recommended_title: bandTitle(scrubTrademarks(r.recommended_title), opts?.titleProduced !== false),
     recommended_bullets: scrubTrademarksArr(r.recommended_bullets),
     recommended_description: scrubTrademarks(r.recommended_description),
     per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubTrademarks(c.keywords) })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
-    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: scrubTrademarks(bandTitle(c.title, opts?.titleProduced !== false)) })),
+    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubTrademarks(c.title), opts?.titleProduced !== false) })),
     // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
     // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
     // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then

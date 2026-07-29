@@ -58,6 +58,37 @@ function alreadyStates(title: string, phrase: string): boolean {
   return p.length > 0 && t.includes(` ${p} `)
 }
 
+/**
+ * Pick a garment surface form whose COVERAGE TOKEN is genuinely new for this title.
+ *
+ * LIVES HERE, NOT IN THE PIPELINE, and that is the point. The first version of this was six inline
+ * lines inside listingPipeline.ts (~9,400 lines) and shipped two invisible escaping bugs that CI,
+ * tsc and 15 green tests all missed: `` new RegExp(`\b${w}\b`) `` — a SINGLE backslash inside a
+ * template literal, so `\b` was U+0008 BACKSPACE rather than a word boundary — plus a literal
+ * backspace byte in a `.replace()` regex that `git diff` renders invisibly. Net effect: the filter
+ * was dead code, every title got `shirt`, the leaf rejected it as already-present, and the net
+ * silently did NOTHING on the exact 66-char case it was written for. Inline regexes in a huge file
+ * are unreviewable; here it is one exported function with tests that would have failed instantly.
+ *
+ * `t-shirt`/`tshirt` fold to the same coverage token as `shirt` (coverage-core's foldGarment), so on
+ * a title already saying "Shirt" they buy no indexing. Only a form whose letters neither contain nor
+ * are contained by an already-present garment word is worth a slot. Returns Title Case, or null.
+ */
+export function pickDistinctGarmentForm(title: string, aliases: readonly string[]): string | null {
+  const bare = (w: string): string => w.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const hay = ` ${title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `
+  // Whole-word containment via padded spaces — no RegExp, so no escaping to get wrong, and a fact
+  // containing regex metacharacters can never throw.
+  const present = (w: string): boolean => hay.includes(` ${w.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `)
+  const presentBare = aliases.filter((al) => present(al)).map(bare)
+  const pick = aliases.find((al) => {
+    if (al.includes(' ') || present(al)) return false
+    const b = bare(al)
+    return b.length > 0 && !presentBare.some((p) => b.includes(p) || p.includes(b))
+  })
+  return pick ? pick.replace(/(^|[\s-])(\w)/g, (_m, sep: string, c: string) => sep + c.toUpperCase()) : null
+}
+
 /** Ordered candidates, strongest product signal first. The garment BRAND leads because it is the
  *  highest-intent fact a shopper filters on ("comfort colors tshirt" is this listing's rank-1
  *  keyword and a genuine attribute of the blank). */
