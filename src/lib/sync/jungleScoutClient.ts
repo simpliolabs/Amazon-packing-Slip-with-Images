@@ -207,9 +207,28 @@ export async function reverseAsinLookup(
  */
 export async function fetchKeywordsByKeyword(
   searchTerm: string,
-  options: { pageSize?: number; minSearchVolume?: number } = {}
+  options: {
+    pageSize?: number;
+    minSearchVolume?: number;
+    /**
+     * api_usage_log `endpoint` label (task #144). Defaults to the exact current literal, so all
+     * five existing call sites (keywordResearcher.ts:164,183,205,319,1272) write byte-identical
+     * ledger rows. PURELY A LABEL: it cannot influence the URL, the body, or the response.
+     * DELIBERATELY NOT ADDED HERE: any `sort`, `filter[...]` or `page[...]` option. A repo-wide
+     * grep for `filter[` returns EXACTLY ONE line (:231, the min_ form, dead since 878e42d), and
+     * no relevance/ascending sort has ever been sent from this codebase. Betting on an unverified
+     * query param in THIS function is the #1 way to re-open #95 — call site :319 IS the #95 cure
+     * (broadNicheSeed) — and logApiCall (cacheService.ts:492-505) has NO status filter, so an
+     * unsupported param 400s and STILL burns a counted credit on every tripping listing, forever.
+     */
+    endpointTag?: string;
+  } = {}
 ): Promise<JungleScoutKeywordRow[]> {
-  const { pageSize = 100, minSearchVolume = 0 } = options;
+  const {
+    pageSize = 100,
+    minSearchVolume = 0,
+    endpointTag = 'keywords_by_keyword_query',
+  } = options;
 
   const creds = await getCredentials();
   if (!creds.enabled) {
@@ -252,7 +271,7 @@ export async function fetchKeywordsByKeyword(
       }
     );
 
-    await logApiCall('jungle_scout', 'keywords_by_keyword_query', [searchTerm], resp.status);
+    await logApiCall('jungle_scout', endpointTag, [searchTerm], resp.status);
 
     if (!resp.ok) {
       const err = await resp.text();
@@ -291,7 +310,7 @@ export async function fetchKeywordsByKeyword(
 
   } catch (err) {
     console.error('[jungleScoutClient] keywords_by_keyword fetch error:', err);
-    await logApiCall('jungle_scout', 'keywords_by_keyword_query', [searchTerm], 500);
+    await logApiCall('jungle_scout', endpointTag, [searchTerm], 500);
     return [];
   }
 }

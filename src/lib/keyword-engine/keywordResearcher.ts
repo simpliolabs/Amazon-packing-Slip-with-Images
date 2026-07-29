@@ -26,6 +26,14 @@ import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
 import { scrubTrademarks, hasTrademark } from '../fba/trademarkGuard';
 import { garmentNounFor, SHIRT_BASE, ALL_GARMENT_ALIAS_WORDS, type GarmentNoun } from '../fba/garmentNoun';
+import { isWithinBudget } from './cacheService';
+// SEED_TOKEN_NET (task #144). No cycle: cacheService imports only engine + selection-core;
+// seedTokenNet imports only coverage-core (dependency-free leaf).
+import {
+  SEED_TOKEN_MODE, SEED_TOKEN_ON, SEED_TOKEN_ACTIVE,
+  SEED_TOKEN_RESERVED_SLOTS, SEED_TAIL_MIN_HEADROOM,
+  auditSeedTokens, reserveSeedTokenSlots,
+} from './seedTokenNet';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -82,6 +90,14 @@ const RESEARCH_TTL_DAYS = 14;
 // to the same normalized seed share ONE research for 14 days. Per-ASIN organic rank (Phase 4b) is
 // NEVER stored here — it stays per-listing.
 const SEED_POOL_TABLE = 'keyword_seed_pool';
+// A harvest thinner than this is an OUTAGE signature, not a niche-tail signature — Phase 2c owns
+// the thin-pool case. Hoisted from the Phase 2c block (was a block-scoped `const` there) so the
+// seed-token net can gate on the SAME number instead of declaring a second one (doctrine 5).
+export const EMPTY_POOL_THRESHOLD = 10;
+// The #423 niche-first cap (b0d91e8, 2026-07-17, live loop on B0DMXMH266) — named, not renumbered.
+// Same values that were inline in categorizeBuckets.
+const NICHE_SLOTS = 70;
+const POOL_SLOTS = 100;
 
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 
@@ -196,7 +212,6 @@ export async function researchKeywords(
   // niche-noun seed (buildFallbackSeed → e.g. "therapist tshirt") that JS has data for. Relevance is
   // preserved by the downstream gate (syncKeywordIntelligence), which filters anything off-product.
   // Fires ONLY on the low-data case (well-seeded listings like the soccer tee skip it). +1 credit.
-  const EMPTY_POOL_THRESHOLD = 10;
   if (nicheKeywords.length < EMPTY_POOL_THRESHOLD) {
     const fallbackSeed = buildFallbackSeed(seed, listingTitle, g);
     const already = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
@@ -302,21 +317,92 @@ export async function researchKeywords(
   // C3 (workflow w6728l4wz): carry each universe's KIND so the broadNicheSeed HEAD can be tagged
   // nicheHead → exempt from the x0.7 opportunity demotion (flag-gated), while the mega-broad
   // category/brand heads stay demoted. vision-niche universes are also winnable heads → nicheHead.
-  const extraUniverses: { seed: string; nicheHead: boolean }[] = [
+  const extraUniverses: { seed: string; nicheHead: boolean; tag?: string }[] = [
     ...visionNicheSeeds.map((seed) => ({ seed, nicheHead: true })),          // U1.x — vision niche heads
     ...([broadNicheSeed(seed, listingTitle, visionIdentity, g)].filter((s): s is string => !!s).map((seed) => ({ seed, nicheHead: true }))),  // U1.5 — BROAD NICHE HEAD
     ...([broadCategorySeed(seed, listingTitle, g)].filter((s): s is string => !!s).map((seed) => ({ seed, nicheHead: false }))),              // U2 — broad category (demoted)
     ...([garmentBrandSeed(seed, listingTitle, g)].filter((s): s is string => !!s).map((seed) => ({ seed, nicheHead: false }))),               // U3 — garment brand (demoted)
   ];
+  // ── SEED-TOKEN NET · niche-tail universe (PO 2026-07-28, task #144) ────────────────────────
+  // MEASURED (B0GF49RLDL "Cupid Valentine", seed "cupid valentine shirt"): jungleScoutClient:235
+  // sorts the seed's related cluster by monthly volume DESC and keeps 100. A niche design's own
+  // terms are LOW-VOLUME BY DEFINITION (~450/mo against a 1,173/mo pool floor), so they fall below
+  // the cut and NEVER enter the pool. The misspelling "confort colors t shirt" (3,625) survived;
+  // zero /valentine|cupid/ rows did.
+  //
+  // ADAPTIVE, NOT UNCONDITIONAL: assert the seed's own tokens landed, and buy ONE more universe
+  // only when they did not. Most listings pay nothing (doctrine 6 — 950/mo hard cap, real money).
+  //
+  // WE CHANGE THE CLUSTER, NEVER THE SORT. Same endpoint, same headers, same
+  // sort=-monthly_search_volume_exact, same page[size]=100 — only search_terms differs, and that is
+  // the one attribute proven on all five production call sites. This is EXACTLY the mechanism
+  // 13b4629 used to cure #95 (add a pull with a broader seed), aimed at the other end of the curve:
+  // the "cupid shirt" cluster's own top-100 is dominated by cupid rows because the 476k/mo
+  // "graphic tees for women" head simply is not in that cluster to crowd them out.
+  //
+  // PLACEMENT IS LOAD-BEARING: this sits PAST the seed-pool-hit/fresh merge, so it audits POOLED
+  // rows too — a stale head-only blob written by the old code self-heals on its next research, with
+  // no version key and no TTL wait (keyword_seed_pool has no version column and hot keys never
+  // expire: reuse re-slides expires_at).
+  const seedToks = SEED_TOKEN_ACTIVE ? distinctiveNicheTokens(seed) : [];
+  const preAudit = auditSeedTokens(seedToks, [...nicheKeywords, ...competitorKeywords]);
+  let tailCandidate: string | null = null;
+  let tailReason: string =
+    seedToks.length === 0 ? 'no_distinctive_tokens' : preAudit.ok ? 'pass' : 'trip';
+  if (!preAudit.ok) {
+    // Skip any missing token whose head is ALREADY being researched (U1.x / U1.5 / U2 / U3 / the
+    // primary). This is why the tail is usually FREE: broadNicheSeed's head is built from the same
+    // vocabulary with the same noun, so it normally covers missing[0] and we fall through to the
+    // token it did NOT cover — on B0GF49RLDL, "valentine shirt" when U1.5 already took "cupid shirt".
+    const emitted = new Set<string>([seedKey, ...extraUniverses.map((u) => normalizeSeedKey(u.seed))]);
+    const cand = preAudit.missing
+      .map((t) => `${t} ${g.noun}`)                       // g.noun — the SAME namespace broadNicheSeed writes
+      .find((h) => { const k = normalizeSeedKey(h); return !!k && !emitted.has(k); }) ?? null;
+    if (!cand) {
+      tailReason = 'already_emitted';                     // free: an existing universe covers it
+    } else if (categorySeed) {
+      // APPAREL-ONLY, mirroring U2/U3: `categorySeed` is supplied by the caller ONLY for
+      // non-apparel, so its presence means "{token} shirt" is nonsense here.
+      tailReason = 'non_apparel';
+    } else if (nicheKeywords.length < EMPTY_POOL_THRESHOLD) {
+      // OUTAGE GUARD (doctrine 3). fetchKeywordsByKeyword returns [] on 429/5xx/budget-denial, so an
+      // outage makes EVERY token look missing on EVERY listing. logApiCall has no status filter, so
+      // each retry would burn a counted credit precisely when the system is degraded. A thin harvest
+      // is Phase 2c's case, not the tail's — a degraded pull must never escalate spend.
+      tailReason = 'harvest_degraded';
+    } else if (!SEED_TOKEN_ON) {
+      tailCandidate = cand;                               // SHADOW: report it, spend nothing, $0
+      tailReason = 'shadow_would_pull';
+    } else {
+      // Re-read the budget immediately before committing to a spend AND hold a headroom reserve, so
+      // this OPTIONAL universe is the FIRST spend to yield as the 950 cap tightens — it can never be
+      // the call that trips the research PAUSE or reaches the $0.05/call band above the plan limit.
+      const head = await isWithinBudget('jungle_scout');
+      if (!head.allowed || head.callsRemaining <= SEED_TAIL_MIN_HEADROOM) {
+        tailReason = 'budget_headroom_reserved';
+      } else {
+        tailCandidate = cand;
+        // Appended LAST so U1.5/U2/U3 keep merge precedence (mergedKw is first-writer-wins) and this
+        // reads as true overflow. nicheHead:true = the SAME treatment broadNicheSeed's head gets —
+        // parity, never a privileged new class.
+        extraUniverses.push({ seed: cand, nicheHead: true, tag: 'keywords_by_keyword_query:tail' });
+        tailReason = 'tail_universe_added';
+      }
+    }
+  }
+  if (SEED_TOKEN_ACTIVE) {
+    console.log(`[SEED_TOKEN_NET] pre-universe ${asin}: tokens=[${seedToks.join(',')}] missing=[${preAudit.missing.join(',')}] candidate=${tailCandidate ?? '-'} reason=${tailReason}`);
+  }
+
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
-  for (const { seed: us, nicheHead: uNicheHead } of extraUniverses) {
+  for (const { seed: us, nicheHead: uNicheHead, tag: uTag } of extraUniverses) {
     const uk = normalizeSeedKey(us);
     if (!uk || universeSeen.has(uk)) continue;
     universeSeen.add(uk);
     let up = forceRefresh ? null : await getSeedPool(uk);
     if (!up) {
-      const kws = await fetchKeywordsByKeyword(us, { pageSize: 100 });
+      const kws = await fetchKeywordsByKeyword(us, { pageSize: 100, endpointTag: uTag });
       creditsUsed++;
       await upsertSeedPool(uk, kws, null, 'universe', asin);
       up = { keywords: kws, competitor: null };
@@ -384,7 +470,7 @@ export async function researchKeywords(
   }
 
   // ── Phase 5: Merge + 3-Bucket Categorization ──────────────────────────────
-  const buckets = categorizeBuckets(nicheKeywords, competitorKeywords);
+  const buckets = categorizeBuckets(nicheKeywords, competitorKeywords, SEED_TOKEN_ON ? seedToks : []);
   const allKeywords = [...buckets.primary, ...buckets.competitorMatch, ...buckets.competitorGaps];
 
   const result: KeywordResearchResult = {
@@ -399,6 +485,30 @@ export async function researchKeywords(
     escalate: seedSel.escalate,
   };
 
+  // ── SEED-TOKEN NET · TERMINAL MEASUREMENT (task #144) ──────────────────────────────────────
+  // Measured on what SHIPS, not on what was fetched: `allKeywords` IS the blob cacheResearch
+  // persists and the array syncKeywordIntelligence feeds to the relevance gate — post-merge,
+  // post-nets, and critically POST-70/100-CAP. A net at the fetch boundary alone would have gone
+  // GREEN on B0GF49RLDL while the shipped blob stayed empty, because the cap eats rows after the
+  // fetch. `shippedHits` is THE number: reason='tail_universe_added' with shippedOk=false means the
+  // harvest worked and the CAP still ate it (check SEED_TOKEN_RESERVED_SLOTS); reason='trip' with
+  // no candidate means every missing token's head was already an emitted universe.
+  // FAIL-OPEN: logs only — never mutates result, never truncates, never throws.
+  if (SEED_TOKEN_ACTIVE) {
+    const shipped = auditSeedTokens(seedToks, allKeywords);
+    console.log(`[SEED_TOKEN_NET] ${JSON.stringify({
+      asin, mode: SEED_TOKEN_MODE, seed, seedKey,
+      poolHit: !!pooled,                 // separates stale-blob trips from fresh-harvest trips
+      tokens: seedToks,
+      preHits: preAudit.hits,            // before the tail universe
+      shippedHits: shipped.hits,         // after the merge AND after the 70/100 cap
+      shippedOk: shipped.ok,
+      reservedSlots: SEED_TOKEN_ON ? SEED_TOKEN_RESERVED_SLOTS : 0,
+      tailCandidate, reason: tailReason,
+      creditsUsed,
+    })}`);
+  }
+
   // Cache the result
   await cacheResearch(asin, result);
   console.log(`[keywordResearcher] Done. ${allKeywords.length} total keywords in 3 buckets (${creditsUsed} credits used).`);
@@ -410,7 +520,8 @@ export async function researchKeywords(
 
 function categorizeBuckets(
   nicheKeywords: JungleScoutKeywordRow[],
-  competitorKeywords: JungleScoutKeywordRow[]
+  competitorKeywords: JungleScoutKeywordRow[],
+  seedTokens: string[] = []
 ): KeywordBuckets {
   // Build a merged, deduplicated map (niche takes precedence for volume data)
   const merged = new Map<string, JungleScoutKeywordRow>();
@@ -433,13 +544,25 @@ function categorizeBuckets(
   // backend still sees them); the niche can never be crowded out of its own listing's universe again.
   const allRows = Array.from(merged.values());
   const isUni = (k: JungleScoutKeywordRow) => (k as { fromUniverse?: boolean }).fromUniverse === true;
-  const nicheRows = allRows.filter(k => !isUni(k))
-    .sort((a, b) => b.searchVolume - a.searchVolume).slice(0, 70);
-  const universeRows = allRows.filter(isUni)
-    .sort((a, b) => b.searchVolume - a.searchVolume).slice(0, 100 - nicheRows.length);
+  // SEED-TOKEN RESERVATION (task #144). Reserve up to SEED_TOKEN_RESERVED_SLOTS positions in EACH
+  // band for rows carrying the design's own tokens — BOTH bands, because on B0GF49RLDL the cupid
+  // rows arrive via broadNicheSeed/the tail as fromUniverse:true and compete for the universe
+  // budget against U2 "graphic tees for women" (476k) and U3 "comfort colors shirt" (306k);
+  // reserving only the niche 70 leaves the measured failure uncured. Band SIZES are unchanged
+  // (reserveSeedTokenSlots reorders, never adds/removes), so the universe budget arithmetic is
+  // identical to today. seedTokens=[] (flag off OR shadow) ⇒ a pure volume-DESC sort —
+  // byte-identical to the previous .filter(...).sort(...). Pinned by seedTokenNet.test.ts.
+  // PRO-#95: for a christian design the seed token IS 'christian', so the reservation PROTECTS
+  // the #95 head family against U2/U3's mega-broad rows rather than evicting it.
+  const nicheRows = reserveSeedTokenSlots(
+    allRows.filter(k => !isUni(k)), seedTokens, SEED_TOKEN_RESERVED_SLOTS,
+  ).slice(0, NICHE_SLOTS);
+  const universeRows = reserveSeedTokenSlots(
+    allRows.filter(isUni), seedTokens, SEED_TOKEN_RESERVED_SLOTS,
+  ).slice(0, POOL_SLOTS - nicheRows.length);
   const allSorted = [...nicheRows, ...universeRows]
     .sort((a, b) => b.searchVolume - a.searchVolume)
-    .slice(0, 100);
+    .slice(0, POOL_SLOTS);
 
   // Build competitor keyword set for categorization
   const compKwSet = new Set(competitorKeywords.map(k => k.keyword.toLowerCase()));
@@ -660,6 +783,31 @@ function garmentBrandSeed(seed: string, listingTitle?: string | null, g: Garment
  * Apparel-only. Returns null if the top token is a blank brand (garmentBrandSeed owns that) OR
  * the derived head equals the primary (no point re-researching).
  */
+/**
+ * The ONE "is this word the DESIGN's identity?" vocabulary (extracted 2026-07-28, task #144).
+ * Was inline in broadNicheSeed; now shared with the seed-token net so a fourth, laxer definition
+ * cannot drift in. Rejects: <=3 chars, SEED_GENERIC, APPAREL_WORDS, NICHE_GENERIC, blank brands
+ * (garmentBrandSeed owns those), tone words (universe-agnostic), and pure digits. De-duplicated
+ * on the de-pluralised form, first occurrence wins — a rejected word is still marked seen, exactly
+ * as before. Order-preserving: broadNicheSeed depends on "first survivor" semantics.
+ */
+export function distinctiveNicheTokens(src: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of (src || '').toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
+    const w = raw.replace(/s$/, '')
+    if (w.length <= 3) continue
+    if (seen.has(w)) continue
+    seen.add(w)
+    if (SEED_GENERIC.has(w) || APPAREL_WORDS.has(w) || NICHE_GENERIC.has(w)) continue
+    if (FALLBACK_BLANK_BRANDS.includes(w)) continue        // garmentBrandSeed owns this universe
+    if (FALLBACK_TONE_WORDS.has(w)) continue               // tone words are universe-agnostic
+    if (/^\d+$/.test(w)) continue
+    out.push(w)
+  }
+  return out
+}
+
 function broadNicheSeed(
   seed: string,
   listingTitle: string | null | undefined,
@@ -676,16 +824,9 @@ function broadNicheSeed(
     ...((visionIdentity?.seedKeywords || []).slice(0, 3)),
   ].join(' ').toLowerCase()
   const productWord = g.noun
-  const seen = new Set<string>()
-  for (const raw of tokenSources.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
-    const w = raw.replace(/s$/, '')
-    if (w.length <= 3) continue
-    if (seen.has(w)) continue
-    seen.add(w)
-    if (SEED_GENERIC.has(w) || APPAREL_WORDS.has(w) || NICHE_GENERIC.has(w)) continue
-    if (FALLBACK_BLANK_BRANDS.includes(w)) continue        // garmentBrandSeed owns this universe
-    if (FALLBACK_TONE_WORDS.has(w)) continue               // tone words are universe-agnostic
-    if (/^\d+$/.test(w)) continue
+  // tokenSources is already lowercased above, so distinctiveNicheTokens' own toLowerCase is a
+  // no-op here — the shared vocabulary, identical filters, identical first-survivor order.
+  for (const w of distinctiveNicheTokens(tokenSources)) {
     const head = `${w} ${productWord}`
     if (normalizeSeedKey(head) === normalizeSeedKey(seed)) continue  // don't re-research primary
     return head
