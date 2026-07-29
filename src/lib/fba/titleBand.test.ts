@@ -101,3 +101,28 @@ describe('enforceTitleBand', () => {
     expect(v.title).not.toMatch(/\s{2,}/)
   })
 })
+
+/* ── Regression for the WIRING, not the leaf: the caller must hand us a garment form whose coverage
+ * token is genuinely new. `T-Shirt` folds to the same token as `Shirt` (coverage-core foldGarment),
+ * so padding "…Shirt" with "T-Shirt" buys no indexing — it just looks padded. The pipeline's alias
+ * picker rejects any alias whose letters contain a garment word already present; this pins the leaf's
+ * behaviour for both the good and the bad input so a future ctx change cannot silently regress it. */
+describe('garmentSecond must be a genuinely distinct surface form', () => {
+  const LIVE = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women'
+  it('a DISTINCT form ("Tee") lands the title in band', () => {
+    const v = enforceTitleBand(LIVE, { apparel: true, garmentSecond: 'Tee' })
+    expect(v.title).toContain(' | Tee')
+    expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+  })
+  it('a longer redundant form cannot sneak past the cap — 76 chars is refused, not truncated', () => {
+    // "T-Shirt" is both redundant (folds to the same coverage token as the "Shirt" already present)
+    // AND two chars too long: 66 + " | T-Shirt" = 76. The leaf refuses it on the CAP alone and
+    // degrades honestly rather than truncating mid-word. Redundancy itself is filtered by
+    // listingPipeline's alias picker BEFORE the leaf is called (it rejects any alias whose letters
+    // contain a garment word the title already carries) — belt and braces, two independent reasons.
+    const v = enforceTitleBand(LIVE, { apparel: true, garmentSecond: 'T-Shirt' })
+    expect(v.title).toBe(LIVE)
+    expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+    expect(v.notes[0]).toMatch(/NO product facts available to reach 70/)
+  })
+})

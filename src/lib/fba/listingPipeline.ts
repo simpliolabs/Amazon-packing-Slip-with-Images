@@ -7675,9 +7675,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const bandGarment = garmentFor(input.productType, repTitle)
   const titleBandCtx = (title: string): TitleBandCtx => {
     const has = (w: string): boolean => new RegExp(`\b${w}\b`, 'i').test(title)
-    // The two surface forms Amazon indexes separately; keeping BOTH is the golden format. Pick the
-    // one the title does NOT already carry, from the garment's own alias list — never a literal.
-    const second = bandGarment.aliases.find((al) => !al.includes(' ') && !has(al))
+    // The two surface forms Amazon indexes separately; keeping BOTH is the golden format. Pick from
+    // the garment's OWN alias list (never a literal) — but a form is only worth a slot if its
+    // coverage token is genuinely NEW. `t-shirt`/`tshirt` fold to the same token as `shirt`
+    // (coverage-core's foldGarment), so on a title that already says "Shirt" they buy nothing; only
+    // `tee` is a distinct surface form. Reject any alias whose letters CONTAIN a garment word the
+    // title already carries.
+    const bare = (w: string): string => w.toLowerCase().replace(/[^a-z0-9]/g, '')
+    const presentBare = bandGarment.aliases.filter((al) => has(al)).map(bare)
+    const second = bandGarment.aliases.find((al) => {
+      if (al.includes(' ') || has(al)) return false
+      const b = bare(al)
+      return !presentBare.some((p) => b.includes(p) || p.includes(b))
+    })
     return {
       apparel: apparelProduct,
       garmentBrand: garmentBrandCanonical || null,
