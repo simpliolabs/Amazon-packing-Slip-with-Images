@@ -16,7 +16,9 @@ export const CONTENT_CONTRACT = {
     floor: 50,              // validateTitle under-length trigger
     goldenBandLo: 70,       // scoreTitleQuality golden band low
     goldenBandHi: 75,
-    humanizerTrigger: 68,   // humanizeTitleTo75 fires below this
+    // 68 CONTRADICTED goldenBandLo:70 — a 68-69 char title was below the band yet never triggered
+    // the humanizer, so the contract disagreed with itself (task #147, found by seam mapping).
+    humanizerTrigger: 70,   // humanizeTitleTo75 fires below this — == goldenBandLo by construction
     fillTarget: 73,         // deterministic fill-to target
   },
   bullets: {
@@ -37,6 +39,9 @@ export const CONTENT_CONTRACT = {
     coreTargetColorless: 244,
     minLegacy: 190,         // backendDegradeGate BACKEND_MIN_LEGACY
     minStrict: 220,         // backendDegradeGate BACKEND_MIN_STRICT + scoreBackend green-band low
+    // The 240-250 golden band had NO constant anywhere in the repo — byteCap/minLegacy/minStrict are
+    // all ceilings and floors, so "reach 240" was never expressible (task #147).
+    fillTarget: 240,        // backend golden-band LOW edge — the number a fill must actually reach
     scorerCharDockLo: 100,  // syncListingContent backend .length<100 dock — DIVERGES (byte vs char) (Step-4)
     scorerCharDockHi: 200,  // syncListingContent backend .length<200 dock
   },

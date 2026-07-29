@@ -53,6 +53,7 @@ import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
+import { enforceTitleBand, type TitleBandCtx } from '@/lib/fba/titleBand'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -1056,6 +1057,16 @@ const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
 // applyTerminalNets so "Regenerate bullets"/"Regenerate description" get the SAME terminal net the full
 // path runs. off=legacy (byte-identical); shadow=log [SPINE_DIFF] which would-change, ship legacy;
 // on=apply the terminal net.
+// SHIP_BAND_NET (2026-07-29, task #147): the ONE terminal band net for the TITLE, installed at
+// `scrubPublished` — the single choke point EVERY exit passes through (title/bullets/keywords/
+// description partials all route via `partialResult`, which is DEFINED as a scrubPublished wrapper).
+// A live regen shipped a 66-char title against the 70-75 band because the ENFORCED retry lives only
+// in the multi-design `buildNicheParentTitle` while single-design ships `runTitleAgent`'s soft pad.
+// DEFAULT ON (opt-OUT, per generation-invariants INVARIANT 3 — a net that must be remembered is the
+// net that gets forgotten). shadow=log [SHIP_BAND_DIFF] only; off=full bypass for rollback.
+const SHIP_BAND_MODE = (process.env.SHIP_BAND_NET || 'on').toLowerCase()
+const SHIP_BAND_ON = SHIP_BAND_MODE !== 'off' && SHIP_BAND_MODE !== 'shadow'
+const SHIP_BAND_SHADOW = SHIP_BAND_MODE === 'shadow'
 const CONTENT_SPINE_MODE = (process.env.CONTENT_SPINE || 'off').toLowerCase()
 const CONTENT_SPINE_ON = CONTENT_SPINE_MODE === 'on'
 const CONTENT_SPINE_SHADOW = CONTENT_SPINE_MODE === 'shadow'
@@ -1574,7 +1585,7 @@ export function capTitle75(title: string): string {
   // A dangling content word from a split keyphrase can survive — acceptable for a last-line backstop;
   // the agent's prompts + retries keep real titles under the cap in the normal path.
   for (let guard = 0; guard < 6; guard++) {
-    const tidied = cut.replace(/[\s,;:&\-–—]+$/g, '').replace(/\s(?:for|and|with|in|of|to|a|an|the|or|by)$/i, '').trim()
+    const tidied = cut.replace(/[\s,;:&|\-–—]+$/g, '').replace(/\s(?:for|and|with|in|of|to|a|an|the|or|by)$/i, '').trim()
     if (tidied === cut) break
     cut = tidied
   }
@@ -7657,6 +7668,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
   // spec-vs-search error this fix condemns. An off-list blank earns a brand mention by being ADDED here.
   const garmentBrandCanonical = blankSpec?.brand ?? ''
+  /* SHIP_BAND_NET (#147) — the FACTS the title band net may pad with. Product attributes only:
+   * BLANK_SPECS values and a distinct garment surface form. NEVER a search-pool term, because a
+   * title is a product claim (spec-grounding beats coverage). A missing fact contributes NO segment,
+   * so a short-sleeve blank can never be padded with "Long Sleeve". */
+  const bandGarment = garmentFor(input.productType, repTitle)
+  const titleBandCtx = (title: string): TitleBandCtx => {
+    const has = (w: string): boolean => new RegExp(`\b${w}\b`, 'i').test(title)
+    // The two surface forms Amazon indexes separately; keeping BOTH is the golden format. Pick the
+    // one the title does NOT already carry, from the garment's own alias list — never a literal.
+    const second = bandGarment.aliases.find((al) => !al.includes(' ') && !has(al))
+    return {
+      apparel: apparelProduct,
+      garmentBrand: garmentBrandCanonical || null,
+      spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
+      garmentSecond: second ? second.replace(/\w/g, (c) => c.toUpperCase()) : null,
+    }
+  }
 
   // Description SUBSTANCE = REAL product facts (blank spec + extracted specs), NEVER search keyphrases.
   // The description is a PROSE field; opportunity/search terms live in BACKEND (Content-step-2). Feeding
@@ -7759,15 +7787,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // result chokepoints (partialResult + the full return below) so no exit path can publish an
   // infringing mark, even one pulled from the keyword pool. Pool/Intelligence data is left as-is —
   // only text that gets WRITTEN to Amazon is scrubbed. (Scope A; per-seller list is a scope-C follow-on.)
-  const scrubPublished = (r: PipelineResult): PipelineResult => ({
+  /* THE band-net door. `titleProduced` is REQUIRED discipline, not politeness: `partialResult`
+   * passes `input.priorTitle` straight through for a bullets/keywords/description-only regen, so an
+   * ungated net would silently rewrite a title the seller never asked to touch — and the UI would
+   * then offer it for push. Only a run that actually PRODUCED a title may band-enforce it. */
+  const bandTitle = (title: string, produced: boolean): string => {
+    if (!produced || !title || (!SHIP_BAND_ON && !SHIP_BAND_SHADOW)) return title
+    const v = enforceTitleBand(title, titleBandCtx(title))
+    if (v.title === title) return title
+    if (SHIP_BAND_SHADOW) {
+      console.log(JSON.stringify({ tag: 'SHIP_BAND_DIFF', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '', next: v.title }))
+      return title
+    }
+    console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
+    return v.title
+  }
+  const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => ({
     ...r,
-    recommended_title: scrubTrademarks(r.recommended_title),
+    recommended_title: scrubTrademarks(bandTitle(r.recommended_title, opts?.titleProduced !== false)),
     recommended_bullets: scrubTrademarksArr(r.recommended_bullets),
     recommended_description: scrubTrademarks(r.recommended_description),
     per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubTrademarks(c.keywords) })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
-    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: scrubTrademarks(c.title) })),
+    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: scrubTrademarks(bandTitle(c.title, opts?.titleProduced !== false)) })),
     // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
     // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
     // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
@@ -7797,7 +7840,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     debug: { titleProblems: [], candidatesUsed: [], titleRetried: false, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key) },
     regeneratedSection: section,
     ...fields,
-  })
+    // Only a TITLE partial actually produced a title this run; every other section passes
+    // `input.priorTitle` straight through, and band-enforcing THAT would hand the seller a
+    // rewritten title they never asked to regenerate (and offer it for push).
+  }, { titleProduced: section === 'title' })
 
   // Stage 1 — Title (skipped on a non-title partial run: the stored title is the anchor,
   // so e.g. regenerated bullets keep deduping against the title the seller already approved)
