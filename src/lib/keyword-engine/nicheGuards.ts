@@ -163,3 +163,24 @@ export function isForeignKeyword(keyword: string): boolean {
   if (FOREIGN_FUNCTION_WORDS.test(kw)) return true       // para/ropa/regalos/divertidas (function/shopper words)
   return false
 }
+
+/* ── AUDIENCE LEAN ────────────────────────────────────────────────────────────────────────────── */
+
+/** ⚠️ KEEP IN SYNC — these regexes exist as module-private copies in syncListingContent.ts (~:360),
+ *  listingPipeline.ts and rankAnalysis.ts (each carries the same KEEP IN SYNC note). This export is
+ *  the CANONICAL home; migrate the private copies here rather than editing four files. */
+const LEAN_FEM_RE = /\bwom[ae]ns?\b|\bladies\b|\bfemale\b|\bgirls?\b/i
+const LEAN_MASC_RE = /\bm[ae]ns?\b|\bmale\b|\bboys?\b/i
+
+/**
+ * A HARD audience lean ('male' | 'female' exactly — soft leans like 'lean_female' pass everything)
+ * excludes keywords that name ONLY the opposite audience: on a hard-female listing "comfort colors
+ * tshirt men" can never convert, so it must never hold a ranking-target seat. Keywords naming both
+ * audiences ("mens and womens tee") or neither are kept — cross-gender gift traffic is real.
+ */
+export function leanExcludesKeyword(keyword: string, hardLean: string | null | undefined): boolean {
+  if (hardLean !== 'male' && hardLean !== 'female') return false
+  return hardLean === 'female'
+    ? LEAN_MASC_RE.test(keyword) && !LEAN_FEM_RE.test(keyword)
+    : LEAN_FEM_RE.test(keyword) && !LEAN_MASC_RE.test(keyword)
+}
