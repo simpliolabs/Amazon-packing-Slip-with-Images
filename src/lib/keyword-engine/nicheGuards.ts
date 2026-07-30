@@ -70,6 +70,19 @@ export function isEquipmentNicheKeyword(keyword: string): boolean {
  *  Own-brand-guarded by the caller's `context`: if the listing's OWN brand is Gildan, it is kept. */
 const COMPETITOR_BLANK_BRANDS = /\b(?:gildan|bella\s*\+?\s*canvas|hanes|jerzees|anvil|tultex|alstyle|fruit\s+of\s+the\s+loom|next\s+level(?:\s+apparel)?|american\s+apparel|port\s*(?:&|and)\s*company|delta\s+apparel)\b/i
 
+/** RETAIL apparel brands — a different class from the BLANK brands above, and the gap that let
+ *  `nike shirts women` (23,353/mo) and the token pair `grunt`+`style` into a wedding vow-renewal
+ *  tee's pool (B0GR22ZHBW, measured 2026-07-30). A shopper searching "nike shirts women" wants
+ *  Nike, full stop: we can never rank for it, our copy must never claim it, and spending backend
+ *  bytes on it is both wasted indexing and trademark-adjacent. The blank-brand list above only
+ *  covers manufacturers you PRINT ON (Gildan, Hanes) — it was never meant to catch the brands you
+ *  COMPETE WITH at retail, and nothing else did.
+ *  Own-brand-guarded by the caller's `context`, exactly like COMPETITOR_BLANK_BRANDS: a seller whose
+ *  own brand appears here keeps its own terms. Deliberately a SHORT, high-confidence list of major
+ *  apparel houses — not a general trademark oracle (that is trademarkGuard's job) and not an excuse
+ *  to blanket-ban every proper noun ([[dont-overgeneralize-specific-failures]]). */
+const COMPETITOR_RETAIL_BRANDS = /\b(?:nike|adidas|puma|reebok|under\s*armou?r|lululemon|patagonia|the\s+north\s+face|columbia\s+sportswear|carhartt|dickies|levi'?s|tommy\s+hilfiger|ralph\s+lauren|calvin\s+klein|champion\s+(?:hoodie|shirt|tee)|grunt\s*style|savage\s+barbell|rothco)\b/i
+
 /** Wholesale / blank-goods intent — the shopper wants an UNPRINTED shirt, the opposite of a graphic tee. */
 const WHOLESALE_INTENT = /\b(?:plain|blank|wholesale|bulk|unprinted)\b/i
 
@@ -117,6 +130,13 @@ export function isOffNicheKeyword(keyword: string, opts?: { context?: string }):
 
   const brand = kw.match(COMPETITOR_BLANK_BRANDS)?.[0]                     // competitor blank brand,
   if (brand && !ctx.includes(brand)) return true                          //   unless it is our OWN brand
+
+  // Competitor RETAIL brand (Nike, Grunt Style, …) — same own-brand escape hatch, same shape as the
+  // blank-brand test above. Split from it because the two are different competitive relationships:
+  // a blank brand is what we PRINT ON, a retail brand is who we COMPETE WITH. Only the first was
+  // ever guarded, which is how "nike shirts women" reached a vow-renewal tee's keyword pool.
+  const retail = kw.match(COMPETITOR_RETAIL_BRANDS)?.[0]
+  if (retail && !ctx.includes(retail)) return true
 
   if (WHOLESALE_INTENT.test(kw) && GARMENT_TOKEN.test(kw)) return true     // "plain/blank t shirts"
   if (ACTIVEWEAR_NICHE.test(kw) && !ACTIVEWEAR_NICHE.test(ctx)) return true // activewear (unless we ARE)
