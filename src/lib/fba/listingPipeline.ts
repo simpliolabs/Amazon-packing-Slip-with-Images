@@ -7799,6 +7799,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // at 200, not 75), which is the Amazon 100476 rejection class. Adversarial review, PR #450.
     const capped = capTitle75(title)
     const v = enforceTitleBand(capped, titleBandCtx(capped))
+    // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
+    // logged only when it changed something, so on the first live run after deploy — a 75-char title
+    // and no log line — "the net works", "the net never fired" and "the net fired and did nothing"
+    // were indistinguishable, and the only honest report was "unknown". The evidence gate for the
+    // whole ship-door plan is a live `decision:'padded'` with from<70 and to in [70,75]; that cannot
+    // be collected without this line. One line per title per exit; cheap next to the LLM calls.
+    console.log(JSON.stringify({
+      tag: 'SHIP_BAND_DECISION',
+      field: 'title',
+      mode: SHIP_BAND_SHADOW ? 'shadow' : 'on',
+      decision: v.decision,
+      from: title.length,
+      to: v.title.length,
+      changed: v.title !== capped,
+      capped: capped.length !== title.length,
+      note: v.notes[0] ?? '',
+    }))
     if (v.title === capped) return capped
     if (SHIP_BAND_SHADOW) {
       console.log(JSON.stringify({ tag: 'SHIP_BAND_DIFF', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '', next: v.title }))
