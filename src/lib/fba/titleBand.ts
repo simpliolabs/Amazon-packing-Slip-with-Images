@@ -130,6 +130,85 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   return out
 }
 
+/** Trivial connectors that may legitimately repeat. Everything else is a "significant word" and is
+ *  allowed once. Mirrors HIGHLIGHT_STOPWORDS (listingPipeline.ts:1627), where men/women/cotton are
+ *  deliberately ABSENT — they count as real words. */
+const TITLE_CONNECTORS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'in', 'to', 'or', 'by', '&', '|'])
+
+/* NO GARMENT-COUNT CAP, deliberately — and this reversed my first implementation.
+ *
+ * I initially capped garment surface forms at two, reading the PO's "variety" decision as "exactly
+ * two". Two tests immediately falsified it: on the live defect it dropped BOTH `Tshirt`s (Tee and
+ * Shirt had already taken the two slots), and it MUTATED a clean title. The reason is that the
+ * repo's own gold pattern carries THREE surfaces —
+ *   THE CEO <niche> Tee Shirt | Comfort Colors TShirt for Women
+ * — because "Tee Shirt" reads as one compound garment and "TShirt" is a second, genuinely
+ * differently-typed search. Capping the raw count breaks the shape we are trying to produce.
+ *
+ * So this net does ONE thing: remove a repeat of the SAME significant word. That is exactly the
+ * live defect ("Tshirt, Tshirt") and nothing more. Surface VARIETY is not repetition, and the
+ * distinction is the whole of the PO's decision. */
+
+/**
+ * Remove repeated significant words, then cap garment surface forms at two DISTINCT ones.
+ *
+ * THE LIVE DEFECT (B0GF49RLDL, 2026-07-29 21:03, verified in the shipped recommendation):
+ *   "THE CEO Cupid Valentine Tee Shirt | Comfort Colors Tshirt, Tshirt for Women"  (75 chars)
+ * "Tshirt" twice. Amazon indexes a token ONCE, so the repeat bought zero extra indexing while
+ * consuming 8 of the 75 characters — measured against that listing's own target set, those 8
+ * characters could have carried "graphic", newly covering `graphic t shirts` (50,962/mo).
+ *
+ * WHY EXISTING CODE MISSED IT: `deduplicatePhrases` (listingPipeline.ts:1600-1613) compares each
+ * 2-3 word window against the window IMMEDIATELY FOLLOWING it, so it only ever catches ADJACENT
+ * repeats. A word repeated at non-adjacent positions is invisible to it. Item Highlights has had a
+ * repeat gate for months (capItemHighlightRepeats); titles never did.
+ *
+ * PO DECISION (binding, recorded in handoff/FOUNDATION_SHIP_DOOR_PLAN.md §3.4-ANSWERED): "variety".
+ * Two garment nouns is the DESIRED shape — `Shirt` + `Tee` — so this must never fold to one. What it
+ * removes is a repeat of the SAME surface form, and any THIRD garment form beyond the two.
+ *
+ * Pure, deterministic, idempotent. Keeps the FIRST occurrence (title order is ranking order — the
+ * earliest position is the most valuable, so a later duplicate is always the one to lose).
+ */
+export function collapseRepeatedWords(title: string): { title: string; removed: string[] } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t0) return { title, removed: [] }
+
+  const words = t0.split(' ')
+  const seen = new Set<string>()
+  const kept: string[] = []
+  const removed: string[] = []
+
+  for (const w of words) {
+    // Compare on letters only, so "Tshirt," and "Tshirt" are the same word and punctuation never
+    // hides a duplicate. The ORIGINAL token (with its punctuation) is what gets kept.
+    const bare = w.toLowerCase().replace(/[^a-z0-9]/g, '')
+    if (!bare || TITLE_CONNECTORS.has(bare) || w === '|') { kept.push(w); continue }
+    if (seen.has(bare)) { removed.push(w); continue }              // repeat of a significant word
+    seen.add(bare)
+    kept.push(w)
+  }
+
+  if (removed.length === 0) return { title: t0, removed: [] }
+
+  // Repair what the removal left behind: doubled spaces, a comma with nothing after it, a dangling
+  // separator, or a trailing connector ("… Comfort Colors ,  for Women" → "… Comfort Colors for Women").
+  const out = kept.join(' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,;:])/g, '$1')            // " ," -> ","
+    .replace(/([,;:])\s*(?=[,;:])/g, '')     // ",," -> ","
+    // A comma that USED to introduce the removed word now sits in front of a connector
+    // ("… Tshirt, for Women"). Drop it — this is the exact residue of the live defect's repair.
+    .replace(/[,;:]\s+(?=(?:for|and|with|in|to|or|by)\b)/gi, ' ')
+    .replace(/\|\s*(?=[,;:])/g, '|')
+    .replace(/\s+\|\s+(?=(?:for|and)\b)/i, ' ') // dangling separator before the audience tail
+    .replace(/[\s,;:|]+$/g, '')              // nothing trailing, ever
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+
+  return { title: out, removed }
+}
+
 /**
  * Raise a short apparel title into the 70-75 band using product facts, inserting a ` | ` separator
  * before the audience tail. PURE, SYNCHRONOUS, TOTAL, IDEMPOTENT, MONOTONE:

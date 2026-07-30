@@ -53,7 +53,7 @@ import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -7797,7 +7797,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
     // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
     // at 200, not 75), which is the Amazon 100476 rejection class. Adversarial review, PR #450.
-    const capped = capTitle75(title)
+    // DEDUPE FIRST (#148). The live defect was "… Comfort Colors Tshirt, Tshirt for Women" — a
+    // repeat of one word, which `deduplicatePhrases` (:1600) cannot see because it only compares
+    // ADJACENT windows. Amazon indexes a token once, so the repeat bought zero extra indexing while
+    // spending 8 of the 75 characters. Removing it BEFORE the band pass means those characters are
+    // available to the pad below rather than locked up in a duplicate.
+    const deduped = collapseRepeatedWords(capTitle75(title))
+    if (deduped.removed.length > 0) {
+      console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', removed: deduped.removed, from: title.length, to: deduped.title.length }))
+    }
+    const capped = deduped.title
     const v = enforceTitleBand(capped, titleBandCtx(capped))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title

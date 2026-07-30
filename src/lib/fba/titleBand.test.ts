@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { enforceTitleBand, pickDistinctGarmentForm, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
+import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
 
 /* The LIVE failure this net exists to fix (B0GF49RLDL, 2026-07-29 21:03 regen). */
 const LIVE_66 = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women'
@@ -244,5 +244,94 @@ describe('TitleBandDecision — every branch reports why', () => {
         expect(v.title).toBe(t.trim())
       }
     }
+  })
+})
+
+/* ── collapseRepeatedWords (#148). THE LIVE DEFECT, verified in the shipped recommendation for
+ * B0GF49RLDL at 2026-07-29 21:03:
+ *   "THE CEO Cupid Valentine Tee Shirt | Comfort Colors Tshirt, Tshirt for Women"
+ * "Tshirt" twice. deduplicatePhrases only compares ADJACENT windows, so a non-adjacent repeat was
+ * invisible. PO decision: VARIETY — two garment nouns is the goal, so this must never collapse to
+ * one; it removes same-form repeats and any third form. */
+describe('collapseRepeatedWords', () => {
+  const LIVE_REPEAT = 'THE CEO Cupid Valentine Tee Shirt | Comfort Colors Tshirt, Tshirt for Women'
+
+  it('THE LIVE DEFECT: the duplicate Tshirt goes, and its dangling comma with it', () => {
+    const v = collapseRepeatedWords(LIVE_REPEAT)
+    expect((v.title.match(/tshirt/gi) ?? []).length).toBe(1)
+    expect(v.title).not.toMatch(/,\s*,|,\s*for\b/)
+    expect(v.removed.length).toBe(1)
+    expect(v.title.length).toBeLessThan(LIVE_REPEAT.length)
+  })
+
+  it('VARIETY IS PRESERVED — two distinct garment nouns survive (never collapses to one)', () => {
+    const v = collapseRepeatedWords(LIVE_REPEAT)
+    expect(v.title).toMatch(/\bTee\b/)
+    expect(v.title).toMatch(/\bShirt\b/)
+  })
+
+  it('SURFACE VARIETY IS NOT REPETITION — three distinct forms are the GOLD shape, untouched', () => {
+    // My first implementation capped garment forms at two, reading "variety" as "exactly two". Two
+    // tests falsified it immediately: it dropped BOTH Tshirts from the live defect, and it mutated
+    // clean titles — because the repo's gold pattern carries Tee + Shirt + TShirt ("Tee Shirt" is a
+    // compound garment, "TShirt" a second, differently-typed search). Only a REPEAT is the defect.
+    const gold = 'THE CEO Later Gator Tee Shirt | Comfort Colors TShirt for Women'
+    const v = collapseRepeatedWords(gold)
+    expect(v.title).toBe(gold)
+    expect(v.removed).toEqual([])
+  })
+
+  it('keeps two distinct garment nouns after a repeat is removed', () => {
+    const v = collapseRepeatedWords('THE CEO Cupid Tee Shirt Tank Tank for Women')
+    expect(v.removed).toContain('Tank')
+    expect(v.title).toMatch(/\bTee\b/)
+    expect(v.title).toMatch(/\bShirt\b/)
+  })
+
+  it('connectors may repeat — "for", "and", "the" are not significant words', () => {
+    const t = 'THE CEO Cupid Tee for Men and Women and Teens'
+    const v = collapseRepeatedWords(t)
+    expect((v.title.match(/\band\b/g) ?? []).length).toBe(2)
+  })
+
+  it('men/women/cotton COUNT as significant — they are allowed once', () => {
+    const v = collapseRepeatedWords('THE CEO Cotton Tee Cotton Shirt for Women')
+    expect((v.title.match(/cotton/gi) ?? []).length).toBe(1)
+  })
+
+  it('punctuation never hides a duplicate ("Tshirt," == "Tshirt")', () => {
+    const v = collapseRepeatedWords('THE CEO Valentine Tshirt, Tshirt Gift')
+    expect((v.title.match(/tshirt/gi) ?? []).length).toBe(1)
+  })
+
+  it('keeps the FIRST occurrence — earliest position is the most valuable', () => {
+    const v = collapseRepeatedWords('Alpha Cupid Beta Cupid Gamma')
+    expect(v.title).toBe('Alpha Cupid Beta Gamma')
+  })
+
+  it('is IDEMPOTENT — a second pass changes nothing', () => {
+    const once = collapseRepeatedWords(LIVE_REPEAT).title
+    expect(collapseRepeatedWords(once).title).toBe(once)
+    expect(collapseRepeatedWords(once).removed).toEqual([])
+  })
+
+  it('a clean title is returned untouched with nothing removed', () => {
+    const clean = 'THE CEO Cupid Valentine Tee Shirt | Comfort Colors Tshirt for Women'
+    const v = collapseRepeatedWords(clean)
+    expect(v.title).toBe(clean)
+    expect(v.removed).toEqual([])
+  })
+
+  it('never leaves a dangling separator or trailing punctuation', () => {
+    for (const t of ['THE CEO Tee Shirt | Tshirt Tshirt', 'Cupid Tee, Tee', 'Alpha | Beta Beta']) {
+      const v = collapseRepeatedWords(t)
+      expect(v.title).not.toMatch(/[\s,;:|]$/)
+      expect(v.title).not.toMatch(/\s{2,}/)
+    }
+  })
+
+  it('empty input is safe', () => {
+    expect(collapseRepeatedWords('').title).toBe('')
+    expect(collapseRepeatedWords('   ').removed).toEqual([])
   })
 })
