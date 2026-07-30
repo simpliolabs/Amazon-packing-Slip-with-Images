@@ -53,7 +53,7 @@ import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -622,7 +622,20 @@ function backendOutputProblems(
   // seller sees which mode fired the gate — helpful for the flip runbook.
   if (minBytes < floor) {
     const suffix = BACKEND_DEGRADE_STRICT_ON ? ` (< ${floor} floor)` : ''
-    problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill${suffix}`)
+    // HONEST CAUSE (#149). The old text read "degraded keyword pool or failed fill" — it named two
+    // causes and committed to neither, and this function CANNOT distinguish them: it receives the
+    // per-child strings and the children, never the keyword pool. That guess sent a live diagnosis
+    // down the wrong path (2026-07-30, B0GR22ZHBW at 194 bytes: it reads as a fill bug, but the pool
+    // held only 18 distinct novel tokens = 116 bytes against a 220 floor — the fill was extracting
+    // nearly everything there was). So: state the measurement, admit the unknown, and name the ONE
+    // check that separates the two. A message that guesses is worse than one that says "look here".
+    problems.push(
+      `a child landed at ${minBytes}/250 bytes${suffix} — the fill did not reach the floor. ` +
+      `This function cannot tell WHY (it never sees the keyword pool): open the Intelligence tab and ` +
+      `count the pool's DISTINCT tokens after stopwords/product-type/gender/title-echo are removed. ` +
+      `Below ~${floor} bytes of novel tokens the pool is too thin and the cure is more on-niche ` +
+      `research; well above it, the fill or its filters are dropping usable tokens.`,
+    )
   }
   logShadowDiff('generator-output', minBytes, { children: perChild.length })
   // DECODED colors (real, non-empty) vs UNdecodable children, counted separately (2026-07-15).
@@ -7797,7 +7810,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
     // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
     // at 200, not 75), which is the Amazon 100476 rejection class. Adversarial review, PR #450.
-    const capped = capTitle75(title)
+    // DEDUPE FIRST (#148). The live defect was "… Comfort Colors Tshirt, Tshirt for Women" — a
+    // repeat of one word, which `deduplicatePhrases` (:1600) cannot see because it only compares
+    // ADJACENT windows. Amazon indexes a token once, so the repeat bought zero extra indexing while
+    // spending 8 of the 75 characters. Removing it BEFORE the band pass means those characters are
+    // available to the pad below rather than locked up in a duplicate.
+    const deduped = collapseRepeatedWords(capTitle75(title))
+    if (deduped.removed.length > 0) {
+      console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', removed: deduped.removed, from: title.length, to: deduped.title.length }))
+    }
+    const capped = deduped.title
     const v = enforceTitleBand(capped, titleBandCtx(capped))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title
