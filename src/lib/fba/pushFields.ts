@@ -106,6 +106,27 @@ export function capForField(field: PushField, value: string): string {
   }
 }
 
+/**
+ * PHASE 4 (foundation plan): the push-boundary title gate. Amazon auto-rewrites item_name over 75
+ * chars (policy 2026-07-27) and Item Highlights 100476-rejects SKUs whose live title exceeds it —
+ * the exact class the #81 heal loop exists to clean up AFTER the fact. This gate refuses BEFORE the
+ * PATCH, so the mess is never made. REFUSE, never truncate: a mid-word slice ships garbage bytes to
+ * a customer-facing field (the #81 gate at pushExecutor:1133 set this precedent for the heal path;
+ * this extends it to the direct title push and the seller's manual override, which was previously
+ * sliced at the generic 200 cap and sent).
+ *
+ * Pure and exported so it is TESTABLE — tonight's dead-code lesson: a 4-line inline check in an
+ * untested 3,000-line file is where bugs hide. Returns the first offending row, or null when safe.
+ */
+export function titlePushBlocked(
+  diff: readonly { sku: string; chars: number; changed: boolean }[],
+): { sku: string; chars: number } | null {
+  for (const d of diff) {
+    if (d.changed && d.chars > 75) return { sku: d.sku, chars: d.chars }
+  }
+  return null
+}
+
 // ─── value resolution ──────────────────────────────────────────────────────────
 
 export interface RecRow {

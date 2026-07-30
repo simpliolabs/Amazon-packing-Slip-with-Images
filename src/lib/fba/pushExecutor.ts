@@ -35,6 +35,7 @@ import {
   FIELD_CONFIG, isPushField, type PushField, PUSH_FIELDS,
   resolveProposed, currentValue, asCompare, buildPatchValue,
   cacheUpdateFor, getByteLength, capBytes, dedupByAsin, buildCoreOps,
+  titlePushBlocked,
 } from '@/lib/fba/pushFields'
 import {
   resolveDetailAttribute, unpushableReason,
@@ -488,6 +489,23 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     })
     .filter((d) => d.raw != null) // keywords: drops SKUs whose ASIN has no per-child recommendation
   if (baseDiff.length === 0) return baseDiff
+
+  // PHASE 4 PUSH-BOUNDARY GATE: refuse a >75-char title BEFORE any PATCH is built. Amazon
+  // auto-rewrites item_name over 75 (2026-07-27 policy) and Item Highlights 100476-rejects SKUs
+  // whose live title exceeds it — the mess the #81 heal loop cleans up AFTER the fact. Refuse,
+  // never truncate (a mid-word slice ships garbage; the :1133 heal gate set the precedent). This
+  // also covers the seller's manual override, which was previously sliced at the generic 200 cap
+  // and sent. Unchanged rows never block — they are not being sent.
+  if (field === 'title') {
+    const over = titlePushBlocked(baseDiff)
+    if (over) {
+      throw new Error(
+        `Title push refused: "${over.sku}" would ship ${over.chars} characters (limit 75). ` +
+        `Amazon auto-rewrites titles over 75 and rejects Item Highlights on them (100476) — ` +
+        `shorten the title or regenerate it, then push again. Nothing was sent.`,
+      )
+    }
+  }
 
   // ── ENRICH with FBM twin SKUs discovered live from Amazon ──
   // listing_content historically deduped some FBA/FBM pairs; the user expects the push to hit
