@@ -54,6 +54,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
@@ -7846,7 +7847,33 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
     return v.title
   }
-  const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => ({
+  /* SHIP CENSUS (Phase 2 of the foundation plan) — MEASURE-ONLY, on the object this function
+   * RETURNS, i.e. the exact bytes that persist. It exists because of a same-day live specimen: the
+   * backend degrade gate measured a healthy string BEFORE the editorial audit, passed, the audit
+   * deleted tokens down to 118 bytes, and 118 persisted with no line anywhere. One JSON log per
+   * violation; it mutates NOTHING and can therefore regress nothing. */
+  const censusLog = (out: PipelineResult): PipelineResult => {
+    try {
+      const violations = shipCensus({
+        exit: (out.regeneratedSection as 'title' | 'bullets' | 'keywords' | 'description' | undefined) ?? 'full',
+        apparel: apparelProduct,
+        title: out.recommended_title || '',
+        bullets: out.recommended_bullets || [],
+        description: out.recommended_description || '',
+        perChildKeywords: out.per_child_keywords || [],
+        designName: effectiveDesignName || designName || null,
+        degradedSections: out.degradedSections,
+      })
+      for (const viol of violations) {
+        console.log(JSON.stringify({ tag: 'SHIP_CENSUS', exit: out.regeneratedSection ?? 'full', ...viol }))
+      }
+    } catch (e) {
+      // The census must never break a regen — it is observation, not enforcement.
+      console.warn('[shipCensus] failed (non-fatal):', e instanceof Error ? e.message : e)
+    }
+    return out
+  }
+  const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => censusLog({
     ...r,
     recommended_title: bandTitle(scrubTrademarks(r.recommended_title), opts?.titleProduced !== false),
     recommended_bullets: scrubTrademarksArr(r.recommended_bullets),
