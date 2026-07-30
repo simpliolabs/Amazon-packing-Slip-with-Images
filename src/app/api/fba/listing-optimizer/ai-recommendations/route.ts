@@ -1266,13 +1266,15 @@ export async function POST(req: NextRequest) {
           // for a fresh one → replace it and reset the lock to 'ai'.
           let titleSourceOut: 'ai' | 'manual' = 'ai'
           let priorKwJson: string | null = null   // prior stored keywords, for the degraded-keywords preserve below
+          let priorDesc: string | null = null     // prior stored description, for the degraded-description preserve (Phase 3)
           try {
             const { data: lockRow } = await supabase
               .from('listing_seo_recommendations')
-              .select('title_source, recommended_title, per_child_titles, recommended_keywords')
+              .select('title_source, recommended_title, per_child_titles, recommended_keywords, recommended_description')
               .eq('parent_asin', parent_asin)
               .maybeSingle()
             priorKwJson = (lockRow as { recommended_keywords?: string } | null)?.recommended_keywords ?? null
+            priorDesc = (lockRow as { recommended_description?: string } | null)?.recommended_description ?? null
             const locked = (lockRow as { title_source?: string } | null)?.title_source === 'manual'
             if (locked && regenerate_section !== 'title') {
               const kept = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
@@ -1306,6 +1308,22 @@ export async function POST(req: NextRequest) {
                 console.warn(`[ai-recommendations] backend keywords degraded for ${parent_asin} — preserved the stored set instead of persisting the degraded one`)
               }
             } catch { /* prior string unparsable — fall through, persist what we generated */ }
+          }
+
+          // DEGRADED-DESCRIPTION PRESERVE (Phase 3, 2026-07-30) — the exact twin of the keywords
+          // block above, added the day the ship census caught a 719-char description PERSISTING
+          // against the 900 floor: the reExpand ran before later stages shortened it, and nothing
+          // re-measured. The census (which measures LAST) degrade-marks it; here we keep the
+          // seller's stored description instead of persisting the short one. A brand-new listing
+          // with no prior keeps the short output — better than nothing, and the census line still
+          // fired so it is visible. Broadcast-only on purpose: the push sends the broadcast
+          // description to every SKU (per-child descriptions are stored but not yet pushed).
+          if (result.degradedSections?.includes('description') && (priorDesc ?? '').trim()) {
+            rec.recommended_description = priorDesc as string
+            rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'description'
+              ? { ...it, replacement_content: priorDesc as string, notes: `${(it as { notes?: string }).notes ?? ''} [This regen's description came back under the length floor — kept your previous description untouched.]`.trim() }
+              : it) as typeof rec.action_plan
+            console.warn(`[ai-recommendations] description degraded (under floor) for ${parent_asin} — preserved the stored description instead of persisting the short one`)
           }
 
           // SHIP-TRUTH DERIVATION (2026-07-09): derive the plan from live truth for BOTH the stream
