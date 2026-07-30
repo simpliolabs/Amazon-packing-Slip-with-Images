@@ -622,7 +622,20 @@ function backendOutputProblems(
   // seller sees which mode fired the gate — helpful for the flip runbook.
   if (minBytes < floor) {
     const suffix = BACKEND_DEGRADE_STRICT_ON ? ` (< ${floor} floor)` : ''
-    problems.push(`a child landed at ${minBytes}/250 bytes — degraded keyword pool or failed fill${suffix}`)
+    // HONEST CAUSE (#149). The old text read "degraded keyword pool or failed fill" — it named two
+    // causes and committed to neither, and this function CANNOT distinguish them: it receives the
+    // per-child strings and the children, never the keyword pool. That guess sent a live diagnosis
+    // down the wrong path (2026-07-30, B0GR22ZHBW at 194 bytes: it reads as a fill bug, but the pool
+    // held only 18 distinct novel tokens = 116 bytes against a 220 floor — the fill was extracting
+    // nearly everything there was). So: state the measurement, admit the unknown, and name the ONE
+    // check that separates the two. A message that guesses is worse than one that says "look here".
+    problems.push(
+      `a child landed at ${minBytes}/250 bytes${suffix} — the fill did not reach the floor. ` +
+      `This function cannot tell WHY (it never sees the keyword pool): open the Intelligence tab and ` +
+      `count the pool's DISTINCT tokens after stopwords/product-type/gender/title-echo are removed. ` +
+      `Below ~${floor} bytes of novel tokens the pool is too thin and the cure is more on-niche ` +
+      `research; well above it, the fill or its filters are dropping usable tokens.`,
+    )
   }
   logShadowDiff('generator-output', minBytes, { children: perChild.length })
   // DECODED colors (real, non-empty) vs UNdecodable children, counted separately (2026-07-15).
