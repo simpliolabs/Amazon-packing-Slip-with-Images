@@ -179,3 +179,70 @@ describe('pickDistinctGarmentForm', () => {
     expect(pickDistinctGarmentForm('CUPID VALENTINE SHIRT FOR WOMEN', SHIRT)).toBe('Tee')
   })
 })
+
+/* ── PHASE 0: the decision verdict. A net whose success is indistinguishable from its absence is not
+ * verifiable — on the first live run the title came back at 75 with no log line, and the only honest
+ * answer was "unknown". Every branch must report WHY, and these tests pin the mapping so the live
+ * evidence gate ("show me a decision:'padded' with from<70 and to in [70,75]") is trustworthy. */
+describe('TitleBandDecision — every branch reports why', () => {
+  const LIVE_SHORT = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women' // 66
+
+  it("padded — the ONLY verdict that proves the net works", () => {
+    const v = enforceTitleBand(LIVE_SHORT, CC)
+    expect(v.decision).toBe('padded')
+    expect(LIVE_SHORT.length).toBeLessThan(TITLE_BAND_LO)
+    expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+    expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+  })
+
+  it("in-band — healthy no-op, and now distinguishable from never running", () => {
+    const inBand = 'THE CEO Cupid Valentine Tee Shirt | Pixel Art Comfort Colors Women Tshirt'
+    expect(enforceTitleBand(inBand, CC).decision).toBe('in-band')
+  })
+
+  it("over-cap — capping is capTitle75's job, so the net stands down and says so", () => {
+    const long = 'THE CEO Cupid Valentine Pixel Art Graphic Tee Shirt | Comfort Colors Relaxed Fit TShirt for Women'
+    expect(long.length).toBeGreaterThan(TITLE_BAND_HI)
+    expect(enforceTitleBand(long, CC).decision).toBe('over-cap')
+  })
+
+  it("non-apparel — deliberate skip, not a failure", () => {
+    expect(enforceTitleBand('THE CEO Ceramic Coffee Mug 11oz', { ...CC, apparel: false }).decision).toBe('non-apparel')
+  })
+
+  it("no-facts — unchanged, and the verdict admits it (never silent)", () => {
+    const v = enforceTitleBand(LIVE_SHORT, { apparel: true })
+    expect(v.decision).toBe('no-facts')
+    expect(v.title).toBe(LIVE_SHORT)
+  })
+
+  it("facts-exhausted — improved but still short; an honest partial, not a success", () => {
+    const v = enforceTitleBand('THE CEO Cupid Tee for Women', { apparel: true, garmentSecond: 'Shirt' })
+    expect(v.decision).toBe('facts-exhausted')
+    expect(v.title.length).toBeLessThan(TITLE_BAND_LO)
+    expect(v.title.length).toBeGreaterThan('THE CEO Cupid Tee for Women'.length)
+  })
+
+  it('empty — the degrade gate owns blank, never this net', () => {
+    expect(enforceTitleBand('', CC).decision).toBe('empty')
+    expect(enforceTitleBand('   ', CC).decision).toBe('empty')
+  })
+
+  it('the verdict never contradicts the returned title', () => {
+    const cases: Array<[string, TitleBandCtx]> = [
+      [LIVE_SHORT, CC], [LIVE_SHORT, { apparel: true }], ['A'.repeat(72), CC],
+      ['A'.repeat(80), CC], ['', CC], ['THE CEO Mug', { ...CC, apparel: false }],
+    ]
+    for (const [t, ctx] of cases) {
+      const v = enforceTitleBand(t, ctx)
+      if (v.decision === 'padded') {
+        expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+        expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+      }
+      if (v.decision === 'in-band') expect(v.title).toBe(t.trim())
+      if (v.decision === 'no-facts' || v.decision === 'non-apparel' || v.decision === 'over-cap') {
+        expect(v.title).toBe(t.trim())
+      }
+    }
+  })
+})

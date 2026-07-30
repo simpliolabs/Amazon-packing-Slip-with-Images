@@ -31,6 +31,27 @@ import { CONTENT_CONTRACT } from './contentContract'
 export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
 export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
 
+/**
+ * WHY the verdict is returned even when nothing changed (Phase 0 of the ship-door plan).
+ *
+ * The net used to be silent on a no-op, which made three very different situations indistinguishable
+ * in production: the net working, the net never firing, and the net firing but achieving nothing. On
+ * the first live run after deploy the title came back at 75 chars with NO log line at all, and the
+ * only honest thing that could be said was "unknown". A net whose success cannot be told apart from
+ * its absence is not verifiable, and an unverifiable net is where dead code hides — this file already
+ * shipped one (see `pickDistinctGarmentForm`'s docstring). So every pass now reports WHY.
+ *
+ *   empty        — blank input; the degrade gate owns that case, never this net
+ *   non-apparel  — deliberately skipped; a short non-apparel title is legitimately short
+ *   over-cap     — already >75; capping belongs to capTitle75, not here
+ *   in-band      — already 70-75; returned byte-identical (this is the common, healthy case)
+ *   padded       — raised INTO the band from a product fact  ← the only outcome that proves it works
+ *   facts-exhausted — improved but still short; honest partial
+ *   no-facts     — nothing available to pad with; unchanged and SAID so
+ */
+export type TitleBandDecision =
+  | 'empty' | 'non-apparel' | 'over-cap' | 'in-band' | 'padded' | 'facts-exhausted' | 'no-facts'
+
 /** Facts only. Every field is a resolved product attribute or a BLANK_SPECS value — never a
  *  search-pool term. All optional: a missing fact contributes NO segment rather than a literal
  *  default, or a short-sleeve blank would ship "Long Sleeve". */
@@ -118,12 +139,12 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
  *     both here would fight it
  *   - never emits a dangling separator
  */
-export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: string; notes: string[] } {
+export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: string; notes: string[]; decision: TitleBandDecision } {
   const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
-  if (!t0) return { title, notes: [] } // empty is the degrade gate's call, never the net's
-  if (!ctx.apparel) return { title: t0, notes: [] }
-  if (t0.length > TITLE_BAND_HI) return { title: t0, notes: [] }
-  if (t0.length >= TITLE_BAND_LO) return { title: t0, notes: [] }
+  if (!t0) return { title, notes: [], decision: 'empty' } // empty is the degrade gate's call, never the net's
+  if (!ctx.apparel) return { title: t0, notes: [], decision: 'non-apparel' }
+  if (t0.length > TITLE_BAND_HI) return { title: t0, notes: [], decision: 'over-cap' }
+  if (t0.length >= TITLE_BAND_LO) return { title: t0, notes: [], decision: 'in-band' }
 
   const m = AUDIENCE_TAIL_RE.exec(t0)
   const head = (m ? t0.slice(0, m.index) : t0).trim()
@@ -137,13 +158,13 @@ export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: str
     if (cand.length >= TITLE_BAND_LO) {
       // First candidate that lands IN band wins — ordered by product-signal strength, so this is
       // deterministic and explainable rather than "whichever happened to fit".
-      return { title: cand, notes: [`band net: +"${seg}" → ${cand.length} chars`] }
+      return { title: cand, notes: [`band net: +"${seg}" → ${cand.length} chars`], decision: 'padded' }
     }
     if (cand.length > best.length) best = cand // monotone improvement, keep hunting
   }
 
   if (best !== t0) {
-    return { title: best, notes: [`band net: padded to ${best.length} chars — facts exhausted below ${TITLE_BAND_LO}`] }
+    return { title: best, notes: [`band net: padded to ${best.length} chars — facts exhausted below ${TITLE_BAND_LO}`], decision: 'facts-exhausted' }
   }
-  return { title: t0, notes: [`band net: ${t0.length} chars, NO product facts available to reach ${TITLE_BAND_LO}`] }
+  return { title: t0, notes: [`band net: ${t0.length} chars, NO product facts available to reach ${TITLE_BAND_LO}`], decision: 'no-facts' }
 }
