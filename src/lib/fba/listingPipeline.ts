@@ -261,11 +261,13 @@ export interface PipelineResult {
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
   /** Degradation flags (2026-07-08): sections whose output failed post-conditions on a FULL regen
-   *  after retry (currently only backend_keywords — core sections THROW instead via
-   *  assertCoreHealthy). The route must NOT persist a flagged section — it keeps the stored value
-   *  and surfaces a warning, instead of the old console.warn-and-persist that shipped an 86-char
-   *  title-echo string over 245-byte approved keywords. */
-  degradedSections?: ('backend_keywords')[]
+   *  after retry (core sections THROW instead via assertCoreHealthy). The route must NOT persist a
+   *  flagged section — it keeps the stored value and surfaces a warning, instead of the old
+   *  console.warn-and-persist that shipped an 86-char title-echo string over 245-byte approved
+   *  keywords. 'description' added 2026-07-30 (Phase 3): the ship census found a 719-char
+   *  description PERSISTING against the 900 floor — the same post-audit blind spot as the 118-byte
+   *  backend — so census floor violations now degrade-mark and route into this same preserve. */
+  degradedSections?: ('backend_keywords' | 'description')[]
 }
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
@@ -7866,6 +7868,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       })
       for (const viol of violations) {
         console.log(JSON.stringify({ tag: 'SHIP_CENSUS', exit: out.regeneratedSection ?? 'full', ...viol }))
+      }
+      /* PHASE 3 ENFORCEMENT (SHIP_ENFORCE, default on). The census MEASURES on the persisting
+       * bytes — after the editorial audit, which is what the producing gates cannot see. When it
+       * finds a floor violation the enforcement is NOT a rewrite (this seam has no pool and no LLM;
+       * padding here would be Goodhart): it marks the section DEGRADED, which routes the result into
+       * the battle-tested abort-and-preserve machinery — the route swaps the seller's prior copy
+       * back in with an honest note, exactly as the pre-audit gate has always done for the runs it
+       * could see. Live evidence for why: 2026-07-30, the gate passed a healthy backend, the audit
+       * gutted it to 118 bytes (later 197), and both PERSISTED because nothing measured after the
+       * audit. A new listing with NO prior keeps the short output (better than nothing) — that
+       * branch already exists in the route and is unchanged. */
+      if ((process.env.SHIP_ENFORCE || 'on').toLowerCase() !== 'off') {
+        const degraded = new Set(out.degradedSections ?? [])
+        const mark = (code: string, section: 'backend_keywords' | 'description'): void => {
+          if (violations.some((x) => x.code === code) && !degraded.has(section)) {
+            degraded.add(section)
+            console.log(JSON.stringify({ tag: 'SHIP_ENFORCE', action: 'degrade-mark', section, code }))
+          }
+        }
+        mark('KEYWORDS_BELOW_FLOOR', 'backend_keywords')
+        mark('DESC_UNDER_FLOOR', 'description')
+        if (degraded.size > (out.degradedSections?.length ?? 0)) out.degradedSections = [...degraded]
       }
     } catch (e) {
       // The census must never break a regen — it is observation, not enforcement.
