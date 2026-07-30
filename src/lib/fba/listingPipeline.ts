@@ -7124,12 +7124,23 @@ export async function reExpandDescriptionIfShort(
       ],
     })
     const raw = (resp.choices[0]?.message?.content || '').replace(/^```html\s*/i, '').replace(/\s*```$/i, '').trim()
-    if (!raw || plainLen(raw) <= preLen) return description         // never regress
+    if (!raw || plainLen(raw) <= preLen) {
+      // The model was ASKED for 920-970 and returned nothing longer. Fail-open is right, but a
+      // silent fail-open is how a 719-char description persisted with no line anywhere (B0GR22ZHBW,
+      // 2026-07-30 — the census caught the RESULT, this names the CAUSE for the next specimen).
+      console.warn(JSON.stringify({ tag: 'DESC_REEXPAND_MISS', reason: raw ? 'not-longer' : 'empty', preLen, gotLen: raw ? plainLen(raw) : 0 }))
+      return description
+    }
     // BELT-AND-SUSPENDERS: LLM instructions can't be trusted (INVARIANT 2). Re-run the scrub on the
     // extended output so an accidental "THE CEO" or "screen-printed" re-injection gets caught here too.
     const scrubbed = scrubDescriptionBody(capDescriptionVisible(raw), { brand: opts.brand ?? '', garmentBrand: opts.garmentBrand })
     return plainLen(scrubbed) > preLen ? scrubbed : description
-  } catch { return description }                                    // fail-open — keep pre-expand copy
+  } catch (e) {
+    // fail-open — keep pre-expand copy, but never silently: the swallowed error here was the one
+    // fact that could distinguish "transient LLM failure" from "prompt regression" on the 719 case.
+    console.warn(JSON.stringify({ tag: 'DESC_REEXPAND_MISS', reason: 'error', preLen, error: e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160) }))
+    return description
+  }
 }
 export function scrubDescriptionBody(html: string, opts: { brand?: string; garmentBrand?: string }): string {
   if (!html) return html
