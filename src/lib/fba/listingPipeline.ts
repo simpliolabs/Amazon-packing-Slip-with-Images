@@ -7540,7 +7540,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Only SEARCHABLE keyphrases (e.g. "comfort colors graphic tee") become title-eligible
   // keywords. Specs (garment-dyed, ring-spun cotton, relaxed fit) are NOT search terms and
   // must NOT enter the title — they go to bullets/description/structured fields only.
+  // OFF-NICHE CHOKE POINT (2026-07-31, USA-250 trace): this merged `analysis` is the single source
+  // every backend/title/bullets pool derives from (backendPool :8869, critLead/critEchoTokens via
+  // `remaining`, council briefs, topVolumeBackendPhrases, fill pools) — and it gains THREE post-gate
+  // injections the relevance gate at :7454 never saw: synthetic attribute CRITICALs (attributeAsKeyword
+  // stamps actionType CRITICAL), secondary design phrases (:7511), identity synonyms (:7535). Filter
+  // ONCE here. Context deliberately EXCLUDES children backend_keywords — the stored contaminated string
+  // self-rescued its own terms through the context escape (the route nicheCtx bug, fixed alongside).
+  const offNicheChokeCtx = `${repTitle ?? ''} ${input.canonicalTitle ?? ''} ${brandName}`
   const analysis = [...attrs.searchKeyphrases.map(attributeAsKeyword), ...cleanGated]
+    .filter((k) => !apparelProduct || !isOffNicheKeyword(k.keyword, { context: offNicheChokeCtx }))
   const bulletAttrs = [...attrs.searchKeyphrases, ...attrs.specs]
 
   // PIN the single highest SEARCH-VOLUME real keyword (not a synthetic attribute, not
@@ -7676,7 +7685,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // the council OR the fill. Filter ONCE here, the single upstream point both consumers read, with the
   // SAME predicate. Apparel-gated + own-brand/activewear aware via the listing's own copy as context.
   const titleNicheCtx = [repTitle, brandName, ...(input.children || []).map((c) => c.title)].filter(Boolean).join(' ')
-  const titleIsApparel = /\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(titleNicheCtx)
+  // `tees?` added 2026-07-31 (USA-250 trace): a listing whose copy says only "Tee" skipped this
+  // probe entirely, disabling the seed-extras off-niche gate on exactly the tee-heavy catalog.
+  const titleIsApparel = /\b(?:t-?shirts?|tshirts?|shirts?|tees?|hoodies?|sweatshirts?|apparel)\b/i.test(titleNicheCtx)
   const notOffNiche = (kw: string) => !titleIsApparel || !isOffNicheKeyword(kw, { context: titleNicheCtx })
   const candidates = selectTitleCandidates(analysis, brandName, repTitle, season, input.outcomeSignals, targets)
     .filter((c) => !colorNeutralFamily || !BASIC_COLOR_RE.test(c.keyword))

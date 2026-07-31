@@ -27,3 +27,22 @@ describe('isOffNicheKeyword — USA-250 dated public event', () => {
     expect(isOffNicheKeyword('250 piece design bundle', WEDDING_CTX)).toBe(false)
   })
 })
+
+import { hasDatedEventContamination } from './nicheGuards'
+
+describe('hasDatedEventContamination — soup-level test for the preserve seam', () => {
+  // The live stored string that the preserve kept re-persisting over clean fresh output.
+  const DIRTY_SOUP = 'we still do women men 250th anniversary usa shirt 250 merchandise unisex graphic tee couples married vow renewal husband wife newlywed jet ebony charcoal cotton fit'
+  it('flags the live contaminated backend soup on a wedding title', () => {
+    expect(hasDatedEventContamination(DIRTY_SOUP, { context: 'THE CEO We Still Do Anniversary T-Shirt for Men and Women' })).toBe(true)
+  })
+  it('a clean soup passes', () => {
+    expect(hasDatedEventContamination('we still do anniversary couples married vow renewal wedding husband wife tee', { context: 'THE CEO We Still Do Anniversary T-Shirt' })).toBe(false)
+  })
+  it('a genuinely patriotic listing keeps its soup (context escape)', () => {
+    expect(hasDatedEventContamination(DIRTY_SOUP, { context: 'THE CEO America 250th Anniversary Patriotic USA Shirt' })).toBe(false)
+  })
+  it('empty input is never contaminated', () => {
+    expect(hasDatedEventContamination('', {})).toBe(false)
+  })
+})
