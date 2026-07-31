@@ -1071,8 +1071,9 @@ const BACKEND_CRIT_ON = BACKEND_CRIT_MODE === 'on'
 const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
 // CONTENT_SPINE (2026-07-22, spine Step 3): route the leaky section-regen returns through the shared
 // applyTerminalNets so "Regenerate bullets"/"Regenerate description" get the SAME terminal net the full
-// path runs. off=legacy (byte-identical); shadow=log [SPINE_DIFF] which would-change, ship legacy;
-// on=apply the terminal net.
+// path runs. UNCONDITIONAL since ship-door Phase 5 (2026-07-31): prod ran CONTENT_SPINE=on from 07-22
+// with no regressions, and an env-gated net leaves an env change able to silently strip it (a net that
+// must be remembered is the net that gets forgotten — generation-invariants INVARIANT 3).
 // SHIP_BAND_NET (2026-07-29, task #147): the ONE terminal band net for the TITLE, installed at
 // `scrubPublished` — the single choke point EVERY exit passes through (title/bullets/keywords/
 // description partials all route via `partialResult`, which is DEFINED as a scrubPublished wrapper).
@@ -1083,9 +1084,6 @@ const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
 const SHIP_BAND_MODE = (process.env.SHIP_BAND_NET || 'on').toLowerCase()
 const SHIP_BAND_ON = SHIP_BAND_MODE !== 'off' && SHIP_BAND_MODE !== 'shadow'
 const SHIP_BAND_SHADOW = SHIP_BAND_MODE === 'shadow'
-const CONTENT_SPINE_MODE = (process.env.CONTENT_SPINE || 'off').toLowerCase()
-const CONTENT_SPINE_ON = CONTENT_SPINE_MODE === 'on'
-const CONTENT_SPINE_SHADOW = CONTENT_SPINE_MODE === 'shadow'
 // TITLE_QUALITY_V2 (2026-07-22, PO "8 golds from 100+ deploys, council still gets it wrong"): the
 // title council was trained for LENGTH (70-75 chars, 50+ commits) but never for FORMAT — sellers
 // still get "THE CEO Later Gator Comfort Colors Long Sleeve Shirt for Women" instead of the gold
@@ -8747,12 +8745,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // the SAME terminal net here. apparel-gated to match the full-path guard.
     if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
       const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand }
-      if (CONTENT_SPINE_ON) {
-        bullets = await applyTerminalNets('bullets', bullets, spineCtx) as string[]
-      } else if (CONTENT_SPINE_SHADOW) {
-        const short = bullets.filter((b) => b.length < BULLET_MIN_CHARS).length
-        if (short) console.log(`[SPINE_DIFF] bullets-only: ${short}/5 broadcast bullets < ${BULLET_MIN_CHARS} — terminal net would expand`)
-      }
+      bullets = await applyTerminalNets('bullets', bullets, spineCtx) as string[]
     }
     // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
     // former "per_child_bullets are ungated on both paths" gap. Deterministic scrub always; audit capped.
@@ -9138,12 +9131,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // SAME terminal net here, before the per-design fan-out and the existing capDescriptionVisible below.
     {
       const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand }
-      if (CONTENT_SPINE_ON && descriptionOnly && brandName) {
+      if (descriptionOnly && brandName) {
         descriptionOnly = await applyTerminalNets('description', descriptionOnly, spineCtx) as string
-      } else if (CONTENT_SPINE_SHADOW && descriptionOnly) {
-        const plain = descriptionOnly.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-        const wouldScrub = brandName ? scrubDescriptionBody(descriptionOnly, { brand: brandName, garmentBrand: blankSpec?.brand }) !== descriptionOnly : false
-        if (plain.length < DESC_MIN_CHARS || wouldScrub) console.log(`[SPINE_DIFF] description-only: len=${plain.length} (floor ${DESC_MIN_CHARS}) wouldScrubBrand=${wouldScrub} — terminal net would fix`)
       }
     }
     // Partial coherence (#9): refresh the per-design descriptions the push actually prefers —
