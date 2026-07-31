@@ -9080,6 +9080,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           console.warn(`[pipeline] per-design description came back EMPTY for "${ctx.designName}" — this group falls back to broadcast`)
           return { skus: ctx.skus, description: broadcastDesc, designName: ctx.designName, designKey: ctx.key }
         }
+        // Floor net + cap on the per-design bytes (Phase 6; live 2026-07-31 B0F6QZ34B1: the strips
+        // above took designs 2/3 to 889/877 under the 900 floor while the broadcast passed at 955 —
+        // census PER_CHILD_DESC_UNDER_FLOOR). Same shared net the broadcast runs (idempotent no-op
+        // when in band; logs DESC_REEXPAND_MISS on failure); INSIDE the fan-out so BOTH callers
+        // (full + description-only partial) are covered by construction. ≤1 LLM call per
+        // under-floor DESIGN, never per child.
+        if (brandName) gd = await reExpandDescriptionIfShort(input.openai, gd, { finalTitle: ctx.title, brand: brandName, garmentBrand: blankSpec?.brand })
+        gd = capDescriptionVisible(gd)
         return { skus: ctx.skus, description: gd, designName: ctx.designName, designKey: ctx.key }
       } catch (e) {
         console.warn(`[pipeline] per-design description failed for "${ctx.designName}" — this group falls back to broadcast:`, e instanceof Error ? e.message : e)
