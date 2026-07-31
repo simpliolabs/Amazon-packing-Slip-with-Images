@@ -27,7 +27,7 @@ import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } f
 // modes, so an explicit preserve gate here would be dead code. The flag's route-side effect is via
 // the outer catch at :1392-1408 which is aiKind-generic — no branch-specific handling needed here.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
-import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
+import { isOffNicheKeyword, hasDatedEventContamination } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
 import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
@@ -259,10 +259,14 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
   // NEVER be fed to the generator as "CRITICAL — you MUST include", which produced actively harmful
   // advice ("weave in 'usher and chris brown shirt'") on a graphic-tee listing. Apparel-gated via the
   // live child copy; the listing's OWN brand / genuine activewear survive via the context.
+  // backend_keywords REMOVED from the context (2026-07-31, USA-250 trace): the stored contaminated
+  // string was self-rescuing its own terms through isOffNicheKeyword's context escape — a term the
+  // filter should drop can never be allowed to testify for itself. `tees?` added to the probe (a
+  // copy that says only "Tee" skipped the filter entirely).
   const nicheCtx = children
-    .map((c) => [c.title, c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5, c.backend_keywords].filter(Boolean).join(' '))
+    .map((c) => [c.title, c.bullet_1, c.bullet_2, c.bullet_3, c.bullet_4, c.bullet_5].filter(Boolean).join(' '))
     .join(' ')
-  if (/\b(?:t-?shirts?|tshirts?|shirts?|hoodies?|sweatshirts?|apparel)\b/i.test(nicheCtx)) {
+  if (/\b(?:t-?shirts?|tshirts?|shirts?|tees?|hoodies?|sweatshirts?|apparel)\b/i.test(nicheCtx)) {
     analysis = analysis.filter((k) => !isOffNicheKeyword(k.keyword, { context: nicheCtx }))
   }
 
@@ -1316,7 +1320,11 @@ export async function POST(req: NextRequest) {
             try {
               const prior = JSON.parse(priorKwJson) as { sku: string; asin: string; keywords: string }[]
               if (Array.isArray(prior) && prior.length > 0 && prior.some((p) => (p?.keywords ?? '').trim())
-                  && minKwBytes(prior) > minKwBytes(rec.per_child_keywords)) {
+                  && minKwBytes(prior) > minKwBytes(rec.per_child_keywords)
+                  // A contaminated prior is never "better" (2026-07-31): the fresh CLEAN 214-byte
+                  // string was being discarded for the 220 floor while the dirty 246-byte prior
+                  // re-persisted every regen — the preserve had become the contamination ratchet.
+                  && !hasDatedEventContamination(prior.map((p) => p?.keywords ?? '').join(' '), { context: rec.recommended_title ?? '' })) {
                 rec.per_child_keywords = prior
                 rec.recommended_keywords = prior[0]?.keywords ?? ''
                 rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'backend_keywords'

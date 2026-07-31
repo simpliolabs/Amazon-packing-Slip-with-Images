@@ -120,6 +120,26 @@ const SHORT_SLEEVE_TEE = /\b(?:t-?\s?shirts?|tshirts?|tees?)\b/i
  * `opts.context` = the listing's live copy (haystack), used to (a) NOT exclude the listing's OWN brand,
  * and (b) NOT exclude activewear terms on a genuine activewear listing.
  */
+// USA-250 rule pieces — ONE source for both the per-keyword test (isOffNicheKeyword) and the
+// whole-soup test (hasDatedEventContamination). Splitting them was how the preserve seam stayed blind.
+const USA_250_TOKEN = /\b250(?:th)?\b/
+const USA_250_SIGNAL = /\b(?:usa|america(?:n)?|1776|patriotic)\b/
+const USA_250_CTX_ESCAPE = /\b(?:250th?|usa|america(?:n)?|patriotic|1776|semiquincentennial)\b/
+
+/** USA-250 dated-event test that also works on a backend token SOUP (a stored recommended_keywords
+ *  string), not just a single keyword phrase. Added for the route's preserve seam: live 2026-07-31,
+ *  the FRESH backend string came out CLEAN at 214 bytes, the census degrade-marked it for the 220
+ *  floor, and the preserve re-persisted the CONTAMINATED 246-byte prior — the two protections were
+ *  fighting, and byte-count "better" kept the dirty string forever. A contaminated prior is never
+ *  "better". Same context escape: a genuinely patriotic listing keeps its terms. */
+export function hasDatedEventContamination(text: string, opts?: { context?: string }): boolean {
+  const s = (text || '').toLowerCase()
+  if (!s) return false
+  const ctx = (opts?.context || '').toLowerCase()
+  const hit = (USA_250_TOKEN.test(s) && USA_250_SIGNAL.test(s)) || /\bsemiquincentennial\b/.test(s)
+  return hit && !USA_250_CTX_ESCAPE.test(ctx)
+}
+
 export function isOffNicheKeyword(keyword: string, opts?: { context?: string }): boolean {
   const kw = (keyword || '').toLowerCase()
   if (!kw) return false
@@ -144,8 +164,7 @@ export function isOffNicheKeyword(keyword: string, opts?: { context?: string }):
   // protection then shielded it from the revived gate. A dated PUBLIC-EVENT niche is not the
   // wearer's own anniversary. Same context-escape shape as the brand tests above: a genuinely
   // patriotic USA-250 design carries usa/america/250th/1776 in its own copy and KEEPS these terms.
-  const USA_250_PAIR = /\b250(?:th)?\b/.test(kw) && /\b(?:usa|america(?:n)?|1776|patriotic)\b/.test(kw)
-  if ((USA_250_PAIR || /\bsemiquincentennial\b/.test(kw)) && !/\b(?:250th?|usa|america(?:n)?|patriotic|1776|semiquincentennial)\b/.test(ctx)) return true
+  if (hasDatedEventContamination(kw, opts)) return true
 
   if (WHOLESALE_INTENT.test(kw) && GARMENT_TOKEN.test(kw)) return true     // "plain/blank t shirts"
   if (ACTIVEWEAR_NICHE.test(kw) && !ACTIVEWEAR_NICHE.test(ctx)) return true // activewear (unless we ARE)
