@@ -769,6 +769,14 @@ export async function POST(req: NextRequest) {
             visionDesign,
             variantDetails,
             keywordContext,
+            // Amazon Custom (migration 052): best-effort separate query — the column may predate
+            // the migration and a combined select would error the WHOLE row (repo trap, see :654).
+            customizable: await (async () => {
+              try {
+                const { data: custRows } = await supabase.from('listing_content').select('is_customizable').eq('parent_asin', parent_asin).eq('is_customizable', true).limit(1)
+                return (custRows?.length ?? 0) > 0
+              } catch { return false }
+            })(),
             hasAplus: rep.has_aplus || false,
             hasBrandStory: rep.aplus_has_brand_story || false,
             auditModel: 'o4-mini',
