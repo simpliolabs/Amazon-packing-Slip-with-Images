@@ -1294,11 +1294,21 @@ export async function POST(req: NextRequest) {
           // is built so the upsert simply rewrites the same stored values, and patch the action-plan
           // card so the UI shows the preserved copy, not the degraded one. A brand-new listing with no
           // prior keywords keeps the degraded output (better than nothing) — the warning still fires.
+          // BETTER-THAN-PRIOR GUARD (2026-07-31, live exhibit): a fresh 898-char description was
+          // discarded for missing the 900 floor by TWO characters while the preserved prior was 719 —
+          // the floor-preserve kept strictly WORSE copy. Doctrine reconcile: preserve fires only when
+          // the prior actually beats the fresh output (empty fresh ⇒ prior always wins, keeping the
+          // #352 empty-only guarantee); otherwise the fresh copy ships WITH the honest degraded note.
+          const minKwBytes = (rows: { keywords?: string }[] | null | undefined): number => {
+            const lens = (rows ?? []).map((p) => new TextEncoder().encode(p?.keywords ?? '').length).filter((n) => n > 0)
+            return lens.length ? Math.min(...lens) : 0
+          }
           let kwPreserved = false
           if (result.degradedSections?.includes('backend_keywords') && priorKwJson) {
             try {
               const prior = JSON.parse(priorKwJson) as { sku: string; asin: string; keywords: string }[]
-              if (Array.isArray(prior) && prior.length > 0 && prior.some((p) => (p?.keywords ?? '').trim())) {
+              if (Array.isArray(prior) && prior.length > 0 && prior.some((p) => (p?.keywords ?? '').trim())
+                  && minKwBytes(prior) > minKwBytes(rec.per_child_keywords)) {
                 rec.per_child_keywords = prior
                 rec.recommended_keywords = prior[0]?.keywords ?? ''
                 rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'backend_keywords'
@@ -1319,11 +1329,18 @@ export async function POST(req: NextRequest) {
           // fired so it is visible. Broadcast-only on purpose: the push sends the broadcast
           // description to every SKU (per-child descriptions are stored but not yet pushed).
           if (result.degradedSections?.includes('description') && (priorDesc ?? '').trim()) {
-            rec.recommended_description = priorDesc as string
-            rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'description'
-              ? { ...it, replacement_content: priorDesc as string, notes: `${(it as { notes?: string }).notes ?? ''} [This regen's description came back under the length floor — kept your previous description untouched.]`.trim() }
-              : it) as typeof rec.action_plan
-            console.warn(`[ai-recommendations] description degraded (under floor) for ${parent_asin} — preserved the stored description instead of persisting the short one`)
+            const visLen = (h: string | null | undefined): number => (h ?? '').replace(/<[^>]*>/g, '').length
+            if (visLen(priorDesc) > visLen(rec.recommended_description)) {
+              rec.recommended_description = priorDesc as string
+              rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'description'
+                ? { ...it, replacement_content: priorDesc as string, notes: `${(it as { notes?: string }).notes ?? ''} [This regen's description came back under the length floor — kept your previous description untouched.]`.trim() }
+                : it) as typeof rec.action_plan
+              console.warn(`[ai-recommendations] description degraded (under floor) for ${parent_asin} — preserved the stored description instead of persisting the short one`)
+            } else {
+              // Fresh is under floor but STILL better than (or equal to) the prior — ship it with an
+              // honest note instead of freezing worse copy (the 898-vs-719 inversion, 2026-07-31).
+              console.warn(`[ai-recommendations] description under floor for ${parent_asin} (${visLen(rec.recommended_description)} chars) but better than the prior (${visLen(priorDesc)}) — shipping the fresh copy`)
+            }
           }
 
           // SHIP-TRUTH DERIVATION (2026-07-09): derive the plan from live truth for BOTH the stream
