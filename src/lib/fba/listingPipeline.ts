@@ -6980,17 +6980,25 @@ function padBulletDeterministic(
   const baseLower = trimmed.toLowerCase()
   const pool = APPAREL_PAD_POOL
   const start = ((bulletIndex % pool.length) + pool.length) % pool.length
-  for (let k = 0; k < pool.length; k++) {
-    const suffix = pool[(start + k) % pool.length] as string
-    if (usedSuffixes.has(suffix)) continue
-    const suffixWords = suffix.toLowerCase().match(/[a-z]{4,}/g) ?? []
-    const overlaps = suffixWords.filter((w) => baseLower.includes(w)).length
-    if (overlaps >= 2) continue
-    const baseWithStop = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
-    const candidate = `${baseWithStop} ${suffix}`.trim()
-    if (candidate.length >= floor && candidate.length <= ceil) {
-      usedSuffixes.add(suffix)
-      return candidate
+  // Two passes (2026-07-31, live B0GR22ZHBW): an all-5-short push consumed suffixes 0-3 on bullets 1-4
+  // and bullet 5's two remaining candidates both hit the overlap-skip — the strict pass exhausted and a
+  // 120-char bullet shipped (census BULLET_UNDER_MIN). The floor is the hard Amazon-facing invariant;
+  // echo-avoidance is a preference — so retry relaxed (used + band still enforced) before giving up.
+  for (const relaxed of [false, true]) {
+    for (let k = 0; k < pool.length; k++) {
+      const suffix = pool[(start + k) % pool.length] as string
+      if (usedSuffixes.has(suffix)) continue
+      if (!relaxed) {
+        const suffixWords = suffix.toLowerCase().match(/[a-z]{4,}/g) ?? []
+        const overlaps = suffixWords.filter((w) => baseLower.includes(w)).length
+        if (overlaps >= 2) continue
+      }
+      const baseWithStop = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
+      const candidate = `${baseWithStop} ${suffix}`.trim()
+      if (candidate.length >= floor && candidate.length <= ceil) {
+        usedSuffixes.add(suffix)
+        return candidate
+      }
     }
   }
   return trimmed
@@ -7049,12 +7057,18 @@ export async function expandShortBulletsTerminal(
           bestDist = dist
           if (dist === 0) break                                // in-band hit → stop retrying
         }
-      } catch { /* keep best-so-far; fall through to next attempt or bullet */ }
+      } catch (e) {
+        // Name the failure (2026-07-31, twin of DESC_REEXPAND_MISS #457): a silent catch here hid a
+        // live run where all 10 attempts contributed nothing and every bullet fell to the pad.
+        console.warn(JSON.stringify({ tag: 'BULLET_EXPAND_MISS', reason: 'error', bullet: i + 1, attempt: attempt + 1, error: e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160) }))
+      }
     }
+    if (bestDist > 0) console.warn(JSON.stringify({ tag: 'BULLET_EXPAND_MISS', reason: best === original ? 'no-usable-rewrite' : 'still-out-of-band', bullet: i + 1, origLen: original.length, bestLen: best.length }))
     // TERMINAL 100% floor guarantee (2026-07-21, workflow wg9bftozi judge verdict). LLM char-count
     // undershoot is systemic (arXiv 2508.13805) — prompt-only control can't guarantee thresholds;
     // deterministic pad is the only reliable enforcer. Idempotent: base >= floor → no-op.
     out[i] = padBulletDeterministic(best, i, usedSuffixes)
+    if ((out[i] ?? '').length < BULLET_MIN_CHARS) console.warn(JSON.stringify({ tag: 'BULLET_PAD_EXHAUSTED', bullet: i + 1, len: (out[i] ?? '').length }))
   }
   return out
 }
