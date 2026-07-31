@@ -7042,14 +7042,18 @@ export async function expandShortBulletsTerminal(
   const needs = bullets.some((b) => (b?.trim().length ?? 0) < BULLET_MIN_CHARS)
   if (!needs) return bullets                                   // IDEMPOTENT no-op — bullets already pass
   const gate = (b: string): string => {
-    let s = ctx.fit ? scrubFitClaims(deDangle(b), ctx.fit) : deDangle(b)
+    // Leading-dash strip (2026-07-31, live B0GR22ZHBW): the model read the prompt's «keep the " - "
+    // prefix» as PREPEND one — stored bullet 1 shipped as "- CELEBRATE ...". Deterministic net, not
+    // a prompt fix alone (INVARIANT 2: the LLM is never the last word on a format invariant).
+    let s = b.replace(/^[\s\-–—]+/, '')
+    s = ctx.fit ? scrubFitClaims(deDangle(s), ctx.fit) : deDangle(s)
     s = s.replace(/\b(\w+)(\s+\1)\b/gi, '$1')                  // parity with per-child truth gate
     if (ctx.garmentBrand) s = normalizeBrandInBullet(s, ctx.garmentBrand)
     return capBulletLen(s, BULLET_MAX_CHARS)
   }
   const out = [...bullets]
   const usedSuffixes = new Set<string>()   // shared across the 5 bullets so the pad picks unique suffixes
-  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters long. Keep its exact ALL-CAPS 2-3 word BENEFIT HOOK and " - " prefix. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY JSON: {"bullet":"..."}.`
+  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters long. The bullet format is "ALL-CAPS 2-3 WORD HOOK - one sentence"; keep the exact hook and start your rewrite WITH the hook — never prepend a dash or bullet mark before it. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY JSON: {"bullet":"..."}.`
   for (let i = 0; i < out.length; i++) {
     const original = (out[i] ?? '').trim()
     if (original.length >= BULLET_MIN_CHARS) continue
