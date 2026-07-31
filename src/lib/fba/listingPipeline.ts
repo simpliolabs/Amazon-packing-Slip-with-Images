@@ -4929,9 +4929,23 @@ export function capDescriptionVisible(html: string, cap = 980): string {
     const i = html.lastIndexOf(tag, off)
     if (i >= 0 && i + tag.length > bestEnd) bestEnd = i + tag.length
   }
-  return bestEnd > 0
+  const cut = bestEnd > 0
     ? html.slice(0, bestEnd).trim()
     : html.slice(0, off).replace(/<[^>]*$/, '').replace(/\s+\S*$/, '').trim()
+  // Tag balance (Phase 6 prerequisite): a </li> boundary inside a <ul> — or the raw-slice fallback —
+  // leaves opened tags unclosed and ships broken HTML to the PDP. Append the missing closers; they add
+  // ZERO visible chars, so the cap above still holds. Pipeline emits only p/ul/li/b.
+  const open: string[] = []
+  const tagScan = /<\/?(p|ul|li|b)\b[^>]*>/gi
+  let m: RegExpExecArray | null
+  while ((m = tagScan.exec(cut))) {
+    const name = (m[1] as string).toLowerCase()
+    if (m[0][1] === '/') {
+      const i = open.lastIndexOf(name)
+      if (i >= 0) open.splice(i, 1)
+    } else open.push(name)
+  }
+  return open.length ? cut + open.reverse().map((t) => `</${t}>`).join('') : cut
 }
 
 /** Description COUNCIL (Approach B) — the description was previously the ONLY published field with no
