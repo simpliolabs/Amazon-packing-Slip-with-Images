@@ -7224,6 +7224,13 @@ const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
   // ("comfort colors shirt"), so it can NEVER supply correct casing — grounding brand identity in the search
   // pool is the spec-vs-search-grounding mistake. The shopper-facing brand comes from here.
   { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed', stretch: 'Low Stretch', fitToSize: 'Runs Slightly Small' } },
+  // Gildan 64000 Softstyle (PO-confirmed 2026-07-31, "Gildan 6400 - YES" for the We Still Do family;
+  // live PDP copy: "4.5 oz./yd² 100% ring-spun cotton", "Lightweight fabric", "modern classic fit",
+  // Crew Neck). The SKUs embed the style number ("640002XL-…"), so \b64000 (no trailing \b — the size
+  // glues on) matches the SKU hay. material stated WITHOUT a percentage: solids are 100% ring-spun but
+  // heather colorways are poly blends, and a spec fact must hold for every child it decorates.
+  // stretch/fitToSize omitted until the PO confirms them (they push Amazon attributes).
+  { match: /\bgildan\b|\b64000/i, spec: { brand: 'Gildan', fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton' } },
 ]
 function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec | null {
   const hay = sources.filter(Boolean).join(' ')
@@ -7342,7 +7349,7 @@ async function runFinalEditorialAudit(
   bullets: string[],
   description: string,
   backendSample: string,
-  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string; widow?: { isWidowFormat: boolean; hobby: string; spouseWord: string } },
+  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string; weightNote?: string; widow?: { isWidowFormat: boolean; hobby: string; spouseWord: string } },
 ): Promise<{ title: string; bullets: string[]; description: string; backendDrop: Set<string> }> {
   const unchanged = { title, bullets, description, backendDrop: new Set<string>() }
   try {
@@ -7359,7 +7366,7 @@ async function runFinalEditorialAudit(
 
 PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.${brandNote}
 
-GARMENT TRUTH (never contradict): ${fitClause}this is a MIDWEIGHT garment — NEVER write "Heavyweight"; only claim a fabric weight you can confirm.
+GARMENT TRUTH (never contradict): ${fitClause}${ctx.weightNote ? `the fabric is ${ctx.weightNote} — never claim a different fabric weight` : 'do NOT claim any fabric weight (lightweight/midweight/heavyweight) — the blank is unconfirmed'}.
 ${widowLine}
 
 RULES:
@@ -7741,7 +7748,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // "Short Sleeve" force-pushed on (no regression on non-tees).
   const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
   const looksTee = /\bt[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover|long[\s-]?sleeve/i.test(garmentHay)
-  const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType) : null
+  // SKUs join the hay (2026-07-31): print-on-demand copy often never names the blank ("Gildan"
+  // appears nowhere on the We Still Do listing) but the SKUs embed the style number ("640002XL-…").
+  const skuHay = (input.children ?? []).map((c) => c.sku).filter(Boolean).join(' ')
+  const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
   // Shopper-facing garment brand, in AUTHORITATIVE casing — from BLANK_SPECS ONLY. Empty when the blank
   // is unknown: attributePin is a lowercase SEARCH phrase ("vintage cat shirt"), NOT a confirmed brand, so
   // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
@@ -8336,6 +8346,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           brandFront: brandName || 'THE CEO',
           garmentBrand: garmentBrandCanonical || '',
           fit: truthFitEarly,
+          weightNote: blankSpec?.weightNote,
           widow: detectWidowFormat(finalTitle, repTitle),
         })
         outB = ar.bullets
@@ -8387,6 +8398,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             brandFront: brandName || 'THE CEO',
             garmentBrand: brand,
             fit,
+            weightNote: blankSpec?.weightNote,
             widow: detectWidowFormat(ctx.title, ctx.groupInput.canonicalTitle),
           })
           if (gb.length === 5) gb = ar.bullets
@@ -9533,6 +9545,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // customer copy, don't drop it as a "competitor") and the real fit (relaxed → forbid "oversized").
       garmentBrand: garmentBrandCanonical || '',
       fit: blankSpec?.fit || pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
+      weightNote: blankSpec?.weightNote,
       widow: detectWidowFormat(finalTitle, repTitle),
     })
     // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped

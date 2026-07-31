@@ -25,4 +25,11 @@ describe('blankSpecFactTokens — Phase 6 facts-only backend pad source', () => 
   it('a sparse spec emits only the fields it has', () => {
     expect(blankSpecFactTokens({ fit: 'Oversized' })).toEqual(['oversized fit'])
   })
+  it('the Gildan 64000 spec (PO-confirmed 2026-07-31) yields its facts, units stripped', () => {
+    const out = blankSpecFactTokens({
+      brand: 'Gildan', fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck',
+      weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton',
+    })
+    expect(out).toEqual(['classic fit', 'short sleeve', 'crew neck', 'ring spun cotton', 'lightweight ring spun'])
+  })
 })
