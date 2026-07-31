@@ -76,6 +76,19 @@ describe('expandShortBulletsTerminal — deterministic floor holds when the LLM 
     const nonEmpty = tails.filter(Boolean)
     expect(new Set(nonEmpty).size).toBe(nonEmpty.length)
   })
+  it('a rewrite that prepends "- " ships without the stray prefix (live B0GR22ZHBW 05:05 run)', async () => {
+    // The first live run after #460 revived the expander: the model read the prompt's «keep the
+    // " - " prefix» as an instruction to PREPEND one — stored bullet 1 began "- CELEBRATE ...".
+    const modelPrependsDash = {
+      chat: { completions: { create: async () => ({ choices: [{ message: { content: JSON.stringify({ bullet: '- CELEBRATE TOGETHERNESS - Soft, comfortable, and made to honor your story, this We Still Do anniversary tee celebrates lasting love with a clean, timeless design.' }) } }] }) } },
+    } as never
+    const out = await expandShortBulletsTerminal(modelPrependsDash, [
+      'CELEBRATE TOGETHERNESS - Too short.',
+      ...liveShortBullets.slice(1),
+    ], { title: 'THE CEO We Still Do Anniversary T-Shirt | Tee for Men and Women', designName: 'We Still Do' })
+    for (const b of out) expect(b).not.toMatch(/^[\s\-–—]/)
+    expect(out[0]).toMatch(/^CELEBRATE TOGETHERNESS - /)
+  })
   it('idempotent: running the net twice adds nothing further', async () => {
     const once = await expandShortBulletsTerminal(openaiThatAlwaysFails, [...liveShortBullets], {
       title: 'THE CEO We Still Do Anniversary T-Shirt | Tee for Men and Women',
