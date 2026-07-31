@@ -138,6 +138,15 @@ export function isOffNicheKeyword(keyword: string, opts?: { context?: string }):
   const retail = kw.match(COMPETITOR_RETAIL_BRANDS)?.[0]
   if (retail && !ctx.includes(retail)) return true
 
+  // America-250 / semiquincentennial (live 2026-07-31, B0GR22ZHBW): "250th anniversary usa shirt"
+  // (50K+/mo, the 2026 event spike) seated as CRITICAL on a vow-renewal WEDDING-anniversary tee —
+  // it entered while the LLM relevance gate was dead (json-word 400, PR #460) and the CRITICAL
+  // protection then shielded it from the revived gate. A dated PUBLIC-EVENT niche is not the
+  // wearer's own anniversary. Same context-escape shape as the brand tests above: a genuinely
+  // patriotic USA-250 design carries usa/america/250th/1776 in its own copy and KEEPS these terms.
+  const USA_250_PAIR = /\b250(?:th)?\b/.test(kw) && /\b(?:usa|america(?:n)?|1776|patriotic)\b/.test(kw)
+  if ((USA_250_PAIR || /\bsemiquincentennial\b/.test(kw)) && !/\b(?:250th?|usa|america(?:n)?|patriotic|1776|semiquincentennial)\b/.test(ctx)) return true
+
   if (WHOLESALE_INTENT.test(kw) && GARMENT_TOKEN.test(kw)) return true     // "plain/blank t shirts"
   if (ACTIVEWEAR_NICHE.test(kw) && !ACTIVEWEAR_NICHE.test(ctx)) return true // activewear (unless we ARE)
   if (EQUIPMENT_GOODS_NOUN.test(kw) && !GARMENT_TOKEN.test(kw)) return true // gear, not a garment
