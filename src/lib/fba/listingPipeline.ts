@@ -5292,7 +5292,7 @@ ${list}
 Return the indices of keywords to DROP:
 1. Other companies' brands or TRADEMARKS (sports teams, bands, other sellers); a keyword for a DIFFERENT physical product than this listing sells — e.g. "sim card", "card reader", or "phone case" on an SD-MEMORY-CARD listing, or "mug" on a t-shirt listing (the shopper typing it wants a different item, so ranking there only brings junk traffic that never converts); or personal/character names with no connection to this product.
 2. VAGUE, non-descriptive filler that does not describe a product attribute, style, design, audience, occasion, or use case (e.g. "interest", "full transparency", "high quality", "best seller").
-KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY {"drop":[...]}.`
+KEEP anything plausibly about this product, including broad descriptors, audiences, occasions, gift terms, and seasonal terms (relevant even when broad). Be CONSERVATIVE — only drop clearly-unrelated or clearly-meaningless terms. Return ONLY JSON: {"drop":[...]}.`
   // Deterministic backstops: ALWAYS drop these regardless of the LLM gate, which is
   // non-deterministic and let them through in live testing.
   //   1. all-junk keywords ("interest", "full transparency", "best seller")
@@ -5556,8 +5556,8 @@ Title: Comfort Colors I Could Be Meaner Shirt Sarcastic Funny Saying Tee
 Title: Gildan Unisex Soft Cotton Crewneck T-Shirt Premium Blank Tee Vintage
 => {"designName":""}
 
-Return ONLY {"designName":"<phrase or empty string>"}.`
-    const user = `${visionText ? `Image: ${visionText}\n` : ''}Title: ${source}\n\nReturn ONLY {"designName":"..."}.`
+Return ONLY JSON: {"designName":"<phrase or empty string>"}.`
+    const user = `${visionText ? `Image: ${visionText}\n` : ''}Title: ${source}\n\nReturn ONLY JSON: {"designName":"..."}.`
     const r = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
@@ -7028,7 +7028,7 @@ export async function expandShortBulletsTerminal(
   }
   const out = [...bullets]
   const usedSuffixes = new Set<string>()   // shared across the 5 bullets so the pad picks unique suffixes
-  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters long. Keep its exact ALL-CAPS 2-3 word BENEFIT HOOK and " - " prefix. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY {"bullet":"..."}.`
+  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters long. Keep its exact ALL-CAPS 2-3 word BENEFIT HOOK and " - " prefix. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY JSON: {"bullet":"..."}.`
   for (let i = 0; i < out.length; i++) {
     const original = (out[i] ?? '').trim()
     if (original.length >= BULLET_MIN_CHARS) continue
