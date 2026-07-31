@@ -110,3 +110,60 @@ describe('honest boundaries — where the census deliberately stays silent', () 
     expect(ok.map((x) => x.code)).not.toContain('TITLE_WORD_REPEAT')
   })
 })
+
+describe('per-child copy — the pushed bytes on multi-design (live B0F6QZ34B1, 2026-07-31)', () => {
+  // The live fan-out: broadcast 955 (in band, silent) while designs 2/3 shipped 889/877 under the
+  // 900 floor with no census line — census was blind to the bytes the push prefers.
+  const desc = (n: number): string => `<p>${'d'.repeat(n)}</p>`
+  const livePerChild = [
+    { designKey: 'FHOSH', description: desc(980) },
+    { designKey: 'FRAF', description: desc(889) },
+    { designKey: 'OF', description: desc(877) },
+  ]
+  it('THE 889/877 SPECIMEN: one aggregated violation, worst design named', () => {
+    const v = shipCensus({ ...HEALTHY, perChildDescriptions: livePerChild })
+    expect(v).toEqual([{ code: 'PER_CHILD_DESC_UNDER_FLOOR', measured: 877, bound: 900, detail: 'OF (2 of 3)' }])
+  })
+  it('all-in-band per-child copy is silent', () => {
+    const v = shipCensus({
+      ...HEALTHY,
+      perChildTitles: [{ designKey: 'A', title: HEALTHY.title }],
+      perChildBullets: [{ designKey: 'A', bullets: HEALTHY.bullets }],
+      perChildDescriptions: [{ designKey: 'A', description: desc(950) }],
+    })
+    expect(v).toEqual([])
+  })
+  it('a per-child shortfall NEVER emits the broadcast code (Phase 3 enforcement must not misfire)', () => {
+    const v = shipCensus({ ...HEALTHY, perChildDescriptions: livePerChild })
+    expect(v.map((x) => x.code)).not.toContain('DESC_UNDER_FLOOR')
+  })
+  it('per-child title over cap aggregates with count', () => {
+    const v = shipCensus({
+      ...HEALTHY,
+      perChildTitles: [
+        { sku: 'S1', title: 'x'.repeat(80) },
+        { sku: 'S2', title: 'x'.repeat(91) },
+        { sku: 'S3', title: HEALTHY.title },
+      ],
+    })
+    expect(v).toEqual([{ code: 'PER_CHILD_TITLE_OVER_CAP', measured: 91, bound: 75, detail: 'S2 (2 of 3)' }])
+  })
+  it('per-child bullets under min aggregate to the worst child', () => {
+    const v = shipCensus({
+      ...HEALTHY,
+      perChildBullets: [
+        { designKey: 'A', bullets: HEALTHY.bullets },
+        { designKey: 'B', bullets: [...HEALTHY.bullets.slice(0, 4), 'SHORT HOOK - Too short.'] },
+      ],
+    })
+    expect(v).toEqual([{ code: 'PER_CHILD_BULLET_UNDER_MIN', measured: 23, bound: 150, detail: 'B (1 of 2)' }])
+  })
+  it('degraded description suppresses per-child description codes too', () => {
+    const v = shipCensus({ ...HEALTHY, perChildDescriptions: livePerChild, degradedSections: ['description'] })
+    expect(v.map((x) => x.code)).not.toContain('PER_CHILD_DESC_UNDER_FLOOR')
+  })
+  it('non-apparel skips per-child length floors', () => {
+    const v = shipCensus({ ...HEALTHY, apparel: false, title: 'THE CEO Ceramic Mug 11oz', description: '<p>A mug.</p>', perChildDescriptions: livePerChild })
+    expect(v.map((x) => x.code)).not.toContain('PER_CHILD_DESC_UNDER_FLOOR')
+  })
+})

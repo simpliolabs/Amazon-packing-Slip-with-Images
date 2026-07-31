@@ -7900,6 +7900,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         bullets: out.recommended_bullets || [],
         description: out.recommended_description || '',
         perChildKeywords: out.per_child_keywords || [],
+        // Per-child copy — the bytes the push PREFERS on multi-design; shipped unmeasured until
+        // live 2026-07-31 (B0F6QZ34B1 fan-out at 889/877 under the 900 floor, no census line).
+        perChildTitles: out.per_child_titles || [],
+        perChildBullets: out.per_child_bullets || [],
+        perChildDescriptions: out.per_child_descriptions || [],
         designName: effectiveDesignName || designName || null,
         degradedSections: out.degradedSections,
       })

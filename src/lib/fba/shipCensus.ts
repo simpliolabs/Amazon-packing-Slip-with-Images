@@ -37,6 +37,13 @@ export interface ShipCensusInput {
   designName?: string | null
   /** Sections a producing stage already declared degraded — the census must not double-report. */
   degradedSections?: readonly string[]
+  /** Per-child copy — on multi-design these are the bytes the push PREFERS (pushFields ~:156), and
+   *  they were shipping unmeasured: live 2026-07-31, B0F6QZ34B1 desc-only regen, broadcast 955 (in
+   *  band, silent) while designs 2/3 fanned out at 889/877 under the 900 floor with NO census line.
+   *  Aggregated to ONE violation per code (worst + count) so a 91-child family cannot log-storm. */
+  perChildTitles?: readonly { sku?: string; designKey?: string; title: string }[]
+  perChildBullets?: readonly { sku?: string; designKey?: string; bullets: readonly string[] }[]
+  perChildDescriptions?: readonly { sku?: string; designKey?: string; description: string }[]
 }
 
 export interface ShipViolation {
@@ -45,6 +52,13 @@ export interface ShipViolation {
     | 'KEYWORDS_BELOW_FLOOR' | 'KEYWORDS_OVER_CAP'
     | 'BULLETS_COUNT' | 'BULLET_UNDER_MIN' | 'BULLET_OVER_MAX'
     | 'DESC_UNDER_FLOOR' | 'DESC_OVER_CEILING' | 'DESC_MISSING_DESIGN'
+    // Per-child copy (the pushed bytes on multi-design). DISTINCT codes on purpose: Phase 3's
+    // enforcement map keys on the broadcast codes, and a per-child shortfall must never route a
+    // healthy BROADCAST into abort-and-preserve (R4 — that would freeze good copy over a fan-out
+    // artifact). These stay measure-only until they earn their own enforcement decision.
+    | 'PER_CHILD_TITLE_OVER_CAP' | 'PER_CHILD_TITLE_UNDER_BAND'
+    | 'PER_CHILD_BULLET_UNDER_MIN' | 'PER_CHILD_BULLET_OVER_MAX'
+    | 'PER_CHILD_DESC_UNDER_FLOOR' | 'PER_CHILD_DESC_OVER_CEILING'
   /** The measured number that tripped it (length/bytes/count). */
   measured: number
   /** The bound it violated, from CONTENT_CONTRACT — never a local literal. */
@@ -128,6 +142,38 @@ export function shipCensus(input: ShipCensusInput): ShipViolation[] {
       const toks = dn.toLowerCase().split(/\s+/).filter((w) => w.length > 2 && !CONNECTORS.has(w))
       const mentioned = toks.length === 0 || toks.some((w) => body.includes(` ${w} `))
       if (!mentioned) v.push({ code: 'DESC_MISSING_DESIGN', measured: dLen, bound: 1, detail: dn })
+    }
+  }
+
+  // ── PER-CHILD COPY — the pushed bytes on multi-design (pushFields prefers per_child_*). One
+  // aggregated violation per code: worst offender + how many of how many, so a 91-child family
+  // emits at most 6 lines, never a storm. Empty per-child sections are silent (same philosophy
+  // as the broadcast checks: measure what shipped, not what didn't run).
+  const childKey = (c: { sku?: string; designKey?: string }): string => c.designKey || c.sku || '?'
+  const pushAgg = (code: ShipViolation['code'], offenders: { key: string; measured: number }[], bound: number, total: number): void => {
+    if (!offenders.length) return
+    const worst = offenders.reduce((a, b) => (Math.abs(b.measured - bound) > Math.abs(a.measured - bound) ? b : a))
+    v.push({ code, measured: worst.measured, bound, detail: `${worst.key} (${offenders.length} of ${total})` })
+  }
+  const pcT = (input.perChildTitles ?? []).filter((c) => (c.title || '').trim())
+  if (pcT.length) {
+    pushAgg('PER_CHILD_TITLE_OVER_CAP', pcT.filter((c) => c.title.trim().length > C.title.hardCap).map((c) => ({ key: childKey(c), measured: c.title.trim().length })), C.title.hardCap, pcT.length)
+    if (input.apparel) pushAgg('PER_CHILD_TITLE_UNDER_BAND', pcT.filter((c) => c.title.trim().length <= C.title.hardCap && c.title.trim().length < C.title.goldenBandLo).map((c) => ({ key: childKey(c), measured: c.title.trim().length })), C.title.goldenBandLo, pcT.length)
+  }
+  const pcB = (input.perChildBullets ?? []).filter((c) => (c.bullets ?? []).some((b) => (b || '').trim()))
+  if (pcB.length) {
+    const worstLenOf = (c: { bullets: readonly string[] }, pick: 'min' | 'max'): number => {
+      const lens = c.bullets.filter((b) => (b || '').trim()).map((b) => b.length)
+      return pick === 'min' ? Math.min(...lens) : Math.max(...lens)
+    }
+    pushAgg('PER_CHILD_BULLET_OVER_MAX', pcB.filter((c) => worstLenOf(c, 'max') > C.bullets.max).map((c) => ({ key: childKey(c), measured: worstLenOf(c, 'max') })), C.bullets.max, pcB.length)
+    if (input.apparel) pushAgg('PER_CHILD_BULLET_UNDER_MIN', pcB.filter((c) => worstLenOf(c, 'min') < C.bullets.min).map((c) => ({ key: childKey(c), measured: worstLenOf(c, 'min') })), C.bullets.min, pcB.length)
+  }
+  if (!degraded.has('description')) {
+    const pcD = (input.perChildDescriptions ?? []).filter((c) => visibleLen(c.description) > 0)
+    if (pcD.length) {
+      pushAgg('PER_CHILD_DESC_OVER_CEILING', pcD.filter((c) => visibleLen(c.description) > C.description.ceiling).map((c) => ({ key: childKey(c), measured: visibleLen(c.description) })), C.description.ceiling, pcD.length)
+      if (input.apparel) pushAgg('PER_CHILD_DESC_UNDER_FLOOR', pcD.filter((c) => visibleLen(c.description) <= C.description.ceiling && visibleLen(c.description) < C.description.floor).map((c) => ({ key: childKey(c), measured: visibleLen(c.description) })), C.description.floor, pcD.length)
     }
   }
 
