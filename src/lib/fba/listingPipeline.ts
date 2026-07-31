@@ -511,6 +511,11 @@ function fillBackendToBudget(
    *  to decide (fold-aware, via the scorer's own bulletTokens) which priority tokens are genuinely
    *  uncovered, so we never spend a byte echoing a token the title already ranks for. */
   coverageHay: string = '',
+  /** Spec-grounded product-FACT phrases (blankSpecFactTokens) — Phase 6 facts-only pad. LAST in
+   *  candidate priority: demand-backed pool + the seller's catalog bigrams always claim bytes
+   *  first; facts fill only the residual gap on thin pools (the 197/220 class). [] = byte-identical
+   *  to today. Every safety filter below (banTok / alreadyIndexed / caps) applies to them too. */
+  factTokens: string[] = [],
 ): string {
   let out = (keywords || '').trim()
   // Token-normalized novelty: the field is a token soup (Amazon matches tokens, not
@@ -573,6 +578,8 @@ function fillBackendToBudget(
     const w = seg.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter((t) => t.length > 1)
     for (let i = 0; i + 1 < w.length; i++) candidates.push(`${w[i]} ${w[i + 1]}`)
   }
+  // 3. spec-grounded product FACTS (Phase 6) — last on purpose; see the factTokens param doc.
+  candidates.push(...factTokens)
 
   for (const cand of candidates) {
     if (capacityFamily && CAPACITY_RE.test(cand)) continue
@@ -7220,6 +7227,21 @@ function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec |
   return null
 }
 
+/** Search-shaped fact phrases from a blank spec — the Phase 6 facts-only backend pad source.
+ *  Every phrase derives from a BLANK_SPECS field, so the pad can never invent a claim (plan R3:
+ *  an unlisted blank returns [] and contributes nothing). Numbers/units are dropped because
+ *  shoppers don't type them ("100% Ring-Spun Cotton" → "ring spun cotton", "6.1 oz" → gone).
+ *  Anti-Goodhart: this is the ~40-60-byte facts ceiling the plan names — the real fix for thin
+ *  pools stays the pool itself (#144/#149), never more padding. */
+export function blankSpecFactTokens(spec: BlankSpec | null): string[] {
+  if (!spec) return []
+  const phrases = [spec.fit && `${spec.fit} fit`, spec.sleeve, spec.neck, spec.material, spec.dye, spec.weightNote]
+  return phrases
+    .filter((p): p is string => !!p)
+    .map((p) => p.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\boz\b/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
 /** Dedup a list of product-fact strings case-insensitively AND by substring containment, so the description
  *  model is never fed the same spec 2-3x (which it echoes → repetition → the audit trims → under-fill).
  *  "Garment-Dyed" collapses into "midweight 6.1 oz garment-dyed"; "ring spun cotton" into "100% Ring-Spun
@@ -9019,7 +9041,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // garment-noun candidate against the title (which stably indexes the product type), not against
         // bullets — bullets are transient prose and their "graphic"/"gift"/etc. would wrongly block
         // high-volume opportunity phrases from ever landing in backend where Content step 2 needs them.
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title) }))
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec)) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -9044,7 +9066,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec)) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -9112,7 +9134,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec)),
       }))
       return out
     }
@@ -9223,7 +9245,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec)),
     }))
     return out
   }
