@@ -83,6 +83,9 @@ interface ListingContentRow {
   sku:                      string
   asin:                     string
   parent_asin:              string | null
+  /** Amazon Custom enrollment (attributes.is_customizable, migration 052). Optional so the
+   *  column-safe upsert ladder can strip it pre-migration. */
+  is_customizable?:         boolean | null
   title:                    string | null
   bullet_1:                 string | null
   bullet_2:                 string | null
@@ -215,6 +218,15 @@ async function fetchListingContent(
   const kwArr = attrs.generic_keyword
   if (Array.isArray(kwArr) && kwArr.length > 0) {
     base.backend_keywords = kwArr.map((k: { value?: string }) => k?.value || '').filter(Boolean).join(' ')
+  }
+
+  // Amazon Custom enrollment (2026-07-31, migration 052): the ONLY machine signal that a listing is
+  // customizable — the PDP's "Customize now" gate is driven by this attribute. Unlocks truthful
+  // "Personalized"/"Custom" copy in the generators; absent/false = the copy ban stays.
+  const custArr = attrs.is_customizable ?? attrs.customizable_product
+  if (Array.isArray(custArr) && custArr.length > 0) {
+    const v = custArr[0]?.value
+    base.is_customizable = v === true || String(v).toLowerCase() === 'true'
   }
 
   // Image count from summaries (mainImage only — otherImages not in Listings Items API)
@@ -1712,9 +1724,15 @@ export async function syncSingleAsinContent(
     }
 
     // 4) Upsert into listing_content, then score via the shared on-demand scorer.
-    const { error: upsertErr } = await supabase
+    let { error: upsertErr } = await supabase
       .from('listing_content')
       .upsert(contentRows, { onConflict: 'sku' })
+    if (upsertErr && /is_customizable/i.test(upsertErr.message)) {
+      // Column-safe ladder (repo convention): migration 052 not applied yet — retry without the new
+      // column so a pre-migration cron sync NEVER breaks content freshness over an optional flag.
+      const legacy = contentRows.map((r) => { const { is_customizable: _drop, ...rest } = r; return rest })
+      ;({ error: upsertErr } = await supabase.from('listing_content').upsert(legacy, { onConflict: 'sku' }))
+    }
     if (upsertErr) {
       console.warn(`[syncSingleAsinContent] upsert failed for ${parentAsin}:`, upsertErr.message)
       if (outcome) outcome.reason = 'sync-failed'

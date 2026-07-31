@@ -65,6 +65,9 @@ export interface TitleBandCtx {
   /** A garment surface form DISTINCT from the one already in the title (title says "Shirt" ⇒ "Tee").
    *  Amazon's golden format keeps both tokens; the caller derives this from `garmentFor`. */
   garmentSecond?: string | null
+  /** Amazon Custom enrollment (listing_content.is_customizable, migration 052) — TRUE makes
+   *  "Personalized" a verified fact segment; false/absent keeps it banned (false claim otherwise). */
+  customizable?: boolean
 }
 
 /** The audience tail the pipeline's own fillers recognise — kept byte-identical to the regexes at
@@ -119,6 +122,10 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     const s = (v ?? '').trim()
     if (s && !alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
+  // Amazon Custom (2026-07-31, PO): "Personalized" leads the fact list — on an enrolled listing it
+  // is both a verified product fact AND the highest-intent search modifier available. Never pushed
+  // when the listing is not enrolled (the flag defaults false; a false claim is worse than a short title).
+  if (ctx.customizable) push('Personalized')
   push(ctx.garmentBrand)
   push(ctx.spec?.fit)
   push(ctx.spec?.sleeve)

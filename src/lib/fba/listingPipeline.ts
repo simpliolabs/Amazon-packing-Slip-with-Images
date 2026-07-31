@@ -133,6 +133,11 @@ export interface PipelineInput {
    *  audit agent recommends Product Details ONLY from this menu — every row is born mapped to
    *  a real attribute of THIS category instead of guessed from an apparel-shaped example list. */
   detailAttributeMenu?: { key: string; title: string; accepted?: string[] }[]
+  /** Amazon Custom enrollment (SP-API attributes.is_customizable via listing_content, migration
+   *  052). TRUE unlocks "Personalized"/"Custom" as truthful copy: a title-band fact segment, a
+   *  backend fact token, and an audit garment-truth clause. Absent/false keeps the ban — most of
+   *  the catalog is fixed-design, and "Personalized" on those would be a false claim. */
+  customizable?: boolean
   analysis: AnalyzedKeyword[]
   children: PipelineChild[]
   /** Current title of the representative child — used for product-name token extraction */
@@ -7218,7 +7223,7 @@ export function scrubDescriptionBody(html: string, opts: { brand?: string; garme
 // attributes — richer than our binary `fabric_stretchability` (Non-stretchable/Stretchable): CC1717's
 // garment-dyed ring-spun cotton is genuinely LOW stretch (not zero) and runs slightly small. Both are
 // product FACTS, so they ground here rather than being guessed from the search pool.
-interface BlankSpec { brand?: string; fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string; stretch?: string; fitToSize?: string }
+interface BlankSpec { brand?: string; brandInCopy?: boolean; fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string; stretch?: string; fitToSize?: string }
 const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
   // `brand` is the AUTHORITATIVE display casing. attributePin is derived from a lowercase SEARCH keyphrase
   // ("comfort colors shirt"), so it can NEVER supply correct casing — grounding brand identity in the search
@@ -7230,7 +7235,9 @@ const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
   // glues on) matches the SKU hay. material stated WITHOUT a percentage: solids are 100% ring-spun but
   // heather colorways are poly blends, and a spec fact must hold for every child it decorates.
   // stretch/fitToSize omitted until the PO confirms them (they push Amazon attributes).
-  { match: /\bgildan\b|\b64000/i, spec: { brand: 'Gildan', fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton' } },
+  // brandInCopy:false (PO 2026-07-31: "Why are we including GILDAN in the title, this is not a
+  // selling point like comfort colors is") — the FACTS decorate copy; the brand NAME does not.
+  { match: /\bgildan\b|\b64000/i, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton' } },
 ]
 function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec | null {
   const hay = sources.filter(Boolean).join(' ')
@@ -7349,7 +7356,7 @@ async function runFinalEditorialAudit(
   bullets: string[],
   description: string,
   backendSample: string,
-  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string; weightNote?: string; widow?: { isWidowFormat: boolean; hobby: string; spouseWord: string } },
+  ctx: { design: string; designPhrases: string[]; garment: string; audience: string; referenceTitle: string; brandFront: string; garmentBrand: string; fit: string; weightNote?: string; customizable?: boolean; widow?: { isWidowFormat: boolean; hobby: string; spouseWord: string } },
 ): Promise<{ title: string; bullets: string[]; description: string; backendDrop: Set<string> }> {
   const unchanged = { title, bullets, description, backendDrop: new Set<string>() }
   try {
@@ -7366,7 +7373,7 @@ async function runFinalEditorialAudit(
 
 PRODUCT: ${ctx.garment || 'graphic t-shirt'} — design/theme "${ctx.design}"${ctx.designPhrases.length ? `; the joke/angle is: ${ctx.designPhrases.join(' | ')}` : ''}. Audience: ${ctx.audience || 'general shoppers'}.${brandNote}
 
-GARMENT TRUTH (never contradict): ${fitClause}${ctx.weightNote ? `the fabric is ${ctx.weightNote} — never claim a different fabric weight` : 'do NOT claim any fabric weight (lightweight/midweight/heavyweight) — the blank is unconfirmed'}.
+GARMENT TRUTH (never contradict): ${fitClause}${ctx.weightNote ? `the fabric is ${ctx.weightNote} — never claim a different fabric weight` : 'do NOT claim any fabric weight (lightweight/midweight/heavyweight) — the blank is unconfirmed'}.${ctx.customizable ? ' This item IS Amazon-customizable — buyers personalize it with their own text before purchase; saying "Personalized" / "Custom" is truthful and ENCOURAGED (it is a top search term for this listing).' : ''}
 ${widowLine}
 
 RULES:
@@ -7756,7 +7763,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // is unknown: attributePin is a lowercase SEARCH phrase ("vintage cat shirt"), NOT a confirmed brand, so
   // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
   // spec-vs-search error this fix condemns. An off-list blank earns a brand mention by being ADDED here.
-  const garmentBrandCanonical = blankSpec?.brand ?? ''
+  // brandInCopy:false (PO veto, 2026-07-31): the blank's FACTS still decorate copy, but its NAME is
+  // not a selling point (Gildan ≠ Comfort Colors) — an empty canonical brand keeps it out of every
+  // copy surface while the competitor-blank drop for the token stays active (we don't index it either).
+  const garmentBrandCanonical = blankSpec?.brandInCopy === false ? '' : (blankSpec?.brand ?? '')
   /* SHIP_BAND_NET (#147) — the FACTS the title band net may pad with. Product attributes only:
    * BLANK_SPECS values and a distinct garment surface form. NEVER a search-pool term, because a
    * title is a product claim (spec-grounding beats coverage). A missing fact contributes NO segment,
@@ -7764,6 +7774,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const bandGarment = garmentFor(input.productType, repTitle)
   const titleBandCtx = (title: string): TitleBandCtx => ({
     apparel: apparelProduct,
+    customizable: input.customizable === true,
     garmentBrand: garmentBrandCanonical || null,
     spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
     // Delegated to the TESTED leaf. This was six inline lines here and shipped two invisible escaping
@@ -8347,6 +8358,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           garmentBrand: garmentBrandCanonical || '',
           fit: truthFitEarly,
           weightNote: blankSpec?.weightNote,
+          customizable: input.customizable === true,
           widow: detectWidowFormat(finalTitle, repTitle),
         })
         outB = ar.bullets
@@ -8399,6 +8411,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
             garmentBrand: brand,
             fit,
             weightNote: blankSpec?.weightNote,
+            customizable: input.customizable === true,
             widow: detectWidowFormat(ctx.title, ctx.groupInput.canonicalTitle),
           })
           if (gb.length === 5) gb = ar.bullets
@@ -9057,7 +9070,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // garment-noun candidate against the title (which stably indexes the product type), not against
         // bullets — bullets are transient prose and their "graphic"/"gift"/etc. would wrongly block
         // high-volume opportunity phrases from ever landing in backend where Content step 2 needs them.
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec)) }))
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -9082,7 +9095,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec)) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -9150,7 +9163,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec)),
+        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
       }))
       return out
     }
@@ -9261,7 +9274,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec)),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
     }))
     return out
   }
@@ -9546,6 +9559,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       garmentBrand: garmentBrandCanonical || '',
       fit: blankSpec?.fit || pdiFinal.find((p) => /\bfit\b/i.test(p.field_name))?.recommended_value?.trim() || '',
       weightNote: blankSpec?.weightNote,
+      customizable: input.customizable === true,
       widow: detectWidowFormat(finalTitle, repTitle),
     })
     // Re-apply the title guards so the audited title stays Amazon-legal (<=75), brand-front, and de-duped

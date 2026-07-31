@@ -335,3 +335,24 @@ describe('collapseRepeatedWords', () => {
     expect(collapseRepeatedWords('   ').removed).toEqual([])
   })
 })
+
+describe('customizable (Amazon Custom, 2026-07-31) — "Personalized" as a leading fact segment', () => {
+  const ctx = (over: object) => ({ apparel: true, garmentBrand: null, spec: null, garmentSecond: 'Tee', ...over })
+  it('an enrolled listing pads with Personalized first', () => {
+    const short = 'THE CEO We Still Do Anniversary Shirt for Men and Women' // 55
+    const v = enforceTitleBand(short, ctx({ customizable: true }))
+    expect(v.title).toMatch(/Personalized/)
+    expect(v.title.length).toBeGreaterThanOrEqual(70)
+    expect(v.title.length).toBeLessThanOrEqual(75)
+  })
+  it('a non-enrolled listing NEVER gains Personalized (false claim)', () => {
+    const short = 'THE CEO We Still Do Anniversary Shirt for Men and Women'
+    const v = enforceTitleBand(short, ctx({ customizable: false }))
+    expect(v.title).not.toMatch(/Personalized/)
+  })
+  it('a title already saying Personalized is not double-padded with it', () => {
+    const has = 'THE CEO Personalized We Still Do Anniversary Shirt for Men and Women' // 68
+    const v = enforceTitleBand(has, ctx({ customizable: true }))
+    expect((v.title.match(/Personalized/g) || []).length).toBe(1)
+  })
+})
