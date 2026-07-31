@@ -347,6 +347,10 @@ export default function ListingDetailPage() {
   const [designBusy, setDesignBusy] = useState<Record<string, boolean>>({})
   const [competitorAsin, setCompetitorAsin] = useState<string>('')
   const [competitorSaving, setCompetitorSaving] = useState(false)
+  // Seller-declared Amazon Custom enrollment (listing_content.is_customizable, migration 052).
+  // null = not yet loaded. Display truth = any child row true (same read the pipeline uses).
+  const [customizable, setCustomizable] = useState<boolean | null>(null)
+  const [customizableSaving, setCustomizableSaving] = useState(false)
   // Seller-set DESIGN NAME override (migration 031). When set, the pipeline anchors every regen on
   // this verbatim — kills the "stuck design" trap where the extractor falls through and the LLM
   // promotes a high-volume keyword to slogan status (B0GQVL3K4B "Too Young to Retire").
@@ -1216,6 +1220,22 @@ export default function ListingDetailPage() {
           if (data.competitorAsin) setCompetitorAsin(data.competitorAsin)
         }
       } catch { /* ignore */ }
+    })()
+  }, [asin])
+
+  // Fetch seller-declared Amazon Custom flag (migration 052). Best-effort: a missing column
+  // on a pre-migration env returns false → toggle shows Off; flipping it surfaces the
+  // run-the-migration error from the POST.
+  useEffect(() => {
+    if (!asin) return
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/customizable?parentAsin=${asin}`)
+        if (resp.ok) {
+          const data = await resp.json() as { customizable?: boolean }
+          setCustomizable(data.customizable === true)
+        }
+      } catch { /* ignore — toggle stays in its loading state */ }
     })()
   }, [asin])
 
@@ -2603,6 +2623,40 @@ export default function ListingDetailPage() {
             <option value="female">Female</option>
             <option value="male">Male</option>
           </select>
+          {/* Migration 052 — seller-declared Amazon Custom enrollment. Amazon's Listings API
+              never exposes Custom enrollment (live probe: 50 attributes, zero customization
+              keys), so this is a manual declaration, written to every listing_content row of
+              the family. ON unlocks "Personalized"/"Custom" in the next regen (title band
+              fact segment, GARMENT TRUTH clause, backend fact tokens); OFF keeps them barred. */}
+          <button
+            onClick={async () => {
+              if (customizable === null || customizableSaving) return
+              const next = !customizable
+              setCustomizable(next)
+              setCustomizableSaving(true)
+              try {
+                const resp = await fetch('/api/fba/customizable', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ parentAsin: asin, customizable: next }),
+                })
+                const data = await resp.json()
+                if (!resp.ok) throw new Error(data.error || 'Save failed')
+              } catch (err) {
+                setCustomizable(!next)
+                setAiError({ kind: 'transient', message: err instanceof Error ? err.message : 'Failed to save customizable flag' })
+              }
+              setCustomizableSaving(false)
+            }}
+            disabled={customizable === null || customizableSaving}
+            title="Is this listing enrolled in Amazon Custom (buyer personalization)? Amazon doesn't report enrollment, so declare it here. On = the next regenerate may use 'Personalized' / 'Custom' in the title, bullets, description and backend. Off = those claims stay forbidden as untruthful."
+            className={`inline-flex items-center gap-1.5 text-xs font-medium border rounded-lg px-3 py-2 transition-colors cursor-pointer disabled:opacity-50 ${
+              customizable
+                ? 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
+                : 'text-slate-700 bg-white border-slate-200 hover:bg-slate-50 hover:border-slate-300'
+            }`}>
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z" /></svg>
+            Customizable{customizable === null ? '' : customizable ? ': On' : ': Off'}
+          </button>
           <button
             onClick={() => generateAiRecs()}
             disabled={aiLoading}
