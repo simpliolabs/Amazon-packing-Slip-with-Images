@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { applyTerminalNets } from './listingPipeline'
+import { applyTerminalNets, expandShortBulletsTerminal, BULLET_MIN_CHARS, BULLET_MAX_CHARS } from './listingPipeline'
 
 // A fake openai that MUST NOT be called — the fixtures are already in-band, so every terminal pass
 // no-ops and no model call happens. If applyTerminalNets ever calls the model here, this test throws.
@@ -34,5 +34,57 @@ describe('applyTerminalNets — idempotent passthrough on in-band input', () => 
     expect(plain.length).toBeGreaterThanOrEqual(900)
     const out = await applyTerminalNets('description', html, ctx) as string
     expect(out).toBe(html)
+  })
+})
+
+// A fake openai that always errors — reproduces the 2026-07-31 B0GR22ZHBW live run where all 10 LLM
+// expander attempts contributed nothing (silently) and every bullet fell to the deterministic pad.
+const openaiThatAlwaysFails = {
+  chat: { completions: { create: async () => { throw new Error('simulated outage') } } },
+} as never
+
+describe('expandShortBulletsTerminal — deterministic floor holds when the LLM contributes nothing', () => {
+  // The exact five bullets the metric loop produced live on B0GR22ZHBW (pad tails stripped). All five
+  // are short, so bullets 1-4 consume pad suffixes 0-3 and bullet 5 hit BOTH remaining suffixes'
+  // overlap-skip ("with"/"year"; "thoughtful"/"gift") — the strict pass exhausted and shipped 120.
+  const liveShortBullets = [
+    'CELEBRATE TOGETHERNESS - Show your lasting bond with the We Still Do design, perfect for anniversaries and special milestones.',
+    'ALL-DAY COMFORT - Enjoy a midweight tee crafted for softness and breathability, keeping you comfortable throughout the day.',
+    'VERSATILE STYLE - This unisex shirt pairs easily with jeans or shorts, making it a great choice for casual outings or celebrations.',
+    'QUALITY YOU CAN TRUST - Durable construction and a vibrant print ensure your message stays bold, wash after wash.',
+    'GREAT GIFT IDEA - Surprise your partner or loved ones with a thoughtful anniversary shirt that celebrates years of love.',
+  ]
+  it('all five live-specimen bullets land in [min, max] even with zero LLM help', async () => {
+    liveShortBullets.forEach((b) => expect(b.length).toBeLessThan(BULLET_MIN_CHARS))
+    const out = await expandShortBulletsTerminal(openaiThatAlwaysFails, [...liveShortBullets], {
+      title: 'THE CEO We Still Do Anniversary T-Shirt | Tee for Men and Women',
+      designName: 'We Still Do',
+      fit: 'relaxed',
+      garmentBrand: 'Comfort Colors',
+    })
+    out.forEach((b) => {
+      expect(b.length).toBeGreaterThanOrEqual(BULLET_MIN_CHARS)
+      expect(b.length).toBeLessThanOrEqual(BULLET_MAX_CHARS)
+    })
+  })
+  it('no two bullets get the same pad suffix in one push', async () => {
+    const out = await expandShortBulletsTerminal(openaiThatAlwaysFails, [...liveShortBullets], {
+      title: 'THE CEO We Still Do Anniversary T-Shirt | Tee for Men and Women',
+      designName: 'We Still Do',
+    })
+    const tails = out.map((b, i) => b.slice(liveShortBullets[i].length))
+    const nonEmpty = tails.filter(Boolean)
+    expect(new Set(nonEmpty).size).toBe(nonEmpty.length)
+  })
+  it('idempotent: running the net twice adds nothing further', async () => {
+    const once = await expandShortBulletsTerminal(openaiThatAlwaysFails, [...liveShortBullets], {
+      title: 'THE CEO We Still Do Anniversary T-Shirt | Tee for Men and Women',
+      designName: 'We Still Do',
+    })
+    const twice = await expandShortBulletsTerminal(openaiThatAlwaysFails, [...once], {
+      title: 'THE CEO We Still Do Anniversary T-Shirt | Tee for Men and Women',
+      designName: 'We Still Do',
+    })
+    expect(twice).toEqual(once)
   })
 })
