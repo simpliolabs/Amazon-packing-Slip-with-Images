@@ -66,3 +66,41 @@ export function tryParsePriorKeywords(priorKwJson: string | null | undefined): {
     return null
   }
 }
+
+/** Worst-child byte length across per-child keyword rows (0 when no non-empty row). This is THE
+ *  preserve comparator: a family is only as indexed as its thinnest child. Extracted from the
+ *  full-path inline (route.ts Phase-3 block) so the partial section-regen path shares the SAME
+ *  rule — the dual-write-path invariant this module exists for. */
+export function minKeywordBytes(rows: { keywords?: string }[] | null | undefined): number {
+  const lens = (rows ?? []).map((p) => new TextEncoder().encode(p?.keywords ?? '').length).filter((n) => n > 0)
+  return lens.length ? Math.min(...lens) : 0
+}
+
+/** Better-than-prior preserve decision for a DEGRADE-MARKED keywords regen (2026-07-31 amendment:
+ *  preserve only when the prior is STRICTLY better — a fresh 214B must beat a dirty/short prior).
+ *  `contaminatedPrior` lets the caller run its contamination predicate (hasDatedEventContamination)
+ *  without this leaf module importing the keyword-engine — a contaminated prior NEVER wins
+ *  (the contamination-ratchet fix, PR #470). */
+export function shouldPreserveKeywords(opts: {
+  prior: { keywords: string }[] | null
+  fresh: { keywords?: string }[] | null | undefined
+  contaminatedPrior: boolean
+}): boolean {
+  if (!opts.prior || opts.prior.length === 0) return false
+  if (opts.contaminatedPrior) return false
+  return minKeywordBytes(opts.prior) > minKeywordBytes(opts.fresh)
+}
+
+/** Visible-character length of an HTML description (tags stripped) — the ONE measurer both
+ *  write paths use for the description preserve compare. */
+export function descriptionVisibleLength(html: string | null | undefined): number {
+  return (html ?? '').replace(/<[^>]*>/g, '').length
+}
+
+/** Better-than-prior preserve decision for a DEGRADE-MARKED description regen: keep the prior only
+ *  when it is strictly longer in VISIBLE chars (an under-floor fresh 898 still beats a prior 719 —
+ *  the PR #468 inversion fix). */
+export function shouldPreserveDescription(prior: string | null | undefined, fresh: string | null | undefined): boolean {
+  if (!(prior ?? '').trim()) return false
+  return descriptionVisibleLength(prior) > descriptionVisibleLength(fresh)
+}

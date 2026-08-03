@@ -22,10 +22,12 @@ import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
-// BACKEND_DEGRADE_STRICT import intentionally omitted: adversarial review 2026-07-22 confirmed the
-// keywords-only partial path already throws 'aiKind=degraded' at listingPipeline.ts:8168 in all
-// modes, so an explicit preserve gate here would be dead code. The flag's route-side effect is via
-// the outer catch at :1392-1408 which is aiKind-generic — no branch-specific handling needed here.
+// Shared preserve rules (#157, 2026-08-03): the 2026-07-22 review's claim that the keywords partial
+// "already throws in all modes" was FALSE — the producing gate's floor is 190 (BACKEND_DEGRADE_STRICT
+// off) while the ship census marks degraded at 220 (CONTENT_CONTRACT.keywords.minStrict) AFTER the
+// audit/scrub, so a 190-219B keywords-only regen (or any post-gate shrink) reaches the partial write
+// with degradedSections set and used to persist silently. Both write paths now share ONE rule set.
+import { tryParsePriorKeywords, shouldPreserveKeywords, shouldPreserveDescription, minKeywordBytes, descriptionVisibleLength } from '@/lib/fba/backendDegradeGate'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { isOffNicheKeyword, hasDatedEventContamination } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
@@ -818,6 +820,9 @@ export async function POST(req: NextRequest) {
                 : it)
             }
             const upd: Record<string, unknown> = { generated_at: new Date().toISOString() }
+            // #157: set when a degrade-marked section keeps the prior via absence-of-write.
+            let kwPreserved = false
+            let descPreserved = false
             if (sec === 'title') {
               upd.recommended_title = result.recommended_title
               if (result.per_child_titles) upd.per_child_titles = result.per_child_titles
@@ -846,19 +851,44 @@ export async function POST(req: NextRequest) {
               upd.keyword_plan = { bullets: result.keywordPlan.bullets, designName: result.keywordPlan.designName || storedPlan.designName || '', coupleConcept: result.keywordPlan.coupleConcept ?? storedPlan.coupleConcept, perDesign: result.keywordPlan.perDesign, ...planCarry }
               result.recommended_bullets.forEach((b, i) => patchItem((el) => el === `bullet_${i + 1}`, b))
             } else if (sec === 'description') {
-              upd.recommended_description = result.recommended_description
-              if (result.per_child_descriptions) upd.per_child_descriptions = result.per_child_descriptions
-              patchItem((el) => el === 'description', result.recommended_description)
+              // PARTIAL-PATH PRESERVE (#157, 2026-08-03 — closes the dual-write-path hole): the ship
+              // census degrade-marks an under-floor description AFTER the audit/fan-out, but this
+              // branch never consulted it and persisted the degraded copy over the seller's prior.
+              // Same better-than-prior rule as the full-path Phase-3 block: preserve = absence-of-
+              // write (identical DB effect to the full path writing the prior back), honest warning
+              // frame before close. An under-floor fresh that still beats the prior ships (PR #468).
+              if (result.degradedSections?.includes('description')
+                  && shouldPreserveDescription(String(storedRec.recommended_description ?? ''), result.recommended_description)) {
+                descPreserved = true
+                console.warn(`[ai-recommendations] partial description degraded for ${parent_asin} — kept the prior (absence-of-write)`)
+              } else {
+                upd.recommended_description = result.recommended_description
+                if (result.per_child_descriptions) upd.per_child_descriptions = result.per_child_descriptions
+                patchItem((el) => el === 'description', result.recommended_description)
+              }
             } else {
-              // Task #103 note: this branch used to be considered a dual-write-path gap because the
-              // full path has an explicit preserve block at ~:1267 while this one didn't. Adversarial
-              // review 2026-07-22 caught it: the KEYWORDS-ONLY PARTIAL path already throws with
-              // aiKind='degraded' UNCONDITIONALLY at listingPipeline.ts:8168 ("HONEST FAILURE"
-              // comment at :8161), so a degraded keywords partial NEVER reaches this branch —
-              // the outer catch at :1392-1408 fires first, no DB write happens, prior is preserved
-              // by absence-of-write. So an explicit preserve here would be dead code in every mode.
-              upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
-              patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
+              // PARTIAL-PATH PRESERVE (#157, 2026-08-03). The old note here claimed the keywords
+              // partial "already throws in all modes" at the producing gate — FALSE: that gate's
+              // floor is backendMinBytesFloor() (190 at BACKEND_DEGRADE_STRICT=off) while the census
+              // marks degraded at 220 (CONTENT_CONTRACT.keywords.minStrict) on the post-audit bytes,
+              // so 190-219B output (or any post-gate trademark-scrub shrink) reached this write and
+              // persisted silently. Now: same rule as the full path — worst-child bytes must beat
+              // the prior AND a contaminated prior never wins (PR #470 ratchet fix; context = the
+              // stored title, unchanged on a keywords-only regen).
+              const priorKw = result.degradedSections?.includes('backend_keywords')
+                ? tryParsePriorKeywords(String(storedRec.recommended_keywords ?? ''))
+                : null
+              if (priorKw && shouldPreserveKeywords({
+                prior: priorKw,
+                fresh: result.per_child_keywords,
+                contaminatedPrior: hasDatedEventContamination(priorKw.map((p) => p?.keywords ?? '').join(' '), { context: String(storedRec.recommended_title ?? '') }),
+              })) {
+                kwPreserved = true
+                console.warn(`[ai-recommendations] partial keywords degraded for ${parent_asin} (fresh worst-child ${minKeywordBytes(result.per_child_keywords)}B) — kept the prior (absence-of-write)`)
+              } else {
+                upd.recommended_keywords = JSON.stringify(result.per_child_keywords)
+                patchItem((el) => el === 'backend_keywords', result.per_child_keywords[0]?.keywords ?? '')
+              }
             }
             upd.action_plan = actionPlan
             let { error: updErr } = await supabase
@@ -895,7 +925,8 @@ export async function POST(req: NextRequest) {
             // Emit the MERGED recommendation (stored row + the new section) in the exact shape
             // the page already consumes — the client code needs zero changes.
             const merged = { ...storedRec, ...upd } as Record<string, unknown>
-            const perChildKw = sec === 'keywords'
+            // #157: a preserved keywords section must emit the STORED prior, not the degraded fresh.
+            const perChildKw = sec === 'keywords' && !kwPreserved
               ? result.per_child_keywords
               : (() => { try { const a = JSON.parse(String(storedRec.recommended_keywords ?? '[]')); return Array.isArray(a) ? a : [] } catch { return [] } })()
             // SHIP-TRUTH DERIVATION (2026-07-09): the emitted plan is derived live, same as the GET —
@@ -920,6 +951,12 @@ export async function POST(req: NextRequest) {
               regenerated_section: sec,
               titleDebug: result.debug,
             })
+            // #157 honest note — mirrors the full path's degraded-preserve warning frame.
+            if (kwPreserved) {
+              emit({ type: 'warning', kind: 'degraded', message: 'Backend keywords came back degraded on this run — kept your previous keywords untouched. Run "Regenerate backend keywords" in a minute to refresh them.' })
+            } else if (descPreserved) {
+              emit({ type: 'warning', kind: 'degraded', message: 'The description came back under the length floor on this run — kept your previous description untouched. Run "Regenerate description" in a minute to refresh it.' })
+            }
             // AI-health bookkeeping (2026-07-08): a hard error that DIDN'T blank this section (e.g. an
             // enrichment call 429'd while the core call survived) still means the account is degraded —
             // warn + record so the next run's failure isn't a surprise. Healthy run self-heals the banner.
@@ -1311,29 +1348,28 @@ export async function POST(req: NextRequest) {
           // the floor-preserve kept strictly WORSE copy. Doctrine reconcile: preserve fires only when
           // the prior actually beats the fresh output (empty fresh ⇒ prior always wins, keeping the
           // #352 empty-only guarantee); otherwise the fresh copy ships WITH the honest degraded note.
-          const minKwBytes = (rows: { keywords?: string }[] | null | undefined): number => {
-            const lens = (rows ?? []).map((p) => new TextEncoder().encode(p?.keywords ?? '').length).filter((n) => n > 0)
-            return lens.length ? Math.min(...lens) : 0
-          }
+          // #157 (2026-08-03): parse + compare + contamination rules extracted to backendDegradeGate
+          // pure helpers so the partial section-regen path shares the IDENTICAL preserve decision
+          // (dual-write-path invariant) — and the rules are unit-tested (backendDegradeGate.test.ts).
           let kwPreserved = false
-          if (result.degradedSections?.includes('backend_keywords') && priorKwJson) {
-            try {
-              const prior = JSON.parse(priorKwJson) as { sku: string; asin: string; keywords: string }[]
-              if (Array.isArray(prior) && prior.length > 0 && prior.some((p) => (p?.keywords ?? '').trim())
-                  && minKwBytes(prior) > minKwBytes(rec.per_child_keywords)
-                  // A contaminated prior is never "better" (2026-07-31): the fresh CLEAN 214-byte
-                  // string was being discarded for the 220 floor while the dirty 246-byte prior
-                  // re-persisted every regen — the preserve had become the contamination ratchet.
-                  && !hasDatedEventContamination(prior.map((p) => p?.keywords ?? '').join(' '), { context: rec.recommended_title ?? '' })) {
-                rec.per_child_keywords = prior
-                rec.recommended_keywords = prior[0]?.keywords ?? ''
-                rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'backend_keywords'
-                  ? { ...it, replacement_content: prior[0]?.keywords ?? '', notes: `${(it as { notes?: string }).notes ?? ''} [This regen's backend output came back degraded — kept your previous keywords untouched.]`.trim() }
-                  : it) as typeof rec.action_plan
-                kwPreserved = true
-                console.warn(`[ai-recommendations] backend keywords degraded for ${parent_asin} — preserved the stored set instead of persisting the degraded one`)
-              }
-            } catch { /* prior string unparsable — fall through, persist what we generated */ }
+          if (result.degradedSections?.includes('backend_keywords')) {
+            const prior = tryParsePriorKeywords(priorKwJson)
+            // A contaminated prior is never "better" (2026-07-31): the fresh CLEAN 214-byte
+            // string was being discarded for the 220 floor while the dirty 246-byte prior
+            // re-persisted every regen — the preserve had become the contamination ratchet.
+            if (prior && shouldPreserveKeywords({
+              prior,
+              fresh: rec.per_child_keywords,
+              contaminatedPrior: hasDatedEventContamination(prior.map((p) => p?.keywords ?? '').join(' '), { context: rec.recommended_title ?? '' }),
+            })) {
+              rec.per_child_keywords = prior
+              rec.recommended_keywords = prior[0]?.keywords ?? ''
+              rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'backend_keywords'
+                ? { ...it, replacement_content: prior[0]?.keywords ?? '', notes: `${(it as { notes?: string }).notes ?? ''} [This regen's backend output came back degraded — kept your previous keywords untouched.]`.trim() }
+                : it) as typeof rec.action_plan
+              kwPreserved = true
+              console.warn(`[ai-recommendations] backend keywords degraded for ${parent_asin} — preserved the stored set instead of persisting the degraded one`)
+            }
           }
 
           // DEGRADED-DESCRIPTION PRESERVE (Phase 3, 2026-07-30) — the exact twin of the keywords
@@ -1345,8 +1381,8 @@ export async function POST(req: NextRequest) {
           // fired so it is visible. Broadcast-only on purpose: the push sends the broadcast
           // description to every SKU (per-child descriptions are stored but not yet pushed).
           if (result.degradedSections?.includes('description') && (priorDesc ?? '').trim()) {
-            const visLen = (h: string | null | undefined): number => (h ?? '').replace(/<[^>]*>/g, '').length
-            if (visLen(priorDesc) > visLen(rec.recommended_description)) {
+            const visLen = descriptionVisibleLength
+            if (shouldPreserveDescription(priorDesc, rec.recommended_description)) {
               rec.recommended_description = priorDesc as string
               rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'description'
                 ? { ...it, replacement_content: priorDesc as string, notes: `${(it as { notes?: string }).notes ?? ''} [This regen's description came back under the length floor — kept your previous description untouched.]`.trim() }
