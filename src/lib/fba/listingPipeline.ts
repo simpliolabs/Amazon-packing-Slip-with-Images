@@ -1102,33 +1102,18 @@ const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
 // stuffing ban, gender-conservative default, titleQualityJudge widening the humanizer adopt gate.
 // Applies on the apparel arms of BOTH producers (runTitleAgent + buildNicheParentTitle);
 // non-apparel keeps its own brief. Git ref for the flagged era: PR #434 / pre-965254e.
-// TITLE_COUNCIL_V3 (2026-07-23, PO "greenlight GO"): Step 7 of the content spine. V2 shipped the RIGHT
-// BRIEF (PO golds + Pattern A/B rules) — but the COUNCIL ARCHITECTURE below still (a) prepends persona
-// text so all 3 proposers draft one shape, (b) uses ONE model env for adversary+judge (correlated
-// verdicts), (c) hardcodes "World Soccer Cup" (stale — TRADEMARK_RULES now says "world futbol cup"),
-// (d) fail-opens by array index (silent SEO bias). V3 flips these one-by-one, plus flag-gates two
-// always-on deterministic gates that fight V2's brief today: the corrective-retry pipe ban (single-
-// design retry loop) and the widen guard that force-injects "for Men and Women".
-// off = legacy runTitleCouncil; shadow = run V3 alongside legacy, log [COUNCIL_V3_DIFF] with both
-// judge scores, ship legacy; on = ship V3 output. Applies to BOTH title paths (single-design via
-// runTitleAgent AND multi-design via buildNicheParentTitle) — INVARIANT 1 parity because both call
-// the same runTitleCouncil.
-const TITLE_V3_MODE = (process.env.TITLE_COUNCIL_V3 || 'off').toLowerCase()
-const TITLE_V3_ON = TITLE_V3_MODE === 'on'
-const TITLE_V3_SHADOW = TITLE_V3_MODE === 'shadow'
-// FIX_C_NICHE_POOL (2026-07-23, PO Q3 = greenlit immediate follow-up): completes V3.1a by surfacing
-// AUDIENCE-RELATIONAL COMPOUND SEEDS (e.g. "golf widow shirt" for a design named "He's Golfing" with
-// lean=lean_female) into input.nicheSeeds so Persona 2's compound-niche-first precedence has something
-// to fire on. Deterministic — no LLM. Detection: female lean + male-pronoun hint in designName → emit
-// widow/wife compounds; symmetric for male lean + female-pronoun hint. Skips gift-SKU patterns where a
-// relational carrier noun (husband/boyfriend/wife/girlfriend) is already present in designName —
-// that case is the anti-lean carrier override territory in Persona 3 (7.1a), not a widow-niche.
-// off = legacy behavior (byte-identical). shadow = log [FIX_C_SEEDS] with what WOULD be injected,
-// don't inject. on = inject compounds into input.nicheSeeds; groundVocab widens automatically because
-// input.nicheSeeds already feeds groundVocab construction (listingPipeline.ts:2824).
-const FIX_C_MODE = (process.env.FIX_C_NICHE_POOL || 'off').toLowerCase()
-const FIX_C_ON = FIX_C_MODE === 'on'
-const FIX_C_SHADOW = FIX_C_MODE === 'shadow'
+// TITLE_COUNCIL_V3 (2026-07-23, PO "greenlight GO"; flag RETIRED 2026-08-03 at live 'on' — on since
+// the 07-23 flip, live-verified on B0GF49RLDL): the V3 council architecture (personas as full
+// system, split adversary/judge models, TRADEMARK_RULES-generated adversary clause, judge-scored
+// fail-open) is now THE council — the pre-V3 legacy council and the [COUNCIL_V3_DIFF] shadow
+// machinery are deleted (legacy stopped being a pre-Step-7 baseline when V3.1a changed its brief
+// un-flagged). The two formerly V3-gated deterministic inversions are resolved to the ON branch:
+// the corrective-retry pipe ban and the "for Men and Women" widen guard are DELETED. Rollback =
+// git-revert (ref: pre-973fb7e).
+// FIX_C_NICHE_POOL (2026-07-23, PO Q3; flag RETIRED 2026-08-03 at live 'on'): audience-relational
+// compound seed injection (deriveAudienceRelationalCompounds — e.g. "golf widow shirt" for "He's
+// Golfing" + lean_female) is now unconditional; the helper returns [] when no compound signal, so
+// it is a no-op on non-matching designs. [FIX_C_SEEDS] stays as the ongoing observability line.
 
 /** Audience-lean signal type — mirrors PipelineInput.audienceLean at :146. */
 type AudienceLean = 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null | undefined
@@ -2745,41 +2730,8 @@ async function titleCouncilAsk(
   } catch { return '' }
 }
 
-/** LEGACY title council (pre-V3). Kept as the default so TITLE_COUNCIL_V3=off is byte-identical to
- *  pre-Step-7. Called by runTitleCouncil() when V3 is off OR when V3 shadow needs the legacy output
- *  for [COUNCIL_V3_DIFF] logging. See runTitleCouncilV3 for the redesigned architecture. */
-async function runTitleCouncilLegacy(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void): Promise<string> {
-  const COUNCIL_MODEL = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'   // adversary + judge model (PR: title-council GPT-5)
-  const personas: { sys: string; temp: number }[] = [
-    { sys: 'You are an award-winning apparel brand COPYWRITER. Write the most compelling, human, DESIGN-LED title — the kind a shopper stops and clicks. ', temp: 0.6 },
-    { sys: 'You are an Amazon SEO STRATEGIST. Capture the most legitimate search value WITHOUT stuffing: the design name leads, then only the highest-value real terms that fit naturally — the rest belongs in bullets/backend. ', temp: 0.3 },
-    { sys: 'You are a CONVERSION strategist focused on trust + click-through. Write a CLEAN, professional title — design name + product type up front, clear audience, nothing that reads like spam. ', temp: 0.4 },
-  ]
-  const drafts = (await Promise.all(personas.map((p) => titleCouncilAsk(openai, p.sys + baseSystem, baseUser, p.temp)))).filter(Boolean)
-  if (drafts.length === 0) return titleCouncilAsk(openai, baseSystem, baseUser, 0.3)            // fail open: single agent
-  if (drafts.length === 1) return drafts[0]
-  onProgress?.('Title council: drafts in, adversary reviewing...')          // keepalive (resets idle timer)
-  const numbered = drafts.map((t, i) => `${i + 1}. ${t}`).join('\n')
-  const critique = await titleCouncilAsk(
-    openai,
-    'You are a ruthless Amazon listing critic AND a skeptical shopper. Attack candidate titles for: keyword stuffing, spammy reads, a buried or duplicated design name, any non-trivial word used more than twice, length over 75 chars (Amazon AUTO-REWRITES longer titles from July 27, 2026), brand not first, and weak click appeal. (a) REJECT any title that spends scarce 75-char budget on a GENERIC audience phrase ("for Men and Women", "for Men", "for Women") when a higher-value PRODUCT-SPECIFIC keyword from the brief is available but unused — the audience suffix is OPTIONAL and droppable; the product-specific keyword wins. (b) FLAG any trademarked phrase (sports teams, leagues, universities, media franchises, e.g. "World Cup", "Florida Gators", "Super Bowl", "Marvel") and REQUIRE the safe substitution ("World Cup" -> "World Soccer Cup", "Super Bowl" -> "Big Game") or its removal. Be specific.',
-    `Brief (the title must satisfy this):\n${baseUser}\n\nCandidate titles for the SAME product:\n${numbered}\n\nCritique EACH, then name the single strongest element across them.`,
-    0.3, 400, COUNCIL_MODEL, 60_000,
-  )
-  onProgress?.('Title council: judge synthesizing the winner...')           // keepalive
-  const judged = await titleCouncilAsk(
-    openai,
-    baseSystem + ' You are the JUDGE: merge the strongest, COMPLIANT elements into ONE final title that satisfies every rule in the brief. Output ONLY the final title string — no quotes, no explanation.',
-    `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
-    0.2, 120, COUNCIL_MODEL, 60_000,
-  )
-  // Fail open to the SEO/anti-stuffing draft (persona #2), NOT the creative one (#0): if the GPT-5
-  // judge errors or returns empty, the leanest draft is the safest fallback. Logged so it's visible.
-  if (!judged) console.warn('[title-council] judge returned empty — failing open to the SEO/anti-stuffing draft')
-  return judged || drafts[1] || drafts[0]
-}
-
-/** V3 title council (2026-07-23, Step 7). Same 3-persona-adversary-judge shape as legacy, but:
+/** V3 title council (2026-07-23, Step 7). Same 3-persona-adversary-judge shape as the pre-V3
+ *  council (deleted 2026-08-03 when TITLE_COUNCIL_V3 retired at 'on' — git ref: pre-973fb7e), but:
  *  (1) each persona is the ENTIRE system message (not `p.sys + baseSystem`) — the personas told the model
  *      one shape while baseSystem told it another, and three "design-led" prepends made all three
  *      proposers draft Pattern A;
@@ -2949,59 +2901,18 @@ ${baseSystem}`,
 }
 
 /** COUNCIL for the title (PO directive: big decisions DEBATE instead of one agent). Reuses the
- *  fully-built title brief (system+user) so every hard constraint still applies, then runs:
- *  3 persona proposers -> a ruthless adversary critique -> a judge that synthesizes the single
- *  best title. The judge's output flows through runTitleAgent's existing validate + deterministic
- *  backstops (brand-lead, design-name lead, gender de-dup, Title-Case), so the council is additive,
- *  not a new failure mode. Fails open to a single agent if all drafts error.
+ *  fully-built title brief (system+user) so every hard constraint still applies, then runs the V3
+ *  3-persona -> adversary -> judge council. The judge's output flows through runTitleAgent's
+ *  existing validate + deterministic backstops (brand-lead, design-name lead, gender de-dup,
+ *  Title-Case), so the council is additive, not a new failure mode. V3 fails open internally
+ *  (best-scoring draft, then single agent).
  *
- *  TITLE_COUNCIL_V3 gate: off (default) = legacy council byte-identical to pre-Step-7. shadow = run
- *  V3 alongside legacy, log [COUNCIL_V3_DIFF] with both judge scores, ship LEGACY. on = ship V3.
- *  In shadow mode we run BOTH councils (~2x cost) for the window it takes to validate — after flip
- *  it's a single V3 run. Applies to both title paths (single-design and multi-design), both call
- *  this function (INVARIANT 1 parity). */
+ *  TITLE_COUNCIL_V3 flag RETIRED 2026-08-03 at live 'on' (on since 07-23, live-verified): the
+ *  legacy council + [COUNCIL_V3_DIFF] shadow machinery are deleted — legacy was no longer a
+ *  pre-Step-7 baseline anyway (V3.1a changed its brief un-flagged). Rollback is git-revert.
+ *  Both title paths (single-design and multi-design) call this wrapper (INVARIANT 1 parity). */
 async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean }): Promise<string> {
-  if (TITLE_V3_ON) return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
-  const legacy = await runTitleCouncilLegacy(openai, baseSystem, baseUser, onProgress)
-  if (TITLE_V3_SHADOW) {
-    // Extra V3 call for observability. Sequential (parallel would spike token/latency AND lose
-    // keepalive spacing on the SSE stream). Judge scores logged so PO can see the delta before flip.
-    const v3 = await runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
-    const brandName = opts?.brandName || 'THE CEO'
-    const lean = opts?.lean
-    // TITLE_COUNCIL_V3.1a Step 9: structured JSON emit so shadow metrics are grep-jq-derivable.
-    // audienceComplianceRate / requiredButDropped / universalForcedTail / mixedLeanParentForcedTail
-    // are all computable from ONE line. Kept compact — no per-persona breakdown (that would need
-    // exposing the internals of runTitleCouncilV3; deferred to a follow-up when the shadow signal
-    // shows more per-persona forensics are needed).
-    const jl = titleQualityJudge(legacy, { brandName, lean })
-    const jv = titleQualityJudge(v3, { brandName, lean })
-    const mode = deriveAudienceMode(lean)
-    const hasTail = (title: string): 'women' | 'men' | 'men-and-women' | 'none' => {
-      if (/\bfor\s+men\s+and\s+women\b/i.test(title)) return 'men-and-women'
-      if (/\bfor\s+women\b/i.test(title) || /\bwomen['’]?s\b/i.test(title) || /\bladies\b/i.test(title)) return 'women'
-      if (/\bfor\s+men\b/i.test(title) || /\bmen['’]?s\b/i.test(title)) return 'men'
-      return 'none'
-    }
-    const legacyTail = hasTail(legacy)
-    const v3Tail = hasTail(v3)
-    const tailMatchesLean = (tail: ReturnType<typeof hasTail>): boolean => {
-      if (!lean || lean === 'unisex') return tail === 'none'
-      if (lean === 'female' || lean === 'lean_female') return tail === 'women'
-      if (lean === 'male' || lean === 'lean_male') return tail === 'men'
-      return false
-    }
-    console.log(JSON.stringify({
-      tag: 'COUNCIL_V3_DIFF',
-      audienceLean: lean ?? null,
-      audienceMode: mode,
-      legacy: { score: jl.score, len: legacy.length, tail: legacyTail, matchesLean: tailMatchesLean(legacyTail), problems: jl.problems, text: legacy.slice(0, 120) },
-      v3: { score: jv.score, len: v3.length, tail: v3Tail, matchesLean: tailMatchesLean(v3Tail), problems: jv.problems, text: v3.slice(0, 120) },
-      requiredButDropped: mode === 'REQUIRED' && !tailMatchesLean(v3Tail),
-      universalForcedTail: mode === 'OPTIONAL' && v3Tail !== 'none',
-    }))
-  }
-  return legacy
+  return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
 }
 
 /** Bullets COUNCIL (PR: bullets-council) — mirrors runTitleCouncil for the 5-bullet ARRAY. Bullets are
@@ -3363,11 +3274,10 @@ Rules:
       model: 'gpt-4.1-mini',
       messages: [
         { role: 'system', content: `You are an Amazon SEO title editor${apparel ? ' for apparel' : ''}. Output ONLY the corrected title string.` },
-        // TITLE_COUNCIL_V3: the corrective-retry pipe ban is un-flagged legacy — it fights every PO gold
-        // that uses ` | ` (6 of 8 golds). When V3 is on we drop that clause so Pattern A retries can
-        // still ship the pipe format the brief demands. Non-pipe rules stay because they're safety, not
-        // format opinions. See docs/title-council-v3-spec.md §5.3.
-        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language${TITLE_V3_ON ? '' : ' (NO " - " dashes or pipes)'}: ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
+        // The corrective-retry pipe ban was deleted with the V3 flip (retired 2026-08-03): it fought
+        // every PO gold that uses ` | ` (6 of 8 golds). Non-pipe rules stay because they're safety,
+        // not format opinions. See docs/title-council-v3-spec.md §5.3.
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language: ${brandName} then ${mustInclude ? `the MANDATORY keyword "${mustInclude}"` : 'the top keyphrase'}${attributePin ? ` then the blank-brand "${attributePin}" if it fits` : ''} then ${apparel ? 'an optional supporting keyphrase if it fits' : 'ONE supporting keyphrase if it fits'}${preferredAudience ? ` then optionally "for ${preferredAudience}" if budget remains (lowest-priority — a product-specific keyphrase outranks it, so drop the audience rather than the keyphrase)` : ''}. Front-load the mandatory keyword. ${apparel ? '50-75 chars' : 'TARGET 60-75 chars'} — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). ${apparel ? 'Product-type word ("shirt"/"tee") used AT MOST twice total. ' : 'Name the product type once or twice; do NOT reframe it as apparel. Include technical search terms (UHS-I/Class N/USB-C/Bluetooth/MB-per-s/capacity/model identifiers) when present in the keyword pool — they ARE search terms. NO filler words ("Durable", "Reliable", "Solution", "Premium", "Versatile"). '}No seasonal terms. No dry physical specs shoppers don\\'t search.${apparel ? ' ONE audience.' : ''} Return ONLY the corrected title.` },
       ],
       temperature: 0.2,
       max_tokens: 120,
@@ -3388,23 +3298,10 @@ Rules:
     problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
   }
 
-  // Audience guarantee: never silently narrow a unisex product to one gender.
-  // TITLE_COUNCIL_V3: the PO gold pattern says NEVER FORCE "for Men and Women" when the design is
-  // universal — this widen guard used to run un-flagged, contradicting the V2 prompt clause "NEVER
-  // force 'for Men and Women'". When V3 is on we skip it so a universal design that the council
-  // (correctly) titled without gender doesn't get its clean tail rewritten into forced dual gender.
-  // (Under V3 the council itself decides — if a design IS gender-specific the persona will emit it.)
-  if (!TITLE_V3_ON && preferredAudience === 'Men and Women' && title) {
-    const lc = title.toLowerCase()
-    if (/\bm[ae]n\b/.test(lc) && !/\bwom[ae]n\b/.test(lc)) {
-      const swapped = title
-        .replace(/\bfor Men\b/i, 'for Men and Women')
-        .replace(/\bMen'?s\b/i, "Men's and Women's")
-      // No length gate: widening the audience is a compliance fix; the 75-char backstop below
-      // protects length (and knows to drop a truncation-mangled audience rather than narrow it).
-      if (swapped !== title) { title = swapped; problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective) }
-    }
-  }
+  // The "for Men and Women" widen guard was deleted with the V3 flip (retired 2026-08-03): the PO
+  // gold pattern says NEVER FORCE "for Men and Women" on a universal design — the council itself
+  // decides, and if a design IS gender-specific the persona emits it. This resolves the documented
+  // V2-brief-vs-widen-guard contradiction (FOUNDATION_SHIP_DOOR_PLAN.md §3.3).
 
   // 🛟 LLM brand-safety judge — final catch-net (PR #80, classified in #86).
   // piggyback brands → REMOVE; compatibility brands → ensure "Compatible with [Brand]"
@@ -7798,24 +7695,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
   }
 
-  // FIX_C_NICHE_POOL (2026-07-23): audience-relational compound seed injection. Fires ONLY when
-  // deriveAudienceRelationalCompounds detects a real signal (spouse-gender hint + wearer lean set +
-  // no relational carrier already in designName). Deterministic; no LLM. Compounds get added to
-  // input.nicheSeeds AFTER the standard fillSeeds assignment above so they flow through the same
-  // downstream path (groundVocab at :2824, brief at :2951, humanizer pool at :3240, fill pool at
-  // :5906). Persona 2's compound-niche-first precedence (V3.1a) will lead with them; if the design
-  // has no compound signal, the helper returns [] and the flag is a no-op.
-  if (FIX_C_ON || FIX_C_SHADOW) {
+  // Audience-relational compound seed injection (2026-07-23 Fix C; FIX_C_NICHE_POOL flag retired
+  // 2026-08-03 at live 'on'). Fires ONLY when deriveAudienceRelationalCompounds detects a real
+  // signal (spouse-gender hint + wearer lean set + no relational carrier already in designName).
+  // Deterministic; no LLM. Compounds get added to input.nicheSeeds AFTER the standard fillSeeds
+  // assignment above so they flow through the same downstream path (groundVocab, brief, humanizer
+  // pool, fill pool). Persona 2's compound-niche-first precedence (V3.1a) leads with them; if the
+  // design has no compound signal, the helper returns [] and this is a no-op.
+  {
     const compounds = deriveAudienceRelationalCompounds(designName, apparelProduct ? (input.audienceLean ?? null) : null, input.productType ?? null)
     if (compounds.length > 0) {
-      if (FIX_C_ON) {
-        input.nicheSeeds = [...new Set([...(input.nicheSeeds ?? []), ...compounds])]
-        onProgress(`Fix C: injected ${compounds.length} audience-relational compound(s).`)
-        console.log(`[FIX_C_SEEDS] mode=on lean=${input.audienceLean ?? 'none'} designName="${designName}" compounds=${JSON.stringify(compounds)}`)
-      } else {
-        // shadow: log what would have been injected without changing the pool
-        console.log(`[FIX_C_SEEDS] mode=shadow lean=${input.audienceLean ?? 'none'} designName="${designName}" wouldInject=${JSON.stringify(compounds)}`)
-      }
+      input.nicheSeeds = [...new Set([...(input.nicheSeeds ?? []), ...compounds])]
+      onProgress(`Fix C: injected ${compounds.length} audience-relational compound(s).`)
+      console.log(`[FIX_C_SEEDS] lean=${input.audienceLean ?? 'none'} designName="${designName}" compounds=${JSON.stringify(compounds)}`)
     }
   }
 
