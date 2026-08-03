@@ -81,15 +81,39 @@ const FAMILY_TABLE: { test: RegExp; base: FamilyBase }[] = [
   { test: /(?:^|_)(APRON)(?:_|$)/, base: { family: 'apron', noun: 'apron', aliases: ['kitchen apron', 'apron'], defaultSeed: 'apron', defaultDisplay: 'Apron', categoryHead: (aud) => `aprons for ${aud}` } },
 ]
 
-/** Which garment families' alias vocabularies are recognized in a title — the union of all
- *  non-shirt family aliases plus the shirt words. Consumers extend their own APPAREL_WORDS scans
- *  with this so "find the garment word in the title" stops missing cap/snapback/hoodie/etc. */
-export const ALL_GARMENT_ALIAS_WORDS: string[] = Array.from(new Set([
-  ...SHIRT_BASE.aliases,
-  ...FAMILY_TABLE.flatMap((f) => f.base.aliases),
-  // single-word forms so token scans match
-  'hat', 'cap', 'snapback', 'beanie', 'hoodie', 'sweatshirt', 'crewneck', 'polo', 'tank', 'dress', 'leggings', 'socks', 'jacket', 'coat', 'pajamas', 'apron', 'visor',
-]))
+/** Single-token garment HEAD NOUNS only — words that BY THEMSELVES name a garment. Deliberately
+ *  excludes the modifier halves of multi-word aliases (dad/trucker/bucket/baseball/knit/winter/
+ *  hooded/crew/neck/muscle/novelty/set/kitchen/graphic): task #156 — the old
+ *  ALL_GARMENT_ALIAS_WORDS `.split()` union made those "apparel words" for EVERY listing, so
+ *  "Best Dad Ever Shirt" seeded as "best ever dad" and "<Design> Graphic Tee" as "<design>
+ *  graphic", poisoning the shared keyword_seed_pool. Token scans must use THIS list (or
+ *  familyScanWords below); multi-word aliases are matched as whole phrases via `.includes()` the
+ *  way garmentNounFor already does. */
+export const GARMENT_HEAD_WORDS: ReadonlySet<string> = new Set([
+  'shirt', 'shirts', 't-shirt', 'tshirt', 'tshirts', 'tee', 'tees',
+  'hat', 'cap', 'snapback', 'beanie', 'visor',
+  'hoodie', 'sweatshirt', 'crewneck', 'pullover',
+  'polo', 'tank', 'top', 'tops',
+  'dress', 'sundress', 'leggings', 'tights', 'socks',
+  'jacket', 'coat', 'windbreaker',
+  'pajamas', 'pajama', 'pjs', 'apron',
+])
+
+/** The garment tokens a TITLE SCAN may recognize for THIS listing: the resolved family's alias
+ *  tokens plus the shirt words, filtered to head nouns. Family-scoped on purpose — a shirt listing
+ *  must never pick up 'cap'/'coat'/'dress' from its design phrase ("Graduation Cap…", "Coat of
+ *  Arms…"), and no listing may treat a modifier ('dad', 'graphic') as a garment word. For
+ *  g=SHIRT_BASE this is a subset of the historical shirt-only literal, so shirt behavior is
+ *  byte-identical in every flag mode. */
+export function familyScanWords(g: GarmentNoun): Set<string> {
+  const out = new Set<string>()
+  for (const alias of [...g.aliases, ...SHIRT_BASE.aliases, g.noun, g.seedNoun]) {
+    for (const tok of (alias ?? '').toLowerCase().split(/\s+/)) {
+      if (GARMENT_HEAD_WORDS.has(tok)) out.add(tok)
+    }
+  }
+  return out
+}
 
 /**
  * Resolve the garment noun for a productType + optional title. productType fixes the FAMILY; the

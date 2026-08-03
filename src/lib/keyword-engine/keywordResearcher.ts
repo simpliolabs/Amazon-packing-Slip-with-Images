@@ -25,7 +25,7 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
 import { scrubTrademarks, hasTrademark } from '../fba/trademarkGuard';
-import { garmentNounFor, SHIRT_BASE, ALL_GARMENT_ALIAS_WORDS, type GarmentNoun } from '../fba/garmentNoun';
+import { garmentNounFor, SHIRT_BASE, GARMENT_HEAD_WORDS, familyScanWords, type GarmentNoun } from '../fba/garmentNoun';
 import { isWithinBudget } from './cacheService';
 // SEED_TOKEN_NET (task #144). No cycle: cacheService imports only engine + selection-core;
 // seedTokenNet imports only coverage-core (dependency-free leaf).
@@ -663,14 +663,25 @@ const SEED_GENERIC = new Set([
 // byte-identical until the PO flips this on after reviewing the shadow diff.
 const GARMENT_NOUN_MODE = (process.env.GARMENT_NOUN || 'off').toLowerCase()
 const GARMENT_NOUN_ON = GARMENT_NOUN_MODE === 'on'
-// Shirt-family words; when the flag is ON, PLUS the union of all garment-family aliases (hat/cap/
-// snapback/beanie/hoodie/sweatshirt/tank/dress/leggings/socks/…) so "find the garment word in the
-// title" scans stop missing non-shirt garments. Flag OFF → the exact original shirt-only set, so
-// shirt (and every not-yet-flipped) listing is byte-identical.
+// The historical shirt-only literal, now UNCONDITIONAL in every flag mode (#156, 2026-08-03).
+// The old ON-mode union of ALL alias tokens made modifier words (dad/graphic/crew/baseball/…)
+// "apparel words" for EVERY listing — "Best Dad Ever Shirt" seeded as "best ever dad" and
+// "<Design> Graphic Tee" as "<design> graphic", a shared-pool poisoning class the live audit
+// caught before it fired. Non-shirt recognition now comes from the FAMILY-SCOPED scanWordsFor(g)
+// below (title scans in the seed builders), never from widening this global exclusion set — so
+// distinctiveNicheTokens / isCategoryGenericOnly / identityTokensOf keep 'baseball'/'winter'/
+// 'bucket'/'kitchen' as design tokens on every listing.
 const APPAREL_WORDS = new Set<string>([
   'shirt','shirts','tshirt','tshirts','t-shirt','tee','tees','top','tops','hoodie','sweatshirt','tank',
-  ...(GARMENT_NOUN_ON ? ALL_GARMENT_ALIAS_WORDS.flatMap((w) => w.split(/\s+/)) : []),
 ])
+// Title-scan vocabulary for ONE listing: the base literal plus the listing's own family head nouns
+// (familyScanWords is head-filtered, so no modifier can enter). For g=SHIRT_BASE this equals the
+// base literal — shirt listings are byte-identical in every mode.
+function scanWordsFor(g: GarmentNoun): Set<string> {
+  const out = new Set(APPAREL_WORDS)
+  for (const w of familyScanWords(g)) out.add(w)
+  return out
+}
 
 /**
  * Build a concise, design-led seed from the title. Drop generic words (year, "personalized",
@@ -678,17 +689,19 @@ const APPAREL_WORDS = new Set<string>([
  * tokens lead, not the qualifiers. Falls back gracefully when nothing distinctive remains.
  */
 export function buildSeedFromTitle(title: string, g: GarmentNoun = SHIRT_BASE): string {
+  // Family-scoped scan set (#156): the base literal + THIS listing's head nouns only.
+  const scan = scanWordsFor(g)
   // Strip brand prefix (everything before first dash or colon) — keep only the lead segment.
   const firstSegment = title.split(/\s*[-–—:]\s*/)[0].trim()
   // Tokenize: lowercase, strip punctuation, split on whitespace.
   const all = firstSegment.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
   // Distinctive = NOT generic AND length > 1 — these tokens NAME the design/niche.
-  const distinctive = all.filter((w) => !SEED_GENERIC.has(w) && !APPAREL_WORDS.has(w) && w.length > 1 && !/^\d+$/.test(w))
+  const distinctive = all.filter((w) => !SEED_GENERIC.has(w) && !scan.has(w) && w.length > 1 && !/^\d+$/.test(w))
   // Take the FIRST 2 distinctive tokens — JS works best with 2-3 word seeds, and the first
   // distinctive words in the seller's own title are almost always the design tokens.
   const lead = distinctive.slice(0, 2)
   // Add an apparel word so JS returns product keywords, not general subject queries.
-  const apparelInTitle = all.find((w) => APPAREL_WORDS.has(w)) || g.seedNoun
+  const apparelInTitle = all.find((w) => scan.has(w)) || g.seedNoun
   const seed = lead.length > 0 ? `${lead.join(' ')} ${apparelInTitle}` : `${all.slice(0, 2).join(' ')} ${apparelInTitle}`.trim()
   return seed.replace(/\s{2,}/g, ' ').trim()
 }
@@ -723,7 +736,8 @@ const FALLBACK_BLANK_BRANDS = [
 export function buildFallbackSeed(seed: string, listingTitle?: string | null, g: GarmentNoun = SHIRT_BASE): string | null {
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
   const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
-  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || g.noun
+  const scan = scanWordsFor(g) // family-scoped (#156) — modifiers can never be the product word
+  const productWord = toks.find((t) => scan.has(t)) || g.noun
 
   // 1) TONE — how shoppers actually search for novelty/slogan tees.
   const tone = toks.find((t) => FALLBACK_TONE_WORDS.has(t))
@@ -735,7 +749,7 @@ export function buildFallbackSeed(seed: string, listingTitle?: string | null, g:
 
   // 3) Longest distinctive token — for designs that DO have a real niche noun.
   const core = toks
-    .filter((t) => t.length > 3 && !SEED_GENERIC.has(t) && !APPAREL_WORDS.has(t) && !FALLBACK_TONE_WORDS.has(t) && !/^\d+$/.test(t))
+    .filter((t) => t.length > 3 && !SEED_GENERIC.has(t) && !scan.has(t) && !FALLBACK_TONE_WORDS.has(t) && !/^\d+$/.test(t))
     .sort((a, b) => b.length - a.length)[0]
   if (!core) return null
   const fallback = `${core} ${productWord}`.replace(/\s{2,}/g, ' ').trim()
@@ -771,7 +785,8 @@ function garmentBrandSeed(seed: string, listingTitle?: string | null, g: Garment
   const brand = FALLBACK_BLANK_BRANDS.find((b) => src.includes(b))
   if (!brand) return null
   const toks = src.replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
-  const productWord = toks.find((t) => APPAREL_WORDS.has(t)) || g.noun
+  const scan = scanWordsFor(g) // family-scoped (#156)
+  const productWord = toks.find((t) => scan.has(t)) || g.noun
   return `${brand} ${productWord}`
 }
 
@@ -1311,8 +1326,10 @@ function emptyResult(): KeywordResearchResult {
 // Recognizes a garment word already present in a phrase. Flag OFF → the exact original shirt-family
 // set (byte-identical). Flag ON → also matches non-shirt families (hat/cap/snapback/beanie/dress/…)
 // so "cashflow cap" isn't re-suffixed to "cashflow cap cap".
+// ON branch: HEAD NOUNS only (#156) — the old alias-token split made 'bucket list'/'baseball mom'/
+// 'winter wonderland' count as "already contains a product word", shipping garment-less seeds to JS.
 const NICHE_APPAREL_RE = GARMENT_NOUN_ON
-  ? new RegExp(`\\b(shirt|shirts|tee|tees|tshirt|tshirts|t-shirt|hoodie|sweatshirt|tank|top|tops|${ALL_GARMENT_ALIAS_WORDS.flatMap((w) => w.split(/\s+/)).filter((w) => w.length > 2).join('|')})\\b`, 'i')
+  ? new RegExp(`\\b(${[...GARMENT_HEAD_WORDS].filter((w) => w.length > 2).join('|')})\\b`, 'i')
   : /\b(shirt|shirts|tee|tees|tshirt|tshirts|t-shirt|hoodie|sweatshirt|tank|top|tops)\b/i
 // Words that never constitute a "niche" on their own (so the blank/product itself is never
 // mistaken for a design theme).
