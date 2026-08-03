@@ -32,8 +32,13 @@ import { isWithinBudget } from './cacheService';
 import {
   SEED_TOKEN_MODE, SEED_TOKEN_ON, SEED_TOKEN_ACTIVE,
   SEED_TOKEN_RESERVED_SLOTS, SEED_TAIL_MIN_HEADROOM,
-  auditSeedTokens, reserveSeedTokenSlots,
+  auditSeedTokens, reserveSeedTokenSlots, seedTokenHit,
 } from './seedTokenNet';
+// POOL_STRATA (handoff/POOL_STRATA_PLAN.md, PO GO 2026-08-03): the stratified pool-composition
+// contract that REPLACES the two-band volume cut below at Phase 3. Phase 1 = shadow-only:
+// compose on the side, ship the OLD composition, log [POOL_STRATA_DIFF]. No cycle: poolComposer
+// imports only seedTokenNet (a coverage-core leaf).
+import { composePool, mergeKeywordRows } from './poolComposer';
 
 // Lazy Proxy (2026-08-03, tests-into-CI): a module-top createClient THROWS without env, which made
 // every test suite importing this module un-runnable locally and in CI. The Proxy defers client
@@ -479,6 +484,41 @@ export async function researchKeywords(
   // ── Phase 5: Merge + 3-Bucket Categorization ──────────────────────────────
   const buckets = categorizeBuckets(nicheKeywords, competitorKeywords, SEED_TOKEN_ON ? seedToks : []);
   const allKeywords = [...buckets.primary, ...buckets.competitorMatch, ...buckets.competitorGaps];
+
+  // ── POOL_STRATA Phase 1 (shadow; PLAN: handoff/POOL_STRATA_PLAN.md) ─────────────────────────
+  // Compute the stratified composition ON THE SIDE over the identical merged input and diff it
+  // against the shipped blob. Ships nothing new: 'on' is NOT armed until Phase 3 (the flip PR is
+  // where the old decider above gets deleted — flipping via env before that would ship an
+  // unreviewed composition). FAIL-OPEN: log-only, never mutates result, never throws.
+  const POOL_STRATA_MODE = (process.env.POOL_STRATA || 'off').toLowerCase();
+  if (POOL_STRATA_MODE !== 'off') {
+    try {
+      const strataToks = SEED_TOKEN_ACTIVE ? seedToks : distinctiveNicheTokens(seed);
+      const comp = composePool(mergeKeywordRows(nicheKeywords, competitorKeywords), strataToks, {
+        // Guaranteed-stratum entry gate: a trademark/foreign/category-generic row must win a
+        // volume seat like anyone else, never a guaranteed S2 one (same nets ingestion uses).
+        s2Gate: (kw) => !hasTrademark(kw) && !isForeignKeyword(kw) && !isCategoryGenericOnly(kw),
+      });
+      const oldSet = new Set(allKeywords.map((k) => k.keyword.toLowerCase()));
+      const newSet = new Set(comp.rows.map((k) => k.keyword.toLowerCase()));
+      const entered = [...newSet].filter((k) => !oldSet.has(k));
+      const exited = [...oldSet].filter((k) => !newSet.has(k));
+      console.log(`[POOL_STRATA_DIFF] ${JSON.stringify({
+        asin, mode: POOL_STRATA_MODE, sha: comp.sha, strata: comp.strata,
+        tokens: strataToks,
+        designTokenHitsOld: strataToks.length ? allKeywords.filter((k) => seedTokenHit(k.keyword, strataToks)).length : 0,
+        designTokenHitsNew: comp.designTokenHits,
+        broadTopRetained: comp.broadTopRetained,
+        enteredCount: entered.length, exitedCount: exited.length,
+        entered: entered.slice(0, 25), exited: exited.slice(0, 25),
+      })}`);
+      if (POOL_STRATA_MODE === 'on') {
+        console.warn('[POOL_STRATA] mode=on requested but the flip is not armed until Phase 3 — behaving as shadow (old composition ships).');
+      }
+    } catch (e) {
+      console.warn('[POOL_STRATA] shadow compose failed (non-fatal):', e instanceof Error ? e.message : e);
+    }
+  }
 
   const result: KeywordResearchResult = {
     buckets,
