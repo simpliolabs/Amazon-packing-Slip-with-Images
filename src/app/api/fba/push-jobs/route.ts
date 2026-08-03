@@ -105,13 +105,14 @@ export async function POST(req: NextRequest) {
  *  dead-code-eliminated the entire queue branch. Live proof: the var was set WITH "Available at Buildtime"
  *  ticked, yet B0FKKN8XKV had ZERO push_jobs rows and the Auto Push still died on the streaming path at
  *  58/151 SKUs. Reading it here makes it a RESTART-only toggle that cannot silently deactivate, and lets
- *  the client ask at click time (no build, no race). NEXT_PUBLIC_ is still honoured so that if a build DID
- *  inline it, nothing regresses. */
+ *  the client ask at click time (no build, no race). The legacy NEXT_PUBLIC_ alias read was dropped
+ *  2026-08-03 AFTER /api/health confirmed the canonical PUSH_QUEUE_ALL=on is set live (flag census R5)
+ *  — dropping it before that confirmation would have silently reverted bulk pushes to the streaming path. */
 // NOT exported: a Next.js App Router route.ts may only export route handlers + the known route config
 // (dynamic/revalidate/...). Exporting an arbitrary helper fails the production build (it type-checks
 // locally, so tsc will NOT catch it — this exact mistake broke the 8581e63 deploy).
 function pushQueueAllEnabled(): boolean {
-  return process.env.PUSH_QUEUE_ALL === 'on' || process.env.NEXT_PUBLIC_PUSH_QUEUE_ALL === 'on'
+  return process.env.PUSH_QUEUE_ALL === 'on'
 }
 
 export async function GET(req: NextRequest) {
