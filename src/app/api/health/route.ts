@@ -23,7 +23,7 @@ export const revalidate = 0
  */
 const BEHAVIOR_FLAGS = [
   'TITLE_COUNCIL_V3',
-  'TITLE_QUALITY_V2',
+  'TITLE_QUALITY_V2', // retired in code 2026-08-03 — listed to surface env residue
   'TITLE_COHERENCE_GATE',
   'BULLET_COHERENCE_GATE',
   'FIX_C_NICHE_POOL',
