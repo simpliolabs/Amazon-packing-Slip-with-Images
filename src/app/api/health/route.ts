@@ -27,7 +27,7 @@ const BEHAVIOR_FLAGS = [
   'TITLE_COHERENCE_GATE',
   'BULLET_COHERENCE_GATE',
   'FIX_C_NICHE_POOL', // retired in code 2026-08-03 — listed to surface env residue
-  'RELEVANCE_THEME_V2',
+  'RELEVANCE_THEME_V2', // retired in code 2026-08-03 (was live-unset) — listed to surface env residue
   'KEYWORD_TARGET_SET',
   'COVERAGE_CORE',
   'CONTENT_SPINE', // retired in code 2026-07-31 — listed to surface env residue
