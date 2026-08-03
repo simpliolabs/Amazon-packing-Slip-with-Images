@@ -31,13 +31,13 @@ const BEHAVIOR_FLAGS = [
   'KEYWORD_TARGET_SET',
   'COVERAGE_CORE',
   'CONTENT_SPINE', // retired in code 2026-07-31 — listed to surface env residue
-  'BACKEND_DEGRADE_STRICT',
+  'BACKEND_DEGRADE_STRICT', // retired in code 2026-08-03 — listed to surface env residue
   'BACKEND_CRITICAL_KEYWORDS',
   'GARMENT_NOUN',
   'SEED_TOKEN_NET',
   'SHIP_BAND_NET', // retired in code 2026-08-03 — listed to surface env residue
   'SHIP_ENFORCE', // retired in code 2026-08-03 — listed to surface env residue
-  'BULLETS_METRIC_LOOP',
+  'BULLETS_METRIC_LOOP', // retired in code 2026-08-03 — listed to surface env residue
   'MULTI_DESIGN_AUDIT_MAX_GROUPS',
   'PUSH_QUEUE_ALL',
   'NEXT_PUBLIC_PUSH_QUEUE_ALL',

@@ -869,12 +869,12 @@ export async function POST(req: NextRequest) {
             } else {
               // PARTIAL-PATH PRESERVE (#157, 2026-08-03). The old note here claimed the keywords
               // partial "already throws in all modes" at the producing gate — FALSE: that gate's
-              // floor is backendMinBytesFloor() (190 at BACKEND_DEGRADE_STRICT=off) while the census
-              // marks degraded at 220 (CONTENT_CONTRACT.keywords.minStrict) on the post-audit bytes,
-              // so 190-219B output (or any post-gate trademark-scrub shrink) reached this write and
-              // persisted silently. Now: same rule as the full path — worst-child bytes must beat
-              // the prior AND a contaminated prior never wins (PR #470 ratchet fix; context = the
-              // stored title, unchanged on a keywords-only regen).
+              // floor is the catastrophic 190 (BACKEND_MIN_LEGACY; the strict flag is retired) while
+              // the census marks degraded at 220 (CONTENT_CONTRACT.keywords.minStrict) on the
+              // post-audit bytes, so 190-219B output (or any post-gate trademark-scrub shrink)
+              // reached this write and persisted silently. Now: same rule as the full path —
+              // worst-child bytes must beat the prior AND a contaminated prior never wins (PR #470
+              // ratchet fix; context = the stored title, unchanged on a keywords-only regen).
               const priorKw = result.degradedSections?.includes('backend_keywords')
                 ? tryParsePriorKeywords(String(storedRec.recommended_keywords ?? ''))
                 : null
