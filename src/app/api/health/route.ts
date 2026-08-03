@@ -34,7 +34,8 @@ const BEHAVIOR_FLAGS = [
   'BACKEND_DEGRADE_STRICT', // retired in code 2026-08-03 — listed to surface env residue
   'BACKEND_CRITICAL_KEYWORDS',
   'GARMENT_NOUN',
-  'SEED_TOKEN_NET',
+  'SEED_TOKEN_NET', // superseded by POOL_STRATA (dies at its Phase 3) — never flip on
+  'POOL_STRATA',
   'SHIP_BAND_NET', // retired in code 2026-08-03 — listed to surface env residue
   'SHIP_ENFORCE', // retired in code 2026-08-03 — listed to surface env residue
   'BULLETS_METRIC_LOOP', // retired in code 2026-08-03 — listed to surface env residue
