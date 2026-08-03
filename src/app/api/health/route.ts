@@ -15,6 +15,37 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
+/**
+ * Behavior-flag readout (flag census, 2026-08-03). Hard allowlist — only known
+ * non-secret behavior switches, never arbitrary env. `null` = unset (module
+ * defaults apply). Dark flags are drift bombs: without this there is no way to
+ * confirm what the live process is actually running with.
+ */
+const BEHAVIOR_FLAGS = [
+  'TITLE_COUNCIL_V3',
+  'TITLE_QUALITY_V2',
+  'TITLE_COHERENCE_GATE',
+  'BULLET_COHERENCE_GATE',
+  'FIX_C_NICHE_POOL',
+  'RELEVANCE_THEME_V2',
+  'KEYWORD_TARGET_SET',
+  'COVERAGE_CORE',
+  'CONTENT_SPINE', // retired in code 2026-07-31 — listed to surface env residue
+  'BACKEND_DEGRADE_STRICT',
+  'BACKEND_CRITICAL_KEYWORDS',
+  'GARMENT_NOUN',
+  'SEED_TOKEN_NET',
+  'SHIP_BAND_NET',
+  'SHIP_ENFORCE',
+  'BULLETS_METRIC_LOOP',
+  'MULTI_DESIGN_AUDIT_MAX_GROUPS',
+  'PUSH_QUEUE_ALL',
+  'NEXT_PUBLIC_PUSH_QUEUE_ALL',
+  'PUSH_HEAL_FEEDS_FALLBACK',
+  'AUTO_RESHIP_ENABLED',
+  'JUNGLE_SCOUT_ENABLED',
+] as const
+
 export async function GET() {
   return NextResponse.json(
     {
@@ -22,6 +53,7 @@ export async function GET() {
       sha: process.env.BUILD_SHA || 'unknown',
       builtAt: process.env.BUILD_TIME || 'unknown',
       now: new Date().toISOString(),
+      flags: Object.fromEntries(BEHAVIOR_FLAGS.map((name) => [name, process.env[name] ?? null])),
     },
     { headers: { 'Cache-Control': 'no-store, max-age=0' } },
   )
