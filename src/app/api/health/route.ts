@@ -22,11 +22,11 @@ export const revalidate = 0
  * confirm what the live process is actually running with.
  */
 const BEHAVIOR_FLAGS = [
-  'TITLE_COUNCIL_V3',
+  'TITLE_COUNCIL_V3', // retired in code 2026-08-03 — listed to surface env residue
   'TITLE_QUALITY_V2', // retired in code 2026-08-03 — listed to surface env residue
   'TITLE_COHERENCE_GATE',
   'BULLET_COHERENCE_GATE',
-  'FIX_C_NICHE_POOL',
+  'FIX_C_NICHE_POOL', // retired in code 2026-08-03 — listed to surface env residue
   'RELEVANCE_THEME_V2',
   'KEYWORD_TARGET_SET',
   'COVERAGE_CORE',

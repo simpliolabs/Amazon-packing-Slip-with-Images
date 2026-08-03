@@ -728,8 +728,9 @@ function persistedIsComplete(ranks: readonly number[], poolSize: number): boolea
  * persisted an EMPTY pool over approved copy.
  *
  * Emits the parity-oracle line at every site in every mode INCLUDING `on` — deliberately unlike
- * TITLE_COUNCIL_V3, which early-returns at listingPipeline.ts:2668 and goes dark after the flip,
- * making post-flip regression unmeasurable.
+ * the (since-retired, 2026-08-03) TITLE_COUNCIL_V3 flag, which early-returned at `on` and went
+ * dark after the flip, making post-flip regression unmeasurable. The lesson stands: a flip must
+ * not kill the oracle that would catch its own regression.
  */
 export function resolveRankingTargets<T extends TargetInput & { selectionRank?: number | null }>(
   rows: readonly T[],
