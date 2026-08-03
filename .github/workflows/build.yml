@@ -39,6 +39,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: placeholder
           OPENAI_API_KEY: placeholder
 
+      - name: Test (blocking — the regression net; 400+ unit tests over the extracted leaves)
+        run: pnpm run test
+        env:
+          # Suites are env-free by design (module-top Supabase clients are lazy Proxies as of
+          # 2026-08-03); placeholders cover any indirect env read. No secret is required.
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          SUPABASE_SERVICE_ROLE_KEY: placeholder
+          OPENAI_API_KEY: placeholder
+
       - name: Lint (non-blocking — informational only)
         run: pnpm run lint
         continue-on-error: true
