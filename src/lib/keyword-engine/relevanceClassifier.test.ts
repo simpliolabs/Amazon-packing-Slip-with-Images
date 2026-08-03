@@ -7,8 +7,10 @@ describe('buildRelevancePrompt — v2=false (pre-V2, byte-identical to shipped)'
 
   it('does NOT include the Design theme / Audience lean block', () => {
     const { user } = buildRelevancePrompt(kwBlock, ctx, false)
-    expect(user).not.toMatch(/Design theme/i)
-    expect(user).not.toMatch(/Audience lean/i)
+    // Anchored to the HEADER lines the v2 block emits — the unconditional KEEP sentence legitimately
+    // says "the design theme" in prose (added with #441), which a loose /Design theme/i would false-flag.
+    expect(user).not.toMatch(/^Design theme:/m)
+    expect(user).not.toMatch(/^Audience lean:/m)
   })
 
   it('does NOT include Rule 6 (WRONG-THEME merch)', () => {

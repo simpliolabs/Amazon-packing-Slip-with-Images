@@ -23,10 +23,17 @@ import { getAccessToken } from '@/lib/amazon/auth'
 const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// Lazy Proxy (2026-08-03, tests-into-CI): a module-top createClient THROWS without env, which made
+// every test suite importing this module un-runnable locally and in CI. The Proxy defers client
+// construction to the first real property access, so env-free unit tests never trigger it; runtime
+// behavior is byte-identical (same client, created once).
+let _supabase: ReturnType<typeof createClient<any>> | null = null
+const supabase = new Proxy({} as ReturnType<typeof createClient<any>>, {
+  get(_t, prop) {
+    _supabase ??= createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+    return (_supabase as unknown as Record<string | symbol, unknown>)[prop]
+  },
+})
 
 const CACHE_SOURCE = 'competitor_seo'
 const CACHE_TTL_DAYS = 14
