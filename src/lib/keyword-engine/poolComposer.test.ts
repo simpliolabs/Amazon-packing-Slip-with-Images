@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { composePool, mergeKeywordRows, DEFAULT_STRATA_CAPS, type PoolRow } from './poolComposer'
+import { composePool, mergeKeywordRows, ensureDesignSupply, DEFAULT_STRATA_CAPS, type PoolRow } from './poolComposer'
 
 // POOL_STRATA Phase 1 net (handoff/POOL_STRATA_PLAN.md). These tests pin the strata GUARANTEES —
 // the properties that make the #144 failure class ("the rows arrived and the cap ate them")
@@ -97,6 +97,56 @@ describe('composePool — strata guarantees', () => {
     expect(comp.strata.s1).toBeLessThanOrEqual(DEFAULT_STRATA_CAPS.s1Broad)
     expect(comp.strata.s2).toBeLessThanOrEqual(DEFAULT_STRATA_CAPS.s2Design)
     expect(comp.strata.s3).toBeLessThanOrEqual(DEFAULT_STRATA_CAPS.s3NicheTail)
+  })
+})
+
+describe('ensureDesignSupply — the composer-owned supply guarantee (P2)', () => {
+  const base = {
+    designTokens: ['cupid', 'valentine'],
+    candidateRows: [] as { keyword?: string }[],
+    emittedKeys: new Set<string>(),
+    headOf: (t: string) => `${t} shirt`,
+    normalizeKey: (h: string) => h.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim(),
+    nonApparel: false,
+    harvestCount: 50,
+    harvestFloor: 10,
+    budget: null,
+    minHeadroom: 50,
+    arm: false,
+  }
+  const covered = Array.from({ length: 4 }, (_, i) => ({ keyword: `cupid valentine tee ${i}` }))
+
+  it('no tokens → none/no_distinctive_tokens (fail-open: never buys for a blank-brand seed)', () => {
+    const d = ensureDesignSupply({ ...base, designTokens: [] })
+    expect(d).toMatchObject({ action: 'none', reason: 'no_distinctive_tokens' })
+  })
+  it('tokens covered → none/pass', () => {
+    const d = ensureDesignSupply({ ...base, candidateRows: covered })
+    expect(d).toMatchObject({ action: 'none', reason: 'pass' })
+  })
+  it('missing but head already emitted → none/already_emitted (the pull is free — it is coming)', () => {
+    const d = ensureDesignSupply({ ...base, emittedKeys: new Set(['cupid shirt', 'valentine shirt']) })
+    expect(d).toMatchObject({ action: 'none', reason: 'already_emitted' })
+  })
+  it('non-apparel → none/non_apparel', () => {
+    const d = ensureDesignSupply({ ...base, nonApparel: true })
+    expect(d).toMatchObject({ action: 'none', reason: 'non_apparel' })
+  })
+  it('degraded harvest → none/harvest_degraded (an outage must never escalate spend)', () => {
+    const d = ensureDesignSupply({ ...base, harvestCount: 3 })
+    expect(d).toMatchObject({ action: 'none', reason: 'harvest_degraded' })
+  })
+  it('shadow (arm=false) → would_pull with the candidate named, budget untouched', () => {
+    const d = ensureDesignSupply(base)
+    expect(d).toMatchObject({ action: 'would_pull', reason: 'shadow_would_pull', candidate: 'cupid shirt' })
+  })
+  it('armed without headroom → none/budget_headroom_reserved', () => {
+    const d = ensureDesignSupply({ ...base, arm: true, budget: { allowed: true, callsRemaining: 50 } })
+    expect(d).toMatchObject({ action: 'none', reason: 'budget_headroom_reserved' })
+  })
+  it('armed with headroom → pull/tail_universe_added', () => {
+    const d = ensureDesignSupply({ ...base, arm: true, budget: { allowed: true, callsRemaining: 200 } })
+    expect(d).toMatchObject({ action: 'pull', reason: 'tail_universe_added', candidate: 'cupid shirt' })
   })
 })
 

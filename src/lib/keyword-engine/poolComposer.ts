@@ -31,7 +31,7 @@
  * beside the shipped old composition); Phase 3 flips + DELETES the old two-band decider and the
  * SEED_TOKEN_NET reservation layer; Phase 4 removes the flag (coverage-core precedent).
  */
-import { seedTokenHit } from './seedTokenNet'
+import { seedTokenHit, auditSeedTokens } from './seedTokenNet'
 
 export interface PoolRow {
   keyword: string
@@ -92,6 +92,71 @@ export function mergeKeywordRows<T extends PoolRow>(nicheKeywords: readonly T[],
     if (!merged.has(key)) merged.set(key, kw)
   }
   return Array.from(merged.values())
+}
+
+/** Verdict of the composer's supply guarantee — Phase 2 of the contract. */
+export interface SupplyDecision {
+  /** none = supply is adequate; would_pull = shadow (spend nothing, report); pull = buy ONE tail universe. */
+  action: 'none' | 'would_pull' | 'pull'
+  /** The `${missingToken} ${noun}` universe head to research when action != none, else null. */
+  candidate: string | null
+  /** Reason codes preserved VERBATIM from the SEED_TOKEN_NET trip logic they replace at Phase 3
+   *  (keywordResearcher.ts:359-399): no_distinctive_tokens | pass | already_emitted | non_apparel |
+   *  harvest_degraded | shadow_would_pull | budget_headroom_reserved | tail_universe_added. */
+  reason: string
+  /** Design tokens under the hit floor (auditSeedTokens semantics). */
+  missing: string[]
+}
+
+/**
+ * ensureDesignSupply — the composer-owned supply guarantee (POOL_STRATA Phase 2).
+ *
+ * PURE DECISION, no I/O: the caller owns the budget read, the noun namespace, and the actual
+ * universe fetch (which stays the normal storage-first seed-pool loop, cross-listing reuse
+ * intact). This relocates the SEED_TOKEN_NET trip conditions VERBATIM into the composition
+ * contract: S2 can only be under-supplied if the design's terms never arrived — in which case the
+ * contract says buy AT MOST ONE `${missingToken} ${noun}` tail universe, and only when
+ *   (a) the harvest is healthy (a quota outage must never look like starvation and never
+ *       escalate spend — the ⭐⭐ budget-guard incident),
+ *   (b) the head is not already an emitted universe (then the pull is FREE — it is coming),
+ *   (c) the listing is apparel (the `${token} shirt`-shaped head is nonsense otherwise), and
+ *   (d) the budget has real headroom (this optional spend yields FIRST as the cap tightens).
+ * budget=null means "unchecked" (shadow callers spend nothing, not even the budget read).
+ */
+export function ensureDesignSupply(opts: {
+  designTokens: string[]
+  /** Merged candidate rows (niche + competitor, pre-cap) the audit counts hits over. */
+  candidateRows: { keyword?: string }[]
+  /** Normalized keys of the primary seed + every universe already emitted this research. */
+  emittedKeys: ReadonlySet<string>
+  /** Builds the tail head for a token — caller owns the noun namespace (`${token} ${g.noun}`). */
+  headOf: (token: string) => string
+  normalizeKey: (head: string) => string
+  nonApparel: boolean
+  /** Pre-universe niche harvest size vs the outage floor (EMPTY_POOL_THRESHOLD). */
+  harvestCount: number
+  harvestFloor: number
+  /** null = shadow caller, budget deliberately unchecked ($0, zero reads). */
+  budget: { allowed: boolean; callsRemaining: number } | null
+  minHeadroom: number
+  /** false = shadow (report would_pull, spend nothing); true = armed (Phase 3). */
+  arm: boolean
+}): SupplyDecision {
+  const { designTokens } = opts
+  if (designTokens.length === 0) return { action: 'none', candidate: null, reason: 'no_distinctive_tokens', missing: [] }
+  const audit = auditSeedTokens(designTokens, opts.candidateRows)
+  if (audit.ok) return { action: 'none', candidate: null, reason: 'pass', missing: [] }
+  const candidate = audit.missing
+    .map((t) => opts.headOf(t))
+    .find((h) => { const k = opts.normalizeKey(h); return !!k && !opts.emittedKeys.has(k) }) ?? null
+  if (!candidate) return { action: 'none', candidate: null, reason: 'already_emitted', missing: audit.missing }
+  if (opts.nonApparel) return { action: 'none', candidate: null, reason: 'non_apparel', missing: audit.missing }
+  if (opts.harvestCount < opts.harvestFloor) return { action: 'none', candidate: null, reason: 'harvest_degraded', missing: audit.missing }
+  if (!opts.arm) return { action: 'would_pull', candidate, reason: 'shadow_would_pull', missing: audit.missing }
+  if (!opts.budget || !opts.budget.allowed || opts.budget.callsRemaining <= opts.minHeadroom) {
+    return { action: 'none', candidate: null, reason: 'budget_headroom_reserved', missing: audit.missing }
+  }
+  return { action: 'pull', candidate, reason: 'tail_universe_added', missing: audit.missing }
 }
 
 export function composePool<T extends PoolRow>(

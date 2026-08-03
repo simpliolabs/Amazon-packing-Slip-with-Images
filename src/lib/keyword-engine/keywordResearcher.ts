@@ -38,7 +38,7 @@ import {
 // contract that REPLACES the two-band volume cut below at Phase 3. Phase 1 = shadow-only:
 // compose on the side, ship the OLD composition, log [POOL_STRATA_DIFF]. No cycle: poolComposer
 // imports only seedTokenNet (a coverage-core leaf).
-import { composePool, mergeKeywordRows } from './poolComposer';
+import { composePool, mergeKeywordRows, ensureDesignSupply } from './poolComposer';
 
 // Lazy Proxy (2026-08-03, tests-into-CI): a module-top createClient THROWS without env, which made
 // every test suite importing this module un-runnable locally and in CI. The Proxy defers client
@@ -407,6 +407,9 @@ export async function researchKeywords(
   }
 
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
+  // POOL_STRATA P2: the outage guard must judge the PRIMARY harvest, not the universe-merged pool
+  // (warm universe reuse could mask a degraded primary fetch) — capture the pre-loop size.
+  const preUniverseNicheCount = nicheKeywords.length;
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
   for (const { seed: us, nicheHead: uNicheHead, tag: uTag } of extraUniverses) {
     const uk = normalizeSeedKey(us);
@@ -503,12 +506,29 @@ export async function researchKeywords(
       const newSet = new Set(comp.rows.map((k) => k.keyword.toLowerCase()));
       const entered = [...newSet].filter((k) => !oldSet.has(k));
       const exited = [...oldSet].filter((k) => !newSet.has(k));
+      // P2: the composer-owned supply verdict (pure; budget deliberately UNCHECKED in shadow — $0,
+      // zero reads). At Phase 3 this same call, armed, feeds the ONE tail-universe pull and the
+      // SEED_TOKEN_NET trip block dies. Reason codes are verbatim-compatible for log continuity.
+      const supply = ensureDesignSupply({
+        designTokens: strataToks,
+        candidateRows: [...nicheKeywords, ...competitorKeywords],
+        emittedKeys: universeSeen,
+        headOf: (t) => `${t} ${g.noun}`,
+        normalizeKey: normalizeSeedKey,
+        nonApparel: !!categorySeed,
+        harvestCount: preUniverseNicheCount,
+        harvestFloor: EMPTY_POOL_THRESHOLD,
+        budget: null,
+        minHeadroom: SEED_TAIL_MIN_HEADROOM,
+        arm: false,
+      });
       console.log(`[POOL_STRATA_DIFF] ${JSON.stringify({
         asin, mode: POOL_STRATA_MODE, sha: comp.sha, strata: comp.strata,
         tokens: strataToks,
         designTokenHitsOld: strataToks.length ? allKeywords.filter((k) => seedTokenHit(k.keyword, strataToks)).length : 0,
         designTokenHitsNew: comp.designTokenHits,
         broadTopRetained: comp.broadTopRetained,
+        supply: { action: supply.action, candidate: supply.candidate, reason: supply.reason, missing: supply.missing },
         enteredCount: entered.length, exitedCount: exited.length,
         entered: entered.slice(0, 25), exited: exited.slice(0, 25),
       })}`);
