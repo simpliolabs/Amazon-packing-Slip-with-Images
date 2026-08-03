@@ -1091,11 +1091,11 @@ const BACKEND_CRIT_SHADOW = BACKEND_CRIT_MODE === 'shadow'
 // description partials all route via `partialResult`, which is DEFINED as a scrubPublished wrapper).
 // A live regen shipped a 66-char title against the 70-75 band because the ENFORCED retry lives only
 // in the multi-design `buildNicheParentTitle` while single-design ships `runTitleAgent`'s soft pad.
-// DEFAULT ON (opt-OUT, per generation-invariants INVARIANT 3 — a net that must be remembered is the
-// net that gets forgotten). shadow=log [SHIP_BAND_DIFF] only; off=full bypass for rollback.
-const SHIP_BAND_MODE = (process.env.SHIP_BAND_NET || 'on').toLowerCase()
-const SHIP_BAND_ON = SHIP_BAND_MODE !== 'off' && SHIP_BAND_MODE !== 'shadow'
-const SHIP_BAND_SHADOW = SHIP_BAND_MODE === 'shadow'
+// UNCONDITIONAL since the flag census (2026-08-03; SHIP_BAND_NET retired — live env was unset =
+// default on, so this is byte-identical). The off/shadow modes were rollback-only, and shadow was
+// incoherent (it shipped the cap+dedupe mutations when the band no-opped but returned the raw
+// UNCAPPED title when the band fired). Rollback is now git-revert, per generation-invariants
+// INVARIANT 3 — a net that must be remembered is the net that gets forgotten.
 // TITLE_QUALITY_V2 (2026-07-22, PO "8 golds from 100+ deploys, council still gets it wrong"): the
 // title council was trained for LENGTH (70-75 chars, 50+ commits) but never for FORMAT — sellers
 // still get "THE CEO Later Gator Comfort Colors Long Sleeve Shirt for Women" instead of the gold
@@ -7903,7 +7903,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * ungated net would silently rewrite a title the seller never asked to touch — and the UI would
    * then offer it for push. Only a run that actually PRODUCED a title may band-enforce it. */
   const bandTitle = (title: string, produced: boolean): string => {
-    if (!produced || !title || (!SHIP_BAND_ON && !SHIP_BAND_SHADOW)) return title
+    if (!produced || !title) return title
     // CAP FIRST, because this door now runs AFTER scrubTrademarks — whose substitutions LENGTHEN the
     // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
     // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
@@ -7928,7 +7928,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     console.log(JSON.stringify({
       tag: 'SHIP_BAND_DECISION',
       field: 'title',
-      mode: SHIP_BAND_SHADOW ? 'shadow' : 'on',
+      // Flag retired 2026-08-03; constant field kept for log-schema stability (grep tooling).
+      mode: 'on',
       decision: v.decision,
       from: title.length,
       to: v.title.length,
@@ -7937,10 +7938,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       note: v.notes[0] ?? '',
     }))
     if (v.title === capped) return capped
-    if (SHIP_BAND_SHADOW) {
-      console.log(JSON.stringify({ tag: 'SHIP_BAND_DIFF', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '', next: v.title }))
-      return title
-    }
     console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
     return v.title
   }
@@ -7969,9 +7966,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       for (const viol of violations) {
         console.log(JSON.stringify({ tag: 'SHIP_CENSUS', exit: out.regeneratedSection ?? 'full', ...viol }))
       }
-      /* PHASE 3 ENFORCEMENT (SHIP_ENFORCE, default on). The census MEASURES on the persisting
-       * bytes — after the editorial audit, which is what the producing gates cannot see. When it
-       * finds a floor violation the enforcement is NOT a rewrite (this seam has no pool and no LLM;
+      /* PHASE 3 ENFORCEMENT (unconditional since the flag census 2026-08-03; the SHIP_ENFORCE flag
+       * was a binary off-switch with no shadow mode, live env unset = on — retiring it is
+       * byte-identical; rollback is git-revert). The census MEASURES on the persisting bytes —
+       * after the editorial audit, which is what the producing gates cannot see. When it finds a
+       * floor violation the enforcement is NOT a rewrite (this seam has no pool and no LLM;
        * padding here would be Goodhart): it marks the section DEGRADED, which routes the result into
        * the battle-tested abort-and-preserve machinery — the route swaps the seller's prior copy
        * back in with an honest note, exactly as the pre-audit gate has always done for the runs it
@@ -7979,7 +7978,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
        * gutted it to 118 bytes (later 197), and both PERSISTED because nothing measured after the
        * audit. A new listing with NO prior keeps the short output (better than nothing) — that
        * branch already exists in the route and is unchanged. */
-      if ((process.env.SHIP_ENFORCE || 'on').toLowerCase() !== 'off') {
+      {
         const degraded = new Set(out.degradedSections ?? [])
         const mark = (code: string, section: 'backend_keywords' | 'description'): void => {
           if (violations.some((x) => x.code === code) && !degraded.has(section)) {

@@ -35,8 +35,8 @@ const BEHAVIOR_FLAGS = [
   'BACKEND_CRITICAL_KEYWORDS',
   'GARMENT_NOUN',
   'SEED_TOKEN_NET',
-  'SHIP_BAND_NET',
-  'SHIP_ENFORCE',
+  'SHIP_BAND_NET', // retired in code 2026-08-03 — listed to surface env residue
+  'SHIP_ENFORCE', // retired in code 2026-08-03 — listed to surface env residue
   'BULLETS_METRIC_LOOP',
   'MULTI_DESIGN_AUDIT_MAX_GROUPS',
   'PUSH_QUEUE_ALL',
