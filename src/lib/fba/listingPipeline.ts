@@ -51,7 +51,7 @@ import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversar
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
-import { BACKEND_DEGRADE_STRICT_ON, backendMinBytesFloor, logShadowDiff } from '@/lib/fba/backendDegradeGate'
+import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
@@ -625,18 +625,15 @@ function backendOutputProblems(
   const problems: string[] = []
   if (perChild.length === 0) return ['no per-child keyword rows were generated']
   const minBytes = Math.min(...perChild.map((p) => getByteLength(p.keywords || '')))
-  // Task #103 (2026-07-22): flag-selectable floor. Default 190 (legacy — flag off = byte-identical).
-  // BACKEND_DEGRADE_STRICT=on raises to 220, matching the doctrine golden band 240-250B / floor 220B
-  // (fba-generation-invariants INVARIANT 2). This is the fix for the B0H9VDCBZJ 70B garbage-floor
-  // persist class where a fresh regen produced 70/86B and shipped as the recommendation over the
-  // prior 207B. Shadow mode: log a [BACKEND_STRICT_DIFF] breadcrumb when the fresh regen lands in
-  // the 190-219 range so the runbook can measure the ON-flip blast radius before flipping.
-  const floor = backendMinBytesFloor()
-  // Message text: keep the pre-diff wording verbatim under legacy (off) so the SSE error frame at
-  // route.ts:1403 is byte-identical to today. Under shadow/on, append the floor number so the
-  // seller sees which mode fired the gate — helpful for the flip runbook.
+  // PRODUCING-GATE floor = 190 (BACKEND_MIN_LEGACY), permanently (#157 Step 2, 2026-08-03 — the
+  // BACKEND_DEGRADE_STRICT flag is retired). Division of labor: this cheap gate catches CATASTROPHIC
+  // output (the B0H9VDCBZJ 70/86B class); the ship census measures the POST-AUDIT bytes against the
+  // doctrine 220 floor (CONTENT_CONTRACT.keywords.minStrict) and degrade-marks, which routes BOTH
+  // write paths into the shared better-than-prior preserve (PR #480). The strict whole-run throw
+  // this replaced lost all six sections to one thin backend; census+preserve keeps the five healthy
+  // ones and swaps only the degraded field.
+  const floor = BACKEND_MIN_LEGACY
   if (minBytes < floor) {
-    const suffix = BACKEND_DEGRADE_STRICT_ON ? ` (< ${floor} floor)` : ''
     // HONEST CAUSE (#149). The old text read "degraded keyword pool or failed fill" — it named two
     // causes and committed to neither, and this function CANNOT distinguish them: it receives the
     // per-child strings and the children, never the keyword pool. That guess sent a live diagnosis
@@ -645,14 +642,13 @@ function backendOutputProblems(
     // nearly everything there was). So: state the measurement, admit the unknown, and name the ONE
     // check that separates the two. A message that guesses is worse than one that says "look here".
     problems.push(
-      `a child landed at ${minBytes}/250 bytes${suffix} — the fill did not reach the floor. ` +
+      `a child landed at ${minBytes}/250 bytes — the fill did not reach the floor. ` +
       `This function cannot tell WHY (it never sees the keyword pool): open the Intelligence tab and ` +
       `count the pool's DISTINCT tokens after stopwords/product-type/gender/title-echo are removed. ` +
       `Below ~${floor} bytes of novel tokens the pool is too thin and the cure is more on-niche ` +
       `research; well above it, the fill or its filters are dropping usable tokens.`,
     )
   }
-  logShadowDiff('generator-output', minBytes, { children: perChild.length })
   // DECODED colors (real, non-empty) vs UNdecodable children, counted separately (2026-07-15).
   const decodedColors = children.map((c) => (c.color || '').toLowerCase()).filter(Boolean)
   const distinctColors = new Set(decodedColors).size
@@ -5642,7 +5638,9 @@ function polishDescription(desc: string, designName?: string | null, brandName?:
 // The bullets council runs once, then many stages rewrite the 5 bullets. This gates the SHIP-READY
 // bullets against an OBJECTIVE metric and, when they fall short, has the council RE-DELIBERATE against a
 // specific deterministic critique (Approach 1, PO-approved 2026-07-10). SHADOW MODE by default
-// (BULLETS_METRIC_LOOP=shadow → runs + logs what it WOULD ship; anything else → OFF, zero cost/zero change).
+// (Was flag-gated by BULLETS_METRIC_LOOP; enforced-by-default since ~07-17 and the flag was retired
+// 2026-08-03 in the flag census — the loop now always runs on apparel. NOTE: an older revision of
+// this comment described the parse INVERTED (shadow-default) — the enforced default was live.)
 
 /** Pure coherence-defect predicate, lifted out of coherenceGateBullets so the metric can score coherence
  *  with NO LLM call: a raw lowercase comma-tail fragment (the backstop's ", oversized tshirts." shape) or
@@ -8647,9 +8645,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   } else {
     bullets = input.priorBullets ?? []
   }
-  // Metric-loop flag (D) — governs the per-child + broadcast bullets quality loops on BOTH the
-  // bullets-only section-regen path (immediately below) and the full path. apparel && env != 'off'.
-  const enableBulletsLoop = apparelProduct && (process.env.BULLETS_METRIC_LOOP || '').toLowerCase() !== 'off'
+  // Metric loop (D) — the per-child + broadcast bullets quality loops on BOTH the bullets-only
+  // section-regen path (immediately below) and the full path. Apparel-only. The BULLETS_METRIC_LOOP
+  // off-switch was retired 2026-08-03 (flag census; live env was unset = enabled).
+  const enableBulletsLoop = apparelProduct
   if (only === 'bullets') {
     // Degradation gate (2026-07-08): empty council output must abort, not overwrite (this exact
     // path persisted [] over B0FRYMM56C's approved bullets during the quota outage).
@@ -9139,20 +9138,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       problems = backendOutputProblems(perChild, input.children, apparelProduct)
       if (problems.length > 0) {
         console.warn(`[listingPipeline] backend output still degraded after retry: ${problems.join('; ')}`)
-        // BACKEND_DEGRADE_STRICT (Task #103, 2026-07-22): under strict mode, mirror the keywords-only
-        // partial path at ~:8161-8168 — THROW with aiKind='degraded'. The route's outer error catch
-        // at ai-recommendations/route.ts:1392-1408 handles it (emits {type:'error', kind:'degraded'}
-        // to the SSE client and short-circuits BEFORE any DB write), so the stored recommendation
-        // stays exactly as approved and the seller sees the amber "content preserved" banner.
-        // Under off/shadow keep the legacy flag-not-throw so behavior is byte-identical (the full-
-        // path preserve block at route.ts:~:1267 catches the returned degradedSections and, if a
-        // valid prior parses, swaps it in — otherwise persists what we generated).
-        if (BACKEND_DEGRADE_STRICT_ON) {
-          const hard = (input.openai as { __aiHardError?: string }).__aiHardError
-          const e = new Error(`Backend regen came back degraded after retry (${problems.join('; ')}). Your previous keywords are untouched — run Regenerate again in a minute.`) as Error & { aiKind?: string }
-          e.aiKind = hard ?? 'degraded'
-          throw e
-        }
+        // Degrade-mark, never throw (#157 Step 2, 2026-08-03 — the BACKEND_DEGRADE_STRICT whole-run
+        // throw is retired): degradedSections routes BOTH write paths into the shared better-than-
+        // prior preserve (PR #480), which keeps the five healthy sections and swaps only the
+        // degraded keywords when the prior is genuinely better (contaminated priors never win).
         degradedSections.push('backend_keywords')
       }
     }
@@ -9160,13 +9149,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const problems = backendOutputProblems(perChild, input.children, apparelProduct)
     if (problems.length > 0) {
       console.warn(`[listingPipeline] per-design backend degraded (failed groups keep previous keywords): ${problems.join('; ')}`)
-      // Per-design branch: strict mode throws too — same aiKind so the route treats it uniformly.
-      if (BACKEND_DEGRADE_STRICT_ON) {
-        const hard = (input.openai as { __aiHardError?: string }).__aiHardError
-        const e = new Error(`Per-design backend regen came back degraded (${problems.join('; ')}). Your previous keywords are untouched — run Regenerate again in a minute.`) as Error & { aiKind?: string }
-        e.aiKind = hard ?? 'degraded'
-        throw e
-      }
+      // Per-design branch: same degrade-mark semantics (#157 Step 2) — census+preserve owns it.
       degradedSections.push('backend_keywords')
     }
   }
