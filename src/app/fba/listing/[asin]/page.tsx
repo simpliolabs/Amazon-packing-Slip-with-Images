@@ -1205,6 +1205,38 @@ export default function ListingDetailPage() {
     setRankRefreshing(false)
   }, [asin])
 
+  /* ONE post-push truth sync (PO 2026-08-04: after Auto Push AND Ship-all-core "nothing updated
+   * until I hard refreshed"). Every push flow — single, details bulk, core bulk, queue or stream —
+   * calls THIS when it finishes; the per-path inline refetches are DELETED. The server is the truth
+   * (write-through + re-score already ran there); the client's only job is to re-pull it. The
+   * queue-path details bulk refetched ONLY the score and never the rows; core bulk refetched only
+   * on ok and skipped verify/outcome/claim/history — the exact divergence the seller hit twice.
+   * TWO passes (immediate + 4s): the server's re-score and verify-task enqueue can land a beat
+   * after the job reports done, and a single immediate pull races them. */
+  const syncAfterPush = useCallback(() => {
+    const pull = async () => {
+      try {
+        const rr = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
+        const jj = await rr.json() as { recommendations?: AiRecommendations | null }
+        if (jj?.recommendations) setAiRecs(jj.recommendations)
+      } catch { /* best-effort — the next page load serves derived truth */ }
+      try {
+        const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
+        const sdata = await sresp.json()
+        const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
+        if (found) setScore(found)
+      } catch { /* best-effort */ }
+      refreshRankFree()
+      refreshVerifyQueue()
+    }
+    bumpHeartbeat()
+    refreshClaim()
+    refreshHistory()
+    refreshOutcome()
+    void pull()
+    setTimeout(() => { void pull() }, 4000)
+  }, [asin, refreshRankFree, refreshVerifyQueue, bumpHeartbeat, refreshClaim, refreshHistory, refreshOutcome])
+
   // Fetch competitor ASIN
   useEffect(() => {
     if (!asin) return
@@ -1737,27 +1769,11 @@ export default function ListingDetailPage() {
         // refetch of the GET returns the truthful plan. Runs on PARTIAL pushes too (adversarial):
         // the derived plan correctly stays REPLACE while stragglers remain, and the accepted SKUs'
         // write-through still moves the cohesion counts.
-        void (async () => {
-          try {
-            const r = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
-            const j = await r.json() as { recommendations?: AiRecommendations | null }
-            if (j?.recommendations) setAiRecs(j.recommendations)
-          } catch { /* refetch is best-effort — the next page load serves derived truth */ }
-        })()
       }
-      // Phase B: a push is a mutation that the server also mirrors into the change-log + may
-      // auto-release the claim (release_reason='push'). Bump the heartbeat (covers a partial push
-      // that KEEPS the claim) and re-sync both the claim chip and the merged change-history.
-      bumpHeartbeat()
-      refreshClaim()
-      refreshHistory()
-      // Phase C: a full-accept push stamps the measuring epoch in listing_outcome_state — re-pull the
-      // ledger + sparkline so the Outcome panel flips to "Measuring 0/2" right away (best-effort).
-      refreshOutcome()
-      // Live-notice: the push may have just enqueued a verify AND/OR a self-heal task — refresh the
-      // verification banner NOW so a scheduled heal is visible before the seller can re-push,
-      // instead of waiting up to 60s for the next poll tick.
-      refreshVerifyQueue()
+      // Post-push truth sync (shared seam): recs + score + rank + verify banner + claim/history/
+      // outcome — see syncAfterPush. Runs on PARTIAL pushes too (adversarial): the derived plan
+      // correctly stays REPLACE while stragglers remain.
+      syncAfterPush()
     } catch (e) {
       // If we have any progress rows, the seller knows what landed (the stream told them
       // per-SKU). We do NOT clear them on error — they're the rollback evidence.
@@ -1765,7 +1781,7 @@ export default function ListingDetailPage() {
       setPushPhase('idle')
     }
     setPushLoading(false)
-  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, bumpHeartbeat, refreshClaim, refreshHistory, refreshOutcome, refreshVerifyQueue])
+  }, [asin, pushField, pushDetailField, buildPushBody, refreshRankFree, getToken, syncAfterPush])
 
   // Ready = pushable (schema-mapped or static), not enum-INVALID, has a value, and differs from live.
   // Per-field "Regenerate Item Highlight" (PO 2026-07-18: "no REGENERATE button"). POSTs the isolated
@@ -1936,7 +1952,9 @@ export default function ListingDetailPage() {
         if (outcome.ok) anyPushed = true
       }
       if (!outcome.ok) bulkStreamInterruptedRef.current = true
-      if (anyPushed) { try { const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' }); const sdata = await sresp.json(); const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin); if (found) setScore(found) } catch { /* best-effort */ } }
+      // Shared post-push truth sync (was: score-only refetch — the panel rows never updated until a
+      // hard refresh, the exact defect the seller reported on Auto Push). Partial runs sync too.
+      if (anyPushed || !outcome.ok) syncAfterPush()
       bulkCancelTokenRef.current = null
       setBulkRunning(false)
       setBulkFinished(true)
@@ -2033,18 +2051,13 @@ export default function ListingDetailPage() {
       // Record that we DID NOT receive a clean result so the header message tells the truth.
       bulkStreamInterruptedRef.current = true
     }
-    if (anyPushed) {
-      try {
-        const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
-        const sdata = await sresp.json()
-        const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
-        if (found) setScore(found)
-      } catch { /* best-effort */ }
-    }
+    // Shared post-push truth sync (was: score-only refetch). Interrupted runs sync too — the
+    // accepted SKUs' write-through already moved server state.
+    if (anyPushed || bulkStreamInterruptedRef.current) syncAfterPush()
     bulkCancelTokenRef.current = null
     setBulkRunning(false)
     setBulkFinished(true)
-  }, [asin, bulkItems, bulkRunning, getToken, runBulkViaQueue, isPushQueueOn])
+  }, [asin, bulkItems, bulkRunning, getToken, runBulkViaQueue, isPushQueueOn, syncAfterPush])
 
   /** Stop a running Auto Push between SKUs (same server cancel as the single-push Stop). */
   const stopBulkPush = useCallback(async () => {
@@ -2097,22 +2110,9 @@ export default function ListingDetailPage() {
       setCoreBulkMessage(outcome.note)
       setCoreBulkPerField(outcome.perField ?? [])
       if (!outcome.ok) coreBulkInterruptedRef.current = true
-      else {
-        try {
-          const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
-          const sdata = await sresp.json()
-          const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
-          if (found) setScore(found)
-        } catch { /* best-effort */ }
-        refreshRankFree()
-        void (async () => {
-          try {
-            const rr = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
-            const jj = await rr.json() as { recommendations?: AiRecommendations | null }
-            if (jj?.recommendations) setAiRecs(jj.recommendations)
-          } catch { /* best-effort */ }
-        })()
-      }
+      // Shared post-push truth sync — interrupted runs sync too (accepted SKUs already moved
+      // server state; the seller reported the score cards frozen until a hard refresh).
+      syncAfterPush()
       coreBulkCancelTokenRef.current = null
       setCoreBulkRunning(false)
       setCoreBulkFinished(true)
@@ -2177,28 +2177,13 @@ export default function ListingDetailPage() {
       coreBulkInterruptedRef.current = true
       setCoreBulkMessage(e instanceof Error ? e.message : 'Ship all core failed')
     }
-    // On a result that shipped something: refetch score + recompute the free rank card + re-pull the
-    // derived action plan (ship-truth — the server write-through + re-score already ran).
-    if (anyPushed) {
-      try {
-        const sresp = await fetch('/api/fba/listing-optimizer', { cache: 'no-store' })
-        const sdata = await sresp.json()
-        const found = sdata.scores?.find((s: SeoScoreRow) => s.parent_asin === asin)
-        if (found) setScore(found)
-      } catch { /* best-effort — the score still updates on next load */ }
-      refreshRankFree()
-      void (async () => {
-        try {
-          const rr = await fetch(`/api/fba/listing-optimizer/ai-recommendations?parent_asin=${asin}&_t=${Date.now()}`, { cache: 'no-store' })
-          const jj = await rr.json() as { recommendations?: AiRecommendations | null }
-          if (jj?.recommendations) setAiRecs(jj.recommendations)
-        } catch { /* refetch is best-effort — the next page load serves derived truth */ }
-      })()
-    }
+    // Shared post-push truth sync (ship-truth — the server write-through + re-score already ran).
+    // Interrupted runs sync too: accepted SKUs moved server state.
+    if (anyPushed || coreBulkInterruptedRef.current) syncAfterPush()
     coreBulkCancelTokenRef.current = null
     setCoreBulkRunning(false)
     setCoreBulkFinished(true)
-  }, [asin, coreBulkRunning, getToken, refreshRankFree, runBulkViaQueue, isPushQueueOn])
+  }, [asin, coreBulkRunning, getToken, runBulkViaQueue, isPushQueueOn, syncAfterPush])
 
   /** Stop a running Ship-all-core between SKUs (same server cancel as the other pushes). */
   const stopCoreBulkPush = useCallback(async () => {

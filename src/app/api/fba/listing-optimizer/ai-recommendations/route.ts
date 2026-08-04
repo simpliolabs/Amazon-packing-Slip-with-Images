@@ -1316,14 +1316,16 @@ export async function POST(req: NextRequest) {
           let titleSourceOut: 'ai' | 'manual' = 'ai'
           let priorKwJson: string | null = null   // prior stored keywords, for the degraded-keywords preserve below
           let priorDesc: string | null = null     // prior stored description, for the degraded-description preserve (Phase 3)
+          let priorPdi: unknown = null            // prior detail rows, for the push-provenance carry-forward below
           try {
             const { data: lockRow } = await supabase
               .from('listing_seo_recommendations')
-              .select('title_source, recommended_title, per_child_titles, recommended_keywords, recommended_description')
+              .select('title_source, recommended_title, per_child_titles, recommended_keywords, recommended_description, product_details_improvements')
               .eq('parent_asin', parent_asin)
               .maybeSingle()
             priorKwJson = (lockRow as { recommended_keywords?: string } | null)?.recommended_keywords ?? null
             priorDesc = (lockRow as { recommended_description?: string } | null)?.recommended_description ?? null
+            priorPdi = (lockRow as { product_details_improvements?: unknown } | null)?.product_details_improvements ?? null
             const locked = (lockRow as { title_source?: string } | null)?.title_source === 'manual'
             if (locked && regenerate_section !== 'title') {
               const kept = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
@@ -1400,6 +1402,36 @@ export async function POST(req: NextRequest) {
           // (instruction/priority/notes); verdict/current_status/replacement_content are computed
           // from rec-vs-cache. A locked+shipped title now derives DONE with the seller's kept title
           // displayed (the "shipped but still red" class dies here).
+          /* PDI PROVENANCE CARRY-FORWARD (PO 2026-08-04: after a full audit, already-on-Amazon
+           * detail rows regressed to "Push" — the audit rebuilds rows with current_value null,
+           * discarding the push write-through's live-truth cache; Auto Push then correctly
+           * diff-skips them while the panel claims they still need pushing). current_value IS the
+           * live-Amazon cache: carry the prior row's value forward whenever the fresh row doesn't
+           * know one. Match by sp_api_key first, folded field name second. recommended_value is
+           * NEVER carried — a changed recommendation correctly shows Push again. */
+          try {
+            type PdiRow = { field_name?: string; sp_api_key?: string; current_value?: string | null }
+            const priorRows: PdiRow[] = Array.isArray(priorPdi) ? priorPdi as PdiRow[] : []
+            if (priorRows.length && Array.isArray(rec.product_details_improvements)) {
+              const fold = (s: unknown): string => String(s ?? '').toLowerCase().replace(/[\s_-]+/g, '')
+              const byKey = new Map<string, string>()
+              for (const p of priorRows) {
+                const cur = String(p.current_value ?? '').trim()
+                if (!cur) continue
+                if (p.sp_api_key) byKey.set(`k:${fold(p.sp_api_key)}`, cur)
+                if (p.field_name) byKey.set(`f:${fold(p.field_name)}`, cur)
+              }
+              if (byKey.size) {
+                rec.product_details_improvements = rec.product_details_improvements.map((row) => {
+                  const r = row as PdiRow
+                  if (String(r.current_value ?? '').trim()) return row
+                  const cur = (r.sp_api_key ? byKey.get(`k:${fold(r.sp_api_key)}`) : undefined) ?? byKey.get(`f:${fold(r.field_name)}`)
+                  return cur ? { ...row, current_value: cur } : row
+                })
+              }
+            }
+          } catch (e) { console.warn('[ai-recommendations] PDI provenance carry-forward failed (non-fatal):', e instanceof Error ? e.message : e) }
+
           try {
             rec.action_plan = deriveActionPlan(
               { ...(rec as unknown as Record<string, unknown>), recommended_keywords: JSON.stringify(rec.per_child_keywords) } as never,
