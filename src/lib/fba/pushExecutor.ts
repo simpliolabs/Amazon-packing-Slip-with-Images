@@ -2899,6 +2899,25 @@ async function maybeEnqueueParentHeal(
     const parent = results.find((r) => r.isParent && r.status === 'failed')
     if (!parent?.sku || (!parent.issues?.length && !parent.error)) return none
     const rejectedAttrs = rejectedAttrKeysFrom(parent)
+    /* POPUP REGRESSION FIX (PO 2026-08-04: "the Update Parent Manually popup is not showing
+     * anymore" + "ALL parents failing, ~50 heal attempts"). An UNPARSEABLE parent rejection — no
+     * structured attributeNames and no known key in the message text — used to produce ZERO
+     * signal here: no heal, no flag, no popup. The parent just failed as an anonymous red row on
+     * every push while the verify cron re-pushed it forever. A structurally-failed parent must
+     * ALWAYS leave a durable seller-visible signal: flag the 'parent_update' sentinel so the
+     * standing heal:manual row exists and the popup fires with the generic Seller-Central
+     * instructions. Transport-class blips (throttle/5xx/timeout) are excluded — those genuinely
+     * deserve a silent retry, not a manual-action alert. */
+    if (rejectedAttrs.length === 0) {
+      const text = `${parent.error ?? ''} ${(parent.issues ?? []).map((i) => i.message ?? '').join(' ')}`
+      const transient = /HTTP (429|5\d\d)|timed? ?out|ETIMEDOUT|ECONN|throttl/i.test(text)
+      if (!transient) {
+        const { flagParentAttrsNeedAttention } = await import('@/lib/fba/verificationQueue')
+        await flagParentAttrsNeedAttention(parent_asin, ['parent_update'])
+        console.log(JSON.stringify({ tag: 'PARENT_MANUAL_FLAG', parent_asin, sku: parent.sku, reason: 'unparseable-structural-rejection', error: text.slice(0, 200) }))
+      }
+      return none
+    }
     // Classify each rejected attr: flat-healable (department/age_range) vs composite-healable (shirt_size
     // container OR its size_system/size_class sub-fields → healParentComposite) vs genuinely not healable.
     const healable = rejectedAttrs.filter((k) => BROADCAST_HEALABLE.has(k))

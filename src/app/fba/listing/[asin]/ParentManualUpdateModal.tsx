@@ -44,6 +44,9 @@ const CONTAINER_LABELS: Record<string, string> = {
   apparel_size: 'Apparel Size (System / Class / Size)',
   item_package_dimensions: 'Package Dimensions (L × W × H)',
   item_package_weight: 'Package Weight',
+  // Sentinel from the push executor: Amazon rejected the parent write but named no attribute —
+  // the operator still needs to fix the parent in Seller Central (generic wording, no field list).
+  parent_update: 'listing record (Amazon rejected the update without naming a field)',
 }
 
 export function ParentManualUpdateModal(props: Props) {

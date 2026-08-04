@@ -1099,9 +1099,14 @@ export default function ListingDetailPage() {
     const manualTask = verifyQueue.tasks.find((t) => t.field === 'heal:manual' && t.status === 'needs_attention')
     if (!manualTask) return
     // Prefer server-provided flag list; fall back to the task's containers if the push emit didn't carry them.
-    const containers = pushResults?.parentManualContainers
+    // POPUP REGRESSION FIX (PO 2026-08-04): an EMPTY list must not silently suppress the popup —
+    // that early-return was one of the three links that let the popup go dark globally while
+    // parents kept failing. When Amazon named no attribute, show the generic modal via the
+    // 'parent_update' sentinel (parent SKU + Seller Central deep-link is exactly what the seller
+    // needs either way).
+    const rawContainers = pushResults?.parentManualContainers
       ?? (manualTask.heal_payload?.missingAttrKeys ?? [])
-    if (containers.length === 0) return
+    const containers = rawContainers.length > 0 ? rawContainers : ['parent_update']
     const dismissKey = `fba.parentManualPopup.dismissed.${asin}.${manualTask.id ?? 'no-id'}`
     if (typeof window !== 'undefined' && window.localStorage.getItem(dismissKey)) return
     if (showParentManual) return   // already open — don't re-mount
