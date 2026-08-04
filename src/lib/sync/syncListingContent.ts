@@ -978,50 +978,16 @@ export function scoreListingContent(
     // `off`/`shadow` run `isSeasonalKeywordLegacy`, the byte-exact historical predicate — NOT
     // `isOffSeasonKeyword(kw, [])`, which normalises apostrophes and therefore strips strictly MORE
     // ("mother's day gift shirt"). A flag that is supposed to change nothing must change nothing.
-    const ktsOn = selectionMode() === 'on'
-    const bulletDesignSeasons = ktsOn ? seasonsIn(scoringCtx.planDesignName ?? '') : []
-    const isSeasonalKw = ktsOn
-      ? (kw: string) => isOffSeasonKeyword(kw, bulletDesignSeasons)
-      : (kw: string) => isSeasonalKeywordLegacy(kw)
-    const bulletOppKw = ((scoringCtx.bulletPlanKeywords && scoringCtx.bulletPlanKeywords.length > 0)
-      ? scoringCtx.bulletPlanKeywords.filter((k) => !isSeasonalKw(k))
-      : [...scoringCtx.topCriticalKeywords, ...scoringCtx.topUpgradeKeywords]
-          .filter((k) => !isSeasonalKw(k))
-          .filter((k) => k.split(/\s+/).length <= 6)
-    ).filter((k) => !isCapacityFamily || !capRe.test(k))
-     .filter((k) => !isColorNeutralFamily || !colorRe.test(k))
-     // OFF-NICHE sibling of the capacity/color guards (2026-07-14): the persisted keyword-plan can
-     // carry wrong-niche keywords (golf pegs, competitor blanks, wholesale, activewear, foreign-lang,
-     // non-apparel goods) from a pre-guard research run — the copy must never weave those, so never
-     // dock for them. Same predicate as fetchScoringContext + rank; own-brand/activewear kept via ctx.
-     .filter((k) => !apparel || !isOffNicheKeyword(k, { context: [title, ...bullets, representativeContent.backend_keywords || ''].join(' ') }))
-     // AUDIENCE-LEAN sibling of the capacity/color/off-niche guards: under a HARD male/female lean the
-     // generator refuses opposite-gender keywords, so the shared broadcast bullets can never carry a
-     // "…for men" term on a Female listing — an unfixable dock. PARITY with the keyword-gap counter, which
-     // already skips these via the SAME leanExcludesKeyword predicate (the live B0FKJW57H7 fix: bullets were
-     // pinned at 19/25 for 3 mens keywords in keyword_plan.bullets that a Female listing will never weave).
-     .filter((k) => !leanExcludesKeyword(k, scoringCtx.hardLean))
-    if (bulletOppKw.length > 0) {
-      // Shared predicate — identical to the bullet validator + the deterministic backstop, so the
-      // generator covers exactly what the scorer docks for (no more 9/18 from rulebook divergence).
-      // HAYSTACK = TITLE ∪ BULLETS ∪ BACKEND (2026-07-09, the 6/18 contract fix, completed):
-      // the PO-approved Content step 2 strategy deliberately moved opportunity-keyword coverage OUT
-      // of bullet prose INTO backend (clean human bullets; keywords index invisibly), and the TITLE
-      // carries the money keywords by design. This dock kept requiring the terms in the 5 bullets
-      // alone, pinning approved clean-prose bullets at -12 forever with a "regenerate to fix" that
-      // regeneration could never fix (the self-healing anti-pattern). Adding backend still left the
-      // listing docked for product-type phrases its own TITLE contains ("t shirts for women" while
-      // the title reads "…TShirt … Shirt for Women") — Amazon indexes the title, so those genuinely
-      // rank. A keyword ranks when its tokens are indexed ANYWHERE on the listing. What remains is
-      // an HONEST dock: a keyword covered by NO section, which regeneration CAN fix (weave it into
-      // bullets or backend). The design-name bullet floor keeps its own dedicated cohesion dock below.
-      const bulletHay = [title, ...bullets, representativeContent.backend_keywords || '']
-      const missingOpp = missingVerdict(bulletHay, bulletOppKw, missingBulletKeywords(bulletHay, bulletOppKw), 'scorer.bulletdock', logAsin)
-      if (missingOpp.length >= 2) {
-        bulletScore -= Math.min(12, missingOpp.length * 2)
-        issues.push({ field: 'bullets', severity: 'warning', message: `Your listing misses ${missingOpp.length} high-opportunity keyword(s) across title + bullets + backend — e.g. ${missingOpp.slice(0, 3).map(k => `"${k}"`).join(', ')}. Regenerate to weave them in (seasonal terms are excluded — those belong in backend).`, auto_fixable: false })
-      }
-    }
+    /* OPPORTUNITY-KEYWORD COVERAGE DOCK — DELETED (PO GO 2026-08-04, scorer↔contract reconcile).
+     * History: this dock (−2 per missing target, cap −12) was the sole producer of "9/18 bullets"
+     * on format-healthy content. It was softened twice (haystack widened to TITLE ∪ BULLETS ∪
+     * BACKEND on 2026-07-09; coverage-core parity later), but what remained — a keyword covered by
+     * NO section — is the KEYWORD dimension's job: criticalCount already docks exactly that class
+     * (−3/−5/−8 at :~1150). Docking it here too double-counted one defect across two dimensions
+     * and contradicted the seller's own rulebook (SELLER_PROFILE §5/§8: keywords live in backend,
+     * bullets are clean benefit prose — "quality over coverage"). Bullets now score PROSE QUALITY
+     * only: count, length band, CAPS benefit leads, title-echo balance, design-name cohesion.
+     * Coverage shortfalls dock the keyword dimension alone. */
 
     // Check for keyword density — bullets should cover different topics
     if (bulletCount >= 3) {
