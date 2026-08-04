@@ -27,17 +27,12 @@ import { resolveOpenAIKey } from '../openai/credentials';
 import { scrubTrademarks, hasTrademark } from '../fba/trademarkGuard';
 import { garmentNounFor, SHIRT_BASE, GARMENT_HEAD_WORDS, familyScanWords, type GarmentNoun } from '../fba/garmentNoun';
 import { isWithinBudget } from './cacheService';
-// SEED_TOKEN_NET (task #144). No cycle: cacheService imports only engine + selection-core;
-// seedTokenNet imports only coverage-core (dependency-free leaf).
-import {
-  SEED_TOKEN_MODE, SEED_TOKEN_ON, SEED_TOKEN_ACTIVE,
-  SEED_TOKEN_RESERVED_SLOTS, SEED_TAIL_MIN_HEADROOM,
-  auditSeedTokens, reserveSeedTokenSlots, seedTokenHit,
-} from './seedTokenNet';
-// POOL_STRATA (handoff/POOL_STRATA_PLAN.md, PO GO 2026-08-03): the stratified pool-composition
-// contract that REPLACES the two-band volume cut below at Phase 3. Phase 1 = shadow-only:
-// compose on the side, ship the OLD composition, log [POOL_STRATA_DIFF]. No cycle: poolComposer
-// imports only seedTokenNet (a coverage-core leaf).
+// Seed-token audit primitives (task #144; the SEED_TOKEN_NET flag/reservation layer died at the
+// POOL_STRATA flip). No cycle: seedTokenNet imports only coverage-core (dependency-free leaf).
+import { SEED_TAIL_MIN_HEADROOM, seedTokenHit } from './seedTokenNet';
+// POOL_STRATA (handoff/POOL_STRATA_PLAN.md, PO GO + flip 2026-08-03): pool membership IS the
+// stratified composition — composePool replaced the two-band volume cut, ensureDesignSupply
+// replaced the SEED_TOKEN_NET trip block. No cycle: poolComposer imports only seedTokenNet.
 import { composePool, mergeKeywordRows, ensureDesignSupply } from './poolComposer';
 
 // Lazy Proxy (2026-08-03, tests-into-CI): a module-top createClient THROWS without env, which made
@@ -106,10 +101,9 @@ const SEED_POOL_TABLE = 'keyword_seed_pool';
 // the thin-pool case. Hoisted from the Phase 2c block (was a block-scoped `const` there) so the
 // seed-token net can gate on the SAME number instead of declaring a second one (doctrine 5).
 export const EMPTY_POOL_THRESHOLD = 10;
-// The #423 niche-first cap (b0d91e8, 2026-07-17, live loop on B0DMXMH266) — named, not renumbered.
-// Same values that were inline in categorizeBuckets.
-const NICHE_SLOTS = 70;
-const POOL_SLOTS = 100;
+// The pool's size + strata guarantees are declared in ONE place: poolComposer.DEFAULT_STRATA_CAPS
+// (POOL_STRATA flip 2026-08-03 — the old NICHE_SLOTS 70 / POOL_SLOTS 100 two-band cut died there;
+// the 100-row total cap survives inside the composer).
 
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 
@@ -356,60 +350,41 @@ export async function researchKeywords(
   // rows too — a stale head-only blob written by the old code self-heals on its next research, with
   // no version key and no TTL wait (keyword_seed_pool has no version column and hot keys never
   // expire: reuse re-slides expires_at).
-  const seedToks = SEED_TOKEN_ACTIVE ? distinctiveNicheTokens(seed) : [];
-  const preAudit = auditSeedTokens(seedToks, [...nicheKeywords, ...competitorKeywords]);
-  let tailCandidate: string | null = null;
-  let tailReason: string =
-    seedToks.length === 0 ? 'no_distinctive_tokens' : preAudit.ok ? 'pass' : 'trip';
-  if (!preAudit.ok) {
-    // Skip any missing token whose head is ALREADY being researched (U1.x / U1.5 / U2 / U3 / the
-    // primary). This is why the tail is usually FREE: broadNicheSeed's head is built from the same
-    // vocabulary with the same noun, so it normally covers missing[0] and we fall through to the
-    // token it did NOT cover — on B0GF49RLDL, "valentine shirt" when U1.5 already took "cupid shirt".
-    const emitted = new Set<string>([seedKey, ...extraUniverses.map((u) => normalizeSeedKey(u.seed))]);
-    const cand = preAudit.missing
-      .map((t) => `${t} ${g.noun}`)                       // g.noun — the SAME namespace broadNicheSeed writes
-      .find((h) => { const k = normalizeSeedKey(h); return !!k && !emitted.has(k); }) ?? null;
-    if (!cand) {
-      tailReason = 'already_emitted';                     // free: an existing universe covers it
-    } else if (categorySeed) {
-      // APPAREL-ONLY, mirroring U2/U3: `categorySeed` is supplied by the caller ONLY for
-      // non-apparel, so its presence means "{token} shirt" is nonsense here.
-      tailReason = 'non_apparel';
-    } else if (nicheKeywords.length < EMPTY_POOL_THRESHOLD) {
-      // OUTAGE GUARD (doctrine 3). fetchKeywordsByKeyword returns [] on 429/5xx/budget-denial, so an
-      // outage makes EVERY token look missing on EVERY listing. logApiCall has no status filter, so
-      // each retry would burn a counted credit precisely when the system is degraded. A thin harvest
-      // is Phase 2c's case, not the tail's — a degraded pull must never escalate spend.
-      tailReason = 'harvest_degraded';
-    } else if (!SEED_TOKEN_ON) {
-      tailCandidate = cand;                               // SHADOW: report it, spend nothing, $0
-      tailReason = 'shadow_would_pull';
-    } else {
-      // Re-read the budget immediately before committing to a spend AND hold a headroom reserve, so
-      // this OPTIONAL universe is the FIRST spend to yield as the 950 cap tightens — it can never be
-      // the call that trips the research PAUSE or reaches the $0.05/call band above the plan limit.
-      const head = await isWithinBudget('jungle_scout');
-      if (!head.allowed || head.callsRemaining <= SEED_TAIL_MIN_HEADROOM) {
-        tailReason = 'budget_headroom_reserved';
-      } else {
-        tailCandidate = cand;
-        // Appended LAST so U1.5/U2/U3 keep merge precedence (mergedKw is first-writer-wins) and this
-        // reads as true overflow. nicheHead:true = the SAME treatment broadNicheSeed's head gets —
-        // parity, never a privileged new class.
-        extraUniverses.push({ seed: cand, nicheHead: true, tag: 'keywords_by_keyword_query:tail' });
-        tailReason = 'tail_universe_added';
-      }
+  // POOL_STRATA P3 (flip, 2026-08-03): the composer-owned supply guarantee — ensureDesignSupply
+  // relocated the old SEED_TOKEN_NET trip conditions VERBATIM (already_emitted / non_apparel /
+  // harvest_degraded / budget_headroom_reserved; see poolComposer.ts). Two-step, preserving the
+  // old discipline: a pure precheck first, and ONLY a would-pull re-reads the budget immediately
+  // before committing — this OPTIONAL universe is the FIRST spend to yield as the cap tightens.
+  // The tail is appended LAST so U1.5/U2/U3 keep merge precedence (mergedKw is first-writer-wins);
+  // nicheHead:true = the SAME treatment broadNicheSeed's head gets. Placement is load-bearing:
+  // PAST the seed-pool-hit/fresh merge, so a stale head-only pooled blob self-heals on its next
+  // research with no version key and no TTL wait.
+  const seedToks = distinctiveNicheTokens(seed);
+  const supplyOpts = {
+    designTokens: seedToks,
+    candidateRows: [...nicheKeywords, ...competitorKeywords],
+    emittedKeys: new Set<string>([seedKey, ...extraUniverses.map((u) => normalizeSeedKey(u.seed)).filter(Boolean)]),
+    headOf: (t: string) => `${t} ${g.noun}`,              // g.noun — the SAME namespace broadNicheSeed writes
+    normalizeKey: normalizeSeedKey,
+    nonApparel: !!categorySeed,                           // categorySeed is supplied ONLY for non-apparel
+    harvestCount: nicheKeywords.length,                   // pre-universe: an outage must never look like starvation
+    harvestFloor: EMPTY_POOL_THRESHOLD,
+    minHeadroom: SEED_TAIL_MIN_HEADROOM,
+  };
+  let supplyDecision = ensureDesignSupply({ ...supplyOpts, budget: null, arm: false });
+  if (supplyDecision.action === 'would_pull') {
+    const head = await isWithinBudget('jungle_scout');
+    supplyDecision = ensureDesignSupply({
+      ...supplyOpts,
+      budget: { allowed: head.allowed, callsRemaining: head.callsRemaining },
+      arm: true,
+    });
+    if (supplyDecision.action === 'pull' && supplyDecision.candidate) {
+      extraUniverses.push({ seed: supplyDecision.candidate, nicheHead: true, tag: 'keywords_by_keyword_query:tail' });
     }
-  }
-  if (SEED_TOKEN_ACTIVE) {
-    console.log(`[SEED_TOKEN_NET] pre-universe ${asin}: tokens=[${seedToks.join(',')}] missing=[${preAudit.missing.join(',')}] candidate=${tailCandidate ?? '-'} reason=${tailReason}`);
   }
 
   const universeSeen = new Set<string>([seedKey]); // never re-research the primary niche
-  // POOL_STRATA P2: the outage guard must judge the PRIMARY harvest, not the universe-merged pool
-  // (warm universe reuse could mask a degraded primary fetch) — capture the pre-loop size.
-  const preUniverseNicheCount = nicheKeywords.length;
   const mergedKw = new Set(nicheKeywords.map((k) => k.keyword.toLowerCase()));
   for (const { seed: us, nicheHead: uNicheHead, tag: uTag } of extraUniverses) {
     const uk = normalizeSeedKey(us);
@@ -484,61 +459,20 @@ export async function researchKeywords(
     console.warn('[keywordResearcher] Phase 4b (our ranks) failed (non-fatal):', e instanceof Error ? e.message : e);
   }
 
-  // ── Phase 5: Merge + 3-Bucket Categorization ──────────────────────────────
-  const buckets = categorizeBuckets(nicheKeywords, competitorKeywords, SEED_TOKEN_ON ? seedToks : []);
+  // ── Phase 5: Stratified composition (POOL_STRATA flip 2026-08-03) ─────────────────────────
+  // The composer IS the membership decider: S1 broad-heads (merge top-30 by volume, verbatim) /
+  // S2 design-own guaranteed (coverage-core predicate, junk-gated) / S3 niche-tail / S4 volume
+  // remainder to the one 100 cap. The old two-band volume cut and the SEED_TOKEN_NET reservation
+  // layer died in this flip (git ref: pre-flip main; evidence: three specimen [POOL_STRATA_DIFF]
+  // runs — ocean-life 4→13 design hits, anniversary's USA-250 tail evicted, 30/30 heads retained
+  // on all three). Rollback = git-revert; the POOL_STRATA env flag is inert (removed at P4).
+  const composition = composePool(mergeKeywordRows(nicheKeywords, competitorKeywords), seedToks, {
+    // Guaranteed-stratum entry gate: a trademark/foreign/category-generic row must win a volume
+    // seat like anyone else, never a guaranteed S2 one (same nets ingestion uses).
+    s2Gate: (kw) => !hasTrademark(kw) && !isForeignKeyword(kw) && !isCategoryGenericOnly(kw),
+  });
+  const buckets = categorizeBuckets(composition.rows, competitorKeywords);
   const allKeywords = [...buckets.primary, ...buckets.competitorMatch, ...buckets.competitorGaps];
-
-  // ── POOL_STRATA Phase 1 (shadow; PLAN: handoff/POOL_STRATA_PLAN.md) ─────────────────────────
-  // Compute the stratified composition ON THE SIDE over the identical merged input and diff it
-  // against the shipped blob. Ships nothing new: 'on' is NOT armed until Phase 3 (the flip PR is
-  // where the old decider above gets deleted — flipping via env before that would ship an
-  // unreviewed composition). FAIL-OPEN: log-only, never mutates result, never throws.
-  const POOL_STRATA_MODE = (process.env.POOL_STRATA || 'off').toLowerCase();
-  if (POOL_STRATA_MODE !== 'off') {
-    try {
-      const strataToks = SEED_TOKEN_ACTIVE ? seedToks : distinctiveNicheTokens(seed);
-      const comp = composePool(mergeKeywordRows(nicheKeywords, competitorKeywords), strataToks, {
-        // Guaranteed-stratum entry gate: a trademark/foreign/category-generic row must win a
-        // volume seat like anyone else, never a guaranteed S2 one (same nets ingestion uses).
-        s2Gate: (kw) => !hasTrademark(kw) && !isForeignKeyword(kw) && !isCategoryGenericOnly(kw),
-      });
-      const oldSet = new Set(allKeywords.map((k) => k.keyword.toLowerCase()));
-      const newSet = new Set(comp.rows.map((k) => k.keyword.toLowerCase()));
-      const entered = [...newSet].filter((k) => !oldSet.has(k));
-      const exited = [...oldSet].filter((k) => !newSet.has(k));
-      // P2: the composer-owned supply verdict (pure; budget deliberately UNCHECKED in shadow — $0,
-      // zero reads). At Phase 3 this same call, armed, feeds the ONE tail-universe pull and the
-      // SEED_TOKEN_NET trip block dies. Reason codes are verbatim-compatible for log continuity.
-      const supply = ensureDesignSupply({
-        designTokens: strataToks,
-        candidateRows: [...nicheKeywords, ...competitorKeywords],
-        emittedKeys: universeSeen,
-        headOf: (t) => `${t} ${g.noun}`,
-        normalizeKey: normalizeSeedKey,
-        nonApparel: !!categorySeed,
-        harvestCount: preUniverseNicheCount,
-        harvestFloor: EMPTY_POOL_THRESHOLD,
-        budget: null,
-        minHeadroom: SEED_TAIL_MIN_HEADROOM,
-        arm: false,
-      });
-      console.log(`[POOL_STRATA_DIFF] ${JSON.stringify({
-        asin, mode: POOL_STRATA_MODE, sha: comp.sha, strata: comp.strata,
-        tokens: strataToks,
-        designTokenHitsOld: strataToks.length ? allKeywords.filter((k) => seedTokenHit(k.keyword, strataToks)).length : 0,
-        designTokenHitsNew: comp.designTokenHits,
-        broadTopRetained: comp.broadTopRetained,
-        supply: { action: supply.action, candidate: supply.candidate, reason: supply.reason, missing: supply.missing },
-        enteredCount: entered.length, exitedCount: exited.length,
-        entered: entered.slice(0, 25), exited: exited.slice(0, 25),
-      })}`);
-      if (POOL_STRATA_MODE === 'on') {
-        console.warn('[POOL_STRATA] mode=on requested but the flip is not armed until Phase 3 — behaving as shadow (old composition ships).');
-      }
-    } catch (e) {
-      console.warn('[POOL_STRATA] shadow compose failed (non-fatal):', e instanceof Error ? e.message : e);
-    }
-  }
 
   const result: KeywordResearchResult = {
     buckets,
@@ -552,29 +486,24 @@ export async function researchKeywords(
     escalate: seedSel.escalate,
   };
 
-  // ── SEED-TOKEN NET · TERMINAL MEASUREMENT (task #144) ──────────────────────────────────────
-  // Measured on what SHIPS, not on what was fetched: `allKeywords` IS the blob cacheResearch
-  // persists and the array syncKeywordIntelligence feeds to the relevance gate — post-merge,
-  // post-nets, and critically POST-70/100-CAP. A net at the fetch boundary alone would have gone
-  // GREEN on B0GF49RLDL while the shipped blob stayed empty, because the cap eats rows after the
-  // fetch. `shippedHits` is THE number: reason='tail_universe_added' with shippedOk=false means the
-  // harvest worked and the CAP still ate it (check SEED_TOKEN_RESERVED_SLOTS); reason='trip' with
-  // no candidate means every missing token's head was already an emitted universe.
-  // FAIL-OPEN: logs only — never mutates result, never truncates, never throws.
-  if (SEED_TOKEN_ACTIVE) {
-    const shipped = auditSeedTokens(seedToks, allKeywords);
-    console.log(`[SEED_TOKEN_NET] ${JSON.stringify({
-      asin, mode: SEED_TOKEN_MODE, seed, seedKey,
-      poolHit: !!pooled,                 // separates stale-blob trips from fresh-harvest trips
+  // ── [POOL_STRATA] census — ALWAYS ON (the anti-goes-dark lesson: a flip must not kill the
+  // oracle that would catch its own regression). Measured on what SHIPS (`allKeywords` is the
+  // blob cacheResearch persists), with the supply verdict + acquisition provenance for the
+  // budget paper trail. FAIL-OPEN: logs only — never mutates result, never throws.
+  try {
+    console.log(`[POOL_STRATA] ${JSON.stringify({
+      asin, seed, seedKey,
+      poolHit: !!pooled,                  // separates stale-blob runs from fresh-harvest runs
+      sha: composition.sha,               // the path-parity oracle
+      strata: composition.strata,
       tokens: seedToks,
-      preHits: preAudit.hits,            // before the tail universe
-      shippedHits: shipped.hits,         // after the merge AND after the 70/100 cap
-      shippedOk: shipped.ok,
-      reservedSlots: SEED_TOKEN_ON ? SEED_TOKEN_RESERVED_SLOTS : 0,
-      tailCandidate, reason: tailReason,
+      designTokenHits: composition.designTokenHits,
+      shippedHits: seedToks.length ? allKeywords.filter((k) => seedTokenHit(k.keyword, seedToks)).length : 0,
+      broadTopRetained: composition.broadTopRetained,
+      supply: { action: supplyDecision.action, candidate: supplyDecision.candidate, reason: supplyDecision.reason },
       creditsUsed,
     })}`);
-  }
+  } catch { /* census must never break a research */ }
 
   // Cache the result
   await cacheResearch(asin, result);
@@ -585,52 +514,16 @@ export async function researchKeywords(
 
 // ─── Bucket Categorization ──────────────────────────────────────────────────
 
+/** Split the COMPOSED pool into the 3 display buckets. Membership is decided UPSTREAM by
+ *  composePool (POOL_STRATA flip 2026-08-03 — the old merge + two-band volume cut that lived here
+ *  died with it; the history: a pure volume sort let 500k-vol broad universes monopolize all 100
+ *  slots on B0DMXMH266, then the 70/30 niche-first bands + the SEED_TOKEN reservation bandaged it,
+ *  and the stratified composition finally made membership a guarantee). `allSorted` arrives
+ *  volume-DESC from the composer, so bucket semantics (primary = top-10 by volume) are unchanged. */
 function categorizeBuckets(
-  nicheKeywords: JungleScoutKeywordRow[],
+  allSorted: JungleScoutKeywordRow[],
   competitorKeywords: JungleScoutKeywordRow[],
-  seedTokens: string[] = []
 ): KeywordBuckets {
-  // Build a merged, deduplicated map (niche takes precedence for volume data)
-  const merged = new Map<string, JungleScoutKeywordRow>();
-  for (const kw of nicheKeywords) {
-    merged.set(kw.keyword.toLowerCase(), kw);
-  }
-  for (const kw of competitorKeywords) {
-    const key = kw.keyword.toLowerCase();
-    if (!merged.has(key)) {
-      merged.set(key, kw);
-    }
-  }
-
-  // NICHE-FIRST cap (2026-07-17 live loop, B0DMXMH266): a pure volume sort let the #280 broad-category
-  // universes (500k-vol "mens shirts") monopolize ALL 100 slots — the design's own niche universe
-  // (5-15k-vol fishing terms, INCLUDING the seller-competitor harvest) was discarded entirely (1
-  // fishing row of 97 stored, live-verified even with a manual "funny fishing shirt" seed). Reserve
-  // the pool for the NICHE: non-universe rows (design-seed + competitor harvest) get up to 70 slots
-  // by volume; fromUniverse broad-category rows fill the remainder. Broad angles keep presence (the
-  // backend still sees them); the niche can never be crowded out of its own listing's universe again.
-  const allRows = Array.from(merged.values());
-  const isUni = (k: JungleScoutKeywordRow) => (k as { fromUniverse?: boolean }).fromUniverse === true;
-  // SEED-TOKEN RESERVATION (task #144). Reserve up to SEED_TOKEN_RESERVED_SLOTS positions in EACH
-  // band for rows carrying the design's own tokens — BOTH bands, because on B0GF49RLDL the cupid
-  // rows arrive via broadNicheSeed/the tail as fromUniverse:true and compete for the universe
-  // budget against U2 "graphic tees for women" (476k) and U3 "comfort colors shirt" (306k);
-  // reserving only the niche 70 leaves the measured failure uncured. Band SIZES are unchanged
-  // (reserveSeedTokenSlots reorders, never adds/removes), so the universe budget arithmetic is
-  // identical to today. seedTokens=[] (flag off OR shadow) ⇒ a pure volume-DESC sort —
-  // byte-identical to the previous .filter(...).sort(...). Pinned by seedTokenNet.test.ts.
-  // PRO-#95: for a christian design the seed token IS 'christian', so the reservation PROTECTS
-  // the #95 head family against U2/U3's mega-broad rows rather than evicting it.
-  const nicheRows = reserveSeedTokenSlots(
-    allRows.filter(k => !isUni(k)), seedTokens, SEED_TOKEN_RESERVED_SLOTS,
-  ).slice(0, NICHE_SLOTS);
-  const universeRows = reserveSeedTokenSlots(
-    allRows.filter(isUni), seedTokens, SEED_TOKEN_RESERVED_SLOTS,
-  ).slice(0, POOL_SLOTS - nicheRows.length);
-  const allSorted = [...nicheRows, ...universeRows]
-    .sort((a, b) => b.searchVolume - a.searchVolume)
-    .slice(0, POOL_SLOTS);
-
   // Build competitor keyword set for categorization
   const compKwSet = new Set(competitorKeywords.map(k => k.keyword.toLowerCase()));
 
