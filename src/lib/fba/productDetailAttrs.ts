@@ -80,6 +80,11 @@ const ATTR_MAP: Record<string, DetailAttribute> = {
   'neck style':                     { spApiKey: 'neck_style',                 scope: 'broadcast' },
   'shirt form type':                { spApiKey: 'shirt_form_type',            scope: 'broadcast' },
   'care instructions':              { spApiKey: 'care_instructions',          scope: 'broadcast' },
+  // Task #82 (keys live-probe-confirmed 2026-08-04, both FLAT with display-name enums). These
+  // aliases are the FALLBACK layer only — regen rows carry schema-resolved sp_api_key; this keeps
+  // verify-push and loadDetailContext working for legacy rows without stored metadata.
+  'apparel fabric stretch':         { spApiKey: 'apparel_fabric_stretch',     scope: 'broadcast' },
+  'fit to size sentiment':          { spApiKey: 'fit_to_size_sentiment',      scope: 'broadcast' },
   'department':                     { spApiKey: 'department',                 scope: 'broadcast' },
   'target gender':                  { spApiKey: 'target_gender',              scope: 'broadcast' },
   'age range':                      { spApiKey: 'age_range_description',      scope: 'broadcast' },
