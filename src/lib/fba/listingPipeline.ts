@@ -54,7 +54,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpec, type BlankSpec } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -7722,6 +7722,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * then offer it for push. Only a run that actually PRODUCED a title may band-enforce it. */
   const bandTitle = (title: string, produced: boolean): string => {
     if (!produced || !title) return title
+    /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
+     * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
+     * "Heavyweight" into a midweight blank's title as if it were fact. Claims the blank spec does
+     * not back are removed BEFORE dedupe/band, so the freed chars go to the facts-only pad below. */
+    const truth = scrubUnspecdGarmentClaims(title, blankSpec)
+    if (truth.removed.length > 0) {
+      console.log(JSON.stringify({ tag: 'SHIP_SPEC_TRUTH', field: 'title', removed: truth.removed, from: title.length, to: truth.title.length }))
+    }
+    title = truth.title
     // CAP FIRST, because this door now runs AFTER scrubTrademarks — whose substitutions LENGTHEN the
     // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
     // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
