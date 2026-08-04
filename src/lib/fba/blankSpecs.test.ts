@@ -1,5 +1,14 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { DEFAULT_BLANK_SPECS, rowToSpec, matchBlankSpec, loadBlankSpecRows } from './blankSpecs'
+
+// NEVER let a unit test touch a real supabase client: CI has real env vars (the first run of this
+// file HUNG 5s on a live .select() with no egress). The mock simulates exactly that failure class —
+// a query that never settles — so the fail-open test pins the timeout race, not ambient env.
+vi.mock('@supabase/supabase-js', () => ({
+  createClient: () => ({
+    from: () => ({ select: () => ({ eq: () => ({ order: () => new Promise(() => { /* never settles */ }) }) }) }),
+  }),
+}))
 
 /* The blank_specs slice (2026-08-04): the catalog moved from a hardcoded const in
  * listingPipeline.ts to the blank_specs DB table (migration 053). These tests pin the THREE
@@ -89,8 +98,8 @@ describe('rowToSpec — DB row decode (must mirror migration 053 column semantic
 })
 
 describe('loadBlankSpecRows — fail-open floor', () => {
-  it('resolves to the in-code seeds when no DB is reachable (this sandbox has no supabase env)', async () => {
-    const rows = await loadBlankSpecRows()
+  it('a HANGING DB (query never settles) fails open to the in-code seeds via the timeout race', async () => {
+    const rows = await loadBlankSpecRows(50)
     expect(rows).toBe(DEFAULT_BLANK_SPECS)
   })
 })

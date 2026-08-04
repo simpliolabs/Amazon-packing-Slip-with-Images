@@ -96,15 +96,26 @@ export function rowToSpec(row: DbRow): BlankSpecRow | null {
 }
 
 const CACHE_TTL_MS = 5 * 60 * 1000
+/** A HANG is worse than an error here: an unreachable-but-not-erroring DB (CI proved the class —
+ *  the select hung >5s with real env vars but no egress) would stall every regen at the blank
+ *  lookup. The race turns a hang into the same fail-open the error path takes. */
+const LOAD_TIMEOUT_MS = 4000
 let cache: { rows: BlankSpecRow[]; at: number } | null = null
 
 /** Load the catalog (5-min cache; ONE cheap read per window). Fail-open to the seeds. */
-export async function loadBlankSpecRows(): Promise<BlankSpecRow[]> {
+export async function loadBlankSpecRows(timeoutMs: number = LOAD_TIMEOUT_MS): Promise<BlankSpecRow[]> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.rows
   try {
     // .order('id') is LOAD-BEARING: matchBlankSpec is first-match-wins, and Postgres row order is
     // unspecified without it — a PO-added row must never nondeterministically shadow a seed.
-    const { data, error } = await supabase.from('blank_specs').select('*').eq('active', true).order('id', { ascending: true })
+    const query = supabase.from('blank_specs').select('*').eq('active', true).order('id', { ascending: true })
+    const { data, error } = await Promise.race([
+      query,
+      new Promise<never>((_, reject) => {
+        const t = setTimeout(() => reject(new Error(`blank_specs load timed out after ${timeoutMs}ms`)), timeoutMs)
+        ;(t as unknown as { unref?: () => void }).unref?.()
+      }),
+    ])
     if (error) throw new Error(error.message)
     const rows = (Array.isArray(data) ? (data as DbRow[]) : []).map(rowToSpec).filter((r): r is BlankSpecRow => !!r)
     if (rows.length === 0) throw new Error('blank_specs empty — using seeds')
