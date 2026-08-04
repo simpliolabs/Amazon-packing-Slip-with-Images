@@ -9300,6 +9300,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // casing/member mismatch surfaces as enum_accepted rather than a bad push.
     overrideField(/fabric stretch\b/i, blankSpec.stretch)
     overrideField(/fit\s*to\s*size/i, blankSpec.fitToSize)
+    /* DETERMINISTIC APPEND (task #82, 2026-08-04). The overrides above only REPLACE rows the audit
+     * happened to propose — when the LLM skipped the attribute, the PO-confirmed spec fact silently
+     * vanished (found in the #82 research pass; Item Highlights already appends unconditionally for
+     * exactly this reason). A spec fact must not depend on LLM initiative: if the live schema menu
+     * carries the attribute and no row proposed it, add the row ourselves. Keys live-probe-confirmed
+     * (?debug=1): apparel_fabric_stretch + fit_to_size_sentiment, both FLAT with display-name enums —
+     * the route's coerceDetailValue then snaps casing and flags any illegal member as enum_accepted. */
+    const appendSpecFact = (key: string, rowRe: RegExp, val: string | undefined): void => {
+      if (!val) return
+      const menuAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === key || rowRe.test(m.title))
+      if (!menuAttr || pdiFinal.some((p) => rowRe.test(String(p.field_name ?? '')))) return
+      pdiFinal.push({
+        field_name: menuAttr.title,
+        current_value: null,
+        recommended_value: val,
+        reason: `Ground-truth spec for the ${attributePinFinal || 'garment'} blank (blank_specs) — a confirmed product fact shoppers filter on, added deterministically rather than waiting for the optimizer to propose it.`,
+      })
+    }
+    appendSpecFact('apparel_fabric_stretch', /fabric stretch\b/i, blankSpec.stretch)
+    appendSpecFact('fit_to_size_sentiment', /fit\s*to\s*size/i, blankSpec.fitToSize)
   }
   // FLAG-AND-FIX rows for catalog blank-boilerplate (PO: "our system needs to FLAG and
   // recommend a FIX — that's why we have the product features optimizer"). Each garment-

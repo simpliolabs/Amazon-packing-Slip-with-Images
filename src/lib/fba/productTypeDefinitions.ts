@@ -407,11 +407,14 @@ export async function listPushableSchemaAttributes(
     // attributes the seller can set in Seller Central, but they never reached the audit menu, so the
     // optimizer never proposed them and they were never pushable. Once in the menu, the audit proposes a
     // value and resolveSpApiKeyFromTitle maps the schema title -> real key automatically (no static
-    // ATTR_MAP entry needed). Several spellings are listed because the exact key is unconfirmed; the
-    // hasOwnProperty gate below makes every non-existent candidate a silent no-op, so only the REAL key
-    // this schema actually has is ever added.
+    // ATTR_MAP entry needed).
+    // 2026-08-04 (task #82): keys CONFIRMED by live-schema probe (?debug=1) — `apparel_fabric_stretch`
+    // (flat; enum High/Low/Medium/No Stretch) and `fit_to_size_sentiment` (flat; enum "Fits True To
+    // Size"/"Runs Large"/"Runs Slightly Large"/"Runs Slightly Small"/"Runs Small "). The dead guess
+    // spellings (fabric_stretch/fit_to_size/size_to_size_recommendation) are removed; the
+    // hasOwnProperty gate below still makes any wrong key a silent no-op on other product types.
     for (const mustKey of ['item_highlights', 'title_differentiation', 'model_name', 'special_feature', 'fabric_type', 'care_instructions', 'theme', 'shirt_form_type',
-      'apparel_fabric_stretch', 'fabric_stretch', 'fit_to_size', 'fit_to_size_sentiment', 'size_to_size_recommendation']) {
+      'apparel_fabric_stretch', 'fit_to_size_sentiment']) {
       if (!out.some((o) => o.key === mustKey) && Object.prototype.hasOwnProperty.call(props, mustKey)) {
         const sub = props[mustKey]
         const enumDef = extractEnum(sub)
