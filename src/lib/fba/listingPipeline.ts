@@ -1691,28 +1691,33 @@ export function buildHighlightsFallback(
   }
   const material = val(/^(?:material|fabric)/i)
   const fit = val(/\bfit\b/i)
-  const neck = val(/neck|collar/i)
+  // Prefer the Neck row over the collar_style row — "crew neck" reads as copy, "round collar" doesn't.
+  const neck = val(/neck/i) || val(/collar/i)
   const sleeve = val(/sleeve/i)
-  const dept = val(/^department$/i).toLowerCase()
-  // Flag ON → also match non-shirt garment words in the title (cap/hat/snapback/beanie/…) so a hat's
-  // highlights say "cap" not the "shirt" fallback. OFF → the exact original shirt-family regex.
-  const garmentRe = GARMENT_NOUN_ON
-    ? /\bt[-\s]?shirts?\b|\btees?\b|\bhoodies?\b|\bsweatshirts?\b|\btank tops?\b|\bsnapback\b|\bcaps?\b|\bhats?\b|\bbeanies?\b|\bdress(?:es)?\b|\bleggings\b|\bsocks?\b|\bjackets?\b|\bshirts?\b/i
-    : /\bt[-\s]?shirts?\b|\btees?\b|\bhoodies?\b|\bsweatshirts?\b|\btank tops?\b|\bshirts?\b/i
-  const garment = apparelProduct
-    ? (finalTitle.match(garmentRe)?.[0] ?? 'shirt').toLowerCase().replace(/\s{2,}/g, ' ').replace(/s$/, '')
-    : ''
+  // (garment-noun + department candidates removed 2026-08-04 — they echoed the title, and IH's rule
+  // is to add NEW information; the composed-copy candidates below carry the field now.)
   const candidates: string[] = []
-  if (material) candidates.push(garment ? `${material} ${garment}` : material)
-  if (designName) candidates.push(garment && !material ? `${designName} ${garment}` : `${designName} design`)
-  if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('custom personalization')
-  if (fit) candidates.push(/\bfit\b/i.test(fit) ? fit : `${fit} fit`)
-  if (neck) candidates.push(neck)
-  if (sleeve) candidates.push(sleeve)
-  if (dept.startsWith('women')) candidates.push('for women')
-  else if (dept.startsWith('men')) candidates.push('for men')
-  // Guaranteed generic tail so the field always carries >= 2 phrases even with zero attribute rows.
-  candidates.push(apparelProduct ? 'comfortable everyday wear' : 'made for everyday use', 'great for gifting')
+  if (apparelProduct) {
+    /* COMPOSED COPY, not a fact-join (PO 2026-08-04: "Cotton tee, Cupid Valentine design, Relaxed
+     * fit, Crew Neck, for women" was rejected as very poorly written — and it echoed the title's
+     * design/garment/audience words, which the LLM path is explicitly forbidden to do). Each fact
+     * is paired with a SAFE generic feel word (soft/comfort/easy — never a performance claim the
+     * spec doesn't back), and the title-echoing candidates (design name, garment noun, department)
+     * are gone: the title already says those, IH must add NEW information. */
+    if (material) candidates.push(`soft ${material.toLowerCase()} feel`)
+    if (fit && neck) candidates.push(`${fit.toLowerCase().replace(/\s*\bfit\b\s*/i, ' ').trim()} ${neck.toLowerCase()} comfort`.replace(/\s{2,}/g, ' '))
+    else if (fit) candidates.push(/\bfit\b/i.test(fit) ? fit.toLowerCase() : `${fit.toLowerCase()} fit`)
+    else if (neck) candidates.push(neck.toLowerCase())
+    if (sleeve) candidates.push(`easy ${sleeve.toLowerCase()} style`)
+    if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('made-to-order personalization')
+    candidates.push('all-day everyday wear', 'great for gifting')
+  } else {
+    if (material) candidates.push(material)
+    if (designName) candidates.push(`${designName} design`)
+    if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('custom personalization')
+    // Guaranteed generic tail so the field always carries >= 2 phrases even with zero attribute rows.
+    candidates.push('made for everyday use', 'great for gifting')
+  }
 
   const ownBrands = ownBrandTokenSet(brandName)
   const used = new Set<string>()
@@ -1772,6 +1777,8 @@ export async function buildItemHighlights(
     + 'do NOT repeat the design, theme, niche, or product-type words already in the title — the title already says those; add NEW info the title lacks (fabric, fit, feel, care); '
     + 'no word may appear twice (trivial connectors like for/and/the/a/of/with/in/to are fine); NEVER output a list of search keywords; '
     + 'no prices, promotions or discount language; no third-party brand names, sports teams, leagues or franchises; at least 2 comma-separated phrases. '
+    + 'STYLE (the seller rejects bare fact-joins): every phrase must read like polished product copy — pair the fact with a feel or benefit word. '
+    + '"soft ring-spun cotton", "relaxed crew-neck fit", "all-day comfort" are RIGHT; "Cotton tee, Crew Neck, for women" is WRONG (bare facts, and it echoes the title). '
     + 'Good example (63 chars): "100% cotton fabric, relaxed crew-neck fit, soft everyday comfort". '
     + 'Return ONLY the Item Highlights string — no quotes, no explanation.'
   const user = [
@@ -9320,6 +9327,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     appendSpecFact('apparel_fabric_stretch', /fabric stretch\b/i, blankSpec.stretch)
     appendSpecFact('fit_to_size_sentiment', /fit\s*to\s*size/i, blankSpec.fitToSize)
+    /* PO panel review (2026-08-04): two more spec-derivable rows the audit was guessing at.
+     * fabric_stretchability is Amazon's BINARY (Non-stretchable/Stretchable) — derive it from the
+     * graded spec.stretch (No/Low → Non-stretchable, the no-elastane convention; Medium/High →
+     * Stretchable) so the two stretch attributes can never disagree. collar_style's enum has NO
+     * "Crew Neck" member; "Round Collar" is the one member that describes a crew neckline — the
+     * audit's "Collarless" was PO-rejected as wrong for a crew-neck tee. */
+    if (blankSpec.stretch) overrideField(/stretchability/i, /\b(?:no|low)\b/i.test(blankSpec.stretch) ? 'Non-stretchable' : 'Stretchable')
+    if (/crew/i.test(blankSpec.neck ?? '')) overrideField(/collar/i, 'Round Collar')
   }
   // FLAG-AND-FIX rows for catalog blank-boilerplate (PO: "our system needs to FLAG and
   // recommend a FIX — that's why we have the product features optimizer"). Each garment-
