@@ -5705,9 +5705,13 @@ async function callBulletsModel(openai: OpenAI, system: string, user: string, mo
   } catch { return [] }
 }
 
-const bulletsResynthSys = (): string => `You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence of ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY {"bullets":[5 strings]}.`
+// "valid JSON" is LOAD-BEARING (the #459/#460 class): OpenAI 400s any json_object call whose
+// messages lack the literal word "json" — this prompt lacked it since birth, so every metric-loop
+// resynthesis died silently (400 → catch → []) and the loop shipped unchanged. Found by the
+// LLM-gateway call census 2026-08-04.
+const bulletsResynthSys = (): string => `You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence of ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY valid JSON: {"bullets":[5 strings]}.`
 function bulletsResynthUser(title: string, designName: string, bullets: string[], critique: string): string {
-  return `PRODUCT TITLE: ${title}\nDESIGN IDENTITY (must appear in >=1 bullet): ${designName || '(none)'}\n\nCURRENT BULLETS:\n${bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')}\n\nCRITIQUE TO FIX:\n${critique}\n\nReturn ONLY {"bullets":[5 strings]}.`
+  return `PRODUCT TITLE: ${title}\nDESIGN IDENTITY (must appear in >=1 bullet): ${designName || '(none)'}\n\nCURRENT BULLETS:\n${bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')}\n\nCRITIQUE TO FIX:\n${critique}\n\nReturn ONLY valid JSON: {"bullets":[5 strings]}.`
 }
 /** Deterministic critique from the failed metric — no LLM. Names exactly what to fix. */
 function bulletsCritique(m: BulletMetric, bullets: string[], designName: string): string {
