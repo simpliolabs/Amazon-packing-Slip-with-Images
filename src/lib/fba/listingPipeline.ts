@@ -52,6 +52,7 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
+import { loadBlankSpecRows, matchBlankSpec, type BlankSpec } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
@@ -7058,27 +7059,14 @@ export function scrubDescriptionBody(html: string, opts: { brand?: string; garme
 // attributes — richer than our binary `fabric_stretchability` (Non-stretchable/Stretchable): CC1717's
 // garment-dyed ring-spun cotton is genuinely LOW stretch (not zero) and runs slightly small. Both are
 // product FACTS, so they ground here rather than being guessed from the search pool.
-interface BlankSpec { brand?: string; brandInCopy?: boolean; fit?: string; sleeve?: string; neck?: string; weightNote?: string; material?: string; dye?: string; stretch?: string; fitToSize?: string }
-const BLANK_SPECS: { match: RegExp; spec: BlankSpec }[] = [
-  // `brand` is the AUTHORITATIVE display casing. attributePin is derived from a lowercase SEARCH keyphrase
-  // ("comfort colors shirt"), so it can NEVER supply correct casing — grounding brand identity in the search
-  // pool is the spec-vs-search-grounding mistake. The shopper-facing brand comes from here.
-  { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed', stretch: 'Low Stretch', fitToSize: 'Runs Slightly Small' } },
-  // Gildan 64000 Softstyle (PO-confirmed 2026-07-31, "Gildan 6400 - YES" for the We Still Do family;
-  // live PDP copy: "4.5 oz./yd² 100% ring-spun cotton", "Lightweight fabric", "modern classic fit",
-  // Crew Neck). The SKUs embed the style number ("640002XL-…"), so \b64000 (no trailing \b — the size
-  // glues on) matches the SKU hay. material stated WITHOUT a percentage: solids are 100% ring-spun but
-  // heather colorways are poly blends, and a spec fact must hold for every child it decorates.
-  // stretch/fitToSize omitted until the PO confirms them (they push Amazon attributes).
-  // brandInCopy:false (PO 2026-07-31: "Why are we including GILDAN in the title, this is not a
-  // selling point like comfort colors is") — the FACTS decorate copy; the brand NAME does not.
-  { match: /\bgildan\b|\b64000/i, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton' } },
-]
-function lookupBlankSpec(...sources: (string | null | undefined)[]): BlankSpec | null {
-  const hay = sources.filter(Boolean).join(' ')
-  for (const b of BLANK_SPECS) if (b.match.test(hay)) return b.spec
-  return null
-}
+// BLANK CATALOG → DB (2026-08-04, PO GO on the blank_specs slice): the hardcoded table moved to
+// the `blank_specs` DB catalog (migration 053, seeded byte-identically; src/lib/fba/blankSpecs.ts
+// owns the reader with a 5-min cache and fail-open to the same seed rows). The PO adds/corrects a
+// blank with one SQL INSERT/UPDATE — no deploy — and affected listings heal on their next regen.
+// Historical decisions preserved in the seeds: CC brand casing is AUTHORITATIVE (spec-vs-search);
+// Gildan brandInCopy:false ("not a selling point like comfort colors"); \b64000 with no trailing
+// boundary so SKU-glued style numbers match; Gildan material without a percentage (heathers are
+// blends — a spec fact must hold for every child it decorates).
 
 /** Search-shaped fact phrases from a blank spec — the Phase 6 facts-only backend pad source.
  *  Every phrase derives from a BLANK_SPECS field, so the pad can never invent a claim (plan R3:
@@ -7604,7 +7592,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // SKUs join the hay (2026-07-31): print-on-demand copy often never names the blank ("Gildan"
   // appears nowhere on the We Still Do listing) but the SKUs embed the style number ("640002XL-…").
   const skuHay = (input.children ?? []).map((c) => c.sku).filter(Boolean).join(' ')
-  const blankSpec = apparelProduct && looksTee ? lookupBlankSpec(attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
+  const blankSpec = apparelProduct && looksTee ? matchBlankSpec(await loadBlankSpecRows(), attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
   // Shopper-facing garment brand, in AUTHORITATIVE casing — from BLANK_SPECS ONLY. Empty when the blank
   // is unknown: attributePin is a lowercase SEARCH phrase ("vintage cat shirt"), NOT a confirmed brand, so
   // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
@@ -7794,7 +7782,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         degradedSections: out.degradedSections,
       })
       for (const viol of violations) {
-        console.log(JSON.stringify({ tag: 'SHIP_CENSUS', exit: out.regeneratedSection ?? 'full', ...viol }))
+        // FACTS-GAP annotation (blank_specs slice, 2026-08-04): a fact-starved short ship should
+        // NAME its cure. When an apparel run has NO blank_specs row, the generator is missing the
+        // proven title/description lever (Gildan 64000 row alone moved a title 63→70) — annotate so
+        // the census line says "add the blank to blank_specs" instead of reading like a code bug.
+        const factsGap = apparelProduct && !blankSpec && (viol.code === 'TITLE_UNDER_BAND' || viol.code === 'DESC_UNDER_FLOOR')
+          ? { factsGap: 'blank.unknown' } : undefined
+        console.log(JSON.stringify({ tag: 'SHIP_CENSUS', exit: out.regeneratedSection ?? 'full', ...viol, ...factsGap }))
       }
       /* PHASE 3 ENFORCEMENT (unconditional since the flag census 2026-08-03; the SHIP_ENFORCE flag
        * was a binary off-switch with no shadow mode, live env unset = on — retiring it is
