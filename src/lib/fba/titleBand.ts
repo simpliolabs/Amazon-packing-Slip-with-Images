@@ -216,6 +216,67 @@ export function collapseRepeatedWords(title: string): { title: string; removed: 
   return { title: out, removed }
 }
 
+/** The weight classes a title can CLAIM. A claim is allowed only when the blank's own weightNote
+ *  contains that word; with no spec the rule is "claim NO weight" (SELLER_PROFILE §2). */
+const WEIGHT_CLAIM_RE = /\b(heavyweight|midweight|lightweight)\b/gi
+/** Fit claims as the explicit "<X> Fit" phrase (both orders are covered by the pad side; the claim
+ *  surface the LLM emits is "<X> Fit"). Bare "classic"/"relaxed" are NOT matched — "Classic Car
+ *  Shirt" is a design, not a fit claim. Standalone "oversized" IS matched: §2's rule is that it
+ *  never appears in visible copy unless the blank is actually oversized. */
+const FIT_CLAIM_RE = /\b(relaxed|classic|slim|regular|oversized|boxy)\s+fit\b|\boversized\b/gi
+
+/**
+ * SPEC-TRUTH NET (2026-08-04). Remove garment fabric-weight and fit CLAIMS that the blank spec does
+ * not back. LIVE DEFECT that forced this: the first fresh title regen after the POOL_STRATA flip on
+ * B0GF49RLDL shipped "THE CEO Cupid Valentine Women's Heavyweight Cotton T-Shirt Classic Fit Crew" —
+ * "Heavyweight" arrived FROM THE SEARCH POOL ("comfort colors heavyweight t shirt" is a live pool
+ * row: the market calls Comfort Colors heavyweight, but the PO-confirmed spec says MIDWEIGHT
+ * 6.1 oz) and "Classic Fit" contradicts the blank's Relaxed fit. The pad half of this module was
+ * already facts-only; this is the missing REMOVAL half of the same rule, so a pool-leaked or
+ * hallucinated claim cannot survive to the shipped bytes. Chars freed here are re-fillable by
+ * enforceTitleBand's facts-only pad, which runs after.
+ *
+ * Pure, deterministic, idempotent. `spec` null/absent = claim nothing (all weight/fit claims go).
+ */
+export function scrubUnspecdGarmentClaims(
+  title: string,
+  spec: { fit?: string | null; weightNote?: string | null } | null | undefined,
+): { title: string; removed: string[] } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t0) return { title, removed: [] }
+  const weightOk = (w: string): boolean => !!spec?.weightNote && spec.weightNote.toLowerCase().includes(w.toLowerCase())
+  const fitOk = (f: string): boolean => !!spec?.fit && spec.fit.toLowerCase() === f.toLowerCase()
+
+  const removed: string[] = []
+  let out = t0.replace(WEIGHT_CLAIM_RE, (m) => {
+    if (weightOk(m)) return m
+    removed.push(m)
+    return ''
+  })
+  out = out.replace(FIT_CLAIM_RE, (m, fitWord: string | undefined) => {
+    const claim = fitWord ?? 'oversized' // the alternation's bare-"oversized" branch has no group
+    if (fitOk(claim)) return m
+    removed.push(m)
+    return ''
+  })
+  if (removed.length === 0) return { title: t0, removed: [] }
+
+  // Residue repair — same classes collapseRepeatedWords repairs after ITS removals (kept as a twin
+  // on purpose; that function is behavior-frozen by its own tests).
+  out = out
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,;:])/g, '$1')
+    .replace(/([,;:])\s*(?=[,;:])/g, '')
+    .replace(/[,;:]\s+(?=(?:for|and|with|in|to|or|by)\b)/gi, ' ')
+    .replace(/\|\s*(?=[,;:])/g, '|')
+    .replace(/\s+\|\s+(?=(?:for|and)\b)/i, ' ')
+    .replace(/^[\s,;:|]+/g, '')
+    .replace(/[\s,;:|]+$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  return { title: out, removed }
+}
+
 /**
  * Raise a short apparel title into the 70-75 band using product facts, inserting a ` | ` separator
  * before the audience tail. PURE, SYNCHRONOUS, TOTAL, IDEMPOTENT, MONOTONE:

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
+import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
 
 /* The LIVE failure this net exists to fix (B0GF49RLDL, 2026-07-29 21:03 regen). */
 const LIVE_66 = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women'
@@ -354,5 +354,57 @@ describe('customizable (Amazon Custom, 2026-07-31) — "Personalized" as a leadi
     const has = 'THE CEO Personalized We Still Do Anniversary Shirt for Men and Women' // 68
     const v = enforceTitleBand(has, ctx({ customizable: true }))
     expect((v.title.match(/Personalized/g) || []).length).toBe(1)
+  })
+})
+
+/* ── SPEC-TRUTH NET (2026-08-04, the POOL_STRATA-flip leak) ─────────────────────────────────────
+ * The composed pool carries the MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"),
+ * and the first fresh title regen after the flip echoed it into a midweight blank's title. */
+describe('scrubUnspecdGarmentClaims', () => {
+  const CC_SPEC = { fit: 'Relaxed', weightNote: 'midweight 6.1 oz garment-dyed' }
+  const GILDAN_SPEC = { fit: 'Classic', weightNote: 'lightweight 4.5 oz ring-spun' }
+
+  it('the LIVE specimen: strips pool-leaked "Heavyweight" + wrong "Classic Fit" on a CC blank', () => {
+    const live = "THE CEO Cupid Valentine Women's Heavyweight Cotton T-Shirt Classic Fit Crew"
+    const r = scrubUnspecdGarmentClaims(live, CC_SPEC)
+    expect(r.removed).toEqual(['Heavyweight', 'Classic Fit'])
+    expect(r.title).toBe("THE CEO Cupid Valentine Women's Cotton T-Shirt Crew")
+    expect(r.title).not.toMatch(/\s{2,}/)
+  })
+
+  it('keeps claims the spec BACKS: "Midweight" + "Relaxed Fit" survive on the CC blank', () => {
+    const t = 'THE CEO Cupid Tee | Midweight Comfort Colors Relaxed Fit Shirt for Women'
+    const r = scrubUnspecdGarmentClaims(t, CC_SPEC)
+    expect(r.removed).toEqual([])
+    expect(r.title).toBe(t)
+  })
+
+  it('keeps Gildan-backed claims on the Gildan spec ("Lightweight", "Classic Fit")', () => {
+    const t = 'THE CEO We Still Do Tee | Lightweight Classic Fit Tshirt for Men and Women'
+    expect(scrubUnspecdGarmentClaims(t, GILDAN_SPEC).removed).toEqual([])
+  })
+
+  it('NULL spec = claim NOTHING: every weight/fit claim goes (the weight-truth rule)', () => {
+    const t = 'THE CEO Dog Mom Heavyweight Relaxed Fit Oversized Tee Shirt for Women'
+    const r = scrubUnspecdGarmentClaims(t, null)
+    expect(r.removed).toEqual(['Heavyweight', 'Relaxed Fit', 'Oversized'])
+    expect(r.title).toBe('THE CEO Dog Mom Tee Shirt for Women')
+  })
+
+  it('standalone "Oversized" is a claim; bare "Classic"/"Relaxed" are NOT ("Classic Car Shirt" is a design)', () => {
+    const r1 = scrubUnspecdGarmentClaims('THE CEO Oversized Sunset Tee for Women', CC_SPEC)
+    expect(r1.removed).toEqual(['Oversized'])
+    const r2 = scrubUnspecdGarmentClaims('THE CEO Classic Car Lover Shirt | Relaxed Weekend Tee', CC_SPEC)
+    expect(r2.removed).toEqual([])
+    expect(r2.title).toBe('THE CEO Classic Car Lover Shirt | Relaxed Weekend Tee')
+  })
+
+  it('is idempotent and repairs comma/separator residue', () => {
+    const t = 'THE CEO Cupid Tee | Heavyweight, for Women'
+    const once = scrubUnspecdGarmentClaims(t, CC_SPEC)
+    expect(once.title).toBe('THE CEO Cupid Tee | for Women'.replace(' | for', ' for')) // separator repaired before tail
+    const twice = scrubUnspecdGarmentClaims(once.title, CC_SPEC)
+    expect(twice.removed).toEqual([])
+    expect(twice.title).toBe(once.title)
   })
 })
