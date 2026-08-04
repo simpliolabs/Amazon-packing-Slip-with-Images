@@ -9336,6 +9336,21 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (blankSpec.stretch) overrideField(/stretchability/i, /\b(?:no|low)\b/i.test(blankSpec.stretch) ? 'Non-stretchable' : 'Stretchable')
     if (/crew/i.test(blankSpec.neck ?? '')) overrideField(/collar/i, 'Round Collar')
   }
+  /* PO 2026-08-04: "Model Name should be without the brand name." The audit tends to emit
+   * "<brand> <design>" ("THE CEO Cupid Valentine"); Amazon's model_name is the MODEL identifier,
+   * and the Brand attribute already carries the brand. Strip the seller brand AND the garment
+   * blank's brand deterministically — a prompt instruction is a request, not a guarantee. A row
+   * that was ONLY the brand is dropped (nothing useful survives). */
+  pdiFinal = pdiFinal.flatMap((p) => {
+    if (!/^model\s*name$/i.test(String(p.field_name ?? ''))) return [p]
+    let v = String(p.recommended_value ?? '')
+    for (const b of [input.brandName, blankSpec?.brand].filter((x): x is string => !!x && !!x.trim())) {
+      v = v.replace(new RegExp(`\\b${b.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), ' ')
+    }
+    v = v.replace(/\s{2,}/g, ' ').trim()
+    if (!v) return []
+    return [v === p.recommended_value ? p : { ...p, recommended_value: v }]
+  })
   // FLAG-AND-FIX rows for catalog blank-boilerplate (PO: "our system needs to FLAG and
   // recommend a FIX — that's why we have the product features optimizer"). Each garment-
   // contradicting attribute string the input scrub caught becomes a Features row with the

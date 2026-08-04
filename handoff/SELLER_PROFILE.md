@@ -70,7 +70,8 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 ## 8. BULLETS · DESCRIPTION · ITEM HIGHLIGHTS
 - **Bullets**: exactly 5, each **150–200 chars**: `ALL-CAPS 2-3 WORD BENEFIT HOOK - one complete sentence.` Hook is a real benefit, never a label; never starts with a dash; garment brand named once (when it's a selling point); design name woven in; quality over coverage — clean 776 beats stuffed 900.
 - **Description**: **900–980 visible chars**, HTML with `<b>` + `<ul><li>`, grounded in real facts (fabric/weight/dye/fit/neck/sleeve) + design story + styling; no search-phrase prose, no brand in body, no internal jargon (seller/SKU/ASIN/listing/keyword/backend).
-- **Item Highlights** (title_differentiation): ≤75 chars, 2–3 short benefit PHRASES (no sentences), customer-facing (never a keyword list), adds what the title lacks, no word repeated >2×, no promo language.
+- **Item Highlights** (title_differentiation): ≤75 chars, 2–3 short benefit PHRASES (no sentences), customer-facing (never a keyword list), adds what the title lacks, no word repeated >2×, no promo language. Written as COPY, never a bare fact-join (PO 2026-08-04: "Cotton tee, Crew Neck, for women" class rejected) — each fact pairs with a feel/benefit word; no title-echo.
+- **Product Detail attributes**: values ground to the spec table where a fact exists (Fit, Sleeve, Stretch binary+graded, Fit-to-Size, Collar: Crew Neck → "Round Collar" — the enum has no Crew member). **Model Name carries NO brand** (PO 2026-08-04): the Brand attribute already says it; "THE CEO Cupid Valentine" → "Cupid Valentine" (deterministic strip of seller + garment brand).
 
 ## 9. MULTI-DESIGN FAMILIES
 - Each design group gets its OWN title/bullets/description; content anchors on the DESIGN (vision-read artwork), never the shirt color.
