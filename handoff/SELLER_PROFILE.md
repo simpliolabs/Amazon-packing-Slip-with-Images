@@ -17,6 +17,7 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 - **Production method**: garments are **printed**, never "screen-printed"/"silk-screened" (auto-rewritten to "printed").
 - **Unisex truth**: the blanks are unisex — "women's fit"/"men's fit" fabricates a gender the garment doesn't have. Audience targeting ("for Women") is fine; fit-gendering is not.
 - A new blank earns copy mentions only by being confirmed and added to the spec table (a PO confirmation like "Gildan 6400 - YES" is the trigger).
+- **The spec table lives in the DATABASE** (2026-08-04, migration 053): `blank_specs` in Supabase is the authoritative catalog — adding/correcting a blank is **one SQL INSERT/UPDATE, no deploy**; affected listings heal on their next regen (reader caches 5 min). The two rows above are seeded byte-identically; the same rows exist in code (`src/lib/fba/blankSpecs.ts`) only as a fail-open floor if the DB is unreachable. `brand_in_copy=false` encodes the Gildan rule; `match_pattern` is a case-insensitive regex over title/attributes/productType/SKUs (`\b64000` deliberately unclosed so "640002XL" matches). A fact-starved short ship now names its cure: SHIP_CENSUS title/description floor lines carry `factsGap:"blank.unknown"` when an apparel run matched no blank.
 
 ## 3. TITLES
 - **Hard law: ≤75 characters** (Amazon auto-rewrites longer, policy 2026-07-27). Golden band **70–75**. The push **refuses** a >75 title rather than truncating.
