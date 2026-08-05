@@ -1793,6 +1793,9 @@ export async function healChildTwinComposite(
     const spec = COMPOSITE_HEAL_SPECS.find((s) => s.containerKey === containerKey)
     const wantedKeys = [...subKeys, ...(spec ? [spec.perVariantField] : [])]
     const twinItemByAsin = new Map<string, Record<string, unknown> | null>()   // one twin read per ASIN
+    // v2 source caches: ONE family-invariant broadcast source per run; one sized source per size token.
+    let familySource: { sku: string; item: Record<string, unknown> } | null | undefined = undefined
+    const sizeSourceBySize = new Map<string, Record<string, unknown> | null>()
 
     /* The batch cap counts WRITES, not list positions: every run walks the WHOLE list (the
      * already-healed no-op check is one cheap read each), so the write window ADVANCES across
@@ -1815,22 +1818,76 @@ export async function healChildTwinComposite(
       // Needs a WRITE — respect the per-run write cap; the remainder rides the queue's next attempt.
       if (writes >= TWIN_HEAL_BATCH) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'deferred: beyond per-run write cap'; continue }
       writes++
-      // Twin = another seller SKU on the SAME ASIN, preferring one that is NOT itself blocked.
+      /* SOURCE SELECTION v2 (2026-08-05, from the FIRST live tick: healed:0/abstained:25 — the
+       * Later-Gator "FBM twins" turned out to be SEPARATE child ASINs, so a same-ASIN twin often
+       * does not exist). Three sources in preference order:
+       *  1. Same-ASIN twin, complete container → verbatim whole-object copy (fully correct).
+       *  2. The SKU's OWN item carries the per-variant field (Amazon's live errors complain only
+       *     about size_system/size_class) → merge JUST the broadcast subKeys from ANY complete
+       *     family sibling (they are family-invariant) over the own item — own `size` preserved.
+       *  3. Own item lacks the per-variant field too → a sibling whose SKU carries the SAME size
+       *     token (…-2XL-… matches 60142XL-…) → verbatim copy of that sibling's item.
+       * No source → abstain (never guess a size). */
       const siblings = [...skuAsin.entries()].filter(([s, a]) => a === asin && s !== sku).map(([s]) => s)
       const twinSku = siblings.find((s) => !blocked.has(s)) ?? siblings[0]
-      if (!twinSku) { out.abstained.push(sku); if (out.errors) out.errors[sku] = 'no same-ASIN twin in listing_content'; continue }
-      let twinItem = twinItemByAsin.get(asin)
-      if (twinItem === undefined) {
-        const twinAttrs = await fetchSkuAttributes(sellerId, token, twinSku)
-        const raw = twinAttrs?.[containerKey]
-        const first = Array.isArray(raw) && raw[0] && typeof raw[0] === 'object'
-          ? raw[0] as Record<string, unknown> : null
-        twinItem = first && wantedKeys.every((k) => first[k] !== undefined && first[k] !== null) ? first : null
-        twinItemByAsin.set(asin, twinItem)
+      let twinItem: Record<string, unknown> | null = null
+      if (twinSku) {
+        const cached = twinItemByAsin.get(asin)
+        if (cached !== undefined) twinItem = cached
+        else {
+          const twinAttrs = await fetchSkuAttributes(sellerId, token, twinSku)
+          const raw = twinAttrs?.[containerKey]
+          const first = Array.isArray(raw) && raw[0] && typeof raw[0] === 'object'
+            ? raw[0] as Record<string, unknown> : null
+          twinItem = first && wantedKeys.every((k) => first[k] !== undefined && first[k] !== null) ? first : null
+          twinItemByAsin.set(asin, twinItem)
+        }
       }
-      if (!twinItem) { out.abstained.push(sku); if (out.errors) out.errors[sku] = `twin ${twinSku} lacks a complete ${containerKey}`; continue }
-      // VERBATIM whole-object copy (Strategy-1 spirit): the twin's first container item, our marketplace.
-      const item: Record<string, unknown> = { ...twinItem, marketplace_id: MARKETPLACE_ID }
+      let item: Record<string, unknown> | null = null
+      if (twinItem) {
+        item = { ...twinItem, marketplace_id: MARKETPLACE_ID }
+      } else {
+        // Family-invariant broadcast source: ONE complete sibling anywhere in the family, read once
+        // and cached for the whole run (size_system/size_class are the same on every child).
+        if (familySource === undefined) {
+          familySource = null
+          for (const [s] of [...skuAsin.entries()].filter(([s2]) => !blocked.has(s2)).slice(0, 5)) {
+            const attrs = await fetchSkuAttributes(sellerId, token, s)
+            const raw = attrs?.[containerKey]
+            const first = Array.isArray(raw) && raw[0] && typeof raw[0] === 'object'
+              ? raw[0] as Record<string, unknown> : null
+            if (first && wantedKeys.every((k) => first[k] !== undefined && first[k] !== null)) { familySource = { sku: s, item: first }; break }
+          }
+        }
+        if (ownFirst && spec && ownFirst[spec.perVariantField] !== undefined && ownFirst[spec.perVariantField] !== null && familySource) {
+          const broadcastBits: Record<string, unknown> = {}
+          for (const k of subKeys) broadcastBits[k] = familySource.item[k]
+          item = { ...ownFirst, ...broadcastBits, marketplace_id: MARKETPLACE_ID }
+        } else if (familySource) {
+          // Size-token match: the blocked SKU's size (…-2XL-…) must appear in the source SKU
+          // (60142XL-… carries it glued). Search a size-matched sibling; verbatim copy its item.
+          const sizeRe = /(?:^|[-_])(XXS|XS|S|M|L|XL|XXL|2XL|3XL|4XL|5XL|6XL)(?=[-_]|$)/i
+          const ownSize = sizeRe.exec(sku)?.[1]?.toUpperCase()
+          // CLEAN-token match only ("-2XL-"), never glued prefixes: "6014XL" is ambiguous between
+          // 6014+XL and 601+4XL, and a wrong-size copy would be a real defect — abstain over guess.
+          const matched = ownSize
+            ? [...skuAsin.keys()].filter((s) => !blocked.has(s) && new RegExp(`(?:^|[-_])${ownSize}(?=[-_]|$)`, 'i').test(s))
+            : []
+          let sizedItem: Record<string, unknown> | null = null
+          for (const s of matched.slice(0, 3)) {
+            const cachedSized = sizeSourceBySize.get(ownSize ?? '')
+            if (cachedSized !== undefined) { sizedItem = cachedSized; break }
+            const attrs = await fetchSkuAttributes(sellerId, token, s)
+            const raw = attrs?.[containerKey]
+            const first = Array.isArray(raw) && raw[0] && typeof raw[0] === 'object'
+              ? raw[0] as Record<string, unknown> : null
+            if (first && wantedKeys.every((k) => first[k] !== undefined && first[k] !== null)) { sizedItem = first; break }
+          }
+          if (ownSize) sizeSourceBySize.set(ownSize, sizedItem)
+          if (sizedItem) item = { ...sizedItem, marketplace_id: MARKETPLACE_ID }
+        }
+      }
+      if (!item) { out.abstained.push(sku); if (out.errors) out.errors[sku] = `no usable ${containerKey} source (no twin, no own size + family source, no size-matched sibling)`; continue }
       const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
       const preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
       if (!preview.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `preview: ${preview.error ?? 'rejected'}`; continue }
