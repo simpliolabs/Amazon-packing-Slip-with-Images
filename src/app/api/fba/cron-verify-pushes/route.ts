@@ -17,7 +17,7 @@ import {
   claimDueTasks, completeTask, rescheduleTask, flagNeedsAttention, softFailTask,
   enqueueVerification, type PushVerificationTask, type HealPayload,
 } from '@/lib/fba/verificationQueue'
-import { executePush, healParentAttributes, healParentComposite, checkHealFamilyIntegrity, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
+import { executePush, healParentAttributes, healParentComposite, healChildTwinComposite, checkHealFamilyIntegrity, SYSTEM_ACTOR } from '@/lib/fba/pushExecutor'
 import { createAdminClient } from '@/lib/supabase/server'
 
 export const dynamic = 'force-dynamic'
@@ -148,7 +148,18 @@ async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean
     // COMPOSITE heal (self-healing composite): a rejection naming a composite container (shirt_size) rides
     // the SAME queue/backoff but dispatches to the purpose-built verbatim-mirror + read-back path, NOT the
     // flat healParentAttributes. Absent `composite` → the existing flat path, behavior unchanged.
-    const res = payload.composite
+    const res = payload.twin && payload.composite
+      // TWIN heal (2026-08-05, the Later-Gator FBM-block incident): CHILD SKUs whose own composite
+      // (shirt_size) is incomplete reject EVERY content write. Mirror the container verbatim from
+      // the same-ASIN twin (which is the same size/color by definition) — not from the parent path.
+      ? await healChildTwinComposite(db, {
+          parent_asin: task.parent_asin,
+          productType: payload.productType,
+          containerKey: payload.composite.containerKey,
+          subKeys: payload.composite.subKeys,
+          skus: payload.twin.skus,
+        })
+      : payload.composite
       ? await healParentComposite(db, {
           parent_asin: task.parent_asin,
           parentSku: payload.parentSku,
