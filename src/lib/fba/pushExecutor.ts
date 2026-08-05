@@ -1861,9 +1861,16 @@ export async function healChildTwinComposite(
           }
         }
         if (ownFirst && spec && ownFirst[spec.perVariantField] !== undefined && ownFirst[spec.perVariantField] !== null && familySource) {
-          const broadcastBits: Record<string, unknown> = {}
-          for (const k of subKeys) broadcastBits[k] = familySource.item[k]
-          item = { ...ownFirst, ...broadcastBits, marketplace_id: MARKETPLACE_ID }
+          /* v5 (2026-08-05, the SC-form revelation): the composite has MORE family-invariant
+           * sub-fields than the ones Amazon's error names — the Seller Central Edit modal shows
+           * FIVE required fields (size_system, size_class, size, body_type, height_type), and the
+           * healthy FBA siblings carry all five. v2's merge copied only the two subKeys from the
+           * error, so the written item was a 4-key partial — and the parent saga proved Amazon
+           * peels conditional layers one at a time and discards incomplete composites whole
+           * (plausibly THE accepted-then-dropped cause). Cure: copy the complete sibling's item
+           * VERBATIM (all sub-fields ride along) and override only the per-variant size with the
+           * blocked SKU's own — the same proven-shape semantic rungs 1 and 3 already use. */
+          item = { ...familySource.item, [spec.perVariantField]: ownFirst[spec.perVariantField], marketplace_id: MARKETPLACE_ID }
         } else if (familySource) {
           // Size-token match: the blocked SKU's size (…-2XL-…) must appear in the source SKU
           // (60142XL-… carries it glued). Search a size-matched sibling; verbatim copy its item.
@@ -1952,7 +1959,24 @@ export async function healChildTwinComposite(
           }
         }
       }
-      if (!persisted) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'read-back mismatch persisted through delete+rewrite (accepted-then-dropped)'; continue }
+      if (!persisted) {
+        out.failed.push(sku)
+        // Name the NEXT conditional layer instead of failing silently: after a swallowed write the
+        // listing's standing issues are the only place Amazon says WHY (the peel-one-layer pattern).
+        let issueNote = ''
+        try {
+          const iUrl = `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+            `?marketplaceIds=${MARKETPLACE_ID}&includedData=issues`
+          await spApiReadBucket.acquire()
+          const iResp = await fetch(iUrl, { headers: { 'x-amz-access-token': token } })
+          if (iResp.ok) {
+            const iJson = (await iResp.json()) as { issues?: { message?: string }[] }
+            issueNote = (iJson.issues ?? []).slice(0, 2).map((i) => i.message ?? '').filter(Boolean).join(' | ').slice(0, 300)
+          }
+        } catch { /* observability only */ }
+        if (out.errors) out.errors[sku] = `read-back mismatch persisted through delete+rewrite (accepted-then-dropped)${issueNote ? `; standing issues now: ${issueNote}` : ''}`
+        continue
+      }
       out.healed.push(sku)
       try {
         await db.from('keyword_push_log').insert({
