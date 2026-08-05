@@ -1915,7 +1915,10 @@ export async function healChildTwinComposite(
         })
       } catch (e) { console.warn('[twin-heal] keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
     }
-    console.log(JSON.stringify({ tag: 'TWIN_HEAL', parent_asin, containerKey, healed: out.healed.length, abstained: out.abstained.length, failed: out.failed.length, writes }))
+    // firstErrors: the diagnosis payload — attempt 2 live showed failed:70 with NO reason visible
+    // anywhere (the queue note carries SKU names only). Three examples name the wall exactly.
+    const firstErrors = Object.entries(out.errors ?? {}).slice(0, 3).map(([s, e]) => `${s}: ${e}`)
+    console.log(JSON.stringify({ tag: 'TWIN_HEAL', parent_asin, containerKey, healed: out.healed.length, abstained: out.abstained.length, failed: out.failed.length, writes, firstErrors }))
   } catch (e) {
     console.warn('[twin-heal] failed (non-fatal):', e instanceof Error ? e.message : e)
     for (const sku of skus) if (!out.healed.includes(sku) && !out.failed.includes(sku) && !out.abstained.includes(sku)) out.failed.push(sku)
