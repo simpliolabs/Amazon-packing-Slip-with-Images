@@ -1918,20 +1918,41 @@ export async function healChildTwinComposite(
         }
         console.log(JSON.stringify({ tag: 'TWIN_HEAL_PREVIEW_ECHO_BYPASS', sku, containerKey }))
       }
-      const live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
+      let live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
       if (!live.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `live: ${live.error ?? 'rejected'}`; continue }
       await sleep(PATCH_DELAY_MS)
       // Tolerant read-back — same subsetDeepEqual discipline as the parent heal (Amazon normalizes).
-      const after = await fetchSkuAttributes(sellerId, token, sku)
-      const afterRaw = after?.[containerKey]
-      const afterFirst = Array.isArray(afterRaw) && afterRaw[0] && typeof afterRaw[0] === 'object'
-        ? afterRaw[0] as Record<string, unknown> : null
-      const persisted = afterFirst != null && wantedKeys.every((k) => {
-        const got = afterFirst[k]
-        if (got === undefined || got === null) return false
-        return subsetDeepEqual(item[k], got)
-      })
-      if (!persisted) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'read-back mismatch: Amazon accepted then dropped sub-fields'; continue }
+      const readBack = async (): Promise<boolean> => {
+        const after = await fetchSkuAttributes(sellerId, token, sku)
+        const afterRaw = after?.[containerKey]
+        const afterFirst = Array.isArray(afterRaw) && afterRaw[0] && typeof afterRaw[0] === 'object'
+          ? afterRaw[0] as Record<string, unknown> : null
+        return afterFirst != null && wantedKeys.every((k) => {
+          const got = afterFirst[k]
+          if (got === undefined || got === null) return false
+          return subsetDeepEqual(item[k], got)
+        })
+      }
+      let persisted = await readBack()
+      if (!persisted) {
+        /* PARTIAL-CONTAINER TRAP ESCALATION (v4, 2026-08-05 — attempt 5 verdict: all 25 live
+         * writes ACCEPTED then sub-fields silently DROPPED). This is the PHE-STS-P rule-99022
+         * class verbatim: a container that exists PARTIALLY (these items carry only `size`)
+         * swallows merged writes. The cure proven there: scoped DELETE of the partial container,
+         * then the complete write. Two-step live, then re-read-back — still the only real gate. */
+        const delOps = [{ op: 'delete' as const, path: `/attributes/${containerKey}` }]
+        const del = await patchSkuMulti(sellerId, token, productType, sku, delOps as unknown as typeof ops, 'LIVE')
+        if (del.ok) {
+          await sleep(PATCH_DELAY_MS)
+          live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
+          if (live.ok) {
+            await sleep(PATCH_DELAY_MS)
+            persisted = await readBack()
+            if (persisted) console.log(JSON.stringify({ tag: 'TWIN_HEAL_DELETE_REWRITE_OK', sku, containerKey }))
+          }
+        }
+      }
+      if (!persisted) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'read-back mismatch persisted through delete+rewrite (accepted-then-dropped)'; continue }
       out.healed.push(sku)
       try {
         await db.from('keyword_push_log').insert({
