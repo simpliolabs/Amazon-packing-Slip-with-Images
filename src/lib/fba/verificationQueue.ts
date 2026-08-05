@@ -101,6 +101,12 @@ export interface HealPayload {
   missingAttrKeys?: string[]
   composite?: { containerKey: string; subKeys: string[] }
   familyCheck?: { childCount: number; containerKey: string }
+  /** TWIN heal (2026-08-05, the Later-Gator FBM-block incident): CHILD SKUs whose OWN composite is
+   *  incomplete (Amazon rejects every content write with the "does not have enough values"
+   *  signature on the container's subKeys). The healer mirrors the container verbatim from each
+   *  SKU's same-ASIN twin — same size/color by definition, so no agreement problem exists. Set
+   *  alongside `composite` (which names the container); `skus` = the blocked children. */
+  twin?: { skus: string[] }
 }
 
 /** Register a SELF-HEAL task on the existing verify queue (migration 042 kind='heal'). Reuses the

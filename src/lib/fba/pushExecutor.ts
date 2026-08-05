@@ -1730,6 +1730,142 @@ export async function healParentComposite(
   return out
 }
 
+/** One live attributes GET for ONE SKU (uncapped sibling of fetchChildAttributesMap — the twin heal
+ *  reads specific SKUs, not an agreement sample). Best-effort: null on any failure. */
+async function fetchSkuAttributes(
+  sellerId: string, token: string, sku: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const url =
+      `${ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
+      `?marketplaceIds=${MARKETPLACE_ID}&includedData=attributes`
+    await spApiReadBucket.acquire()
+    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
+    if (!resp.ok) return null
+    const json = (await resp.json()) as { attributes?: Record<string, unknown> }
+    return json.attributes ?? null
+  } catch { return null }
+}
+
+/** Per-run cap for the twin heal: 4 SP-API calls per healed SKU (twin read + preview + live +
+ *  read-back) under the cron's 4-minute budget alongside other tasks. Remainder rides the queue's
+ *  attempts/backoff — the cron re-claims the task and the healer skips already-complete SKUs. */
+const TWIN_HEAL_BATCH = 25
+
+/**
+ * TWIN HEAL (2026-08-05 — the Later-Gator incident, PO: "ALL parents failing, ~50 heal attempts").
+ * ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE CLASS: a CHILD SKU whose OWN composite container is incomplete on Amazon (live specimen: all
+ * 70 FBM twins of B0GML5V7KZ missing shirt_size.size_system/size_class) rejects EVERY content
+ * write — Amazon re-validates the whole listing on any PATCH, so title/bullets/description/keywords
+ * all bounce with "The field 'size_class' for the attribute 'Shirt Size' does not have enough
+ * values" while the content itself is fine. The verify cron then re-pushes forever (the seller's
+ * "50 attempts").
+ *
+ * THE CURE: mirror the container VERBATIM from the SKU's same-ASIN twin — the FBA SKU that accepts
+ * writes carries a complete container, and a same-ASIN twin is the same size/color BY DEFINITION,
+ * so unlike the parent heal there is no agreement problem and the per-variant field (`size`) is
+ * copied too. Preview → live → tolerant read-back (subsetDeepEqual), the same discipline as
+ * healParentComposite. Once healed, the EXISTING verify/re-push cron delivers the blocked content —
+ * no new re-push machinery.
+ *
+ * Never throws; the cron rides the queue's attempts/backoff on a non-converged result. Already-
+ * complete SKUs (healed by a prior attempt or by hand) read back as complete and are skipped as
+ * healed-no-op, which is what makes re-claimed attempts idempotent.
+ */
+export async function healChildTwinComposite(
+  db: SupabaseClient,
+  opts: { parent_asin: string; productType: string; containerKey: string; subKeys: string[]; skus: string[] },
+): Promise<HealResult> {
+  const { parent_asin, productType, containerKey, subKeys, skus } = opts
+  const out: HealResult = { healed: [], abstained: [], failed: [], errors: {} }
+  try {
+    const token = await getAccessToken()
+    const sellerId = await getSellerId()
+    // sku → asin for the whole family in ONE query; twins = other SKUs sharing the ASIN.
+    const { data: famRows } = await db.from('listing_content')
+      .select('sku, asin').eq('parent_asin', parent_asin)
+    const skuAsin = new Map<string, string>()
+    for (const r of (famRows ?? []) as { sku: string; asin: string }[]) {
+      if (r.sku && r.asin) skuAsin.set(r.sku, r.asin)
+    }
+    const blocked = new Set(skus)
+    const spec = COMPOSITE_HEAL_SPECS.find((s) => s.containerKey === containerKey)
+    const wantedKeys = [...subKeys, ...(spec ? [spec.perVariantField] : [])]
+    const twinItemByAsin = new Map<string, Record<string, unknown> | null>()   // one twin read per ASIN
+
+    /* The batch cap counts WRITES, not list positions: every run walks the WHOLE list (the
+     * already-healed no-op check is one cheap read each), so the write window ADVANCES across
+     * attempts. A slice-based cap would re-process the same healed head forever and never reach
+     * the tail (caught in adversarial review before shipping). */
+    let writes = 0
+    for (const sku of skus) {
+      const asin = skuAsin.get(sku)
+      if (!asin) { out.abstained.push(sku); continue }
+      // IDEMPOTENCE: a SKU healed by a prior attempt (or by hand in Seller Central) reads back
+      // complete — count it healed without writing anything.
+      const ownAttrs = await fetchSkuAttributes(sellerId, token, sku)
+      const ownRaw = ownAttrs?.[containerKey]
+      const ownFirst = Array.isArray(ownRaw) && ownRaw[0] && typeof ownRaw[0] === 'object'
+        ? ownRaw[0] as Record<string, unknown> : null
+      if (ownFirst && wantedKeys.every((k) => ownFirst[k] !== undefined && ownFirst[k] !== null)) {
+        out.healed.push(sku)
+        continue
+      }
+      // Needs a WRITE — respect the per-run write cap; the remainder rides the queue's next attempt.
+      if (writes >= TWIN_HEAL_BATCH) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'deferred: beyond per-run write cap'; continue }
+      writes++
+      // Twin = another seller SKU on the SAME ASIN, preferring one that is NOT itself blocked.
+      const siblings = [...skuAsin.entries()].filter(([s, a]) => a === asin && s !== sku).map(([s]) => s)
+      const twinSku = siblings.find((s) => !blocked.has(s)) ?? siblings[0]
+      if (!twinSku) { out.abstained.push(sku); if (out.errors) out.errors[sku] = 'no same-ASIN twin in listing_content'; continue }
+      let twinItem = twinItemByAsin.get(asin)
+      if (twinItem === undefined) {
+        const twinAttrs = await fetchSkuAttributes(sellerId, token, twinSku)
+        const raw = twinAttrs?.[containerKey]
+        const first = Array.isArray(raw) && raw[0] && typeof raw[0] === 'object'
+          ? raw[0] as Record<string, unknown> : null
+        twinItem = first && wantedKeys.every((k) => first[k] !== undefined && first[k] !== null) ? first : null
+        twinItemByAsin.set(asin, twinItem)
+      }
+      if (!twinItem) { out.abstained.push(sku); if (out.errors) out.errors[sku] = `twin ${twinSku} lacks a complete ${containerKey}`; continue }
+      // VERBATIM whole-object copy (Strategy-1 spirit): the twin's first container item, our marketplace.
+      const item: Record<string, unknown> = { ...twinItem, marketplace_id: MARKETPLACE_ID }
+      const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
+      const preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
+      if (!preview.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `preview: ${preview.error ?? 'rejected'}`; continue }
+      const live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
+      if (!live.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `live: ${live.error ?? 'rejected'}`; continue }
+      await sleep(PATCH_DELAY_MS)
+      // Tolerant read-back — same subsetDeepEqual discipline as the parent heal (Amazon normalizes).
+      const after = await fetchSkuAttributes(sellerId, token, sku)
+      const afterRaw = after?.[containerKey]
+      const afterFirst = Array.isArray(afterRaw) && afterRaw[0] && typeof afterRaw[0] === 'object'
+        ? afterRaw[0] as Record<string, unknown> : null
+      const persisted = afterFirst != null && wantedKeys.every((k) => {
+        const got = afterFirst[k]
+        if (got === undefined || got === null) return false
+        return subsetDeepEqual(item[k], got)
+      })
+      if (!persisted) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'read-back mismatch: Amazon accepted then dropped sub-fields'; continue }
+      out.healed.push(sku)
+      try {
+        await db.from('keyword_push_log').insert({
+          parent_asin, sku, field: `heal:twin:${containerKey}`,
+          previous_value: null, new_value: JSON.stringify(item),
+          submission_id: live.submissionId, status: 'accepted', error_message: null,
+          pushed_by: SYSTEM_ACTOR.id,
+        })
+      } catch (e) { console.warn('[twin-heal] keyword_push_log insert failed (non-fatal):', e instanceof Error ? e.message : e) }
+    }
+    console.log(JSON.stringify({ tag: 'TWIN_HEAL', parent_asin, containerKey, healed: out.healed.length, abstained: out.abstained.length, failed: out.failed.length, writes }))
+  } catch (e) {
+    console.warn('[twin-heal] failed (non-fatal):', e instanceof Error ? e.message : e)
+    for (const sku of skus) if (!out.healed.includes(sku) && !out.failed.includes(sku) && !out.abstained.includes(sku)) out.failed.push(sku)
+  }
+  return out
+}
+
 /** PARENTAGE CONFIRMATION for the delete-partial heal (adversarial review 2026-07-02, fix 2).
  *  findParentSku equality only proves LOOKUP CONSISTENCY (both sides resolved the same row for the
  *  ASIN) — it does NOT prove the SKU is a variation-parent hub. Positively confirm via a live GET with
@@ -2990,6 +3126,56 @@ async function maybeEnqueueParentHeal(
   }
 }
 
+/** TWIN-HEAL TRIGGER (2026-08-05, the Later-Gator incident). Scans FAILED CHILD rows for the
+ *  incomplete-composite signature — Amazon rejecting a content write because the SKU's OWN
+ *  composite container lacks its sub-fields ("The field 'size_class' for the attribute 'Shirt
+ *  Size' does not have enough values"). NOTE the child errors name the SUBKEYS, not the
+ *  per-variant field the parent-hub signature uses — conditionalRequirementRegex is built per
+ *  subKey here. Matching SKUs get ONE batched heal:twin task (verbatim mirror from the same-ASIN
+ *  twin, healChildTwinComposite). Never throws; an in-flight task is never reset (re-enqueue
+ *  would zero its attempt budget on every user re-push — the same guard the parent heals use). */
+async function maybeEnqueueChildTwinHeal(
+  parent_asin: string, productType: string | null, results: PushResultRow[],
+): Promise<{ scheduled: boolean; containerKey?: string; count: number }> {
+  try {
+    if (!productType) return { scheduled: false, count: 0 }
+    for (const spec of COMPOSITE_HEAL_SPECS) {
+      const nameRe = containerNameRegex(spec.containerKey)
+      const subRes = spec.subKeys.map((k) => conditionalRequirementRegex(k))
+      const skus = results
+        .filter((r) => !r.isParent && r.status === 'failed' && r.sku)
+        .filter((r) => {
+          const text = `${r.error ?? ''} ${(r.issues ?? []).map((i) => i.message ?? '').join(' ')}`
+          return nameRe.test(text) && subRes.some((re) => re.test(text))
+        })
+        .map((r) => r.sku)
+      if (skus.length === 0) continue
+      const { enqueueHeal, hasActiveHealTask } = await import('@/lib/fba/verificationQueue')
+      if (await hasActiveHealTask(parent_asin, 'heal:twin')) {
+        // Already in flight — report it as scheduled (that IS what the seller must hear) without
+        // resetting the running task's budget.
+        return { scheduled: true, containerKey: spec.containerKey, count: skus.length }
+      }
+      const parentSku = results.find((r) => r.isParent)?.sku ?? parent_asin
+      // maxAttempts 6: TWIN_HEAL_BATCH=25 SKUs per run → 3 productive runs for a 70-SKU family,
+      // doubled for transient headroom. Idempotent re-runs skip already-complete SKUs.
+      const scheduled = await enqueueHeal(parent_asin, {
+        parentSku, productType, missingAttrKeys: [spec.containerKey],
+        composite: { containerKey: spec.containerKey, subKeys: spec.subKeys },
+        twin: { skus },
+      }, 6, 'heal:twin')
+      if (scheduled) {
+        console.log(JSON.stringify({ tag: 'TWIN_HEAL_ENQUEUED', parent_asin, containerKey: spec.containerKey, blocked: skus.length }))
+        return { scheduled: true, containerKey: spec.containerKey, count: skus.length }
+      }
+    }
+    return { scheduled: false, count: 0 }
+  } catch (e) {
+    console.warn('[twin-heal] enqueue trigger failed (non-fatal):', e instanceof Error ? e.message : e)
+    return { scheduled: false, count: 0 }
+  }
+}
+
 /**
  * Re-score a parent purely from the (now-current) `listing_content` cache and persist the fresh scores +
  * display title onto `listing_seo_scores`. Single implementation of the re-score, routed through
@@ -3296,6 +3482,10 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // parent-rejected note must say SO — not "complete it in Seller Central" (which invites the
           // re-push that would abandon the heal). The Seller-Central wording stays for the no-heal case.
           const heal = await maybeEnqueueParentHeal(parent_asin, productType, results)
+          // TWIN HEAL (2026-08-05): CHILD rows blocked by their own incomplete composite get the
+          // twin-mirror heal scheduled; surfaced through the same healScheduled/healAttrs UI hints.
+          const twin = await maybeEnqueueChildTwinHeal(parent_asin, productType, results)
+          if (twin.scheduled) { heal.healScheduled = true; heal.healAttrs = [...heal.healAttrs, `${twin.containerKey} (${twin.count} variant${twin.count === 1 ? '' : 's'})`] }
           const parentNoteFinal = heal.healScheduled ? HEAL_SCHEDULED_PARENT_NOTE : parentNote
 
           // WRITE-THROUGH + RE-SCORE so Features rises IMMEDIATELY (the bullets ship→rise experience),
@@ -3633,6 +3823,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
         // scheduled heal REPLACES the "complete it in Seller Central" parent note (that wording invites
         // the re-push that would abandon the heal); it stays only when NO heal could be scheduled.
         const heal = await maybeEnqueueParentHeal(parent_asin, productType, results)
+        // TWIN HEAL (2026-08-05): CHILD rows blocked by their own incomplete composite (the
+        // Later-Gator class — every content write bounces off missing shirt_size sub-fields) get
+        // the twin-mirror heal scheduled; surfaced through the same healScheduled/healAttrs hints.
+        const twin = await maybeEnqueueChildTwinHeal(parent_asin, productType, results)
+        if (twin.scheduled) { heal.healScheduled = true; heal.healAttrs = [...heal.healAttrs, `${twin.containerKey} (${twin.count} variant${twin.count === 1 ? '' : 's'})`] }
         const parentNoteFinal = heal.healScheduled ? HEAL_SCHEDULED_PARENT_NOTE : parentNote
 
         // Re-score so the page's score reflects the just-pushed values. Best-effort.
