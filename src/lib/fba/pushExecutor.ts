@@ -1971,7 +1971,18 @@ export async function healChildTwinComposite(
          * class verbatim: a container that exists PARTIALLY (these items carry only `size`)
          * swallows merged writes. The cure proven there: scoped DELETE of the partial container,
          * then the complete write. Two-step live, then re-read-back — still the only real gate. */
-        const delOps = [{ op: 'delete' as const, path: `/attributes/${containerKey}` }]
+        /* v7 (2026-08-05, the InvalidInput discovery): Amazon's patch dialect is NOT RFC 6902 —
+         * a delete op MUST carry `value` naming what is stored, or the call 400s with
+         * "Invalid empty value provided in patch at index of 0". Every prior delete (this
+         * escalation AND the parent saga's scoped-delete endpoint) omitted value, so the
+         * delete-then-complete-write cure has never actually executed. Read the CURRENT stored
+         * array and delete exactly that. */
+        const curAttrs = await fetchSkuAttributes(sellerId, token, sku)
+        const curRaw = curAttrs?.[containerKey]
+        const delOps = [{
+          op: 'delete' as const, path: `/attributes/${containerKey}`,
+          value: Array.isArray(curRaw) && curRaw.length > 0 ? curRaw : [item],
+        }]
         const del = await patchSkuMulti(sellerId, token, productType, sku, delOps as unknown as typeof ops, 'LIVE')
         // Observability gap closed (v6): a failed DELETE used to fall through silently, making a
         // blocked escalation indistinguishable from a swallowed rewrite (the parent saga's
