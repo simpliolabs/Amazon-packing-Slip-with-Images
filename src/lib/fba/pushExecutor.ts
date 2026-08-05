@@ -1796,6 +1796,7 @@ export async function healChildTwinComposite(
     // v2 source caches: ONE family-invariant broadcast source per run; one sized source per size token.
     let familySource: { sku: string; item: Record<string, unknown> } | null | undefined = undefined
     const sizeSourceBySize = new Map<string, Record<string, unknown> | null>()
+    let twinDebugLogged = false   // ONE payload-forensics line per run (TWIN_HEAL_DEBUG)
 
     /* The batch cap counts WRITES, not list positions: every run walks the WHOLE list (the
      * already-healed no-op check is one cheap read each), so the write window ADVANCES across
@@ -1890,7 +1891,18 @@ export async function healChildTwinComposite(
       if (!item) { out.abstained.push(sku); if (out.errors) out.errors[sku] = `no usable ${containerKey} source (no twin, no own size + family source, no size-matched sibling)`; continue }
       const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
       const preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
-      if (!preview.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `preview: ${preview.error ?? 'rejected'}`; continue }
+      if (!preview.ok) {
+        out.failed.push(sku)
+        if (out.errors) out.errors[sku] = `preview: ${preview.error ?? 'rejected'}`
+        // PAYLOAD FORENSICS (2026-08-05): attempt 2 previewed the SAME missing-subfields error the
+        // fix supplies — the patch is somehow not changing the validated state. Log the exact bytes
+        // ONCE per run so the next tick shows what Amazon actually received vs what the SKU held.
+        if (!twinDebugLogged) {
+          twinDebugLogged = true
+          console.log(JSON.stringify({ tag: 'TWIN_HEAL_DEBUG', sku, own: ownFirst, wrote: item, previewIssues: (preview.issues ?? []).slice(0, 3) }).slice(0, 2000))
+        }
+        continue
+      }
       const live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
       if (!live.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `live: ${live.error ?? 'rejected'}`; continue }
       await sleep(PATCH_DELAY_MS)
