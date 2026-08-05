@@ -1797,6 +1797,9 @@ export async function healChildTwinComposite(
     let familySource: { sku: string; item: Record<string, unknown> } | null | undefined = undefined
     const sizeSourceBySize = new Map<string, Record<string, unknown> | null>()
     let twinDebugLogged = false   // ONE payload-forensics line per run (TWIN_HEAL_DEBUG)
+    // v6: fields the preview negotiation banned ("not allowed / at most 0") — family-invariant
+    // shape verdict, learned on the first SKU and pre-stripped for the rest of the run.
+    let negotiatedBanned: Set<string> | null = null
 
     /* The batch cap counts WRITES, not list positions: every run walks the WHOLE list (the
      * already-healed no-op check is one cheap read each), so the write window ADVANCES across
@@ -1896,8 +1899,29 @@ export async function healChildTwinComposite(
         }
       }
       if (!item) { out.abstained.push(sku); if (out.errors) out.errors[sku] = `no usable ${containerKey} source (no twin, no own size + family source, no size-matched sibling)`; continue }
+      /* v6 PREVIEW NEGOTIATION (2026-08-05, the body_type discovery): a preview given a NEW shape
+       * evaluates it for REAL — v5's five-field write drew "the field 'body_type' … is not
+       * allowed. Expected at most '0'" (for as1/alpha sizes the tightened schema DISALLOWS
+       * body/height; the healthy FBA siblings carry them only as LEGACY data, so a verbatim copy
+       * over-carries). Obey the preview: strip any NON-REQUIRED field it names as not-allowed and
+       * re-preview (≤3 rounds). The shape is family-invariant, so the first SKU's verdict is
+       * cached and pre-stripped for the rest of the run. Echo bypass below still covers the
+       * standing-issue parrot; read-back stays the only real gate. */
+      if (negotiatedBanned) for (const k of negotiatedBanned) if (!(wantedKeys as string[]).includes(k)) delete item[k]
       const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
-      const preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
+      let preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
+      for (let round = 0; round < 3 && !preview.ok; round++) {
+        const msgs = (preview.issues ?? []).map((i) => i.message ?? '').concat(preview.error ? [preview.error] : [])
+        const banned = new Set<string>()
+        for (const m of msgs) {
+          const mm = /field\s+'"?([a-z0-9_]+)"?'.{0,160}?(?:is not allowed|at most '0')/i.exec(m)
+          if (mm?.[1] && !(wantedKeys as string[]).includes(mm[1]) && item[mm[1]] !== undefined) banned.add(mm[1])
+        }
+        if (banned.size === 0) break
+        for (const k of banned) { delete item[k]; (negotiatedBanned ??= new Set<string>()).add(k) }
+        console.log(JSON.stringify({ tag: 'TWIN_HEAL_NEGOTIATED', sku, stripped: [...banned], kept: Object.keys(item) }))
+        preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
+      }
       if (!preview.ok) {
         /* PREVIEW-ECHO BYPASS (v3, 2026-08-05 — the forensics verdict). The payload is
          * schema-perfect (flat strings, valid enums, both required sub-fields present — verified
@@ -1949,6 +1973,10 @@ export async function healChildTwinComposite(
          * then the complete write. Two-step live, then re-read-back — still the only real gate. */
         const delOps = [{ op: 'delete' as const, path: `/attributes/${containerKey}` }]
         const del = await patchSkuMulti(sellerId, token, productType, sku, delOps as unknown as typeof ops, 'LIVE')
+        // Observability gap closed (v6): a failed DELETE used to fall through silently, making a
+        // blocked escalation indistinguishable from a swallowed rewrite (the parent saga's
+        // strategy-2 internal-error class). One line names it.
+        if (!del.ok) console.log(JSON.stringify({ tag: 'TWIN_HEAL_DELETE_FAILED', sku, err: (del.error ?? 'rejected').slice(0, 200) }))
         if (del.ok) {
           await sleep(PATCH_DELAY_MS)
           live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
