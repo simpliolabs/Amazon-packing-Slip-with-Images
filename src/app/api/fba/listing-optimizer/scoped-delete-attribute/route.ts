@@ -131,7 +131,17 @@ export async function POST(req: NextRequest) {
 
     // STEP 3 — VALIDATION_PREVIEW. If Amazon rejects the delete in preview, we bail without
     // any LIVE side-effects. Common cause: dead-token stored state that even DELETE can't cure.
-    const patchBody = { productType, patches: [{ op: 'delete', path: `/attributes/${attribute}` }] }
+    // Amazon's patch dialect is NOT RFC 6902: a delete op MUST carry `value` naming what is
+    // stored, or the call 400s "Invalid empty value provided in patch at index of 0" (the
+    // 2026-08-05 twin-heal discovery — every valueless delete ever sent was rejected, which is
+    // why this endpoint could not cure PHE-STS-P). Delete exactly the stored array.
+    const patchBody = {
+      productType,
+      patches: [{
+        op: 'delete', path: `/attributes/${attribute}`,
+        ...(Array.isArray(preAttributeValue) && preAttributeValue.length > 0 ? { value: preAttributeValue } : {}),
+      }],
+    }
     const patchUrl = `${SP_API_ENDPOINT}/listings/2021-08-01/items/${sellerId}/${encodeURIComponent(sku)}` +
       `?marketplaceIds=${MARKETPLACE_ID}&includedData=issues`
     const previewResp = await fetch(`${patchUrl}&mode=VALIDATION_PREVIEW`, {
