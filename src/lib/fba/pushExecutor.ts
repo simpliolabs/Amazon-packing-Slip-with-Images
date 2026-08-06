@@ -1804,9 +1804,6 @@ export async function healChildTwinComposite(
     let familySource: { sku: string; item: Record<string, unknown> } | null | undefined = undefined
     const sizeSourceBySize = new Map<string, Record<string, unknown> | null>()
     let twinDebugLogged = false   // ONE payload-forensics line per run (TWIN_HEAL_DEBUG)
-    // v6: fields the preview negotiation banned ("not allowed / at most 0") — family-invariant
-    // shape verdict, learned on the first SKU and pre-stripped for the rest of the run.
-    let negotiatedBanned: Set<string> | null = null
 
     /* The batch cap counts WRITES, not list positions: every run walks the WHOLE list (the
      * already-healed no-op check is one cheap read each), so the write window ADVANCES across
@@ -1906,29 +1903,17 @@ export async function healChildTwinComposite(
         }
       }
       if (!item) { out.abstained.push(sku); if (out.errors) out.errors[sku] = `no usable ${containerKey} source (no twin, no own size + family source, no size-matched sibling)`; continue }
-      /* v6 PREVIEW NEGOTIATION (2026-08-05, the body_type discovery): a preview given a NEW shape
-       * evaluates it for REAL — v5's five-field write drew "the field 'body_type' … is not
-       * allowed. Expected at most '0'" (for as1/alpha sizes the tightened schema DISALLOWS
-       * body/height; the healthy FBA siblings carry them only as LEGACY data, so a verbatim copy
-       * over-carries). Obey the preview: strip any NON-REQUIRED field it names as not-allowed and
-       * re-preview (≤3 rounds). The shape is family-invariant, so the first SKU's verdict is
-       * cached and pre-stripped for the rest of the run. Echo bypass below still covers the
-       * standing-issue parrot; read-back stays the only real gate. */
-      if (negotiatedBanned) for (const k of negotiatedBanned) if (!(wantedKeys as string[]).includes(k)) delete item[k]
+      /* v9 (2026-08-06, the GROUND-TRUTH probe): v6 obeyed the preview's "body_type … is not
+       * allowed. Expected at most '0'" and stripped body/height — but the sku-attributes probe
+       * proved that objection is a LIE: the only ZERO-ISSUE record shape in the family is the
+       * FIVE-field inline item ({size, size_system, size_class, body_type, height_type} — the
+       * healthy FBA siblings), while every 3-field record (including the PO's Seller-Central-fixed
+       * row, whose body/height SC ALSO silently dropped) still carries the standing 99022. So the
+       * strip-negotiation is DELETED: write the proven sibling shape verbatim, and the bypass
+       * below treats a not-allowed objection about a sub-key the zero-issue sibling carries as
+       * one more preview artifact. Read-back after delete+rewrite remains the only real gate. */
       const ops = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
-      let preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
-      for (let round = 0; round < 3 && !preview.ok; round++) {
-        const msgs = (preview.issues ?? []).map((i) => i.message ?? '').concat(preview.error ? [preview.error] : [])
-        const banned = new Set<string>()
-        for (const m of msgs) {
-          const mm = /field\s+'"?([a-z0-9_]+)"?'.{0,160}?(?:is not allowed|at most '0')/i.exec(m)
-          if (mm?.[1] && !(wantedKeys as string[]).includes(mm[1]) && item[mm[1]] !== undefined) banned.add(mm[1])
-        }
-        if (banned.size === 0) break
-        for (const k of banned) { delete item[k]; (negotiatedBanned ??= new Set<string>()).add(k) }
-        console.log(JSON.stringify({ tag: 'TWIN_HEAL_NEGOTIATED', sku, stripped: [...banned], kept: Object.keys(item) }))
-        preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
-      }
+      const preview = await patchSkuMulti(sellerId, token, productType, sku, ops, 'VALIDATION_PREVIEW')
       if (!preview.ok) {
         /* PREVIEW-ECHO BYPASS (v3, 2026-08-05 — the forensics verdict). The payload is
          * schema-perfect (flat strings, valid enums, both required sub-fields present — verified
@@ -1943,8 +1928,14 @@ export async function healChildTwinComposite(
         const subRes = subKeys.map((k) => conditionalRequirementRegex(k))
         const nameRe = containerNameRegex(containerKey)
         const msgs = (preview.issues ?? []).map((i) => i.message ?? '')
-        const allEcho = msgs.length > 0 && msgs.every((m) => nameRe.test(m) && subRes.some((re) => re.test(m)))
-        const errEcho = msgs.length === 0 && !!preview.error && nameRe.test(preview.error) && subRes.some((re) => re.test(preview.error ?? ''))
+        // v9: a "not allowed / at most '0'" objection about a sub-key we DELIBERATELY carry
+        // (because the zero-issue sibling shape carries it) is a preview artifact, not a verdict —
+        // the probe proved five-field is the only healthy stored shape. Bypassable like the echo.
+        const notAllowedLie = (m: string) => subKeys.some((k) =>
+          item[k] !== undefined && new RegExp(`field\\s+'"?${k}"?'.{0,160}?(?:is not allowed|at most '0')`, 'i').test(m))
+        const allEcho = msgs.length > 0 && msgs.every((m) => (nameRe.test(m) && subRes.some((re) => re.test(m))) || notAllowedLie(m))
+        const errEcho = msgs.length === 0 && !!preview.error &&
+          ((nameRe.test(preview.error) && subRes.some((re) => re.test(preview.error ?? ''))) || notAllowedLie(preview.error))
         if (!allEcho && !errEcho) {
           out.failed.push(sku)
           if (out.errors) out.errors[sku] = `preview: ${preview.error ?? 'rejected'}`
