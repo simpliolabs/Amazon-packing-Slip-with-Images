@@ -34,6 +34,10 @@ export interface BlankSpec {
   dye?: string
   stretch?: string
   fitToSize?: string
+  /** TRUE = the blank is cut on a unisex size chart (PO 2026-08-06: whole current catalog).
+   *  Drives the sizing-clarity copy in bullets/description/features — NEVER the title (PO rule).
+   *  DB-only by design (seeds stay byte-identical to migration 053; fail-open = no claim). */
+  unisex?: boolean
 }
 
 export interface BlankSpecRow { match: RegExp; spec: BlankSpec }
@@ -66,6 +70,7 @@ interface DbRow {
   dye?: string | null
   stretch?: string | null
   fit_to_size?: string | null
+  unisex?: boolean | null
   active?: boolean | null
 }
 
@@ -92,6 +97,7 @@ export function rowToSpec(row: DbRow): BlankSpecRow | null {
   if (row.dye) spec.dye = row.dye
   if (row.stretch) spec.stretch = row.stretch
   if (row.fit_to_size) spec.fitToSize = row.fit_to_size
+  if (row.unisex === true) spec.unisex = true
   return { match, spec }
 }
 

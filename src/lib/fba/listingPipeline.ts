@@ -1684,6 +1684,7 @@ export function buildHighlightsFallback(
   brandName: string, apparelProduct: boolean, capacityFamily: boolean,
   /** See validateItemHighlights — default [] keeps the historical blanket strip. */
   designSeasons: readonly string[] = [],
+  unisexFit = false,
 ): string {
   const val = (re: RegExp): string => {
     const row = details.find((d) => re.test(d.field_name) && (d.recommended_value || '').trim().length > 0 && d.recommended_value.trim().length <= 40)
@@ -1708,6 +1709,7 @@ export function buildHighlightsFallback(
     if (fit && neck) candidates.push(`${fit.toLowerCase().replace(/\s*\bfit\b\s*/i, ' ').trim()} ${neck.toLowerCase()} comfort`.replace(/\s{2,}/g, ' '))
     else if (fit) candidates.push(/\bfit\b/i.test(fit) ? fit.toLowerCase() : `${fit.toLowerCase()} fit`)
     else if (neck) candidates.push(neck.toLowerCase())
+    if (unisexFit && !candidates.some((c) => /unisex/i.test(c))) candidates.splice(1, 0, 'relaxed unisex fit')
     if (sleeve) candidates.push(`easy ${sleeve.toLowerCase()} style`)
     if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('made-to-order personalization')
     candidates.push('all-day everyday wear', 'great for gifting')
@@ -1751,6 +1753,9 @@ export async function buildItemHighlights(
   /** Season policy for THIS regen (makeSeasonPolicy). Defaults to the blanket policy so the
    *  out-of-file caller (regenerate-item-highlight/route.ts, 8 args) is byte-identical to today. */
   season: SeasonPolicy = BLANKET_SEASON_POLICY,
+  /** blankSpec.unisex — adds the unisex-fit fact to the brief + fallback (PO 2026-08-06).
+   *  Defaults false so the out-of-file regen-route caller stays byte-identical. */
+  unisexFit = false,
 ): Promise<string> {
   // Product FACTS for the brief: the attribute rows the pipeline already computed (Material /
   // Fit Type / Neck / Sleeve / Department / Style / Target Gender). Keywords are CONTEXT only.
@@ -1784,6 +1789,7 @@ export async function buildItemHighlights(
   const user = [
     'Product facts:',
     `- Title: ${finalTitle}`,
+    unisexFit ? '- Fit note: unisex sizing, runs relaxed (a TRUE spec fact — "relaxed unisex fit" is a great phrase)' : '',
     designName ? `- Design name: ${designName}` : '',
     ...factRows,
     `- Product type: ${apparelProduct ? 'apparel (garment)' : 'non-apparel'}`,
@@ -1844,7 +1850,7 @@ export async function buildItemHighlights(
   // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant AND
   // (via the keyword-list gate above) a real spec-grounded highlight, not a truncated keyword list.
   if (problems.length === 0) return capItemHighlightRepeats(out)
-  return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective))
+  return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective, unisexFit))
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
@@ -6975,24 +6981,57 @@ export async function applyTerminalNets(
     fit: string | undefined
     brandName: string
     garmentBrand: string | undefined
+    /** blankSpec.unisex — drives the sizing-clarity guarantee (PO 2026-08-06: unisex blanks
+     *  marketed to women MUST say so in bullets/description/features, NEVER the title). */
+    unisex?: boolean
   },
 ): Promise<string[] | string> {
   if (field === 'bullets') {
-    const bullets = value as string[]
+    let bullets = value as string[]
     if (!Array.isArray(bullets) || bullets.length !== 5) return bullets
-    return expandShortBulletsTerminal(ctx.openai, bullets, {
+    bullets = await expandShortBulletsTerminal(ctx.openai, bullets, {
       title: ctx.finalTitle,
       designName: ctx.designName,
       fit: ctx.fit,
       garmentBrand: ctx.garmentBrand,
     })
+    if (ctx.unisex) bullets = ensureUnisexFitClause(bullets)
+    return bullets
   }
   // description
   let d = value as string
   if (!d) return d
   if (ctx.brandName) d = scrubDescriptionBody(d, { brand: ctx.brandName, garmentBrand: ctx.garmentBrand })
+  if (ctx.unisex) d = capDescriptionVisible(injectUnisexFitNote(d))
   if (ctx.brandName) d = await reExpandDescriptionIfShort(ctx.openai, d, { finalTitle: ctx.finalTitle, brand: ctx.brandName, garmentBrand: ctx.garmentBrand })
   return d
+}
+
+/** UNISEX SIZING CLARITY — bullets half (PO 2026-08-06: the whole catalog is unisex blanks
+ *  marketed to women; a woman shopper assumes a women's cut unless told otherwise — a returns
+ *  risk, not a wording nicety). Deterministic and idempotent: no-op when any bullet already
+ *  says "unisex"; otherwise appends the sizing guidance to the fit-adjacent bullet (else the
+ *  last one). Runs INSIDE applyTerminalNets so every path — full regen, section-regen — gets
+ *  it by construction. NEVER applied to the title (explicit PO rule). */
+export function ensureUnisexFitClause(bullets: string[]): string[] {
+  if (!Array.isArray(bullets) || bullets.length === 0) return bullets
+  if (bullets.some((b) => /unisex/i.test(b || ''))) return bullets
+  const out = [...bullets]
+  const idx = out.findIndex((b) => /\b(?:fit|relaxed|comfort|soft)\b/i.test(b || ''))
+  const i = idx >= 0 ? idx : out.length - 1
+  const base = (out[i] || '').trim().replace(/[.\s]+$/, '')
+  out[i] = `${base}. Unisex sizing runs relaxed — many women size down one for a fitted look.`
+  return out
+}
+
+/** UNISEX SIZING CLARITY — description half. Inserts one bolded fit note right after the FIRST
+ *  paragraph (so the later visible-length cap trims tail prose, never this note). Idempotent:
+ *  no-op when the description already mentions "unisex". */
+export function injectUnisexFitNote(d: string): string {
+  if (!d || /unisex/i.test(d)) return d
+  const note = '<p><b>Unisex Fit:</b> Cut on a relaxed unisex size chart — for a more fitted look, many women size down one.</p>'
+  const idx = d.indexOf('</p>')
+  return idx >= 0 ? d.slice(0, idx + 4) + note + d.slice(idx + 4) : note + d
 }
 
 export async function reExpandDescriptionIfShort(
@@ -8683,7 +8722,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // loop; the bullets-only path never did, so a section-regen could ship broadcast bullets < 150. Wire
     // the SAME terminal net here. apparel-gated to match the full-path guard.
     if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
-      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand }
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true }
       bullets = await applyTerminalNets('bullets', bullets, spineCtx) as string[]
     }
     // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
@@ -9077,7 +9116,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // so a section-regen could ship brand-in-body / "screen-printed" / sub-900 broadcast copy. Wire the
     // SAME terminal net here, before the per-design fan-out and the existing capDescriptionVisible below.
     {
-      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand }
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true }
       if (descriptionOnly && brandName) {
         descriptionOnly = await applyTerminalNets('description', descriptionOnly, spineCtx) as string
       }
@@ -9409,7 +9448,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const hlPool = targets.live
       ? targets.keep(analysis).filter((k) => k.selectionSlot !== 'BACKEND')
       : analysis
-    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, hlPool, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season)
+    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, hlPool, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season, blankSpec?.unisex === true)
     // The highlight LLM can still echo "oversized" from its context keywords even with the corrected Fit
     // factRow; scrub it to the true fit and collapse any duplicate word it creates ("oversized relaxed" →
     // "relaxed relaxed" → "relaxed") so the pushable Item Highlight can't ship a fit contradiction.
