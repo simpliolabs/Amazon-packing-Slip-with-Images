@@ -1293,7 +1293,14 @@ const BROADCAST_HEALABLE = new Set<string>([
  *  conditional-requirement signature regex (see conditionalRequirementRegex). */
 interface CompositeHealSpec { containerKey: string; subKeys: string[]; perVariantField: string }
 const COMPOSITE_HEAL_SPECS: CompositeHealSpec[] = [
-  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'], perVariantField: 'size' },
+  /* v8 (2026-08-05, the conditional FLIP): the selector [size_system, age_range_description,
+   * size_class] reads the STANDING listing data — with system/class ABSENT, body_type is BANNED
+   * ("at most 0", the v6 negotiation verdict); once system/class PERSIST, body_type/height_type
+   * become REQUIRED ("minimum 1", the post-heal Ship-all-core rejection). So the full invariant
+   * set names all four sub-keys; on a still-diseased family the v6 preview negotiation strips the
+   * not-yet-allowed pair (round 1 → 3-field write persists), and the next push-failure cycle
+   * re-arms to add them (round 2 → 5-field). Two-pass convergence, all automatic. */
+  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class', 'body_type', 'height_type'], perVariantField: 'size' },
 ]
 /** Item A (2026-07-21, PO approved): return the FIRST composite container this parent has been flagged
  *  needs_attention on, or null if no active flag stands. When non-null, the content + details push
@@ -1958,7 +1965,10 @@ export async function healChildTwinComposite(
         const afterRaw = after?.[containerKey]
         const afterFirst = Array.isArray(afterRaw) && afterRaw[0] && typeof afterRaw[0] === 'object'
           ? afterRaw[0] as Record<string, unknown> : null
-        return afterFirst != null && wantedKeys.every((k) => {
+        // v8: gate only on the keys we actually WROTE — the v6 negotiation may have stripped
+        // sub-keys the standing conditional bans (pre-heal state), and demanding them at
+        // read-back would fail a legitimately persisted partial-stage write.
+        return afterFirst != null && wantedKeys.filter((k) => item[k] !== undefined).every((k) => {
           const got = afterFirst[k]
           if (got === undefined || got === null) return false
           return subsetDeepEqual(item[k], got)
