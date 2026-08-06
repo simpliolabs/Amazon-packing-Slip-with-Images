@@ -1293,14 +1293,14 @@ const BROADCAST_HEALABLE = new Set<string>([
  *  conditional-requirement signature regex (see conditionalRequirementRegex). */
 interface CompositeHealSpec { containerKey: string; subKeys: string[]; perVariantField: string }
 const COMPOSITE_HEAL_SPECS: CompositeHealSpec[] = [
-  /* v8 (2026-08-05, the conditional FLIP): the selector [size_system, age_range_description,
-   * size_class] reads the STANDING listing data — with system/class ABSENT, body_type is BANNED
-   * ("at most 0", the v6 negotiation verdict); once system/class PERSIST, body_type/height_type
-   * become REQUIRED ("minimum 1", the post-heal Ship-all-core rejection). So the full invariant
-   * set names all four sub-keys; on a still-diseased family the v6 preview negotiation strips the
-   * not-yet-allowed pair (round 1 → 3-field write persists), and the next push-failure cycle
-   * re-arms to add them (round 2 → 5-field). Two-pass convergence, all automatic. */
-  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class', 'body_type', 'height_type'], perVariantField: 'size' },
+  /* v10 (2026-08-06, the catch-22 verdict): body_type/height_type are UNWRITABLE via this API —
+   * LIVE validation rejects them "at most '0'" on every new submission (v9 proved it live) while
+   * the standing conditional simultaneously demands them "min 1" on 3-field records. The legacy
+   * five-field records are grandfathered; the 3-field write is the API-achievable cure (v7 proved
+   * it persists) and the residual standing complaint is stepped over by the executor's
+   * previewObjectionsUnrelated bypass — content flows regardless. So subKeys stays the 2-key
+   * list: the heal must deliver the achievable fix, not chase the unwritable pair. */
+  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'], perVariantField: 'size' },
 ]
 /** Item A (2026-07-21, PO approved): return the FIRST composite container this parent has been flagged
  *  needs_attention on, or null if no active flag stands. When non-null, the content + details push
@@ -1352,6 +1352,26 @@ function conditionalRequirementRegex(perVariantField: string): RegExp {
 function containerNameRegex(containerKey: string): RegExp {
   const escaped = containerKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(escaped.replace(/_/g, '[\\s_-]?'), 'i')
+}
+
+/** UNRELATED-ATTRIBUTE ECHO BYPASS (2026-08-06, the Later-Gator incident-closer).
+ *  VALIDATION_PREVIEW re-validates the WHOLE listing, so a listing carrying a standing defect
+ *  (live specimen: the shirt_size body_type catch-22 — required "min 1" by the standing
+ *  conditional yet rejected "at most 0" on every new submission, i.e. unfixable via this API)
+ *  parrots that defect at EVERY preview — including content pushes that never touch the
+ *  defective attribute. This is what blocked all 280 Later-Gator content pushes while the
+ *  content itself was valid. A preview objection that never NAMES the attribute being written
+ *  is a verdict on the standing state, not on this submission → proceed to LIVE. Live remains
+ *  a real synchronous validator (proven tonight: it rejects genuinely-invalid payloads), and
+ *  the verify cron's read-back stays the delivery gate. Scoped tightly: requires ≥1 STRUCTURED
+ *  issue and EVERY issue silent about the written attribute (prose or snake_case form). */
+function previewObjectionsUnrelated(
+  preview: { issues?: Array<{ message?: string }> | null }, attribute: string,
+): boolean {
+  const issues = preview.issues ?? []
+  if (issues.length === 0) return false
+  const nameRe = containerNameRegex(attribute)
+  return issues.every((i) => !nameRe.test(i.message ?? ''))
 }
 
 /** The outcome of one heal pass over a parent hub. `healed` = attrs written live; `abstained` =
@@ -4677,7 +4697,10 @@ async function pushPerFieldFallback(
         autoHealNote = `auto-heal skipped: ${heal.error}`
       }
     }
-    if (!preview.ok) {
+    if (!preview.ok && previewObjectionsUnrelated(preview, p.attribute.spApiKey)) {
+      // Standing-state echo about OTHER attributes — not a verdict on this detail write.
+      console.log(JSON.stringify({ tag: 'PUSH_ECHO_BYPASS', sku, attribute: p.attribute.spApiKey }))
+    } else if (!preview.ok) {
       const baseErr = preview.error && /currently unsupported/i.test(preview.error)
         ? `${preview.error} — Amazon hasn't opened API writes for this attribute yet (launch July 27, 2026).`
         // PARITY with the single-attribute IH site: Amazon 100476 = this SKU's live title is >75 chars.
@@ -4718,10 +4741,11 @@ async function pushCoreFieldFallback(
   for (const r of rows) {
     const attribute = FIELD_CONFIG[r.field].attribute
     const preview = await patchSku(sellerId, token, productType, sku, attribute, r.value, 'VALIDATION_PREVIEW')
-    if (!preview.ok) {
+    if (!preview.ok && !previewObjectionsUnrelated(preview, attribute)) {
       out.push({ field: r.field, ok: false, submissionId: null, error: preview.error })
       await sleep(PATCH_DELAY_MS); continue
     }
+    if (!preview.ok) console.log(JSON.stringify({ tag: 'PUSH_ECHO_BYPASS', sku, attribute }))
     const live = await patchSku(sellerId, token, productType, sku, attribute, r.value, 'LIVE')
     out.push({ field: r.field, ok: live.ok, submissionId: live.submissionId, error: live.error })
     await sleep(PATCH_DELAY_MS)
