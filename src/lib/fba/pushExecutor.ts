@@ -1929,10 +1929,15 @@ export async function healChildTwinComposite(
           // (60142XL-… carries it glued). Search a size-matched sibling; verbatim copy its item.
           const sizeRe = /(?:^|[-_])(XXS|XS|S|M|L|XL|XXL|2XL|3XL|4XL|5XL|6XL)(?=[-_]|$)/i
           const ownSize = sizeRe.exec(sku)?.[1]?.toUpperCase()
-          // CLEAN-token match only ("-2XL-"), never glued prefixes: "6014XL" is ambiguous between
-          // 6014+XL and 601+4XL, and a wrong-size copy would be a real defect — abstain over guess.
+          // CLEAN-token match ("-2XL-") OR a KNOWN-style-prefix glued form (v15, PO Option A
+          // 2026-08-07): an anchored known style number makes the glue unambiguous — "6014S-…" /
+          // "60142XL-…" parse as style 6014 + size (the old fear, "6014XL" = 601+4XL, cannot
+          // occur because 601 is not a known style). Extend the prefix list alongside blank_specs.
           const matched = ownSize
-            ? [...skuAsin.keys()].filter((s) => !blocked.has(s) && new RegExp(`(?:^|[-_])${ownSize}(?=[-_]|$)`, 'i').test(s))
+            ? [...skuAsin.keys()].filter((s) => !blocked.has(s) && (
+                new RegExp(`(?:^|[-_])${ownSize}(?=[-_]|$)`, 'i').test(s) ||
+                new RegExp(`^(?:6014|64000|1717|3001)${ownSize}(?=[-_]|$)`, 'i').test(s)
+              ))
             : []
           let sizedItem: Record<string, unknown> | null = null
           for (const s of matched.slice(0, 3)) {
