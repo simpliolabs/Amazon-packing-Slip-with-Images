@@ -4567,13 +4567,30 @@ export async function executeBulkCorePush(params: PushParams, emit: PushEmit): P
     const notLiveSkus = new Set<string>()
     const activeFields: PushField[] = []
     let parentDropped = false
+    /* PARENT CONTENT (2026-08-07, PO GO): the single-field path already ships the parent via the
+     * baseline-wrapped write; bulk-core dropped it. Collect the parent's changed BROADCAST rows
+     * (title/bullets/description — keywords stays child-only per buildCoreOps' assertion) and
+     * push them after the children through the same baseline mechanism. */
+    const parentRows: CorePlanRow[] = []
+    let parentSkuForPush: string | null = null
     for (const field of requested) {
       const rows = (await loadDiff(parent_asin, field)).filter((d) => d.raw != null)
       let fieldHasChange = false
       for (const d of rows) {
-        // DROP the non-buyable variation parent (asin === parent_asin OR the isParent flag loadDiff set
-        // on the broadcast parent row) — no per-child keywords, and it re-validates its whole record.
-        if (d.asin === parent_asin || d.isParent) { parentDropped = true; continue }
+        // Non-buyable variation parent (asin === parent_asin OR the isParent flag loadDiff set on
+        // the broadcast parent row): route to the baseline-wrapped parent push below (never the
+        // child PATCH loop — the hub re-validates its whole record).
+        if (d.asin === parent_asin || d.isParent) {
+          if (field !== 'keywords' && d.changed) {
+            const rawP = d.raw as string | string[]
+            const scrubP = (x: string) => scrubCelebrityNames(scrubTrademarks(x), `bulk-push:parent:${field}`)
+            parentSkuForPush = d.sku
+            parentRows.push({ field, value: Array.isArray(rawP) ? rawP.map(scrubP) : scrubP(rawP), current: d.current })
+          } else {
+            parentDropped = true
+          }
+          continue
+        }
         if (d.notLive) { notLiveSkus.add(d.sku); continue }   // confirmed-offerless → phantom-prevention
         if (!d.changed) continue                              // only fields that differ from live push
         fieldHasChange = true
@@ -4679,6 +4696,33 @@ export async function executeBulkCorePush(params: PushParams, emit: PushEmit): P
       await sleep(PATCH_DELAY_MS)
     }
 
+    // ── PARENT CONTENT (PO GO 2026-08-07): ship the hub's changed broadcast fields through the
+    // baseline-wrapped write the single-field path already uses (fetchParentFamilyBaseline; falls
+    // back to a plain patch when the baseline read fails). Runs AFTER the children so their
+    // progress streams first; results tally per field like any SKU; unrelated-attribute echoes
+    // are bypassed the same as the per-field fallbacks.
+    if (parentSkuForPush && parentRows.length > 0 && !cancelled && !pushCancelled(params.cancel_token)) {
+      const pSku = parentSkuForPush
+      const baseline = await fetchParentFamilyBaseline(sellerId, token, pSku)
+      for (const r of parentRows) {
+        const attribute = FIELD_CONFIG[r.field].attribute
+        const doPatch = (mode: 'VALIDATION_PREVIEW' | 'LIVE') => baseline
+          ? patchParentSkuWithBaseline(sellerId, token, productType, pSku, attribute, r.value, mode, baseline)
+          : patchSku(sellerId, token, productType, pSku, attribute, r.value, mode)
+        const prev = await doPatch('VALIDATION_PREVIEW')
+        let ok = prev.ok || previewObjectionsUnrelated(prev, attribute)
+        let submissionId: string | null = null
+        let err: string | undefined = prev.error ?? undefined
+        if (ok) { const live = await doPatch('LIVE'); ok = live.ok; submissionId = live.submissionId; err = live.error ?? undefined }
+        if (!tally[r.field]) tally[r.field] = { accepted: 0, failed: 0 }
+        if (!activeFields.includes(r.field)) activeFields.push(r.field)
+        tally[r.field][ok ? 'accepted' : 'failed']++
+        await logPush({ parent_asin, sku: pSku, field: r.field, previous_value: r.current, new_value: Array.isArray(r.value) ? r.value.join(' | ') : r.value, submission_id: submissionId, status: ok ? 'accepted' : 'failed', error_message: ok ? null : (err ?? null) })
+        emit({ type: 'progress', sku: pSku, status: ok ? 'accepted' : 'failed', fields: [FIELD_CONFIG[r.field].label] })
+        await sleep(PATCH_DELAY_MS)
+      }
+    }
+
     // ── ONE re-score for the whole batch + a push-trigger score-history change-point. Capture the
     // fingerprint + post-push overall EXACTLY as executePush does so the epoch + history row measure the
     // just-shipped copy.
@@ -4748,7 +4792,7 @@ export async function executeBulkCorePush(params: PushParams, emit: PushEmit): P
       pushed: totalAccepted, failed: totalFailed, total: skusTouched, cancelled: cancelled || undefined,
       message: cancelled
         ? `Stopped by you — ${skusTouched} SKU(s) processed before the stop; accepted fields stay pushed, the rest are untouched.`
-        : `Shipped ${activeFields.length} core field(s) across ${skusTouched} SKU(s) that needed it${totalFailed ? `, ${totalFailed} field-push(es) failed` : ''}.${parentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''}${skippedNote} Changes typically reflect in 15-30 minutes.`,
+        : `Shipped ${activeFields.length} core field(s) across ${skusTouched} SKU(s) that needed it${totalFailed ? `, ${totalFailed} field-push(es) failed` : ''}.${parentRows.length > 0 ? ' (Variation parent hub also updated.)' : parentDropped ? ' (Variation parent skipped — non-buyable hub.)' : ''}${skippedNote} Changes typically reflect in 15-30 minutes.`,
     })
   } catch (err) {
     emit({ type: 'error', error: err instanceof Error ? err.message : 'Ship all core failed' })
