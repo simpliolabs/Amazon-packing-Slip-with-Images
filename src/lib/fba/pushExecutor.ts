@@ -1293,14 +1293,20 @@ const BROADCAST_HEALABLE = new Set<string>([
  *  conditional-requirement signature regex (see conditionalRequirementRegex). */
 interface CompositeHealSpec { containerKey: string; subKeys: string[]; perVariantField: string }
 const COMPOSITE_HEAL_SPECS: CompositeHealSpec[] = [
-  /* v10 (2026-08-06, the catch-22 verdict): body_type/height_type are UNWRITABLE via this API —
-   * LIVE validation rejects them "at most '0'" on every new submission (v9 proved it live) while
-   * the standing conditional simultaneously demands them "min 1" on 3-field records. The legacy
-   * five-field records are grandfathered; the 3-field write is the API-achievable cure (v7 proved
-   * it persists) and the residual standing complaint is stepped over by the executor's
-   * previewObjectionsUnrelated bypass — content flows regardless. So subKeys stays the 2-key
-   * list: the heal must deliver the achievable fix, not chase the unwritable pair. */
-  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class'], perVariantField: 'size' },
+  /* v11 (2026-08-07, the AGE-SELECTOR discovery — supersedes v10's "unwritable catch-22"):
+   * the conditional's selector is [size_system, age_range_description, size_class] over STORED
+   * data, and it has THREE states, not two:
+   *   - system/class ABSENT           → body/height BANNED ("at most 0" — the v9 live rejection)
+   *   - system/class present, age ABSENT → 3-field tolerated (the v7 era)
+   *   - system/class present, age PRESENT → body/height REQUIRED ("min 1") and now WRITABLE —
+   *     the PO's Age Range details push armed this state and re-blocked all content writes on
+   *     the 3-field FBM SKUs (2026-08-07 Ship: 70 failed naming body/height).
+   * v9's "catch-22" verdict was measured in the age-ABSENT state. Any family that receives the
+   * age_range_description detail push develops the third state, so the DETECTOR must recognize
+   * the body/height layer: subKeys names all four. The healer copies a five-field sibling item
+   * verbatim; the v9 notAllowedLie bypass no-ops when nothing is banned; read-back gates on the
+   * keys actually written. */
+  { containerKey: 'shirt_size', subKeys: ['size_system', 'size_class', 'body_type', 'height_type'], perVariantField: 'size' },
 ]
 /** Item A (2026-07-21, PO approved): return the FIRST composite container this parent has been flagged
  *  needs_attention on, or null if no active flag stands. When non-null, the content + details push
