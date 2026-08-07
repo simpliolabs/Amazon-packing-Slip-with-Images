@@ -158,6 +158,7 @@ async function runHeal(task: PushVerificationTask): Promise<{ converged: boolean
           containerKey: payload.composite.containerKey,
           subKeys: payload.composite.subKeys,
           skus: payload.twin.skus,
+          deleteContainer: payload.deleteContainer === true,
         })
       : payload.composite
       ? await healParentComposite(db, {

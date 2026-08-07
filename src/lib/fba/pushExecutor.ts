@@ -1808,9 +1808,9 @@ const TWIN_HEAL_BATCH = 25
  */
 export async function healChildTwinComposite(
   db: SupabaseClient,
-  opts: { parent_asin: string; productType: string; containerKey: string; subKeys: string[]; skus: string[] },
+  opts: { parent_asin: string; productType: string; containerKey: string; subKeys: string[]; skus: string[]; deleteContainer?: boolean },
 ): Promise<HealResult> {
-  const { parent_asin, productType, containerKey, subKeys, skus } = opts
+  const { parent_asin, productType, containerKey, subKeys, skus, deleteContainer } = opts
   const out: HealResult = { healed: [], abstained: [], failed: [], errors: {} }
   try {
     const token = await getAccessToken()
@@ -1845,6 +1845,26 @@ export async function healChildTwinComposite(
       const ownRaw = ownAttrs?.[containerKey]
       const ownFirst = Array.isArray(ownRaw) && ownRaw[0] && typeof ownRaw[0] === 'object'
         ? ownRaw[0] as Record<string, unknown> : null
+      /* v14 DELETE MODE (2026-08-07, the containerless discovery — PROVEN by the PO's Ship:
+       * all 25 containerless SKUs ACCEPTED bullets while every 3-field SKU failed the body/height
+       * demand, and containerless records carry ZERO standing issues). FBM offer-twins do not
+       * need their own shirt_size (display size comes from the catalog's five-field FBA
+       * contributions + variation theme) — in the age-armed state the container is pure poison,
+       * so the heal REMOVES it: delete-with-value (v7-proven), read back ABSENCE. Payload-gated
+       * (deliberate, PO-armed) — never the default. */
+      if (deleteContainer) {
+        if (!ownFirst) { out.healed.push(sku); continue }   // already containerless
+        if (writes >= TWIN_HEAL_BATCH) { out.failed.push(sku); if (out.errors) out.errors[sku] = 'deferred: beyond per-run write cap'; continue }
+        writes++
+        const delOnly = [{ op: 'delete' as const, path: `/attributes/${containerKey}`, value: ownRaw }]
+        const delR = await patchSkuMulti(sellerId, token, productType, sku, delOnly as unknown as { op: 'replace'; path: string; value: unknown }[], 'LIVE')
+        if (!delR.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `delete: ${delR.error ?? 'rejected'}`; continue }
+        await sleep(PATCH_DELAY_MS)
+        const after = await fetchSkuAttributes(sellerId, token, sku)
+        const gone = !after || after[containerKey] === undefined || after[containerKey] === null
+        if (gone) { out.healed.push(sku) } else { out.failed.push(sku); if (out.errors) out.errors[sku] = 'container still present after delete' }
+        continue
+      }
       if (ownFirst && wantedKeys.every((k) => ownFirst[k] !== undefined && ownFirst[k] !== null)) {
         out.healed.push(sku)
         continue

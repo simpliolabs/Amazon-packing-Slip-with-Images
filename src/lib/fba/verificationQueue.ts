@@ -107,6 +107,9 @@ export interface HealPayload {
    *  SKU's same-ASIN twin — same size/color by definition, so no agreement problem exists. Set
    *  alongside `composite` (which names the container); `skus` = the blocked children. */
   twin?: { skus: string[] }
+  /** v14: delete the composite container on the twin SKUs instead of completing it (the
+   *  containerless-cure — payload-gated, deliberate). */
+  deleteContainer?: boolean
 }
 
 /** Register a SELF-HEAL task on the existing verify queue (migration 042 kind='heal'). Reuses the
