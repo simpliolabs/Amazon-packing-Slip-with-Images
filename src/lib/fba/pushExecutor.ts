@@ -1974,6 +1974,28 @@ export async function healChildTwinComposite(
         console.log(JSON.stringify({ tag: 'TWIN_HEAL_PREVIEW_ECHO_BYPASS', sku, containerKey }))
       }
       let live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
+      /* v12 TOP-LEVEL FALLBACK (2026-08-07, the double-bind verdict): in the age-present state
+       * Amazon SIMULTANEOUSLY demands 'Shirt Size'.body_type/height_type ("min 1" — blocks all
+       * content writes) and bans writing them INLINE ("at most 0" for the attributes 'Shirt Body
+       * Type'/'Shirt Height Type' — attempt-2 live census, same selector tuple, minutes apart).
+       * The rejection's own attribute names are the clue: Amazon parses the inline sub-fields as
+       * the STANDALONE top-level attributes shirt_body_type/shirt_height_type — so write them
+       * THERE (the shape every flat attr uses) plus the tolerated 3-field inline composite, and
+       * let Amazon fold. Read-back below then answers whether the fold happens. */
+      if (!live.ok && /is not allowed|at most '0'/i.test(live.error ?? '')) {
+        const bodyVal = item.body_type
+        const heightVal = item.height_type
+        const slim = { ...item }
+        delete slim.body_type
+        delete slim.height_type
+        const slimOps = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [slim] }]
+        const topOps = [
+          ...(bodyVal !== undefined ? [{ op: 'replace' as const, path: '/attributes/shirt_body_type', value: [{ value: bodyVal, marketplace_id: MARKETPLACE_ID }] }] : []),
+          ...(heightVal !== undefined ? [{ op: 'replace' as const, path: '/attributes/shirt_height_type', value: [{ value: heightVal, marketplace_id: MARKETPLACE_ID }] }] : []),
+        ]
+        live = await patchSkuMulti(sellerId, token, productType, sku, [...slimOps, ...topOps], 'LIVE')
+        if (live.ok) console.log(JSON.stringify({ tag: 'TWIN_HEAL_TOPLEVEL_FALLBACK', sku, wrote: topOps.map((o) => o.path) }))
+      }
       if (!live.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `live: ${live.error ?? 'rejected'}`; continue }
       await sleep(PATCH_DELAY_MS)
       // Tolerant read-back — same subsetDeepEqual discipline as the parent heal (Amazon normalizes).
