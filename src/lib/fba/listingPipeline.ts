@@ -7638,11 +7638,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // available here. Comfort Colors sweatshirts fall back to the guess rather than getting
   // "Short Sleeve" force-pushed on (no regression on non-tees).
   const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
-  const looksTee = /\bt[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover|long[\s-]?sleeve/i.test(garmentHay)
+  /* looksShirt (2026-08-07, the Later-Gator unisex miss): the old `looksTee` gate demanded a
+   * tee/tshirt token AND rejected any "long sleeve" — so a LONG SLEEVE SHIRT family (CC 6014,
+   * title says just "Shirt") got blankSpec=NULL and lost EVERY spec fact (brand casing, fit,
+   * unisex…). A long-sleeve shirt is still a shirt; the gate's real job is only to keep true
+   * non-shirt classes (sweatshirt/hoodie/fleece/pullover) from inheriting shirt-blank facts. */
+  const isLongSleeve = /long[\s-]?sleeve/i.test(garmentHay)
+  const looksShirt = /\bt?[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover/i.test(garmentHay)
   // SKUs join the hay (2026-07-31): print-on-demand copy often never names the blank ("Gildan"
   // appears nowhere on the We Still Do listing) but the SKUs embed the style number ("640002XL-…").
   const skuHay = (input.children ?? []).map((c) => c.sku).filter(Boolean).join(' ')
-  const blankSpec = apparelProduct && looksTee ? matchBlankSpec(await loadBlankSpecRows(), attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
+  const blankSpecMatched = apparelProduct && looksShirt ? matchBlankSpec(await loadBlankSpecRows(), attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
+  // A long-sleeve family must not inherit a short-sleeve blank row's sleeve fact (the CC row is
+  // the 1717/short-sleeve spec until the PO adds a 6014 row) — drop the contradicted fact, keep the rest.
+  const blankSpec = blankSpecMatched && isLongSleeve && /short/i.test(blankSpecMatched.sleeve ?? '')
+    ? { ...blankSpecMatched, sleeve: undefined }
+    : blankSpecMatched
   // Shopper-facing garment brand, in AUTHORITATIVE casing — from BLANK_SPECS ONLY. Empty when the blank
   // is unknown: attributePin is a lowercase SEARCH phrase ("vintage cat shirt"), NOT a confirmed brand, so
   // title-casing it as one would force "Vintage Cat" into copy on the print-on-demand majority — the exact
