@@ -4346,12 +4346,21 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
 
     // ── PHASE 4 — write-through (per field with ≥1 accept) + ONE re-score for the whole batch.
     const acceptedFields = livePlans.filter((p) => tally[p.field].accepted > 0)
-    if (acceptedFields.length > 0) {
+    /* SHIP-TRUTH for the NO-OP field (PO 2026-08-06, second report of "not marking all as done"):
+     * a field whose differ read EVERY SKU already-correct never wrote, never logged, and never
+     * write-through'd — so its card could NEVER flip to "On Amazon" and re-pushing no-ops forever.
+     * The differ's per-SKU read IS live truth (we just fetched it): write it through exactly like
+     * an accept. Guarded on a completed, non-empty run so a cancelled or zero-SKU pass can't
+     * false-stamp. Re-score + verify-queue stay gated on REAL accepts below (nothing changed). */
+    const verifiedFields = (!cancelled && skuSet.length > 0)
+      ? livePlans.filter((p) => tally[p.field].accepted === 0 && tally[p.field].failed === 0)
+      : []
+    if (acceptedFields.length > 0 || verifiedFields.length > 0) {
       try {
         const { data: recR } = await db.from('listing_seo_recommendations').select('product_details_improvements').eq('parent_asin', parent_asin).single()
         const pdi = ((recR?.product_details_improvements ?? []) as Record<string, unknown>[])
         let touched = false
-        for (const p of acceptedFields) {
+        for (const p of [...acceptedFields, ...verifiedFields]) {
           const wantField = normalizeFieldName(p.field)
           for (const row of pdi) {
             if (normalizeFieldName(String(row.field_name ?? '')) === wantField) { row.current_value = p.value; row.recommended_value = p.value; row.enum_valid = true; touched = true }
@@ -4359,6 +4368,8 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
         }
         if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
       } catch (e) { console.warn('[bulk-details] write-through failed (non-fatal):', e) }
+    }
+    if (acceptedFields.length > 0) {
 
       emit({ type: 'rescore', message: 'Re-scoring listing…' })
       try {
