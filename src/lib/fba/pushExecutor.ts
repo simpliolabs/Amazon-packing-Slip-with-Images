@@ -1957,8 +1957,9 @@ export async function healChildTwinComposite(
         // v9: a "not allowed / at most '0'" objection about a sub-key we DELIBERATELY carry
         // (because the zero-issue sibling shape carries it) is a preview artifact, not a verdict —
         // the probe proved five-field is the only healthy stored shape. Bypassable like the echo.
+        const cur0 = item as Record<string, unknown>   // non-null: guarded above; closure over the mutable let defeats TS narrowing
         const notAllowedLie = (m: string) => subKeys.some((k) =>
-          item[k] !== undefined && new RegExp(`field\\s+'"?${k}"?'.{0,160}?(?:is not allowed|at most '0')`, 'i').test(m))
+          cur0[k] !== undefined && new RegExp(`field\\s+'"?${k}"?'.{0,160}?(?:is not allowed|at most '0')`, 'i').test(m))
         const allEcho = msgs.length > 0 && msgs.every((m) => (nameRe.test(m) && subRes.some((re) => re.test(m))) || notAllowedLie(m))
         const errEcho = msgs.length === 0 && !!preview.error &&
           ((nameRe.test(preview.error) && subRes.some((re) => re.test(preview.error ?? ''))) || notAllowedLie(preview.error))
@@ -1994,7 +1995,14 @@ export async function healChildTwinComposite(
           ...(heightVal !== undefined ? [{ op: 'replace' as const, path: '/attributes/shirt_height_type', value: [{ value: heightVal, marketplace_id: MARKETPLACE_ID }] }] : []),
         ]
         live = await patchSkuMulti(sellerId, token, productType, sku, [...slimOps, ...topOps], 'LIVE')
-        if (live.ok) console.log(JSON.stringify({ tag: 'TWIN_HEAL_TOPLEVEL_FALLBACK', sku, wrote: topOps.map((o) => o.path) }))
+        if (live.ok) {
+          console.log(JSON.stringify({ tag: 'TWIN_HEAL_TOPLEVEL_FALLBACK', sku, wrote: topOps.map((o) => o.path) }))
+          /* v13: the read-back must gate on what the ACCEPTED write carried — v12 kept gating on
+           * the five-field item, declared the accepted slim+top-level write a mismatch, and the
+           * escalation then DELETED the container and rewrote the unwritable five-field shape,
+           * leaving 25 SKUs with NO shirt_size at all (2026-08-07 attempt-3 damage). */
+          item = slim
+        }
       }
       if (!live.ok) { out.failed.push(sku); if (out.errors) out.errors[sku] = `live: ${live.error ?? 'rejected'}`; continue }
       await sleep(PATCH_DELAY_MS)
@@ -2007,10 +2015,11 @@ export async function healChildTwinComposite(
         // v8: gate only on the keys we actually WROTE — the v6 negotiation may have stripped
         // sub-keys the standing conditional bans (pre-heal state), and demanding them at
         // read-back would fail a legitimately persisted partial-stage write.
-        return afterFirst != null && wantedKeys.filter((k) => item[k] !== undefined).every((k) => {
+        const cur = item as Record<string, unknown>   // non-null: guarded before the closure; re-assigned only to non-null shapes
+        return afterFirst != null && wantedKeys.filter((k) => cur[k] !== undefined).every((k) => {
           const got = afterFirst[k]
           if (got === undefined || got === null) return false
-          return subsetDeepEqual(item[k], got)
+          return subsetDeepEqual(cur[k], got)
         })
       }
       let persisted = await readBack()
@@ -2039,11 +2048,25 @@ export async function healChildTwinComposite(
         if (!del.ok) console.log(JSON.stringify({ tag: 'TWIN_HEAL_DELETE_FAILED', sku, err: (del.error ?? 'rejected').slice(0, 200) }))
         if (del.ok) {
           await sleep(PATCH_DELAY_MS)
-          live = await patchSkuMulti(sellerId, token, productType, sku, ops, 'LIVE')
+          /* v13: rewrite the CURRENT item (post-negotiation/post-fallback shape), never the
+           * original ops — v12 rewrote the five-field original after the delete, Amazon
+           * rejected it ("at most 0"), and 25 SKUs were left with NO container at all. */
+          const rewriteOps = [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [item] }]
+          live = await patchSkuMulti(sellerId, token, productType, sku, rewriteOps, 'LIVE')
           if (live.ok) {
             await sleep(PATCH_DELAY_MS)
             persisted = await readBack()
             if (persisted) console.log(JSON.stringify({ tag: 'TWIN_HEAL_DELETE_REWRITE_OK', sku, containerKey }))
+          } else {
+            // v13 RESTORE GUARANTEE: a rejected rewrite after a successful delete must NEVER end
+            // with the container absent — write the minimal known-good shape (strip the sub-keys
+            // Amazon bans in this state) so the SKU is no worse than before the escalation.
+            const restore: Record<string, unknown> = { ...item }
+            delete restore.body_type
+            delete restore.height_type
+            const rest = await patchSkuMulti(sellerId, token, productType, sku,
+              [{ op: 'replace' as const, path: `/attributes/${containerKey}`, value: [restore] }], 'LIVE')
+            console.log(JSON.stringify({ tag: 'TWIN_HEAL_RESTORE', sku, ok: rest.ok, err: rest.ok ? undefined : (rest.error ?? 'rejected').slice(0, 160) }))
           }
         }
       }
