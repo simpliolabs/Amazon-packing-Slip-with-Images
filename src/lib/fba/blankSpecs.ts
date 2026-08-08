@@ -276,6 +276,15 @@ export function applyBlankBrandNetToDetails(
   if (!current.trim()) return { details: arr, changed: false }
   const netted = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, titles, blank))
   if (netted === current) return { details: arr, changed: false }
-  const out = arr.map((p, i) => (i === idx ? { ...p, recommended_value: netted } : p))
+  // WATERFALL WINS (PO ruling, SELLER_PROFILE §5 — adversarial precedence question 2026-08-08):
+  // this net MAY rewrite even a sticky-kept PO-ACCEPTED Item Highlight when the shipping titles
+  // lack the blank brand — §5's MUST ("the Item Highlights MUST carry it") is the PO's standing
+  // rule, so brand presence beats the accepted string. Only recommended_value changes
+  // (current_value stays at the accepted/live value), so the rewrite surfaces as a fresh Push
+  // proposal requiring PO action — it never ships silently. Stamp value_source:'spec' (the value
+  // is blank_specs-derived truth) so the NEXT regen's sticky gate classifies it as a legitimate
+  // spec re-propose instead of re-deriving the same snap→net cycle every regen. Logged loudly.
+  console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'details-rewrite', field: detailValueToString(arr[idx].field_name), from: current, to: netted, note: 'waterfall-over-sticky: may rewrite an accepted IH per SELLER_PROFILE §5; surfaces as Push, never ships silently' }))
+  const out = arr.map((p, i) => (i === idx ? { ...p, recommended_value: netted, value_source: 'spec' } : p))
   return { details: out, changed: true }
 }

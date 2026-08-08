@@ -120,6 +120,10 @@ describe('T4.9 applyBlankBrandNetToDetails — the stored-IH re-net for title pa
     expect(out.changed).toBe(true)
     expect(String(out.details[1].recommended_value).startsWith('authentic Comfort Colors blank')).toBe(true)
     expect(String(out.details[1].recommended_value).length).toBeLessThanOrEqual(75)
+    // WATERFALL WINS (SELLER_PROFILE §5, ruling 2026-08-08): the rewritten row is stamped with
+    // spec provenance (blank_specs-derived) so the NEXT regen's sticky gate reads it as a
+    // legitimate spec re-propose instead of snapping it back and re-netting every regen.
+    expect((out.details[1] as { value_source?: string }).value_source).toBe('spec')
     expect(out.details[0]).toBe(details[0]) // non-IH rows keep identity
     expect(details[1].recommended_value).toBe('soft ring-spun cotton, relaxed crew neck fit') // input not mutated
   })

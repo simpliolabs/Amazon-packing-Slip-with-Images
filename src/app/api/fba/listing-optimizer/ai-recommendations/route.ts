@@ -42,6 +42,13 @@ import { maybeEnqueueContentReconcile, jsonChanged, perChildChanged, resolveTitl
 // the persist-time manual-lock guard both change the SHIPPED title after the stored/fresh IH was
 // netted — both sites re-run the ONE shared net against the title that actually ships.
 import { resolveBlankRowForNet, applyBlankBrandNetToDetails } from '@/lib/fba/blankSpecs'
+// STICKY DETAILS (PO 2026-08-08: "Collarless" churned over the accepted-pushed "Round Collar").
+// ONE pure gate on the full path (after enum coercion, before the live-score gap count) — an
+// accepted details:* push is a standing approval; only blank_specs provenance
+// (value_source='spec') — plus the narrow crew-collar 'ruling' vs an accepted "Collarless" — may
+// re-propose over it. See stickyDetails.ts for the dual-write-path argument (the #79 partial
+// never rebuilds details).
+import { applyStickyDetails, collectAcceptedDetailPushes, type AcceptedPushRow } from '@/lib/fba/stickyDetails'
 
 function getAdminSupabase() {
   return createClient(
@@ -1208,6 +1215,92 @@ export async function POST(req: NextRequest) {
             console.warn('[AI Recs] product-detail enum validation skipped (non-fatal):', vErr instanceof Error ? vErr.message : vErr)
           }
 
+          /* STICKY DETAILS GATE (PO 2026-08-08 — supersedes the 2026-08-04 PDI provenance
+           * carry-forward, whose current_value-only carry it PRESERVES for rows without push
+           * evidence). "recommended_value is NEVER carried" was the bug the PO falsified: the
+           * mega-audit + dedicated details fill re-answer EVERY attribute from scratch each regen,
+           * so LLM churn ≡ "changed recommendation" and the accepted-pushed "Round Collar" became
+           * "Collarless". An ACCEPTED `details:<sp_api_key>` push is a STANDING APPROVAL (the
+           * manual-title-lock precedent): a fresh row may re-propose over it ONLY with
+           * deterministic spec provenance (value_source='spec', stamped at the pipeline's
+           * blank_specs sites — the PO-editable table is the legit trigger) or the narrow
+           * 'ruling' provenance (crew-collar mapping vs an accepted "Collarless" only). Everything
+           * else snaps back (rec=cur=V → the "✓ On Amazon" chip renders; V passed Amazon
+           * validation at push, so enum_valid=true is safe post-coercion). The evidence read fails
+           * CLOSED: fall back to the prior rows' write-through equality mirror rather than trust
+           * fresh LLM output. POSITION (adversarial LOW 2026-08-08): AFTER enum coercion
+           * (sp_api_key stamped) and BEFORE the live-score block below, so the Features gap count
+           * sees the SAME post-snap rows the next sync will read (#85 no-flip-flop — a snapped row
+           * is not a gap this regen either). Still the ONE seam where fresh proposals exist
+           * (dual-write doctrine: the #79 partial path never rebuilds details; its only detail
+           * write is the deterministic IH re-net over the stored — already-sticky — row, i.e.
+           * sticky-keep → net → caps by construction). The ihReverted waterfall re-net stays at
+           * the persist boundary (it must key on the titles shipping AFTER the manual-lock guard). */
+          let stickyIhReverted = false
+          try {
+            if (Array.isArray(result.product_details_improvements)) {
+              // Prior stored rows (carry-forward source + the fail-closed equality mirror). Read
+              // here because the lock/prior read runs AFTER the live score; a failed read leaves
+              // null, which applyStickyDetails treats as "no prior rows" (same as no prior).
+              let stickyPriorPdi: unknown = null
+              try {
+                const { data: priorRow, error: priorErr } = await supabase
+                  .from('listing_seo_recommendations')
+                  .select('product_details_improvements')
+                  .eq('parent_asin', parent_asin)
+                  .maybeSingle()
+                if (priorErr) throw new Error(priorErr.message)
+                stickyPriorPdi = (priorRow as { product_details_improvements?: unknown } | null)?.product_details_improvements ?? null
+              } catch (e) {
+                console.warn(`[ai-recommendations] sticky-details prior-row read failed for ${parent_asin} (carry-forward + equality mirror unavailable this run):`, e instanceof Error ? e.message : e)
+              }
+              let acceptedByKey: Map<string, string> | null = null
+              try {
+                // Same evidence rows verify-push treats as ground truth (verify-push/route.ts:198-238):
+                // latest accepted, non-rolled-back row per details:<sp_api_key>. DESC order is
+                // load-bearing — collectAcceptedDetailPushes keeps the FIRST row per key.
+                // EXHAUSTIVE read (adversarial MEDIUM 2026-08-08): ONE bulk detail push on a large
+                // dual-SKU family exceeds a single 1000-row page (26 attrs × 33 ASINs × 2 SKUs ≈
+                // 1,716 accepted rows — B0FKKN8XKV itself is a 33-SKU family), and with DESC order
+                // the earliest-pushed attributes of that session would fall off a single page:
+                // lookupAccepted would miss their key and the row would fall to the legacy
+                // carry-forward — fresh LLM churn over a PO-accepted value, the exact bug this
+                // gate kills. Page until a short page; a truncation at the hard cap is LOUD.
+                const PAGE = 1000
+                const allRows: AcceptedPushRow[] = []
+                for (let page = 0; ; page++) {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const { data: pl, error: plErr } = await (supabase as any)
+                    .from('keyword_push_log')
+                    .select('field, new_value, status, pushed_at, rolled_back_at')
+                    .eq('parent_asin', parent_asin)
+                    .like('field', 'details:%')
+                    .eq('status', 'accepted')
+                    .order('pushed_at', { ascending: false })
+                    .order('id', { ascending: false })   // stable tiebreaker: same-timestamp rows must not shuffle across page boundaries
+                    .range(page * PAGE, (page + 1) * PAGE - 1)
+                  if (plErr) throw new Error(plErr.message ?? String(plErr))
+                  allRows.push(...((pl ?? []) as AcceptedPushRow[]))
+                  if (!pl || pl.length < PAGE) break
+                  if (page >= 24) {   // hard stop ~25k rows — far beyond any real family; NEVER silent
+                    console.warn(`[ai-recommendations] sticky-details evidence read TRUNCATED at ${allRows.length} rows for ${parent_asin} — attributes whose latest accepted push predates this window are invisible to the sticky gate`)
+                    break
+                  }
+                }
+                acceptedByKey = collectAcceptedDetailPushes(allRows)
+              } catch (e) {
+                console.warn(`[ai-recommendations] sticky-details evidence read FAILED for ${parent_asin} — fail closed to prior-row equality:`, e instanceof Error ? e.message : e)
+              }
+              const sticky = applyStickyDetails({
+                fresh: result.product_details_improvements,
+                prior: stickyPriorPdi,
+                acceptedByKey,
+              })
+              if (sticky.changed) result.product_details_improvements = sticky.details as unknown as typeof result.product_details_improvements
+              stickyIhReverted = sticky.ihReverted
+            }
+          } catch (e) { console.warn('[ai-recommendations] sticky-details gate failed (non-fatal):', e instanceof Error ? e.message : e) }
+
           // ── LIVE SCORE (computed UP FRONT) — drives the issues panel AND verdict gating below ──
           // Scored on the live listing_content rows (independent of the AI rewrite). Best-effort:
           // scoring must NEVER break a generation that already produced recommendations. We need it
@@ -1453,7 +1546,7 @@ export async function POST(req: NextRequest) {
           let titleSourceOut: 'ai' | 'manual' = 'ai'
           let priorKwJson: string | null = null   // prior stored keywords, for the degraded-keywords preserve below
           let priorDesc: string | null = null     // prior stored description, for the degraded-description preserve (Phase 3)
-          let priorPdi: unknown = null            // prior detail rows, for the push-provenance carry-forward below
+          // (prior detail rows are read by the STICKY DETAILS GATE above the live score — not here)
           let priorTitle: string | null = null    // prior stored title, for the content-reconcile changed-compare below
           let priorBullets: unknown = null        // prior stored bullets (JSONB), same reconcile compare
           let priorPerChildTitles: unknown = null       // prior per-child twins (JSONB) — the push
@@ -1480,7 +1573,6 @@ export async function POST(req: NextRequest) {
             if (lockErr) throw new Error(lockErr.message)
             priorKwJson = (lockRow as { recommended_keywords?: string } | null)?.recommended_keywords ?? null
             priorDesc = (lockRow as { recommended_description?: string } | null)?.recommended_description ?? null
-            priorPdi = (lockRow as { product_details_improvements?: unknown } | null)?.product_details_improvements ?? null
             priorTitle = (lockRow as { recommended_title?: string } | null)?.recommended_title ?? null
             priorBullets = (lockRow as { recommended_bullets?: unknown } | null)?.recommended_bullets ?? null
             priorPerChildTitles = (lockRow as { per_child_titles?: unknown } | null)?.per_child_titles ?? null
@@ -1589,35 +1681,27 @@ export async function POST(req: NextRequest) {
           // (instruction/priority/notes); verdict/current_status/replacement_content are computed
           // from rec-vs-cache. A locked+shipped title now derives DONE with the seller's kept title
           // displayed (the "shipped but still red" class dies here).
-          /* PDI PROVENANCE CARRY-FORWARD (PO 2026-08-04: after a full audit, already-on-Amazon
-           * detail rows regressed to "Push" — the audit rebuilds rows with current_value null,
-           * discarding the push write-through's live-truth cache; Auto Push then correctly
-           * diff-skips them while the panel claims they still need pushing). current_value IS the
-           * live-Amazon cache: carry the prior row's value forward whenever the fresh row doesn't
-           * know one. Match by sp_api_key first, folded field name second. recommended_value is
-           * NEVER carried — a changed recommendation correctly shows Push again. */
-          try {
-            type PdiRow = { field_name?: string; sp_api_key?: string; current_value?: string | null }
-            const priorRows: PdiRow[] = Array.isArray(priorPdi) ? priorPdi as PdiRow[] : []
-            if (priorRows.length && Array.isArray(rec.product_details_improvements)) {
-              const fold = (s: unknown): string => String(s ?? '').toLowerCase().replace(/[\s_-]+/g, '')
-              const byKey = new Map<string, string>()
-              for (const p of priorRows) {
-                const cur = String(p.current_value ?? '').trim()
-                if (!cur) continue
-                if (p.sp_api_key) byKey.set(`k:${fold(p.sp_api_key)}`, cur)
-                if (p.field_name) byKey.set(`f:${fold(p.field_name)}`, cur)
-              }
-              if (byKey.size) {
-                rec.product_details_improvements = rec.product_details_improvements.map((row) => {
-                  const r = row as PdiRow
-                  if (String(r.current_value ?? '').trim()) return row
-                  const cur = (r.sp_api_key ? byKey.get(`k:${fold(r.sp_api_key)}`) : undefined) ?? byKey.get(`f:${fold(r.field_name)}`)
-                  return cur ? { ...row, current_value: cur } : row
-                })
-              }
+          // ORDER (#523 doctrine: sticky-keep → waterfall net → caps). The sticky gate itself ran
+          // BEFORE the live score above (see the STICKY DETAILS GATE block); only this re-net stays
+          // at the persist boundary because it must key on the titles shipping AFTER the manual-lock
+          // guard. A sticky-snapped Item Highlight was brand-netted against the title that shipped
+          // AT PUSH TIME — re-run the ONE shared net (it caps internally) against the titles
+          // shipping NOW. Revert-only: an un-snapped IH already ran the pipeline's own net this
+          // regen (and the lock guard's re-net above when the manual title was kept). WATERFALL
+          // WINS (PO ruling, SELLER_PROFILE §5): this MAY rewrite the reverted PO-accepted IH
+          // string when the shipping titles lack the blank brand — it surfaces as a fresh Push
+          // proposal (current_value untouched), stamped value_source='spec' inside the net so the
+          // next regen's sticky pass treats it as a legitimate spec re-propose.
+          if (stickyIhReverted) {
+            try {
+              const shipTitles = [String(rec.recommended_title ?? ''), ...((Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { title?: string }[]).map((c) => String(c?.title ?? ''))]
+              const blankRow = await resolveBlankRowForNet(supabase, { parentAsin: parent_asin, childAsin: children[0]?.asin ?? null, titles: shipTitles })
+              const netted = applyBlankBrandNetToDetails(rec.product_details_improvements, shipTitles, blankRow)
+              if (netted.changed) rec.product_details_improvements = netted.details as unknown as typeof rec.product_details_improvements
+            } catch (e) {
+              console.warn('[ai-recommendations] post-sticky IH re-net failed (kept IH ships exactly as accepted):', e instanceof Error ? e.message : e)
             }
-          } catch (e) { console.warn('[ai-recommendations] PDI provenance carry-forward failed (non-fatal):', e instanceof Error ? e.message : e) }
+          }
 
           try {
             rec.action_plan = deriveActionPlan(
@@ -1896,12 +1980,18 @@ export async function GET(req: NextRequest) {
   // table (migrations 015/016) — the card just shows no ship date, never errors.
   const field_pushed_at: Record<string, string> = {}
   try {
+    // ROLLED-BACK rows are excluded (adversarial LOW 2026-08-08): verify-push's rollback stamps
+    // rolled_back_at while LEAVING status='accepted', so without this filter a rolled-back detail
+    // push would still win the map and the panel would show a "shipped Xd ago" chip for a value
+    // the sticky gate (collectAcceptedDetailPushes) and verify-push both correctly ignore — the
+    // evidence readers must agree.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: pl } = await (supabase as any)
       .from('keyword_push_log')
       .select('field, pushed_at')
       .eq('parent_asin', parent_asin)
       .eq('status', 'accepted')
+      .is('rolled_back_at', null)
       .order('pushed_at', { ascending: false })
     for (const r of (pl ?? []) as { field: string | null; pushed_at: string | null }[]) {
       if (r.field && r.pushed_at && !field_pushed_at[r.field]) field_pushed_at[r.field] = r.pushed_at

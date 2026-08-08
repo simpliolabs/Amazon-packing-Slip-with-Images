@@ -264,6 +264,16 @@ export function isItemHighlightsField(
   return f === 'itemhighlight' || f === 'itemhighlights' || f === 'titledifferentiation'
 }
 
+/** collar_style from the NECKLINE truth — the #161 PO mapping as a pure rule (2026-08-08 root
+ *  fix): Amazon's collar_style enum has NO "Crew Neck" member; "Round Collar" is the one member
+ *  that describes a crew neckline, and the audit's "Collarless" was PO-rejected as wrong for a
+ *  crew-neck tee. Extracted so listingPipeline applies it from ANY neck source (blank_specs.neck
+ *  OR the audit's own Neck row) and the rule is unit-testable. Returns null when the neckline
+ *  doesn't determine a collar member (never guess). */
+export function collarStyleForNeck(neck: string | null | undefined): string | null {
+  return /crew/i.test(neck ?? '') ? 'Round Collar' : null
+}
+
 /** Amazon error 100476 — "Provide an Item Name that is 75 characters or less to use Item Highlights".
  *  Item Highlights only render beside a SHORT title, so Amazon REFUSES the write while the listing's live
  *  item_name exceeds 75 chars. This is a DIFFERENT condition from the marketplace-wide pre-launch wall
