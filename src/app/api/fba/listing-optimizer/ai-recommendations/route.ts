@@ -483,10 +483,14 @@ export async function POST(req: NextRequest) {
 
     // V2: Auto-sync keyword intelligence if empty (self-healing)
     // This ensures Regenerate AI Audit works even if keyword cache was cleared
+    // analyzed_at DESC, not 'id' (2026-08-08): the same 1-row probe now also yields the NEWEST
+    // analysis timestamp for the freshness barrier below — empty-check semantics unchanged, zero
+    // extra DB reads on the warm path.
     const { data: existingKws } = await supabase
       .from('keyword_analysis')
-      .select('id')
+      .select('analyzed_at')
       .eq('asin', (await supabase.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()).data?.top_child_asin || children[0]?.asin)
+      .order('analyzed_at', { ascending: false })
       .limit(1)
     
     // Reference-signal fingerprint (H follow-up): force a keyword RE-RESEARCH when the seller's
@@ -550,6 +554,48 @@ export async function POST(req: NextRequest) {
         }
       } catch (syncErr) {
         console.warn('[ai-recommendations] Auto-sync failed, proceeding without keyword data:', syncErr)
+      }
+    } else if (syncAsin) {
+      // FRESHNESS BARRIER (H-a cross-request race, 2026-08-08): the "Re-research + Rewrite" auto-chain
+      // fires this regen the moment keyword_cache.fetched_at advances — researchKeywords' LAST step —
+      // but the background syncKeywordIntelligence continuation is still tens of seconds from its
+      // storeAnalysis rewrite of keyword_analysis, so the reads below would consume the PRE-research
+      // pool (the short-backend bug). Detect exactly that mid-window state (research stamp newer than
+      // the newest stored analysis row) and run the same one-shot promotion as the intelligence GET
+      // self-heal: forceRefresh:false cache-HITS the research (0 JS credits), useStoredAnalysis:false
+      // re-runs the gate+engine, and storeAnalysis lands BEFORE buildKeywordContext/getStoredAnalysis
+      // read. Only on this else-branch (the sync above, when it ran, promoted synchronously); on a
+      // warm cache-hit regen fetched_at <= analyzed_at → one single-row timestamp read, no-op.
+      // Best-effort fail-open like the sync gate.
+      try {
+        const { data: cr } = await supabase
+          .from('keyword_cache')
+          .select('fetched_at').eq('asin', syncAsin).eq('source', 'keyword_research').maybeSingle()
+        const researchedAt = (cr as { fetched_at?: string } | null)?.fetched_at ?? null
+        const lastAnalyzedAt = (existingKws?.[0] as { analyzed_at?: string } | undefined)?.analyzed_at ?? null
+        if (researchedAt && (!lastAnalyzedAt || new Date(researchedAt).getTime() > new Date(lastAnalyzedAt).getTime())) {
+          // Retrievability guard (adversarial catch, same hazard the GET self-heal gates on): a
+          // fetched_at newer than analyzed_at does NOT prove the cache is still servable — past the
+          // 14-day research TTL getCachedResearch returns null and researchKeywords would fall through
+          // to a FULL 3-4-credit Jungle Scout pull inside a plain Regenerate. An empty/expired cache
+          // reads as poolSize 0 → no-op (which also stops the empty-harvest perpetual-refire state,
+          // where storeAnalysis never advances analyzed_at).
+          const { freshResearchPoolSize } = await import('@/lib/keyword-engine/keywordResearcher')
+          const poolSize = await freshResearchPoolSize(syncAsin)
+          if (poolSize > 0) {
+            console.log(`[ai-recommendations] freshness barrier: research (${researchedAt}, ${poolSize} kws) newer than stored analysis (${lastAnalyzedAt}) — promoting the fresh pool before generation`)
+            const { syncKeywordIntelligence } = await import('@/lib/sync/syncKeywordIntelligence')
+            await syncKeywordIntelligence(syncAsin, {
+              forceRefresh: false,
+              useStoredAnalysis: false,
+              includeJungleScout: true,
+              parentAsin: parent_asin,
+              listingTitle: children[0]?.title || undefined,
+            })
+          }
+        }
+      } catch (barrierErr) {
+        console.warn('[ai-recommendations] freshness barrier failed, proceeding with stored analysis:', barrierErr)
       }
     }
 
