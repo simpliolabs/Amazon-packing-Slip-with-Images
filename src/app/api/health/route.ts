@@ -11,6 +11,7 @@
  * is fresh, the new code is live. No auth required (no sensitive data). Never cached.
  */
 import { NextResponse } from 'next/server'
+import { describeContentReconcileMode } from '@/lib/fba/contentReconcile'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -41,6 +42,7 @@ const BEHAVIOR_FLAGS = [
   'BULLETS_METRIC_LOOP', // retired in code 2026-08-03 — listed to surface env residue
   'MULTI_DESIGN_AUDIT_MAX_GROUPS',
   'PUSH_QUEUE_ALL',
+  'CONTENT_RECONCILE_ENABLED', // content-reconcile loop (PO 2026-08-08) — UNSET = SHADOW; echoed as the EFFECTIVE mode below, never raw
   'NEXT_PUBLIC_PUSH_QUEUE_ALL',
   'PUSH_HEAL_FEEDS_FALLBACK',
   'AUTO_RESHIP_ENABLED',
@@ -54,7 +56,13 @@ export async function GET() {
       sha: process.env.BUILD_SHA || 'unknown',
       builtAt: process.env.BUILD_TIME || 'unknown',
       now: new Date().toISOString(),
-      flags: Object.fromEntries(BEHAVIOR_FLAGS.map((name) => [name, process.env[name] ?? null])),
+      flags: {
+        ...Object.fromEntries(BEHAVIOR_FLAGS.map((name) => [name, process.env[name] ?? null])),
+        // EFFECTIVE mode, not the raw env: for every other flag null reads "unset → off/default",
+        // but this loop runs in SHADOW when unset — echoing null would tell the flag census the
+        // opposite of the truth ('shadow (default)' when unset; 'off'/'shadow'/'on' otherwise).
+        CONTENT_RECONCILE_ENABLED: describeContentReconcileMode(),
+      },
     },
     { headers: { 'Cache-Control': 'no-store, max-age=0' } },
   )
