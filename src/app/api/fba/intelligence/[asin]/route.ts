@@ -128,7 +128,15 @@ export async function GET(
       // forceRefresh:false cache-HITS the research → 0 Jungle Scout credits; the relevance gate (with
       // never-collapse floor) still applies. storeAnalysis stamps analyzed_at > researchedAt, so this
       // is idempotent — it won't re-fire on the next load (no per-load engine churn, no loop).
-      if ((!stored || stored.length <= 1) && researchedAt) {
+      // NATIVE-METRIC BACKFILL (migration 055, PO 2026-08-08): stored rows written before #520 have
+      // market_opportunity NULL on their JS-sourced rows. One cache-HIT engine pass stamps them at 0
+      // credits — so ALSO fire the one-shot promotion when the pool is healthy but unstamped
+      // (heal-on-read; idempotent: after one pass the JS rows carry the metric and this reads false;
+      // SQP/import-only listings have no JS rows to stamp and never match, so no per-load churn).
+      const needsNativeBackfill = !!stored && stored.length > 1 &&
+        stored.some((k) => (k.dataSource === 'jungle_scout' || k.dataSource === 'inherited') && k.marketOpportunity == null) &&
+        !stored.some((k) => k.marketOpportunity != null)
+      if ((!stored || stored.length <= 1 || needsNativeBackfill) && researchedAt) {
         try {
           // lastAnalyzedAt hoisted above (2026-08-08) — same value this branch used to query inline.
           const researchNewer = !lastAnalyzedAt || new Date(researchedAt).getTime() > new Date(lastAnalyzedAt).getTime()
@@ -136,9 +144,12 @@ export async function GET(
           // gives credit safety (a non-zero fresh size ⇒ researchKeywords cache-HITS ⇒ 0 credits; an
           // expired cache reads as 0) AND prevents per-load churn (an empty/≤stored pool can't help,
           // so we don't re-run the engine every load when storeAnalysis won't advance analyzed_at).
+          // Backfill variant: pool need only be NON-EMPTY (equal-size is fine — the point is the
+          // stamp, not more rows) and the research-newer requirement is waived (analysis is newer by
+          // definition; the CACHE being servable is the gate).
           const { freshResearchPoolSize } = await import('@/lib/keyword-engine/keywordResearcher')
           const poolSize = await freshResearchPoolSize(childAsin)
-          if (researchNewer && poolSize > (stored?.length ?? 0)) {
+          if (needsNativeBackfill ? poolSize > 0 : (researchNewer && poolSize > (stored?.length ?? 0))) {
             console.log(`[intelligence] self-heal ${childAsin}: stored=${stored?.length ?? 0}, fresh pool=${poolSize} (newer than analysis ${lastAnalyzedAt}) — promoting cached pool (0 credits)`)
             const promoteTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined
             await syncKeywordIntelligence(childAsin, {
@@ -146,7 +157,8 @@ export async function GET(
               parentAsin: parentAsin || undefined, listingTitle: promoteTitle,
             })
             const promoted = await getStoredAnalysis(childAsin, readWindow(100))
-            if (promoted && promoted.length > (stored?.length ?? 0)) {
+            // Backfill runs at EQUAL size — accept the re-read whenever it's no smaller.
+            if (promoted && (needsNativeBackfill ? promoted.length >= (stored?.length ?? 0) : promoted.length > (stored?.length ?? 0))) {
               stored = promoted
               // storeAnalysis just stamped analyzed_at ≥ researchedAt — reflect it so the auto-chain
               // poll (which requires lastAnalyzedAt ≥ researchedAt) doesn't read a pre-promotion value.
