@@ -3,8 +3,8 @@
  * Uses GPT-4.1-mini vision to identify garment color from product images.
  * Returns an exact catalog color name or null on failure.
  */
-import OpenAI from 'openai'
 import { getCatalogColors } from './colorCatalogs'
+import { getLlmClient } from '@/lib/fba/llmGateway'
 
 const OPENAI_TIMEOUT_MS = 15_000
 
@@ -21,8 +21,9 @@ export async function detectColor(
   sku: string,
   title: string
 ): Promise<string | null> {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
+  // Gateway pilot (PR-1): same fail-open shape as before — null client = key unset.
+  const client = getLlmClient({ timeoutMs: OPENAI_TIMEOUT_MS })
+  if (!client) {
     console.warn('[AI Color] OPENAI_API_KEY not set, skipping detection')
     return null
   }
@@ -30,11 +31,6 @@ export async function detectColor(
   try {
     const catalogColors = getCatalogColors(sku, title)
     const colorList = catalogColors.join(', ')
-
-    const client = new OpenAI({
-      apiKey,
-      timeout: OPENAI_TIMEOUT_MS,
-    })
 
     const response = await client.chat.completions.create({
       model: 'gpt-4.1-mini',
