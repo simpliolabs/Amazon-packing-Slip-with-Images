@@ -46,7 +46,7 @@ import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey, deriveNicheS
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
+import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
@@ -73,7 +73,16 @@ import { getSellerId as getSpApiSellerId } from '@/lib/fba/pushExecutor'
 export interface PipelinePerChildKeywords { sku: string; asin: string; keywords: string }
 export interface PipelineVariantCorrection { sku: string; field: string; current: string; replace_with: string; reason: string }
 export interface PipelineCannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
-export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string }
+/** value_source (sticky-details gate, 2026-08-08): provenance stamped at the DETERMINISTIC
+ *  proposal sites only — 'spec' = blank_specs ground truth (the ONE source allowed to re-propose
+ *  over a PO-accepted push), 'audience' = the audience-lean map (defers to an accepted push — the
+ *  pushed value is the newer PO declaration), 'ruling' = a deterministic PO ruling from an
+ *  LLM-derived fact (today ONLY the crew-neckline → "Round Collar" collar mapping; the sticky gate
+ *  honors it solely against an accepted "Collarless"). Absent = LLM guess (never outranks a push).
+ *  UNFORGEABLE: the pdiFinal normalize map DELETES any value_source arriving on the blind-cast LLM
+ *  parse before the stamp sites run — the invariant is structural, not prompt-behavioral.
+ *  Persisted on the JSONB item — no migration. */
+export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; value_source?: 'spec' | 'audience' | 'ruling' }
 export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; exact_text: string; why: string }
 
 // Backend-first placement net (Step 3, task #60): the LLM audit still tends to claim bullet_1..3 for
@@ -9354,12 +9363,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (Additional Features: ["Water Proof","Shock Proof"]) or a bare number — every consumer
   // (.trim(), byte caps, PATCH bodies) assumes string, and the listing page hard-crashed on
   // B0GCF11RKL until normalized. Stringify at the write boundary so persisted rows are clean.
-  pdiFinal = pdiFinal.map((p) => ({
-    ...p,
-    field_name: detailValueToString(p.field_name),
-    current_value: p.current_value == null ? null : detailValueToString(p.current_value),
-    recommended_value: detailValueToString(p.recommended_value),
-  }))
+  pdiFinal = pdiFinal.map((p) => {
+    // PROVENANCE HARDENING (adversarial MEDIUM 2026-08-08): `value_source` is RESERVED for the
+    // deterministic stamp sites below (blank_specs overrides / audience map / crew-collar ruling).
+    // The audit + details-fill rows are a blind-cast parseJsonLoose parse and this spread preserves
+    // stray keys — an LLM that echoed or hallucinated `value_source:'spec'` would forge provenance
+    // and walk through the sticky gate as a fake "spec re-propose" over a PO-accepted push. Delete
+    // it structurally here so the "stamped at deterministic sites ONLY" invariant cannot be
+    // prompt-gamed (neither prompt mentions the key, but that is behavior, not a guarantee).
+    const rest = { ...p }
+    delete rest.value_source
+    return {
+      ...rest,
+      field_name: detailValueToString(p.field_name),
+      current_value: p.current_value == null ? null : detailValueToString(p.current_value),
+      recommended_value: detailValueToString(p.recommended_value),
+    }
+  })
   // AUDIENCE-LEAN override for audit-guessed DEMOGRAPHIC details: the audit echoes the
   // catalog's (often blank-boilerplate) demographics and ignored the seller's selector —
   // live failure: Department "Mens" + Target Gender "male" recommended on a FEMALE run.
@@ -9371,8 +9391,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       : { dept: 'Unisex', gender: 'Unisex' }
     pdiFinal = pdiFinal.map((p) => {
       const f = p.field_name.toLowerCase().trim()
-      if (f === 'department') return { ...p, recommended_value: dem.dept, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
-      if (f === 'target gender') return { ...p, recommended_value: dem.gender, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
+      // value_source:'audience' (sticky-details): deterministic but SELECTOR-derived — a
+      // PO-accepted pushed Department/Target Gender is the NEWER declaration and wins at the gate.
+      if (f === 'department') return { ...p, recommended_value: dem.dept, value_source: 'audience' as const, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
+      if (f === 'target gender') return { ...p, recommended_value: dem.gender, value_source: 'audience' as const, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
       return p
     })
   }
@@ -9387,8 +9409,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (blankSpec) {
     const overrideField = (re: RegExp, val: string | undefined) => {
       if (!val) return
+      // value_source:'spec' (sticky-details gate): blank_specs is the ONE source allowed to
+      // re-propose over a PO-accepted detail push — stamp provenance at the deterministic site.
       pdiFinal = pdiFinal.map((p) => re.test(p.field_name)
-        ? { ...p, recommended_value: val, reason: `Ground-truth spec for the ${attributePinFinal || 'Comfort Colors'} blank — overrides a value the optimizer inferred from the search-keyword pool.` }
+        ? { ...p, recommended_value: val, value_source: 'spec' as const, reason: `Ground-truth spec for the ${attributePinFinal || 'Comfort Colors'} blank — overrides a value the optimizer inferred from the search-keyword pool.` }
         : p)
     }
     // Override only the REPORTED-wrong attributes (Fit + Sleeve). Neck is left to the guess: it was already
@@ -9418,6 +9442,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         field_name: menuAttr.title,
         current_value: null,
         recommended_value: val,
+        value_source: 'spec',
         reason: `Ground-truth spec for the ${attributePinFinal || 'garment'} blank (blank_specs) — a confirmed product fact shoppers filter on, added deterministically rather than waiting for the optimizer to propose it.`,
       })
     }
@@ -9430,7 +9455,50 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
      * "Crew Neck" member; "Round Collar" is the one member that describes a crew neckline — the
      * audit's "Collarless" was PO-rejected as wrong for a crew-neck tee. */
     if (blankSpec.stretch) overrideField(/stretchability/i, /\b(?:no|low)\b/i.test(blankSpec.stretch) ? 'Non-stretchable' : 'Stretchable')
-    if (/crew/i.test(blankSpec.neck ?? '')) overrideField(/collar/i, 'Round Collar')
+  }
+  /* #161 COLLAR ROOT FIX (2026-08-08, hoisted OUT of the `if (blankSpec)` gate). The collar
+   * mapping used to run only when a blank_specs row resolved AND carried `neck` — the exact
+   * failure classes that shipped "Collarless" on B0FKKN8XKV (blankSpec=NULL until bd88f0b's
+   * looksShirt fix; a DB row whose neck column is NULL is silently dropped by rowToSpec). The
+   * rule is about the NECKLINE truth, not the blank row: collar_style's enum has no "Crew Neck"
+   * member and "Round Collar" is the one member that describes a crew neckline (collarStyleForNeck,
+   * unit-tested). Neck truth resolves SPEC-FIRST (blank_specs.neck), else the audit's own Neck row
+   * (already reliably "Crew Neck" — see the Neck note above) — so the mapping holds on EVERY path,
+   * including full-regen audit re-proposals with no blank spec. value_source:'spec' when
+   * blank_specs supplied the neck; an LLM-derived neck stamps 'ruling' instead (adversarial
+   * MEDIUM 2026-08-08): the sticky gate honors 'ruling' ONLY against an accepted "Collarless" —
+   * so an accepted-pushed "Collarless" (bulk Auto Push of the pre-fix audit) can't freeze this
+   * root fix out forever on the blankSpec=NULL class (which can never earn a 'spec' stamp), while
+   * an accepted push of any OTHER collar value still outranks the LLM-derived neck.
+   * Override-only, like #161: a family whose audit proposed no collar row gets none forced. */
+  if (apparelProduct) {
+    const neckFromAudit = pdiFinal.find((p) => /\bneck\b/i.test(String(p.field_name ?? '')))?.recommended_value ?? ''
+    const neckFromSpec = blankSpec?.neck ?? ''
+    const collarVal = collarStyleForNeck(neckFromSpec || neckFromAudit)
+    if (collarVal) {
+      // ENUM-AWARE guard (adversarial LOW 2026-08-08): "Round Collar" membership is live-proven
+      // only for the incident tee family's collar_style enum. When THIS family's schema menu
+      // carries a collar attribute whose accepted list LACKS the mapped value, forcing it would
+      // downgrade a menu-verbatim member to enum_valid=false (a red, unpushable row) — keep the
+      // audit's member instead. No/empty accepted list fails OPEN (the route's coercion +
+      // VALIDATION_PREVIEW still backstop a bad member visibly, never as a silent bad push).
+      const collarMenu = (input.detailAttributeMenu ?? []).find((m) => /collar/i.test(m.title) || /collar/i.test(m.key))
+      const collarEnumOk = !collarMenu?.accepted?.length
+        || collarMenu.accepted.some((v) => String(v).trim().toLowerCase() === collarVal.toLowerCase())
+      if (!collarEnumOk) {
+        console.log(`[details] collar override SKIPPED: this family's ${collarMenu?.key ?? 'collar'} enum has no "${collarVal}" member — keeping the audit's value`)
+      } else {
+        const fromSpec = !!collarStyleForNeck(neckFromSpec)
+        pdiFinal = pdiFinal.map((p) => /collar/i.test(String(p.field_name ?? ''))
+          ? {
+              ...p,
+              recommended_value: collarVal,
+              value_source: (fromSpec ? 'spec' : 'ruling') as 'spec' | 'ruling',
+              reason: `A crew neckline maps to "${collarVal}" — Amazon's collar_style enum has no "Crew Neck" member, and "Collarless" is wrong for a crew-neck garment (PO ruling).`,
+            }
+          : p)
+      }
+    }
   }
   /* PO 2026-08-04: "Model Name should be without the brand name." The audit tends to emit
    * "<brand> <design>" ("THE CEO Cupid Valentine"); Amazon's model_name is the MODEL identifier,
