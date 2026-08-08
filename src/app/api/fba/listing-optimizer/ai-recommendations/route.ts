@@ -290,8 +290,11 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
     return 'LOW'
   }
 
+  // Data-truth (PO 2026-08-08): "Opp" in this LLM-facing brief must be the NATIVE JS market metric
+  // (marketOpportunity 0-10). Rows without native data (SQP/import/pre-054) show the internal
+  // gap-amplified composite explicitly labeled "Priority" — never presented as market opportunity.
   const formatKw = (k: typeof analysis[0]) =>
-    `  "${k.keyword}" — Vol: ${k.searchVolume.toLocaleString()}/mo | Opp: ${k.opportunityScore}/100 | Comp: ${getCompLevel(k.competingProducts)}`
+    `  "${k.keyword}" — Vol: ${k.searchVolume.toLocaleString()}/mo | ${k.marketOpportunity != null ? `Opp: ${k.marketOpportunity}/10 (market)` : `Priority: ${k.coverageGapScore}/100 (internal gap score)`} | Comp: ${getCompLevel(k.competingProducts)}`
 
   const formatSection = (items: typeof analysis, emptyMsg: string) =>
     items.length > 0 ? items.map(formatKw).join('\n') : `  [NO KEYWORDS IN THIS SECTION]`
@@ -310,15 +313,16 @@ To unlock keyword-driven recommendations, trigger a keyword sync first.
 
   const contextBlock = `KEYWORD INTELLIGENCE (from Brand Analytics + Jungle Scout):
 Data source: ${analysis[0].dataSource === 'sqp' ? 'Amazon Brand Analytics (real sales data)' : analysis[0].dataSource === 'jungle_scout' ? 'Jungle Scout API' : 'Inherited from sibling products'}
-Sort order: Keywords within each section are sorted by OPPORTUNITY SCORE (highest first).
+Sort order: Keywords within each section are sorted by PLACEMENT PRIORITY (highest first).
 The first keyword listed = highest priority = best combination of rankability, search volume, competition gap, and conversion potential.
 
-Each keyword entry follows this format:
-  "keyword phrase" — Vol: [monthly searches] | Opp: [score 0-100] | Comp: [LOW/MED/HIGH]
+Each keyword entry follows one of these formats:
+  "keyword phrase" — Vol: [monthly searches] | Opp: [0-10, Jungle Scout market metric] | Comp: [LOW/MED/HIGH]
+  "keyword phrase" — Vol: [monthly searches] | Priority: [0-100, our internal placement score — NOT market data] | Comp: [LOW/MED/HIGH]
 
 ---
 
-TOP KEYWORDS BY OPPORTUNITY SCORE:
+TOP KEYWORDS BY PLACEMENT PRIORITY:
 ${brandAnchor
   ? `The highest-scoring keyword already associated with this product is: "${brandAnchor.keyword}" — Vol: ${brandAnchor.searchVolume.toLocaleString()}/mo
 
@@ -657,7 +661,7 @@ export async function POST(req: NextRequest) {
       .single()
     const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null; design_name_override?: string | null } | null
     const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
-    // 150, not 50: opportunityScore is gap-amplified, so right after the seller PUSHES
+    // 150, not 50: coverageGapScore (DB: opportunity_score) is gap-amplified, so right after the seller PUSHES
     // keywords the covered terms collapse to raw/3 and sink BELOW the top-50 cut — the
     // next regen then never even saw the listing's best (now-covered) terms. The pipeline's
     // own pools slice and byte-cap downstream; passing the full stored universe costs nothing.

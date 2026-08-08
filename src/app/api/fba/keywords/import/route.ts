@@ -160,7 +160,7 @@ export async function POST(req: NextRequest) {
     const rows = result.allKeywords.map((kw) => ({
       asin: analysisAsin,
       keyword: kw.keyword,
-      opportunity_score: kw.opportunityScore,
+      opportunity_score: kw.coverageGapScore,
       action_type: kw.actionType,
       action_text: kw.actionText,
       in_title: kw.inTitle,
@@ -192,11 +192,13 @@ export async function POST(req: NextRequest) {
       inserted += chunk.length
     }
 
+    // `priority`, not `opportunity` (PO data-truth 2026-08-08): H10 imports carry a faked
+    // relevancyScore (sales*5 above), so this composite is NOT market data — never label it opportunity.
     const topNew = result.allKeywords
       .slice()
-      .sort((a, b) => b.opportunityScore - a.opportunityScore)
+      .sort((a, b) => b.coverageGapScore - a.coverageGapScore)
       .slice(0, 12)
-      .map((k) => ({ keyword: k.keyword, opportunity: Math.round(k.opportunityScore), volume: k.searchVolume, action: k.actionType }))
+      .map((k) => ({ keyword: k.keyword, priority: Math.round(k.coverageGapScore), volume: k.searchVolume, action: k.actionType }))
 
     return NextResponse.json({
       asin: analysisAsin,

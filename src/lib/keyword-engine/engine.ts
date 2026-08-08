@@ -14,6 +14,7 @@
 import { checkPresence, checkPresenceAny, ListingContent } from './checkPresence';
 import { calculateScore, ScoringInputs } from './calculateScore';
 import { generateAction, prioritizeActions, KeywordAction, ActionContext } from './generateActions';
+import { poolOpportunityScore } from './poolOpportunity';
 // KEYWORD_TARGET_SET (#143): the ONE copy of the legacy 4-bucket tier arithmetic, previously
 // duplicated verbatim here and in the Intelligence route.
 import { legacyTierBuckets } from './selection-core';
@@ -85,7 +86,12 @@ export type RawKeywordRow = SQPKeywordRow | JungleScoutKeywordRow;
 
 export interface AnalyzedKeyword {
   keyword: string;
-  opportunityScore: number;
+  /** INTERNAL gap-amplified placement composite (0-100) — `rawScore × usageGapMultiplier ÷ 3`
+   *  (calculateScore.ts). It swings with OUR OWN coverage (52→19 the moment we cover a keyword),
+   *  so it is a PLACEMENT-PRIORITY signal, never market data. Renamed from `opportunityScore`
+   *  (PO data-truth rule 2026-08-08): nothing labeled "opportunity" may be fabricated — the
+   *  displayable market metric is `marketOpportunity` below. DB column stays `opportunity_score`. */
+  coverageGapScore: number;
   actionType: KeywordAction['actionType'];
   actionText: string;
   rationale: string;
@@ -113,6 +119,20 @@ export interface AnalyzedKeyword {
    *  null = not ranking / not measured. The rank tracker snapshots this over time. */
   organicRank?: number | null;
   scoreBreakdown?: object;
+
+  /* ── NATIVE Jungle Scout market metrics (PO data-truth rule 2026-08-08) ──────────────────────
+   * Coverage-INDEPENDENT: none of these can swing when WE change our own listing content.
+   * ALL OPTIONAL for the same three reasons as the target-set fields below (hand-built literals,
+   * client mirrors, pre-migration-054 rows). null/undefined = honest "not measured" — JS-sourced
+   * rows carry them; SQP/import rows do not (surface as "n/a", never a fake 0). */
+  /** JS ease_of_ranking_score, native 0-100, higher = easier to rank (Cerebro-IQ equivalent). */
+  jsEaseOfRanking?: number | null;
+  /** JS relevancy_score, native purchase-intent signal (can exceed 100). */
+  jsRelevancyScore?: number | null;
+  /** Market-only opportunity 0-10 (poolOpportunityScore: demand × winnability from native fields
+   *  ONLY — same synthesis the /fba/keywords pool dashboard shows). THE display metric wherever
+   *  "opportunity" is shown to the seller; `coverageGapScore` is the internal placement composite. */
+  marketOpportunity?: number | null;
 
   /* ── KEYWORD_TARGET_SET (#143, 2026-07-24) ────────────────────────────────────────────────────
    * Populated by cacheService.getStoredAnalysis's mapper, and ONLY when selectionMode() === 'on'
@@ -240,6 +260,35 @@ function normalizeJungleScoutRow(row: JungleScoutKeywordRow): {
   };
 }
 
+/**
+ * NATIVE market metrics from a raw Jungle Scout row (PO data-truth rule 2026-08-08). PURE.
+ * marketOpportunity reuses poolOpportunityScore — the ONE portal-wide "opportunity" definition
+ * (already live on /fba/keywords) — so the listing page and the pool dashboard can never disagree
+ * about what a 7.2 means. Coverage-independent by construction: inputs are market fields only.
+ * Returns nulls when the row carries no usable market data (e.g. a synthetic/imported row with
+ * searchVolume 0) so consumers render "n/a" instead of a fabricated 0.
+ */
+export function nativeMarketMetrics(row: {
+  searchVolume?: number;
+  organicProductCount?: number;
+  relevancyScore?: number;
+  easeOfRankingScore?: number;
+}): { jsEaseOfRanking: number | null; jsRelevancyScore: number | null; marketOpportunity: number | null } {
+  const ease = Number.isFinite(Number(row.easeOfRankingScore)) ? Math.round(Number(row.easeOfRankingScore)) : null;
+  const relev = Number.isFinite(Number(row.relevancyScore)) ? Math.round(Number(row.relevancyScore)) : null;
+  const volume = Math.max(0, Number(row.searchVolume) || 0);
+  // poolOpportunityScore returns 0 for zero volume; distinguish "no demand data" (null) from a real
+  // scored 0 by requiring volume > 0 — a synthetic attribute row must show n/a, not 0.0.
+  const marketOpportunity = volume > 0
+    ? poolOpportunityScore({
+        searchVolume: volume,
+        organicProductCount: row.organicProductCount,
+        easeOfRankingScore: row.easeOfRankingScore,
+      })
+    : null;
+  return { jsEaseOfRanking: ease, jsRelevancyScore: relev, marketOpportunity };
+}
+
 // ─── Main Engine Function ─────────────────────────────────────────────────────
 
 export function runKeywordEngine(
@@ -310,9 +359,15 @@ export function runKeywordEngine(
     };
     const action = generateAction(actionCtx);
 
+    // NATIVE market metrics (PO 2026-08-08): only JS-shaped rows carry them. SQP rows get nulls —
+    // honest "not measured", surfaced as n/a downstream (never a fake 0).
+    const native = dataSource === 'sqp'
+      ? { jsEaseOfRanking: null, jsRelevancyScore: null, marketOpportunity: null }
+      : nativeMarketMetrics(rawRow as JungleScoutKeywordRow);
+
     analyzed.push({
       keyword: normalized.keyword,
-      opportunityScore: score.opportunityScore,
+      coverageGapScore: score.coverageGapScore,
       actionType: score.actionType,
       actionText: action.primaryAction,
       rationale: action.rationale,
@@ -331,6 +386,7 @@ export function runKeywordEngine(
       dataSource,
       organicRank: normalized.organicRank,
       scoreBreakdown: score.scoreBreakdown,
+      ...native,
     });
   }
 

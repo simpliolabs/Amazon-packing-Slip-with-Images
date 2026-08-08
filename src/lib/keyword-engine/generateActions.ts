@@ -31,7 +31,8 @@ export interface ActionContext {
 
 export interface KeywordAction {
   actionType: ScoreResult['actionType'];
-  opportunityScore: number;
+  /** Gap-amplified placement composite (calculateScore.ts) — internal priority, not market data. */
+  coverageGapScore: number;
   primaryAction: string;    // The specific thing to do
   rationale: string;        // Why this generates ranking/sales
   urgency: 'high' | 'medium' | 'low';
@@ -103,7 +104,7 @@ export function generateAction(ctx: ActionContext): KeywordAction {
 
       return {
         actionType,
-        opportunityScore: score.opportunityScore,
+        coverageGapScore: score.coverageGapScore,
         primaryAction: action,
         rationale: `${vol} searches/month, ${comp}, ${where}.${rationaleExtra}`,
         urgency: 'high',
@@ -117,7 +118,7 @@ export function generateAction(ctx: ActionContext): KeywordAction {
       // In bullets but not title
       return {
         actionType,
-        opportunityScore: score.opportunityScore,
+        coverageGapScore: score.coverageGapScore,
         primaryAction: `Move "${keyword}" from your bullets to your title`,
         rationale: `${vol} searches/month. You mention it in bullets but Amazon weights title keywords 3–5× more for ranking. Moving it to the title will directly improve your organic rank.`,
         urgency: 'high',
@@ -131,7 +132,7 @@ export function generateAction(ctx: ActionContext): KeywordAction {
       // In title but not bullets
       return {
         actionType,
-        opportunityScore: score.opportunityScore,
+        coverageGapScore: score.coverageGapScore,
         primaryAction: `Add "${keyword}" to at least one bullet point`,
         rationale: `${vol} searches/month. It's in your title but bullets reinforce relevance signals and improve conversion. Customers scanning bullets expect to see their search term confirmed.`,
         urgency: 'medium',
@@ -146,7 +147,7 @@ export function generateAction(ctx: ActionContext): KeywordAction {
         : '';
       return {
         actionType,
-        opportunityScore: score.opportunityScore,
+        coverageGapScore: score.coverageGapScore,
         primaryAction: `Maintain current optimization for "${keyword}"`,
         rationale: `${vol} searches/month, ${comp}. ${purchaseText} This keyword is well-covered in your listing. Focus PPC spend here to defend and grow your rank.`,
         urgency: 'low',
@@ -158,7 +159,7 @@ export function generateAction(ctx: ActionContext): KeywordAction {
     default: {
       return {
         actionType: 'OPTIMIZED',
-        opportunityScore: score.opportunityScore,
+        coverageGapScore: score.coverageGapScore,
         primaryAction: `"${keyword}" is well-covered across your listing`,
         rationale: `${vol} searches/month. Present in ${presence.coverageCount} listing fields. Low incremental opportunity — focus effort on higher-scoring keywords.`,
         urgency: 'low',
@@ -170,7 +171,7 @@ export function generateAction(ctx: ActionContext): KeywordAction {
 
 /**
  * Sort and filter a list of keyword actions for display.
- * Returns top N by opportunity score, with CRITICAL and UPGRADE first.
+ * Returns top N by coverage-gap score, with CRITICAL and UPGRADE first.
  */
 export function prioritizeActions(
   actions: KeywordAction[],
@@ -189,8 +190,8 @@ export function prioritizeActions(
       // Primary: action type priority
       const pDiff = (priority[b.actionType] ?? 0) - (priority[a.actionType] ?? 0);
       if (pDiff !== 0) return pDiff;
-      // Secondary: opportunity score
-      return b.opportunityScore - a.opportunityScore;
+      // Secondary: coverage-gap score (placement priority)
+      return b.coverageGapScore - a.coverageGapScore;
     })
     .slice(0, topN);
 }

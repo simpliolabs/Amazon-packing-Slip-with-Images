@@ -1,10 +1,7 @@
 /**
  * calculateScore.ts
  * ─────────────────────────────────────────────────────────────────────────────
- * Calculates the Opportunity Score for a keyword against a specific ASIN.
- *
- * The score replicates the logic behind Helium 10's Cerebro IQ Score:
- * higher score = bigger opportunity for ranking and sales.
+ * Calculates the COVERAGE-GAP SCORE for a keyword against a specific ASIN.
  *
  * Formula:
  *   score = (
@@ -15,6 +12,13 @@
  *   ) × usageGapMultiplier      // listing gap amplifier (1.0 – 3.0)
  *
  * Final score is normalized to 0–100.
+ *
+ * NAMING (PO data-truth rule 2026-08-08): this composite was called "opportunityScore", but the
+ * ×usageGapMultiplier term makes it swing with OUR OWN coverage — covering a keyword collapses it
+ * toward raw/3 (the PO's 52→19 on "christian shirts for women"). It is a PLACEMENT-PRIORITY /
+ * gap signal, NOT market data, so nothing may display it as "opportunity". The displayable market
+ * metric is `marketOpportunity` (poolOpportunityScore from native JS fields, engine.ts). The DB
+ * column keeps its legacy name `opportunity_score` — same number, honest code name.
  *
  * Karpathy principle: Think before coding. Every weight is justified.
  */
@@ -51,7 +55,8 @@ export interface ScoringInputs {
 }
 
 export interface ScoreResult {
-  opportunityScore: number; // 0–100
+  /** Gap-amplified placement composite, 0–100 (see file header — NOT market data). */
+  coverageGapScore: number;
   actionType: 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED';
   scoreBreakdown: {
     volumeScore: number;
@@ -70,7 +75,7 @@ export interface ScoreResult {
  * (a fishing tee's fishing keywords). A modest 0.7 factor demotes them just enough that genuinely
  * winnable niche terms out-rank the unwinnable mega-volume heads, WITHOUT evicting universe terms from
  * the pool — they stay for backend coverage, demoted from CRITICAL to UPGRADE at most. Applied BEFORE
- * deriveActionType so the stored opportunityScore and the CRITICAL tier stay coherent (Invariant 6).
+ * deriveActionType so the stored coverageGapScore (DB: opportunity_score) and the CRITICAL tier stay coherent (Invariant 6).
  * SAFE for a listing whose niche IS broad (a plain graphic tee): its broad terms arrive via the DESIGN
  * query (non-universe → full weight) and are deduped out of the universe merge, so they keep full priority.
  */
@@ -179,16 +184,16 @@ export function calculateScore(inputs: ScoringInputs): ScoreResult {
   const amplified = rawScore * presence.usageGapMultiplier;
 
   // Normalize to 0–100 (max possible: 100 × 3.0 = 300 → normalize by 3.0)
-  const opportunityScore = Math.min(Math.round(amplified / 3.0), 100);
+  const coverageGapScore = Math.min(Math.round(amplified / 3.0), 100);
 
   // Data source confidence adjustment: inherited data gets a 15% penalty
   const adjustedScore = dataSource === 'inherited'
-    ? Math.round(opportunityScore * 0.85)
-    : opportunityScore;
+    ? Math.round(coverageGapScore * 0.85)
+    : coverageGapScore;
 
   // #280 universe demotion (niche-priority): modestly down-weight broad-category / garment-brand universe
   // heads so a design's winnable niche terms out-rank them in the opportunity view. Applied before
-  // deriveActionType so the CRITICAL tier and the stored opportunityScore agree.
+  // deriveActionType so the CRITICAL tier and the stored coverageGapScore agree.
   // C3 EXEMPTION (workflow w6728l4wz, flag-gated): a broadNicheSeed HEAD ("christian shirt" ~45k) is
   // the WINNABLE niche head the PO wants front-loaded — NOT a mega-broad category/brand head. When
   // GARMENT_NOUN=on, skip the x0.7 for nicheHead rows so they keep their real (CRITICAL-tier) score.
@@ -202,7 +207,7 @@ export function calculateScore(inputs: ScoringInputs): ScoreResult {
   const actionType = deriveActionType(finalScore, presence);
 
   return {
-    opportunityScore: finalScore,
+    coverageGapScore: finalScore,
     actionType,
     scoreBreakdown: {
       volumeScore: Math.round(vScore * 100) / 100,

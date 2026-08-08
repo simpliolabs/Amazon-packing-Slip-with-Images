@@ -559,7 +559,7 @@ function buildResultFromStored(
   stored: ReturnType<typeof getStoredAnalysis> extends Promise<infer T> ? NonNullable<T> : never
 ): EngineResult {
   // KEYWORD_TARGET_SET (#143). `stored` arrives from getStoredAnalysis, which at `on` ALREADY
-  // ordered it selection_rank-first. Re-sorting by opportunityScore here would throw that away and
+  // ordered it selection_rank-first. Re-sorting by coverageGapScore here would throw that away and
   // hand back the gap-amplified ordering this PR exists to stop — so at `on` the incoming order is
   // authoritative and only the pooled tail (rank NULL) needs the legacy sort.
   //
@@ -574,10 +574,10 @@ function buildResultFromStored(
         const ar = typeof a.selectionRank === 'number' ? a.selectionRank : Infinity;
         const br = typeof b.selectionRank === 'number' ? b.selectionRank : Infinity;
         if (ar !== br) return ar - br;
-        if (b.opportunityScore !== a.opportunityScore) return b.opportunityScore - a.opportunityScore;
+        if (b.coverageGapScore !== a.coverageGapScore) return b.coverageGapScore - a.coverageGapScore;
         return a.keyword.localeCompare(b.keyword);
       })
-    : [...stored].sort((a, b) => b.opportunityScore - a.opportunityScore);
+    : [...stored].sort((a, b) => b.coverageGapScore - a.coverageGapScore);
   return {
     asin,
     analyzedAt: new Date().toISOString(),
@@ -609,7 +609,7 @@ function mergeKeywordResults(
   }
 
   return Array.from(merged.values())
-    .sort((a, b) => b.opportunityScore - a.opportunityScore);
+    .sort((a, b) => b.coverageGapScore - a.coverageGapScore);
 }
 
 function buildSummary(keywords: EngineResult['allKeywords']): EngineResult['summary'] {

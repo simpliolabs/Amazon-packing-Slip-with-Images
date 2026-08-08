@@ -107,7 +107,7 @@ export type TargetGuard = null | 'empty-input' | 'no-eligible'
 /**
  * NOTE WHAT IS DELIBERATELY ABSENT — this is the fix, expressed as a type:
  *   - NO `inTitle` / `inBullets` / `inDescription` / `inBackend` / `usageGapMultiplier`
- *   - NO `opportunityScore`
+ *   - NO `coverageGapScore` (the gap-amplified composite formerly named `opportunityScore`)
  * The selector CANNOT see the usage-gap multiplier, so it cannot reward us for NOT covering a
  * keyword — which is the entire fix.
  *
@@ -658,25 +658,31 @@ export function selectRankingTargets<T extends TargetInput>(
  * :464. Those sites keep their own thunks; substituting this one there would BREAK `off`
  * byte-identity at two of the highest-traffic write paths.
  *
- * Deliberately a DIFFERENT generic constraint from TargetInput: it needs `opportunityScore`, which
- * TargetInput does not have and must never have.
+ * Deliberately a DIFFERENT generic constraint from TargetInput: it needs `coverageGapScore` (the
+ * gap-amplified composite formerly named opportunityScore), which TargetInput does not have and
+ * must never have.
  */
-export function legacyTierBuckets<T extends { actionType: string; opportunityScore: number }>(
+export function legacyTierBuckets<T extends { actionType: string; coverageGapScore: number }>(
   analyzed: readonly T[],
 ): T[] {
+  // DELIBERATELY the gap-amplified coverageGapScore, not marketOpportunity (PO 2026-08-08 review):
+  // this is the LEGACY off/shadow fallback whose ≥50 cut and tier caps are calibrated to the 0-100
+  // composite — swapping in the 0-10 native metric here would silently re-tier CRITICAL/UPGRADE
+  // portal-wide. The gap semantic is also CORRECT for tiering: a covered keyword decaying out of
+  // CRITICAL is the intended behavior. At `on`, selection_rank (gap-free) decides targets instead.
   const criticalAll = analyzed
     .filter((a) => a.actionType === 'CRITICAL')
     .slice()
-    .sort((a, b) => b.opportunityScore - a.opportunityScore)
+    .sort((a, b) => b.coverageGapScore - a.coverageGapScore)
   const criticalCapped =
     criticalAll.length <= 5
       ? criticalAll
-      : criticalAll.filter((a) => a.opportunityScore >= 50).slice(0, 10).length >= 5
-        ? criticalAll.filter((a) => a.opportunityScore >= 50).slice(0, 10)
+      : criticalAll.filter((a) => a.coverageGapScore >= 50).slice(0, 10).length >= 5
+        ? criticalAll.filter((a) => a.coverageGapScore >= 50).slice(0, 10)
         : criticalAll.slice(0, 5)
 
   const top = (t: string) =>
-    analyzed.filter((a) => a.actionType === t).slice().sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10)
+    analyzed.filter((a) => a.actionType === t).slice().sort((a, b) => b.coverageGapScore - a.coverageGapScore).slice(0, 10)
 
   return [...criticalCapped, ...top('UPGRADE'), ...top('REINFORCE'), ...top('DEFENDED')]
 }

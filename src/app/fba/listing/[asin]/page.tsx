@@ -126,7 +126,10 @@ function relDate(iso: string | null | undefined): string {
 }
 
 interface AnalyzedKeyword {
-  keyword: string; opportunityScore: number
+  // coverageGapScore = internal gap-amplified placement composite (renamed from opportunityScore,
+  // PO data-truth 2026-08-08 — it swings with our own coverage, so it is never labeled "opportunity").
+  // marketOpportunity = native JS market metric 0-10 (null = not measured / pre-migration-054).
+  keyword: string; coverageGapScore: number; marketOpportunity?: number | null
   actionType: 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED' | 'IRRELEVANT'
   actionText: string; rationale: string; urgency: string; estimatedImpact: string
   searchVolume: number; keywordSales: number; competingProducts: number
@@ -4290,11 +4293,14 @@ export default function ListingDetailPage() {
                     const ordered = live
                       ? [...rows].sort((x, y) => ((x.selectionRank ?? Infinity) - (y.selectionRank ?? Infinity)) || (prio(y) - prio(x)))
                       : rows
+                    // CSV columns (PO data-truth 2026-08-08): "Market Opp" = native JS 0-10 (blank =
+                    // not measured); "Gap Priority" = the internal gap-amplified composite, no longer
+                    // labeled "Opportunity" because it is not market data.
                     const csv = [live
-                      ? 'Keyword,Match Type,Search Volume,Keyword Sales,Opportunity,Title Density,Our Rank,Action,Slot,Ranking Target,Why'
-                      : 'Keyword,Match Type,Search Volume,Keyword Sales,Opportunity,Title Density,Our Rank,Action']
+                      ? 'Keyword,Match Type,Search Volume,Keyword Sales,Market Opp,Gap Priority,Title Density,Our Rank,Action,Slot,Ranking Target,Why'
+                      : 'Keyword,Match Type,Search Volume,Keyword Sales,Market Opp,Gap Priority,Title Density,Our Rank,Action']
                       .concat(ordered.map((k) => {
-                        const base: unknown[] = [k.keyword, 'Exact', k.searchVolume ?? '', k.keywordSales ?? '', k.opportunityScore ?? '', k.titleDensity ?? '', k.organicRank ?? '', k.actionType]
+                        const base: unknown[] = [k.keyword, 'Exact', k.searchVolume ?? '', k.keywordSales ?? '', k.marketOpportunity ?? '', k.coverageGapScore ?? '', k.titleDensity ?? '', k.organicRank ?? '', k.actionType]
                         return (live
                           ? base.concat([k.selectionRank == null ? 'POOLED' : (k.selectionSlot ?? 'TARGET'), k.selectionRank ?? '', k.selectionReason ?? ''])
                           : base
@@ -4438,8 +4444,8 @@ export default function ListingDetailPage() {
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Keyword</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500">Vol</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title={kwData.targetSetLive
-                      ? 'Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is. NOTE: this score no longer decides which keywords we target — the gap term made it reward keywords we do NOT cover. Ranking targets are chosen by theme fit × raw market value; see the Slot and Why columns.'
-                      : 'Opportunity score 0-100: demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is'}>Opp</th>
+                      ? 'Gap-priority score 0-100 (internal, NOT market data): demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is — it drops when you cover a keyword, by design. This score no longer decides which keywords we target — ranking targets are chosen by theme fit × raw market value; see the Slot and Why columns. The market-truth number is the RANK panel’s Jungle Scout opportunity (0-10).'
+                      : 'Gap-priority score 0-100 (internal, NOT market data): demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is — it drops when you cover a keyword, by design. The market-truth number is the RANK panel’s Jungle Scout opportunity (0-10).'}>Priority</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="YOUR organic rank for this keyword (Jungle Scout, measured on each Re-research). Arrow = movement vs the previous snapshot. — = not ranking.">Rank</th>
                     {kwData.targetSetLive && <th className="text-left px-3 py-2 font-medium text-slate-500" title="CORE = this design's own subject. CATEGORY = universal garment revenue. BACKEND = a real target, but one your visible copy must not contain (an off-season holiday) — it lives in your search terms. POOLED = indexed, but not one of the 30 we are actively targeting.">Slot</th>}
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
@@ -4462,7 +4468,7 @@ export default function ListingDetailPage() {
                         )}
                       </td>
                       <td className="px-3 py-2 text-right text-slate-600">{kw.searchVolume.toLocaleString()}</td>
-                      <td className={`px-3 py-2 text-right font-semibold ${kw.opportunityScore >= 70 ? 'text-violet-700' : kw.opportunityScore >= 40 ? 'text-slate-700' : 'text-slate-400'}`}>{Math.round(kw.opportunityScore)}</td>
+                      <td className={`px-3 py-2 text-right font-semibold ${kw.coverageGapScore >= 70 ? 'text-violet-700' : kw.coverageGapScore >= 40 ? 'text-slate-700' : 'text-slate-400'}`}>{Math.round(kw.coverageGapScore)}</td>
                       <td className="px-3 py-2 text-right whitespace-nowrap">
                         {kw.organicRank != null ? (
                           <span className="text-slate-700 font-medium">
