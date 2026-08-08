@@ -24,7 +24,8 @@ type ActionType = 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED
 
 interface AnalyzedKeyword {
   keyword: string
-  opportunityScore: number
+  /** Internal gap-amplified placement composite (renamed from opportunityScore, PO 2026-08-08). */
+  coverageGapScore: number
   actionType: ActionType
   actionText: string
   rationale: string
@@ -189,7 +190,7 @@ export function KeywordIntelligencePanel({ asin, data, loading, error, onRefresh
                 <span className="text-sm font-semibold text-gray-900 truncate">{kw.keyword}</span>
                 <KeywordActionBadge type={kw.actionType} />
               </div>
-              <span className="shrink-0 text-sm font-bold text-violet-700">{kw.opportunityScore}</span>
+              <span className="shrink-0 text-sm font-bold text-violet-700" title="Placement priority (internal gap-amplified score, 0-100) — not a market metric; it drops when you cover the keyword, by design">{kw.coverageGapScore}</span>
             </div>
 
             {/* Action text */}

@@ -35,7 +35,15 @@ export type ActionType = 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OP
 export interface RankPlaybookRow {
   keyword: string
   volume: number
-  opportunityScore: number
+  /** Internal gap-amplified placement composite (0-100, engine `coverageGapScore`). Kept on the row
+   *  for the composite FALLBACK display only — it swings with our own coverage (52→19 after a push),
+   *  so it must never be presented as market data (PO data-truth rule 2026-08-08). */
+  coverageGapScore: number
+  /** NATIVE market opportunity, 0-10 (poolOpportunityScore from JS fields only) — THE displayed
+   *  "opp" number and the top-10 sort key. null = not measured (SQP/import rows, pre-054 rows):
+   *  the panel then shows the composite with a `~` prefix so a fabricated number is never
+   *  mistaken for market data. */
+  marketOpportunity: number | null
   actionType: ActionType
   youCover: boolean
   coveredIn: string[]                 // ['title','bullets','description','backend'] or ['(live content)']
@@ -45,7 +53,7 @@ export interface RankPlaybookRow {
   theirShare: number | null           // 0..100 — SHARE AMONG TOP RETURNED LISTINGS (not market share)
   sellerVisible: boolean | null       // in this keyword's top returned listings; null = not measured
   sovStatus: SovStatus
-  priority: number                    // 1..N (deterministic fallback: opportunity desc)
+  priority: number                    // 1..N (deterministic fallback: rankOpportunityKey desc)
   /** Outcome loop (#89): SQP share movement since the last monthly snapshot. Absent/null until ≥2 months of
    *  history exist (insufficient_data → null). `text` is server-authored + sanitize()-clamped and only ever
    *  asserts correlation ("rose AFTER a change"), NEVER causation. */
@@ -128,6 +136,18 @@ export function sanitize(s: string): string {
  *  so if the LLM tripped an over-promise we DROP the whole string ('') and let the caller fall back to the
  *  deterministic baseline — fail closed, never show mangled or sneaky copy. */
 export function cleanLlm(s: string): string { return isOverPromise(s) ? '' : s.trim() }
+
+/**
+ * Top-10 sort key (PO data-truth rule 2026-08-08): NATIVE market opportunity leads; a row without
+ * native data falls back to its gap composite. PURE, exported for tests.
+ * Scale note: marketOpportunity is 0-10 (JS niche-score model, ~7+ strong) and the composite is
+ * 0-100 (~70+ strong) — ×10 puts both on one nominal 0-100 axis so a mixed pool (JS rows + SQP/
+ * import rows) still sorts deterministically. The fallback is a display-marked approximation
+ * (`~` in the panel), not market data.
+ */
+export function rankOpportunityKey(r: { marketOpportunity: number | null; coverageGapScore: number }): number {
+  return r.marketOpportunity != null ? r.marketOpportunity * 10 : r.coverageGapScore
+}
 
 // ─── Free core (spec §2) ──────────────────────────────────────────────────────
 export interface FreeCore {
@@ -348,7 +368,8 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     return {
       keyword: k.keyword,
       volume: k.searchVolume,
-      opportunityScore: k.opportunityScore,
+      coverageGapScore: k.coverageGapScore,
+      marketOpportunity: k.marketOpportunity ?? null,
       actionType,
       youCover,
       coveredIn,
@@ -369,9 +390,10 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     }
   })
 
-  // Top-10 by opportunity desc; among near-equal opportunity, prefer uncovered (winnable) — but a
+  // Top-10 by NATIVE market opportunity desc (rankOpportunityKey; composite fallback per-row only
+  // when native is absent — PO 2026-08-08); among near-equal, prefer uncovered (winnable) — but a
   // low-opportunity-uncovered term never displaces a high-opportunity one (spec D3 fix).
-  const top10 = [...rows].sort((a, b) => (b.opportunityScore - a.opportunityScore) || (Number(!a.youCover) - Number(!b.youCover))).slice(0, 10)
+  const top10 = [...rows].sort((a, b) => (rankOpportunityKey(b) - rankOpportunityKey(a)) || (Number(!a.youCover) - Number(!b.youCover))).slice(0, 10)
 
   const covered = rows.filter((r) => r.youCover).length
   const total = rows.length
@@ -423,7 +445,12 @@ function councilBrief(rows: RankPlaybookRow[], coverage: { covered: number; tota
     const comp = r.sovStatus === 'ok' && r.topCompetitorBrand
       ? `; top competitor ${r.topCompetitorBrand} ~${r.theirShare}% of clicks${r.sellerVisible === false ? ', you are NOT in its top listings' : r.sellerVisible ? ', you ARE in its top listings' : ''}`
       : ''
-    return `${i + 1}. "${r.keyword}" — opportunity ${r.opportunityScore}, ${r.actionType}, ${cov}${comp}`
+    // Data-truth (PO 2026-08-08): the LLM council must not be told a gap-amplified internal number
+    // is "opportunity". Native = market data; fallback is explicitly labeled as our internal priority.
+    const opp = r.marketOpportunity != null
+      ? `market opportunity ${r.marketOpportunity}/10`
+      : `internal gap priority ~${r.coverageGapScore}/100 (not market data)`
+    return `${i + 1}. "${r.keyword}" — ${opp}, ${r.actionType}, ${cov}${comp}`
   }).join('\n')
   return `Product (live title): ${ctx.title}\nContent coverage: ${coverage.covered}/${coverage.total} top keywords; ${criticalGaps} high-opportunity gap(s).\n\nTop keyword playbook:\n${lines}`
 }

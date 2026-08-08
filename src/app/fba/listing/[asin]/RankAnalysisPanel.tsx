@@ -189,7 +189,16 @@ export default function RankAnalysisPanel({ asin }: { asin: string }) {
                   <tr key={i} className="hover:bg-slate-50 align-top">
                     <td className="px-3 py-2 text-slate-800">
                       {r.keyword}
-                      <span className="block text-[10px] text-slate-400">{(r.volume ?? 0).toLocaleString()} vol · opp {r.opportunityScore}</span>
+                      {/* Data-truth (PO 2026-08-08): "opp" shows the NATIVE JS market metric (0-10).
+                          A row without native data (SQP/import, pre-migration, or a result cached
+                          before this change — legacy key `opportunityScore`) falls back to the
+                          internal gap composite marked `~` so a fabricated number is never
+                          mistaken for market data. */}
+                      <span className="block text-[10px] text-slate-400" title={r.marketOpportunity != null ? 'Jungle Scout market opportunity (0-10): demand × winnability — independent of your own listing content' : 'No native market metric for this keyword — showing our internal gap-priority score (~, 0-100), which changes when your own coverage changes'}>
+                        {(r.volume ?? 0).toLocaleString()} vol · opp {r.marketOpportunity != null
+                          ? `${r.marketOpportunity}/10`
+                          : `~${r.coverageGapScore ?? (r as unknown as { opportunityScore?: number }).opportunityScore ?? 0}`}
+                      </span>
                     </td>
                     <td className="px-3 py-2">
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${ACTION_BADGE[r.actionType] || 'bg-slate-100 text-slate-600'}`}>{r.actionType}</span>

@@ -20,7 +20,8 @@ type ActionType = 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED
 
 interface AnalyzedKeyword {
   keyword: string
-  opportunityScore: number
+  /** Internal gap-amplified placement composite (renamed from opportunityScore, PO 2026-08-08). */
+  coverageGapScore: number
   actionType: ActionType
   actionText: string
   rationale: string

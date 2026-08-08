@@ -177,6 +177,43 @@ async function readPriorSignals(asin: string): Promise<PriorSignals> {
   }
 }
 
+/** Prior NATIVE market metrics (migration 055), keyed by keyword — the sticky half of the
+ *  PO 2026-08-08 data-truth rule. Same doctrine as readPriorSignals: native metrics are produced
+ *  ONLY by a JS-sourced research run, but storeAnalysis is also called by the SQP writer, the
+ *  SQP-wins merge and the SQP cron — none of which carry them. Without carry-forward each of
+ *  those would NULL the freshly-harvested market data for every keyword it touched.
+ *  Missing column (pre-055 DB) reports ok:true with an empty map — genuinely nothing to carry,
+ *  the write path's own fallback strips the columns. A REAL read failure reports ok:false, and
+ *  the caller then OMITS the native columns entirely (upsert preserves omitted columns). */
+async function readPriorNativeMetrics(
+  asin: string
+): Promise<{ ok: boolean; map: Map<string, { ease: number | null; relevancy: number | null; market: number | null }> }> {
+  const map = new Map<string, { ease: number | null; relevancy: number | null; market: number | null }>();
+  try {
+    const { data, error } = await supabase
+      .from('keyword_analysis')
+      .select('keyword, js_ease_of_ranking, js_relevancy_score, market_opportunity')
+      .eq('asin', asin);
+    if (error) {
+      const missingCol = error.code === '42703' || error.code === 'PGRST204'
+        || /js_ease_of_ranking|js_relevancy_score|market_opportunity/i.test(error.message ?? '');
+      return { ok: missingCol, map };
+    }
+    for (const r of (data ?? []) as Record<string, unknown>[]) {
+      const kw = typeof r.keyword === 'string' ? r.keyword : null;
+      if (!kw) continue;
+      map.set(kw, {
+        ease: typeof r.js_ease_of_ranking === 'number' ? r.js_ease_of_ranking : null,
+        relevancy: typeof r.js_relevancy_score === 'number' ? r.js_relevancy_score : null,
+        market: typeof r.market_opportunity === 'number' ? r.market_opportunity : null,
+      });
+    }
+    return { ok: true, map };
+  } catch {
+    return { ok: false, map };
+  }
+}
+
 /**
  * Persist analyzed keyword results to keyword_analysis table.
  * Uses upsert on (asin, keyword) to handle re-analysis cleanly.
@@ -209,6 +246,26 @@ export async function storeAnalysis(
   const prior = wantTargets ? await readPriorSignals(asin) : { ok: false, map: new Map() } as PriorSignals;
   const writeTargets = wantTargets && prior.ok;
 
+  /* ── NATIVE market metrics (migration 055, PO 2026-08-08) — BOTH payload branches below carry
+   * them (the ai-recommendations dual-write-path lesson: an invariant on one branch only is a bug).
+   * allCurrentNative (a pure JS research run) skips the prior read — nothing to carry forward.
+   * writeNative=false ⇒ the columns are OMITTED from the payload; PostgREST upsert leaves omitted
+   * columns untouched, so a failed prior read can never blank stored market data (fail-open). */
+  const anyCurrentNative = keywords.some((k) => k.marketOpportunity != null || k.jsEaseOfRanking != null || k.jsRelevancyScore != null);
+  const allCurrentNative = keywords.every((k) => k.marketOpportunity != null);
+  const priorNative = allCurrentNative
+    ? { ok: true, map: new Map<string, { ease: number | null; relevancy: number | null; market: number | null }>() }
+    : await readPriorNativeMetrics(asin);
+  const writeNative = allCurrentNative || (priorNative.ok && anyCurrentNative) || (priorNative.ok && priorNative.map.size > 0);
+  const nativeCols = (kw: AnalyzedKeyword): Record<string, unknown> =>
+    writeNative
+      ? {
+          js_ease_of_ranking: kw.jsEaseOfRanking ?? priorNative.map.get(kw.keyword)?.ease ?? null,
+          js_relevancy_score: kw.jsRelevancyScore ?? priorNative.map.get(kw.keyword)?.relevancy ?? null,
+          market_opportunity: kw.marketOpportunity ?? priorNative.map.get(kw.keyword)?.market ?? null,
+        }
+      : {};
+
   let rows: Record<string, unknown>[];
 
   if (!writeTargets) {
@@ -216,7 +273,7 @@ export async function storeAnalysis(
     rows = keywords.map(kw => ({
       asin,
       keyword: kw.keyword,
-      opportunity_score: kw.opportunityScore,
+      opportunity_score: kw.coverageGapScore,
       action_type: kw.actionType,
       action_text: kw.actionText,
       in_title: kw.inTitle,
@@ -230,6 +287,7 @@ export async function storeAnalysis(
       organic_rank: kw.organicRank ?? null,
       data_source: kw.dataSource,
       analyzed_at: runTs,
+      ...nativeCols(kw),
     }));
     if (wantTargets && !prior.ok) {
       // Named explicitly: this run had context and (maybe) ratings but could not read what was
@@ -273,7 +331,7 @@ export async function storeAnalysis(
     rows = merged.map((m) => ({
       asin,
       keyword: m.kw.keyword,
-      opportunity_score: m.kw.opportunityScore,
+      opportunity_score: m.kw.coverageGapScore,
       action_type: m.kw.actionType,
       action_text: m.kw.actionText,
       in_title: m.kw.inTitle,
@@ -296,6 +354,7 @@ export async function storeAnalysis(
       selection_rank: verdict.rankOf.get(m.kw.keyword) ?? null,
       selection_slot: verdict.slotOf.get(m.kw.keyword) ?? null,
       selection_reason: verdict.reasonOf.get(m.kw.keyword) ?? null,
+      ...nativeCols(m.kw),
     }));
 
     console.log(JSON.stringify({
@@ -340,13 +399,15 @@ export async function storeAnalysis(
     // pattern as logPush). 23514 is added for 049's CHECK constraints: a half-applied migration can
     // have the column without the constraint, or reject a band the code considers valid.
     const missingCol = error.code === '42703' || error.code === 'PGRST204' || error.code === '23514'
-      || /title_density|organic_rank|theme_fit|theme_about|theme_run_id|selection_rank|selection_slot|selection_reason/i.test(error.message ?? '');
+      || /title_density|organic_rank|theme_fit|theme_about|theme_run_id|selection_rank|selection_slot|selection_reason|js_ease_of_ranking|js_relevancy_score|market_opportunity/i.test(error.message ?? '');
     if (missingCol) {
       const legacy = chunk.map((row) => {
         const {
           title_density: _omitTd, organic_rank: _omitRank,
           theme_fit: _f, theme_about: _a, theme_run_id: _r,
           selection_rank: _sr, selection_slot: _ss, selection_reason: _sre,
+          // Migration 054 (native market metrics) not applied — same fail-open contract.
+          js_ease_of_ranking: _je, js_relevancy_score: _jr, market_opportunity: _mo,
           ...rest
         } = row;
         return rest;
@@ -418,7 +479,8 @@ export async function getStoredAnalysis(
 
   return data.map(row => ({
     keyword: row.keyword,
-    opportunityScore: row.opportunity_score,
+    // DB column keeps its legacy name; in code this is the gap-amplified placement composite.
+    coverageGapScore: row.opportunity_score,
     actionType: row.action_type,
     actionText: row.action_text ?? '',
     // `rationale` was declared at engine.ts:88 and hardcoded '' here since inception — never
@@ -441,6 +503,11 @@ export async function getStoredAnalysis(
     dataSource: row.data_source,
     titleDensity: row.title_density ?? null,
     organicRank: row.organic_rank ?? null,
+    // NATIVE market metrics (migration 055). `select('*')` returns them once migrated; a pre-055
+    // row yields undefined → null — an honest "not measured", rendered as n/a (never a fake 0).
+    jsEaseOfRanking: (row.js_ease_of_ranking ?? null) as number | null,
+    jsRelevancyScore: (row.js_relevancy_score ?? null) as number | null,
+    marketOpportunity: (row.market_opportunity ?? null) as number | null,
     // Target-set fields surface ONLY at `on`. At off/shadow they stay `undefined`, so
     // `isRankingTarget` reads false for every row and every consumer falls open to its legacy list
     // without needing a second code path. This is the whole read-gating contract in four lines.

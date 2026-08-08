@@ -53,6 +53,7 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 - **Seasonal**: strip only OFF-season terms — a Valentine design KEEPS "valentine" everywhere (its theme IS the holiday).
 - **30 ranking-target seats**, one per search intent (no spelling-variant waste); theme-fit rated against a persisted PO-editable theme card; a thin niche design's own keywords are harvested and seat-reserved even at low volume.
 - The 158→240 byte gap on thin designs is a **pool problem** — never "solved" by padding junk.
+- **Opportunity score = Jungle Scout's MARKET metric, never our fabricated composite** (PO 2026-08-08: "the Opp score should be a JUNGLE SCOUT opp score, NOT our fabricated one — it should not be changing from pull to pull and be used to make the right keyword placement decisions"). The displayed/decision-driving opp number must be the provider's market opportunity (stable across pulls unless the MARKET moves); the internal volume×usage-gap composite may exist only as a clearly-named internal gap signal, never labeled "opportunity" and never the placement decider.
 
 ## 6. BANNED & PROTECTED TERMS (all published fields + research seeds)
 - **Trademarks**: "World Cup"→"World Futbol Cup" (futbol per PO; keeps "cup"); "Super Bowl"→"Big Game"; FIFA/Olympics/NFL/NBA/MLB/NHL/NCAA dropped outright; ~60 team/college/franchise word-marks dropped from the pool (no "for [Brand]" framing exists for them). Generic descriptors (spain, jersey, football, cup) are NOT trademarks — never drop them.

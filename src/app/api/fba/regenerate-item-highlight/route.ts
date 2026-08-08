@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
     const resolved = await resolveToChildAsin(parent_asin.toUpperCase(), supabase)
     const analysis = (resolved ? await getStoredAnalysis(resolved.childAsin, readWindow(100)) : []) ?? []
     // KEYWORD_TARGET_SET (#143). This route BYPASSES runListingPipeline entirely, so it must resolve
-    // its own targets — buildItemHighlights sorts contextKws by opportunityScore, which is the
+    // its own targets — buildItemHighlights sorts contextKws by coverageGapScore, which is the
     // gap-amplified score this PR exists to stop trusting. Without this, the one surface that skips
     // the pipeline would keep feeding off-theme keywords to the highlight prompt after the flip.
     //

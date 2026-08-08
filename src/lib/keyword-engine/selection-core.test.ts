@@ -4,7 +4,7 @@
  * What this file is FOR (read before adding a case):
  *
  *   1. THE NAMED BUG (§A). B0GF49RLDL ("Comfort Colors Halftone Cupid Valentine Shirt for Women").
- *      Today `opportunityScore = rawScore × presence.usageGapMultiplier ÷ 3.0` pays an up-to-3×
+ *      Today `coverageGapScore = rawScore × presence.usageGapMultiplier ÷ 3.0` pays an up-to-3×
  *      premium for keywords we do NOT cover, so "art teacher clothes" (5,331/mo) scores 53 and
  *      lands CRITICAL while "comfort colors tshirt" (306,496/mo) scores 14 and sits in DEFENDED.
  *      §A is the acceptance test for that inversion and must never be weakened.
@@ -229,7 +229,7 @@ const B0GF49RLDL = (): TargetInput[] => [
   mk({ keyword: 'shirt', searchVolume: 1_200_000, keywordSales: 9_000, competingProducts: 200_000, themeFit: 1, themeAbout: 'any shirt' }),
   mk({ keyword: 'tee shirts', searchVolume: 88_000, keywordSales: 700, competingProducts: 70_000, themeFit: 1, themeAbout: 'any tee' }),
 
-  // ── band 0 — THE BUG. Every one of these outranked the band-2 rows under opportunityScore. ──
+  // ── band 0 — THE BUG. Every one of these outranked the band-2 rows under coverageGapScore. ──
   mk({ keyword: 'art teacher clothes', searchVolume: 5_331, keywordSales: 400, competingProducts: 4_100, themeFit: 0, themeAbout: 'art teachers' }),
   mk({ keyword: 'art teacher shirts', searchVolume: 3_434, keywordSales: 400, competingProducts: 2_900, themeFit: 0, themeAbout: 'art teachers' }),
   mk({ keyword: 'art teacher shirt', searchVolume: 7_010, keywordSales: 400, competingProducts: 5_600, themeFit: 0, themeAbout: 'art teachers' }),
@@ -449,7 +449,7 @@ describe('§A B0GF49RLDL acceptance — relevance must out-rank the presence pre
   })
 
   it('the raw-market ordering of the two headline keywords no longer inverts', () => {
-    // Under opportunityScore: art teacher clothes 53 > comfort colors tshirt 14. Under targetScore
+    // Under coverageGapScore: art teacher clothes 53 > comfort colors tshirt 14. Under targetScore
     // the presence multiplier is structurally absent, so the market math alone decides.
     const pool = B0GF49RLDL()
     const artTeacher = pool.find((r) => r.keyword === 'art teacher clothes')!
@@ -492,8 +492,8 @@ describe('§B presence-invariance', () => {
 
   it('excess presence-shaped properties on the row are structurally ignored by the score', () => {
     const base = mk({ keyword: 'comfort colors tshirt', searchVolume: 306_496, competingProducts: 90_000, themeFit: 2 })
-    const covered = { ...base, inTitle: true, inBullets: true, inDescription: true, inBackend: true, usageGapMultiplier: 1.0, opportunityScore: 14 } as TargetInput
-    const uncovered = { ...base, inTitle: false, inBullets: false, inDescription: false, inBackend: false, usageGapMultiplier: 3.0, opportunityScore: 53 } as TargetInput
+    const covered = { ...base, inTitle: true, inBullets: true, inDescription: true, inBackend: true, usageGapMultiplier: 1.0, coverageGapScore: 14 } as TargetInput
+    const uncovered = { ...base, inTitle: false, inBullets: false, inDescription: false, inBackend: false, usageGapMultiplier: 3.0, coverageGapScore: 53 } as TargetInput
     expect(targetScore(covered)).toBe(targetScore(base))
     expect(targetScore(uncovered)).toBe(targetScore(base))
   })
@@ -1437,30 +1437,30 @@ describe('§K incumbency damper', () => {
  * §L — LEGACY PARITY. The byte-identical-`off` proof.
  * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
 
-type LegacyRow = { keyword: string; actionType: string; opportunityScore: number }
+type LegacyRow = { keyword: string; actionType: string; coverageGapScore: number }
 
 /** VERBATIM transcription of engine.ts:310-325. Do not tidy it: divergence here IS the test. */
-function engineInline<T extends { actionType: string; opportunityScore: number }>(analyzed: readonly T[]): T[] {
+function engineInline<T extends { actionType: string; coverageGapScore: number }>(analyzed: readonly T[]): T[] {
   const criticalAll = analyzed.filter(a => a.actionType === 'CRITICAL')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore);
+    .sort((a, b) => b.coverageGapScore - a.coverageGapScore);
   const criticalCapped = criticalAll.length <= 5
     ? criticalAll
-    : criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10).length >= 5
-      ? criticalAll.filter(a => a.opportunityScore >= 50).slice(0, 10)
+    : criticalAll.filter(a => a.coverageGapScore >= 50).slice(0, 10).length >= 5
+      ? criticalAll.filter(a => a.coverageGapScore >= 50).slice(0, 10)
       : criticalAll.slice(0, 5);
 
   const upgradeTop = analyzed.filter(a => a.actionType === 'UPGRADE')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+    .sort((a, b) => b.coverageGapScore - a.coverageGapScore).slice(0, 10);
   const reinforceTop = analyzed.filter(a => a.actionType === 'REINFORCE')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+    .sort((a, b) => b.coverageGapScore - a.coverageGapScore).slice(0, 10);
   const defendedTop = analyzed.filter(a => a.actionType === 'DEFENDED')
-    .sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, 10);
+    .sort((a, b) => b.coverageGapScore - a.coverageGapScore).slice(0, 10);
 
   const topOpportunities = [...criticalCapped, ...upgradeTop, ...reinforceTop, ...defendedTop];
   return topOpportunities;
 }
 
-const legacyRow = (keyword: string, actionType: string, opportunityScore: number): LegacyRow => ({ keyword, actionType, opportunityScore })
+const legacyRow = (keyword: string, actionType: string, coverageGapScore: number): LegacyRow => ({ keyword, actionType, coverageGapScore })
 
 const legacyTail = (): LegacyRow[] => [
   ...Array.from({ length: 14 }, (_, i) => legacyRow(`upg-${pad(i)}`, 'UPGRADE', 49 - i)),

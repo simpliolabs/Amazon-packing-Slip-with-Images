@@ -1765,7 +1765,7 @@ export async function buildItemHighlights(
     .map((d) => `- ${d.field_name}: ${d.recommended_value.trim()}`)
   const ownBrands = ownBrandTokenSet(brandName)
   const contextKws = [...pool]
-    .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    .sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
     .map((k) => scrubTrademarks((k.keyword || '').trim()).toLowerCase())
     .filter((kw) => kw
       && !season.isOffSeason(kw)
@@ -2376,7 +2376,7 @@ export function scoreBackend(str: string, ctx: BackendScoringCtx = {}): { green:
 
 // ─── Stage 0 — candidate preparation (code only) ───────────────────────────────
 
-interface TitleCandidate { keyword: string; opportunityScore: number; role: 'keyphrase' | 'descriptive' | 'audience'; organicRank?: number | null }
+interface TitleCandidate { keyword: string; coverageGapScore: number; role: 'keyphrase' | 'descriptive' | 'audience'; organicRank?: number | null }
 
 function extractProductNameTokens(repTitle: string | null): string[] {
   return (repTitle ?? '')
@@ -2396,7 +2396,7 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
 
   // Outcome-loop tiebreak (#89): among near-equal opportunity, prefer a keyword whose SQP share is RISING
   // (reinforce what's working) and de-prioritize one that's flat-despite-a-content-change (its ceiling is now
-  // non-content — reviews/price/velocity, not more copy). SECONDARY to opportunityScore: it only reorders
+  // non-content — reviews/price/velocity, not more copy). SECONDARY to coverageGapScore: it only reorders
   // TIES, never across opportunity tiers, never drops a keyword. Strict no-op when outcomeSignals is empty.
   const riseRank = (kw: string): number => {
     const s = outcomeSignals?.[kw.toLowerCase()]
@@ -2424,7 +2424,7 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
   const eligible = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !season.isOffSeason(k.keyword))
-    .sort((a, b) => (b.opportunityScore - a.opportunityScore) || (tdRank(b) - tdRank(a)) || (strikeRank(b) - strikeRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
+    .sort((a, b) => (b.coverageGapScore - a.coverageGapScore) || (tdRank(b) - tdRank(a)) || (strikeRank(b) - strikeRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
 
   // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
   // product. The old "keep the higher-opportunity one at >=60% overlap" rule caused synonym + niche
@@ -2449,7 +2449,7 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
     return 'descriptive'
   }
 
-  return deduped.slice(0, 7).map((k) => ({ keyword: k.keyword, opportunityScore: k.opportunityScore, role: roleOf(k.keyword), organicRank: k.organicRank ?? null }))
+  return deduped.slice(0, 7).map((k) => ({ keyword: k.keyword, coverageGapScore: k.coverageGapScore, role: roleOf(k.keyword), organicRank: k.organicRank ?? null }))
 }
 
 /** Deterministic backstop for NON-APPAREL titles: gpt-4.1-mini keeps stacking product-type synonyms
@@ -3127,7 +3127,9 @@ async function runTitleAgent(
           : c.organicRank <= 30 ? `, we rank #${c.organicRank} — STRIKING DISTANCE, title placement moves this fastest`
             : `, we rank #${c.organicRank}`
         : ''
-      return `  - "${c.keyword}" (opportunity ${c.opportunityScore}, role: ${c.role}${rank})`
+      // "placement priority", not "opportunity" (PO data-truth 2026-08-08): this is the internal
+      // gap-amplified composite — the LLM must not be told a fabricated number is market opportunity.
+      return `  - "${c.keyword}" (placement priority ${c.coverageGapScore}, role: ${c.role}${rank})`
     })
     .join('\n')
   const attrLine = attributes.length
@@ -3672,7 +3674,7 @@ async function runBulletsAgent(
   const giftAudiences: string[] = []
   if (apparel) {
     const seenAud = new Set<string>()
-    const rankedKw = [...input.analysis].sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    const rankedKw = [...input.analysis].sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
     for (const k of rankedKw) {
       for (const w of k.keyword.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
         if (AUDIENCE_GIFT_WORDS.has(w) && !seenAud.has(w)) { seenAud.add(w); giftAudiences.push(w) }
@@ -5495,7 +5497,7 @@ function attributeAsKeyword(attr: string): AnalyzedKeyword {
     // highest SEARCH-VOLUME real keyword (that regression dropped "see you later
     // alligator shirt", 22.7k/mo, from the title). 35 keeps it above filler, below the
     // genuine money keywords. The orchestrator separately PINS the top-volume keyword.
-    opportunityScore: 35,
+    coverageGapScore: 35,
     actionType: 'CRITICAL',
     actionText: '', rationale: '', urgency: 'high', estimatedImpact: '',
     searchVolume: 0, keywordSales: 0, competingProducts: 0,
@@ -7401,7 +7403,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const srcRe = new RegExp(`\\b(?:${sources.join('|')})\\b`, 'i')
       const bestSibling = cleanGated
         .filter((k) => srcRe.test(k.keyword))
-        .reduce<AnalyzedKeyword | null>((a, b) => (!a || (b.opportunityScore || 0) > (a.opportunityScore || 0) ? b : a), null)
+        .reduce<AnalyzedKeyword | null>((a, b) => (!a || (b.coverageGapScore || 0) > (a.coverageGapScore || 0) ? b : a), null)
       // Clone the best sibling's opportunity profile (score/volume/actionType) onto the synonym token so
       // the RANK panel + placement treat it as the high-value keyword it is; fall back to filler if no
       // sibling is in the pool (e.g. the concept was only in the title, already stripped upstream).
@@ -7442,8 +7444,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const demoteRe = femaleish ? MASC_RE : FEM_RE
     const hard = lean === 'male' || lean === 'female'
     for (const k of analysis) {
-      if (boostRe.test(k.keyword) && !demoteRe.test(k.keyword)) k.opportunityScore = (k.opportunityScore || 0) * 1.2
-      else if (demoteRe.test(k.keyword) && !boostRe.test(k.keyword)) k.opportunityScore = (k.opportunityScore || 0) * (hard ? 0.5 : 0.8)
+      if (boostRe.test(k.keyword) && !demoteRe.test(k.keyword)) k.coverageGapScore = (k.coverageGapScore || 0) * 1.2
+      else if (demoteRe.test(k.keyword) && !boostRe.test(k.keyword)) k.coverageGapScore = (k.coverageGapScore || 0) * (hard ? 0.5 : 0.8)
     }
   }
 
@@ -7499,7 +7501,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)
-    .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0) || (b.opportunityScore || 0) - (a.opportunityScore || 0))[0]
+    .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0) || (b.coverageGapScore || 0) - (a.coverageGapScore || 0))[0]
   season.diff('title-must-include', cleanGated.map((k) => k.keyword))
   const mustInclude = mustIncludeKw?.keyword
 
@@ -7579,7 +7581,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .filter((k) => notOffNiche(k.keyword))                                  // off-niche can't reach the title
     .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword))  // color-neutral broadcast title
     .filter((k) => k.keyword.split(/\s+/).length <= 6)  // skip long-tail phrases that wouldn't fit
-    .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    .sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
     .slice(0, 10)                                        // matches the scorer's top-10 cap
     .map((k) => k.keyword)
 
@@ -7601,7 +7603,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // verified: first #86 deploy surfaced ZERO brands because it read cleanGated.)
     const ranked = [...input.analysis]
       .filter((k) => !season.isOffSeason(k.keyword))
-      .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+      .sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
     for (const k of ranked) {
       for (const brand of findThirdPartyBrands(k.keyword, ownB)) {
         // Title-case the brand for display ("canon" → "Canon", multi-word kept lower→Title).
@@ -8457,7 +8459,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     remainingForBullets.push(k)
   }
   // Highest-opportunity first so bullets 1-3 reinforce the true top keyphrases.
-  remainingForBullets.sort((a, b) => b.opportunityScore - a.opportunityScore)
+  remainingForBullets.sort((a, b) => b.coverageGapScore - a.coverageGapScore)
 
   // Stage 2 — Bullets
   // Capacity-family detection — used by the plan filter just below AND passed to the bullets
@@ -8530,7 +8532,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // scorer would dock coverage for a garment/plural variant Layer-1 deleted from the generator. Dedup
   // BEFORE slice so we keep 10 DISTINCT concepts, and every consumer reads the identical universe.
   const topOpportunityKwsForBullets = dedupeBulletVariants(topOppDeduped
-    .sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0))
+    .sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
     .map((k) => k.keyword)).slice(0, 10)
   // ── Multi-design group scoping (parity-audit structural build 2026-07-03) ─────────────────────
   // PARTIAL-REGEN COHERENCE (#3/#9/#23): bullets/description/keywords-only regens skip the title
@@ -8754,7 +8756,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (even ones in the title — utilize the best Jungle Scout terms) PLUS long-tail /
   // synonyms / occasion / seasonal. Whole coherent phrases, filled toward ~240 bytes.
   //
-  // POOL COMPOSITION — the push-starvation trap (live 2026-06-12): opportunityScore is
+  // POOL COMPOSITION — the push-starvation trap (live 2026-06-12): coverageGapScore is
   // gap-AMPLIFIED (raw × usageGap 1-3), so the moment the seller PUSHES the keywords the
   // covered terms' scores collapse to raw/3 and flip toward OPTIMIZED ("fully covered").
   // Filtering OPTIMIZED out + sorting by the collapsed score made the FIRST regen after a
@@ -8796,7 +8798,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       (BACKEND_CRIT_ON ? ((b.actionType === 'CRITICAL' ? 1 : 0) - (a.actionType === 'CRITICAL' ? 1 : 0)) : 0) ||
       (b.keywordSales || 0) - (a.keywordSales || 0) ||
       (b.searchVolume || 0) - (a.searchVolume || 0) ||
-      b.opportunityScore - a.opportunityScore)
+      b.coverageGapScore - a.coverageGapScore)
 
   // FALLBACK CHAIN — Part 3, "then use the keyword POOL" (PO 2026-07-18: keywords → council logic → pool).
   // A thin-niche listing's own analysis pool can't fill the 250-byte backend budget with unique clean

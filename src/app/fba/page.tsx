@@ -216,7 +216,8 @@ interface AiRecommendations {
 // ─── Keyword Intelligence Types ─────────────────────────────────────────────
 interface AnalyzedKeyword {
   keyword: string
-  opportunityScore: number
+  /** Internal gap-amplified placement composite (renamed from opportunityScore, PO 2026-08-08). */
+  coverageGapScore: number
   actionType: 'CRITICAL' | 'UPGRADE' | 'REINFORCE' | 'DEFENDED' | 'OPTIMIZED'
   actionText: string
   rationale: string
