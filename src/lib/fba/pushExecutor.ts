@@ -2994,10 +2994,16 @@ async function negotiateParentRecordFix(
               // Belt-and-suspenders audit trail: a SECOND keyword_push_log row for the title write
               // (the existing intent-audit row at :2547 records composite finalOps only). Best-effort;
               // never blocks the healed return.
+              // field is 'heal:feeds-title', NOT 'title' (adversarial review 2026-08-08): this title
+              // landed as a RIDER on a composite cure — the PO never shipped it — so it must stay
+              // visible in history but INVISIBLE to prior-ship evidence readers keyed on the
+              // unprefixed core field ('title'): the content-reconcile evidence query, verify-push's
+              // target set, and the per-field "shipped" chip (field_pushed_at). heal:* is the
+              // established heal-machinery namespace those readers already exclude.
               if (parentTitleForFeed.length > 0) {
                 try {
                   await db.from('keyword_push_log').insert({
-                    parent_asin, sku: parentSku, field: 'title',
+                    parent_asin, sku: parentSku, field: 'heal:feeds-title',
                     previous_value: null, new_value: parentTitleForFeed,
                     submission_id: feedResult.feedId, status: 'accepted', error_message: null,
                     pushed_by: SYSTEM_ACTOR.id,

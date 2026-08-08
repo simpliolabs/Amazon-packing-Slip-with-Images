@@ -33,6 +33,11 @@ import { isOffNicheKeyword, hasDatedEventContamination } from '@/lib/keyword-eng
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
 import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
+// CONTENT-RECONCILE (PO 2026-08-08, SELLER_PROFILE §10): ONE shared helper, called from BOTH
+// write paths (full dbPayload upsert + #79 partial early-return) — dual-write-path doctrine.
+// jsonChanged/perChildChanged/resolveTitleLocked are the shared PURE compare/lock rules
+// (unit-tested in contentReconcile.test.ts) so the two paths cannot drift.
+import { maybeEnqueueContentReconcile, jsonChanged, perChildChanged, resolveTitleLocked } from '@/lib/fba/contentReconcile'
 
 function getAdminSupabase() {
   return createClient(
@@ -664,13 +669,20 @@ export async function POST(req: NextRequest) {
     // partial run (bullets regenerate against the already-approved title). Row missing or
     // priors absent → fall back to a FULL regen so the seller always gets a result.
     let storedRec: Record<string, unknown> | null = null
+    // FAIL-CLOSED breadcrumb (adversarial review 2026-08-08): TRUE when the stored-rec read below
+    // errored (vs. legitimately finding no row). Today a failed read leaves storedRec null → the
+    // partial branch falls back to FULL regen and never consults this — but the reconcile's
+    // titleLocked must stay fail-closed even if that coupling ever loosens (resolveTitleLocked).
+    let storedRecReadFailed = false
     let onlySection: 'title' | 'bullets' | 'description' | 'keywords' | undefined
     if (['title', 'bullets', 'description', 'keywords'].includes(regenerate_section ?? '')) {
-      const { data: recRow } = await supabase
+      const { data: recRow, error: recReadErr } = await supabase
         .from('listing_seo_recommendations')
         .select('*')
         .eq('parent_asin', parent_asin)
         .single()
+      // PGRST116 (0 rows on .single()) is a genuine "no stored row yet" → NOT a read failure.
+      storedRecReadFailed = !!recReadErr && recReadErr.code !== 'PGRST116'
       storedRec = recRow as Record<string, unknown> | null
       const priorTitle = String(storedRec?.recommended_title ?? '')
       const priorBullets = Array.isArray(storedRec?.recommended_bullets) ? (storedRec?.recommended_bullets as string[]) : []
@@ -1014,6 +1026,38 @@ export async function POST(req: NextRequest) {
             } else {
               await recordAiHealth('ok')
             }
+            // CONTENT-RECONCILE (PO 2026-08-08, SELLER_PROFILE §10) — dual-write-path rule: the
+            // partial early-return persists content too, so it calls the SAME helper as the full
+            // upsert path. `changed` = the section's column landed in `upd` AND the persisted bytes
+            // actually differ from the stored prior (presence-of-write alone is NOT change — a
+            // byte-identical regen must not enqueue a churn job). Per-child twins compare through
+            // perChildChanged: `upd.per_child_* === undefined` (no per-child output, or deleted by
+            // the missing-column retry above) reads as unchanged — absence-of-write semantics.
+            // storedRec still holds the PRIOR values here (only title_source was mutated above).
+            // titleLocked reads storedRec AFTER the explicit-title unlock above, so a failed unlock
+            // write still skips the title, and resolveTitleLocked fails CLOSED on an unreadable
+            // stored row. Awaited but the helper never throws — a reconcile failure cannot break
+            // the regen response.
+            await maybeEnqueueContentReconcile({
+              db: supabase,
+              parentAsin: parent_asin,
+              titleLocked: resolveTitleLocked((storedRec as { title_source?: string }).title_source, storedRecReadFailed),
+              candidates: [{
+                field: sec,
+                changed:
+                  sec === 'title'
+                    ? String(result.recommended_title ?? '') !== String(storedRec.recommended_title ?? '')
+                      || perChildChanged(upd.per_child_titles, storedRec.per_child_titles ?? null)
+                    : sec === 'bullets'
+                    ? jsonChanged(result.recommended_bullets ?? null, storedRec.recommended_bullets ?? null)
+                      || perChildChanged(upd.per_child_bullets, storedRec.per_child_bullets ?? null)
+                    : sec === 'description'
+                    ? !descPreserved && (String(result.recommended_description ?? '') !== String(storedRec.recommended_description ?? '')
+                      || perChildChanged(upd.per_child_descriptions, storedRec.per_child_descriptions ?? null))
+                    : !kwPreserved && JSON.stringify(result.per_child_keywords) !== String(storedRec.recommended_keywords ?? ''),
+                degradePreserved: sec === 'description' ? descPreserved : sec === 'keywords' ? kwPreserved : false,
+              }],
+            })
             controller.close()
             return
           }
@@ -1363,15 +1407,38 @@ export async function POST(req: NextRequest) {
           let priorKwJson: string | null = null   // prior stored keywords, for the degraded-keywords preserve below
           let priorDesc: string | null = null     // prior stored description, for the degraded-description preserve (Phase 3)
           let priorPdi: unknown = null            // prior detail rows, for the push-provenance carry-forward below
+          let priorTitle: string | null = null    // prior stored title, for the content-reconcile changed-compare below
+          let priorBullets: unknown = null        // prior stored bullets (JSONB), same reconcile compare
+          let priorPerChildTitles: unknown = null       // prior per-child twins (JSONB) — the push
+          let priorPerChildBullets: unknown = null      // executor prefers these per SKU, so the
+          let priorPerChildDescriptions: unknown = null // reconcile compare must include them too
+          // FAIL-CLOSED flag (adversarial review 2026-08-08 BLOCKER): TRUE when the prior/lock read
+          // below failed. An unknown lock state must never overwrite a possibly-manual title, so when
+          // set: (a) recommended_title + per_child_titles are OMITTED from every persist in this path
+          // (the stored title — manual or not — survives untouched), and (b) the content-reconcile
+          // hook is skipped entirely (with null priors every changed-compare would read true and
+          // titleLocked would read false — exactly the state that must not drive autonomous pushes).
+          let lockCheckFailed = false
           try {
-            const { data: lockRow } = await supabase
+            const { data: lockRow, error: lockErr } = await supabase
               .from('listing_seo_recommendations')
-              .select('title_source, recommended_title, per_child_titles, recommended_keywords, recommended_description, product_details_improvements')
+              // per_child_bullets/descriptions are migration-033 columns: on a pre-033 DB this select
+              // ERRORS and the catch below fails CLOSED (title preserved, reconcile skipped) — loud,
+              // never a silent lock bypass. Apply 033 before deploy (same contract as the upsert).
+              .select('title_source, recommended_title, recommended_bullets, per_child_titles, per_child_bullets, per_child_descriptions, recommended_keywords, recommended_description, product_details_improvements')
               .eq('parent_asin', parent_asin)
               .maybeSingle()
+            // supabase-js returns errors in the result (it does NOT throw) — promote to the catch so
+            // a failed read can never masquerade as "no prior row" (the fail-open hole this closes).
+            if (lockErr) throw new Error(lockErr.message)
             priorKwJson = (lockRow as { recommended_keywords?: string } | null)?.recommended_keywords ?? null
             priorDesc = (lockRow as { recommended_description?: string } | null)?.recommended_description ?? null
             priorPdi = (lockRow as { product_details_improvements?: unknown } | null)?.product_details_improvements ?? null
+            priorTitle = (lockRow as { recommended_title?: string } | null)?.recommended_title ?? null
+            priorBullets = (lockRow as { recommended_bullets?: unknown } | null)?.recommended_bullets ?? null
+            priorPerChildTitles = (lockRow as { per_child_titles?: unknown } | null)?.per_child_titles ?? null
+            priorPerChildBullets = (lockRow as { per_child_bullets?: unknown } | null)?.per_child_bullets ?? null
+            priorPerChildDescriptions = (lockRow as { per_child_descriptions?: unknown } | null)?.per_child_descriptions ?? null
             const locked = (lockRow as { title_source?: string } | null)?.title_source === 'manual'
             if (locked && regenerate_section !== 'title') {
               const kept = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
@@ -1381,7 +1448,10 @@ export async function POST(req: NextRequest) {
               titleSourceOut = 'manual'
               console.log(`[ai-recommendations] manual-title lock HELD for ${parent_asin} — kept the seller's title through a ${regenerate_section ?? 'full'} regen`)
             }
-          } catch (e) { console.warn('[ai-recommendations] manual-title lock check failed (non-fatal):', e instanceof Error ? e.message : e) }
+          } catch (e) {
+            lockCheckFailed = true
+            console.warn(`[ai-recommendations] manual-title lock check FAILED for ${parent_asin} — FAIL CLOSED: title omitted from this persist (lock-preserve) + content-reconcile skipped:`, e instanceof Error ? e.message : e)
+          }
           rec.title_source = titleSourceOut   // carry the lock state into the streamed result so the "✏️ locked" badge survives a whole-audit
 
           // DEGRADED-KEYWORDS PRESERVE (2026-07-08): the pipeline flagged the backend keywords as
@@ -1400,6 +1470,9 @@ export async function POST(req: NextRequest) {
           // pure helpers so the partial section-regen path shares the IDENTICAL preserve decision
           // (dual-write-path invariant) — and the rules are unit-tested (backendDegradeGate.test.ts).
           let kwPreserved = false
+          // Full-path twin of the partial path's descPreserved (#157 asked for this flag): the
+          // description preserve below mutates rec silently — the reconcile guard needs the boolean.
+          let descPreserved = false
           if (result.degradedSections?.includes('backend_keywords')) {
             const prior = tryParsePriorKeywords(priorKwJson)
             // A contaminated prior is never "better" (2026-07-31): the fresh CLEAN 214-byte
@@ -1432,6 +1505,7 @@ export async function POST(req: NextRequest) {
             const visLen = descriptionVisibleLength
             if (shouldPreserveDescription(priorDesc, rec.recommended_description)) {
               rec.recommended_description = priorDesc as string
+              descPreserved = true
               rec.action_plan = (rec.action_plan ?? []).map((it) => (it as { element?: string }).element === 'description'
                 ? { ...it, replacement_content: priorDesc as string, notes: `${(it as { notes?: string }).notes ?? ''} [This regen's description came back under the length floor — kept your previous description untouched.]`.trim() }
                 : it) as typeof rec.action_plan
@@ -1492,9 +1566,18 @@ export async function POST(req: NextRequest) {
           // (a locked listing stays 'manual' by omission — the upsert doesn't touch the column; the only
           // clear is the explicit-title partial path). Keeping it out of dbPayload means a lagging
           // migration 044 can't fail this upsert and trip the loud "FULL UPSERT FAILED" path every audit.
+          // LOCK-PRESERVE (fail closed, adversarial review 2026-08-08): when the lock/prior read
+          // failed, the title columns are OMITTED so the upsert cannot overwrite a possibly-manual
+          // stored title with this run's AI title. Every other column still persists normally.
+          if (lockCheckFailed) {
+            console.warn(`[ai-recommendations] lock-preserve for ${rec.parent_asin}: persisting WITHOUT recommended_title/per_child_titles (lock state unreadable this run)`)
+          }
           const dbPayload: Record<string, unknown> = {
             parent_asin: rec.parent_asin,
-            recommended_title: rec.recommended_title,
+            ...(lockCheckFailed ? {} : {
+              recommended_title: rec.recommended_title,
+              per_child_titles: rec.per_child_titles ?? null,
+            }),
             recommended_bullets: rec.recommended_bullets,
             recommended_keywords: JSON.stringify(rec.per_child_keywords),
             recommended_description: rec.recommended_description,
@@ -1504,7 +1587,6 @@ export async function POST(req: NextRequest) {
             product_details_improvements: rec.product_details_improvements,
             keyword_reconciliation: rec.keyword_reconciliation,
             action_plan: rec.action_plan,
-            per_child_titles: rec.per_child_titles ?? null,
             // Per-design bullets/description (migration 033) — JSONB, only present for multi-design POD families.
             per_child_bullets: rec.per_child_bullets ?? null,
             per_child_descriptions: rec.per_child_descriptions ?? null,
@@ -1514,6 +1596,12 @@ export async function POST(req: NextRequest) {
           const { error: upsertErr } = await supabase
             .from('listing_seo_recommendations')
             .upsert(dbPayload, { onConflict: 'parent_asin' })
+          // Persist outcome gate for the content-reconcile hook below (adversarial review 2026-08-08):
+          // the hook's contract is "after a regen PERSISTS changed core content" — if BOTH the full
+          // upsert and the minimal retry failed, nothing new is stored and the hook must not run
+          // (the enqueued job would ship pre-regen drift and the log would lie about a change that
+          // never landed). Flipped back to true only when the minimal retry succeeds.
+          let persistOk = !upsertErr
           if (upsertErr) {
             // LOUD: the full upsert failed. The minimal retry below SAVES THE CORE recommendation, but
             // per_child_* (per-design titles/bullets/descriptions) + keyword_plan are not in it. A MISSING
@@ -1523,9 +1611,10 @@ export async function POST(req: NextRequest) {
             console.error(`[AI Recs] FULL UPSERT FAILED for ${rec.parent_asin} — core saved via minimal retry, but PER-DESIGN content is at risk. Likely a MISSING COLUMN (run migration 033 / 022). Error:`, upsertErr.message)
             // The minimal payload intentionally OMITS the newer JSONB columns (incl. keyword_plan) so a
             // missing column can't break the core-recommendations save — that's the schema-missing safety net.
-            await supabase.from('listing_seo_recommendations').upsert({
+            // (Same lock-preserve rule as dbPayload: no title columns when the lock state is unreadable.)
+            const { error: minimalRetryErr } = await supabase.from('listing_seo_recommendations').upsert({
               parent_asin: rec.parent_asin,
-              recommended_title: rec.recommended_title,
+              ...(lockCheckFailed ? {} : { recommended_title: rec.recommended_title }),
               recommended_bullets: rec.recommended_bullets,
               recommended_keywords: JSON.stringify(rec.per_child_keywords),
               recommended_description: rec.recommended_description,
@@ -1535,6 +1624,10 @@ export async function POST(req: NextRequest) {
               action_plan: rec.action_plan,
               generated_at: rec.generated_at,
             }, { onConflict: 'parent_asin' })
+            persistOk = !minimalRetryErr
+            if (minimalRetryErr) {
+              console.error(`[AI Recs] MINIMAL RETRY ALSO FAILED for ${rec.parent_asin} — nothing persisted this run (stored row unchanged). Error:`, minimalRetryErr.message)
+            }
             // Best-effort recover keyword_plan (the regen-time score was computed WITH it; if it doesn't land
             // here too, the next sync reads NULL and the score jumps with no seller action — the trust trap).
             // A column-safe UPDATE: if keyword_plan exists (full upsert failed transiently) this restores
@@ -1550,15 +1643,46 @@ export async function POST(req: NextRequest) {
             // so a missing 033 column can't also drop the 017 titles. A missing column errors harmlessly
             // (ignored) — the loud error above already surfaced the gap; applying the migration is the fix.
             try {
-              await supabase.from('listing_seo_recommendations')
-                .update({ per_child_titles: rec.per_child_titles ?? null })
-                .eq('parent_asin', rec.parent_asin)
+              // Lock-preserve parity: never write per_child_titles when the lock state is unreadable.
+              if (!lockCheckFailed) {
+                await supabase.from('listing_seo_recommendations')
+                  .update({ per_child_titles: rec.per_child_titles ?? null })
+                  .eq('parent_asin', rec.parent_asin)
+              }
             } catch { /* per_child_titles column absent — handled by migration 017 */ }
             try {
               await supabase.from('listing_seo_recommendations')
                 .update({ per_child_bullets: rec.per_child_bullets ?? null, per_child_descriptions: rec.per_child_descriptions ?? null })
                 .eq('parent_asin', rec.parent_asin)
             } catch { /* per_child_bullets/descriptions column absent — handled by migration 033 */ }
+          }
+
+          // CONTENT-RECONCILE (PO 2026-08-08, SELLER_PROFILE §10): changed + previously-shipped +
+          // not-degrade-preserved core fields auto-ship through the queue Ship-all-core uses.
+          // `changed` = the PERSISTED value differs from the prior stored row, broadcast OR per-child
+          // twin (the executor prefers per_child_* per SKU, so a multi-design regen that only moves
+          // per-child copy must still reconcile). A degrade-preserve writes the prior back → compares
+          // equal → naturally no-ops; the flags are the explicit second net. Values are NOT
+          // snapshotted — the executor resolves the stored rec at run time (lock-safe). Awaited
+          // (fire-and-forget racing controller.close() can be lost) but the helper never throws.
+          // FAIL-CLOSED gates (adversarial review 2026-08-08): an unreadable lock/prior state or a
+          // failed persist skips the hook entirely — unknown state must never drive autonomous pushes.
+          if (lockCheckFailed) {
+            console.warn(`[CONTENT_RECONCILE] parent=${rec.parent_asin} skipped=lock-read-failed (fail closed — prior/lock state unknown this run)`)
+          } else if (!persistOk) {
+            console.warn(`[CONTENT_RECONCILE] parent=${rec.parent_asin} skipped=persist-failed (nothing new is stored — nothing to reconcile)`)
+          } else {
+            await maybeEnqueueContentReconcile({
+              db: supabase,
+              parentAsin: rec.parent_asin,
+              titleLocked: titleSourceOut === 'manual',
+              candidates: [
+                { field: 'title', changed: String(dbPayload.recommended_title ?? '') !== String(priorTitle ?? '') || jsonChanged(dbPayload.per_child_titles ?? null, priorPerChildTitles), degradePreserved: false },
+                { field: 'bullets', changed: jsonChanged(dbPayload.recommended_bullets ?? null, priorBullets) || jsonChanged(dbPayload.per_child_bullets ?? null, priorPerChildBullets), degradePreserved: false },
+                { field: 'description', changed: String(dbPayload.recommended_description ?? '') !== String(priorDesc ?? '') || jsonChanged(dbPayload.per_child_descriptions ?? null, priorPerChildDescriptions), degradePreserved: descPreserved },
+                { field: 'keywords', changed: String(dbPayload.recommended_keywords ?? '') !== String(priorKwJson ?? ''), degradePreserved: kwPreserved },
+              ],
+            })
           }
 
           // Degraded-keywords / hard-error warnings (2026-07-08): the run SUCCEEDED (core content is
