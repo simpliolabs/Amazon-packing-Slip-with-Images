@@ -22,6 +22,9 @@ interface AnalyzedKeyword {
   keyword: string
   /** Internal gap-amplified placement composite (renamed from opportunityScore, PO 2026-08-08). */
   coverageGapScore: number
+  /** Native JS market metric 0-10 (migration 055) — flows through to KeywordIntelligencePanel's
+   *  market-first badge. Optional so every pre-055 payload keeps compiling (engine.ts:145-146). */
+  marketOpportunity?: number | null
   actionType: ActionType
   actionText: string
   rationale: string

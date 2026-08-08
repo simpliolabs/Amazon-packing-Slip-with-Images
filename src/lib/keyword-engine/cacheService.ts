@@ -123,6 +123,14 @@ export interface StoreAnalysisOpts {
   themeRunId?: string | null;
   /** Escape hatch for callers that persist a PARTIAL pool and must not recompute selection. */
   skipTargetSet?: boolean;
+  /** TRUE only on runs whose pool actually MEASURED our organic rank (the JS research path —
+   *  Phase 4b keywords_by_asin — fresh or served from the research cache, where rank ABSENCE
+   *  genuinely means "checked, not ranking"). When true, `kw.organicRank ?? null` writes verbatim
+   *  (the honest not-ranking null must land). When false/absent (the SQP writer + SQP cron, which
+   *  never measure ranks), a null rank falls back STICKY to the previously stored value — the same
+   *  carry contract as the native metrics, because an unmeasuring writer must not erase a measured
+   *  rank (Item 3 "Rank column empty", PO 2026-08-08). */
+  measuredRanks?: boolean;
 }
 
 /** Prior per-keyword signals, plus whether the read actually SUCCEEDED. */
@@ -182,35 +190,73 @@ async function readPriorSignals(asin: string): Promise<PriorSignals> {
  *  ONLY by a JS-sourced research run, but storeAnalysis is also called by the SQP writer, the
  *  SQP-wins merge and the SQP cron — none of which carry them. Without carry-forward each of
  *  those would NULL the freshly-harvested market data for every keyword it touched.
- *  Missing column (pre-055 DB) reports ok:true with an empty map — genuinely nothing to carry,
+ *  Missing column (pre-055 DB) reports ok:true with no native values — genuinely nothing to carry,
  *  the write path's own fallback strips the columns. A REAL read failure reports ok:false, and
- *  the caller then OMITS the native columns entirely (upsert preserves omitted columns). */
+ *  the caller then OMITS the native columns entirely (upsert preserves omitted columns).
+ *
+ *  `ranksOk` is the SAME contract for organic_rank (adversarial HIGH, 2026-08-08): the rank carry
+ *  must mirror the native-column omission rule, because organic_rank predates 055 (migration 026) —
+ *  a post-026/pre-055 DB 42703s THIS select on the native columns while organic_rank EXISTS with
+ *  measured data, and a transient read failure must disable the rank write outright rather than let
+ *  an unmeasuring writer upsert organic_rank:null over every measured rank. So: on a native-column
+ *  missing error we RETRY a pre-055-safe select of just organic_rank; only a genuinely-absent
+ *  organic_rank column (pre-026) or a full success reports ranksOk:true.
+ *  `hasNative` = at least one stored row actually carries a native metric value — the write path
+ *  includes the native columns only when there is something real to carry (or this run measured). */
 async function readPriorNativeMetrics(
   asin: string
-): Promise<{ ok: boolean; map: Map<string, { ease: number | null; relevancy: number | null; market: number | null }> }> {
-  const map = new Map<string, { ease: number | null; relevancy: number | null; market: number | null }>();
+): Promise<{ ok: boolean; ranksOk: boolean; hasNative: boolean; map: Map<string, { ease: number | null; relevancy: number | null; market: number | null; rank: number | null }> }> {
+  const map = new Map<string, { ease: number | null; relevancy: number | null; market: number | null; rank: number | null }>();
   try {
+    // organic_rank rides the same read (Item 3 sticky-rank carry, 2026-08-08) — one roundtrip.
     const { data, error } = await supabase
       .from('keyword_analysis')
-      .select('keyword, js_ease_of_ranking, js_relevancy_score, market_opportunity')
+      .select('keyword, js_ease_of_ranking, js_relevancy_score, market_opportunity, organic_rank')
       .eq('asin', asin);
     if (error) {
       const missingCol = error.code === '42703' || error.code === 'PGRST204'
-        || /js_ease_of_ranking|js_relevancy_score|market_opportunity/i.test(error.message ?? '');
-      return { ok: missingCol, map };
+        || /js_ease_of_ranking|js_relevancy_score|market_opportunity|organic_rank/i.test(error.message ?? '');
+      if (!missingCol) return { ok: false, ranksOk: false, hasNative: false, map };
+      // Post-026/pre-055 deploy window: the combined select 42703'd on a native column, but
+      // organic_rank may exist WITH measured data. Retry the pre-055-safe select so the rank carry
+      // survives the exact migration window the graduated 056 retry below was built for.
+      try {
+        const { data: d2, error: e2 } = await supabase
+          .from('keyword_analysis')
+          .select('keyword, organic_rank')
+          .eq('asin', asin);
+        if (e2) {
+          // organic_rank itself absent (pre-026 DB) → genuinely nothing to carry → ranksOk:true
+          // (the write path's own legacy strip removes the column). Any OTHER failure → ranksOk:false.
+          const rankMissing = e2.code === '42703' || e2.code === 'PGRST204' || /organic_rank/i.test(e2.message ?? '');
+          return { ok: true, ranksOk: rankMissing, hasNative: false, map };
+        }
+        for (const r of (d2 ?? []) as Record<string, unknown>[]) {
+          const kw = typeof r.keyword === 'string' ? r.keyword : null;
+          if (!kw) continue;
+          map.set(kw, { ease: null, relevancy: null, market: null, rank: typeof r.organic_rank === 'number' ? r.organic_rank : null });
+        }
+        return { ok: true, ranksOk: true, hasNative: false, map };
+      } catch {
+        return { ok: true, ranksOk: false, hasNative: false, map };
+      }
     }
+    let hasNative = false;
     for (const r of (data ?? []) as Record<string, unknown>[]) {
       const kw = typeof r.keyword === 'string' ? r.keyword : null;
       if (!kw) continue;
-      map.set(kw, {
+      const entry = {
         ease: typeof r.js_ease_of_ranking === 'number' ? r.js_ease_of_ranking : null,
         relevancy: typeof r.js_relevancy_score === 'number' ? r.js_relevancy_score : null,
         market: typeof r.market_opportunity === 'number' ? r.market_opportunity : null,
-      });
+        rank: typeof r.organic_rank === 'number' ? r.organic_rank : null,
+      };
+      if (entry.ease != null || entry.relevancy != null || entry.market != null) hasNative = true;
+      map.set(kw, entry);
     }
-    return { ok: true, map };
+    return { ok: true, ranksOk: true, hasNative, map };
   } catch {
-    return { ok: false, map };
+    return { ok: false, ranksOk: false, hasNative: false, map };
   }
 }
 
@@ -254,9 +300,9 @@ export async function storeAnalysis(
   const anyCurrentNative = keywords.some((k) => k.marketOpportunity != null || k.jsEaseOfRanking != null || k.jsRelevancyScore != null);
   const allCurrentNative = keywords.every((k) => k.marketOpportunity != null);
   const priorNative = allCurrentNative
-    ? { ok: true, map: new Map<string, { ease: number | null; relevancy: number | null; market: number | null }>() }
+    ? { ok: true, ranksOk: true, hasNative: false, map: new Map<string, { ease: number | null; relevancy: number | null; market: number | null; rank: number | null }>() }
     : await readPriorNativeMetrics(asin);
-  const writeNative = allCurrentNative || (priorNative.ok && anyCurrentNative) || (priorNative.ok && priorNative.map.size > 0);
+  const writeNative = allCurrentNative || (priorNative.ok && anyCurrentNative) || (priorNative.ok && priorNative.hasNative);
   const nativeCols = (kw: AnalyzedKeyword): Record<string, unknown> =>
     writeNative
       ? {
@@ -264,6 +310,26 @@ export async function storeAnalysis(
           js_relevancy_score: kw.jsRelevancyScore ?? priorNative.map.get(kw.keyword)?.relevancy ?? null,
           market_opportunity: kw.marketOpportunity ?? priorNative.map.get(kw.keyword)?.market ?? null,
         }
+      : {};
+
+  /* ── STICKY ORGANIC RANK (Item 3 "Rank column empty", PO 2026-08-08) ─────────────────────────
+   * organic_rank is MEASURED only by the JS research path (Phase 4b keywords_by_asin); the SQP
+   * writer and SQP cron never measure it, yet their upsert wrote `organic_rank: null` over every
+   * previously measured rank — organic_rank had NO sticky carry, unlike the theme/native columns.
+   * Measured runs (opts.measuredRanks) write verbatim so an honest "checked, not ranking" null
+   * still lands; unmeasuring runs fall back to the prior stored value. Applied in BOTH payload
+   * branches below (dual-write-path doctrine).
+   *
+   * RUN-LEVEL CARRY CONTRACT (adversarial HIGH, 2026-08-08 — mirrors writeNative): an UNMEASURING
+   * writer may include organic_rank in the payload ONLY when the carry source was actually
+   * readable (priorNative.ranksOk). Otherwise the column is OMITTED entirely — PostgREST upsert
+   * preserves omitted columns, so a transient prior-read failure (or the post-026/pre-055 window,
+   * which ranksOk now survives via its own retry) can never erase a measured rank. Omission is
+   * run-level, so bulk-upsert payload keys stay homogeneous. */
+  const writeRanks = opts?.measuredRanks === true || priorNative.ranksOk;
+  const rankCols = (kw: AnalyzedKeyword): Record<string, unknown> =>
+    writeRanks
+      ? { organic_rank: opts?.measuredRanks ? (kw.organicRank ?? null) : (kw.organicRank ?? priorNative.map.get(kw.keyword)?.rank ?? null) }
       : {};
 
   let rows: Record<string, unknown>[];
@@ -284,7 +350,7 @@ export async function storeAnalysis(
       competing_products: kw.competingProducts,
       keyword_sales: kw.keywordSales,
       title_density: kw.titleDensity ?? null,
-      organic_rank: kw.organicRank ?? null,
+      ...rankCols(kw),
       data_source: kw.dataSource,
       analyzed_at: runTs,
       ...nativeCols(kw),
@@ -348,7 +414,7 @@ export async function storeAnalysis(
       competing_products: m.kw.competingProducts,
       keyword_sales: m.kw.keywordSales,
       title_density: m.kw.titleDensity ?? null,
-      organic_rank: m.kw.organicRank ?? null,
+      ...rankCols(m.kw),
       data_source: m.kw.dataSource,
       analyzed_at: runTs,
       // Sticky judgment signals.
@@ -360,6 +426,12 @@ export async function storeAnalysis(
       selection_rank: verdict.rankOf.get(m.kw.keyword) ?? null,
       selection_slot: verdict.slotOf.get(m.kw.keyword) ?? null,
       selection_reason: verdict.reasonOf.get(m.kw.keyword) ?? null,
+      // EASE-WEIGHT STAMP (migration 056, PO 2026-08-08). The literal NUMBER 0 — never null — so a
+      // rollback to weight 0 restamps to equality after ONE pass (no refire loop). Written ONLY here
+      // (the merge branch, beside the ranks it describes); the legacy branch OMITS it so PostgREST
+      // upsert preserves it sticky WITH the stale ranks — stamping the current weight there without
+      // recomputing ranks would stamp a lie.
+      selection_ease_weight: opts!.ctx!.easeWeight ?? 0,
       ...nativeCols(m.kw),
     }));
 
@@ -409,13 +481,28 @@ export async function storeAnalysis(
     // pattern as logPush). 23514 is added for 049's CHECK constraints: a half-applied migration can
     // have the column without the constraint, or reject a band the code considers valid.
     const missingCol = error.code === '42703' || error.code === 'PGRST204' || error.code === '23514'
-      || /title_density|organic_rank|theme_fit|theme_about|theme_run_id|selection_rank|selection_slot|selection_reason|js_ease_of_ranking|js_relevancy_score|market_opportunity/i.test(error.message ?? '');
+      || /title_density|organic_rank|theme_fit|theme_about|theme_run_id|selection_rank|selection_slot|selection_reason|js_ease_of_ranking|js_relevancy_score|market_opportunity|selection_ease_weight/i.test(error.message ?? '');
     if (missingCol) {
+      // GRADUATED RETRY (migration 056): when the ONLY missing column is selection_ease_weight, retry
+      // with just that stripped so a pre-056 (post-049/055) database keeps persisting fresh
+      // selection/theme/native writes in the deploy→PO-applies-SQL window. Anything else falls to the
+      // full legacy strip exactly as before.
+      if (/selection_ease_weight/i.test(error.message ?? '')) {
+        const minus056 = chunk.map((row) => {
+          const { selection_ease_weight: _sew, ...rest } = row;
+          return rest;
+        });
+        const { error: e056 } = await supabase.from('keyword_analysis').upsert(minus056, { onConflict: 'asin,keyword' });
+        if (!e056) { wroteAny = true; continue; }
+        // Fall through to the full legacy strip on any further failure.
+      }
       const legacy = chunk.map((row) => {
         const {
           title_density: _omitTd, organic_rank: _omitRank,
           theme_fit: _f, theme_about: _a, theme_run_id: _r,
           selection_rank: _sr, selection_slot: _ss, selection_reason: _sre,
+          // Migration 056 (ease-weight stamp) not applied — same fail-open contract.
+          selection_ease_weight: _sew,
           // Migration 054 (native market metrics) not applied — same fail-open contract.
           js_ease_of_ranking: _je, js_relevancy_score: _jr, market_opportunity: _mo,
           ...rest
@@ -513,6 +600,14 @@ export async function getStoredAnalysis(
     dataSource: row.data_source,
     titleDensity: row.title_density ?? null,
     organicRank: row.organic_rank ?? null,
+    // EASE-WEIGHT STAMP (migration 056) — heal metadata, NOT display data, so it is UNGATED by
+    // `targetsLive` (gating would blind the read-side ease-restamp comparison at shadow). The
+    // tri-state is load-bearing (see AnalyzedKeyword.selectionEaseWeight): a pre-056 DB has NO
+    // `selection_ease_weight` property in the row JSON → undefined → the heal never refires;
+    // a migrated-but-unstamped row reads null → "written under weight 0" → refires exactly once.
+    selectionEaseWeight: !('selection_ease_weight' in (row as Record<string, unknown>))
+      ? undefined
+      : ((row.selection_ease_weight ?? null) as number | null),
     // NATIVE market metrics (migration 055). `select('*')` returns them once migrated; a pre-055
     // row yields undefined → null — an honest "not measured", rendered as n/a (never a fake 0).
     jsEaseOfRanking: (row.js_ease_of_ranking ?? null) as number | null,

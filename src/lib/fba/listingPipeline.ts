@@ -52,7 +52,7 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
-import { loadBlankSpecRows, matchBlankSpec, type BlankSpec } from '@/lib/fba/blankSpecs'
+import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
@@ -148,6 +148,13 @@ export interface PipelineInput {
    *  repTitle is children[0] = the alphabetically-first variant, often a stale/secondary title that
    *  does NOT lead with the design name. Null when no score row exists. */
   canonicalTitle?: string | null
+  /** The PO's LOCKED recommended_title when listing_seo_recommendations.title_source='manual'
+   *  (migration 044) — the title the shipped IH will actually sit beside, because the persist-time
+   *  lock guard (ai-recommendations route) discards this run's fresh title on locked listings.
+   *  Consumed by the blank-brand IH waterfall net (PO 2026-08-08); null/absent = not locked →
+   *  the net tests the fresh finalTitle. Best-effort at the route (a failed pre-read passes null,
+   *  which only means the net keys on finalTitle — never a crash). */
+  lockedTitle?: string | null
   /** Seller-set DESIGN NAME override (listing_seo_scores.design_name_override, migration 031).
    *  When set, extractDesignName uses this VERBATIM — bypasses LLM / vision / leadingDesignPhrase.
    *  Deterministic anchor for cases where the heuristic chain fails (PO 2026-06-14:
@@ -1756,6 +1763,13 @@ export async function buildItemHighlights(
   /** blankSpec.unisex — adds the unisex-fit fact to the brief + fallback (PO 2026-08-06).
    *  Defaults false so the out-of-file regen-route caller stays byte-identical. */
   unisexFit = false,
+  /** Matched blank ROW for the blank-brand waterfall net (PO 2026-08-08). null = no matched blank
+   *  (or a caller that predates the net) → the net no-ops, byte-identical to today. */
+  blankBrand: BlankSpecRow | null = null,
+  /** The title(s) the shipped IH will actually sit beside — the PO's LOCKED title when
+   *  title_source='manual' (the fresh finalTitle is discarded at persist on locked listings), else
+   *  finalTitle. null = default to [finalTitle]. */
+  netTitles: (string | null | undefined)[] | null = null,
 ): Promise<string> {
   // Product FACTS for the brief: the attribute rows the pipeline already computed (Material /
   // Fit Type / Neck / Sleeve / Department / Style / Target Gender). Keywords are CONTEXT only.
@@ -1849,8 +1863,14 @@ export async function buildItemHighlights(
   // shipped "comfort colors" ×3 on a Comfort-Colors blank; the fallback is repeat-safe by construction but
   // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant AND
   // (via the keyword-list gate above) a real spec-grounded highlight, not a truncated keyword list.
-  if (problems.length === 0) return capItemHighlightRepeats(out)
-  return capItemHighlightRepeats(buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective, unisexFit))
+  // BLANK-BRAND WATERFALL (PO 2026-08-08): the net wraps BOTH producer paths — LLM output AND the
+  // spec fallback (Invariant 1: one net, every path) — and the cap re-runs after any insertion so
+  // the shipped bytes always hold ≤75 chars / ≤2 per word.
+  const titlesForNet = netTitles ?? [finalTitle]
+  if (problems.length === 0) return capItemHighlightRepeats(ensureBlankBrandInHighlights(out, titlesForNet, blankBrand))
+  return capItemHighlightRepeats(ensureBlankBrandInHighlights(
+    buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective, unisexFit),
+    titlesForNet, blankBrand))
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
@@ -7664,7 +7684,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // SKUs join the hay (2026-07-31): print-on-demand copy often never names the blank ("Gildan"
   // appears nowhere on the We Still Do listing) but the SKUs embed the style number ("640002XL-…").
   const skuHay = (input.children ?? []).map((c) => c.sku).filter(Boolean).join(' ')
-  const blankSpecMatched = apparelProduct && looksShirt ? matchBlankSpec(await loadBlankSpecRows(), attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
+  // ROW kept (2026-08-08): the blank-brand IH waterfall net needs the match REGEX too; the spec is
+  // derived from it so every downstream `blankSpec.*` consumer is byte-identical.
+  const blankSpecRowMatched = apparelProduct && looksShirt ? matchBlankSpecRow(await loadBlankSpecRows(), attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
+  const blankSpecMatched = blankSpecRowMatched?.spec ?? null
   // A long-sleeve family must not inherit a short-sleeve blank row's sleeve fact (the CC row is
   // the 1717/short-sleeve spec until the PO adds a 6014 row) — drop the contradicted fact, keep the rest.
   const blankSpec = blankSpecMatched && isLongSleeve && /short/i.test(blankSpecMatched.sleeve ?? '')
@@ -9478,11 +9501,35 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const hlPool = targets.live
       ? targets.keep(analysis).filter((k) => k.selectionSlot !== 'BACKEND')
       : analysis
-    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, hlPool, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season, blankSpec?.unisex === true)
+    // BLANK-BRAND WATERFALL (PO 2026-08-08): pass the matched blank ROW (brand + match regex are
+    // untouched by the long-sleeve sleeve-drop above) and the title the IH will actually ship
+    // beside — the PO's LOCKED title when title_source='manual' (the fresh finalTitle is discarded
+    // at persist on locked listings; live case B0FKKN8XKV), else this run's finalTitle.
+    //
+    // SPEC-TRUTH ROW for the brand-INSERTION net (adversarial HIGH, 2026-08-08): re-resolve WITHOUT
+    // attributePinFinal. The pin is attrs.searchKeyphrases[0] — MARKET vocabulary that contaminates
+    // other listings' pools ("comfort colors" on a Gildan 64000 family), and first-match-wins row
+    // selection over a pin-bearing hay would let the net stamp a FALSE "authentic Comfort Colors
+    // blank" claim on a Gildan garment. blankSpecRowMatched (pin included) still drives the FACT
+    // decorations — pre-net that hay only ever leaked spec facts, never an affirmative brand claim.
+    const blankBrandNetRow = apparelProduct && looksShirt
+      ? matchBlankSpecRow(await loadBlankSpecRows(), input.canonicalTitle, repTitle, input.productType, skuHay)
+      : null
+    // Per-child titles join the net set (adversarial LOW, multi-design): the IH is ONE broadcast
+    // value pushed to every SKU, while per_child_titles ship per SKU — the waterfall is satisfied
+    // only when EVERY shipped title carries the brand (enforced inside the net via every()).
+    const ihNetTitles = input.lockedTitle
+      ? [input.lockedTitle]
+      : [finalTitle, ...(perChildTitles ?? []).map((c) => c.title)]
+    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, hlPool, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season, blankSpec?.unisex === true, blankBrandNetRow, ihNetTitles)
     // The highlight LLM can still echo "oversized" from its context keywords even with the corrected Fit
     // factRow; scrub it to the true fit and collapse any duplicate word it creates ("oversized relaxed" →
     // "relaxed relaxed" → "relaxed") so the pushable Item Highlight can't ship a fit contradiction.
-    if (hl && blankSpec?.fit) hl = scrubFitClaims(hl, blankSpec.fit).replace(/\b(\w+)(\s+\1)\b/gi, '$1')
+    // capItemHighlightRepeats RE-WRAPS the scrub (adversarial LOW): scrubFitClaims runs AFTER the
+    // generator's terminal cap and can lengthen the string ("boxy"→"Relaxed", +3/occurrence past 75)
+    // or repeat the fit word 3x across phrases — the cap is idempotent, so re-running it is free and
+    // restores the ≤75 / ≤2-per-word guarantee on the bytes that persist.
+    if (hl && blankSpec?.fit) hl = capItemHighlightRepeats(scrubFitClaims(hl, blankSpec.fit).replace(/\b(\w+)(\s+\1)\b/gi, '$1'))
     if (hl) {
       pdiFinal.push({
         field_name: highlightsAttr.title,

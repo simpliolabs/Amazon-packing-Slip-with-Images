@@ -36,7 +36,7 @@ import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 // browser must never call selectionMode() (a non-NEXT_PUBLIC_ env var reads undefined there, so it
 // would always say 'off'), and gating the UI on payload row-shape instead would make a rollback
 // need data surgery rather than an env flip.
-import { selectionMode, resolveRankingTargets, legacyTierBuckets } from '@/lib/keyword-engine/selection-core';
+import { selectionMode, selectionEaseWeight, needsEaseRestamp, resolveRankingTargets, legacyTierBuckets } from '@/lib/keyword-engine/selection-core';
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
@@ -136,7 +136,27 @@ export async function GET(
       const needsNativeBackfill = !!stored && stored.length > 1 &&
         stored.some((k) => (k.dataSource === 'jungle_scout' || k.dataSource === 'inherited') && k.marketOpportunity == null) &&
         !stored.some((k) => k.marketOpportunity != null)
-      if ((!stored || stored.length <= 1 || needsNativeBackfill) && researchedAt) {
+      // EASE-RESTAMP (migration 056, PO 2026-08-08): the stored selection was computed under a
+      // DIFFERENT KEYWORD_EASE_WEIGHT than currently configured (ctxSha deliberately excludes the
+      // weight — PR #522 — so staleness is detected by the persisted stamp instead). Same one-shot
+      // cache-HIT promotion as needsNativeBackfill: 0 JS credits, idempotent — the merge-branch
+      // write restamps every row, so this reads false on the next load (stamp equality after one pass).
+      //
+      // COOLDOWN (adversarial MEDIUM, 2026-08-08): the restamp is the one heal whose CLEARING
+      // condition needs the LLM-dependent merge branch — a persistent legacy landing (AI quota
+      // outage) would otherwise retry the full SQP-sync + LLM pass on EVERY page load and every 8s
+      // auto-chain poll tick. A FAILED attempt's legacy write still advances analyzed_at, so
+      // requiring lastAnalyzedAt to be ≥30min old self-throttles the retry (~2/hour) with no new
+      // state. Scoped to the ease variant only: the native backfill clears even on the legacy
+      // write, and the thin-pool heal is already gated by research-newer + bigger.
+      const EASE_RESTAMP_COOLDOWN_MS = 30 * 60 * 1000
+      const easeCoolingDown = !!lastAnalyzedAt && Date.now() - new Date(lastAnalyzedAt).getTime() < EASE_RESTAMP_COOLDOWN_MS
+      const easeStale = needsEaseRestamp(stored ?? [], selectionEaseWeight(), selectionMode())
+      if (easeStale && easeCoolingDown) {
+        console.log(`[intelligence] ease-restamp for ${childAsin} deferred — last analysis write < 30min old (cooldown; will retry after it ages)`)
+      }
+      const needsEase = easeStale && !easeCoolingDown
+      if ((!stored || stored.length <= 1 || needsNativeBackfill || needsEase) && researchedAt) {
         try {
           // lastAnalyzedAt hoisted above (2026-08-08) — same value this branch used to query inline.
           const researchNewer = !lastAnalyzedAt || new Date(researchedAt).getTime() > new Date(lastAnalyzedAt).getTime()
@@ -149,21 +169,32 @@ export async function GET(
           // definition; the CACHE being servable is the gate).
           const { freshResearchPoolSize } = await import('@/lib/keyword-engine/keywordResearcher')
           const poolSize = await freshResearchPoolSize(childAsin)
-          if (needsNativeBackfill ? poolSize > 0 : (researchNewer && poolSize > (stored?.length ?? 0))) {
-            console.log(`[intelligence] self-heal ${childAsin}: stored=${stored?.length ?? 0}, fresh pool=${poolSize} (newer than analysis ${lastAnalyzedAt}) — promoting cached pool (0 credits)`)
+          // Backfill/restamp variants need only a NON-EMPTY servable cache (equal size is fine — the
+          // point is the stamp, not more rows); the thin-pool heal keeps its research-newer + bigger gate.
+          if ((needsNativeBackfill || needsEase) ? poolSize > 0 : (researchNewer && poolSize > (stored?.length ?? 0))) {
+            const reason = needsEase
+              ? `ease-restamp stored=${(stored ?? []).find((k) => k.selectionRank != null)?.selectionEaseWeight ?? 0} now=${selectionEaseWeight()}`
+              : needsNativeBackfill ? 'native-metric backfill' : 'thin-pool promotion'
+            console.log(`[intelligence] self-heal ${childAsin}: stored=${stored?.length ?? 0}, fresh pool=${poolSize} (${reason}) — promoting cached pool (0 credits)`)
             const promoteTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined
             await syncKeywordIntelligence(childAsin, {
               forceRefresh: false, includeJungleScout: true, useStoredAnalysis: false,
               parentAsin: parentAsin || undefined, listingTitle: promoteTitle,
             })
             const promoted = await getStoredAnalysis(childAsin, readWindow(100))
-            // Backfill runs at EQUAL size — accept the re-read whenever it's no smaller.
-            if (promoted && (needsNativeBackfill ? promoted.length >= (stored?.length ?? 0) : promoted.length > (stored?.length ?? 0))) {
+            // Backfill/restamp run at EQUAL size — accept the re-read whenever it's no smaller.
+            if (promoted && ((needsNativeBackfill || needsEase) ? promoted.length >= (stored?.length ?? 0) : promoted.length > (stored?.length ?? 0))) {
               stored = promoted
               // storeAnalysis just stamped analyzed_at ≥ researchedAt — reflect it so the auto-chain
               // poll (which requires lastAnalyzedAt ≥ researchedAt) doesn't read a pre-promotion value.
               lastAnalyzedAt = new Date().toISOString()
               console.log(`[intelligence] self-heal ${childAsin}: promoted to ${promoted.length} keywords`)
+              // LOUD LOOP GUARD (risk R1): if the promotion landed on the LEGACY storeAnalysis branch
+              // (ctx null / prior-signal read failure) the stamp did NOT update and this will retry
+              // next load — say so instead of silently churning OpenAI spend.
+              if (needsEase && needsEaseRestamp(promoted, selectionEaseWeight(), selectionMode())) {
+                console.warn(`[intelligence] self-heal ${childAsin}: ease-restamp FAILED (write landed on the legacy branch?) — will retry next load`)
+              }
             }
           } else if (researchNewer) {
             console.log(`[intelligence] self-heal ${childAsin}: fresh pool=${poolSize} not larger than stored=${stored?.length ?? 0} — skipping (no gain; cache expired reads as 0 → no credit spend)`)
@@ -300,16 +331,22 @@ export async function GET(
         // First row per keyword = latest snapshot, second = previous.
         const latest = new Map<string, number | null>();
         const prev = new Map<string, number | null>();
-        for (const s of snaps as { keyword: string; organic_rank: number | null }[]) {
+        // Latest CHECK date per keyword (Item 3, PO 2026-08-08): a snapshot row's PRESENCE marks a
+        // real Re-research measurement (captureRankSnapshots stores checked-but-not-ranking as a
+        // NULL-rank row), so the UI can honestly split "checked <date> — not ranking" from
+        // "never measured" instead of one ambiguous em-dash.
+        const checkedAt = new Map<string, string>();
+        for (const s of snaps as { keyword: string; organic_rank: number | null; snapshot_date?: string }[]) {
           const k = s.keyword.toLowerCase();
-          if (!latest.has(k)) latest.set(k, s.organic_rank);
+          if (!latest.has(k)) { latest.set(k, s.organic_rank); if (s.snapshot_date) checkedAt.set(k, s.snapshot_date); }
           else if (!prev.has(k)) prev.set(k, s.organic_rank);
         }
-        const enrich = (rows?: { keyword: string; organicRank?: number | null; prevOrganicRank?: number | null }[]) => {
+        const enrich = (rows?: { keyword: string; organicRank?: number | null; prevOrganicRank?: number | null; rankCheckedAt?: string | null }[]) => {
           for (const r of rows ?? []) {
             const k = r.keyword.toLowerCase();
             if (r.organicRank == null && latest.has(k)) r.organicRank = latest.get(k) ?? null;
             if (prev.has(k)) r.prevOrganicRank = prev.get(k) ?? null;
+            if (checkedAt.has(k)) r.rankCheckedAt = checkedAt.get(k) ?? null;
           }
         };
         enrich((result as { topOpportunities?: { keyword: string }[] }).topOpportunities);

@@ -17,6 +17,7 @@
 
 import { useState } from 'react'
 import { KeywordActionBadge } from './KeywordActionBadge'
+import { priorityDisplay, priorityTooltip } from '@/lib/fba/priorityDisplay'  // market-first Priority (PO 2026-08-08)
 
 // ─── Types (mirrors engine.ts AnalyzedKeyword) ────────────────────────────────
 
@@ -26,6 +27,9 @@ interface AnalyzedKeyword {
   keyword: string
   /** Internal gap-amplified placement composite (renamed from opportunityScore, PO 2026-08-08). */
   coverageGapScore: number
+  /** Native JS market metric 0-10 (migration 055). Optional: pre-055 payloads / SQP rows lack it —
+   *  the badge then falls back to the ~gap composite (priorityDisplay). */
+  marketOpportunity?: number | null
   actionType: ActionType
   actionText: string
   rationale: string
@@ -190,7 +194,18 @@ export function KeywordIntelligencePanel({ asin, data, loading, error, onRefresh
                 <span className="text-sm font-semibold text-gray-900 truncate">{kw.keyword}</span>
                 <KeywordActionBadge type={kw.actionType} />
               </div>
-              <span className="shrink-0 text-sm font-bold text-violet-700" title="Placement priority (internal gap-amplified score, 0-100) — not a market metric; it drops when you cover the keyword, by design">{kw.coverageGapScore}</span>
+              {(() => {
+                // Market-first (PO 2026-08-08 override of #520): native market_opportunity N/10
+                // primary; the internal gap composite demoted to the tooltip / honest ~fallback.
+                const pd = priorityDisplay(kw.marketOpportunity, kw.coverageGapScore)
+                return (
+                  // pd.cls, not a local native/fallback fork (adversarial LOW, 2026-08-08): cls
+                  // already encodes the banding, so a LOW native score (1/10) greys out here exactly
+                  // as it does on the listing page — the module's "render identically" contract.
+                  <span className={`shrink-0 text-sm font-bold ${pd.cls}`}
+                    title={priorityTooltip(pd.native, kw.coverageGapScore)}>{pd.text}</span>
+                )
+              })()}
             </div>
 
             {/* Action text */}

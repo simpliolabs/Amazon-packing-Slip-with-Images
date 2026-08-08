@@ -15,6 +15,7 @@ import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSparkline'
 import { presentOutcome, MEASURE_TARGET, type OutcomeChip } from '@/lib/fba/outcomePresentation'
+import { priorityDisplay, priorityTooltip } from '@/lib/fba/priorityDisplay'  // market-first Priority cell (PO 2026-08-08)
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -138,6 +139,10 @@ interface AnalyzedKeyword {
   titleDensity?: number | null
   organicRank?: number | null
   prevOrganicRank?: number | null
+  /** Latest keyword_rank_snapshots.snapshot_date for this keyword (server-enriched). Present =
+   *  a Re-research actually MEASURED this keyword at that date; absent = never measured — the
+   *  em-dash tooltip states which, so "not ranking" and "never checked" stop looking identical. */
+  rankCheckedAt?: string | null
   dataSource: string
   /** KEYWORD_TARGET_SET (#143). Present ONLY when the server says targetSetLive; all optional so
    *  this mirror compiles unchanged against every pre-flip payload. */
@@ -4444,8 +4449,8 @@ export default function ListingDetailPage() {
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Keyword</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500">Vol</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title={kwData.targetSetLive
-                      ? 'Gap-priority score 0-100 (internal, NOT market data): demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is — it drops when you cover a keyword, by design. This score no longer decides which keywords we target — ranking targets are chosen by theme fit × raw market value; see the Slot and Why columns. The market-truth number is the RANK panel’s Jungle Scout opportunity (0-10).'
-                      : 'Gap-priority score 0-100 (internal, NOT market data): demand × proven sales × competition × rank momentum × how big the gap in YOUR listing is — it drops when you cover a keyword, by design. The market-truth number is the RANK panel’s Jungle Scout opportunity (0-10).'}>Priority</th>
+                      ? 'Jungle Scout market opportunity 0-10 (market truth: demand × winnability, independent of your own content, stable across pulls). Rows without a native metric show the internal gap composite marked ~ (0-100 — it drops when you cover a keyword, by design). Neither number decides targeting — ranking targets are chosen by theme fit × raw market value; see the Slot and Why columns.'
+                      : 'Jungle Scout market opportunity 0-10 (market truth: demand × winnability, independent of your own content, stable across pulls). Rows without a native metric show the internal gap composite marked ~ (0-100 — it drops when you cover a keyword, by design).'}>Priority</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-500" title="YOUR organic rank for this keyword (Jungle Scout, measured on each Re-research). Arrow = movement vs the previous snapshot. — = not ranking.">Rank</th>
                     {kwData.targetSetLive && <th className="text-left px-3 py-2 font-medium text-slate-500" title="CORE = this design's own subject. CATEGORY = universal garment revenue. BACKEND = a real target, but one your visible copy must not contain (an off-season holiday) — it lives in your search terms. POOLED = indexed, but not one of the 30 we are actively targeting.">Slot</th>}
                     <th className="text-left px-3 py-2 font-medium text-slate-500">Action</th>
@@ -4468,10 +4473,24 @@ export default function ListingDetailPage() {
                         )}
                       </td>
                       <td className="px-3 py-2 text-right text-slate-600">{kw.searchVolume.toLocaleString()}</td>
-                      <td className={`px-3 py-2 text-right font-semibold ${kw.coverageGapScore >= 70 ? 'text-violet-700' : kw.coverageGapScore >= 40 ? 'text-slate-700' : 'text-slate-400'}`}>{Math.round(kw.coverageGapScore)}</td>
+                      {/* Market-first Priority (PO 2026-08-08 override of #520): native market_opportunity
+                          N/10 primary; gap composite demoted to the tooltip, or shown as an honest ~fallback
+                          when no native metric exists (priorityDisplay — shared with the optimizer mirror). */}
+                      {(() => {
+                        const pd = priorityDisplay(kw.marketOpportunity, kw.coverageGapScore)
+                        return (
+                          <td className={`px-3 py-2 text-right font-semibold ${pd.cls}`}
+                            title={priorityTooltip(pd.native, kw.coverageGapScore)}>{pd.text}</td>
+                        )
+                      })()}
                       <td className="px-3 py-2 text-right whitespace-nowrap">
                         {kw.organicRank != null ? (
-                          <span className="text-slate-700 font-medium">
+                          // Dated on the NON-null side too (adversarial LOW, 2026-08-08): the sticky
+                          // carry means a rank can be months old if research never re-runs — an
+                          // undated "#3" would read as current forever.
+                          <span className="text-slate-700 font-medium" title={kw.rankCheckedAt
+                            ? `Measured ${kw.rankCheckedAt} (Jungle Scout organic-rank check) — carried forward until the next Re-research`
+                            : 'Jungle Scout organic-rank measurement — carried forward until the next Re-research'}>
                             #{kw.organicRank}
                             {kw.prevOrganicRank != null && kw.prevOrganicRank !== kw.organicRank && (
                               <span className={`ml-1 text-[10px] font-semibold ${kw.organicRank < kw.prevOrganicRank ? 'text-emerald-600' : 'text-red-500'}`}
@@ -4484,7 +4503,11 @@ export default function ListingDetailPage() {
                             )}
                           </span>
                         ) : (
-                          <span className="text-slate-300" title={kw.prevOrganicRank != null ? `Dropped out — was #${kw.prevOrganicRank} at the previous check` : 'Not ranking (or not yet measured — ranks come from Jungle Scout research)'}>
+                          <span className="text-slate-300" title={kw.prevOrganicRank != null
+                            ? `Dropped out — was #${kw.prevOrganicRank} at the previous check`
+                            : kw.rankCheckedAt
+                              ? `Checked ${kw.rankCheckedAt} — not ranking in Amazon's organic results for this keyword`
+                              : 'Never measured — ranks come from the 4-credit Re-research (Jungle Scout measures YOUR organic rank per keyword)'}>
                             {kw.prevOrganicRank != null ? `— (was #${kw.prevOrganicRank})` : '—'}
                           </span>
                         )}

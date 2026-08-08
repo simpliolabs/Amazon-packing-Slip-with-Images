@@ -80,6 +80,13 @@ export interface KeywordResearchResult {
   source: 'vision' | 'title' | 'manual' | 'category' | 'agent' | 'rules';
   /** ISO timestamp */
   researchedAt: string;
+  /** TRUE when this result was served VERBATIM from the 14-day research cache (adversarial MEDIUM,
+   *  2026-08-08): its organicRank values were measured at the ORIGINAL fetch, up to TTL days ago.
+   *  Consumers must NOT re-snapshot those ranks as a today measurement (captureRankSnapshots would
+   *  stamp snapshot_date=TODAY over stale ranks, corrupting the rank time-series the "Checked
+   *  <date>" tooltip presents as measurement truth). Set ONLY at the cache-hit return — never
+   *  persisted into the cache itself, so a fresh run always reads falsy. */
+  servedFromCache?: boolean;
   /** The 1-3 seeds the Seed Agent considered (primary first) — for surfacing + PR2 multi-universe. */
   seedsConsidered?: string[];
   /** Self-eval: agent underperformed → suggest escalating to a full Seed Council (C). */
@@ -146,7 +153,10 @@ export async function researchKeywords(
     const cached = await getCachedResearch(asin);
     if (cached) {
       console.log(`[keywordResearcher] Cache HIT for ${asin}. Returning cached 3-bucket result.`);
-      return cached;
+      // servedFromCache marks the ranks as measured-at-original-fetch (see the interface note) so
+      // callers skip rank-snapshot capture. The seed-pool path below does NOT set it: a pool hit
+      // still runs Phase 4b, which measures THIS listing's ranks fresh.
+      return { ...cached, servedFromCache: true };
     }
   }
 

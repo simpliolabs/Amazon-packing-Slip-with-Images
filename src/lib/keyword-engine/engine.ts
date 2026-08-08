@@ -160,6 +160,13 @@ export interface AnalyzedKeyword {
   selectionRank?: number | null;
   selectionSlot?: 'CORE' | 'CATEGORY' | 'BACKEND' | null;
   selectionReason?: string | null;
+  /** KEYWORD_EASE_WEIGHT the persisted selection was computed under (migration 056). Heal
+   *  metadata for the intelligence GET's ease-restamp self-heal — NOT display data, so the
+   *  getStoredAnalysis mapper populates it UNGATED by selectionMode. Tri-state:
+   *    undefined = pre-056 DB (column absent) — the heal NEVER refires (fail-open);
+   *    null      = migrated-but-unstamped (pre-ease era row) — treated as "written under weight 0";
+   *    number    = the weight the persisted selection_rank was computed under. */
+  selectionEaseWeight?: number | null;
 }
 
 export interface EngineResult {
