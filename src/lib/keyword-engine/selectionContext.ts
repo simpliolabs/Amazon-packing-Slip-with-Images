@@ -34,7 +34,7 @@
  */
 
 import { seasonsIn } from './seasonalTerms'
-import { RANKING_CANDIDATE_POOL, selectionMode, selectionSha, type SelectionContext } from './selection-core'
+import { RANKING_CANDIDATE_POOL, selectionEaseWeight, selectionMode, selectionSha, type SelectionContext } from './selection-core'
 import { loadCoverageHaystack } from './loadListingContent'
 
 /* ── APPAREL ─────────────────────────────────────────────────────────────────────────────────── */
@@ -112,10 +112,14 @@ export function deriveSeasonsFrom(src: DesignSeasonSources): string[] {
  * (seasonalTerms.ts:118-122). A degraded context can therefore only ever be MORE conservative than
  * today; it can never invent a season.
  */
-export const INERT_SELECTION_CONTEXT: SelectionContext = { haystack: '', isApparel: false, designSeasons: [], lean: null }
+export const INERT_SELECTION_CONTEXT: SelectionContext = { haystack: '', isApparel: false, designSeasons: [], lean: null, easeWeight: 0 }
 
-/** Pure assembly from pieces the caller already has. No I/O, no flag read — callers that hold every
- *  input (the scorer, the rank panel) use this and pay zero extra queries. */
+/** Assembly from pieces the caller already has. No I/O, no queries — callers that hold every
+ *  input (the scorer, the rank panel) use this and pay zero extra queries.
+ *  ONE deliberate call-time flag read lives here: `selectionEaseWeight()` (KEYWORD_EASE_WEIGHT,
+ *  PO 2026-08-08 ease-aware priority). It is read in THE one derivation precisely so no two sites
+ *  can ever disagree on the weight — and at the unset default it returns 0, which keeps every
+ *  verdict byte-identical (selection-core's easeBonus contributes nothing at 0). */
 export function buildSelectionContext(
   parts: { haystack?: string | null; audienceLean?: string | null } & DesignSeasonSources,
 ): SelectionContext {
@@ -126,7 +130,7 @@ export function buildSelectionContext(
   // lean: only the two HARD values pass through (selection-core's contract); soft leans
   // ('lean_female' etc.) and absence normalize to null = no exclusion, today's behaviour.
   const lean = parts.audienceLean === 'female' || parts.audienceLean === 'male' ? parts.audienceLean : null
-  return { haystack, isApparel: isApparelPool(haystack), designSeasons: deriveSeasonsFrom(parts), lean }
+  return { haystack, isApparel: isApparelPool(haystack), designSeasons: deriveSeasonsFrom(parts), lean, easeWeight: selectionEaseWeight() }
 }
 
 /* ── PARITY ORACLE ───────────────────────────────────────────────────────────────────────────── */
@@ -143,6 +147,11 @@ export function buildSelectionContext(
 export function ctxSha(c: SelectionContext): string {
   // `lean` is a selection input, so it MUST be in the sha: two sites disagreeing on the lean would
   // pick different sets, and the oracle's whole job is to make that disagreement loud.
+  // `easeWeight` is DELIBERATELY excluded: like `selectionMode` itself (also absent), it is ONE
+  // process-wide env value read at exactly one place (`buildSelectionContext`), so per-site
+  // disagreement is structurally impossible — and excluding it keeps every existing ctxSha stable
+  // across the KEYWORD_EASE_WEIGHT rollout. The weight in force is visible on the same log lines
+  // via `[KW_TARGET_SET].easeWeight` instead.
   return selectionSha([c.haystack, c.isApparel ? 'apparel' : 'non-apparel', c.lean ?? 'no-lean', ...c.designSeasons])
 }
 

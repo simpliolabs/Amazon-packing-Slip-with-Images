@@ -44,11 +44,15 @@ import {
   INCUMBENCY_BONUS,
   RANKING_VOLUME_BACKSTOP,
   PROVEN_RANK_FLOOR,
+  EASE_WEIGHT_MAX,
+  EASE_VOLUME_FLOOR,
   selectionMode,
+  selectionEaseWeight,
   isRankingTarget,
   selectionSha,
   marketScore,
   effectiveBand,
+  easeBonus,
   targetScore,
   selectRankingTargets,
   legacyTierBuckets,
@@ -2617,3 +2621,163 @@ describe('§Q CORE reservation — B0GF49RLDL production replay', () => {
     expect(v.slotCounts.CATEGORY).toBe(16)
   })
 })
+
+/* ── §EASE — ease-aware priority via market_opportunity (PO 2026-08-08 3-factor rule) ────────────
+ * THE CHANNEL IS marketOpportunity (native, demand-gated, coverage-INDEPENDENT — migration 055),
+ * NEVER raw js_ease_of_ranking and NEVER the gap composite. The named acceptance case is
+ * B0FKKN8XKV: "cute christian shirts for women" (3,749/mo, ease 100, marketOpportunity 6.2) must
+ * outrank a higher-volume peer once the weight is threaded — and be byte-identical without it.
+ */
+describe('§EASE — easeBonus: bounded, floored, inert by default', () => {
+  it.each<[string, { searchVolume: number; marketOpportunity?: number | null }, number | undefined, number]>([
+    ['weight 0 (the rollout default) ⇒ 0', { searchVolume: 5_000, marketOpportunity: 6.2 }, 0, 0],
+    ['weight absent (undefined) ⇒ 0', { searchVolume: 5_000, marketOpportunity: 6.2 }, undefined, 0],
+    ['weight NaN ⇒ 0 (num() coercion)', { searchVolume: 5_000, marketOpportunity: 6.2 }, NaN, 0],
+    ['weight negative ⇒ clamped to 0', { searchVolume: 5_000, marketOpportunity: 6.2 }, -5, 0],
+    ['JUNK GUARD: vol below EASE_VOLUME_FLOOR ⇒ 0 even at opportunity 10 × max weight', { searchVolume: EASE_VOLUME_FLOOR - 1, marketOpportunity: 10 }, EASE_WEIGHT_MAX, 0],
+    ['vol exactly at the floor ⇒ bonus applies', { searchVolume: EASE_VOLUME_FLOOR, marketOpportunity: 4 }, 10, 4],
+    ['marketOpportunity null ⇒ 0 (SQP/import rows)', { searchVolume: 5_000, marketOpportunity: null }, 10, 0],
+    ['marketOpportunity absent ⇒ 0 (structural no-op)', { searchVolume: 5_000 }, 10, 0],
+    ['marketOpportunity NaN ⇒ 0', { searchVolume: 5_000, marketOpportunity: NaN }, 10, 0],
+    ['B0FKKN8XKV row: vol 3,749 · opp 6.2 · weight 10 ⇒ 6.2', { searchVolume: 3_749, marketOpportunity: 6.2 }, 10, 6.2],
+    ['weight 15 · opp 6.2 ⇒ 9.3', { searchVolume: 3_749, marketOpportunity: 6.2 }, 15, 9.3],
+    ['opportunity clamped to 10: opp 12 · weight 10 ⇒ 10', { searchVolume: 5_000, marketOpportunity: 12 }, 10, 10],
+    ['weight clamped to EASE_WEIGHT_MAX: weight 999 · opp 10 ⇒ EASE_WEIGHT_MAX', { searchVolume: 5_000, marketOpportunity: 10 }, 999, EASE_WEIGHT_MAX],
+  ])('%s', (_name, k, w, expected) => {
+    expect(easeBonus(k, w)).toBeCloseTo(expected, 10)
+  })
+
+  it('max contribution is exactly easeWeight — never more (the "≈ one band step" bound)', () => {
+    for (const w of [1, 5, 10, EASE_WEIGHT_MAX]) {
+      expect(easeBonus({ searchVolume: 1_000_000, marketOpportunity: 10 }, w)).toBeCloseTo(w, 10)
+    }
+  })
+})
+
+describe('§EASE — targetScore: additive inside base, before the band multiplier', () => {
+  it('default parameter ⇒ byte-identical to the pre-ease formula (every existing caller unaffected)', () => {
+    const row = mk({ marketOpportunity: 6.2, searchVolume: 3_749 })
+    expect(targetScore(row)).toBe(targetScore(row, 0))
+    expect(targetScore(row)).toBeCloseTo(marketScore(row) * THEME_BAND_WEIGHT[2], 10)
+  })
+
+  it.each<[ThemeBand]>([[1], [2], [3]])(
+    'formula at band %i: (marketScore + easeBonus) × bandWeight',
+    (band) => {
+      const row = mk({ themeFit: band, searchVolume: 3_749, marketOpportunity: 6.2 })
+      expect(targetScore(row, 10)).toBeCloseTo(
+        (marketScore(row) + easeBonus(row, 10)) * THEME_BAND_WEIGHT[band],
+        10,
+      )
+    },
+  )
+
+  it('band 0 zeroes the whole thing — ease can NEVER resurrect an off-theme keyword', () => {
+    const offTheme = mk({ themeFit: 0, searchVolume: 50_000, marketOpportunity: 10 })
+    expect(targetScore(offTheme, EASE_WEIGHT_MAX)).toBe(0)
+  })
+
+  it('incumbency and ease are both additive inside base (they stack, band-scaled)', () => {
+    const row = mk({ themeFit: 2, searchVolume: 3_749, marketOpportunity: 6.2, prevSelectionRank: 4 })
+    expect(targetScore(row, 10)).toBeCloseTo(
+      (marketScore(row) + INCUMBENCY_BONUS + easeBonus(row, 10)) * THEME_BAND_WEIGHT[2],
+      10,
+    )
+  })
+})
+
+describe('§EASE — selectRankingTargets: threading, byte-identity, and the B0FKKN8XKV acceptance', () => {
+  /** The named acceptance pair. Volumes chosen so the peer's marketScore lead (~2.9 pts from
+   *  volume) is SMALLER than the christian row's ease bonus at weight 10 (6.2 pts) — the exact
+   *  "buried by volume ordering" shape the PO rule targets. Both band 3, both survive every net. */
+  const christian = (): TargetInput =>
+    mk({ keyword: 'cute christian shirts for women', searchVolume: 3_749, marketOpportunity: 6.2, themeFit: 3, actionType: 'UPGRADE' })
+  const volumePeer = (): TargetInput =>
+    mk({ keyword: 'default graphic tee', searchVolume: 9_000, marketOpportunity: null, themeFit: 3, actionType: 'UPGRADE' })
+
+  it('ctx WITHOUT easeWeight ⇒ verdict byte-identical to explicit easeWeight 0 (rollout default)', () => {
+    const pool = [christian(), volumePeer()]
+    const bare = selectRankingTargets(pool, CTX)
+    const explicit = selectRankingTargets(pool, { ...CTX, easeWeight: 0 })
+    expect(bare.sha).toBe(explicit.sha)
+    expect(kwOf(bare.targets)).toEqual(kwOf(explicit.targets))
+  })
+
+  it('ACCEPTANCE (B0FKKN8XKV): weight 0 buries the ease-100 keyword under its volume peer; weight 10 promotes it', () => {
+    const at = (easeWeight: number): ReadonlyMap<string, number> =>
+      selectRankingTargets([volumePeer(), christian()], { ...CTX, easeWeight }).rankOf
+    const before = at(0)
+    expect(before.get('default graphic tee')).toBe(1) // volume ordering wins without the weight
+    expect(before.get('cute christian shirts for women')).toBe(2)
+    const after = at(10)
+    expect(after.get('cute christian shirts for women')).toBe(1) // ease-aware priority wins the tie zone
+    expect(after.get('default graphic tee')).toBe(2)
+  })
+
+  it('honest prose: the reason names the ease term when (and only when) it moved the score', () => {
+    const withWeight = selectRankingTargets([christian(), volumePeer()], { ...CTX, easeWeight: 10 })
+    expect(withWeight.reasonOf.get('cute christian shirts for women')).toContain('+ ease 6.2 (opportunity 6.2/10)')
+    expect(withWeight.reasonOf.get('default graphic tee')).not.toContain('ease') // no native metric ⇒ no claim
+    const without = selectRankingTargets([christian(), volumePeer()], CTX)
+    expect(without.reasonOf.get('cute christian shirts for women')).not.toContain('ease')
+  })
+
+  it('JUNK GUARD end-to-end: a sub-floor ease-100 long-tail is never promoted past a real keyword', () => {
+    // NOTE the real row is the factory's own 'default graphic tee': fixture keywords must survive
+    // isOffNicheKeyword — 'plain …' reads as a blank-apparel/wholesale term and is netted out.
+    const junk = mk({ keyword: 'obscure hyper niche phrase', searchVolume: EASE_VOLUME_FLOOR - 60, marketOpportunity: 10, themeFit: 2 })
+    const real = mk({ keyword: 'default graphic tee', searchVolume: 5_000, marketOpportunity: null, themeFit: 2 })
+    const v = selectRankingTargets([junk, real], { ...CTX, easeWeight: EASE_WEIGHT_MAX })
+    expect(v.rankOf.get('default graphic tee')).toBe(1)
+    expect(v.rankOf.get('obscure hyper niche phrase')).toBe(2)
+  })
+
+  it('band gate is senior to ease: a band-0 opportunity-10 row outside the backstop stays excluded', () => {
+    // 8 higher-volume survivors saturate RANKING_VOLUME_BACKSTOP, so the band-0 row cannot be
+    // rescued by membership — and ease must not become a second rescue channel.
+    const W = ['apple', 'beach', 'crane', 'dwarf', 'eagle', 'flame', 'grape', 'house']
+    const pool: TargetInput[] = W.map((w, i) =>
+      mk({ keyword: `graphic tee ${w}`, searchVolume: 10_000 + i, themeFit: 2 }))
+    pool.push(mk({ keyword: 'totally off theme phrase', searchVolume: 500, marketOpportunity: 10, themeFit: 0 }))
+    const v = selectRankingTargets(pool, { ...CTX, easeWeight: EASE_WEIGHT_MAX })
+    expect(kwOf(v.targets)).not.toContain('totally off theme phrase')
+    expect(v.reasonOf.get('totally off theme phrase')).toContain('off-theme')
+  })
+
+  it('PURITY: selectRankingTargets never reads KEYWORD_EASE_WEIGHT — only ctx threads the weight', () => {
+    const pool = [christian(), volumePeer()]
+    const saved = process.env.KEYWORD_EASE_WEIGHT
+    try {
+      delete process.env.KEYWORD_EASE_WEIGHT
+      const unset = selectRankingTargets(pool, CTX)
+      process.env.KEYWORD_EASE_WEIGHT = '15'
+      const envSet = selectRankingTargets(pool, CTX)
+      expect(envSet.sha).toBe(unset.sha) // env alone changed NOTHING
+      expect(kwOf(envSet.targets)).toEqual(kwOf(unset.targets))
+    } finally {
+      if (saved === undefined) delete process.env.KEYWORD_EASE_WEIGHT
+      else process.env.KEYWORD_EASE_WEIGHT = saved
+    }
+  })
+})
+
+describe('§EASE — selectionEaseWeight: the call-time flag read at the impure boundary', () => {
+  const FLAG = 'KEYWORD_EASE_WEIGHT'
+  let saved: string | undefined
+  beforeEach(() => { saved = process.env[FLAG]; delete process.env[FLAG] })
+  afterEach(() => { if (saved === undefined) delete process.env[FLAG]; else process.env[FLAG] = saved })
+
+  it.each<[string, string | null, number]>([
+    ['unset ⇒ 0 (byte-identical rollout default)', null, 0],
+    ['"10" ⇒ 10 (the recommended weight)', '10', 10],
+    ['"12.5" ⇒ 12.5 (floats allowed)', '12.5', 12.5],
+    ['"999" ⇒ clamped to EASE_WEIGHT_MAX', '999', EASE_WEIGHT_MAX],
+    ['"-3" ⇒ 0 (negatives never demote)', '-3', 0],
+    ['"abc" ⇒ 0 (invalid never throws)', 'abc', 0],
+    ['"0" ⇒ 0', '0', 0],
+  ])('%s', (_name, value, expected) => {
+    if (value !== null) process.env[FLAG] = value
+    expect(selectionEaseWeight()).toBe(expected)
+  })
+})
+

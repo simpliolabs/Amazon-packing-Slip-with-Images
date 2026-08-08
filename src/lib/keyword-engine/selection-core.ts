@@ -82,6 +82,35 @@ export const RANKING_VOLUME_BACKSTOP = 8
  *  Applied 1→2 ONLY, never 0→2 — see `effectiveBand`. */
 export const PROVEN_RANK_FLOOR = 30
 
+/** EASE-AWARE PRIORITY (PO 2026-08-08 "3-factor targeting rule": market opportunity + ease + volume).
+ *  Bounds on the additive `easeBonus` term inside `targetScore`.
+ *
+ *  THE CHANNEL IS `marketOpportunity` — the NATIVE, demand-gated 0-10 metric (migration 055,
+ *  poolOpportunityScore) — NEVER raw `js_ease_of_ranking` (JS ease is frequently 100 exactly where
+ *  volume is near-zero: no competition because no demand) and NEVER the gap composite (structurally
+ *  absent from `TargetInput`). Acceptance intent (B0FKKN8XKV): "cute christian shirts for women"
+ *  (3,749/mo, ease 100, marketOpportunity 6.2) must qualify as a target/placement candidate instead
+ *  of being buried under higher-volume peers by pure volume-flavored ordering.
+ *
+ *  - `EASE_WEIGHT_MAX` caps `SelectionContext.easeWeight`. A full-boost keyword (opportunity 10)
+ *    gains at most `easeWeight` points BEFORE the band multiplier — at the recommended 10-15 that is
+ *    ≈ one THEME_BAND_WEIGHT step on a strong pool, enough to beat volume peers, never enough to
+ *    outvote the band gate, the CORE reservation, or swamp `INCUMBENCY_BONUS` churn damping.
+ *  - `EASE_VOLUME_FLOOR` is the junk-long-tail guard: below a real demand floor, ease may never
+ *    promote. `marketOpportunity` is already demand-gated (poolOpportunity.ts:35,41,48); the
+ *    explicit floor makes "ease cannot promote junk" a stated invariant rather than an emergent
+ *    one. 100/mo also caps the discontinuity at the floor: marketOpportunity there is ≤ 4.0, so the
+ *    largest possible score cliff is ≤ 0.4 × easeWeight.
+ *
+ *  The bonus enters INSIDE `base`, BEFORE the band multiplier — the same slot as INCUMBENCY_BONUS —
+ *  so band 0 zeroes it: ease-aware priority re-orders ELIGIBLE keywords but can never resurrect an
+ *  off-theme one, and CRITICAL money keywords' first claim in the backend fill (CRIT-first second
+ *  key, listingPipeline fill) is untouched. */
+export const EASE_WEIGHT_MAX = 15
+
+/** Minimum real search volume before `easeBonus` may promote a keyword. See EASE_WEIGHT_MAX doc. */
+export const EASE_VOLUME_FLOOR = 100
+
 // Fail fast at import time if the quotas ever drift from the target count.
 if (TARGET_SLOTS.CORE + TARGET_SLOTS.CATEGORY + TARGET_SLOTS.BACKEND !== RANKING_TARGET_COUNT) {
   throw new Error(
@@ -135,6 +164,14 @@ export interface TargetInput {
   /** MARKET-wide sales for the keyword. Feeds `marketScore` ONLY — never the proven floor. */
   keywordSales: number
   competingProducts: number
+  /** NATIVE market opportunity 0-10 (migration 055 · poolOpportunityScore: demand × winnability,
+   *  demand-GATED at the source). Coverage-INDEPENDENT by construction — computed from Jungle Scout
+   *  market fields only, never from our own listing content — so admitting it does NOT violate the
+   *  presence-free invariant this type exists to enforce. Feeds ONLY the bounded `easeBonus` term in
+   *  `targetScore` (PO 2026-08-08 3-factor rule). OPTIONAL KEY (#143 rationale): SQP/import/pre-054
+   *  rows have no native metrics; absent and explicit null both mean "not measured" ⇒ 0 effect ⇒
+   *  byte-identical for those rows. */
+  marketOpportunity?: number | null
   /** THIS ASIN's organic rank. Feeds the 1→2 proven floor only.
    *  OPTIONAL KEY (#143) for the same reason as `prevSelectionRank` below: `AnalyzedKeyword` declares
    *  it `organicRank?: number | null` (it is null for native SQP/JS rows), and the sole read at :284
@@ -187,6 +224,15 @@ export interface SelectionContext {
    * reason as prevSelectionRank (#143): existing callers must not be forced to fabricate a value.
    */
   lean?: 'female' | 'male' | null
+  /**
+   * Ease-aware additive weight for `targetScore` (PO 2026-08-08 3-factor rule; see EASE_WEIGHT_MAX).
+   * Threaded from the impure boundary — `buildSelectionContext` reads `KEYWORD_EASE_WEIGHT` via
+   * `selectionEaseWeight()` at call time — because `selectRankingTargets` must never read env
+   * (its purity contract below). OPTIONAL KEY: absent, 0, or invalid ⇒ the ease term contributes
+   * nothing and every verdict is byte-identical to pre-ease behaviour — the rollout default.
+   * Clamped to [0, EASE_WEIGHT_MAX] inside `easeBonus`.
+   */
+  easeWeight?: number
 }
 
 export interface TargetVerdict<T extends TargetInput> {
@@ -225,6 +271,20 @@ export interface TargetVerdict<T extends TargetInput> {
 export function selectionMode(): SelectionMode {
   const v = (typeof process === 'undefined' ? '' : process.env.KEYWORD_TARGET_SET || '').toLowerCase()
   return v === 'on' || v === 'shadow' ? v : 'off'
+}
+
+/** Ease-aware weight flag (PO 2026-08-08), same call-time-read discipline as `selectionMode` above:
+ *  server-side env change + restart flips it, no rebuild, never module-scope, never NEXT_PUBLIC_.
+ *  Read ONLY at the impure boundary (`buildSelectionContext` — THE one SelectionContext derivation,
+ *  so no two sites can ever disagree on the weight); `selectRankingTargets` stays env-free and
+ *  receives the value through `SelectionContext.easeWeight`.
+ *  Unset / invalid / ≤0 ⇒ 0 ⇒ byte-identical (the rollout default). Clamped to EASE_WEIGHT_MAX.
+ *  ROLLOUT: storeAnalysis writes selection at shadow AND on, so flip `KEYWORD_EASE_WEIGHT` only
+ *  after a `[KW_TARGET_SET]` sha-diff review (both log lines now carry `easeWeight`). */
+export function selectionEaseWeight(): number {
+  const raw = typeof process === 'undefined' ? '' : process.env.KEYWORD_EASE_WEIGHT || ''
+  const n = Number.parseFloat(raw)
+  return Number.isFinite(n) && n > 0 ? Math.min(n, EASE_WEIGHT_MAX) : 0
 }
 
 /** THE membership predicate — safe on server AND client, because it reads only the row.
@@ -304,20 +364,45 @@ export function effectiveBand(k: TargetInput): ThemeBand {
   return proven && raw < 2 ? 2 : raw
 }
 
-/** Final ranking score. Incumbency is added BEFORE the band multiplier so it can damp churn among
- *  near-ties without ever rescuing an off-theme keyword (band 0 multiplies the whole thing to 0). */
-export function targetScore(k: TargetInput): number {
+/**
+ * Bounded ease-aware bonus (PO 2026-08-08 3-factor rule; bounds documented at EASE_WEIGHT_MAX).
+ * Reads `marketOpportunity` — the native, demand-gated 0-10 metric — NEVER raw js_ease_of_ranking
+ * and NEVER the gap composite (structurally absent from TargetInput). Guards, in order:
+ *   1. weight clamped to [0, EASE_WEIGHT_MAX]; 0 / absent / NaN / negative ⇒ 0 (rollout default,
+ *      byte-identical to pre-ease behaviour)
+ *   2. EASE_VOLUME_FLOOR — the junk-long-tail guard: below a real demand floor, ease never promotes
+ *   3. marketOpportunity clamped to [0, 10]; null / absent / NaN ⇒ 0 (SQP/import rows unaffected)
+ * Max contribution = easeWeight, at marketOpportunity 10.
+ */
+export function easeBonus(
+  k: Pick<TargetInput, 'searchVolume' | 'marketOpportunity'>,
+  easeWeight: number | undefined,
+): number {
+  const w = Math.min(Math.max(num(easeWeight), 0), EASE_WEIGHT_MAX)
+  if (w === 0) return 0
+  if (num(k.searchVolume) < EASE_VOLUME_FLOOR) return 0
+  const mo = Math.min(Math.max(num(k.marketOpportunity), 0), 10)
+  return w * (mo / 10)
+}
+
+/** Final ranking score. Incumbency and the ease bonus are added BEFORE the band multiplier so they
+ *  can damp churn / promote winnable keywords among near-ties without ever rescuing an off-theme
+ *  keyword (band 0 multiplies the whole thing to 0). `easeWeight` defaults to 0 so every existing
+ *  caller — and every pool without a threaded weight — is byte-identical to pre-ease behaviour. */
+export function targetScore(k: TargetInput, easeWeight = 0): number {
   const incumbent = typeof k.prevSelectionRank === 'number' && Number.isFinite(k.prevSelectionRank)
-  const base = marketScore(k) + (incumbent ? INCUMBENCY_BONUS : 0)
+  const base = marketScore(k) + (incumbent ? INCUMBENCY_BONUS : 0) + easeBonus(k, easeWeight)
   return base * (THEME_BAND_WEIGHT[effectiveBand(k)] ?? 0)
 }
 
 /** Total order. V8's sort is not guaranteed stable across engines and equal scores are dense at the
  *  tail, so every comparison falls through to the keyword itself. The `Number.isFinite` guard
  *  matters: `NaN !== 0` is TRUE, so returning a NaN difference would skip the tiebreak and let the
- *  engine coerce it to +0 — silently reinstating input-array order. */
-function byScoreThenKeyword(a: TargetInput, b: TargetInput): number {
-  const d = targetScore(b) - targetScore(a)
+ *  engine coerce it to +0 — silently reinstating input-array order. `easeWeight` (default 0 =
+ *  byte-identical) must be the SAME value at every score-ordered pass inside one selection —
+ *  `selectRankingTargets` binds it once from ctx so the passes cannot disagree. */
+function byScoreThenKeyword(a: TargetInput, b: TargetInput, easeWeight = 0): number {
+  const d = targetScore(b, easeWeight) - targetScore(a, easeWeight)
   if (Number.isFinite(d) && d !== 0) return d
   return a.keyword < b.keyword ? -1 : a.keyword > b.keyword ? 1 : 0
 }
@@ -382,6 +467,12 @@ export function selectRankingTargets<T extends TargetInput>(
   })
 
   if (!rows || rows.length === 0) return degenerate('empty-input')
+
+  // Ease-aware weight, bound ONCE from ctx (threaded from the impure boundary — this function never
+  // reads env) and applied through ONE comparator, so every score-ordered pass below — the BACKEND
+  // reservation, the CORE reservation, the main fill, and the final rank — must agree on it.
+  const easeW = ctx.easeWeight ?? 0
+  const byScore = (a: TargetInput, b: TargetInput): number => byScoreThenKeyword(a, b, easeW)
 
   // ── step 1: deterministic nets (the LLM proposes, the filter disposes) ──
   const survivors: T[] = []
@@ -538,7 +629,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // bullets. Reservation is bounded by TARGET_SLOTS.BACKEND, so it cannot starve the visible copy.
   const offSeasonByScore = distinct
     .filter((e) => e.slot === 'BACKEND')
-    .sort((a, b) => byScoreThenKeyword(a.row, b.row))
+    .sort((a, b) => byScore(a.row, b.row))
   for (const e of offSeasonByScore) place(e)
 
   // CORE RESERVATION (2026-07-29, task #144 replay on B0GF49RLDL). Same disease as the BACKEND
@@ -559,7 +650,7 @@ export function selectRankingTargets<T extends TargetInput>(
   // to the design's own subject.
   const coreByScore = distinct
     .filter((e) => e.slot === 'CORE')
-    .sort((a, b) => byScoreThenKeyword(a.row, b.row))
+    .sort((a, b) => byScore(a.row, b.row))
   for (const e of coreByScore) {
     if (remaining.CORE <= 0) break
     place(e)
@@ -568,12 +659,12 @@ export function selectRankingTargets<T extends TargetInput>(
   // Backstop members claim membership first so a misfiring rater run cannot cost the listing its
   // biggest legitimate traffic — but `chosen` is re-sorted by score below, so claiming membership
   // early never buys a better RANK than the score earns.
-  const ordered = distinct.slice().sort((a, b) => byScoreThenKeyword(a.row, b.row))
+  const ordered = distinct.slice().sort((a, b) => byScore(a.row, b.row))
   for (const e of ordered) if (backstopIntents.has(e.row.keyword)) place(e)
   for (const e of ordered) place(e)
 
   // ── step 7: rank by score (membership ≠ position), then slot + deterministic reason ──
-  chosen.sort((a, b) => byScoreThenKeyword(a.row, b.row))
+  chosen.sort((a, b) => byScore(a.row, b.row))
 
   const targets: T[] = []
   chosen.forEach((c, i) => {
@@ -582,11 +673,14 @@ export function selectRankingTargets<T extends TargetInput>(
     rankOf.set(c.row.keyword, rank)
     slotOf.set(c.row.keyword, c.slot)
     slotCounts[c.slot]++
+    // Honest prose: when the ease term moved this row's score, SAY so — the seller-visible Why
+    // column must state the formula actually used, never a simplification of it.
+    const bonus = easeBonus(c.row, easeW)
     reasonOf.set(
       c.row.keyword,
       c.rescued
         ? `volume backstop (${num(c.row.searchVolume).toLocaleString('en-US')}/mo) — rated off-theme but too large to abandon · ${c.slot} rank ${rank}/${RANKING_TARGET_COUNT}`
-        : `${c.slot} rank ${rank}/${RANKING_TARGET_COUNT} — market ${marketScore(c.row).toFixed(1)} × theme ${(THEME_BAND_WEIGHT[effectiveBand(c.row)] ?? 0).toFixed(2)}`,
+        : `${c.slot} rank ${rank}/${RANKING_TARGET_COUNT} — market ${marketScore(c.row).toFixed(1)}${bonus > 0 ? ` + ease ${bonus.toFixed(1)} (opportunity ${num(c.row.marketOpportunity).toFixed(1)}/10)` : ''} × theme ${(THEME_BAND_WEIGHT[effectiveBand(c.row)] ?? 0).toFixed(2)}`,
     )
   })
 
@@ -805,6 +899,9 @@ export function resolveRankingTargets<T extends TargetInput & { selectionRank?: 
       // deterministic net contradicted the raters. NOTE it is 0 for a merely mis-rated band-1 row —
       // the backstop can be load-bearing with nRescued === 0, so do not read it as "backstop idle".
       nRescued: rescuedCount,
+      // Ease-aware weight in force (PO 2026-08-08) — logged so the sha-diff review that gates the
+      // KEYWORD_EASE_WEIGHT flip can attribute every membership/order change to the weight.
+      easeWeight: opts.ctx.easeWeight ?? 0,
       shaLegacy: selectionSha(legacy.map((r) => r.keyword)),
       shaNext: selectionSha(next.map((r) => r.keyword)),
     }),
