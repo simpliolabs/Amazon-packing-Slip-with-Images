@@ -229,9 +229,16 @@ export function calculateScore(inputs: ScoringInputs): ScoreResult {
  * DEFENDED  — In title + bullets (no gap, just monitor)
  * OPTIMIZED — Low score or already fully covered
  */
-function deriveActionType(
+// EXPORTED (2026-08-08 rank-panel coherence): the RANK panel re-derives its DISPLAYED action from the
+// LIVE coverage flags (rankAnalysis.buildFreeCore at COVERAGE_CORE=on) so the badge, the ✓/✗ icon and
+// the advice text all come from ONE decision at ONE freshness. A second copy of this ladder is exactly
+// how the repo grew seven disagreeing "covered" definitions — export the one that exists.
+// Param is the structural subset actually read, so callers with live per-field flags don't have to
+// fabricate a usageGapMultiplier. NOTE the score>=20 fallback labels ZERO-presence keywords UPGRADE —
+// "UPGRADE ⇒ present" is NOT an invariant; display code must gate presence claims on coverage, not this.
+export function deriveActionType(
   score: number,
-  presence: PresenceResult
+  presence: Pick<PresenceResult, 'inTitle' | 'inBullets' | 'coverageCount'>
 ): ScoreResult['actionType'] {
   const { inTitle, inBullets, coverageCount } = presence;
 

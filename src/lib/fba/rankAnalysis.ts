@@ -15,6 +15,7 @@ import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { selectionMode, isRankingTarget } from '@/lib/keyword-engine/selection-core'
 import { readWindow } from '@/lib/keyword-engine/selectionContext'
 import { isWithinBudget } from '@/lib/keyword-engine/cacheService'
+import { deriveActionType } from '@/lib/keyword-engine/calculateScore'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 // COHERENCE Invariant 2/6: at COVERAGE_CORE=on the RANK panel decides coverage LIVE from the child's
 // OWN twin rows via the shared field-agnostic predicate (same one Intelligence + the scorer use) — no
@@ -149,6 +150,16 @@ export function rankOpportunityKey(r: { marketOpportunity: number | null; covera
   return r.marketOpportunity != null ? r.marketOpportunity * 10 : r.coverageGapScore
 }
 
+/** Top-10 comparator: market opportunity desc; among equal keys, UNCOVERED first (winnable) — the
+ *  2026-08-08 fix: the previous inline tie-break `Number(!a.youCover) - Number(!b.youCover)` sorted
+ *  COVERED first, inverted against its own "prefer uncovered" comment. PURE, exported for tests. */
+export function rankRowCompare(
+  a: { marketOpportunity: number | null; coverageGapScore: number; youCover: boolean },
+  b: { marketOpportunity: number | null; coverageGapScore: number; youCover: boolean },
+): number {
+  return (rankOpportunityKey(b) - rankOpportunityKey(a)) || (Number(!b.youCover) - Number(!a.youCover))
+}
+
 // ─── Free core (spec §2) ──────────────────────────────────────────────────────
 export interface FreeCore {
   analyzed: boolean
@@ -161,7 +172,12 @@ export interface FreeCore {
   baselineVerdict: RankVerdict
 }
 
-function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: boolean, isTarget?: boolean, slot?: string | null): string {
+// EXPORTED for tests (pure rule). COHERENCE HARDENING (2026-08-08): this function must NEVER assert a
+// presence it wasn't handed. `action_type` is a research-time snapshot (and deriveActionType's score>=20
+// fallback labels ZERO-presence keywords UPGRADE), so the old "UPGRADE ⇒ present" / "DEFENDED ⇒ covered"
+// branches produced the live contradiction "✗ icon + PROMOTE — present" in one table row. `youCover` is
+// the ONE coverage decision (the same one that draws the icon) and every presence claim now gates on it.
+export function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: boolean, isTarget?: boolean, slot?: string | null): string {
   // IRRELEVANT first — the keyword was classified as off-product (different niche, e.g. Star Wars
   // father's-day terms surfacing under a retirement-tee research). Adding it dilutes relevance.
   // (PO 2026-06-14: the previous "OPTIONAL — weave into bullets/backend if natural" fallback was
@@ -179,11 +195,51 @@ function contentActionFor(actionType: ActionType, youCover: boolean, inTitle: bo
   //     "regenerate that regeneration can't fix" anti-pattern the scorer was already cured of.
   if (isTarget === false) return 'SKIP — not a ranking target for this design (still indexed via your backend terms)'
   if (slot === 'BACKEND') return 'BACKEND — off-season for this design; it lives in your search terms, not the visible copy'
-  if (actionType === 'CRITICAL' && !youCover) return 'ADD — high-opportunity term not yet in your copy'
+  if ((actionType === 'CRITICAL' || actionType === 'UPGRADE' || actionType === 'DEFENDED') && !youCover) return 'ADD — high-opportunity term not yet in your copy'
   if (actionType === 'UPGRADE' && !inTitle) return 'PROMOTE — present, pull into the title (higher weight)'
   if (actionType === 'DEFENDED') return "DEFEND — you're covered here; hold it"
   if (youCover) return 'COVERED — content job done here; rank now depends on non-content levers'
   return 'OPTIONAL — lower-opportunity; weave into bullets/backend if natural'
+}
+
+/** =on DISPLAY re-derivation (Invariant 6): ONE decision at ONE freshness — the badge re-derives from
+ *  the SAME live per-field flags that drew the ✓/✗ icon. Stored action_type stays untouched for the
+ *  engine. PURE, exported for tests.
+ *   • IRRELEVANT passes through: it is a relevance classification, not a presence one. Relevance
+ *     authority lives in the classifier — any re-research/storeAnalysis rewrites action_type from a
+ *     fresh classification, at which point this passthrough stops matching. Re-deriving IRRELEVANT
+ *     rows from presence would relabel off-product keywords CRITICAL/"ADD" (the #203 / PO-2026-06-14
+ *     regression the SKIP branch exists to prevent).
+ *   • COVERED-ELSEWHERE guard (adversarial MEDIUM 2026-08-08): the shared ladder has no branch for
+ *     "covered only in description/backend" (or covered cross-field with every flag false) — score>=50
+ *     there derives CRITICAL, i.e. a red CRITICAL badge beside a green ✓ in the STANDARD post-push
+ *     state (backend is the sanctioned keyword home, Invariant 3). Coverage anywhere is coverage
+ *     (Invariant 2): a covered keyword is never presented as a gap tier — it maps to DEFENDED
+ *     ("hold it"). Guarded at THIS call site only, so the engine's research-time derivation (scorer
+ *     docking, generateActions) is untouched.
+ *   • KNOWN BIAS (adversarial medium-low, accepted + documented): `score` is the STORED gap-AMPLIFIED
+ *     composite — it embeds the research-time usageGapMultiplier (1.0–3.0), and getStoredAnalysis
+ *     cannot un-amplify it (the breakdown/rawScore is not persisted). A keyword covered at research
+ *     stores ~raw/3, so if the copy later DROPS it, it re-derives UPGRADE (score>=20 fallback), not
+ *     CRITICAL — coverage-REGRESSION rows under-tier vs a never-covered twin with identical market
+ *     stats. Curing this needs a persisted rawScore (backlog), not a display patch. The inverse is
+ *     safe: a stored CRITICAL implies stored score >= 50, which re-derives CRITICAL when live-uncovered.
+ *   • SIBLING SURFACE (adversarial medium-low, tracked follow-up): the Intelligence tab still renders
+ *     STORED action_type (route summary buckets + page.tsx badges), so RANK (live) and Intelligence
+ *     (research-time) can disagree on one keyword until that surface re-derives from the same live
+ *     coverageAcrossRows flags. */
+export function deriveLiveActionType(
+  storedActionType: string,
+  score: number,
+  cov: { covered: boolean; inTitle: boolean; inBullets: boolean; inDescription: boolean; inBackend: boolean },
+): ActionType {
+  if (storedActionType === 'IRRELEVANT') return storedActionType as ActionType
+  const derived = deriveActionType(score, {
+    inTitle: cov.inTitle,
+    inBullets: cov.inBullets,
+    coverageCount: [cov.inTitle, cov.inBullets, cov.inDescription, cov.inBackend].filter(Boolean).length,
+  })
+  return derived === 'CRITICAL' && cov.covered ? 'DEFENDED' : derived
 }
 
 export function buildBaselineVerdict(covered: number, total: number, criticalGaps: number): RankVerdict {
@@ -193,7 +249,10 @@ export function buildBaselineVerdict(covered: number, total: number, criticalGap
     contentCanDo: CONTENT_CAN_DO,
     contentCannotDo: CONTENT_CANNOT_DO,
     honestNote: HONEST_NOTE,
-    indexedCoverage: `${covered} of ${total} top keywords covered`,
+    // SCOPE CUE (2026-08-08): this pill counts the FULL filtered pool; the table shows only the top 10
+    // by market opportunity (which skews uncovered). Say "pool" so 48/66 + an all-✗ table reads as two
+    // scopes, not a contradiction.
+    indexedCoverage: `${covered} of ${total} pool keywords covered`,
     criticalGaps,
   }
 }
@@ -221,18 +280,100 @@ export async function buildHaystack(parentAsin: string | null, childAsin: string
  * that must agree is a silent-drift hazard: if they diverge, every cached analysis reads stale
  * forever (permanent recompute) or fresh forever (permanently stale advice), and neither shows an error.
  *
- * KEYWORD_TARGET_SET inputs are appended ONLY at `on`. At off/shadow the recipe reduces to exactly
- * today's `sha1(coverageMode + haystack)`, so merely DEPLOYING this PR invalidates nothing — the
- * one-shot catalogue-wide recompute is the price of the FLIP, not of the deploy.
+ * FORMAT (2026-08-08): TWO sha1 halves joined by ':' — `sha1(coverageMode + haystack)` (the COPY
+ * half) + ':' + `sha1(kwpool [+ kts])` (the POOL half). Exact-match staleness compares the whole
+ * string; the halves exist so the GET refresh path can tell a POOL-ONLY move (heal restamp /
+ * re-research — the old council headline still describes the live copy) from a REAL copy change
+ * (headline must reset) — see sameCopyEpoch. KEYWORD_TARGET_SET's kts term is appended to the POOL
+ * half ONLY at `on` (theme runs are a pool concern, not a copy one).
  *
  * Why theme_run_id belongs in the hash: without it, flipping the flag leaves every cached playbook
  * intact and the RANK panel keeps advising "ADD art teacher clothes" indefinitely after the selector
  * stopped treating it as a target — confidently and permanently wrong, with nothing to notice it.
+ *
+ * Why the keyword-POOL term belongs in the hash (2026-08-08, unconditional): the fingerprint used to
+ * hash only listing_content, so flows that rewrite keyword_analysis WITHOUT touching the copy — a
+ * fresh Intelligence re-research, the #521 market_opportunity heal-on-read backfill, #523 ease/
+ * selection restamps — never invalidated a cached playbook: the panel kept serving the old
+ * action_type / null marketOpportunity / old top-10 order indefinitely. Adding the term (and the
+ * ':' format) changes every existing fingerprint ONCE on deploy — a one-shot 0-credit free-core
+ * recompute per listing on its next GET (paid SOV/realities are carried forward by keyword in the
+ * refresh path).
  */
-async function fingerprintOf(haystack: string, themeRunId: string | null): Promise<string> {
-  const parts = [coverageMode(), haystack]
-  if (selectionMode() === 'on') parts.push(`kts:${themeRunId ?? 'none'}`)
-  return createHash('sha1').update(parts.join('\n')).digest('hex')
+async function fingerprintOf(haystack: string, themeRunId: string | null, poolStamp: string): Promise<string> {
+  const copyHalf = createHash('sha1').update([coverageMode(), haystack].join('\n')).digest('hex')
+  const poolParts = [`kwpool:${poolStamp}`]
+  if (selectionMode() === 'on') poolParts.push(`kts:${themeRunId ?? 'none'}`)
+  const poolHalf = createHash('sha1').update(poolParts.join('\n')).digest('hex')
+  return `${copyHalf}:${poolHalf}`
+}
+
+/** True when a stored fingerprint shares the COPY half (coverageMode + haystack) with a fresh one —
+ *  i.e. only the keyword-POOL half moved. Drives the council-headline carry in the GET refresh path.
+ *  A legacy pre-format fingerprint (no ':') always reads false — failing toward a full reset, never
+ *  toward keeping stale copy-describing prose. PURE, exported for tests. */
+export function sameCopyEpoch(stored: string | null | undefined, fresh: string): boolean {
+  return !!stored && stored.includes(':') && stored.split(':')[0] === fresh.split(':')[0]
+}
+
+/** Keyword-POOL staleness term: `count | max(analyzed_at) | count(market_opportunity) | irr:count`
+ *  over the ASIN's keyword_analysis rows — moves on re-research (count/analyzed_at), on the #521
+ *  market_opportunity backfill (mo count), on pool rewrites, AND on the ai-recommendations
+ *  IRRELEVANT ratchet (irr count). The ratchet is the ONE pool rewrite that changes action_type
+ *  without touching anything else this stamp hashes — without the irr term, a regen that marked
+ *  keywords off-product left the cached playbook advising "ADD — high-opportunity term" on those
+ *  same keywords indefinitely (adversarial HIGH 2026-08-08). The ratchet must NOT bump analyzed_at
+ *  instead: that would defer the ease-restamp cooldown and interact with the stale-prune.
+ *
+ *  analyzed_at semantics (the sentence that used to live here claimed the OPPOSITE): every
+ *  storeAnalysis — ease-restamp, native backfill, thin-pool promotion, re-research — DOES stamp
+ *  `analyzed_at: runTs` on all rows (cacheService, both payload branches; it drives the stale-prune).
+ *  That is the INTENDED invalidation channel: those heals change data this panel displays
+ *  (marketOpportunity, selection ranks), so the cached playbook must recompute — a 0-credit
+ *  free-core pass on the next GET. The GET refresh path keeps the PAID council headline across
+ *  pool-only moves via sameCopyEpoch, so heal churn cannot wipe it.
+ *
+ *  Best-effort: a failed read retries once on the pre-055 projection (no market_opportunity column →
+ *  the mo slot reads 'na') so re-research/ratchet detection stays alive on an unmigrated database;
+ *  only a terminal failure yields the CONSTANT 'unavailable' (never a perpetual invalidation), and
+ *  it warns once per process — a silently frozen stamp disables pool-staleness detection (the
+ *  haystack half still invalidates on copy changes), which is exactly the "neither shows an error"
+ *  hazard the fingerprint docstring cites. */
+let poolStampWarnedOnce = false
+async function keywordPoolStamp(childAsin: string, supabase: AdminClient): Promise<string> {
+  type StampRow = { analyzed_at?: string | null; market_opportunity?: number | null; action_type?: string | null }
+  const summarize = (rows: StampRow[], moMeasured: boolean): string => {
+    let maxAt = ''
+    let moCount = 0
+    let irrCount = 0
+    for (const r of rows) {
+      if (r.analyzed_at && r.analyzed_at > maxAt) maxAt = r.analyzed_at
+      if (r.market_opportunity != null) moCount++
+      if (r.action_type === 'IRRELEVANT') irrCount++
+    }
+    return `${rows.length}|${maxAt || 'none'}|${moMeasured ? moCount : 'na'}|irr:${irrCount}`
+  }
+  const warnOnce = (detail: unknown) => {
+    if (poolStampWarnedOnce) return
+    poolStampWarnedOnce = true
+    console.warn(`[rank-analysis] keywordPoolStamp unavailable (first seen on ${childAsin}) — pool-staleness detection is FROZEN until keyword_analysis reads recover (copy changes still invalidate):`, detail instanceof Error ? detail.message : detail)
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any   // market_opportunity: migration 055, not in generated types yet
+    const { data, error } = await db.from('keyword_analysis').select('analyzed_at, market_opportunity, action_type').eq('asin', childAsin)
+    if (!error) return summarize((data ?? []) as StampRow[], true)
+    // Pre-055 database: the projection 42703s on market_opportunity on EVERY call. Retry without it
+    // so the pool term keeps working there (count/analyzed_at/irr), instead of silently no-oping the
+    // entire pool-staleness fix in that environment.
+    const retry = await db.from('keyword_analysis').select('analyzed_at, action_type').eq('asin', childAsin)
+    if (!retry.error) return summarize((retry.data ?? []) as StampRow[], false)
+    warnOnce(retry.error?.message ?? error?.message)
+    return 'unavailable'
+  } catch (e) {
+    warnOnce(e)
+    return 'unavailable'
+  }
 }
 
 /** The ASIN's newest theme_run_id, or null. Best-effort by design: a pre-049 database, a missing
@@ -264,6 +405,7 @@ export async function contentFingerprint(parentAsin: string | null, childAsin: s
   return fingerprintOf(
     await buildHaystack(parentAsin, childAsin, supabase),
     await newestThemeRunId(childAsin, supabase),
+    await keywordPoolStamp(childAsin, supabase),
   )
 }
 
@@ -277,7 +419,7 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
   // resolvers is a tracked follow-up; this is NOT a byte-for-byte parity guarantee with the scorer.
   const haystack = await buildHaystack(parentAsin, childAsin, supabase)
   // ONE recipe, shared with contentFingerprint() — see fingerprintOf.
-  const fingerprint = await fingerprintOf(haystack, await newestThemeRunId(childAsin, supabase))
+  const fingerprint = await fingerprintOf(haystack, await newestThemeRunId(childAsin, supabase), await keywordPoolStamp(childAsin, supabase))
 
   let kws = await getStoredAnalysis(childAsin, readWindow(100))
   if (!kws || kws.length === 0) {
@@ -321,10 +463,14 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     }
   }
 
-  const check = makeCoverageChecker(haystack)   // today's baseline (coverage.ts kwToks over the family haystack)
+  // Legacy baseline check (coverage.ts kwToks over the family haystack): the production verdict at
+  // =off and the "old" half of the =shadow diff. At =on it is SKIPPED entirely — the live
+  // coverageAcrossRows verdict overwrites it anyway, so running it would be dead work by a second
+  // tokenizer (Invariant 1). Delete the import once the flag is retired.
+  const covMode = coverageMode()
+  const check = covMode !== 'on' ? makeCoverageChecker(haystack) : null
   // At =on/=shadow, load the child's OWN twin rows ONCE and decide coverage LIVE via the shared
   // field-agnostic predicate. =off skips this query entirely (perf no-op).
-  const covMode = coverageMode()
   const liveRows = covMode !== 'off' ? await loadListingRowsForPresence(supabase, childAsin) : []
 
   // Outcome loop (#89): per-keyword SQP share movement since the last monthly snapshot. Best-effort — {} (so
@@ -336,20 +482,23 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
     let youCover = flagCover.length > 0
     let coveredIn = flagCover
     // Stale-flag fallback: presence flags are a snapshot; if all false, trust the LIVE token check.
-    if (!youCover && check(k.keyword)) { youCover = true; coveredIn = ['(live content)'] }
+    if (!youCover && check && check(k.keyword)) { youCover = true; coveredIn = ['(live content)'] }
     // COVERAGE_CORE (Invariant 2/6): at =on, coverage is decided LIVE from the child's own twin rows via
     // the shared field-agnostic predicate — stored flags are no longer a coverage source (only a cache),
     // and coveredIn becomes true per-field (drops the opaque '(live content)' sentinel). =shadow logs diffs.
     let inTitleLive = k.inTitle
+    let actionType = k.actionType as ActionType
     if (covMode !== 'off') {
       const cov = coverageAcrossRows(k.keyword, liveRows)
       if (covMode === 'shadow') {
         if (cov.covered !== youCover) console.log(`[COVERAGE_DIFF] site=rank asin=${childAsin} kw=${JSON.stringify(k.keyword)} old=${youCover} new=${cov.covered}`)
       } else {
         youCover = cov.covered; coveredIn = cov.coveredIn; inTitleLive = cov.inTitle
+        // ONE decision at ONE freshness — see deriveLiveActionType for the IRRELEVANT passthrough,
+        // the covered-elsewhere guard, and the documented amplified-score bias.
+        actionType = deriveLiveActionType(k.actionType as string, k.coverageGapScore, cov)
       }
     }
-    const actionType = k.actionType as ActionType
     // Author the honest share-movement line server-side + sanitize it (correlation only, never causation).
     const sig = (signals as Record<string, { direction: string; shareAfter: number | null; contentChangedBetween: boolean; nonContentBottleneck: boolean }>)[k.keyword.toLowerCase()]
     let shareSignal: RankPlaybookRow['shareSignal'] = null
@@ -393,7 +542,7 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
   // Top-10 by NATIVE market opportunity desc (rankOpportunityKey; composite fallback per-row only
   // when native is absent — PO 2026-08-08); among near-equal, prefer uncovered (winnable) — but a
   // low-opportunity-uncovered term never displaces a high-opportunity one (spec D3 fix).
-  const top10 = [...rows].sort((a, b) => (rankOpportunityKey(b) - rankOpportunityKey(a)) || (Number(!a.youCover) - Number(!b.youCover))).slice(0, 10)
+  const top10 = [...rows].sort(rankRowCompare).slice(0, 10)
 
   const covered = rows.filter((r) => r.youCover).length
   const total = rows.length

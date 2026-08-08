@@ -21,6 +21,9 @@ import {
   freeCoreToResult,
   contentFingerprint,
   runCouncilAnalysis,
+  buildBaselineVerdict,
+  sameCopyEpoch,
+  cleanLlm,
   type RankContext,
   type RankAnalysisResult,
 } from '@/lib/fba/rankAnalysis';
@@ -83,8 +86,7 @@ export async function GET(
     if ((refreshFree || staleCache) && fresh.analyzed) {
       // Carry forward the prior PAID per-keyword SOV + council realities BY KEYWORD — the same
       // merge runCouncilAnalysis does, so a free re-check NEVER wipes paid competition data
-      // (the #154 blocker class). The headline intentionally resets to the deterministic
-      // baseline: the old council's wording described coverage that just changed.
+      // (the #154 blocker class).
       const prior = row?.result ?? null;
       if (prior?.rows?.length) {
         const byKw = new Map(prior.rows.map((p) => [p.keyword.toLowerCase(), p]));
@@ -99,14 +101,33 @@ export async function GET(
         fresh.competitionRan = prior.competitionRan;
         fresh.creditsSpent = prior.creditsSpent;
       }
-      // Persist with the FRESH fingerprint so the stale flag clears everywhere (full upsert is
-      // safe here: every column is supplied, nothing resets to DEFAULT). Missing table = silent.
+      // COUNCIL HEADLINE (adversarial MEDIUM 2026-08-08): reset it to the deterministic baseline
+      // ONLY on a real copy/predicate change. Every storeAnalysis (ease-restamp, native backfill,
+      // thin-pool promotion, re-research) bumps analyzed_at and thus the POOL half of the fingerprint
+      // by design — resetting on those wiped the PAID council headline catalog-wide on a single
+      // KEYWORD_EASE_WEIGHT tune (and ~2/hr in a degraded AI-outage landing), even though the old
+      // wording still described the live copy. Carry it forward when only the pool half moved
+      // (sameCopyEpoch) — but ONLY a COUNCIL-authored headline: a baseline headline embeds
+      // coverage counts this recompute may have changed, so it is told apart by reconstructing the
+      // prior result's OWN baseline and rebuilt fresh instead. cleanLlm re-clamps defensively.
+      if (prior?.verdict?.headline && sameCopyEpoch(row?.content_fingerprint, core.contentFingerprint)) {
+        const priorBaseline = buildBaselineVerdict(prior.coverage?.covered ?? 0, prior.coverage?.total ?? 0, prior.verdict.criticalGaps ?? 0).headline;
+        const carried = prior.verdict.headline === priorBaseline ? '' : cleanLlm(prior.verdict.headline);
+        if (carried) fresh.verdict = { ...fresh.verdict, headline: carried };
+      }
+      // Persist with the fingerprint buildFreeCore computed BEFORE its data reads (fail-SAFE: the
+      // served data can only be NEWER than the hash, which self-heals via a mismatch on the next
+      // GET). Recomputing here hashed AFTER the reads — a storeAnalysis landing in between (the
+      // intelligence GET self-heals run concurrently on the same page load) cached OLD rows under
+      // the NEW fingerprint, serving stale-as-fresh until the next change (adversarial MEDIUM
+      // 2026-08-08; the POST path already persists core.contentFingerprint via runCouncilAnalysis).
+      // Also drops a redundant haystack+pool read per stale GET. Full upsert is safe here: every
+      // column is supplied, nothing resets to DEFAULT. Missing table = silent.
       try {
-        const fp = await contentFingerprint(parentAsin, childAsin, supabase);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const db = supabase as any; // listing_rank_analysis not in generated types yet (migration 021)
         await db.from('listing_rank_analysis').upsert(
-          { child_asin: childAsin, parent_asin: parentAsin, analyzed_at: analyzedAt, competition_ran: fresh.competitionRan, credits_spent: fresh.creditsSpent, content_fingerprint: fp, result: fresh, run_lock_at: null },
+          { child_asin: childAsin, parent_asin: parentAsin, analyzed_at: analyzedAt, competition_ran: fresh.competitionRan, credits_spent: fresh.creditsSpent, content_fingerprint: core.contentFingerprint, result: fresh, run_lock_at: null },
           { onConflict: 'child_asin' },
         );
       } catch (persistErr) {

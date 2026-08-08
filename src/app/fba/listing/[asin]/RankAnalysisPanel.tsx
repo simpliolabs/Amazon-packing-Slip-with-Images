@@ -171,7 +171,11 @@ export default function RankAnalysisPanel({ asin }: { asin: string }) {
             )}
           </div>
 
-          {/* Playbook table */}
+          {/* Playbook table — SCOPE CUE (2026-08-08): the header pill counts the FULL filtered pool;
+              this table is only the top 10 by market opportunity, which legitimately skews to the
+              uncovered broad heads. Without the caption, "48/66 covered" above an all-✗ table reads
+              as a contradiction instead of two different scopes. */}
+          <p className="px-4 pt-2 text-[10px] text-slate-400">Top 10 keywords by market opportunity — the coverage count above spans the full keyword pool</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="bg-slate-50 border-b border-slate-200">
