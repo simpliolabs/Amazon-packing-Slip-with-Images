@@ -86,6 +86,23 @@ export async function GET(
     let result;
 
     if (storedOnly) {
+      // Stored-analysis timestamp (max keyword_analysis.analyzed_at) — hoisted out of the self-heal
+      // branch (2026-08-08) and exposed as lastAnalyzedAt so the Re-research auto-chain can wait for
+      // research → analysis PROMOTION: researchedAt advancing only proves researchKeywords cached its
+      // harvest; the background sync continuation rewrites keyword_analysis tens of seconds later, and
+      // chaining a regen in between read the PRE-research pool (the short-backend race). Read the
+      // stamp BEFORE the rows (adversarial catch): if storeAnalysis lands between the two reads, the
+      // pair errs stale-safe — promoted=false this poll, clean rows+stamp next poll — instead of
+      // reporting promoted=true alongside pre-promotion rows.
+      let lastAnalyzedAt: string | null = null
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: aRow } = await (supabase as any).from('keyword_analysis')
+          .select('analyzed_at').eq('asin', childAsin)
+          .order('analyzed_at', { ascending: false }).limit(1).maybeSingle()
+        lastAnalyzedAt = (aRow as { analyzed_at?: string } | null)?.analyzed_at ?? null
+      } catch { /* best-effort — null just means the auto-chain falls back to its timeout */ }
+
       // Fast path: return stored analysis without any API calls.
       // readWindow widens to RANKING_CANDIDATE_POOL at `on` ONLY, so all 30 targets are inside
       // the window (§P precondition). At off/shadow it returns 100 unchanged — byte-identical.
@@ -113,11 +130,7 @@ export async function GET(
       // is idempotent — it won't re-fire on the next load (no per-load engine churn, no loop).
       if ((!stored || stored.length <= 1) && researchedAt) {
         try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const { data: aRow } = await (supabase as any).from('keyword_analysis')
-            .select('analyzed_at').eq('asin', childAsin)
-            .order('analyzed_at', { ascending: false }).limit(1).maybeSingle()
-          const lastAnalyzedAt = (aRow as { analyzed_at?: string } | null)?.analyzed_at ?? null
+          // lastAnalyzedAt hoisted above (2026-08-08) — same value this branch used to query inline.
           const researchNewer = !lastAnalyzedAt || new Date(researchedAt).getTime() > new Date(lastAnalyzedAt).getTime()
           // Promote ONLY when the fresh research pool is BIGGER than what's stored. This single check
           // gives credit safety (a non-zero fresh size ⇒ researchKeywords cache-HITS ⇒ 0 credits; an
@@ -135,6 +148,9 @@ export async function GET(
             const promoted = await getStoredAnalysis(childAsin, readWindow(100))
             if (promoted && promoted.length > (stored?.length ?? 0)) {
               stored = promoted
+              // storeAnalysis just stamped analyzed_at ≥ researchedAt — reflect it so the auto-chain
+              // poll (which requires lastAnalyzedAt ≥ researchedAt) doesn't read a pre-promotion value.
+              lastAnalyzedAt = new Date().toISOString()
               console.log(`[intelligence] self-heal ${childAsin}: promoted to ${promoted.length} keywords`)
             }
           } else if (researchNewer) {
@@ -192,6 +208,9 @@ export async function GET(
         parentAsin,
         analyzedAt: new Date().toISOString(),
         researchedAt,
+        // Max keyword_analysis.analyzed_at — the PROMOTION stamp. The auto-chain must not regen
+        // until lastAnalyzedAt ≥ researchedAt (research cached but not yet promoted = mid-window).
+        lastAnalyzedAt,
         dataSource: stored[0]?.dataSource ?? 'sqp',
         totalKeywordsAnalyzed: stored.length,
         topOpportunities,

@@ -9165,7 +9165,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
   // "country western" — then leftover pool keywords), THEN the hard-lean gender strip
   // so the strip cleans additions too.
-  const finishBackendFull = (rows: PipelinePerChildKeywords[]): PipelinePerChildKeywords[] => {
+  // extraBan (2026-08-08, audit-drop re-fill): lets the post-audit re-fill ban the exact tokens the
+  // editorial audit just dropped, so the deterministic fill cannot re-add audited-out junk.
+  const finishBackendFull = (rows: PipelinePerChildKeywords[], extraBan?: (w: string) => boolean): PipelinePerChildKeywords[] => {
     const ownB = ownBrandTokenSet(brandName)
     // HARD audience FIRST (2026-07-08 reorder): strip the opposite gender's standalone tokens
     // (PO caught "…darlin mens black men…" persisting on a Female listing), THEN fill — the
@@ -9177,9 +9179,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     // broadcastDesignAnchor (adversarial): parity with the agent's anchor — see the rest path.
     const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
+    const ban = extraBan ? (w: string) => banBackendTok(w) || extraBan(w) : banBackendTok
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
+      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, ban, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
     }))
     return out
   }
@@ -9504,6 +9507,35 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         ...c,
         keywords: c.keywords.split(/\s+/).filter((t) => t && !auditRes.backendDrop.has(t.toLowerCase())).join(' '),
       }))
+      // RE-FILL AFTER THE DROP (2026-08-08): this drop runs AFTER fillBackendToBudget and AFTER the
+      // producing gate measured healthy PRE-audit bytes — with no re-fill, the drop alone gutted
+      // backends to 118B and the degrade-preserve machinery persisted the short fresh (the confession
+      // above scrubPublished). Deterministic re-fill to band with the dropped tokens BANNED so
+      // audit-deleted junk cannot return (zero LLM calls; the gender strip inside is idempotent, and
+      // the closure now dedups against the AUDITED title — bullets deliberately excluded per #69).
+      // Safe by construction: this audit fires only on single-design !onlySection runs (guard above),
+      // exactly where the family-level fill is correct (usedPerDesignBackend is always false
+      // single-design). If band is still unreachable, degrade-mark — never throw
+      // (BACKEND_DEGRADE_STRICT retired) — so census + better-than-prior preserve own the decision.
+      // Ban set is normTok-folded (adversarial catch): the fill tests ban(normTok(raw)) with
+      // punctuation stripped, so a raw-lowercase set would let "darlin'"/"v-neck" return as
+      // "darlin"/"vneck"; multi-word drop entries are split so each token bans individually.
+      const dropToks = new Set(
+        [...auditRes.backendDrop].flatMap((d) => d.split(/\s+/).map((t) => t.toLowerCase().replace(/[^a-z0-9]/g, ''))).filter(Boolean)
+      )
+      const dropBan = (w: string) => dropToks.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))
+      perChild = finishBackendFull(perChild, dropBan)
+      const postAuditProblems = backendOutputProblems(perChild, input.children, apparelProduct)
+      if (postAuditProblems.length > 0 && !degradedSections.includes('backend_keywords')) degradedSections.push('backend_keywords')
+      // Ship-truth resync (#358 class): the backend_keywords action-plan card snapshotted
+      // perChild[0].keywords BEFORE this audit block — after drop + re-fill the stored card would
+      // diverge from the bytes that actually push. Point it at the final string.
+      const finalKw0 = perChild[0]?.keywords
+      if (finalKw0) {
+        for (const item of actionPlan) {
+          if (item.element === 'backend_keywords') item.replacement_content = finalKw0
+        }
+      }
     }
     onProgress('Final editorial audit applied.')
   }

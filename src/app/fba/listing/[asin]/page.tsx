@@ -4383,10 +4383,16 @@ export default function ListingDetailPage() {
                       const data = await resp.json().catch(() => ({}))
                       if (!resp.ok || data.error) { setKwResearchMsg(`✗ ${data.error ?? `HTTP ${resp.status}`}`); setKwResearchBusy(false); return }
 
-                      // 3) Poll until the research timestamp advances (research complete), or time out.
+                      // 3) Poll until the research timestamp advances AND the new pool is PROMOTED
+                      //    (lastAnalyzedAt ≥ researchedAt), or time out. researchedAt advancing alone
+                      //    only proves researchKeywords cached its harvest — the background sync still
+                      //    runs the relevance gate + engine for tens of seconds before storeAnalysis
+                      //    rewrites keyword_analysis; chaining the regen in that window made
+                      //    generateAiRecs read the PRE-research pool (the short-backend race).
+                      //    Timeout 180s→240s: the break now waits for the later promotion event.
                       setKwResearchMsg(`⏳ Researching keywords${kwSeed.trim() ? ` (seed “${kwSeed.trim()}”)` : ' (auto seed)'}… ~1 min, runs in background.`)
                       const started = Date.now()
-                      const TIMEOUT_MS = 180_000
+                      const TIMEOUT_MS = 240_000
                       let freshPool: KeywordIntelligenceResult | null = null
                       while (Date.now() - started < TIMEOUT_MS) {
                         await new Promise((r) => setTimeout(r, 8000))
@@ -4394,12 +4400,13 @@ export default function ListingDetailPage() {
                           const poll = await fetch(`/api/fba/intelligence/${asin}?stored=true`, { cache: 'no-store' })
                           if (poll.ok) {
                             const pd = await poll.json()
-                            if (pd?.researchedAt && pd.researchedAt !== prevResearchedAt && (pd.totalKeywordsAnalyzed ?? 0) > 0) { freshPool = pd; break }
+                            const promoted = !!pd?.lastAnalyzedAt && !!pd?.researchedAt && new Date(pd.lastAnalyzedAt).getTime() >= new Date(pd.researchedAt).getTime()
+                            if (pd?.researchedAt && pd.researchedAt !== prevResearchedAt && promoted && (pd.totalKeywordsAnalyzed ?? 0) > 0) { freshPool = pd; break }
                           }
                         } catch { /* transient — keep polling */ }
                       }
                       if (!freshPool) {
-                        setKwResearchMsg('⚠ Research is taking longer than expected. Reload the tab to see the refreshed pool, then Regenerate.')
+                        setKwResearchMsg('⚠ Research is taking longer than expected — it may still finish in the background. Click Regenerate when ready; it picks up the fresh keywords automatically.')
                         setKwResearchBusy(false); return
                       }
 
