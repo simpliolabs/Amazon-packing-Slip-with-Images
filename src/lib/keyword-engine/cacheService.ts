@@ -324,6 +324,12 @@ export async function storeAnalysis(
         themeFit: m.themeFit,
         themeAbout: m.themeAbout,
         prevSelectionRank: m.prevSelectionRank,
+        // NATIVE market opportunity (migration 055) — coverage-INDEPENDENT, so it does not breach
+        // TargetInput's presence-free invariant. Feeds ONLY the bounded ease term in targetScore
+        // (PO 2026-08-08 3-factor rule; inert while ctx.easeWeight is 0). This is the ONE write-side
+        // construction site; read-side recompute sites pass whole AnalyzedKeyword rows and inherit
+        // the field structurally.
+        marketOpportunity: m.kw.marketOpportunity ?? null,
       })),
       opts!.ctx!,
     );
@@ -369,6 +375,10 @@ export async function storeAnalysis(
       backstop: verdict.backstopCount,
       rescued: verdict.rescuedCount,
       sha: verdict.sha,
+      // Ease-aware weight in force (PO 2026-08-08): the KEYWORD_EASE_WEIGHT flip is gated on a
+      // sha-diff review of THIS line (writes happen at shadow AND on — the weight is live here
+      // before any read-side flip, so the diff must be attributable).
+      easeWeight: opts!.ctx!.easeWeight ?? 0,
       rated: ratings?.size ?? 0,
       carriedForward: merged.filter((m) => m.themeFit !== null && !ratings?.has(m.kw.keyword)).length,
     }));

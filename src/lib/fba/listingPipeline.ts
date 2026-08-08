@@ -2387,7 +2387,7 @@ function extractProductNameTokens(repTitle: string | null): string[] {
     .slice(0, 3)
 }
 
-function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, season: SeasonPolicy, outcomeSignals?: Record<string, OutcomeSignal>, targets: TargetPolicy = INERT_TARGET_POLICY): TitleCandidate[] {
+export function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, repTitle: string | null, season: SeasonPolicy, outcomeSignals?: Record<string, OutcomeSignal>, targets: TargetPolicy = INERT_TARGET_POLICY): TitleCandidate[] {
   // KEYWORD_TARGET_SET (#143): the title draws from the ranking targets only. Defaulted to the
   // inert policy so any caller that does not pass one is byte-identical to today.
   analysis = targets.keep(analysis)
@@ -2420,11 +2420,25 @@ function selectTitleCandidates(analysis: AnalyzedKeyword[], brandName: string, r
   const strikeRank = (k: AnalyzedKeyword): number =>
     k.organicRank != null && k.organicRank >= 11 && k.organicRank <= 30 ? 1 : 0
 
+  // Ease-aware tiebreak (PO 2026-08-08 3-factor rule: market opportunity + ease + volume): among
+  // near-equal coverage gaps, prefer a keyword whose NATIVE marketOpportunity (migration 055:
+  // demand-gated 0-10, coverage-INDEPENDENT — never the gap composite, never raw js_ease_of_ranking)
+  // says the market is winnable. ≥6 is the JS niche-score "strong" band, and the demand gate inside
+  // poolOpportunityScore is the junk-long-tail guard (near-zero volume can never reach 6).
+  // Acceptance intent (B0FKKN8XKV): "cute christian shirts for women" (3,749/mo, ease 100, opp 6.2)
+  // wins its composite tie and qualifies as a title candidate instead of being buried by volume-
+  // correlated ordering. Same contract as tdRank/strikeRank: reorders TIES only — the PRIMARY key
+  // stays coverageGapScore ("placement decisions SHOULD prefer gaps" is locked doctrine, cf. the
+  // backendPool comment in the fill), so CRITICAL money keywords keep first claim; strict no-op
+  // when native data is absent (null/undefined ⇒ 0: every SQP/import pool sorts byte-identically).
+  const mkoRank = (k: AnalyzedKeyword): number =>
+    k.marketOpportunity != null && k.marketOpportunity >= 6 ? 1 : 0
+
   season.diff('title-candidates', analysis.map((k) => k.keyword))
   const eligible = analysis
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !season.isOffSeason(k.keyword))
-    .sort((a, b) => (b.coverageGapScore - a.coverageGapScore) || (tdRank(b) - tdRank(a)) || (strikeRank(b) - strikeRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
+    .sort((a, b) => (b.coverageGapScore - a.coverageGapScore) || (mkoRank(b) - mkoRank(a)) || (tdRank(b) - tdRank(a)) || (strikeRank(b) - strikeRank(a)) || (riseRank(b.keyword) - riseRank(a.keyword)))
 
   // Dedup overlapping keyphrases so the TITLE gets DIVERSE terms — not five ways to say the same
   // product. The old "keep the higher-opportunity one at >=60% overlap" rule caused synonym + niche
