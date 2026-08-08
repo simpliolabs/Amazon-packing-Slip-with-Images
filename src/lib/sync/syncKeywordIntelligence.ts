@@ -20,6 +20,7 @@
  */
 
 import { syncKeywordData } from './syncKeywordData';
+import { inheritJsMeasurements } from './mergeInherit';
 import { getJungleScoutStatus } from './jungleScoutClient';
 import {
   getCachedKeywords,
@@ -189,7 +190,9 @@ export async function syncKeywordIntelligence(
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
         // The gate's ctx/ratings ride along to the ONE place selection is computed. ctx null ⇒
         // legacy 15-column write (see StoreAnalysisOpts.ctx).
-        await storeAnalysis(asin, mergedKeywords, { ctx: gated.ctx, ratings: gated.ratings, themeRunId: gated.themeRunId });
+        // measuredRanks: this pool is the JS research harvest (served from cache), whose ranks were
+        // MEASURED by Phase 4b at the original fetch — rank absence genuinely means "not ranking".
+        await storeAnalysis(asin, mergedKeywords, { ctx: gated.ctx, ratings: gated.ratings, themeRunId: gated.themeRunId, measuredRanks: true });
 
         return {
           ...sqpResult,
@@ -277,14 +280,23 @@ export async function syncKeywordIntelligence(
 
         // Merge JS results into SQP results (SQP takes precedence for same keywords)
         const mergedKeywords = mergeKeywordResults(sqpResult.allKeywords, jsResult.allKeywords);
-        await storeAnalysis(asin, mergedKeywords, { ctx: gatedFresh.ctx, ratings: gatedFresh.ratings, themeRunId: gatedFresh.themeRunId });
+        // measuredRanks: Phase 4b just measured OUR ranks on this fresh research — nulls are honest.
+        await storeAnalysis(asin, mergedKeywords, { ctx: gatedFresh.ctx, ratings: gatedFresh.ratings, themeRunId: gatedFresh.themeRunId, measuredRanks: true });
 
         // Rank tracker (PO: "track OUR ranking keywords over time"): snapshot our organic rank
         // per keyword from this FRESH Jungle Scout measurement. The cache-hit path deliberately
         // does NOT capture — its ranks were measured (and snapshotted) at the original fetch.
-        await captureRankSnapshots(asin, researchResult.allKeywords.map((k) => ({
-          keyword: k.keyword, organicRank: k.organicRank ?? null, searchVolume: k.searchVolume ?? null,
-        })));
+        // Same rule when researchKeywords itself served its 14-day cache VERBATIM (adversarial
+        // MEDIUM, 2026-08-08 — the >24h-raw-cache promotion path, e.g. every ease-restamp/weight
+        // flip): stamping snapshot_date=TODAY over ranks measured up to 14 days ago would corrupt
+        // the rank time-series and fake the "Checked <date>" tooltip's measurement claim.
+        if (researchResult.servedFromCache) {
+          console.log(`[syncKeywordIntelligence] research for ${asin} served from cache — skipping rank-snapshot capture (ranks were measured & snapshotted at the original fetch)`);
+        } else {
+          await captureRankSnapshots(asin, researchResult.allKeywords.map((k) => ({
+            keyword: k.keyword, organicRank: k.organicRank ?? null, searchVolume: k.searchVolume ?? null,
+          })));
+        }
 
         console.log(`[syncKeywordIntelligence] Research pipeline complete for ${asin}: ${researchResult.allKeywords.length} keywords, ${researchResult.creditsUsed} credits, competitor: ${researchResult.competitor?.asin || 'none'}`);
 
@@ -603,8 +615,17 @@ function mergeKeywordResults(
   // Add JS keywords that don't exist in SQP
   for (const kw of jsKeywords) {
     const key = kw.keyword.toLowerCase();
-    if (!merged.has(key)) {
+    const existing = merged.get(key);
+    if (!existing) {
       merged.set(key, kw);
+    } else {
+      // FIELD-LEVEL inherit (Item 3 / Rank-column-empty + adversarial MEDIUM, 2026-08-08): SQP rows
+      // NEVER carry the JS-measured fields (organicRank + the three migration-055 native metrics),
+      // so the whole-row SQP precedence above silently nulled — permanently and unhealably, see
+      // mergeInherit.ts — the values only the JS path produces, for every dual-source keyword.
+      // SQP still wins every other field; the rule itself lives in the pure, tested helper.
+      const inherited = inheritJsMeasurements(existing, kw);
+      if (inherited !== existing) merged.set(key, inherited);
     }
   }
 

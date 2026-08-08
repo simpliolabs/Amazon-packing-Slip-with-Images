@@ -38,6 +38,10 @@ import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
 // jsonChanged/perChildChanged/resolveTitleLocked are the shared PURE compare/lock rules
 // (unit-tested in contentReconcile.test.ts) so the two paths cannot drift.
 import { maybeEnqueueContentReconcile, jsonChanged, perChildChanged, resolveTitleLocked } from '@/lib/fba/contentReconcile'
+// Blank-brand waterfall re-net (adversarial MEDIUMs, 2026-08-08): a title-only partial regen and
+// the persist-time manual-lock guard both change the SHIPPED title after the stored/fresh IH was
+// netted — both sites re-run the ONE shared net against the title that actually ships.
+import { resolveBlankRowForNet, applyBlankBrandNetToDetails } from '@/lib/fba/blankSpecs'
 
 function getAdminSupabase() {
   return createClient(
@@ -814,6 +818,25 @@ export async function POST(req: NextRequest) {
             // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
             // the alphabetically-first variant and often does NOT lead with the design name.
             canonicalTitle: pipelineScoreRow?.product_title ?? null,
+            // PO manual title lock (migration 044) for the blank-brand IH waterfall net: on locked
+            // listings the persist-time lock guard keeps the STORED title, so the IH net must test
+            // THAT title, not this run's fresh one. storedRec is loaded only on partial regens —
+            // full regens pay one best-effort read. try/catch → null = net keys on finalTitle.
+            lockedTitle: await (async (): Promise<string | null> => {
+              try {
+                if (storedRec) {
+                  return (storedRec as { title_source?: string }).title_source === 'manual'
+                    ? (String(storedRec.recommended_title ?? '').trim() || null) : null
+                }
+                const { data: lockRow } = await supabase
+                  .from('listing_seo_recommendations')
+                  .select('title_source, recommended_title')
+                  .eq('parent_asin', parent_asin)
+                  .maybeSingle()
+                const lr = lockRow as { title_source?: string; recommended_title?: string } | null
+                return lr?.title_source === 'manual' ? (String(lr.recommended_title ?? '').trim() || null) : null
+              } catch { return null }
+            })(),
             // Seller-set design name override (migration 031). When set, extractDesignName uses
             // it VERBATIM — kills the entire "stuck design" class of bugs (LLM + heuristic +
             // vision all bypassed). Deterministic.
@@ -905,6 +928,26 @@ export async function POST(req: NextRequest) {
                 ...planCarry,
               }
               patchItem((el) => el === 'title', result.recommended_title)
+              // IH RE-NET ON TITLE CHANGE (adversarial MEDIUM, 2026-08-08): a title-only regen can
+              // DROP the blank brand from the shipped title while the stored Item Highlight —
+              // netted against the OLD title — still omits it, silently breaking the SELLER_PROFILE
+              // §5 waterfall until the next full regen. Re-run the shared net over the stored IH
+              // against the titles that will now ship (the lock is cleared below, so the fresh
+              // title is the shipped one). Insert-only + best-effort: failure keeps the stored IH.
+              try {
+                const newPct = (result.per_child_titles ?? (Array.isArray(storedRec.per_child_titles) ? storedRec.per_child_titles : null)) as { title?: string }[] | null
+                const shipTitles = [String(result.recommended_title ?? ''), ...(newPct ?? []).map((c) => String(c?.title ?? ''))]
+                const blankRow = await resolveBlankRowForNet(supabase, {
+                  parentAsin: parent_asin, childAsin: children[0]?.asin ?? null, titles: shipTitles,
+                })
+                const netted = applyBlankBrandNetToDetails(storedRec.product_details_improvements, shipTitles, blankRow)
+                if (netted.changed) {
+                  upd.product_details_improvements = netted.details
+                  console.log(`[ai-recommendations] title partial for ${parent_asin}: blank-brand net updated the stored Item Highlight to match the new title`)
+                }
+              } catch (e) {
+                console.warn('[ai-recommendations] title-partial IH re-net failed (stored IH kept):', e instanceof Error ? e.message : e)
+              }
             } else if (sec === 'bullets') {
               upd.recommended_bullets = result.recommended_bullets
               // Multi-design coherence (parity-audit #3/#23): the per-design sets regenerate on
@@ -1451,6 +1494,26 @@ export async function POST(req: NextRequest) {
               if (Array.isArray(keptPct) && keptPct.length) rec.per_child_titles = keptPct as typeof rec.per_child_titles
               titleSourceOut = 'manual'
               console.log(`[ai-recommendations] manual-title lock HELD for ${parent_asin} — kept the seller's title through a ${regenerate_section ?? 'full'} regen`)
+              // IH/LOCK COHERENCE (adversarial MEDIUM, 2026-08-08): the fresh IH in `rec` was netted
+              // against the pipeline's lockedTitle read taken at REQUEST START — a lock created (or a
+              // transient failure of that read) during the multi-minute run means the IH may key on
+              // the fresh finalTitle this guard just DISCARDED, leaving the brand in neither the kept
+              // title nor the IH. The kept title is in hand HERE, so re-run the shared net against it.
+              // Also cures the fail-open (:lockedTitle IIFE catch→null) vs fail-closed (this guard)
+              // asymmetry. Inner try/catch: a net failure must NOT flip lockCheckFailed.
+              try {
+                const keptTitles = [kept, ...((Array.isArray(keptPct) ? keptPct : []) as { title?: string }[]).map((c) => String(c?.title ?? ''))]
+                const blankRow = await resolveBlankRowForNet(supabase, {
+                  parentAsin: parent_asin, childAsin: children[0]?.asin ?? null, titles: keptTitles,
+                })
+                const netted = applyBlankBrandNetToDetails(rec.product_details_improvements, keptTitles, blankRow)
+                if (netted.changed) {
+                  rec.product_details_improvements = netted.details as unknown as typeof rec.product_details_improvements
+                  console.log(`[ai-recommendations] lock guard for ${parent_asin}: blank-brand net re-keyed the fresh Item Highlight to the kept manual title`)
+                }
+              } catch (e) {
+                console.warn('[ai-recommendations] lock-guard IH re-net failed (fresh IH kept as generated):', e instanceof Error ? e.message : e)
+              }
             }
           } catch (e) {
             lockCheckFailed = true

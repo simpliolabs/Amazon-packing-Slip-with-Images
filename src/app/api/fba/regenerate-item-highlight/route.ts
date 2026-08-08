@@ -18,6 +18,7 @@ import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selection
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { buildItemHighlights } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
+import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
 
 function admin() {
   return createClient(
@@ -95,10 +96,26 @@ export async function POST(req: NextRequest) {
 
     const apparel = /\b(shirt|tee|t-?shirts?|hoodie|sweatshirt|tank|apparel|garment)\b/i.test(title)
 
+    // ── BLANK-BRAND WATERFALL (PO 2026-08-08, all-paths invariant): this route bypasses the
+    // pipeline, so it resolves its own blank row — via the ONE shared spec-truth resolver
+    // (resolveBlankRowForNet: stored/live title + productType + SKU style numbers, NEVER a search
+    // keyphrase; looksShirt-gated so hoodies/sweatshirts never inherit a shirt blank's brand).
+    // `title` here is rec.recommended_title, which IS the PO's locked title when
+    // title_source='manual' (lock-title route stores it there) — exactly the title the net must
+    // test. Best-effort: any read failure leaves blankRow null → net no-ops.
+    const blankRow = await resolveBlankRowForNet(supabase, {
+      parentAsin: parent_asin,
+      childAsin: resolved?.childAsin ?? null,
+      titles: [title],
+    })
+
     const openai = await openaiClient()
     let hl = ''
     try {
-      hl = await buildItemHighlights(openai, title, designAnchor, factRows, hlAnalysis, 'THE CEO', apparel, false)
+      // unisexFit from the resolved blank row (adversarial LOW, path parity / Invariant 1: one net,
+      // one input set, every path — the pipeline passes blankSpec?.unisex === true; hardcoding false
+      // here dropped the unisex-sizing fact from every route-regenerated highlight).
+      hl = await buildItemHighlights(openai, title, designAnchor, factRows, hlAnalysis, 'THE CEO', apparel, false, undefined, blankRow?.spec.unisex === true, blankRow, [title])
     } catch (e) {
       return NextResponse.json({ error: 'Generation failed: ' + (e instanceof Error ? e.message : String(e)) }, { status: 500 })
     }

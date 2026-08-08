@@ -287,6 +287,48 @@ export function selectionEaseWeight(): number {
   return Number.isFinite(n) && n > 0 ? Math.min(n, EASE_WEIGHT_MAX) : 0
 }
 
+/**
+ * Does the PERSISTED selection need an ease-weight restamp? (PO 2026-08-08: KEYWORD_EASE_WEIGHT went
+ * live AFTER the last storeAnalysis write, so the target panel showed pre-ease ranks.)
+ *
+ * PURE — mode and weight are passed in (this module's purity contract; the impure boundary is the
+ * intelligence GET, which reads both flags at call time). Deliberately NOT part of ctxSha: PR #522
+ * excluded easeWeight from the sha (one process-wide env value, per-site disagreement structurally
+ * impossible), so WRITE-vs-NOW staleness is detected by comparing the persisted stamp instead.
+ *
+ * The stamp tri-state (see AnalyzedKeyword.selectionEaseWeight) is the loop-killer:
+ *   - undefined on EVERY ranked row = migration 056 not applied (column absent) → false, forever —
+ *     a pre-migration DB must never refire per-load (fail-open, blank_specs precedent).
+ *   - null = migrated-but-unstamped (pre-ease-era write) → treated as "written under weight 0", so
+ *     it refires exactly when the configured weight ≠ 0 — the PO's live complaint.
+ *   - number = the weight in force at write time; refire on inequality. The merge branch stamps the
+ *     literal 0 (never null), so a rollback to weight 0 also restamps to equality after one pass.
+ *
+ * Gated on mode === 'on': at shadow, persisted ranks are never displayed (read-gating contract) and
+ * natural writes restamp; at off, doctrine 2 forbids the extra reads a refire would trigger.
+ */
+export function needsEaseRestamp(
+  rows: readonly { selectionRank?: number | null; selectionEaseWeight?: number | null }[],
+  weightNow: number,
+  mode: SelectionMode,
+): boolean {
+  if (mode !== 'on') return false
+  const ranked = rows.filter((r) => typeof r.selectionRank === 'number' && r.selectionRank != null)
+  if (ranked.length === 0) return false // no persisted selection — the thin-pool self-heal owns that case
+  // Column-existence probe BY VALUE (the mapper emits undefined for a pre-056 row; JSON.stringify
+  // then drops the key, so over-the-wire consumers see the same tri-state).
+  const stamps = ranked.map((r) => r.selectionEaseWeight).filter((s) => s !== undefined)
+  if (stamps.length === 0) return false // pre-056 DB — fail-open, never refire
+  // ANY-DISAGREES probe (adversarial LOW, 2026-08-08). The old first-non-null probe read a
+  // HALF-restamped selection (process death between storeAnalysis' 100-row chunks → mixed old/new
+  // stamps) as healthy whenever rank 1's chunk had landed, freezing mixed selection_ranks
+  // invisibly. some() heals that state in ONE refire and cannot loop: a COMPLETED merge write
+  // rewrites-or-prunes every ranked row (colliding imports are overwritten; non-colliding imports
+  // never receive a selection_rank), so after one full pass every stamp agrees with weightNow.
+  // null = pre-ease era = "written under weight 0".
+  return stamps.some((s) => (s ?? 0) !== weightNow)
+}
+
 /** THE membership predicate — safe on server AND client, because it reads only the row.
  *  Ranks are 1-based and dense; 0, NaN, negatives and non-integers are all NOT targets, so a
  *  consumer that carelessly writes `if (row.selection_rank)` can never disagree with this. */
