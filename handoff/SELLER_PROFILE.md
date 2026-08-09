@@ -44,6 +44,7 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 - **Widow format**: "{Hobby} Widow/Wife" designs — the wearer is the SPOUSE, not the enthusiast. Never "for golf-loving women"; correct: "for the golf widow whose husband is always at the course". These spouse compounds ("golf widow shirt") are the money niche and get seeded deliberately.
 - A gift design naming the recipient ("Best Husband Ever" on a ladies cut) blocks the opposite tail.
 - A gender word appears at most ONCE in a title.
+- **"for Men and Women" is a CHARACTER WASTE, not a feature (PO ruling 2026-08-09, on their own locked `THE CEO World Soccer Cup Soccer T-Shirt, Women'S T-Shirts for Men and Women` — verbatim: "is TERRIBLE and Wasting MEN, WOMEN")**: the inclusive tail eats ~20 of 75 chars that a money keyword should own. NEVER pair it with a gendered noun ("Women's … for Men and Women" is self-contradicting AND redundant). Universal design → prefer the top market-opportunity keyword in that space; use the audience tail only when nothing better fits. Also: casing artifacts like "Women'S" are defects — Title-Case must not capitalize the letter after an apostrophe.
 
 ## 5. KEYWORD PLACEMENT & BACKEND
 - **Doctrine: backend is the overflow home.** Title = 1–2 money keywords; bullets = clean shopper prose (keywords only when natural, NEVER forced — bullets carry no coverage duty); description = facts + story; **backend = everything else** (synonyms, occasions, long-tail, misspellings). Coverage anywhere counts everywhere.

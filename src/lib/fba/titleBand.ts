@@ -261,9 +261,21 @@ export function scrubUnspecdGarmentClaims(
   })
   if (removed.length === 0) return { title: t0, removed: [] }
 
-  // Residue repair — same classes collapseRepeatedWords repairs after ITS removals (kept as a twin
-  // on purpose; that function is behavior-frozen by its own tests).
-  out = out
+  out = repairRemovalResidue(out)
+  return { title: out, removed }
+}
+
+/**
+ * Repair the punctuation residue a mid-string REMOVAL leaves behind: doubled spaces, a space before
+ * a comma, doubled commas, a comma that used to introduce the removed words and now sits in front of
+ * a connector ("… Tshirt, for Women"), a dangling ` | ` before the audience tail, and any leading or
+ * trailing separator. Extracted verbatim from `scrubUnspecdGarmentClaims` so the removal nets that
+ * came after it repair IDENTICALLY rather than each growing its own near-copy (INVARIANT 5: one
+ * source per rule). `collapseRepeatedWords` deliberately keeps its own inline chain — it is the one
+ * variant WITHOUT the leading strip, and it is behavior-frozen by its own tests.
+ */
+function repairRemovalResidue(s: string): string {
+  return s
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+([,;:])/g, '$1')
     .replace(/([,;:])\s*(?=[,;:])/g, '')
@@ -274,7 +286,58 @@ export function scrubUnspecdGarmentClaims(
     .replace(/[\s,;:|]+$/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
-  return { title: out, removed }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * DEFECT 2 — THE TITLE-CASE APOSTROPHE ARTIFACT (PO ruling 2026-08-09, SELLER_PROFILE §4).
+ *
+ * THE LIVE SPECIMEN is the PO's own locked title:
+ *   THE CEO World Soccer Cup Soccer T-Shirt, Women'S T-Shirts for Men and Women
+ * "Women'S" — a capital S after the apostrophe. It is not an LLM typo; it is MANUFACTURED by our own
+ * Title-Case passes. Four of them case a phrase with `s.replace(/\b\w/g, c => c.toUpperCase())`, and
+ * in JavaScript an apostrophe is a NON-word character, so `\b` fires between "women'" and "s" and
+ * the possessive gets capitalised. The pool phrase that fed it — "women's t shirts" — is a perfectly
+ * good market keyword; we corrupt it on the way in (listingPipeline.ts :5447 design-name caser,
+ * :6012 single-design fill, :6426 family-niche anchor, :6542 multi-design parent fill).
+ *
+ * WHY BOTH A SOURCE FIX AND A TERMINAL NET. The four casers are fixed at the source (they now route
+ * through this function), but the artifact can also arrive from a council/LLM title, a stored prior,
+ * or a caser added tomorrow — so the same rule ALSO runs as a terminal net inside `bandTitle`, on
+ * the bytes that ship. Same function, both ends: one rule, no drift (INVARIANT 2 + INVARIANT 5).
+ *
+ * WHAT MUST NOT BREAK (the PO's own caveats):
+ *   - legitimate ALL-CAPS tokens: "THE CEO", "USB", "CEO'S" — never touched
+ *   - "TShirt" / "T-Shirt" — no apostrophe, structurally out of scope
+ *   - a genuine capitalised word start after an apostrophe: "O'Brien", "L'Oreal", "D'Angelo",
+ *     "O'Neill", "Rock'N'Roll" — never lowercased
+ * TWO INDEPENDENT DISCRIMINATORS make that safe, and BOTH must hold before a letter is lowered:
+ *   1. the letter run AFTER the apostrophe is a known English enclitic (s/t/re/ll/ve/m/d) AND ends
+ *      the word. This alone disposes of every surname: "Brien"/"Neill"/"Angelo"/"Oreal"/"Roll" are
+ *      not enclitics, and "o'clock" has a 5-letter run that can never match the {1,2} run.
+ *   2. the word BEFORE the apostrophe is not a multi-letter ALL-CAPS token, which protects "CEO'S"
+ *      and "USA'S". Note this is a TOKEN test, not a character test: an earlier draft rejected any
+ *      uppercase character before the apostrophe and a test caught it immediately — that also
+ *      rejects "I'Ll"/"I'M"/"I'Ve", where the capital is the English pronoun and the fix is wanted.
+ */
+const APOSTROPHE_ENCLITICS = new Set(['s', 't', 're', 'll', 've', 'm', 'd'])
+
+/**
+ * Lowercase the letter(s) a Title-Case pass wrongly capitalised after an apostrophe.
+ * "Women'S T-Shirts" → "Women's T-Shirts" · "Dad'S" → "Dad's" · "Don'T" → "Don't".
+ *
+ * PURE, TOTAL, IDEMPOTENT (an already-correct "Women's" has a lowercase run and is returned
+ * byte-identical), and LENGTH-NEUTRAL — it can never move a title across the 70-75 band, which is
+ * why it may run first in the door without a band guard.
+ */
+export function fixApostropheCase(title: string): string {
+  const t = title || ''
+  if (!/['’]/.test(t)) return title // fast path: the overwhelming majority of titles
+  return t.replace(/([A-Za-z]+)(['’])([A-Za-z]{1,2})(?![A-Za-z])/g, (m, pre: string, apo: string, run: string) => {
+    if (run === run.toLowerCase()) return m                        // already correct — idempotence
+    if (!APOSTROPHE_ENCLITICS.has(run.toLowerCase())) return m     // "O'Brien", "Rock'N'Roll"
+    if (pre.length > 1 && pre === pre.toUpperCase()) return m      // "CEO'S", "USA'S" — all-caps token
+    return `${pre}${apo}${run.toLowerCase()}`
+  })
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -563,4 +626,168 @@ export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: str
     return { title: best, notes: [`band net: padded to ${best.length} chars — facts exhausted below ${TITLE_BAND_LO}`], decision: 'facts-exhausted' }
   }
   return { title: t0, notes: [`band net: ${t0.length} chars, NO product facts available to reach ${TITLE_BAND_LO}`], decision: 'no-facts' }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * DEFECT 1 — "for Men and Women" IS CHARACTER WASTE (PO ruling 2026-08-09, SELLER_PROFILE §4).
+ *
+ * THE PO'S VERDICT on their OWN locked title, verbatim: "TERRIBLE and Wasting MEN, WOMEN" —
+ *   THE CEO World Soccer Cup Soccer T-Shirt, Women'S T-Shirts for Men and Women
+ * The inclusive tail spends ~18 of 75 characters to say nothing, and here it says nothing TWICE: the
+ * title already claims "Women's T-Shirts" and then offers the product to men. That self-contradiction
+ * is not new — `validateTitle` (listingPipeline.ts:1953-1959) has DOCKED the gender-word-twice shape
+ * for months ("state the audience ONCE"). Docking is advisory: it asks the retry loop to fix the
+ * title and the retry loop is free to fail, so the defect shipped anyway. Per INVARIANT 2 a
+ * measurable invariant gets a deterministic net on the SHIPPED bytes, never a prompt or a score dock.
+ *
+ * THE THREE RULES, and where each is enforced:
+ *   (a) the inclusive phrase must NEVER co-occur with a gendered noun elsewhere → enforced HERE
+ *       (delete the phrase; the audience is already stated once, by the noun)
+ *   (b) on a LEANED listing it is already banned by §4 → enforced HERE, by NARROWING it to the
+ *       leaned gender rather than deleting it. §4's other half is positive — "Lean set → the title
+ *       MUST carry the matching tail" — so a bare delete would cure one §4 violation by creating
+ *       another. "for Men and Women" on a female-lean becomes "for Women": 9 chars freed, audience
+ *       kept, lean honoured. (When rule (a) also fires the noun already carries the audience, so
+ *       deletion wins and no second gender word is introduced.)
+ *   (c) on a UNIVERSAL design it is allowed ONLY when no money keyword fits that space → already
+ *       enforced UPSTREAM by `enforceMoneyTail`, which was built to treat a bare trailing audience
+ *       tail as the replaceable region and whose AUDIENCE_TAIL_RE explicitly covers
+ *       `men and women` / `women and men`. VERIFIED, not assumed: on the PO's own title it returns
+ *       'no-fit' (it reached the band-fit stage, i.e. it DID claim the tail region — a title with no
+ *       replaceable tail returns 'no-tail' instead), and on a universal title it replaces the tail
+ *       outright: "…Dink Responsibly Tee for Men and Women" → "…Dink Responsibly Tee | Funny Graphic
+ *       Tees for Women" (70). So this net runs AFTER the money tail and simply honours its verdict:
+ *       if the keyword took the space the phrase is gone; if it declined, 'universal-allowed' keeps
+ *       the phrase, which is exactly "allowed only when nothing better fits".
+ *
+ * FAIL-OPEN. A removal that cannot be re-filled back into 70-75 from product facts is REFUSED and
+ * the title returns byte-identical, logged — trading a wasteful in-band title for a clean out-of-band
+ * one is not an improvement Amazon rewards.
+ */
+export type InclusiveAudienceDecision =
+  | 'empty' | 'non-apparel' | 'no-phrase' | 'universal-allowed' | 'band-guard' | 'narrowed' | 'stripped'
+
+export interface InclusiveAudienceCtx {
+  /** Non-apparel titles never carry a garment audience tail. */
+  apparel: boolean
+  /** Seller audience lean — same union `enforceMoneyTail` takes, so the door passes ONE value. */
+  lean?: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
+  /** The facts the band pad may re-fill freed characters with. Safe to compute from the PRE-removal
+   *  title: this net only ever deletes AUDIENCE words, never a garment noun, so `garmentSecond`
+   *  (`pickDistinctGarmentForm`) resolves identically before and after. */
+  band: TitleBandCtx
+}
+
+/** Both genders, in either order, joined by "and"/"&"/","/nothing, with an optional leading "for" —
+ *  i.e. every equivalent the PO named: "for Men and Women", "for Men & Women", "Men's and Women's",
+ *  "Mens Womens". Built fresh per call: a shared /g/ regex carries `lastIndex` state across calls,
+ *  which is exactly how a "deterministic" net stops being deterministic. */
+const INCLUSIVE_MASC = String.raw`(?:men|mens|men['’]s)`
+const INCLUSIVE_FEM = String.raw`(?:women|womens|women['’]s|ladies|ladies['’])`
+const INCLUSIVE_JOIN = String.raw`(?:\s*(?:and|&|\+|,)\s*|\s+)`
+const inclusiveAudienceRe = (): RegExp => new RegExp(
+  String.raw`(?:\bfor\s+)?\b(?:${INCLUSIVE_MASC}${INCLUSIVE_JOIN}${INCLUSIVE_FEM}|${INCLUSIVE_FEM}${INCLUSIVE_JOIN}${INCLUSIVE_MASC})\b`,
+  'gi',
+)
+
+/** Gendered NOUNS whose presence makes an inclusive audience claim self-contradicting.
+ *
+ *  A false positive here DELETES a tail that rule (c) would have ALLOWED, so this lexicon contains
+ *  only words that can essentially ONLY be an audience claim on an apparel title. Deliberately
+ *  EXCLUDED, each for a concrete reason:
+ *    - `him`/`her`/`his` — PO gold #1 is "…I Will Praise Him in Every Season Tee | Christian Shirts
+ *      for Women". "Him" there is devotional, not an audience.
+ *    - singular `man`/`woman`/`girl`/`boy` — design vocabulary ("Man Cave", "Girl Dad").
+ *    - plural `girls`/`boys` — same trap one step up: "Girls Trip", "Boys Night Out" are designs
+ *      this seller plausibly prints, and a youth-audience listing is not what this ruling is about.
+ *  What remains is the adult audience-noun set the PO's own specimen used. */
+const GENDERED_NOUN_RE = /\b(?:men|mens|men['’]s|women|womens|women['’]s|ladies)\b/i
+
+/**
+ * Enforce the PO's inclusive-audience ruling on a title's shipped bytes.
+ *
+ * PURE, SYNCHRONOUS, DETERMINISTIC, IDEMPOTENT (an applied result contains no inclusive phrase and
+ * re-enters as 'no-phrase', byte-identical). Never lengthens the audience claim, never invents a
+ * gender the listing did not already state, and never returns a title outside [70,75] that the input
+ * was not already outside.
+ */
+export function enforceInclusiveAudience(
+  title: string,
+  ctx: InclusiveAudienceCtx,
+): { title: string; decision: InclusiveAudienceDecision; note: string } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t0) return { title, decision: 'empty', note: '' }
+  if (!ctx.apparel) return { title: t0, decision: 'non-apparel', note: '' }
+
+  const matches = [...t0.matchAll(inclusiveAudienceRe())]
+  if (matches.length === 0) return { title: t0, decision: 'no-phrase', note: '' }
+
+  // Rule (a): probe the title with EVERY inclusive phrase masked out, so the phrase's own "Men"/
+  // "Women" can never be mistaken for the gendered noun that contradicts it.
+  const masked = t0.replace(inclusiveAudienceRe(), ' ')
+  const genderedElsewhere = GENDERED_NOUN_RE.exec(masked)?.[0] ?? null
+
+  // Rule (b): a lean NARROWS the tail to the leaned gender; a soft lean counts (SELLER_PROFILE §4
+  // draws no distinction — "'for Men and Women' is never correct on a leaned listing").
+  const narrowTo = (ctx.lean === 'female' || ctx.lean === 'lean_female') ? 'Women'
+    : (ctx.lean === 'male' || ctx.lean === 'lean_male') ? 'Men'
+      : null
+
+  // Rule (c): universal design, no contradicting noun — the money tail already had first refusal on
+  // this space upstream and declined, which is precisely the condition under which §4 allows it.
+  if (!narrowTo && !genderedElsewhere) {
+    return { title: t0, decision: 'universal-allowed', note: 'universal design, no gendered noun, money tail declined the space' }
+  }
+
+  /* EXACTLY ONE match may be narrowed, and only when rule (a) is silent. Narrowing every match of
+   * "Mens Womens Tee for Men and Women" would ship "Womens Tee for Women" — the gender-word-twice
+   * shape :1953-1959 docks, i.e. we would have cured the waste by re-creating the contradiction.
+   * The trailing tail wins the slot when there is one (it is the audience's natural home); otherwise
+   * the first match keeps the lean in its stacked-adjective position. Every other match is deleted.
+   * When rule (a) fires, `narrowIdx` is -1 and ALL matches go: the gendered noun already states the
+   * audience once, which is the whole point of the rule. */
+  const trailingIdx = matches.findIndex((m) => t0.slice((m.index ?? 0) + m[0].length).trim().length === 0)
+  const narrowIdx = (narrowTo && !genderedElsewhere) ? (trailingIdx >= 0 ? trailingIdx : 0) : -1
+
+  let out = ''
+  let cursor = 0
+  let narrowed = false
+  let deleted = 0
+  matches.forEach((m, i) => {
+    const start = m.index ?? 0
+    const end = start + m[0].length
+    out += t0.slice(cursor, start)
+    if (i === narrowIdx) {
+      // Position decides the FORM: a trailing tail reads "for Women"; a mid-title occurrence is the
+      // stacked-adjective slot ("Mens Womens Graphic Tee") and reads "Womens". Both keep §4's
+      // positive half — a leaned title MUST still carry its matching audience word.
+      out += (i === trailingIdx) ? ` for ${narrowTo}` : ` ${narrowTo === 'Women' ? 'Womens' : 'Mens'}`
+      narrowed = true
+    } else {
+      out += ' '
+      deleted++
+    }
+    cursor = end
+  })
+  out += t0.slice(cursor)
+  const reduced = repairRemovalResidue(out)
+
+  // Re-fill the freed characters from PRODUCT FACTS (never the pool — spec-vs-search grounding), then
+  // judge the FINAL bytes. This is why the guard lives here and not in the caller: the removal and
+  // the re-fill are one decision, and only their composition can be checked against the band.
+  const padded = enforceTitleBand(reduced, ctx.band).title
+  if (padded.length < TITLE_BAND_LO || padded.length > TITLE_BAND_HI) {
+    return {
+      title: t0,
+      decision: 'band-guard',
+      note: `removal would land ${padded.length} chars, outside [${TITLE_BAND_LO},${TITLE_BAND_HI}] even after the facts pad — refused, byte-identical`,
+    }
+  }
+
+  const why = genderedElsewhere ? `contradicts gendered noun "${genderedElsewhere}"` : `lean=${ctx.lean}`
+  return {
+    title: padded,
+    decision: narrowed ? 'narrowed' : 'stripped',
+    note: `${narrowed ? `narrowed to the ${narrowTo} lean${deleted > 0 ? ` (+${deleted} deleted)` : ''}` : `removed ${deleted} inclusive phrase(s)`} — ${why}; ${t0.length} → ${padded.length} chars`,
+  }
 }

@@ -54,7 +54,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { collapseRepeatedWords, enforceMoneyTail, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceInclusiveAudience, enforceMoneyTail, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -5444,7 +5444,10 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
     while (w.length > 1 && GENERIC_TAIL.test(w[0])) w = w.slice(1)
     return w.join(' ')
   }
-  const titleCase = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+  // fixApostropheCase (PO 2026-08-09, §4): an apostrophe is a NON-word char, so `\b` fires between
+  // "women'" and "s" and this pass would emit "Women'S". Post-net rather than a rewritten regex so
+  // every other casing behavior here stays byte-identical.
+  const titleCase = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
   // accept(): a design name must ACTUALLY appear in the title or image text (rejects LLM
   // hallucination/paraphrase), is not the seller's own brand, is 1-6 words, and is not entirely
   // generic. Generic edge words are trimmed first ("Later Gator Shirt" -> "Later Gator").
@@ -6009,7 +6012,9 @@ async function buildTitleFor(
     // phrases didn't, landing "Mens" on a "for Women" title). Single-gender tails are never
     // droppable (audienceDroppable requires "and"), so this cannot go stale.
     const tailGender = /\bfor\s+men\s*$/i.test(tail) ? 'men' : /\bfor\s+women\s*$/i.test(tail) ? 'women' : null
-    const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    // fixApostropheCase (PO 2026-08-09, §4): this is the caser that produced the PO's "Women'S
+    // T-Shirts" — the pool phrase "women's t shirts" is fine; `\b\w` capitalised the possessive.
+    const titleCaseKw = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
     const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
     const MASC_T = /\bm[ae]ns?\b/i
     const canonPhrases: string[] = []
@@ -6423,7 +6428,8 @@ RULES (deterministic — checked by title QUALITY judge):
       const brandMatch = brandName ? title.match(new RegExp(`^\\s*${brandName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i')) : null
       const head = brandMatch ? brandMatch[0].trim() : ''
       const rest = title.slice(head.length).replace(/^[\s,]+/, '').trim()
-      const anchorTC = familyNicheClean.replace(/\b\w/g, (c) => c.toUpperCase())
+      // fixApostropheCase (PO 2026-08-09, §4) — see the note on titleCaseKw.
+      const anchorTC = fixApostropheCase(familyNicheClean.replace(/\b\w/g, (c) => c.toUpperCase()))
       title = `${head ? `${head} ` : ''}${anchorTC}${rest ? `, ${rest}` : ''}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ').trim()
     }
   }
@@ -6539,7 +6545,9 @@ RULES (deterministic — checked by title QUALITY judge):
     // this parent title. A truly design-specific motif ("american flag") keeps its tokens, stays blocked.
     const familyNicheToks = new Set(bulletTokens(familyNicheClean).map(fillNormTok))
     const designTokSets = designNames.filter(Boolean).map((d) => new Set([...bulletTokens(d)].map(fillNormTok).filter((t) => !familyNicheToks.has(t))))
-    const titleCaseKw = (s: string) => s.replace(/\b\w/g, (c) => c.toUpperCase())
+    // fixApostropheCase (PO 2026-08-09, §4): this is the caser that produced the PO's "Women'S
+    // T-Shirts" — the pool phrase "women's t shirts" is fine; `\b\w` capitalised the possessive.
+    const titleCaseKw = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
     // Garment-truthfulness rail (review-caught BLOCKER): the child fill vets keywords against the
     // seller's own text; the parent fill had NO rail, so a stray "hoodie" keyword in the family
     // pool would ship a product-identity misclaim. Parent trust = product type + design names.
@@ -7902,6 +7910,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * the route's lock guard. */
   const bandTitle = (title: string, produced: boolean, moneyKws: readonly string[] | null = null): string => {
     if (!produced || !title) return title
+    /* DEFECT 2 (PO 2026-08-09, §4) — the Title-Case apostrophe artifact ("Women'S T-Shirts"). Runs
+     * FIRST because it is LENGTH-NEUTRAL (it can never move a title across the band) and every stage
+     * below reads cleaner bytes for it: the gendered-noun probe, the word dedupe and the census all
+     * see "Women's" rather than a mangled token. The four casers that MANUFACTURE the artifact are
+     * fixed at their source too (:5447 / :6012 / :6426 / :6542); this is the terminal half of the
+     * same rule, catching a council/LLM title, a stored prior, or a caser added tomorrow. */
+    const cased = fixApostropheCase(title)
+    if (cased !== title) {
+      console.log(JSON.stringify({ tag: 'SHIP_APOSTROPHE_CASE', field: 'title', from: title, to: cased }))
+    }
+    title = cased
     /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
      * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
      * "Heavyweight" into a midweight blank's title as if it were fact. Claims the blank spec does
@@ -7954,6 +7973,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       if (['already-covered', 'no-tail', 'design-right', 'fact-tail', 'empty', 'non-apparel'].includes(mt.decision)) break
     }
+    /* DEFECT 1 (PO 2026-08-09, §4) — "for Men and Women" is CHARACTER WASTE. Deliberately AFTER the
+     * money-tail loop: §4 allows the inclusive tail on a universal design ONLY when nothing better
+     * fits that space, and `enforceMoneyTail` is what decides "better" — it already treats the
+     * inclusive tail as its replaceable region (AUDIENCE_TAIL_RE covers "men and women"). So the
+     * keyword gets first refusal, and this net then enforces the two rules the money tail does not
+     * own: never co-occur with a gendered noun (delete), never appear on a leaned listing (narrow to
+     * the leaned gender). It re-pads from facts internally and refuses any removal it cannot land
+     * back inside the band, so a skip is byte-identical. */
+    const inc = enforceInclusiveAudience(moneyed, { apparel: apparelProduct, lean, band: titleBandCtx(moneyed) })
+    console.log('[TITLE_GOLD]', JSON.stringify({
+      tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision,
+      from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note,
+    }))
+    moneyed = inc.title
     const v = enforceTitleBand(moneyed, titleBandCtx(moneyed))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title
