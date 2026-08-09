@@ -162,6 +162,19 @@ interface KeywordIntelligenceResult {
    *  shape instead would keep the new UI alive after a rollback, because the COLUMNS survive an env
    *  flip by design — this boolean makes rollback a pure env change. */
   targetSetLive?: boolean
+  /** MARKET-DATA HEALTH (PO ruling 2026-08-09). Server-derived from the stored pool by
+   *  keyword-engine/marketDataHealth.ts — the client only RENDERS it, never recomputes it (the TTL
+   *  lives in RESEARCH_TTL_DAYS server-side and a second literal here would be a divergent TTL).
+   *  Optional so this mirror compiles against every pre-change payload; absent ⇒ no banner. */
+  marketDataHealth?: {
+    rows: number
+    rowsWithMarketOpportunity: number
+    rowsWithSelectionRank: number
+    researchedAt: string | null
+    ageDays: number | null
+    ttlDays: number
+    state: 'fresh' | 'stale' | 'unscored' | 'empty' | 'unknown'
+  }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -171,6 +184,40 @@ function barColor(score: number, max: number) {
   if (pct >= 0.8) return 'bg-green-500'
   if (pct >= 0.6) return 'bg-amber-500'
   return 'bg-red-500'
+}
+
+/**
+ * MARKET-DATA HEALTH banner copy (PO ruling 2026-08-09). PRESENTATION ONLY — every verdict
+ * (including the TTL comparison) is computed server-side in keyword-engine/marketDataHealth.ts;
+ * this function may not re-derive one, or the screen and the generator would drift apart.
+ * `fresh` (and an absent signal) render NOTHING — a healthy pool gets no chrome.
+ */
+function marketDataBanner(h: NonNullable<KeywordIntelligenceResult['marketDataHealth']> | undefined) {
+  if (!h || h.state === 'fresh') return null
+  const when = h.researchedAt
+    ? `researched ${h.ageDays == null ? '' : h.ageDays === 0 ? 'today, ' : `${h.ageDays}d ago, `}${new Date(h.researchedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : 'research date unknown'
+  const counts = `${h.rows} keyword${h.rows === 1 ? '' : 's'} stored · ${h.rowsWithMarketOpportunity} with a market opportunity score · ${h.rowsWithSelectionRank} selected as ranking targets · ${when}`
+  if (h.state === 'unscored') return {
+    tone: 'bg-amber-50 border-amber-200 text-amber-900',
+    headline: 'No market opportunity data — keywords ranked by volume only. Re-research to get opportunity + ease scores.',
+    detail: counts,
+  }
+  if (h.state === 'stale') return {
+    tone: 'bg-amber-50 border-amber-200 text-amber-900',
+    headline: `Keyword research is ${h.ageDays}d old (refreshed every ${h.ttlDays}d) — opportunity + ease scores may no longer match the market. Re-research to refresh.`,
+    detail: counts,
+  }
+  if (h.state === 'empty') return {
+    tone: 'bg-slate-50 border-slate-200 text-slate-700',
+    headline: 'No keyword pool stored for this listing yet. Run a keyword research to build one.',
+    detail: null,
+  }
+  return {   // 'unknown' — a read failed. Say that, never imply the data is fine.
+    tone: 'bg-slate-50 border-slate-200 text-slate-700',
+    headline: "Market data health unavailable — this pool's research date could not be read, so freshness is unverified.",
+    detail: h.rows > 0 ? counts : null,
+  }
 }
 
 function issueBorder(field: string) {
@@ -4352,6 +4399,21 @@ export default function ListingDetailPage() {
                   />
                 </label>
               </div>
+              {/* MARKET-DATA HEALTH (PO ruling 2026-08-09): "VOLUME is not the biggest thing we look
+                  at but the JS opportunity and ranking ability with the right volume." When the pool
+                  carries no market_opportunity, every number in the table below is volume or our own
+                  internal gap priority — the seller must be told that, not shown a confident-looking
+                  ranking. Server-derived (marketDataHealth); a healthy pool renders nothing. */}
+              {(() => {
+                const mdb = marketDataBanner(kwData.marketDataHealth)
+                if (!mdb) return null
+                return (
+                  <div className={`px-3 py-2 border-b ${mdb.tone}`}>
+                    <p className="text-[11px] font-semibold leading-snug">{mdb.headline}</p>
+                    {mdb.detail && <p className="text-[10px] mt-0.5 opacity-80">{mdb.detail}</p>}
+                  </div>
+                )
+              })()}
               {kwImportMsg && (
                 <p className={`px-3 py-2 text-[11px] border-b border-slate-100 ${kwImportMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>{kwImportMsg}</p>
               )}

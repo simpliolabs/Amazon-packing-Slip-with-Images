@@ -99,7 +99,10 @@ const RESEARCH_CACHE_KEY = 'keyword_research';
 // 14 days (PO 2026-06-17): the niche keyword universe is stable enough that re-querying Jungle
 // Scout sooner just burns credits. Applies to BOTH the per-ASIN fast-path cache (keyword_cache)
 // and the cross-listing shared niche pool (keyword_seed_pool).
-const RESEARCH_TTL_DAYS = 14;
+// EXPORTED (2026-08-09): the market-data health signal must call a pool "stale" against the SAME
+// number keyword_cache expiry is computed from. A second literal in the health module or the UI
+// would be a silently divergent TTL — the exact failure EMPTY_POOL_THRESHOLD was hoisted to prevent.
+export const RESEARCH_TTL_DAYS = 14;
 // Cross-listing niche pool (migration 032): Phases 2–4 are NICHE-level, so listings that resolve
 // to the same normalized seed share ONE research for 14 days. Per-ASIN organic rank (Phase 4b) is
 // NEVER stored here — it stays per-listing.

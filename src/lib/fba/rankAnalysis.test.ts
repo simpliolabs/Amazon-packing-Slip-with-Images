@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { contentActionFor, rankRowCompare, rankOpportunityKey, deriveLiveActionType, sameCopyEpoch, type ActionType } from './rankAnalysis'
+import { contentActionFor, rankRowCompare, rankOpportunityKey, deriveLiveActionType, sameCopyEpoch, marketDataBriefNote, type ActionType, type RankPlaybookRow } from './rankAnalysis'
 import { deriveActionType } from '@/lib/keyword-engine/calculateScore'
 
 /* 2026-08-08 rank-row coherence (screenshot bug: ✗ icon + "PROMOTE — present" in ONE row).
@@ -138,5 +138,39 @@ describe('deriveActionType — the display re-derivation input (and the trap the
     expect(deriveActionType(90, { inTitle: true, inBullets: true, coverageCount: 2 })).toBe('DEFENDED')
     expect(deriveActionType(10, { inTitle: false, inBullets: true, coverageCount: 3 })).toBe('OPTIMIZED')
     expect(deriveActionType(5, { inTitle: false, inBullets: false, coverageCount: 0 })).toBe('OPTIMIZED')
+  })
+})
+
+/* PO ruling 2026-08-09 ("VOLUME is not the biggest thing we look at but the JS opportunity and
+ * ranking ability with the right volume"). The RANK council brief must not hand an LLM a dense,
+ * ordered list of composite/volume numbers when NOTHING in the pool carries market data — the
+ * council will reason over them as market truth and author confident opportunity advice about a
+ * pool that was never measured (B0GVV3XL4T: 88 rows, 0 with market_opportunity). */
+describe('marketDataBriefNote — the council is TOLD when nothing was measured', () => {
+  const r = (marketOpportunity: number | null) => ({ marketOpportunity }) as unknown as RankPlaybookRow
+
+  it('ALL rows unscored → a loud data note', () => {
+    const note = marketDataBriefNote([r(null), r(null), r(null)])
+    expect(note).toMatch(/NO MARKET DATA/)
+    expect(note).toMatch(/not measure how winnable|Neither measures how winnable/)
+    expect(note).toMatch(/fresh keyword research/)
+  })
+
+  it('the note forbids exactly the failure mode: ranking/ordering as opportunity', () => {
+    const note = marketDataBriefNote([r(null)])
+    expect(note).toMatch(/Do NOT rank, compare, or describe these keywords as high- or low-opportunity/)
+    expect(note).toMatch(/do not treat the order they appear in as a priority order/)
+  })
+
+  it('ONE market-scored row → NO note (brief byte-identical to before this change)', () => {
+    expect(marketDataBriefNote([r(null), r(6.2), r(null)])).toBe('')
+  })
+
+  it('a measured ZERO counts as market data → no note', () => {
+    expect(marketDataBriefNote([r(0)])).toBe('')
+  })
+
+  it('no rows at all → no note (the brief has nothing to disclaim)', () => {
+    expect(marketDataBriefNote([])).toBe('')
   })
 })

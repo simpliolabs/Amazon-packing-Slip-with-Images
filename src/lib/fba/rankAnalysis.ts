@@ -23,6 +23,10 @@ import { makeCoverageChecker } from '@/lib/keyword-engine/coverage'
 import { coverageMode, coverageAcrossRows } from '@/lib/keyword-engine/coverage-core'
 import { loadListingRowsForPresence } from '@/lib/keyword-engine/loadListingContent'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
+// PO ruling 2026-08-09 — the SAME predicate the money-tail refusal and the intelligence health
+// signal use, so "this pool carries no market data" can never be true on one surface and false
+// on another.
+import { hasAnyMarketOpportunity } from '@/lib/keyword-engine/marketDataHealth'
 import { fetchShareOfVoice } from '@/lib/sync/jungleScoutClient'
 import { createAdminClient } from '@/lib/supabase/server'
 
@@ -587,6 +591,27 @@ function parseJsonLoose<T>(raw: string): T {
 
 const isGpt5 = (m: string): boolean => /^(gpt-5|o\d)/.test(m)
 
+/**
+ * THE market-data disclosure for the council brief. PURE, exported for tests.
+ *
+ * Per-row labelling ("internal gap priority ~52/100 (not market data)") was already honest, but a
+ * brief in which EVERY row is unscored still READS as a market ranking: the list is ordered, the
+ * numbers are dense, and the LLM has no way to know the ordering carries no winnability signal.
+ * PO ruling (verbatim 2026-08-09): "VOLUME is not the biggest thing we look at but the JS
+ * opportunity and ranking ability with the right volume." So when NOTHING carries market data the
+ * brief SAYS SO, in one un-missable line above the playbook, and instructs the council to name the
+ * gap rather than reason over the numbers as if they were market truth.
+ * Returns '' when at least one row is market-scored — the brief is then byte-identical to today.
+ */
+export function marketDataBriefNote(rows: readonly RankPlaybookRow[]): string {
+  if (rows.length === 0 || hasAnyMarketOpportunity(rows)) return ''
+  return 'DATA NOTE — NO MARKET DATA: not one keyword below carries a Jungle Scout market opportunity or ease-of-ranking score. '
+    + 'Every number shown is either raw search volume or OUR OWN internal gap priority, which moves when we change our own copy. '
+    + 'Neither measures how winnable a term is. Do NOT rank, compare, or describe these keywords as high- or low-opportunity, '
+    + 'and do not treat the order they appear in as a priority order. Say plainly that this listing needs fresh keyword research '
+    + 'before opportunity can be judged, and confine your advice to what is knowable from coverage alone.'
+}
+
 function councilBrief(rows: RankPlaybookRow[], coverage: { covered: number; total: number }, criticalGaps: number, ctx: RankContext): string {
   const lines = rows.map((r, i) => {
     const cov = r.youCover ? `COVERED (${r.coveredIn.join('/')})` : 'NOT covered'
@@ -601,7 +626,15 @@ function councilBrief(rows: RankPlaybookRow[], coverage: { covered: number; tota
       : `internal gap priority ~${r.coverageGapScore}/100 (not market data)`
     return `${i + 1}. "${r.keyword}" — ${opp}, ${r.actionType}, ${cov}${comp}`
   }).join('\n')
-  return `Product (live title): ${ctx.title}\nContent coverage: ${coverage.covered}/${coverage.total} top keywords; ${criticalGaps} high-opportunity gap(s).\n\nTop keyword playbook:\n${lines}`
+  // The gap headline is only honest when SOMETHING was measured: with no market data the count is
+  // "CRITICAL and uncovered", which is a coverage fact, not a high-OPPORTUNITY fact.
+  const note = marketDataBriefNote(rows)
+  const gaps = note
+    ? `${criticalGaps} uncovered CRITICAL term(s) (opportunity NOT measured)`
+    : `${criticalGaps} high-opportunity gap(s)`
+  return `Product (live title): ${ctx.title}\nContent coverage: ${coverage.covered}/${coverage.total} top keywords; ${gaps}.\n`
+    + (note ? `\n${note}\n` : '')
+    + `\nTop keyword playbook:\n${lines}`
 }
 
 /** Full-5 council. Returns an honest headline + keyword→reality map. Fails OPEN (failedOpen:true,
