@@ -1686,21 +1686,29 @@ export async function POST(req: NextRequest) {
           // at the persist boundary because it must key on the titles shipping AFTER the manual-lock
           // guard. A sticky-snapped Item Highlight was brand-netted against the title that shipped
           // AT PUSH TIME — re-run the ONE shared net (it caps internally) against the titles
-          // shipping NOW. Revert-only: an un-snapped IH already ran the pipeline's own net this
-          // regen (and the lock guard's re-net above when the manual title was kept). WATERFALL
-          // WINS (PO ruling, SELLER_PROFILE §5): this MAY rewrite the reverted PO-accepted IH
-          // string when the shipping titles lack the blank brand — it surfaces as a fresh Push
-          // proposal (current_value untouched), stamped value_source='spec' inside the net so the
-          // next regen's sticky pass treats it as a legitimate spec re-propose.
-          if (stickyIhReverted) {
-            try {
-              const shipTitles = [String(rec.recommended_title ?? ''), ...((Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { title?: string }[]).map((c) => String(c?.title ?? ''))]
-              const blankRow = await resolveBlankRowForNet(supabase, { parentAsin: parent_asin, childAsin: children[0]?.asin ?? null, titles: shipTitles })
-              const netted = applyBlankBrandNetToDetails(rec.product_details_improvements, shipTitles, blankRow)
-              if (netted.changed) rec.product_details_improvements = netted.details as unknown as typeof rec.product_details_improvements
-            } catch (e) {
-              console.warn('[ai-recommendations] post-sticky IH re-net failed (kept IH ships exactly as accepted):', e instanceof Error ? e.message : e)
+          // shipping NOW.
+          // UNCONDITIONAL since 2026-08-09 (adversarial HIGH, TITLE_MONEY_TAIL batch): this block
+          // was revert-only on the theory that an un-snapped IH "already ran the pipeline's own net
+          // this regen" — but that net keys on ihNetTitles built from the PRE-scrubPublished
+          // finalTitle, and the terminal title stages (money tail, trademark scrub) can change the
+          // shipped title AFTER that snapshot. On a plain full regen (no lock, no sticky revert)
+          // nothing re-keyed the IH to the FINAL bytes, so a brand deleted from the title at the
+          // last stage shipped in NEITHER field, violating the §5 waterfall ("runs on every title
+          // change"). The net is idempotent and caps internally, so the unconditional pass is free
+          // when nothing changed. WATERFALL WINS (PO ruling, SELLER_PROFILE §5): this MAY rewrite a
+          // reverted PO-accepted IH string when the shipping titles lack the blank brand — it
+          // surfaces as a fresh Push proposal (current_value untouched), stamped value_source='spec'
+          // inside the net so the next regen's sticky pass treats it as a legitimate spec re-propose.
+          try {
+            const shipTitles = [String(rec.recommended_title ?? ''), ...((Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { title?: string }[]).map((c) => String(c?.title ?? ''))]
+            const blankRow = await resolveBlankRowForNet(supabase, { parentAsin: parent_asin, childAsin: children[0]?.asin ?? null, titles: shipTitles })
+            const netted = applyBlankBrandNetToDetails(rec.product_details_improvements, shipTitles, blankRow)
+            if (netted.changed) {
+              rec.product_details_improvements = netted.details as unknown as typeof rec.product_details_improvements
+              console.log(`[ai-recommendations] persist-boundary IH re-net for ${parent_asin}: blank-brand net re-keyed the Item Highlight to the final shipping titles${stickyIhReverted ? ' (sticky-reverted IH)' : ''}`)
             }
+          } catch (e) {
+            console.warn('[ai-recommendations] persist-boundary IH re-net failed (IH ships as generated/kept):', e instanceof Error ? e.message : e)
           }
 
           try {

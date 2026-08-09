@@ -49,12 +49,12 @@ import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
 import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
-import { isCelebrityToken } from '@/lib/fba/celebrityGuard'
+import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceMoneyTail, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -1172,7 +1172,7 @@ const PO_GOLD_TITLES = [
   'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',                 // 75 — Pattern B, high-search category
   'THE CEO Cashflow Cap | Puff Embroidery Cotton Twill Snapback Hat for Men',                    // 72 — Pattern A, headwear + gender
   'THE CEO Don’t Quit Tee Shirt | Bold Motivational tShirt for Men & Women',                     // 71 — Pattern A, motivational
-  'THE CEO Christian Tee Shirt Comfort Color I Will Praise Him in Every Season',                 // 75 — Pattern B, faith category
+  'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women',                  // 74 — Pattern A, MONEY-KEYWORD pipe tail (PO lock, B0FKKN8XKV — replaces the obsolete inverted Pattern-B form)
   'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women',                   // 73 — Pattern A, idiom kept short
   'THE CEO I Could Be Meaner Tee Shirt | Comfort Color Graphic Shirt for Women',                 // 75 — Pattern A, statement
   'THE CEO Ocean Life Sea Animals Tee Shirt | Comfort Colors Tshirt for Women',                  // 74 — Pattern A, theme
@@ -3250,9 +3250,10 @@ PATTERN A (DEFAULT — pipe format for pun/idiom/statement/theme designs):
   ${brandName} [Design Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${audOpt && !/^unisex$/i.test(audOpt) ? ` [for ${audOpt}?]` : ''}
   - Product noun repeats TWICE with SEO variety: "Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat".
   - Category brand goes AFTER the pipe (e.g. Comfort Colors, Cotton Twill Snapback).
+  - The pipe-right may instead be [ONE high-volume category keyphrase] — the MONEY TAIL ("… Season Tee | Christian Shirts for Women", gold #5). Prefer it when the design's category has a high-search head keyword.
   - Audience is OPTIONAL — include ONLY when the design is genuinely gender-specific or the space fits naturally. NEVER force "for Men and Women".
 
-PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Christian, Spain/Championship, Fathers Day):
+PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Spain/Championship, Fathers Day):
   ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Design Phrase LAST]
   - Category keywords LEAD; design phrase comes at the END.
   - Use Pattern B ONLY when at least one keyphrase below has category-head volume that's higher than the design phrase's search intent.
@@ -3510,11 +3511,12 @@ PATTERN A (DEFAULT — pipe format for pun/idiom/statement/theme designs):
   ${brandName} [Design Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${aud && !/^unisex$/i.test(aud) ? ` [for ${aud}?]` : ''}
   - Product noun repeats TWICE with SEO variety: "Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat".
   - Category brand goes AFTER the pipe (e.g. Comfort Colors, Cotton Twill Snapback).
+  - The pipe-right may instead be [ONE high-volume category keyphrase] — the MONEY TAIL ("… Season Tee | Christian Shirts for Women", gold #5). Prefer it when the design's category has a high-search head keyword.
   - Audience is OPTIONAL — include ONLY when the design is genuinely gender-specific or the space fits naturally. NEVER force "for Men and Women".
 
-PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Christian, Spain/Championship, Fathers Day):
+PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Spain/Championship, Fathers Day):
   ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Design Phrase LAST]
-  - Category keywords LEAD (Spain Jersey / Christian / Fathers Day). Design phrase comes at the END.
+  - Category keywords LEAD (Spain Jersey / Fathers Day). Design phrase comes at the END.
   - Use Pattern B ONLY when at least one keyphrase below has category-head volume that's higher than the design phrase's search intent.
 
 INPUT FOR THIS TITLE:
@@ -7611,6 +7613,68 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .filter((c) => !colorNeutralFamily || !BASIC_COLOR_RE.test(c.keyword))
     .filter((c) => notOffNiche(c.keyword))
 
+  // ── TITLE_MONEY_TAIL (#147 title half) — ONE money keyword for the PO gold pipe tail ──────────
+  // The locked gold shape is `Brand + design + noun | <category money keyword>` (B0FKKN8XKV:
+  // "THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women"). Six stacked
+  // leaks kept that tail from shipping — the :7815 4-word pin drop, the advisory apparel mustLine,
+  // the design-grounding strip (:3137 — category demand is definitionally NOT design vocabulary),
+  // the coverageGap sort burial, Pattern A's fact-only pipe-right, and the facts-only terminal
+  // pads. So the slot's CANDIDATES are derived HERE, deterministically, and enforced by
+  // enforceMoneyTail in bandTitle — never by prompts. Deliberately sorted marketOpportunity DESC
+  // (native market data, migration 055) then searchVolume DESC and NOT gap-sorted: gap-sorting is
+  // the exact burial this cures — "already covered elsewhere" must not demote the keyword whose
+  // title PRESENCE is the point. Fail-open at every step: no qualifying keyword ⇒ [] ⇒
+  // byte-identical titles.
+  // TOP-5 CANDIDATE LIST, not [0] (adversarial MEDIUM, 2026-08-09): enforceMoneyTail has its own
+  // per-keyword vetoes (word-repeat, spec-conflict, no-fit, cross-gender vs the TITLE tail) the
+  // derivation cannot see — a single-candidate hand-off burned the whole feature on the first
+  // net-side skip although candidate #2 would have applied. bandTitle tries each in order and
+  // stops at the first 'applied' OR 'already-covered' (the top candidate already indexing from the
+  // title = the slot is genuinely satisfied — never install a lower-value keyword past it).
+  // DEFENDED/REINFORCE stay in the pool DELIBERATELY: actionType was rated against the STORED
+  // content, so a fresh title may have dropped a DEFENDED keyword — and with the candidate list a
+  // still-covered one costs nothing (already-covered = satisfied, by design, not a burn).
+  // off → inert; shadow → derive + [MONEY_TAIL_DIFF] the would-be title, ship unchanged; on → ship.
+  // Phase 1 = BROADCAST title only (per_child_titles get null; group-scoped derivation via
+  // scopeKwsToGroup is Phase 2). Env read at call time, per the selection-core lesson (:35).
+  const moneyTailMode = (process.env.TITLE_MONEY_TAIL || 'off').toLowerCase()
+  let titleMoneyKws: string[] = []
+  if (moneyTailMode !== 'off' && apparelProduct && targets.live) {
+    const MT_GARMENT_RE = /\b(?:t-?shirts?|tshirts?|shirts?|tees?)\b/i
+    const MT_FEM = /\bwom[ae]ns?\b|\bladies\b/i, MT_MASC = /\bm[ae]ns?\b/i // :6011-6012 twins
+    titleMoneyKws = [...new Set(targets.keep(analysis)
+      // BACKEND-slot targets are backend-only by definition (off-season holidays etc. — the same
+      // reason the :7534 pin draws from targets.core and :8500/:9570 exclude the slot). A BACKEND
+      // keyword welded into the visible title would be a dock no regenerate could clear.
+      .filter((k) => k.selectionSlot !== 'BACKEND')
+      .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
+      .filter((k) => !season.isOffSeason(k.keyword))
+      .filter((k) => notOffNiche(k.keyword))
+      .filter((k) => !colorNeutralFamily || !BASIC_COLOR_RE.test(k.keyword)) // color-neutral broadcast
+      .filter((k) => { const n = k.keyword.trim().split(/\s+/).length; return n >= 3 && n <= 5 })
+      .filter((k) => MT_GARMENT_RE.test(k.keyword))                          // must carry a garment noun
+      // SOFT leans veto here too (adversarial MEDIUM, 2026-08-09): enforceMoneyTail vetoes
+      // lean_female/lean_male as well, so a derivation that only filtered hard leans handed the
+      // net candidates it would deterministically refuse. Mirror the net's own rule — knowable
+      // at derivation time, so the slot is never wasted on a guaranteed cross-gender skip.
+      .filter((k) => !((lean === 'female' || lean === 'lean_female') && MT_MASC.test(k.keyword) && !MT_FEM.test(k.keyword)))  // :6031-6034
+      .filter((k) => !((lean === 'male' || lean === 'lean_male') && MT_FEM.test(k.keyword) && !MT_MASC.test(k.keyword)))
+      .map((k) => ({ k, safe: scrubTrademarks(k.keyword) }))
+      .filter((e) => e.safe.trim().length > 0)                               // a fully-scrubbed kw is no candidate
+      .filter((e) => findTrademarkPhrases(e.safe).length === 0)              // tmSafeKw twin (:3151)
+      // CELEBRITY GATE (adversarial HIGH, 2026-08-09): the derivation had a trademark gate but no
+      // celebrity gate — on the exact target ASIN (B0FKKN8XKV) "forrest frank shirt" carries real
+      // search demand, passes every structural filter, and would be welded into the VISIBLE title
+      // only for the push-boundary scrub to mangle it later. Same seam class as trademarks.
+      .filter((e) => !hasCelebrityName(e.safe))
+      .sort((a, b) => ((b.k.marketOpportunity ?? -1) - (a.k.marketOpportunity ?? -1))
+        || ((b.k.searchVolume || 0) - (a.k.searchVolume || 0)))
+      .map((e) => e.safe))].slice(0, 5)
+    if (titleMoneyKws.length > 0) {
+      console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'MONEY_KW', mode: moneyTailMode, asin: input.children[0]?.asin ?? '?', kws: titleMoneyKws }))
+    }
+  }
+
   // Stage 0c — top UPGRADE keywords for explicit title-coverage. UPGRADE = ranking
   // signal already present in bullets but absent from the title. The scorer in
   // syncListingContent.ts docks 5 points when 7+ of these are missing (3 when 3-6
@@ -7829,7 +7893,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * passes `input.priorTitle` straight through for a bullets/keywords/description-only regen, so an
    * ungated net would silently rewrite a title the seller never asked to touch — and the UI would
    * then offer it for push. Only a run that actually PRODUCED a title may band-enforce it. */
-  const bandTitle = (title: string, produced: boolean): string => {
+  /* `moneyKws` (TITLE_MONEY_TAIL, #147): the derived category money-keyword CANDIDATES for the PO
+   * gold pipe tail (top 5, opportunity-sorted) — non-empty ONLY on the broadcast call and only when
+   * the flag is shadow/on. Per-child titles pass the default null in Phase 1 (group-scoped
+   * derivation is Phase 2), so the net is SHARED across both exits (path parity) while the input is
+   * phased. Manual locks are untouchable by construction: a non-title partial passes produced=false
+   * (priorTitle passthrough), and a locked full regen has its fresh title discarded at persist by
+   * the route's lock guard. */
+  const bandTitle = (title: string, produced: boolean, moneyKws: readonly string[] | null = null): string => {
     if (!produced || !title) return title
     /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
      * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
@@ -7854,7 +7925,36 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', removed: deduped.removed, from: title.length, to: deduped.title.length }))
     }
     const capped = deduped.title
-    const v = enforceTitleBand(capped, titleBandCtx(capped))
+    /* MONEY TAIL (#147) — wire order is spec-truth → cap → dedupe → enforceMoneyTail →
+     * enforceTitleBand: when the gold tail lands the title is already in band and the facts-only
+     * pad below never fires (curing the "fact tail eats the money slot" leak); when it skips,
+     * every downstream byte is identical to today. Shadow ships unchanged + logs the diff.
+     * CANDIDATE LOOP (adversarial MEDIUM, 2026-08-09): per-keyword skips (cross-gender/word-repeat/
+     * spec-conflict/no-fit) try the next candidate instead of burning the slot; 'already-covered'
+     * STOPS the loop (the top candidate indexing from the title = slot satisfied — a lower-value
+     * keyword must not be installed past it); title-structural skips (no-tail/design-right/
+     * fact-tail/empty/non-apparel) stop too — they are identical for every candidate. */
+    let moneyed = capped
+    for (const moneyKw of moneyKws ?? []) {
+      const mt = enforceMoneyTail(moneyed, moneyKw, {
+        apparel: apparelProduct, lean, spec: blankSpec,
+        // Parity with the census/anchor sites (:7967/:8763): effectiveDesignName first. The net
+        // itself treats an unresolvable design as design-right (protected), never guard-off.
+        protect: (effectiveDesignName || designName) || null,
+        garmentBrand: garmentBrandCanonical || null,
+      })
+      console.log('[TITLE_GOLD]', JSON.stringify({
+        tag: 'SHIP_MONEY_TAIL', mode: moneyTailMode, decision: mt.decision, kw: moneyKw,
+        from: moneyed.length, to: mt.title.length, note: mt.note,
+      }))
+      if (mt.decision === 'applied') {
+        if (moneyTailMode === 'on') moneyed = mt.title
+        else console.log('[MONEY_TAIL_DIFF]', JSON.stringify({ kw: moneyKw, current: moneyed, would: mt.title }))
+        break
+      }
+      if (['already-covered', 'no-tail', 'design-right', 'fact-tail', 'empty', 'non-apparel'].includes(mt.decision)) break
+    }
+    const v = enforceTitleBand(moneyed, titleBandCtx(moneyed))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title
     // and no log line — "the net works", "the net never fired" and "the net fired and did nothing"
@@ -7869,11 +7969,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       decision: v.decision,
       from: title.length,
       to: v.title.length,
-      changed: v.title !== capped,
+      changed: v.title !== moneyed,
       capped: capped.length !== title.length,
       note: v.notes[0] ?? '',
     }))
-    if (v.title === capped) return capped
+    if (v.title === moneyed) return moneyed
     console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
     return v.title
   }
@@ -7938,21 +8038,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     return out
   }
+  // CELEBRITY PARITY AT THE CHOKE POINT (adversarial HIGH, 2026-08-09): isCelebrityToken is a
+  // PER-TOKEN gate (banBackendTok), so a PHRASE entry ("forrest frank", "chris brown") has NEVER
+  // matched at generation — each half passes alone and the LLM fill can compose the pair into
+  // stored bytes that only the push-boundary scrub would later strip, silently diverging pushed
+  // bytes from the stored/approved ones. Run the SAME phrase-aware terminal scrub the push runs
+  // (scrubCelebrityNames) right beside scrubTrademarks on every published surface, so stored ≡
+  // pushed. Idempotent; runs before bandTitle so the band pad can re-fill any freed chars.
+  const scrubPub = (s: string, fieldCtx: string): string => scrubCelebrityNames(scrubTrademarks(s), `pipeline:${fieldCtx}`)
   const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => censusLog({
     ...r,
-    recommended_title: bandTitle(scrubTrademarks(r.recommended_title), opts?.titleProduced !== false),
-    recommended_bullets: scrubTrademarksArr(r.recommended_bullets),
-    recommended_description: scrubTrademarks(r.recommended_description),
-    per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubTrademarks(c.keywords) })),
+    // Third arg = the derived money-keyword candidates (TITLE_MONEY_TAIL) — BROADCAST title only in Phase 1.
+    recommended_title: bandTitle(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false, titleMoneyKws),
+    recommended_bullets: scrubCelebrityNamesArr(scrubTrademarksArr(r.recommended_bullets), 'pipeline:bullets'),
+    recommended_description: scrubPub(r.recommended_description, 'description'),
+    per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubPub(c.keywords, 'backend') })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
-    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubTrademarks(c.title), opts?.titleProduced !== false) })),
+    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false) })),
     // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
     // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
     // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
     // these are generated + stored for the UI/push to read; nothing per-design reaches Amazon.
-    per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map(scrubTrademarks) })),
-    per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubTrademarks(c.description) })),
+    per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map((b) => scrubPub(b, 'per-child-bullets')) })),
+    per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubPub(c.description, 'per-child-description') })),
     // Audit blobs are seller-facing copy too (PO-caught 2026-07-02: raw mark in an action_plan copy
     // block). Deep-scrub every string value; identifier keys (sku/asin/element/...) are skipped
     // inside scrubTrademarksDeep so SKU codes are never rewritten.
@@ -8961,6 +9070,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // per-design fill safety), so an over-exemption here cannot cross a design's real content.
     if (BACKEND_CRIT_ON) {
       for (const k of backendPool) if (k.actionType === 'CRITICAL') for (const t of k.keyword.split(/\s+/)) s.delete(normIdxTok(t))
+    }
+    // TITLE_MONEY_TAIL echo exemption (adversarial LOW, 2026-08-09): once the flag is ON, the
+    // STORED title can carry the welded money keyword — on a later keywords-only regen that title
+    // arrives as priorTitle and its tokens land in this echo set, stripping the money keyword from
+    // the byte-fill. If the PO then pushes keywords WITHOUT the title, the keyword lives in
+    // neither field (the backend-title-echo class). Same doctrine as the CRITICAL exemption above
+    // (SELLER_PROFILE §5: money keywords are exempt from title-echo dedup); mode-gated so
+    // off/shadow stay byte-identical.
+    if (moneyTailMode === 'on') {
+      for (const kw of titleMoneyKws) for (const t of kw.split(/\s+/)) s.delete(normIdxTok(t))
     }
     return s
   }

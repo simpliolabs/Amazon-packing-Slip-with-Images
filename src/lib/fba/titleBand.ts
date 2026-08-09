@@ -277,6 +277,255 @@ export function scrubUnspecdGarmentClaims(
   return { title: out, removed }
 }
 
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * MONEY TAIL (#147 title half, TITLE_MONEY_TAIL). The PO's LOCKED gold shape for a single-design
+ * apparel title is
+ *   THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women
+ * i.e. `Brand + design + noun | <ONE high-volume category money keyword>`. Six stacked pipeline
+ * leaks kept that pipe tail from ever shipping (the 4-word pin drop, the advisory mustLine, the
+ * design-grounding strip, the gap-sort burial, Pattern A's fact-only pipe-right, and the fact-only
+ * terminal pads) — so per the generation-invariants doctrine the shape is enforced HERE, by a
+ * deterministic terminal net on the shipped bytes, never by prompts.
+ *
+ * DELIBERATELY SEPARATE from enforceTitleBand: that net is BY DOCTRINE facts-only (spec-vs-search
+ * grounding — it pads from BLANK_SPECS, never the pool). The money keyword is the ONE search-
+ * grounded slot the gold grants, so it lives in its own stage, runs BEFORE the fact pad, and when
+ * it lands (in band) the fact pad simply no-ops. When it skips, today's bytes are byte-identical.
+ */
+
+/** Why the net did (or did not) fire — every pass reports, per Phase-0 observability.
+ *   empty / no-kw / non-apparel — structural skips (no keyword derived ⇒ zero behavior change)
+ *   already-covered — every significant keyword token is in the title (also the idempotence path)
+ *   cross-gender    — keyword fights the seller lean / the title's audience tail
+ *   word-repeat     — keyword would re-print a significant left-side word (one garment-family
+ *                     repeat is allowed — the golds repeat the noun: "…Tee | … Shirts …")
+ *   design-right    — the pipe's right side carries the protected design phrase (or no design
+ *                     name resolved, so the right side CANNOT be proven replaceable); never replaced
+ *   fact-tail       — the pipe's right side carries the garment BRAND or a SPEC FACT (the gold-#2
+ *                     "… | Long Sleeve Comfort Colors Shirt" shape). CONSERVATIVE SKIP pending the
+ *                     PO scope ruling: SELLER_PROFILE §3 protects the golds as fixtures and bans
+ *                     pool terms outside the ONE money slot, so this net never evicts a brand/fact
+ *                     tail — whether a high-value money keyword may EVER outrank one is an open PO
+ *                     question recorded in §3.
+ *   no-tail         — the title has neither a ` | ` pipe nor a bare trailing audience tail. The net
+ *                     only ever REPLACES a tail; it never APPENDS where none existed (conservative
+ *                     reading of the design-led doctrine — the B0FKKN8XKV gold's pre-lock title
+ *                     ended "for Women", i.e. had a replaceable tail).
+ *   spec-conflict   — the market phrase would re-leak a spec claim the blank doesn't back
+ *   no-fit          — the candidate cannot land inside [70,75] without truncating the keyword
+ *   applied         — the gold-shape tail shipped  ← the only outcome that changes bytes */
+export type MoneyTailDecision =
+  | 'empty' | 'no-kw' | 'non-apparel' | 'already-covered' | 'cross-gender'
+  | 'word-repeat' | 'design-right' | 'fact-tail' | 'no-tail' | 'spec-conflict' | 'no-fit' | 'applied'
+
+export interface MoneyTailCtx {
+  /** Non-apparel never gets the garment money tail. */
+  apparel: boolean
+  /** Seller audience lean — the cross-gender veto twin of listingPipeline.ts:6031-6034. Soft leans
+   *  veto too (stricter than the fill): a wrong veto is a no-op, a wrong ship is a regression. */
+  lean?: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
+  /** Blank spec — feeds scrubUnspecdGarmentClaims (a market phrase like "heavyweight shirts" must
+   *  not re-leak a weight/fit claim the blank doesn't back) AND the fact-tail guard (a pipe-right
+   *  stating the blank's fit/sleeve/neck is a protected fact tail, never evicted). */
+  spec?: { fit?: string | null; sleeve?: string | null; neck?: string | null; weightNote?: string | null } | null
+  /** The design phrase. On a piped title the right side is replaceable only when it can be PROVEN
+   *  not to carry the design — if it shares a distinctive token with the design (Pattern-B-ish
+   *  "… | I Will Praise Him …"), or no design name resolved at all (nothing to prove against),
+   *  the net must never delete the right side. */
+  protect?: string | null
+  /** The garment blank's brand in canonical casing (BLANK_SPECS, e.g. "Comfort Colors"). A
+   *  pipe-right carrying its tokens is a protected brand/fact tail (gold #2's shape) — the
+   *  fact-tail guard skips rather than evict it. */
+  garmentBrand?: string | null
+}
+
+/** Spec-fact vocabulary (post-moneyNormTok fold) that only ever appears in a FACT pipe tail —
+ *  the deterministic half of the fact-tail guard for when the blank spec is unresolved (null
+ *  spec must still protect "… | Long Sleeve Comfort Colors Shirt"). Deliberately tight: each
+ *  word is garment-attribute vocabulary, not design vocabulary. */
+const MONEY_FACT_TAIL_LEXICON = new Set([
+  'sleeve', 'fit', 'neck', 'crew', 'heavyweight', 'midweight', 'lightweight', 'cotton', 'personalized',
+])
+
+/** Twin of listingPipeline's fillNormTok (gender fold + light plural fold + tshirt→shirt), kept
+ *  local so this leaf stays import-free from the 9,400-line pipeline. Set-membership only. */
+const moneyNormTok = (t: string): string => {
+  const g = t === 'mens' ? 'men' : t === 'womens' ? 'women' : t
+  const p = g.length > 3 ? g.replace(/s$/, '') : g
+  return p === 'tshirt' ? 'shirt' : p
+}
+/** Significant, normalized tokens of a phrase (connectors dropped). */
+const moneySigToks = (s: string): string[] =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/)
+    .filter((w) => w.length > 0 && !TITLE_CONNECTORS.has(w))
+    .map(moneyNormTok)
+
+/** Garment-noun family (post-fold): the ONE significant repeat the golds allow ("…Tee Shirt | …
+ *  Tshirt…"). shirt/shirts/t-shirt/tshirt fold to `shirt`; tee/tees fold to `tee`. */
+const MONEY_GARMENT_FAMILY = new Set(['shirt', 'tee'])
+/** Audience words (post-fold) — a repeat of these is resolvable by dropping the keyword's own
+ *  "for women/men" SUFFIX (never by truncating mid-phrase). 'ladie' is 'ladies' post-fold. */
+const MONEY_AUDIENCE_TOKS = new Set(['men', 'women', 'ladie'])
+/** Byte-for-byte twins of the fill's gender probes (listingPipeline.ts:6011-6012). */
+const MONEY_FEM_RE = /\bwom[ae]ns?\b|\bladies\b/i
+const MONEY_MASC_RE = /\bm[ae]ns?\b/i
+
+/** Title Case for the money keyword ("christian shirts for women" → "Christian Shirts for Women");
+ *  connectors stay lower unless leading, matching the gold's casing. */
+const moneyTitleCase = (s: string): string =>
+  s.split(' ').map((w, i) => {
+    const lw = w.toLowerCase()
+    if (i > 0 && TITLE_CONNECTORS.has(lw)) return lw
+    return lw.charAt(0).toUpperCase() + lw.slice(1)
+  }).join(' ')
+
+/**
+ * Install the PO gold money tail: `<protected left> | <Title-Cased money keyword>`.
+ *
+ * PURE, SYNCHRONOUS, DETERMINISTIC, IDEMPOTENT (an applied result re-enters as 'already-covered').
+ * The LEFT side (brand + design + noun — the protected money phrase, same doctrine as the
+ * runTitleAgent tail-dedup at listingPipeline.ts:3459) is kept VERBATIM.
+ *
+ * CONSERVATIVE SCOPE (2026-08-09 adversarial verdicts — pending the PO's explicit scope ruling,
+ * recorded in SELLER_PROFILE §3): the net only ever REPLACES an existing tail — a pipe-right or a
+ * bare trailing audience tail — and never APPENDS to a tail-less title ('no-tail'). A pipe-right
+ * is replaceable only when it can be PROVEN to carry neither the design ('design-right', which
+ * also fires when no design name resolved), nor the garment brand, nor a spec fact ('fact-tail' —
+ * the protection that keeps gold #2 "… | Long Sleeve Comfort Colors Shirt" byte-identical under
+ * ANY keyword; the probe that forced this showed the pre-guard net deleting "Long Sleeve" and
+ * evicting "Comfort Colors" for an opp-floor-less keyword). The audience survives either inside
+ * the keyword itself ("… for Women") or re-appended verbatim after it. The keyword is NEVER
+ * truncated mid-phrase — the only permitted trim is its own "for women/men" suffix, and only when
+ * the audience already lives on the left. Anything that cannot land inside
+ * [TITLE_BAND_LO, TITLE_BAND_HI] skips, byte-identical (fail-open).
+ */
+export function enforceMoneyTail(
+  title: string,
+  moneyKw: string | null | undefined,
+  ctx: MoneyTailCtx,
+): { title: string; decision: MoneyTailDecision; note: string } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t0) return { title, decision: 'empty', note: '' }
+  const kw0 = (moneyKw || '').replace(/\s{2,}/g, ' ').trim().toLowerCase()
+  if (!kw0) return { title: t0, decision: 'no-kw', note: '' }
+  if (!ctx.apparel) return { title: t0, decision: 'non-apparel', note: '' }
+
+  const kwFem = MONEY_FEM_RE.test(kw0)
+  const kwMasc = MONEY_MASC_RE.test(kw0)
+
+  // Idempotence / no-op: every significant keyword token already indexes from the title.
+  const titleToks = new Set(moneySigToks(t0))
+  const kwSig = moneySigToks(kw0)
+  if (kwSig.length === 0) return { title: t0, decision: 'no-kw', note: '' }
+  if (kwSig.every((tok) => titleToks.has(tok))) return { title: t0, decision: 'already-covered', note: '' }
+  // An intra-keyword duplicate would ship a repeated word no later net removes (collapseRepeated
+  // Words runs BEFORE this stage by wire order) — refuse rather than mutate the keyword.
+  if (new Set(kwSig).size !== kwSig.length) return { title: t0, decision: 'word-repeat', note: 'intra-keyword repeat' }
+
+  // Cross-gender veto — the seller lean half of listingPipeline.ts:6031-6034 (soft leans included:
+  // stricter here is fail-open, a skip is a no-op).
+  const lean = ctx.lean
+  if ((lean === 'female' || lean === 'lean_female') && kwMasc && !kwFem) return { title: t0, decision: 'cross-gender', note: `lean=${lean}` }
+  if ((lean === 'male' || lean === 'lean_male') && kwFem && !kwMasc) return { title: t0, decision: 'cross-gender', note: `lean=${lean}` }
+
+  // Split: protect the left side verbatim. A piped title's right side is the replaceable fact
+  // tail; an unpiped title's replaceable part is only its bare trailing audience tail.
+  const pipeIdx = t0.indexOf(' | ')
+  const tailM = AUDIENCE_TAIL_RE.exec(t0)
+  const tailStr = tailM ? t0.slice(tailM.index) : ''            // e.g. " for Women" (leading space kept)
+  const left = pipeIdx >= 0
+    ? t0.slice(0, pipeIdx).trim()
+    : (tailM ? t0.slice(0, tailM.index).trim() : t0)
+
+  // CONSERVATIVE: replace-only, never append. A title with neither a pipe nor a bare trailing
+  // audience tail has no replaceable tail region — skip rather than graft one on.
+  if (pipeIdx < 0 && !tailM) return { title: t0, decision: 'no-tail', note: 'no pipe and no trailing audience tail to replace' }
+
+  // The tailGender half of the :6031-6034 veto: never put a masc-only keyword on a "for Women" title.
+  const tailFem = MONEY_FEM_RE.test(tailStr) || /\bher\b/i.test(tailStr)
+  const tailMasc = MONEY_MASC_RE.test(tailStr) || /\bhim\b/i.test(tailStr)
+  if (tailFem && !tailMasc && kwMasc && !kwFem) return { title: t0, decision: 'cross-gender', note: 'tail=women' }
+  if (tailMasc && !tailFem && kwFem && !kwMasc) return { title: t0, decision: 'cross-gender', note: 'tail=men' }
+
+  if (pipeIdx >= 0) {
+    const rightToks = new Set(moneySigToks(t0.slice(pipeIdx + 3)))
+    // Never replace a pipe-right that carries the DESIGN. Fail-open direction (adversarial LOW,
+    // 2026-08-09): when NO design name resolved, the right side cannot be PROVEN design-free, so
+    // guard-off would be exactly wrong — treat unprovable as protected.
+    const designToks = moneySigToks(ctx.protect ?? '')
+      .filter((tok) => !MONEY_GARMENT_FAMILY.has(tok) && !MONEY_AUDIENCE_TOKS.has(tok))
+    if (designToks.length === 0) {
+      return { title: t0, decision: 'design-right', note: 'no resolvable design name — pipe right cannot be proven replaceable' }
+    }
+    if (designToks.some((tok) => rightToks.has(tok))) {
+      return { title: t0, decision: 'design-right', note: 'pipe right side carries the design phrase' }
+    }
+    // Never replace a pipe-right that carries the garment BRAND or a SPEC FACT — the gold-#2
+    // "… | Long Sleeve Comfort Colors Shirt" shape is a PO gold ("Protected as test fixtures —
+    // no net may alter them", SELLER_PROFILE §3). Whether a money keyword may ever outrank a
+    // brand/fact tail (and above what value floor) is an OPEN PO question; until ruled, skip.
+    const factToks = new Set([
+      ...moneySigToks(ctx.garmentBrand ?? ''),
+      ...moneySigToks([ctx.spec?.fit, ctx.spec?.sleeve, ctx.spec?.neck].filter(Boolean).join(' ')),
+    ])
+    const factHit = [...rightToks].find((tok) =>
+      (factToks.has(tok) || MONEY_FACT_TAIL_LEXICON.has(tok)) && !MONEY_GARMENT_FAMILY.has(tok) && !MONEY_AUDIENCE_TOKS.has(tok))
+    if (factHit) {
+      return { title: t0, decision: 'fact-tail', note: `pipe right side carries brand/spec fact "${factHit}" — protected` }
+    }
+  }
+
+  // Repeat guard vs the PROTECTED left side: at most ONE garment-family repeat (the golds repeat
+  // the noun); an audience repeat is resolvable ONLY by dropping the keyword's own "for women/men"
+  // suffix (the audience already lives on the left); anything else skips.
+  const leftSet = new Set(moneySigToks(left))
+  let kwFinal = kw0
+  const offenders = (kws: string): string[] => {
+    let garmentRepeatUsed = false
+    const out: string[] = []
+    for (const tok of new Set(moneySigToks(kws))) {
+      if (!leftSet.has(tok)) continue
+      if (MONEY_GARMENT_FAMILY.has(tok) && !garmentRepeatUsed) { garmentRepeatUsed = true; continue }
+      out.push(tok)
+    }
+    return out
+  }
+  let off = offenders(kwFinal)
+  const AUD_SUFFIX_RE = /\s+for\s+(?:women|men)\s*$/i
+  if (off.length > 0 && off.every((tok) => MONEY_AUDIENCE_TOKS.has(tok)) && AUD_SUFFIX_RE.test(kwFinal)) {
+    kwFinal = kwFinal.replace(AUD_SUFFIX_RE, '').trim()
+    off = offenders(kwFinal)
+  }
+  if (off.length > 0) return { title: t0, decision: 'word-repeat', note: `repeats: ${off.join(', ')}` }
+
+  // Assemble. The audience survives: inside the keyword itself when it carries one, else the
+  // original bare tail is re-appended VERBATIM (a lean listing must never lose its tail here).
+  const kwCarriesAudience = MONEY_FEM_RE.test(kwFinal) || MONEY_MASC_RE.test(kwFinal)
+  const reTail = tailStr && !kwCarriesAudience ? tailStr : ''
+  let cand = `${left} | ${moneyTitleCase(kwFinal)}${reTail}`.replace(/\s{2,}/g, ' ').trim()
+
+  // Spec truth: a market phrase must not re-leak a weight/fit claim the blank doesn't back.
+  const scrubbed = scrubUnspecdGarmentClaims(cand, ctx.spec)
+  if (scrubbed.removed.length > 0) {
+    return { title: t0, decision: 'spec-conflict', note: `spec-truth would remove: ${scrubbed.removed.join(', ')}` }
+  }
+
+  // Band fit. Over the cap the ONLY permitted trim is the keyword's own audience suffix, and only
+  // when that audience already appears on the left — never truncate the keyword itself.
+  if (cand.length > TITLE_BAND_HI && AUD_SUFFIX_RE.test(kwFinal) && !reTail) {
+    const audTok = /women\s*$/i.test(kwFinal) ? 'women' : 'men'
+    if (leftSet.has(audTok)) {
+      kwFinal = kwFinal.replace(AUD_SUFFIX_RE, '').trim()
+      cand = `${left} | ${moneyTitleCase(kwFinal)}`.replace(/\s{2,}/g, ' ').trim()
+    }
+  }
+  if (cand.length > TITLE_BAND_HI || cand.length < TITLE_BAND_LO) {
+    return { title: t0, decision: 'no-fit', note: `candidate ${cand.length} chars outside [${TITLE_BAND_LO},${TITLE_BAND_HI}]` }
+  }
+
+  return { title: cand, decision: 'applied', note: `money tail "${moneyTitleCase(kwFinal)}" → ${cand.length} chars` }
+}
+
 /**
  * Raise a short apparel title into the 70-75 band using product facts, inserting a ` | ` separator
  * before the audience tail. PURE, SYNCHRONOUS, TOTAL, IDEMPOTENT, MONOTONE:

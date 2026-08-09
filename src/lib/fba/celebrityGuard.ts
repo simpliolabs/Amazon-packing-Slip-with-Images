@@ -10,12 +10,19 @@
  *     scrubTrademarks; needs its OWN seam.
  *   - task #72: "usher and chris brown shirt", "grafica tees women" — same class from ingestion.
  *
- * Applied SYMMETRICALLY at TWO seams:
- *   (a) Generation: a per-token check that keeps the name out of the produced bytes (paired with
- *       banBackendTok in listingPipeline.ts's runBackendAgent).
- *   (b) Push boundary: a terminal net that catches an ingestion contaminant that slipped every gate,
- *       right beside scrubTrademarks (pushExecutor.ts: executePush + executeBulkCorePush both scrub-at-push
- *       so a manually-typed OR stale value can never write to Amazon). Idempotent.
+ * Applied SYMMETRICALLY at THREE seams:
+ *   (a) Generation, per-token: isCelebrityToken inside banBackendTok (listingPipeline.ts) keeps a
+ *       SINGLE-token name out of the byte-fill. PHRASE entries never match here by construction —
+ *       each half is a common word and deliberately not a token.
+ *   (a2) Generation EXIT, phrase-aware (2026-08-09, adversarial fix): scrubCelebrityNames runs in
+ *       the pipeline's scrubPublished choke point beside scrubTrademarks, on every published
+ *       surface (title/bullets/description/backend + per-child twins) — THE seam that catches a
+ *       composed phrase ("forrest frank", "chris brown") so stored bytes ≡ pushed bytes.
+ *   (b) Push boundary: the same terminal net catching an ingestion contaminant or stale stored
+ *       value (pushExecutor.ts: executePush + executeBulkCorePush both scrub-at-push so a
+ *       manually-typed OR stale value can never write to Amazon). Idempotent.
+ *   The TITLE_MONEY_TAIL derivation additionally gates candidates via hasCelebrityName, so a
+ *   demanded name ("forrest frank shirt" on B0FKKN8XKV) can never be welded into the visible title.
  *
  * Meta (PO 2026-07-21, "LLM should figure it out with training"): this seed list should GROW from a
  * data source — a versioned JSON/CSV appended by a "PO flagged a drop" workflow — rather than
@@ -43,6 +50,13 @@ const CELEBRITY_TOKENS: string[] = [
   // Music (task #72 class)
   'usher', 'drake', 'beyonce', 'beyoncé', 'rihanna', 'taylor swift', 'kanye',
   'chris brown', 'bruno mars', 'ariana grande', 'billie eilish',
+  // Christian music (PO ruling 2026-08-08: real search demand on B0FKKN8XKV, scrubbed anyway —
+  // 'forrest frank' as a phrase; bare 'forrest'/'frank' deliberately NOT tokens (common
+  // names/words — the conservative rule above). Phrase entries are enforced by the PHRASE-AWARE
+  // seams — the scrubPublished generation-exit scrub, the push-boundary scrub, and the money-tail
+  // derivation's hasCelebrityName gate — NOT by the per-token banBackendTok check, which by
+  // construction cannot see a two-word phrase (each half passes alone).
+  'forrest frank',
   // Politics / celebrities occasionally hitting apparel pools
   'trump', 'biden', 'obama', 'harris',
 ]
@@ -59,7 +73,8 @@ export function isCelebrityToken(tokenLower: string): boolean {
   return CELEBRITY_SINGLE_TOKENS.has(tokenLower)
 }
 
-/** True when the text contains any celebrity name (single-token or phrase). For assertions/flagging. */
+/** True when the text contains any celebrity name (single-token or phrase). Gates the
+ *  TITLE_MONEY_TAIL keyword derivation (listingPipeline.ts) and serves assertions/flagging. */
 export function hasCelebrityName(text: string): boolean {
   if (!text) return false
   const lower = text.toLowerCase()
