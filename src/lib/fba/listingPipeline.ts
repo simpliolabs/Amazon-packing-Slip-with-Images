@@ -24,6 +24,10 @@ import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { garmentNounFor, SHIRT_BASE, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
+// PO RULING 2026-08-09 — the money tail may never be decided by raw volume. ONE shared pure rule
+// (also read by the intelligence GET's health signal and the RANK council brief) so the three
+// surfaces cannot disagree about whether a pool carries market data.
+import { rankByMarketOpportunity, carriesMarketOpportunity } from '@/lib/keyword-engine/marketDataHealth'
 import { isOffNicheKeyword, isForeignKeyword } from '@/lib/keyword-engine/nicheGuards'
 // SEASONAL — the ONE list + the ON/OFF-season predicate (PO 2026-07-23). This file used to carry its
 // OWN private copy of SEASONAL_TERMS (a `const` at :244) that no other module could reach, which is
@@ -150,6 +154,15 @@ export interface PipelineInput {
   customizable?: boolean
   analysis: AnalyzedKeyword[]
   children: PipelineChild[]
+  /** Parent ASIN of the family this run generates for. DIAGNOSTICS ONLY — every generator is
+   *  child-scoped and nothing branches on it. Threaded (2026-08-09) so the MONEY_TAIL_NO_MARKET_DATA
+   *  refusal is attributable to a listing without a child→parent grep. Absent ⇒ null in the log. */
+  parentAsin?: string | null
+  /** keyword_cache.fetched_at for the analysed ASIN — WHEN this keyword pool was researched.
+   *  DIAGNOSTICS ONLY (no gate reads it): a refusal log that says "0 of 88 rows carry market data,
+   *  researched 46 days ago" is actionable; one that says only "no market data" is not. Best-effort
+   *  at the route — a failed read passes null, which only costs the date in one log line. */
+  researchedAt?: string | null
   /** Current title of the representative child — used for product-name token extraction */
   repTitle: string | null
   /** Canonical listing title (listing_seo_scores.product_title — the title the seller & dashboard
@@ -7590,11 +7603,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (targets.live && pinPool.length === 0) {
     console.log(`[KW_TARGET_PIN_FALLBACK] asin=${input.children[0]?.asin ?? '?'} no CORE-slot target; pinning from ${targets.keep(cleanGated).length > 0 ? 'any-target' : 'legacy'} pool`)
   }
-  const mustIncludeKw = pinFrom
+  // MARKET TRUTH ON THE PIN (PO ruling 2026-08-09, SELLER_PROFILE §5: "VOLUME is not the biggest
+  // thing we look at but the JS opportunity and ranking ability with the right volume"). Raw volume
+  // picked `usa soccer jersey` (1.98M/mo) for a niche 2026 tee — real demand, unwinnable. Rank by
+  // market_opportunity (demand × winnability) FIRST; volume may only break ties BETWEEN scored rows.
+  // A pool with no market data still pins (stripping the pin catalog-wide is a bigger change than the
+  // ruling asks) but it can never do so SILENTLY — the log names the gap and the seller-facing
+  // marketDataHealth banner says the same thing on the listing.
+  const pinCandidates = pinFrom
     .filter((k) => ['CRITICAL', 'UPGRADE', 'DEFENDED', 'REINFORCE'].includes(k.actionType))
     .filter((k) => !season.isOffSeason(k.keyword))
     .filter((k) => k.keyword.split(/\s+/).length <= 6)
-    .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0) || (b.coverageGapScore || 0) - (a.coverageGapScore || 0))[0]
+  const pinScored = pinCandidates.filter((k) => carriesMarketOpportunity(k))
+  if (pinCandidates.length > 0 && pinScored.length === 0) {
+    console.warn(JSON.stringify({ tag: 'TITLE_PIN_NO_MARKET_DATA', parent: input.parentAsin ?? null,
+      asin: input.children[0]?.asin ?? null, candidates: pinCandidates.length,
+      note: 'no candidate carries market_opportunity — pin fell back to volume order; re-research to score the pool' }))
+  }
+  const mustIncludeKw = (pinScored.length > 0 ? pinScored : pinCandidates)
+    .sort((a, b) => (pinScored.length > 0
+      ? (b.marketOpportunity ?? 0) - (a.marketOpportunity ?? 0)
+      : 0) || (b.searchVolume || 0) - (a.searchVolume || 0) || (b.coverageGapScore || 0) - (a.coverageGapScore || 0))[0]
   season.diff('title-must-include', cleanGated.map((k) => k.keyword))
   const mustInclude = mustIncludeKw?.keyword
 
@@ -7690,7 +7719,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   if (moneyTailMode !== 'off' && apparelProduct && targets.live) {
     const MT_GARMENT_RE = /\b(?:t-?shirts?|tshirts?|shirts?|tees?)\b/i
     const MT_FEM = /\bwom[ae]ns?\b|\bladies\b/i, MT_MASC = /\bm[ae]ns?\b/i // :6011-6012 twins
-    titleMoneyKws = [...new Set(targets.keep(analysis)
+    const mtCandidates = targets.keep(analysis)
       // BACKEND-slot targets are backend-only by definition (off-season holidays etc. — the same
       // reason the :7534 pin draws from targets.core and :8500/:9570 exclude the slot). A BACKEND
       // keyword welded into the visible title would be a dock no regenerate could clear.
@@ -7715,9 +7744,35 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // search demand, passes every structural filter, and would be welded into the VISIBLE title
       // only for the push-boundary scrub to mangle it later. Same seam class as trademarks.
       .filter((e) => !hasCelebrityName(e.safe))
-      .sort((a, b) => ((b.k.marketOpportunity ?? -1) - (a.k.marketOpportunity ?? -1))
-        || ((b.k.searchVolume || 0) - (a.k.searchVolume || 0)))
-      .map((e) => e.safe))].slice(0, 5)
+
+    // ── NO SILENT VOLUME-ONLY FALLBACK (PO RULING, verbatim 2026-08-09) ────────────────────────
+    // "VOLUME is not the biggest thing we look at but the JS opportunity and ranking ability with
+    // the right volume." The old comparator here was `(mo ?? -1) DESC || searchVolume DESC`, which
+    // reads as market-first but DEGRADES SILENTLY: when no candidate carries market_opportunity
+    // every key is -1, the first term is a constant 0, and the whole slot is decided by RAW VOLUME
+    // — the single highest-volume head phrase welded into the visible title with no winnability
+    // signal behind it. Live proof (B0GVV3XL4T, probed 2026-08-09): 88 stored rows, ZERO with
+    // market_opportunity, research 46 days stale, and the pool's volume leaders are unwinnable
+    // heads for a niche 2026 tee ("usa soccer jersey" 1.98M/mo).
+    // rankByMarketOpportunity is the shared rule: it DROPS unscored rows, so volume can only ever
+    // break a tie BETWEEN two market-scored rows, and it returns [] when nothing is scored. Empty
+    // ⇒ enforceMoneyTail installs nothing ⇒ the title stays BYTE-IDENTICAL and honest, which is the
+    // correct outcome: no money tail beats a confidently-wrong one. Loud, structured, and greppable
+    // so the degradation is never invisible again.
+    const mtRanked = rankByMarketOpportunity(mtCandidates, (e) => e.k)
+    if (mtCandidates.length > 0 && mtRanked.length === 0) {
+      console.log('[MONEY_TAIL_NO_MARKET_DATA]', JSON.stringify({
+        tag: 'MONEY_TAIL_NO_MARKET_DATA',
+        parent: input.parentAsin ?? null,
+        asin: input.children[0]?.asin ?? null,
+        poolRows: analysis.length,
+        withMo: 0,                                                    // scored CANDIDATES — 0 by construction on this branch
+        poolWithMarketOpportunity: analysis.filter((k) => carriesMarketOpportunity(k)).length,
+        candidates: mtCandidates.length,                              // how many we REFUSED rather than pick on volume
+        researchedAt: input.researchedAt ?? null,
+      }))
+    }
+    titleMoneyKws = [...new Set(mtRanked.map((e) => e.safe))].slice(0, 5)
     if (titleMoneyKws.length > 0) {
       console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'MONEY_KW', mode: moneyTailMode, asin: input.children[0]?.asin ?? '?', kws: titleMoneyKws }))
     }

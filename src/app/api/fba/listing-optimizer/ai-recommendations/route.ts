@@ -680,6 +680,19 @@ export async function POST(req: NextRequest) {
     // early-return inherit the same window (dual-write-path parity, structurally).
     const analysis = (await getStoredAnalysis(analysisAsin, readWindow(150))) ?? []
 
+    // WHEN this pool was researched — diagnostics for the money-tail market-data refusal
+    // (MONEY_TAIL_NO_MARKET_DATA, PO ruling 2026-08-09). One indexed single-row read inside a 3-4
+    // minute regen; best-effort, and deliberately placed on the SAME line as the analysis load so
+    // BOTH write paths (full dbPayload + every #79 section-regen early return) inherit it
+    // structurally rather than by remembering to copy it.
+    let poolResearchedAt: string | null = null
+    try {
+      const { data: prCache } = await supabase
+        .from('keyword_cache')
+        .select('fetched_at').eq('asin', analysisAsin).eq('source', 'keyword_research').maybeSingle()
+      poolResearchedAt = (prCache as { fetched_at?: string } | null)?.fetched_at ?? null
+    } catch { /* best-effort — null only costs the date in one log line, never a regen */ }
+
     // ── #79 per-section regen: load the STORED recommendation — its title/bullets anchor the
     // partial run (bullets regenerate against the already-approved title). Row missing or
     // priors absent → fall back to a FULL regen so the seller always gets a result.
@@ -821,6 +834,10 @@ export async function POST(req: NextRequest) {
             detailAttributeMenu: detailMenu,
             analysis,
             children: pipelineChildren,
+            // Diagnostics only (PO ruling 2026-08-09) — attributes the MONEY_TAIL_NO_MARKET_DATA
+            // refusal to a listing and dates the pool it refused.
+            parentAsin: parent_asin,
+            researchedAt: poolResearchedAt,
             repTitle: rep.title,
             // Canonical title (best-seller's product_title) for design-name extraction — rep.title is
             // the alphabetically-first variant and often does NOT lead with the design name.

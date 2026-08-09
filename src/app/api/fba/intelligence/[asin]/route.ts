@@ -44,6 +44,11 @@ import { checkPresenceAny } from '@/lib/keyword-engine/checkPresence';
 // COHERENCE Invariant 6: at COVERAGE_CORE=on the Present-In tab decides coverage via the SAME shared
 // field-agnostic predicate the RANK panel uses, so the two read screens are identical by construction.
 import { coverageMode, coverageAcrossRows } from '@/lib/keyword-engine/coverage-core';
+// MARKET-DATA HEALTH (PO ruling 2026-08-09). Same pure module the money-tail refusal and the RANK
+// council brief read, and RESEARCH_TTL_DAYS is the ONE existing TTL declaration (keyword_cache
+// expiry is computed from it) — the staleness verdict here can never drift from the cache's own.
+import { deriveMarketDataHealth } from '@/lib/keyword-engine/marketDataHealth';
+import { RESEARCH_TTL_DAYS } from '@/lib/keyword-engine/keywordResearcher';
 import { loadListingRowsForPresence, loadRepresentativeListingRow } from '@/lib/keyword-engine/loadListingContent';
 
 // resolveToChildAsin extracted to @/lib/fba/resolveAsin (shared with the rank-analysis route, no fork).
@@ -212,6 +217,9 @@ export async function GET(
             totalKeywordsAnalyzed: 0,
             summary: { critical: 0, upgrade: 0, reinforce: 0, defended: 0, optimized: 0 },
             topOpportunities: [],
+            // Same key, same shape, on BOTH stored branches — a consumer must never have to ask
+            // "which branch answered?" to know whether the field exists (state:'empty' here).
+            marketDataHealth: deriveMarketDataHealth([], researchedAt, { ttlDays: RESEARCH_TTL_DAYS }),
             message: 'No analysis available yet. Trigger a sync to generate keyword intelligence.',
           },
           { status: 200 }
@@ -254,6 +262,14 @@ export async function GET(
         // Max keyword_analysis.analyzed_at — the PROMOTION stamp. The auto-chain must not regen
         // until lastAnalyzedAt ≥ researchedAt (research cached but not yet promoted = mid-window).
         lastAnalyzedAt,
+        // MARKET-DATA HEALTH (PO ruling 2026-08-09). Computed from `stored` — rows ALREADY read
+        // above — so it costs three in-memory passes and ZERO extra round trips. This is the signal
+        // that makes the B0GVV3XL4T degradation visible to the seller instead of only to a log:
+        // 88 rows / 0 with market_opportunity / 0 selected / researched 46 days ago.
+        // FAIL-OPEN BY CONTRACT: deriveMarketDataHealth swallows its own read errors and returns
+        // state:'unknown' (pinned by marketDataHealth.test.ts) — so there is deliberately no
+        // second try/catch here, which would be unreachable and would hide that contract.
+        marketDataHealth: deriveMarketDataHealth(stored, researchedAt, { ttlDays: RESEARCH_TTL_DAYS }),
         dataSource: stored[0]?.dataSource ?? 'sqp',
         totalKeywordsAnalyzed: stored.length,
         topOpportunities,
