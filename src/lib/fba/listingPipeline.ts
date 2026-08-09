@@ -41,7 +41,7 @@ import { selectionMode, isRankingTarget, selectionSha, type SelectionContext } f
 // that cannot build a PipelineInput. selectionContext.ts imports seasonalTerms/selection-core/
 // loadListingContent only, so importing it here creates no cycle.
 import { deriveSeasonsFrom } from '@/lib/keyword-engine/selectionContext'
-import { guaranteedIdentitySynonyms, getSeedPool, normalizeSeedKey, deriveNicheSeeds } from '@/lib/keyword-engine/keywordResearcher'
+import { guaranteedIdentitySynonyms, identitySynonymPhrases, getSeedPool, normalizeSeedKey, deriveNicheSeeds } from '@/lib/keyword-engine/keywordResearcher'
 // Competitor SEO snapshot (title-council fallback chain Part 1): the seller-named competitor's live
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
@@ -54,7 +54,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { collapseRepeatedWords, enforceInclusiveAudience, enforceMoneyTail, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripVariantColorWords, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -7474,6 +7474,34 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // sibling is in the pool (e.g. the concept was only in the title, already stripped upstream).
       cleanGated.unshift(bestSibling ? { ...bestSibling, keyword: synonym } : attributeAsKeyword(synonym))
     }
+    /* SYNONYM PHRASES (PO ruling 2026-08-09, SELLER_PROFILE §3 gold rule 3: '"Football" is a
+     * required international synonym on soccer products'). The bare-token injection above makes the
+     * sibling INDEXABLE — it enters `analysis`, so the backend pool and the coverage model both see
+     * it. What it can never be is CHOSEN for the title's money slot: the money-tail derivation at
+     * :7660 requires 3-5 words carrying a garment noun, and "football" is one word. The PO's gold
+     * spends that slot on exactly such a phrase ("… | USA Mexico Canada Football Tee"), so the
+     * sibling has to reach the pool in phrase form too.
+     * NOT a hardcoded title string: `identitySynonymPhrases` MIRRORS phrases the market already
+     * returned for the source term, substituting only where the source token directly modifies a
+     * garment noun, and each mirror INHERITS its source row's real opportunity/volume/action —
+     * so the selector still picks on merit, it just stops being structurally unable to pick this.
+     * `selectionRank: undefined` (not the source's rank) is deliberate and is the documented
+     * meaning of undefined at :1497 — "the row was never in the scored pool at all ⇒ EXEMPT". A
+     * mirror is synthetic; inheriting a null rank would let the target-set filter delete a synonym
+     * §3 calls REQUIRED. Capped at 4 by inherited opportunity so a soccer family cannot flood the
+     * pool. Fail-open at every step: no source row ⇒ nothing injected ⇒ byte-identical. */
+    const synonymPhrases = identitySynonymPhrases(cleanGated.map((k) => k.keyword), input.canonicalTitle, repTitle)
+      .map((p) => ({ ...p, row: cleanGated.find((k) => k.keyword.toLowerCase() === p.source.toLowerCase()) }))
+      .filter((p): p is { phrase: string; source: string; row: AnalyzedKeyword } => !!p.row)
+      .sort((a, b) => ((b.row.marketOpportunity ?? -1) - (a.row.marketOpportunity ?? -1))
+        || ((b.row.coverageGapScore || 0) - (a.row.coverageGapScore || 0)))
+      .slice(0, 4)
+    for (const { phrase, source, row } of synonymPhrases) {
+      const pl = phrase.toLowerCase()
+      if (cleanGated.some((k) => k.keyword.toLowerCase() === pl)) continue
+      cleanGated.unshift({ ...row, keyword: phrase, selectionRank: undefined })
+      console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'SYNONYM_PHRASE', asin: input.children[0]?.asin ?? '?', phrase, source, opp: row.marketOpportunity ?? null }))
+    }
   }
   // (Design-NICHE seed moved BELOW designGroupInfo — it must be single-design-gated and grounded
   // against the design vocab, both of which are only known after design resolution.)
@@ -7967,7 +7995,51 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', decision: 'refused-trademark-resurrection', title }))
     }
     const capped = deduped.title
-    /* MONEY TAIL (#147) — wire order is spec-truth → cap → dedupe → enforceMoneyTail →
+    /* The context BOTH the waste net's probe and the money-tail loop use. Composed ONCE so the
+     * probe ("would removing this waste free space for the keyword?") is answered against exactly
+     * the arguments the loop below is about to run with — a second, drifting copy would let the two
+     * nets disagree, and the waste net would strip on a promise the loop never keeps. */
+    const moneyCtx = {
+      apparel: apparelProduct, lean, spec: blankSpec,
+      // Parity with the census/anchor sites (:7967/:8763): effectiveDesignName first. The net
+      // itself treats an unresolvable design as design-right (protected), never guard-off.
+      // IDENTITY SYNONYMS FOLDED IN (PO ruling 2026-08-09, §6 "soccer ≡ football ≡ futbol"): the
+      // design-right guard compares the pipe-right against the DESIGN's tokens, and dropping the
+      // spec-fact half of the tail guard left it as the only thing standing between a good money
+      // tail and a churny replacement. The PO's own gold ends "| USA Mexico Canada Football Tee" —
+      // "Football" IS this design's concept, spelled the way the rest of the world spells it, so a
+      // tail carrying it is carrying the design. Composed from the SAME map the pool injection uses
+      // (`guaranteedIdentitySynonyms`, :7465) rather than a second copy inside the leaf; asymmetric
+      // by construction, so a gridiron design gains nothing. Protect-direction only.
+      protect: [
+        effectiveDesignName || designName,
+        ...guaranteedIdentitySynonyms(effectiveDesignName || designName).map((s) => s.synonym),
+      ].filter(Boolean).join(' ') || null,
+      garmentBrand: garmentBrandCanonical || null,
+    }
+    /* TITLE WASTE VOCABULARY (PO ruling 2026-08-09, §3 gold rule 4 + §8) — "Unisex" and "Classic
+     * Fit" are not title words. The PO's own rewrite is the specimen:
+     *   AI:  THE CEO 2026 World Soccer Cup USA Mexico Canada Unisex Tee | Classic Fit
+     *   PO:  THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee
+     * BEFORE the money tail, unlike the color and inclusive-audience nets below: those two compete
+     * for the tail region the keyword wants, so the keyword gets first refusal and they clean up
+     * afterwards. This one frees characters on the LEFT, and freed characters only help the keyword
+     * if they are free when it is measured against the band. `moneyKws` is passed ONLY at
+     * TITLE_MONEY_TAIL=on — at off/shadow the keyword never ships, so a removal justified by it
+     * would leave a short title with nothing to fill it (the net then falls back to the facts-pad
+     * arm alone). Fail-open: any removal that satisfies neither arm returns byte-identical. */
+    const waste = stripTitleWasteVocabulary(capped, {
+      apparel: apparelProduct,
+      band: titleBandCtx(capped),
+      moneyKws: moneyTailMode === 'on' ? (moneyKws ?? null) : null,
+      money: moneyCtx,
+    })
+    console.log('[TITLE_GOLD]', JSON.stringify({
+      tag: 'SHIP_TITLE_WASTE', decision: waste.decision,
+      from: capped.length, to: waste.title.length, changed: waste.title !== capped, note: waste.note,
+    }))
+    let moneyed = waste.title
+    /* MONEY TAIL (#147) — wire order is spec-truth → cap → dedupe → waste → enforceMoneyTail →
      * enforceTitleBand: when the gold tail lands the title is already in band and the facts-only
      * pad below never fires (curing the "fact tail eats the money slot" leak); when it skips,
      * every downstream byte is identical to today. Shadow ships unchanged + logs the diff.
@@ -7975,26 +8047,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
      * spec-conflict/no-fit) try the next candidate instead of burning the slot; 'already-covered'
      * STOPS the loop (the top candidate indexing from the title = slot satisfied — a lower-value
      * keyword must not be installed past it); title-structural skips (no-tail/design-right/
-     * fact-tail/empty/non-apparel) stop too — they are identical for every candidate. */
-    let moneyed = capped
-    for (const moneyKw of moneyKws ?? []) {
-      const mt = enforceMoneyTail(moneyed, moneyKw, {
-        apparel: apparelProduct, lean, spec: blankSpec,
-        // Parity with the census/anchor sites (:7967/:8763): effectiveDesignName first. The net
-        // itself treats an unresolvable design as design-right (protected), never guard-off.
-        protect: (effectiveDesignName || designName) || null,
-        garmentBrand: garmentBrandCanonical || null,
-      })
+     * brand-tail/empty/non-apparel) stop too — they are identical for every candidate. The loop
+     * itself lives in the leaf (`tryMoneyTail`) so the waste net probes the SAME code path. */
+    const mtRun = tryMoneyTail(moneyed, moneyKws, moneyCtx)
+    for (const a of mtRun.attempts) {
       console.log('[TITLE_GOLD]', JSON.stringify({
-        tag: 'SHIP_MONEY_TAIL', mode: moneyTailMode, decision: mt.decision, kw: moneyKw,
-        from: moneyed.length, to: mt.title.length, note: mt.note,
+        tag: 'SHIP_MONEY_TAIL', mode: moneyTailMode, decision: a.decision, kw: a.kw,
+        from: moneyed.length, to: a.title.length, note: a.note,
       }))
-      if (mt.decision === 'applied') {
-        if (moneyTailMode === 'on') moneyed = mt.title
-        else console.log('[MONEY_TAIL_DIFF]', JSON.stringify({ kw: moneyKw, current: moneyed, would: mt.title }))
-        break
-      }
-      if (['already-covered', 'no-tail', 'design-right', 'fact-tail', 'empty', 'non-apparel'].includes(mt.decision)) break
+    }
+    if (mtRun.applied) {
+      const wonKw = mtRun.attempts[mtRun.attempts.length - 1]?.kw ?? ''
+      if (moneyTailMode === 'on') moneyed = mtRun.title
+      else console.log('[MONEY_TAIL_DIFF]', JSON.stringify({ kw: wonKw, current: moneyed, would: mtRun.title }))
     }
     /* DEFECT B (PO §5, live B0GVVY5TS9 2026-08-09) — A COLOR WORD IN THE SHARED TITLE. §5: "shared
      * title/bullets carry NO color word; colors rank per-child via each child's own backend tail".

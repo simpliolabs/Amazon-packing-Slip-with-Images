@@ -15,14 +15,16 @@ import { enforceMoneyTail, TITLE_BAND_LO, TITLE_BAND_HI, type MoneyTailCtx } fro
 const CC_SPEC = { fit: 'Relaxed', weightNote: 'Midweight 6.1 oz garment-dyed' }
 const APPAREL: MoneyTailCtx = { apparel: true, lean: null, spec: CC_SPEC, protect: null, garmentBrand: 'Comfort Colors' }
 
-/* The two PO golds, pinned as fixtures. */
+/* The THREE PO golds, pinned as fixtures. */
 const GOLD_CHRISTIAN = 'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women'
 const GOLD_ALLIGATOR = 'THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt'
+const GOLD_SOCCER = 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee'
 
 describe('enforceMoneyTail — PO gold fixtures', () => {
   it('pins the gold fixtures at their recorded lengths', () => {
     expect(GOLD_CHRISTIAN.length).toBe(74)
     expect(GOLD_ALLIGATOR.length).toBe(72)
+    expect(GOLD_SOCCER.length).toBe(72)
   })
 
   it('B0FKKN8XKV lock: design-led title + money keyword → the EXACT locked gold', () => {
@@ -37,19 +39,61 @@ describe('enforceMoneyTail — PO gold fixtures', () => {
     expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
   })
 
-  it('CONSERVATIVE (pending PO scope ruling): a brand/fact pipe tail is PROTECTED, never evicted', () => {
-    // Was the "gold-#1→gold-#2 upgrade" test — the adversarial probe showed the same mechanic
-    // deleting "Long Sleeve" and evicting "Comfort Colors" from the CANONICAL protected gold #2
-    // for ANY qualifying keyword (no value floor), against SELLER_PROFILE §3's "Protected as test
-    // fixtures — no net may alter them". Until the PO rules on scope (may a money keyword ever
-    // outrank a brand/fact tail, and above what floor?), the net skips: fail-open, byte-identical.
+  it('PO RULING 2026-08-09 — direction A: a BRAND pipe tail is still PROTECTED, never evicted', () => {
+    // The adversarial probe showed this mechanic deleting "Long Sleeve" and evicting "Comfort
+    // Colors" from the CANONICAL protected gold #2 for ANY qualifying keyword. The PO ruling keeps
+    // exactly this half: §2 — "the Comfort Colors name IS a selling point"; §3 — a tail carrying
+    // the garment BRAND stays protected. Fail-open, byte-identical.
     const v = enforceMoneyTail(
       'THE CEO I Will Praise Him in Every Season Tee | Comfort Colors Shirt',
       'christian shirts for women',
       { ...APPAREL, protect: 'I Will Praise Him in Every Season' },
     )
-    expect(v.decision).toBe('fact-tail')
+    expect(v.decision).toBe('brand-tail')
     expect(v.title).toBe('THE CEO I Will Praise Him in Every Season Tee | Comfort Colors Shirt')
+  })
+
+  /* ── PO RULING 2026-08-09 — direction B: THE MONEY TAIL BEATS A SPEC-FACT TAIL ─────────────────
+   * The ruling's own specimen, from the B0GVV3XL4T rewrite:
+   *   AI:  THE CEO 2026 World Soccer Cup USA Mexico Canada Unisex Tee | Classic Fit   (72)
+   *   PO:  THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee   (72)
+   * "the pipe-right is the MONEY position; a spec FACT there ('Classic Fit') is a waste of the
+   * highest-value real estate." Before this change every one of these returned 'fact-tail' and the
+   * title shipped with the fact — verified against the shipped net, not assumed. */
+  describe('a pure SPEC-FACT pipe tail is now REPLACEABLE', () => {
+    const GILDAN = { fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun' }
+
+    it('"| Classic Fit" is evicted for the money keyword (the ruling\'s own case)', () => {
+      const v = enforceMoneyTail(
+        'THE CEO 2026 World Soccer Cup USA Mexico Canada Tee | Classic Fit',
+        'football tee shirt',
+        { apparel: true, lean: null, spec: GILDAN, protect: '2026 World Soccer Cup', garmentBrand: null },
+      )
+      expect(v.decision).toBe('applied')
+      expect(v.title).toBe('THE CEO 2026 World Soccer Cup USA Mexico Canada Tee | Football Tee Shirt')
+      expect(v.title).not.toMatch(/classic fit/i)
+      expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+      expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+    })
+
+    it.each([
+      ['a bare sleeve/fit phrase', 'THE CEO See You Later Alligator Tee Shirt | Short Sleeve Crew Neck'],
+      ['a spec tail on the Gildan blank', 'THE CEO See You Later Alligator Tee Shirt | Lightweight Classic Fit'],
+    ])('%s no longer blocks the money keyword', (_n, title) => {
+      const v = enforceMoneyTail(title, 'christian shirts for women',
+        { apparel: true, lean: null, spec: GILDAN, protect: 'See You Later Alligator', garmentBrand: null })
+      expect(v.decision).toBe('applied')
+      expect(v.title).toBe('THE CEO See You Later Alligator Tee Shirt | Christian Shirts for Women')
+    })
+
+    it('the BRAND guard still fires when the same tail ALSO carries the brand', () => {
+      // "Long Sleeve Comfort Colors Shirt" is a spec phrase AND a brand phrase. The ruling protects
+      // it on the brand axis alone, which is the whole reason gold #2 survives direction B.
+      const v = enforceMoneyTail(GOLD_ALLIGATOR, 'christian shirts for women',
+        { ...APPAREL, protect: 'See You Later Alligator' })
+      expect(v.decision).toBe('brand-tail')
+      expect(v.title).toBe(GOLD_ALLIGATOR)
+    })
   })
 
   it('alligator gold with NO qualifying keyword is byte-identical (fail-open)', () => {
@@ -65,16 +109,31 @@ describe('enforceMoneyTail — PO gold fixtures', () => {
     // Comfort Colors brand ENTIRELY). The fact-tail guard pins the gold byte-identical.
     for (const kw of ['comfort colors shirts for women', 'cute graphic tshirts for women']) {
       const v = enforceMoneyTail(GOLD_ALLIGATOR, kw, { ...APPAREL, protect: 'See You Later Alligator' })
-      expect(v.decision).toBe('fact-tail')
+      expect(v.decision).toBe('brand-tail')
       expect(v.title).toBe(GOLD_ALLIGATOR)
     }
   })
 
-  it('fact-tail fires from the spec lexicon alone (garmentBrand unresolved): "Long Sleeve" tail protected', () => {
+  it('brand-tail fires from the BRAND LEXICON alone (garmentBrand unresolved) — gold #2 is a FIXTURE, not a lucky resolve', () => {
+    // The hole the PO ruling opened: the old guard protected this tail via its SPEC lexicon
+    // ('sleeve'), which the ruling deletes. If the brand guard depended solely on ctx.garmentBrand,
+    // gold #2 would become attackable on every regen where the blank row failed to match. §3
+    // protects the golds as FIXTURES, unconditionally — hence MONEY_BRAND_TAIL_PHRASES.
     const v = enforceMoneyTail(GOLD_ALLIGATOR, 'cute graphic tshirts for women',
       { ...APPAREL, garmentBrand: null, protect: 'See You Later Alligator' })
-    expect(v.decision).toBe('fact-tail')
+    expect(v.decision).toBe('brand-tail')
     expect(v.title).toBe(GOLD_ALLIGATOR)
+  })
+
+  it('gold #3 (soccer, 2026-08-09) is byte-identical under attack keywords', () => {
+    // Its tail is the MONEY keyword already — every candidate must either see it as covered or
+    // refuse to touch a keyword-bearing tail it cannot improve. Never a rewrite.
+    for (const kw of ['usa mexico canada football tee', 'football tee shirt', 'soccer shirts for women']) {
+      const v = enforceMoneyTail(GOLD_SOCCER, kw,
+        { apparel: true, lean: null, spec: null, protect: '2026 World Soccer Cup', garmentBrand: null })
+      expect(v.title).toBe(GOLD_SOCCER)
+      expect(v.decision).not.toBe('applied')
+    }
   })
 
   it('alligator gold whose tail already indexes the keyword → already-covered, byte-identical', () => {

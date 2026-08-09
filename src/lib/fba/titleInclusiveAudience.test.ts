@@ -131,20 +131,24 @@ describe('PO golds are PROTECTED FIXTURES — no net may alter them', () => {
     expect(door(GOLD_CHRISTIAN, LEAN_F)).toBe(GOLD_CHRISTIAN)
   })
 
-  it('PRE-EXISTING (not this ruling): collapseRepeatedWords DOES mutate gold #2 — pinned, reported, not fixed here', () => {
-    // Gold #2 carries the garment noun TWICE by design ("…Alligator Shirt | Long Sleeve Comfort
-    // Colors Shirt"). `collapseRepeatedWords` (#148, shipped before this ruling) removes any repeat
-    // of a significant word, so it strips the trailing "Shirt" — 72 → 66 — and the band pad then
-    // refills the hole with an unrelated fact. That is a live conflict between #148 and
-    // SELLER_PROFILE §3 ("Protected as test fixtures — no net may alter them"); it predates this
-    // change, is caused by neither new net, and is a PO scope call (is the noun repeat intentional
-    // in the gold, or is #148 right?). Pinned here so the finding is visible in CI rather than lost.
+  it('RESOLVED by the PO ruling 2026-08-09: collapseRepeatedWords no longer mutates gold #2', () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and that inversion is the point. It was pinned on
+    // 2026-08-09 as a live, UNRESOLVED conflict: gold #2 carries the garment noun twice by design
+    // ("…Alligator Shirt | Long Sleeve Comfort Colors Shirt"), `collapseRepeatedWords` (#148)
+    // stripped the trailing "Shirt" (72 → 66), and the open question was recorded as a PO scope
+    // call — "is the noun repeat intentional in the gold, or is #148 right?".
+    // The B0GVV3XL4T ruling answers it: the repeat is INTENTIONAL. SELLER_PROFILE §3 gold rule 4
+    // names the shape outright — "the noun ×2 pattern (Tee Shirt … Tee) carries the garment" — and
+    // the new gold spends it exactly the same way. #148 is now scoped to a repeat WITHIN one pipe
+    // segment (the live "Tshirt, Tshirt" defect), which leaves the golds alone.
     const v = collapseRepeatedWords(GOLD_ALLIGATOR)
-    expect(v.removed).toEqual(['Shirt'])
-    expect(v.title).toBe('THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors')
-    // …and neither net this ruling adds contributes to that mutation:
+    expect(v.removed).toEqual([])
+    expect(v.title).toBe(GOLD_ALLIGATOR)
     expect(fixApostropheCase(GOLD_ALLIGATOR)).toBe(GOLD_ALLIGATOR)
     expect(enforceInclusiveAudience(GOLD_ALLIGATOR, UNIVERSAL).title).toBe(GOLD_ALLIGATOR)
+    // …and the whole composed door is now byte-identical on it, like gold #1.
+    expect(door(GOLD_ALLIGATOR, UNIVERSAL)).toBe(GOLD_ALLIGATOR)
+    expect(door(GOLD_ALLIGATOR, LEAN_F)).toBe(GOLD_ALLIGATOR)
   })
 })
 
