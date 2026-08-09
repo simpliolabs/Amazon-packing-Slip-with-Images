@@ -901,6 +901,77 @@ export function guaranteedIdentitySynonyms(...texts: (string | null | undefined)
   return [...bySyn.entries()].map(([synonym, srcs]) => ({ synonym, sources: [...srcs] }))
 }
 
+/** Garment nouns a category synonym may legitimately MODIFY. Deliberately a garment list and not a
+ *  general noun list — see `identitySynonymPhrases` for why the adjacency test is the whole guard. */
+const SYNONYM_GARMENT_NOUNS = new Set([
+  'shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees', 'jersey', 'jerseys',
+  'hoodie', 'hoodies', 'sweatshirt', 'sweatshirts', 'tank', 'tanks', 'top', 'tops',
+])
+
+/**
+ * The sibling-term PHRASES a listing should target — the same IDENTITY_SYNONYMS map as above,
+ * reaching one level further so the synonym can actually be CHOSEN rather than merely indexed.
+ *
+ * WHY THE BARE TOKEN WAS NOT ENOUGH (PO ruling 2026-08-09, SELLER_PROFILE §3 gold rule 3:
+ * '"Football" is a required international synonym on soccer products'). `guaranteedIdentitySynonyms`
+ * already guarantees the bare token "football" enters the shared pool, so the backend indexes it.
+ * But the TITLE money-tail selector (listingPipeline, TITLE_MONEY_TAIL) only considers 3-5 word
+ * candidates that carry a garment noun — a one-word row can never qualify. The PO's own gold spends
+ * the money slot on exactly such a phrase:
+ *   THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee
+ * So the sibling has to be available in PHRASE form. This does NOT hardcode a title string: it
+ * MIRRORS phrases the market already returned for the source term, and the caller clones the source
+ * row's real opportunity onto them, so the selector still picks on merit against every other
+ * candidate — it just stops being structurally unable to pick this one.
+ *
+ * THE ADJACENCY GUARD is the whole safety story. Only an occurrence of the source token that
+ * DIRECTLY MODIFIES a garment noun is substituted ("usa mexico canada soccer tee" → "… football
+ * tee"; "soccer jersey" → "football jersey"). In that position the token is a product-category
+ * modifier, which is precisely what soccer≡football≡futbol (§6) licenses. Everywhere else it may be
+ * part of a fixed phrase, and blind substitution would mint nonsense: "world soccer cup shirt" is
+ * the seller's own trademark SUBSTITUTION for the FIFA mark (trademarkGuard.ts:19), not a category
+ * modifier, and "world football cup shirt" is not a thing anyone searches. The garment-adjacency
+ * test excludes it without needing a special case for "cup".
+ *
+ * ASYMMETRIC by construction, inherited from the map: a gridiron "football" identity yields nothing.
+ * Pure; the caller dedups against the live pool and decides how many to admit.
+ */
+export function identitySynonymPhrases(
+  poolKeywords: readonly string[],
+  ...texts: (string | null | undefined)[]
+): { phrase: string; source: string }[] {
+  const present = new Set<string>()
+  for (const s of texts) {
+    if (!s) continue
+    for (const raw of s.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)) {
+      present.add(raw.replace(/s$/, ''))
+    }
+  }
+  const keys = Object.keys(IDENTITY_SYNONYMS).filter((k) => present.has(k))
+  if (keys.length === 0) return []
+
+  const out: { phrase: string; source: string }[] = []
+  const seen = new Set<string>()
+  const poolKeys = new Set(poolKeywords.map((k) => k.toLowerCase().replace(/[^a-z0-9]/g, '')))
+  for (const kw of poolKeywords) {
+    const toks = (kw || '').toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean)
+    for (const key of keys) {
+      // The token must sit immediately LEFT of a garment noun — that is the modifier position.
+      const idx = toks.findIndex((t, i) => t === key && SYNONYM_GARMENT_NOUNS.has(toks[i + 1] ?? ''))
+      if (idx < 0) continue
+      for (const sib of IDENTITY_SYNONYMS[key]) {
+        if (toks.includes(sib)) continue                        // the phrase already says it
+        const phrase = toks.map((t, i) => (i === idx ? sib : t)).join(' ')
+        const dedupe = phrase.replace(/[^a-z0-9]/g, '')
+        if (seen.has(dedupe) || poolKeys.has(dedupe)) continue   // already harvested / already emitted
+        seen.add(dedupe)
+        out.push({ phrase, source: kw })
+      }
+    }
+  }
+  return out
+}
+
 /** Pure relevance check: does this keyword share ≥1 non-generic identity token with the
  *  listing's identity? E.g. for a SOCCER listing with identity {soccer, world, cup, fan, usa,
  *  mexico, canada, supporters, match}, "soccer jersey" passes (soccer ∈ identity); "family

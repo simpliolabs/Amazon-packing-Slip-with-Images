@@ -124,7 +124,14 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   const out: string[] = []
   const push = (v?: string | null): void => {
     const s = (v ?? '').trim()
-    if (s && !alreadyStates(title, s) && !out.includes(s)) out.push(s)
+    // TITLE-ONLY WASTE VOCABULARY (PO ruling 2026-08-09, §3 gold rule 4). "Classic Fit" is a REAL
+    // Gildan 64000 spec fact — `titleBandCtx` composes it straight from `blank_specs.fit` — but the
+    // PO ruled it is not a TITLE word. Without this check the pad would re-install the exact phrase
+    // `stripTitleWasteVocabulary` just removed (the two nets compose inside one door pass), which is
+    // both a live oscillation and a broken idempotence claim. The fact itself is untouched
+    // everywhere else: bullets, description and the Product Detail attributes still read the spec.
+    if (!s || isTitleWasteVocabulary(s)) return
+    if (!alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
   // Amazon Custom (2026-07-31, PO): "Personalized" leads the fact list — on an enrolled listing it
   // is both a verified product fact AND the highest-intent search modifier available. Never pushed
@@ -161,7 +168,8 @@ const TITLE_CONNECTORS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 
  * distinction is the whole of the PO's decision. */
 
 /**
- * Remove repeated significant words, then cap garment surface forms at two DISTINCT ones.
+ * Remove repeated significant words — globally for ordinary words, PER ` | ` SEGMENT for the garment
+ * noun family, because the PO golds deliberately spend the noun once on each side of the pipe.
  *
  * THE LIVE DEFECT (B0GF49RLDL, 2026-07-29 21:03, verified in the shipped recommendation):
  *   "THE CEO Cupid Valentine Tee Shirt | Comfort Colors Tshirt, Tshirt for Women"  (75 chars)
@@ -189,16 +197,44 @@ export function collapseRepeatedWords(
 
   const words = t0.split(' ')
   const seen = new Set<string>()
+  /* THE GOLDS' NOUN ×2 ACROSS THE PIPE (defect found 2026-08-09 while pinning the third PO gold as a
+   * fixture, and it was live). This function was deleting the second garment noun from TWO of the
+   * three golds:
+   *   THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt   72 → 66 ("Shirt")
+   *   THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee   72 → 68 ("Tee")
+   * Gold #2 survived only by luck of spelling ("Tee" + "Shirts" are different letters). The pattern
+   * is not a defect, it is THE SHAPE: SELLER_PROFILE §3 "Product noun ×2", and the B0GVV3XL4T
+   * ruling names it outright — "the noun ×2 pattern (Tee Shirt … Tee) carries the garment".
+   * `enforceMoneyTail` has always known this ("at most ONE garment-family repeat — the golds repeat
+   * the noun"); this net did not, so the door installed the gold tail and then deleted half of it.
+   * The distinction that separates the golds from the live "Tshirt, Tshirt" defect is WHICH SIDE OF
+   * THE PIPE each occurrence sits on: the golds spend the noun once per segment, the defect spends
+   * it twice in one. So garment-family words are deduped PER SEGMENT (max two segments, i.e. still
+   * "×2"); every other significant word keeps the global one-and-only rule. */
+  const garmentSegs = new Map<string, Set<number>>()
+  let segment = 0
+  const isGarment = (bare: string): boolean => MONEY_GARMENT_FAMILY.has(moneyNormTok(bare))
   const kept: string[] = []
   const removed: string[] = []
 
   for (const w of words) {
+    if (w === '|') { segment++; kept.push(w); continue }
     // Compare on letters only, so "Tshirt," and "Tshirt" are the same word and punctuation never
     // hides a duplicate. The ORIGINAL token (with its punctuation) is what gets kept.
     const bare = w.toLowerCase().replace(/[^a-z0-9]/g, '')
-    if (!bare || TITLE_CONNECTORS.has(bare) || w === '|') { kept.push(w); continue }
-    if (seen.has(bare)) { removed.push(w); continue }              // repeat of a significant word
+    if (!bare || TITLE_CONNECTORS.has(bare)) { kept.push(w); continue }
+    if (seen.has(bare)) {
+      const segs = garmentSegs.get(bare)
+      if (segs && !segs.has(segment) && segs.size < 2) {          // the golds' one cross-pipe repeat
+        segs.add(segment)
+        kept.push(w)
+        continue
+      }
+      removed.push(w)                                             // repeat of a significant word
+      continue
+    }
     seen.add(bare)
+    if (isGarment(bare)) garmentSegs.set(bare, new Set([segment]))
     kept.push(w)
   }
 
@@ -385,12 +421,12 @@ export function fixApostropheCase(title: string): string {
  *                     repeat is allowed — the golds repeat the noun: "…Tee | … Shirts …")
  *   design-right    — the pipe's right side carries the protected design phrase (or no design
  *                     name resolved, so the right side CANNOT be proven replaceable); never replaced
- *   fact-tail       — the pipe's right side carries the garment BRAND or a SPEC FACT (the gold-#2
- *                     "… | Long Sleeve Comfort Colors Shirt" shape). CONSERVATIVE SKIP pending the
- *                     PO scope ruling: SELLER_PROFILE §3 protects the golds as fixtures and bans
- *                     pool terms outside the ONE money slot, so this net never evicts a brand/fact
- *                     tail — whether a high-value money keyword may EVER outrank one is an open PO
- *                     question recorded in §3.
+ *   brand-tail      — the pipe's right side carries the garment BRAND (the gold-#2
+ *                     "… | Long Sleeve Comfort Colors Shirt" shape). PO RULING 2026-08-09
+ *                     (SELLER_PROFILE §3, B0GVV3XL4T gold) NARROWED this from the old 'fact-tail':
+ *                     a BRAND-carrying tail stays protected (§2: the Comfort Colors name IS a
+ *                     selling point), but a tail carrying ONLY spec facts is now REPLACEABLE — the
+ *                     pipe-right is the MONEY position and a fact there wastes it.
  *   no-tail         — the title has neither a ` | ` pipe nor a bare trailing audience tail. The net
  *                     only ever REPLACES a tail; it never APPENDS where none existed (conservative
  *                     reading of the design-led doctrine — the B0FKKN8XKV gold's pre-lock title
@@ -400,7 +436,16 @@ export function fixApostropheCase(title: string): string {
  *   applied         — the gold-shape tail shipped  ← the only outcome that changes bytes */
 export type MoneyTailDecision =
   | 'empty' | 'no-kw' | 'non-apparel' | 'already-covered' | 'cross-gender'
-  | 'word-repeat' | 'design-right' | 'fact-tail' | 'no-tail' | 'spec-conflict' | 'no-fit' | 'applied'
+  | 'word-repeat' | 'design-right' | 'brand-tail' | 'no-tail' | 'spec-conflict' | 'no-fit' | 'applied'
+
+/** The skips that are IDENTICAL for every candidate keyword, so trying the next one is pointless:
+ *  they are properties of the TITLE (or of the slot already being satisfied), not of the keyword.
+ *  Owned here rather than inline at the call site — `stripTitleWasteVocabulary` probes the same
+ *  loop to answer "does removing this waste free space for a keyword?", and two copies of the stop
+ *  set is exactly how the probe and the door would drift apart (INVARIANT 5: one source per rule). */
+export const MONEY_TAIL_STRUCTURAL_SKIPS: ReadonlySet<MoneyTailDecision> = new Set<MoneyTailDecision>([
+  'already-covered', 'no-tail', 'design-right', 'brand-tail', 'empty', 'non-apparel',
+])
 
 export interface MoneyTailCtx {
   /** Non-apparel never gets the garment money tail. */
@@ -409,8 +454,8 @@ export interface MoneyTailCtx {
    *  veto too (stricter than the fill): a wrong veto is a no-op, a wrong ship is a regression. */
   lean?: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
   /** Blank spec — feeds scrubUnspecdGarmentClaims (a market phrase like "heavyweight shirts" must
-   *  not re-leak a weight/fit claim the blank doesn't back) AND the fact-tail guard (a pipe-right
-   *  stating the blank's fit/sleeve/neck is a protected fact tail, never evicted). */
+   *  not re-leak a weight/fit claim the blank doesn't back). It NO LONGER protects a pipe tail:
+   *  the PO ruling 2026-08-09 makes a pure spec-fact tail replaceable by the money keyword. */
   spec?: { fit?: string | null; sleeve?: string | null; neck?: string | null; weightNote?: string | null } | null
   /** The design phrase. On a piped title the right side is replaceable only when it can be PROVEN
    *  not to carry the design — if it shares a distinctive token with the design (Pattern-B-ish
@@ -418,18 +463,31 @@ export interface MoneyTailCtx {
    *  the net must never delete the right side. */
   protect?: string | null
   /** The garment blank's brand in canonical casing (BLANK_SPECS, e.g. "Comfort Colors"). A
-   *  pipe-right carrying its tokens is a protected brand/fact tail (gold #2's shape) — the
-   *  fact-tail guard skips rather than evict it. */
+   *  pipe-right carrying ALL of its tokens is a protected BRAND tail (gold #2's shape) — the
+   *  brand-tail guard skips rather than evict it. */
   garmentBrand?: string | null
 }
 
-/** Spec-fact vocabulary (post-moneyNormTok fold) that only ever appears in a FACT pipe tail —
- *  the deterministic half of the fact-tail guard for when the blank spec is unresolved (null
- *  spec must still protect "… | Long Sleeve Comfort Colors Shirt"). Deliberately tight: each
- *  word is garment-attribute vocabulary, not design vocabulary. */
-const MONEY_FACT_TAIL_LEXICON = new Set([
-  'sleeve', 'fit', 'neck', 'crew', 'heavyweight', 'midweight', 'lightweight', 'cotton', 'personalized',
-])
+/**
+ * Garment BRANDS whose presence in a pipe tail keeps that tail protected even when the caller could
+ * not resolve `ctx.garmentBrand` (an unmatched blank row, a partial regen, a stale cache).
+ *
+ * WHY A LEXICON AT ALL, when the caller normally passes the brand. Gold #2 —
+ *   THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt
+ * — must be byte-identical under ANY attack keyword, and SELLER_PROFILE §3 protects it as a FIXTURE,
+ * not as "protected when the blank happened to resolve". Before the PO ruling the spec lexicon
+ * ('sleeve', 'fit', …) covered that hole incidentally; the ruling deletes the spec half, so the hole
+ * has to be closed on the BRAND axis explicitly or the gold becomes attackable whenever
+ * `garmentBrand` is null. Protect-direction only: a false positive costs one skipped money tail
+ * (today's behaviour), never a mangled gold.
+ *
+ * Mirrors the only `blank_specs` row with `brand_in_copy` TRUE (SELLER_PROFILE §2: "Comfort Colors …
+ * The name IS a selling point"; Gildan is brand_in_copy=false and never appears in copy at all, so
+ * it can never BE a tail). Kept as a literal rather than an import because this file is a leaf by
+ * construction — `blankSpecs.ts` pulls in supabase-js and productDetailAttrs, which would make this
+ * net un-unit-testable in isolation. Add a phrase here when a new brand_in_copy blank is confirmed.
+ */
+const MONEY_BRAND_TAIL_PHRASES: readonly string[] = ['comfort colors']
 
 /** Twin of listingPipeline's fillNormTok (gender fold + light plural fold + tshirt→shirt), kept
  *  local so this leaf stays import-free from the 9,400-line pipeline. Set-membership only. */
@@ -470,17 +528,16 @@ const moneyTitleCase = (s: string): string =>
  * The LEFT side (brand + design + noun — the protected money phrase, same doctrine as the
  * runTitleAgent tail-dedup at listingPipeline.ts:3459) is kept VERBATIM.
  *
- * CONSERVATIVE SCOPE (2026-08-09 adversarial verdicts — pending the PO's explicit scope ruling,
- * recorded in SELLER_PROFILE §3): the net only ever REPLACES an existing tail — a pipe-right or a
- * bare trailing audience tail — and never APPENDS to a tail-less title ('no-tail'). A pipe-right
- * is replaceable only when it can be PROVEN to carry neither the design ('design-right', which
- * also fires when no design name resolved), nor the garment brand, nor a spec fact ('fact-tail' —
- * the protection that keeps gold #2 "… | Long Sleeve Comfort Colors Shirt" byte-identical under
- * ANY keyword; the probe that forced this showed the pre-guard net deleting "Long Sleeve" and
- * evicting "Comfort Colors" for an opp-floor-less keyword). The audience survives either inside
- * the keyword itself ("… for Women") or re-appended verbatim after it. The keyword is NEVER
- * truncated mid-phrase — the only permitted trim is its own "for women/men" suffix, and only when
- * the audience already lives on the left. Anything that cannot land inside
+ * SCOPE (narrowed by the PO ruling 2026-08-09, SELLER_PROFILE §3): the net only ever REPLACES an
+ * existing tail — a pipe-right or a bare trailing audience tail — and never APPENDS to a tail-less
+ * title ('no-tail'). A pipe-right is replaceable only when it can be PROVEN to carry neither the
+ * design ('design-right', which also fires when no design name resolved) nor the garment BRAND
+ * ('brand-tail' — the protection that keeps gold #2 "… | Long Sleeve Comfort Colors Shirt"
+ * byte-identical under ANY keyword). A tail of pure SPEC FACTS is no longer protected: the PO
+ * ruled the pipe-right is the MONEY position and "| Classic Fit" wastes it. The audience survives
+ * either inside the keyword itself ("… for Women") or re-appended verbatim after it. The keyword is
+ * NEVER truncated mid-phrase — the only permitted trim is its own "for women/men" suffix, and only
+ * when the audience already lives on the left. Anything that cannot land inside
  * [TITLE_BAND_LO, TITLE_BAND_HI] skips, byte-identical (fail-open).
  */
 export function enforceMoneyTail(
@@ -544,18 +601,31 @@ export function enforceMoneyTail(
     if (designToks.some((tok) => rightToks.has(tok))) {
       return { title: t0, decision: 'design-right', note: 'pipe right side carries the design phrase' }
     }
-    // Never replace a pipe-right that carries the garment BRAND or a SPEC FACT — the gold-#2
-    // "… | Long Sleeve Comfort Colors Shirt" shape is a PO gold ("Protected as test fixtures —
-    // no net may alter them", SELLER_PROFILE §3). Whether a money keyword may ever outrank a
-    // brand/fact tail (and above what value floor) is an OPEN PO question; until ruled, skip.
-    const factToks = new Set([
-      ...moneySigToks(ctx.garmentBrand ?? ''),
-      ...moneySigToks([ctx.spec?.fit, ctx.spec?.sleeve, ctx.spec?.neck].filter(Boolean).join(' ')),
-    ])
-    const factHit = [...rightToks].find((tok) =>
-      (factToks.has(tok) || MONEY_FACT_TAIL_LEXICON.has(tok)) && !MONEY_GARMENT_FAMILY.has(tok) && !MONEY_AUDIENCE_TOKS.has(tok))
-    if (factHit) {
-      return { title: t0, decision: 'fact-tail', note: `pipe right side carries brand/spec fact "${factHit}" — protected` }
+    /* BRAND TAIL — the ONE pipe-right this net still refuses to touch.
+     *
+     * PO RULING 2026-08-09 (SELLER_PROFILE §3, the B0GVV3XL4T gold) resolved the open scope question
+     * this guard was parked on, and it resolved it AGAINST the old fact half:
+     *   AI:  THE CEO 2026 World Soccer Cup USA Mexico Canada Unisex Tee | Classic Fit
+     *   PO:  THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee
+     * "the pipe-right is the MONEY position … a tail carrying only spec FACTS (`| Classic Fit`,
+     * `| Unisex Tee`, a bare sleeve/fit/weight phrase) is REPLACEABLE by the top market-opportunity
+     * keyword — facts belong in bullets/description, never in the highest-value real estate."
+     * So the spec-fact half of this guard is GONE (that is the entire behaviour change), and what
+     * remains is the BRAND half: §2 says the Comfort Colors NAME is itself a selling point, and
+     * gold #2 "… | Long Sleeve Comfort Colors Shirt" stays a protected fixture.
+     *
+     * ALL brand tokens must be present, not any one of them — "Comfort" alone is ordinary copy
+     * vocabulary, "Comfort Colors" is the brand. Tighter than the old any-token probe on purpose:
+     * the guard now carries the whole protection load, so it must protect the brand and nothing else. */
+    const brandCarried = (brand: string): boolean => {
+      const toks = moneySigToks(brand)
+      return toks.length > 0 && toks.every((tok) => rightToks.has(tok))
+    }
+    const brandHit = [ctx.garmentBrand ?? '', ...MONEY_BRAND_TAIL_PHRASES]
+      .map((b) => b.trim())
+      .find((b) => b.length > 0 && brandCarried(b))
+    if (brandHit) {
+      return { title: t0, decision: 'brand-tail', note: `pipe right side carries the garment brand "${brandHit}" — protected` }
     }
   }
 
@@ -608,6 +678,37 @@ export function enforceMoneyTail(
   }
 
   return { title: cand, decision: 'applied', note: `money tail "${moneyTitleCase(kwFinal)}" → ${cand.length} chars` }
+}
+
+/** One candidate's verdict, so the caller can log every attempt (Phase-0 observability). */
+export interface MoneyTailAttempt { kw: string; decision: MoneyTailDecision; note: string; title: string }
+
+/**
+ * Run the money-tail CANDIDATE LOOP: try each derived keyword in order, stop at the first 'applied',
+ * and stop early on a skip that is structural (identical for every candidate — see
+ * MONEY_TAIL_STRUCTURAL_SKIPS). Per-keyword skips (cross-gender / word-repeat / spec-conflict /
+ * no-fit) fall through to the next candidate instead of burning the slot.
+ *
+ * EXTRACTED FROM THE DOOR so there is exactly ONE loop. `stripTitleWasteVocabulary` has to answer
+ * "would removing this waste word free space for the money keyword?", and the only trustworthy way
+ * to answer it is to run the identical loop the door is about to run on the identical context — a
+ * second, slightly-different copy inside the waste net is precisely how a "deterministic" pair of
+ * nets starts disagreeing with each other. Pure and side-effect free; the caller owns the logging
+ * and the shadow/on decision.
+ */
+export function tryMoneyTail(
+  title: string,
+  kws: readonly string[] | null | undefined,
+  ctx: MoneyTailCtx,
+): { title: string; applied: boolean; attempts: MoneyTailAttempt[] } {
+  const attempts: MoneyTailAttempt[] = []
+  for (const kw of kws ?? []) {
+    const mt = enforceMoneyTail(title, kw, ctx)
+    attempts.push({ kw, decision: mt.decision, note: mt.note, title: mt.title })
+    if (mt.decision === 'applied') return { title: mt.title, applied: true, attempts }
+    if (MONEY_TAIL_STRUCTURAL_SKIPS.has(mt.decision)) break
+  }
+  return { title, applied: false, attempts }
 }
 
 /**
@@ -935,5 +1036,164 @@ export function stripVariantColorWords(
     title: padded,
     decision: 'stripped',
     note: `removed variant color word(s) ${removed.join(', ')}${kept > 0 ? ` (${kept} kept as design vocabulary)` : ''}; ${t0.length} → ${padded.length} chars`,
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * TITLE WASTE VOCABULARY — "Unisex" and "Classic Fit" (PO ruling 2026-08-09, SELLER_PROFILE §3
+ * gold rule 4 + the §8 unisex rule).
+ *
+ * THE SPECIMEN is the PO's own rewrite of the AI's B0GVV3XL4T title:
+ *   AI:  THE CEO 2026 World Soccer Cup USA Mexico Canada Unisex Tee | Classic Fit   (72)
+ *   PO:  THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee   (72)
+ * Same 72 characters; the PO spent 19 of them on a money keyword instead of two product facts.
+ * §3: '"Unisex"/"Classic Fit" are NOT title words (they belong in bullets/description per the unisex
+ * rule §8) — the noun ×2 pattern (Tee Shirt … Tee) carries the garment instead.' §8 is even more
+ * explicit and is the older of the two rulings: the unisex fit MUST be stated, "but ONLY in Bullets,
+ * Description, and Features/Item Highlights. NEVER in the Title".
+ *
+ * TITLE-ONLY, and that word is doing real work. Neither phrase is FALSE — the blanks genuinely are
+ * unisex (`blank_specs.unisex`) and the Gildan 64000 genuinely is a classic fit (`blank_specs.fit`).
+ * Nothing here touches those facts anywhere else: `applyTerminalNets` still guarantees the unisex
+ * sizing clause in the bullets and the description note, the Item Highlights still carry the fit,
+ * and the Product Detail attributes still push Fit Type. This net removes them from ONE field,
+ * because in a 75-character budget they cost a money keyword.
+ *
+ * WHY DETERMINISTIC AND HERE. Identical reasoning to the three nets above: `validateTitle` can dock
+ * and prompts can ask, but a dock is advisory and the retry loop is free to fail — the AI title
+ * shipped with BOTH phrases. Per INVARIANT 2 a measurable invariant gets a terminal net on the
+ * SHIPPED bytes, at the one shared `bandTitle` seam every exit passes through.
+ *
+ * THE PO'S OWN GUARD, verbatim: strip "only when removal frees space for a keyword or the title
+ * still lands in 70-75". Both arms are implemented below, in that order — the money keyword gets
+ * first claim on the freed characters (that is the whole point of the ruling), and the facts pad
+ * only inherits the space when no keyword fits. A removal that satisfies neither arm is REFUSED,
+ * byte-identical: a wasteful in-band title beats a clean out-of-band one, because Amazon rewrites
+ * the second one.
+ */
+
+/** The two phrases, and nothing else. A blocklist that grows by vibes is how a net starts eating
+ *  genuine copy; each entry here is a phrase the PO named in the ruling. `unisex` is a single word
+ *  wherever it appears; `classic fit` is matched as the two-word CLAIM only, so a design called
+ *  "Classic Car Shirt" is untouched — the same distinction FIT_CLAIM_RE already draws above. */
+const TITLE_WASTE_SOURCE = String.raw`\bunisex\b|\bclassic\s+fit\b`
+/** Built fresh per call — a shared /g/ regex carries `lastIndex` across calls, which is exactly how
+ *  a "deterministic" net stops being deterministic (same reason as `inclusiveAudienceRe`). */
+const titleWasteRe = (): RegExp => new RegExp(TITLE_WASTE_SOURCE, 'gi')
+/** Non-global twin for predicate use, so no `lastIndex` state can leak between probes. */
+const TITLE_WASTE_TEST_RE = new RegExp(TITLE_WASTE_SOURCE, 'i')
+
+/** Does this phrase consist of / contain TITLE-only waste vocabulary? Exported because the facts
+ *  pad must refuse to ADD what this net removes — one predicate, both ends (INVARIANT 5). */
+export function isTitleWasteVocabulary(phrase: string): boolean {
+  return TITLE_WASTE_TEST_RE.test(phrase || '')
+}
+
+/** Why the net did (or did not) fire — every pass reports, per Phase-0 observability.
+ *   empty / non-apparel — structural skips
+ *   no-waste        — no waste phrase present (also the idempotence path: a stripped result carries
+ *                     none and re-enters here byte-identical)
+ *   money-tail-owns — the ONLY waste sits in a pipe-right that is ENTIRELY waste ("… | Classic
+ *                     Fit"). Deleting it here would delete the pipe, and `enforceMoneyTail` returns
+ *                     'no-tail' on a tail-less title — i.e. the removal would destroy the very slot
+ *                     the ruling wants the money keyword to take. Hand the region to the money tail
+ *                     instead (post-ruling it is replaceable). If the money tail also declines, the
+ *                     phrase survives — which is the same answer the band guard would give anyway,
+ *                     since a bare "…Unisex Tee" left over is ~13 chars under the band.
+ *   band-guard      — neither arm of the PO's guard held → refused, byte-identical
+ *   stripped        — waste left the shipped bytes  ← the only outcome that changes them */
+export type TitleWasteDecision =
+  | 'empty' | 'non-apparel' | 'no-waste' | 'money-tail-owns' | 'band-guard' | 'stripped'
+
+export interface TitleWasteCtx {
+  /** Non-apparel: "unisex"/"classic fit" are not garment waste there, and §8 is an apparel rule. */
+  apparel: boolean
+  /** The facts the band pad may re-fill freed characters with (arm 2 of the PO's guard). Safe to
+   *  compute from the PRE-removal title: this net only ever deletes waste vocabulary, never a
+   *  garment noun, so `garmentSecond` (`pickDistinctGarmentForm`) resolves identically either side. */
+  band: TitleBandCtx
+  /** Arm 1 of the PO's guard — "removal frees space for a keyword". The money-keyword CANDIDATES the
+   *  door is about to try, and the context it will try them with. Pass null unless the money tail is
+   *  actually LIVE (`TITLE_MONEY_TAIL=on`): at off/shadow the door ships the title unchanged, so a
+   *  removal justified by a keyword that never lands would leave a short title and nothing to fill
+   *  it. Absent ⇒ arm 1 is simply unavailable and arm 2 (the facts pad) decides alone. */
+  moneyKws?: readonly string[] | null
+  money?: MoneyTailCtx | null
+}
+
+/**
+ * Remove TITLE-only waste vocabulary from a title's shipped bytes, under the PO's two-arm guard.
+ *
+ * PURE, SYNCHRONOUS, DETERMINISTIC, IDEMPOTENT (a stripped result carries no waste phrase and
+ * re-enters as 'no-waste', byte-identical). Never adds a word of its own: arm 1 hands the freed
+ * characters to `enforceMoneyTail` (the door installs the keyword in the very next stage), arm 2 to
+ * `enforceTitleBand`, which pads only from BLANK_SPECS facts and is itself now barred from
+ * re-adding this vocabulary. FAIL-OPEN: a refusal returns the input byte-identical with the reason.
+ *
+ * RUNS BEFORE THE MONEY TAIL in the door, deliberately — the opposite of the color and
+ * inclusive-audience nets. Those two compete with the keyword for the SAME tail region, so the
+ * keyword gets first refusal and they clean up after. This one mostly frees characters on the LEFT
+ * ("…Canada Unisex Tee"), and those characters are only useful to the keyword if they are free
+ * BEFORE it is measured against the band. The one case where it WOULD collide with the tail region
+ * is carved out above as 'money-tail-owns'.
+ */
+export function stripTitleWasteVocabulary(
+  title: string,
+  ctx: TitleWasteCtx,
+): { title: string; decision: TitleWasteDecision; note: string } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t0) return { title, decision: 'empty', note: '' }
+  if (!ctx.apparel) return { title: t0, decision: 'non-apparel', note: '' }
+
+  const matches = [...t0.matchAll(titleWasteRe())]
+  if (matches.length === 0) return { title: t0, decision: 'no-waste', note: '' }
+
+  // The carve-out: a pipe-right made of NOTHING but waste is the money tail's region, not ours.
+  const pipeIdx = t0.indexOf(' | ')
+  const rightStart = pipeIdx >= 0 ? pipeIdx + 3 : -1
+  const rightIsAllWaste = rightStart >= 0
+    && t0.slice(rightStart).replace(titleWasteRe(), ' ').replace(/[^A-Za-z0-9]+/g, ' ').trim().length === 0
+  const removable = matches.filter((m) => !(rightIsAllWaste && (m.index ?? 0) >= rightStart))
+  if (removable.length === 0) {
+    return { title: t0, decision: 'money-tail-owns', note: `pipe right "${t0.slice(rightStart)}" is pure waste — handed to enforceMoneyTail, which may replace it wholesale` }
+  }
+
+  let out = ''
+  let cursor = 0
+  const removed: string[] = []
+  for (const m of removable) {
+    const start = m.index ?? 0
+    out += `${t0.slice(cursor, start)} `
+    removed.push(m[0])
+    cursor = start + m[0].length
+  }
+  out += t0.slice(cursor)
+  const reduced = repairRemovalResidue(out)
+  const what = `removed ${removed.join(', ')}`
+
+  // ARM 1 — "removal frees space for a keyword". The PO's ruling is explicitly a PRIORITY ruling
+  // (money beats facts in the pipe-right), so the keyword is offered the freed characters FIRST.
+  // The title is returned UN-padded: padding it here would hand the space to a fact and could even
+  // put the garment BRAND into the pipe-right, which the brand-tail guard would then protect —
+  // the fact pad locking out the very keyword this removal was justified by.
+  if (ctx.moneyKws && ctx.moneyKws.length > 0 && ctx.money) {
+    const after = tryMoneyTail(reduced, ctx.moneyKws, ctx.money)
+    if (after.applied) {
+      const won = after.attempts[after.attempts.length - 1]?.kw ?? ''
+      return { title: reduced, decision: 'stripped', note: `${what}; freed ${t0.length - reduced.length} chars for money keyword "${won}" (${t0.length} → ${reduced.length}, keyword lands it at ${after.title.length})` }
+    }
+  }
+
+  // ARM 2 — "or the title still lands in 70-75", judged on the FINAL bytes after the facts pad,
+  // because the removal and the re-fill are ONE decision (same reasoning as the two nets above).
+  const padded = enforceTitleBand(reduced, ctx.band).title
+  if (padded.length >= TITLE_BAND_LO && padded.length <= TITLE_BAND_HI) {
+    return { title: padded, decision: 'stripped', note: `${what}; ${t0.length} → ${padded.length} chars` }
+  }
+
+  return {
+    title: t0,
+    decision: 'band-guard',
+    note: `${what} would land ${padded.length} chars, outside [${TITLE_BAND_LO},${TITLE_BAND_HI}] and no money keyword fits the freed space — refused, byte-identical`,
   }
 }
