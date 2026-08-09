@@ -15,20 +15,42 @@
 // catch the compound colorways Amazon's Color attribute carries ("Blue Spruce",
 // "Heather Forest"). Single-word match anchor used by BASIC_COLOR_RE; the multi-token
 // compound test in isGarmentColor() reuses the same word list.
-const COLOR_WORDS = [
+// THE BASE list — the 28 words that can only be a garment color in running apparel copy. This is
+// the ONE vocabulary the "no color word in shared/broadcast copy" rule (SELLER_PROFILE §5) is
+// measured against, at every site: the title candidate/money-keyword filters and the fill guards in
+// listingPipeline, the bullet-cohesion dock in syncListingContent, and the terminal title net
+// `stripVariantColorWords` (titleBand.ts). It used to exist as three byte-identical literals in
+// three files, each carrying a "KEEP IN SYNC" comment — which is how a shared rule drifts
+// (INVARIANT 5: one source per rule). Exported below as BASIC_COLOR_WORDS / BASIC_COLOR_WORD_RE.
+export const BASIC_COLOR_WORDS: readonly string[] = [
   'black', 'white', 'navy', 'red', 'blue', 'green', 'grey', 'gray', 'pink', 'purple',
   'yellow', 'orange', 'brown', 'tan', 'teal', 'maroon', 'burgundy', 'charcoal', 'ivory',
   'beige', 'olive', 'mint', 'coral', 'lavender', 'mustard', 'rust', 'sage', 'cream',
-  // Compound-colorway extensions (each is a real garment-color token):
+]
+
+// Compound-colorway extensions (each is a real garment-color token). DELIBERATELY NOT in the base
+// list: 'forest' / 'sky' / 'wine' / 'gold' / 'royal' / 'stone' / 'natural' are ordinary DESIGN
+// vocabulary ("Forest Bathing", "Big Sky", "Wine Lover"), so they may gate an Amazon Color ATTRIBUTE
+// value (isGarmentColor, where every token must be a color) but must never be stripped out of
+// running copy.
+const COMPOUND_COLOR_WORDS: readonly string[] = [
   'spruce', 'heather', 'forest', 'sky', 'royal', 'kelly', 'sand', 'stone', 'slate',
   'indigo', 'lilac', 'peach', 'gold', 'silver', 'bone', 'natural', 'ash', 'graphite',
   'denim', 'wine', 'brick', 'clay', 'moss', 'fern', 'aqua', 'turquoise', 'plum',
   'mauve', 'taupe', 'khaki', 'crimson',
 ]
 
+const COLOR_WORDS = [...BASIC_COLOR_WORDS, ...COMPOUND_COLOR_WORDS]
+
 // Basic single-word garment colors that are USELESS as a per-design label when Amazon's color attr
 // is the literal shirt color (the FIFA/soccer families: every child's color attr is 'Black'/'White').
 export const BASIC_COLOR_RE = new RegExp(`^(?:${COLOR_WORDS.join('|')})$`, 'i')
+
+/** WORD-BOUNDARY probe for a base garment color inside RUNNING TEXT ("plain black tshirt men").
+ *  Non-global (`i` only) so it is stateless and safe to share as a module constant — every caller
+ *  uses `.test()`. Callers that need to ENUMERATE matches build their own `gi` regex from
+ *  BASIC_COLOR_WORDS per call, because a shared /g/ regex carries `lastIndex` across calls. */
+export const BASIC_COLOR_WORD_RE = new RegExp(`\\b(?:${BASIC_COLOR_WORDS.join('|')})\\b`, 'i')
 
 // Per-token garment-color test (the COLOR_WORDS set as a single-token anchor).
 const COLOR_WORD_RE = new RegExp(`^(?:${COLOR_WORDS.join('|')})$`, 'i')

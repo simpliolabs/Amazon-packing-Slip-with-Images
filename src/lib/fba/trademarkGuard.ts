@@ -59,15 +59,116 @@ export function buildAdversaryTrademarkClause(): string {
   return `FLAG any trademarked phrase (sports teams, leagues, universities, media franchises) and REQUIRE the safe swap. ${parts.join('. ')}.`
 }
 
-/** Replace every protected mark with its safe substitution (or drop it), then tidy the artifacts
- *  a drop/substitution leaves behind (doubled spaces, space-before-punct, dangling commas). Idempotent:
- *  the safe phrasing "World Soccer Cup" contains no protected mark, so re-running is a no-op. */
-export function scrubTrademarks(text: string): string {
-  if (!text) return text
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * SUBSTITUTION IDEMPOTENCE (live defect B0GVVY5TS9, 2026-08-09).
+ *
+ * THE SHIPPED SPECIMEN, verbatim:
+ *   THE CEO Futbol World Futbol Cup Soccer Tee Shirt | the Black Short Sleeve
+ * "Futbol World Futbol Cup". The council wrote "Futbol World Cup" (a bilingual design — "futbol" is
+ * this seller's own design vocabulary), the `world cup -> world futbol cup` rule fired ON TOP of a
+ * token its own substitution supplies, and the result reads as gibberish.
+ *
+ * The old idempotence claim ("the safe phrasing contains no protected mark, so re-running is a
+ * no-op") was true only of the scrub's OWN output in isolation. It said nothing about input that
+ * ALREADY carries the distinguishing token, and it could not see the second half of the live loop:
+ * `collapseRepeatedWords` (titleBand.ts) deletes the repeated "Futbol", which RESURRECTS the bare
+ * "World Cup", and the route's scrub-on-serve (ai-recommendations/route.ts:2017) then re-doubles it.
+ * Two nets, each locally correct, oscillating on the shipped bytes.
+ *
+ * THE RULE: a substitution must never print a token the adjacent context already supplies. Two
+ * shapes, distinguished by how the substitution relates to the mark:
+ *   INSERTION  (sub ⊇ mark tokens + exactly ONE new token) — "world cup" -> "world futbol cup".
+ *              The new token is ABSORBED when it sits immediately before or after the result, so
+ *              "Futbol World Cup" -> "World Futbol Cup" (mark gone, token printed once).
+ *   REPLACEMENT (sub shares no structure with the mark) — "super bowl" -> "big game". Only an
+ *              immediately-repeated WHOLE substitution collapses ("Big Game Super Bowl" ->
+ *              "Big Game"). Deliberately NOT the single-token rule: "big"/"game" are ordinary
+ *              English, and absorbing them one at a time would eat "Board Game Super Bowl".
+ * Adjacency-only, by construction — a distant "futbol" is left alone; deleting a word elsewhere in
+ * the string is a rewrite, not a scrub.
+ */
+
+/** Regex-escape a literal for embedding in a RegExp. */
+const reEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** A rule's MARK as plain display words: `world\s+cup` -> ['world','cup'] (twin of the display
+ *  derivation in buildAdversaryTrademarkClause — same escapes, same order). */
+function markWords(mark: string): string[] {
+  return mark
+    .replace(/\\s[+*]/g, ' ')
+    .replace(/\\/g, '')
+    .replace(/\?/g, '')
+    .toLowerCase().split(/\s+/).filter(Boolean)
+}
+
+/** Precomputed per substituting rule: the sub as a whitespace-tolerant pattern, plus the single
+ *  INSERTED token when the rule is an insertion (null for a replacement rule). Derived from
+ *  TRADEMARK_RULES itself, so adding a rule needs no second edit here. */
+const TM_ABSORB: { subPattern: string; insertToken: string | null }[] = TRADEMARK_RULES
+  .filter((r) => r.sub)
+  .map(({ mark, sub }) => {
+    const mw = markWords(mark)
+    const sw = sub.toLowerCase().split(/\s+/).filter(Boolean)
+    const added = sw.filter((w) => !mw.includes(w))
+    const isInsertion = mw.every((w) => sw.includes(w)) && added.length === 1
+    return { subPattern: sw.map(reEsc).join('\\s+'), insertToken: isInsertion ? added[0] : null }
+  })
+
+/** Collapse the adjacency a substitution just created. Pure; loops each rewrite to a fixed point so
+ *  a run of three ("Futbol World Futbol Cup Futbol") settles in one call. */
+function absorbSubstitutionDuplicates(text: string): string {
+  let out = text
+  const collapse = (re: RegExp, rep: string): void => {
+    let prev: string
+    do { prev = out; out = out.replace(re, rep) } while (out !== prev)
+  }
+  for (const { subPattern, insertToken } of TM_ABSORB) {
+    // (1) the whole substitution printed twice in a row — the REPLACEMENT shape
+    //     ("Big Game Super Bowl Party" -> "Big Game Big Game Party" -> "Big Game Party").
+    collapse(new RegExp(`\\b(?:${subPattern})\\s+(?=(?:${subPattern})\\b)`, 'gi'), '')
+    if (!insertToken) continue
+    const tok = reEsc(insertToken)
+    // (2) the inserted token immediately BEFORE the substitution — the live defect.
+    collapse(new RegExp(`\\b${tok}\\s+(?=(?:${subPattern})\\b)`, 'gi'), '')
+    // (3) ... or immediately AFTER it ("World Cup Futbol" -> "World Futbol Cup").
+    collapse(new RegExp(`\\b((?:${subPattern}))\\s+${tok}\\b`, 'gi'), '$1')
+  }
+  return out
+}
+
+/** One substitution sweep: every protected mark -> its safe substitution (or dropped). */
+function substituteMarks(text: string): string {
   let out = text
   for (const { mark, sub } of TRADEMARK_RULES) {
     const re = new RegExp(`\\b${mark}\\b`, 'gi')
     out = out.replace(re, (m) => matchCase(sub, m))
+  }
+  return out
+}
+
+/** Guard rail on the self-checking loop below — a stable rule set converges in ONE pass; anything
+ *  that does not is a rule-table bug and must be shouted about, not spun on. */
+const TM_MAX_PASSES = 4
+
+/** Replace every protected mark with its safe substitution (or drop it), then tidy the artifacts
+ *  a drop/substitution leaves behind (doubled spaces, space-before-punct, dangling commas).
+ *
+ *  SELF-CHECKING: substitute + absorb is applied until the string stops changing, so the returned
+ *  value is a FIXED POINT — `scrubTrademarks(scrubTrademarks(x)) === scrubTrademarks(x)` for every
+ *  input, which is exactly the property the route's scrub-on-serve and the generation-exit scrub
+ *  both rely on. A rule set that cannot converge logs TRADEMARK_SCRUB_UNSTABLE and bails at the
+ *  last stable value rather than looping. */
+export function scrubTrademarks(text: string): string {
+  if (!text) return text
+  let out = text
+  for (let pass = 1; ; pass++) {
+    const next = absorbSubstitutionDuplicates(substituteMarks(out))
+    if (next === out) break
+    out = next
+    if (pass >= TM_MAX_PASSES) {
+      console.warn(JSON.stringify({ tag: 'TRADEMARK_SCRUB_UNSTABLE', passes: pass, input: text, out }))
+      break
+    }
   }
   return out
     .replace(/\s{2,}/g, ' ')

@@ -26,6 +26,10 @@
  */
 
 import { CONTENT_CONTRACT } from './contentContract'
+// Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
+// file stays cycle-free and unit-testable in isolation.
+import { BASIC_COLOR_WORDS } from './designName'
+import { hasTrademark } from './trademarkGuard'
 
 /** ONE source per bound — never a new magic number (generation-invariants INVARIANT 5). */
 export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
@@ -177,7 +181,9 @@ const TITLE_CONNECTORS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 
  * Pure, deterministic, idempotent. Keeps the FIRST occurrence (title order is ranking order — the
  * earliest position is the most valuable, so a later duplicate is always the one to lose).
  */
-export function collapseRepeatedWords(title: string): { title: string; removed: string[] } {
+export function collapseRepeatedWords(
+  title: string,
+): { title: string; removed: string[]; refusedForTrademark?: boolean } {
   const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
   if (!t0) return { title, removed: [] }
 
@@ -212,6 +218,21 @@ export function collapseRepeatedWords(title: string): { title: string; removed: 
     .replace(/[\s,;:|]+$/g, '')              // nothing trailing, ever
     .replace(/\s{2,}/g, ' ')
     .trim()
+
+  /* TRADEMARK RESURRECTION GUARD (live defect B0GVVY5TS9, 2026-08-09) — the OTHER half of the
+   * "Futbol World Futbol Cup" loop. `scrubTrademarks` turns "Futbol World Cup" into a string whose
+   * safe substitution reprints a token the design already used; this dedupe then deletes the repeat
+   * and hands back a bare "World Cup" — the protected mark, restored — which the route's
+   * scrub-on-serve re-substitutes on the way out. trademarkGuard's absorb pass cures the ADJACENT
+   * shape at the source; a non-adjacent one ("Futbol Shirt World Cup" → "Futbol Shirt World Futbol
+   * Cup") can still reach here, and no dedupe may ever be the thing that republishes a mark. So:
+   * if the removal would introduce a mark the input did not carry, refuse the whole pass and return
+   * byte-identical. Fail-open by construction — an un-deduped title is a quality miss; a
+   * resurrected trademark is a suppression/IP risk. Costs nothing on every other title (a
+   * mark-free input short-circuits on the first probe). */
+  if (!hasTrademark(t0) && hasTrademark(out)) {
+    return { title: t0, removed: [], refusedForTrademark: true }
+  }
 
   return { title: out, removed }
 }
@@ -789,5 +810,130 @@ export function enforceInclusiveAudience(
     title: padded,
     decision: narrowed ? 'narrowed' : 'stripped',
     note: `${narrowed ? `narrowed to the ${narrowTo} lean${deleted > 0 ? ` (+${deleted} deleted)` : ''}` : `removed ${deleted} inclusive phrase(s)`} — ${why}; ${t0.length} → ${padded.length} chars`,
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * DEFECT B — A COLOR WORD IN SHARED COPY (SELLER_PROFILE §5, live B0GVVY5TS9 2026-08-09).
+ *
+ * §5, verbatim: "Colors: shared title/bullets carry NO color word; colors rank per-child via each
+ * child's own backend tail." §3 says the same thing from the other side: "no variant attributes
+ * (size/color)". A shared title is broadcast to every SKU in the family, so a color word in it
+ * mis-describes every variant that is not that color — and buys nothing, because each child already
+ * indexes its own shade through its own backend string.
+ *
+ * THE SHIPPED SPECIMEN, verbatim:
+ *   THE CEO Futbol World Futbol Cup Soccer Tee Shirt | the Black Short Sleeve
+ * "Black" in the BROADCAST title. Nothing in the code enforced §5 on shipped bytes: the rule existed
+ * only upstream, as a POOL filter (`colorNeutralFamily` + BASIC_COLOR_RE at listingPipeline :7621 /
+ * :7661 / :7697 / :7890 / :9072 / :9158) — which keeps a color KEYWORD out of the candidate pool but
+ * cannot touch a color word an LLM council wrote, a stored prior carried, or a fill composed. Per
+ * INVARIANT 2 a measurable invariant gets a deterministic net on the shipped bytes.
+ *
+ * SAME VOCABULARY, NO NEW PREDICATE. BASIC_COLOR_WORDS (designName.ts) is the base 28-word list the
+ * pool filters already use — this net does not invent one, and the compound-colorway extensions
+ * ('forest', 'sky', 'wine', 'gold', …) are deliberately excluded there because they are ordinary
+ * design vocabulary.
+ *
+ * DESIGN CARVE-OUT. A color word that belongs to the DESIGN ("Black Cat", "Pink Ribbon") is not a
+ * variant attribute and is never removed — the same distinction listingPipeline :829 already draws
+ * ("A design name containing a color is unaffected — it flows via the verbatim design-name anchor,
+ * not the keyword pool"). The caller passes every design phrase in scope (family design name plus
+ * each per-child design name), so a multi-design broadcast title is protected against ALL of its
+ * designs' vocabulary.
+ *
+ * SCOPE — BROADCAST *AND* PER-CHILD, and that is correct here rather than a hazard. Colour is never
+ * a per-child TITLE axis in this codebase: `per_child_titles` are produced in exactly two places,
+ * per DESIGN GROUP for multi-design apparel (listingPipeline :8312 — every SKU in the group, across
+ * all its colors, gets the SAME string) and per CAPACITY for non-apparel families (:8595, gated
+ * `!apparelProduct`). There is no path where a child's title states that child's own color, so the
+ * net can run on every title the door sees. Non-apparel is skipped outright: a color there is a
+ * product fact, not a variant attribute.
+ */
+
+/** Why the net did (or did not) fire — every pass reports, per Phase-0 observability.
+ *   empty / non-apparel — structural skips
+ *   no-color      — no base color word present (also the idempotence path: an applied result
+ *                   contains no removable color and re-enters here byte-identical)
+ *   design-color  — every color word present belongs to the design phrase; protected, untouched
+ *   band-guard    — removal could not land back inside [70,75] even after the facts pad → refused
+ *   stripped      — a variant color word left the shipped bytes  ← the only outcome that changes them */
+export type VariantColorDecision =
+  | 'empty' | 'non-apparel' | 'no-color' | 'design-color' | 'band-guard' | 'stripped'
+
+export interface VariantColorCtx {
+  /** Non-apparel color words are product facts, not variant attributes — skipped. */
+  apparel: boolean
+  /** Every design phrase in scope, space-joined. A color word appearing here is DESIGN vocabulary
+   *  and is never removed. Empty/absent = no design vocabulary to protect (the removal proceeds —
+   *  a color word that no design claims is a variant attribute by elimination). */
+  protect?: string | null
+  /** The facts the band pad may re-fill freed characters with. Safe to compute from the PRE-removal
+   *  title: this net only ever deletes COLOR words, never a garment noun, so `garmentSecond`
+   *  (`pickDistinctGarmentForm`) resolves identically before and after. */
+  band: TitleBandCtx
+}
+
+/** Built fresh per call — a shared /g/ regex carries `lastIndex` across calls, which is exactly how
+ *  a "deterministic" net stops being deterministic (same reason as `inclusiveAudienceRe`). */
+const variantColorRe = (): RegExp => new RegExp(`\\b(?:${BASIC_COLOR_WORDS.join('|')})\\b`, 'gi')
+
+/**
+ * Remove garment-color words from a SHARED title's shipped bytes, re-pad from product facts, and
+ * refuse any removal that cannot land back inside the band.
+ *
+ * PURE, SYNCHRONOUS, DETERMINISTIC, IDEMPOTENT (an applied result carries no removable color word
+ * and re-enters as 'no-color', byte-identical). Never adds a word — the re-fill is `enforceTitleBand`,
+ * which pads only from BLANK_SPECS facts, never the search pool (spec-vs-search grounding), and can
+ * never emit a color. FAIL-OPEN: a refusal returns the input byte-identical with the reason.
+ */
+export function stripVariantColorWords(
+  title: string,
+  ctx: VariantColorCtx,
+): { title: string; decision: VariantColorDecision; note: string } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t0) return { title, decision: 'empty', note: '' }
+  if (!ctx.apparel) return { title: t0, decision: 'non-apparel', note: '' }
+
+  const matches = [...t0.matchAll(variantColorRe())]
+  if (matches.length === 0) return { title: t0, decision: 'no-color', note: '' }
+
+  // Design carve-out. Compared on bare lowercase WORDS so "Black-Cat" and "black cat" protect alike.
+  const protectedWords = new Set(
+    (ctx.protect ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter(Boolean),
+  )
+  const removable = matches.filter((m) => !protectedWords.has(m[0].toLowerCase()))
+  if (removable.length === 0) {
+    return { title: t0, decision: 'design-color', note: `color word(s) belong to the design "${ctx.protect}" — protected` }
+  }
+
+  let out = ''
+  let cursor = 0
+  const removed: string[] = []
+  for (const m of removable) {
+    const start = m.index ?? 0
+    out += `${t0.slice(cursor, start)} `
+    removed.push(m[0])
+    cursor = start + m[0].length
+  }
+  out += t0.slice(cursor)
+  const reduced = repairRemovalResidue(out)
+
+  // Re-fill the freed characters from PRODUCT FACTS, then judge the FINAL bytes — the removal and the
+  // re-fill are ONE decision (same reasoning as enforceInclusiveAudience's guard).
+  const padded = enforceTitleBand(reduced, ctx.band).title
+  if (padded.length < TITLE_BAND_LO || padded.length > TITLE_BAND_HI) {
+    return {
+      title: t0,
+      decision: 'band-guard',
+      note: `removing ${removed.join(', ')} would land ${padded.length} chars, outside [${TITLE_BAND_LO},${TITLE_BAND_HI}] even after the facts pad — refused, byte-identical`,
+    }
+  }
+
+  const kept = matches.length - removable.length
+  return {
+    title: padded,
+    decision: 'stripped',
+    note: `removed variant color word(s) ${removed.join(', ')}${kept > 0 ? ` (${kept} kept as design vocabulary)` : ''}; ${t0.length} → ${padded.length} chars`,
   }
 }
