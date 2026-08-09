@@ -37,6 +37,8 @@ import { missingBulletKeywords, bulletTokens } from '@/lib/keyword-engine/bullet
 // unified predicate at =on. Retires the raw descLower.includes() substring model (3c dock).
 import { coverageMode, coveredVerdict, missingVerdict, coverageTokens } from '@/lib/keyword-engine/coverage-core'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
+// ONE garment-color vocabulary (2026-08-09) — shared with the generator filters + the terminal title net.
+import { BASIC_COLOR_WORD_RE } from '@/lib/fba/designName'
 import { loadCoverageHaystack } from '@/lib/keyword-engine/loadListingContent'
 // seasonalTerms is a ZERO-IMPORT leaf, so importing it here cannot create the scorer→pipeline cycle
 // that the deleted local BULLET_SEASONAL_TERMS copy existed to avoid.
@@ -966,8 +968,10 @@ export function scoreListingContent(
     // COLOR sibling of the capacity guard: on a MULTI-variant apparel family the broadcast
     // bullets are shared across every color, so a keyword carrying one specific color
     // ("plain black tshirt men") can never be woven — don't dock for it. Per-child backend
-    // keeps the color terms. KEEP IN SYNC with BASIC_COLOR_RE in listingPipeline.
-    const colorRe = /\b(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)\b/i
+    // keeps the color terms. ONE SOURCE (2026-08-09): the word list lives in designName.ts and is
+    // shared with the generator-side filters and the terminal title net — this was the third
+    // byte-identical copy, kept in step only by a comment.
+    const colorRe = BASIC_COLOR_WORD_RE
     const isColorNeutralFamily = apparel && childContents.length > 1
     // ONE seasonal predicate, shared with the generators (seasonalTerms.ts, a zero-import leaf).
     // Scoped to the DESIGN's own occasion: a Valentine design's `valentine*` keywords are placeable

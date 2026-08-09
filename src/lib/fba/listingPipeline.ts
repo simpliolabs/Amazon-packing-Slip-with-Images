@@ -54,14 +54,14 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { collapseRepeatedWords, enforceInclusiveAudience, enforceMoneyTail, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceInclusiveAudience, enforceMoneyTail, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripVariantColorWords, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
 // design name from the SKU designKey; isGarmentColor gates the literal shirt color OUT of the anchor
 // so per-design content is about the DESIGN ('Rude Potato'), not the color ('Blue Spruce').
-import { deriveDesignLabel, isGarmentColor } from '@/lib/fba/designName'
+import { deriveDesignLabel, isGarmentColor, BASIC_COLOR_WORD_RE } from '@/lib/fba/designName'
 // Per-design name resolution (Commit 2 hot-fix): the seller stores the design name as Amazon's
 // Color attribute per variant; fetch via Listings Items API. Token + sellerId resolution mirrors
 // the SP-API call sites in pushExecutor.
@@ -825,8 +825,11 @@ function enforceHardAudience(text: string, audience: 'Men' | 'Women'): string {
 // child (whatever color it happens to be) and drags its color into the pool. Color keywords
 // still rank per-child via the backend strings (each child gets its OWN color terms). A
 // design name containing a color ("Black Cat") is unaffected — it flows via the verbatim
-// design-name anchor, not the keyword pool. KEEP IN SYNC with the copy in syncListingContent.
-const BASIC_COLOR_RE = /\b(?:black|white|navy|red|blue|green|grey|gray|pink|purple|yellow|orange|brown|tan|teal|maroon|burgundy|charcoal|ivory|beige|olive|mint|coral|lavender|mustard|rust|sage|cream)\b/i
+// design-name anchor, not the keyword pool.
+// ONE SOURCE (2026-08-09): this was a byte-identical literal here, in syncListingContent and (as the
+// base half of COLOR_WORDS) in designName — three copies, two "KEEP IN SYNC" comments. The word list
+// now lives once in designName.ts; this alias keeps all eight call sites below unchanged.
+const BASIC_COLOR_RE = BASIC_COLOR_WORD_RE
 
 /**
  * Third-party brand names that REQUIRE 'for [Brand]' or 'compatible with [Brand]' framing
@@ -6467,9 +6470,18 @@ RULES (deterministic — checked by title QUALITY judge):
   if (title) {
     const brandLen = brandName && title.toLowerCase().startsWith(brandName.trim().toLowerCase()) ? brandName.trim().length : 0
     const head = title.slice(0, brandLen)
-    const rest = title.slice(brandLen).replace(/[A-Za-z][A-Za-z'’-]*/g, (w, off: number) => {
+    const restIn = title.slice(brandLen)
+    const rest = restIn.replace(/[A-Za-z][A-Za-z'’-]*/g, (w, off: number) => {
       const lw = w.toLowerCase()
-      if (off > 0 && MINOR_WORDS.has(lw)) return lw
+      // CLAUSE-INITIAL EXEMPTION (live B0GVVY5TS9, 2026-08-09). English title case lowercases a minor
+      // word MID-clause only. This caser tested position with `off > 0` alone, so a minor word that
+      // OPENS the pipe-right clause got lowercased too, and the family parent shipped
+      //   "THE CEO … Soccer Tee Shirt | the Black Short Sleeve"
+      // — a stray lowercase "the" mid-title. A `|`/`,`/`;`/`:` immediately before the word means it
+      // starts a new clause, so it keeps its capital. Length-neutral and PO-gold-safe: gold #1's
+      // "… Him in Every Season Tee | Christian Shirts for Women" has no minor word at a clause
+      // opening, so every gold is byte-identical under this rule.
+      if (off > 0 && MINOR_WORDS.has(lw) && !/[|,;:]\s*$/.test(restIn.slice(0, off))) return lw
       return w.charAt(0).toUpperCase() + w.slice(1)
     })
     title = head + rest
@@ -7908,7 +7920,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * phased. Manual locks are untouchable by construction: a non-title partial passes produced=false
    * (priorTitle passthrough), and a locked full regen has its fresh title discarded at persist by
    * the route's lock guard. */
-  const bandTitle = (title: string, produced: boolean, moneyKws: readonly string[] | null = null): string => {
+  /* `protectDesign` (DEFECT B, 2026-08-09): every design phrase in scope for THIS title, space-joined.
+   * The color net must never strip a color word that IS the design ("Black Cat"), and the door is the
+   * only place that knows which designs a given exit covers — the broadcast title is answerable to
+   * EVERY design in the family, a per-child title to its own group's. Defaults to the family name so
+   * an un-passed call is protected, never guard-off. */
+  const bandTitle = (title: string, produced: boolean, moneyKws: readonly string[] | null = null, protectDesign: string | null = null): string => {
     if (!produced || !title) return title
     /* DEFECT 2 (PO 2026-08-09, §4) — the Title-Case apostrophe artifact ("Women'S T-Shirts"). Runs
      * FIRST because it is LENGTH-NEUTRAL (it can never move a title across the band) and every stage
@@ -7943,6 +7960,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (deduped.removed.length > 0) {
       console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', removed: deduped.removed, from: title.length, to: deduped.title.length }))
     }
+    // The dedupe refused because removing the repeat would have re-created a protected mark — the
+    // second half of the live "Futbol World Futbol Cup" oscillation (B0GVVY5TS9). Rare and always
+    // worth a line: it means an upstream producer wrote a mark-adjacent token.
+    if (deduped.refusedForTrademark) {
+      console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', decision: 'refused-trademark-resurrection', title }))
+    }
     const capped = deduped.title
     /* MONEY TAIL (#147) — wire order is spec-truth → cap → dedupe → enforceMoneyTail →
      * enforceTitleBand: when the gold tail lands the title is already in band and the facts-only
@@ -7973,6 +7996,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       if (['already-covered', 'no-tail', 'design-right', 'fact-tail', 'empty', 'non-apparel'].includes(mt.decision)) break
     }
+    /* DEFECT B (PO §5, live B0GVVY5TS9 2026-08-09) — A COLOR WORD IN THE SHARED TITLE. §5: "shared
+     * title/bullets carry NO color word; colors rank per-child via each child's own backend tail".
+     * The rule lived ONLY as an upstream pool filter (colorNeutralFamily + BASIC_COLOR_RE), which a
+     * council-written / prior-carried / fill-composed color word walks straight past — so it is
+     * enforced HERE, on the bytes that ship, like every other §-rule in this door.
+     * DELIBERATELY AFTER the money-tail loop, for the same reason DEFECT 1 is: a color word lives in
+     * the tail region the money keyword wants, and `enforceMoneyTail` gets first refusal on that
+     * space (when it takes the tail the color leaves for free, and the net below then reports
+     * 'no-color'). BEFORE the inclusive-audience net because a mis-describing color is the harder
+     * violation of the two and should get the better-funded re-pad. It re-pads from facts internally
+     * and refuses any removal it cannot land back inside the band, so a skip is byte-identical. */
+    const colorNet = stripVariantColorWords(moneyed, {
+      apparel: apparelProduct,
+      protect: protectDesign || effectiveDesignName || designName || null,
+      band: titleBandCtx(moneyed),
+    })
+    console.log('[TITLE_GOLD]', JSON.stringify({
+      tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision,
+      from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note,
+    }))
+    moneyed = colorNet.title
     /* DEFECT 1 (PO 2026-08-09, §4) — "for Men and Women" is CHARACTER WASTE. Deliberately AFTER the
      * money-tail loop: §4 allows the inclusive tail on a universal design ONLY when nothing better
      * fits that space, and `enforceMoneyTail` is what decides "better" — it already treats the
@@ -8079,16 +8123,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // (scrubCelebrityNames) right beside scrubTrademarks on every published surface, so stored ≡
   // pushed. Idempotent; runs before bandTitle so the band pad can re-fill any freed chars.
   const scrubPub = (s: string, fieldCtx: string): string => scrubCelebrityNames(scrubTrademarks(s), `pipeline:${fieldCtx}`)
-  const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => censusLog({
+  const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => {
+  /* DESIGN VOCABULARY THE COLOR NET MUST NOT STRIP (DEFECT B). Resolved HERE because this is the one
+   * place that sees the whole result: on a multi-design family `effectiveDesignName` is deliberately
+   * '' (:7750) and each design's name lives on its own per_child_titles row, so the FAMILY protect
+   * set is the union — a broadcast title is answerable to every design in the family. The same union
+   * is handed to the per-child exit: over-protecting a sibling design's color word costs at most one
+   * un-stripped color (fail-open), while under-protecting corrupts a design name. */
+  const protectHay = [
+    effectiveDesignName || designName,
+    ...(r.per_child_titles ?? []).map((c) => c.designName ?? ''),
+  ].filter(Boolean).join(' ')
+  return censusLog({
     ...r,
     // Third arg = the derived money-keyword candidates (TITLE_MONEY_TAIL) — BROADCAST title only in Phase 1.
-    recommended_title: bandTitle(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false, titleMoneyKws),
+    recommended_title: bandTitle(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false, titleMoneyKws, protectHay),
     recommended_bullets: scrubCelebrityNamesArr(scrubTrademarksArr(r.recommended_bullets), 'pipeline:bullets'),
     recommended_description: scrubPub(r.recommended_description, 'description'),
     per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubPub(c.keywords, 'backend') })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
-    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false) })),
+    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false, null, protectHay) })),
     // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
     // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
     // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
@@ -8102,6 +8157,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     keyword_reconciliation: scrubTrademarksDeep(r.keyword_reconciliation),
     product_details_improvements: scrubTrademarksDeep(r.product_details_improvements),
   })
+  }
   const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => scrubPublished({
     recommended_title: input.priorTitle ?? '',
     recommended_bullets: input.priorBullets ?? [],
