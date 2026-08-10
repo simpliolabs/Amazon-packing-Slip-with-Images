@@ -37,7 +37,7 @@ import OpenAI from 'openai'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { resolveOpenAIKey } from '../openai/credentials'
 import { instrumentAiHealth, getAiHardError } from '../openai/errorClass'
-import { selectionMode, type ThemeBand } from './selection-core'
+import { selectionMode, themePrintTest, type ThemeBand } from './selection-core'
 
 /* ── CONSTANTS (ONE home per budget — no magic numbers at call sites) ─────────────────────────── */
 
@@ -371,6 +371,37 @@ Return ONLY the line.`
  * exactly once, deterministically, in selection-core's `marketScore` + `RANKING_VOLUME_BACKSTOP`,
  * where it is measurable and auditable. Nothing in the strings below may reintroduce it.
  */
+/**
+ * THE PRINT TEST — the ONE 2-vs-3 boundary, stated once and handed to every persona AND the rubric.
+ *
+ * WHY IT EXISTS (PO ruling 2026-08-09, confirming the diagnosis): on B0GVV3XL4T the panel rated
+ * `soccer shirt` and `futbol` band 2 — the SAME band as `oversized tshirts for women`. Since
+ * `THEME_BAND_WEIGHT` multiplies every band-2 row by the same 0.85, the theme term cancelled out
+ * between them and raw volume broke the tie, so a 442K/mo generic apparel head outranked the
+ * design's own subject and the 14 CORE seats sat nearly empty (2 of 86 rows reached band 3).
+ *
+ * The rubric was never wrong — band 2 already says "true of this product REGARDLESS OF PRINT". What
+ * was missing is that the boundary was never stated as an EXCLUSION, so two of the three personas
+ * (whose whole job is defending breadth against a theme purist) could absorb design-subject phrases
+ * into 2 without contradicting anything they had been told. With the LOWER median (:539) two such
+ * votes are all it takes.
+ *
+ * So this is a CONSTRAINT, not another exemplar — exemplars are what leaked last time
+ * ([[editorial-audit-prompt-leaks]]: state constraints, not examples). It is also symmetric: it
+ * PROTECTS band 2 (the defender's legitimate revenue case) by giving it a precise membership rule
+ * instead of a vibe, and it cannot pull anything into 3 that names a DIFFERENT theme — that is
+ * still band 0.
+ */
+const PRINT_TEST = `THE PRINT TEST — the ONE rule that separates band 2 from band 3, applied to every keyword:
+Ask: "would this phrase still be true of this garment if a COMPLETELY DIFFERENT design were printed on it?"
+  YES, still true  -> band 2. It describes the blank, not the art (garment nouns, blank brands, fit/
+                      fabric/size/cut, audience words, "graphic tee"-class phrases).
+  NO, only true because of what is PRINTED -> band 3 if the print is THIS design's subject/occasion/
+                      joke; band 0 if it names a DIFFERENT identifiable theme.
+Band 2 is therefore RESERVED for print-independent phrases. A phrase naming this design's own subject
+is NEVER band 2 for being broad or common — breadth is not a reason to demote it, and a loose or
+informal phrasing of this design's subject is still band 3.`
+
 const PERSONA_SYSTEM: Record<RaterPersona, string> = {
   theme_custodian: `You are the THEME CUSTODIAN on a 3-rater panel scoring Amazon search keywords against ONE graphic-apparel design.
 You own the two ENDS of the scale and nobody else will defend them.
@@ -382,13 +413,18 @@ You are NOT here to keep the candidate list large. A list that is mostly off-the
 A theme purist sits on this panel and WILL try to strip legitimate broad revenue out of this listing. Preventing that is why you exist.
 Band 2 (CATEGORY) is a real, valuable band, not a consolation prize. It is every phrase that is true of this garment no matter what is printed on it: garment nouns, blank brands, fit / fabric / size / cut words, audience words, and broad graphic-tee-class category phrases.
 oversized tshirts for women is band 2. comfort colors tshirt is band 2. NEITHER is band 0 — the shopper typing them would be perfectly happy with this product.
-Band 0 is ONLY for a keyword naming a DIFFERENT identifiable design theme. Never use band 0 to mean too broad.`,
+Band 0 is ONLY for a keyword naming a DIFFERENT identifiable design theme. Never use band 0 to mean too broad.
+Your band 2 is a REAL band with a PRECISE membership rule, not a catch-all. Defending it means holding
+the print-independent phrases in 2 — it does NOT mean pulling this design's own subject down into 2.
+A phrase that is only searched because of what is PRINTED is the theme custodian's to claim, and you
+lose nothing by conceding it: band 3 keywords are placed too.`,
 
   conversion_realist: `You are the CONVERSION REALIST on a 3-rater panel scoring Amazon search keywords against ONE graphic-apparel design.
 You price PLACEABILITY: a band is only earned if this listing's copy can honestly carry the phrase and the click can convert.
 - Under a hard AUDIENCE LEAN, opposite-gender terms are band 1 or lower (husband shirt, shirts for men on a lean_female design; the mirror on lean_male). Our generators structurally refuse to place them, so ranking there buys traffic we cannot serve.
 - Role, profession and identity words the design does not claim (teacher, nurse, coach, mom of boys) are band 1 or lower UNLESS the THEME CARD claims that role.
-- Do not confuse placeability with breadth: a broad garment or category phrase is still band 2, because it is placeable and it converts.`,
+- Do not confuse placeability with breadth: a broad PRINT-INDEPENDENT garment or category phrase is still band 2, because it is placeable and it converts.
+- Placeability is a FLOOR, not a ceiling. A phrase naming this design's own subject is maximally placeable — our copy leads with it — so it is band 3. Never settle it at 2 for being broad or common.`,
 }
 
 /** The JSON contract, appended to every persona so all three emit the SAME shape over the SAME list. */
@@ -407,7 +443,11 @@ export function buildRaterPrompt(
   title: string,
   keywordsBlock: string,
 ): { system: string; user: string } {
-  const system = `${PERSONA_SYSTEM[persona]}
+  // ONE insertion point for the 2-vs-3 boundary — every persona gets the IDENTICAL constraint, so
+  // the panel cannot disagree about where the line is (three personas each carrying their own copy is
+  // how this module would grow a second rulebook). Call-time env read: `THEME_PRINT_TEST=off`
+  // restores the pre-ruling prompt byte-for-byte without a redeploy.
+  const system = `${PERSONA_SYSTEM[persona]}${themePrintTest() ? `\n\n${PRINT_TEST}` : ''}
 ${RATER_JSON_CONTRACT}`
   const user = `THEME CARD (AUTHORITATIVE): ${themeCard}
 AUDIENCE LEAN (AUTHORITATIVE): ${lean || 'unisex/unknown'}
@@ -420,9 +460,13 @@ ${keywordsBlock}
 
 For EVERY keyword output {"i":<index>,"a":"<1-3 words: what the SHOPPER wants>","f":<0|1|2|3>}.
 WRITE "a" BEFORE DECIDING "f".
-  3 CORE      - the shopper would be satisfied by THIS design's subject/occasion/joke.
+  3 CORE      - the shopper would be satisfied by THIS design's subject/occasion/joke. Includes the
+                broad and common ways of naming that subject — breadth NEVER demotes a design-subject
+                phrase to 2.
   2 CATEGORY  - universal to this garment: garment nouns, blank brands, fit/fabric/size, audience
-                words, "graphic tee"-class category phrases. True of this product regardless of print.
+                words, "graphic tee"-class category phrases. True of this product regardless of print
+                — and RESERVED for those. If the phrase is only true BECAUSE of what is printed, it
+                is 3 (this design's subject) or 0 (a different theme), never 2.
   1 GENERIC   - carries no theme information and no category specificity.
   0 OFF       - names a DIFFERENT identifiable design theme: another profession, fandom,
                 celebrity/band/athlete, sport, holiday, event or hobby than the THEME CARD.

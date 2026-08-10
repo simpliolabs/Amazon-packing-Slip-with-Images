@@ -9,7 +9,7 @@
  * caught ZERO because a >50% floor voided every honest verdict. If someone ever "helpfully" adds one
  * back to combineRaterVerdicts or parseRaterVerdict, that test goes red.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import type { ThemeBand } from './selection-core'
 import {
   buildRaterPrompt,
@@ -496,5 +496,73 @@ describe('NO plausibility floor — the INVERSE of relevanceClassifier.ts:117 / 
     const m = parseRaterVerdict(raw, 20)
     expect(m.size).toBe(20)
     expect([...m.values()].every((r) => r.band === 0)).toBe(true)
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE PRINT TEST — the 2-vs-3 boundary (PO ruling 2026-08-09).
+ *
+ * WHY THESE EXIST. On B0GVV3XL4T the panel rated `soccer shirt` and `futbol` band 2 — the SAME band
+ * as `oversized tshirts for women`. THEME_BAND_WEIGHT multiplies every band-2 row by the same 0.85,
+ * so the theme term CANCELS between them and raw volume breaks the tie: a 442K/mo generic apparel
+ * head outranked the design's own subject and only 2 of 86 rows reached band 3, leaving 14 CORE
+ * seats nearly empty.
+ *
+ * The rubric was never wrong (band 2 already said "regardless of print") — the boundary was never
+ * stated as an EXCLUSION, so the two breadth-defending personas could absorb design-subject phrases
+ * into 2 without contradicting anything. With the LOWER median, two such votes decide.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+describe('the print test (2-vs-3 boundary)', () => {
+  const priorFlag = process.env.THEME_PRINT_TEST
+  const build = (p: (typeof RATER_PERSONAS)[number]) =>
+    buildRaterPrompt(p, 'A 2026 world cup soccer fan graphic tee', 'unisex', 'THE CEO Soccer Tee', '0: soccer shirt')
+  afterEach(() => {
+    if (priorFlag === undefined) delete process.env.THEME_PRINT_TEST
+    else process.env.THEME_PRINT_TEST = priorFlag
+  })
+
+  it('reaches EVERY persona — a boundary only two of three raters know is not a boundary', () => {
+    delete process.env.THEME_PRINT_TEST
+    for (const p of RATER_PERSONAS) {
+      expect(build(p).system).toContain('THE PRINT TEST')
+      expect(build(p).system).toContain('COMPLETELY DIFFERENT design were printed')
+    }
+  })
+
+  it('is BYTE-IDENTICAL across personas — one rulebook, not three', () => {
+    delete process.env.THEME_PRINT_TEST
+    const extract = (s: string) => s.slice(s.indexOf('THE PRINT TEST'))
+    const [a, b, c] = RATER_PERSONAS.map((p) => extract(build(p).system))
+    expect(a).toBe(b)
+    expect(b).toBe(c)
+  })
+
+  it('states band 2 as RESERVED for print-independent phrases, and forbids demoting on breadth', () => {
+    delete process.env.THEME_PRINT_TEST
+    const s = build('category_defender').system
+    expect(s).toContain('RESERVED')
+    expect(s).toMatch(/NEVER band 2 for being broad/i)
+  })
+
+  it('THEME_PRINT_TEST=off restores the pre-ruling prompt — the revert lever actually reverts', () => {
+    process.env.THEME_PRINT_TEST = 'off'
+    for (const p of RATER_PERSONAS) expect(build(p).system).not.toContain('THE PRINT TEST')
+  })
+
+  it('any other value keeps it ON (default-on is deliberate: it implements a PO ruling)', () => {
+    for (const v of ['', 'on', 'ON', 'true', 'garbage']) {
+      process.env.THEME_PRINT_TEST = v
+      expect(build('theme_custodian').system).toContain('THE PRINT TEST')
+    }
+  })
+
+  it('the user-block rubric carries the same exclusion, so system and rubric cannot drift apart', () => {
+    delete process.env.THEME_PRINT_TEST
+    const u = build('theme_custodian').user
+    expect(u).toContain('RESERVED for those')
+    // Whitespace-tolerant: the rubric is a wrapped template literal, so asserting on line SHAPE
+    // makes the test fail on a reflow that changed nothing. Assert the words, not the wrapping.
+    expect(u.replace(/\s+/g, ' ')).toContain('breadth NEVER demotes a design-subject phrase to 2')
   })
 })
