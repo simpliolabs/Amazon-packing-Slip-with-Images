@@ -5567,7 +5567,12 @@ function attributeAsKeyword(attr: string): AnalyzedKeyword {
     searchVolume: 0, keywordSales: 0, competingProducts: 0,
     asinImpressionShare: 0, asinClickShare: 0, asinPurchaseShare: 0,
     inTitle: false, inBullets: false, inDescription: false, inBackend: false,
-    dataSource: 'jungle_scout',
+    // 'inherited', NOT 'jungle_scout' (fixed 2026-08-09). Nothing about this row came from Jungle
+    // Scout — it is synthesised from a product ATTRIBUTE and every market field on it is a zero we
+    // wrote ourselves. Claiming the provider's name on it made a fabricated row indistinguishable
+    // from a measured one at every consumer that branches on dataSource. 'inherited' is the existing
+    // union member that already means "carried, not measured"; no schema change.
+    dataSource: 'inherited',
   } as AnalyzedKeyword
 }
 
@@ -7482,10 +7487,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const bestSibling = cleanGated
         .filter((k) => srcRe.test(k.keyword))
         .reduce<AnalyzedKeyword | null>((a, b) => (!a || (b.coverageGapScore || 0) > (a.coverageGapScore || 0) ? b : a), null)
-      // Clone the best sibling's opportunity profile (score/volume/actionType) onto the synonym token so
-      // the RANK panel + placement treat it as the high-value keyword it is; fall back to filler if no
+      // Clone the best sibling's PLACEMENT profile (coverageGapScore/volume/actionType) onto the
+      // synonym token so placement treats it as the high-value keyword it is; fall back to filler if no
       // sibling is in the pool (e.g. the concept was only in the title, already stripped upstream).
-      cleanGated.unshift(bestSibling ? { ...bestSibling, keyword: synonym } : attributeAsKeyword(synonym))
+      //
+      // The three NATIVE Jungle Scout metrics are NULLED — the twin of the fix at
+      // syncKeywordIntelligence.ts (see the long note there). Jungle Scout measured the SOURCE phrase,
+      // not this token, so inheriting them would state a measurement that was never taken. Nulling
+      // them also stops `carriesMarketOpportunity` from letting an unmeasured token win the title
+      // money-tail pin, while `coverageGapScore` keeps it placeable in the backend bytes.
+      cleanGated.unshift(
+        bestSibling
+          ? { ...bestSibling, keyword: synonym, jsEaseOfRanking: null, jsRelevancyScore: null, marketOpportunity: null }
+          : attributeAsKeyword(synonym),
+      )
     }
     /* SYNONYM PHRASES (PO ruling 2026-08-09, SELLER_PROFILE §3 gold rule 3: '"Football" is a
      * required international synonym on soccer products'). The bare-token injection above makes the

@@ -468,7 +468,35 @@ async function applyRelevanceGate<T extends { keyword: string }>(
         const srcRe = new RegExp(`\\b(?:${sources.join('|')})\\b`, 'i');
         let best: T | null = null;                                            // highest-volume harvested sibling
         for (const k of set) if (srcRe.test(k.keyword) && (best === null || volOf(k) > volOf(best))) best = k;
-        if (best) adds.push({ ...best, keyword: synonym });                   // inherit its volume/data profile
+        // INHERIT THE PLACEMENT PRIORITY, NEVER THE MEASURED METRICS (PO ruling 2026-08-09, "A: YES").
+        //
+        // This line used to be a bare `{ ...best, keyword: synonym }` — "inherit its volume/data
+        // profile" — which copied the SOURCE row's NATIVE Jungle Scout metrics onto a token Jungle
+        // Scout never measured. Because these rows persist to keyword_analysis specifically so they
+        // "surface as ranking OPPORTUNITIES in the RANK panel" (the comment above), the seller was
+        // shown `football` carrying `soccer jersey`'s measured opportunity — fabricated market data,
+        // and a direct contradiction of the standing rule that the opportunity number must be the
+        // provider's own (SELLER_PROFILE §5, "never our fabricated composite").
+        //
+        // The three NATIVE columns (migration 055) are nulled; everything else is kept. That split is
+        // the whole fix, and it is why nothing regresses:
+        //   - `carriesMarketOpportunity` (marketDataHealth.ts:109) now reads FALSE for these rows, so
+        //     they can never win the title money-tail pin on numbers nobody measured, and the
+        //     marketDataHealth census stops counting them as measured supply.
+        //   - `priorityDisplay(marketOpportunity, coverageGapScore)` (page.tsx:4552) falls through to
+        //     the `~N` composite, which the UI ALREADY renders as explicitly-not-market-data.
+        //   - `coverageGapScore` + `searchVolume` are retained, so the synonym keeps its placement
+        //     power and still reaches the backend bytes — which is the entire point of adding it, and
+        //     per the PO's scope ruling ("B: NO [customer-facing], but backend yes") the backend is
+        //     exactly where it belongs.
+        // Net effect: the term still gets indexed; the NUMBER next to it stops lying.
+        if (best) adds.push({
+          ...best,
+          keyword: synonym,
+          jsEaseOfRanking: null,
+          jsRelevancyScore: null,
+          marketOpportunity: null,
+        } as T);
       }
       if (adds.length) console.log(`[syncKeywordIntelligence] identity-synonym opportunities for ${asin}: +${adds.map((a) => a.keyword).join(', ')}`);
       return adds.length ? [...set, ...adds] : set;
