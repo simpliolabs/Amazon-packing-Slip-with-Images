@@ -178,12 +178,19 @@ export async function GET(
       // That reasoning holds for a heal that FAILS. It does NOT hold for a heal that is KILLED:
       //
       //   MEASURED on B0GVV3XL4T (86 rows, ranked but wholly unrated): the promotion re-runs the
-      //   sync INCLUDING a full LLM rating of the pool, which took >160s and was cut off by the
-      //   gateway (502 Bad Gateway) BEFORE storeAnalysis. No write ⇒ analyzed_at never advances ⇒
-      //   `easeCoolingDown` is still false on the very next request ⇒ the next page load fires
-      //   another doomed 160s billable job. An unbounded retry loop, one per page view, plus a 502
-      //   for the seller. Control: an already-rated family (B0FKKN8XKV, 102 rows / 97 rated)
-      //   returns the same endpoint in 2.0s, so the cost is the RATING, not the read.
+      //   sync INCLUDING a full LLM rating of the pool. It ran >160s and the gateway returned 502
+      //   to the CLIENT — twice. While it runs, analyzed_at has not advanced, so `easeCoolingDown`
+      //   is still false and the NEXT page load starts ANOTHER full billable rating of the same
+      //   pool. Control: an already-rated family (B0FKKN8XKV, 102 rows / 97 rated) returns this
+      //   same endpoint in 2.0s, so the cost is the RATING, not the read — the heal fires exactly
+      //   where it cannot finish in time.
+      //
+      //   PRECISION (verified after the fact, and an earlier draft of this note got it wrong):
+      //   the work DOES complete and write — Node keeps executing after the client disconnects, and
+      //   the pool later read 86/86 rated in 1.95s. So this is DUPLICATED SPEND plus a broken page,
+      //   NOT an infinite loop; it self-terminates once any one attempt's write lands. That makes it
+      //   less severe than "loops for ever" but no less wrong: an unbounded LLM call has no business
+      //   on a request path a proxy can time out, and the seller saw a 502 either way.
       //
       // A retry guard armed by the work's COMPLETION cannot throttle work that never completes.
       // The durable fix is to arm the cooldown BEFORE the expensive call and to stop doing the

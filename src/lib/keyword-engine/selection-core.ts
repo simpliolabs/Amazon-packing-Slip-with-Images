@@ -315,9 +315,15 @@ export function selectionMode(): SelectionMode {
  * Default OFF, and this one is not a rollout convenience — it is a load-bearing kill switch.
  * Shipped ON (unflagged) in PR #531 and taken down the same night: the promotion re-runs a full
  * LLM rating of the pool inside the request, which on an 86-row family exceeded the gateway
- * timeout (>160s ⇒ 502) BEFORE the write that arms the cooldown. A retry guard armed by the
- * work's COMPLETION cannot throttle work that never completes, so every page load re-fired
- * another doomed billable job. See the incident note at the `themeUnrated` call site.
+ * timeout (>160s) — so the SELLER gets a 502 while the work continues invisibly server-side, and
+ * every page load landing in that window starts ANOTHER full billable rating of the same pool,
+ * because the cooldown is armed by a write that has not happened yet.
+ *
+ * MEASURED BOTH WAYS (2026-08-09): two reads of B0GVV3XL4T 502'd at ~160s; afterwards the pool
+ * read 86/86 rated in 1.95s — i.e. the work DOES complete and write, the response just cannot be
+ * delivered. So this is duplicated spend + a broken page, NOT an infinite loop (an earlier note
+ * here said "loops forever"; that was wrong and is corrected). It self-terminates once any one
+ * attempt's write lands. See the incident note at the `themeUnrated` call site.
  *
  * Do NOT flip this on until the heal is (a) armed BEFORE the expensive call and (b) off the
  * request path. `off` is byte-identical to pre-#531 read behaviour.
