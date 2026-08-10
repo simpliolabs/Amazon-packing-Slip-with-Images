@@ -33,6 +33,7 @@ const BEHAVIOR_FLAGS = [
   'KEYWORD_EASE_WEIGHT', // numeric weight, not on/off (selection-core.selectionEaseWeight; unset/≤0 ⇒ ease term inert) — echo gap found 2026-08-08
   'THEME_HEAL_ON_READ', // KILL SWITCH, default off — in-band re-rating 502'd past its own cooldown (2026-08-09); must read 'off' until the heal moves off the request path
   'THEME_PRINT_TEST', // rater 2-vs-3 boundary (PO ruling 2026-08-09); DEFAULT ON — 'off' reverts the pre-ruling prompt without a redeploy
+  'TITLE_MONEY_TAIL', // DARK FLAG until 2026-08-09: gates the money-tail door (listingPipeline.ts:7719/:8116) that the PO gold's '| ... Football Tee' needs, defaults 'off', and was echoed NOWHERE — so its live value could not be verified, only assumed
   'COVERAGE_CORE',
   'CONTENT_SPINE', // retired in code 2026-07-31 — listed to surface env residue
   'BACKEND_DEGRADE_STRICT', // retired in code 2026-08-03 — listed to surface env residue
