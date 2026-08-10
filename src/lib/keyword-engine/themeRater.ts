@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto'
 import OpenAI from 'openai'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { resolveOpenAIKey } from '../openai/credentials'
-import { instrumentAiHealth } from '../openai/errorClass'
+import { instrumentAiHealth, getAiHardError } from '../openai/errorClass'
 import { selectionMode, type ThemeBand } from './selection-core'
 
 /* ── CONSTANTS (ONE home per budget — no magic numbers at call sites) ─────────────────────────── */
@@ -101,6 +101,23 @@ export interface ThemeCardContext {
   /** listing_seo_scores.design_name_overrides (migration 034) — {designKey: name} for multi-design
    *  families. EVERY value must reach the card; see the multi-design clause in buildThemeCardPrompt. */
   designNameOverrides?: Record<string, string> | null
+  /**
+   * product_identity.identity_data.designTheme — what vision read off the ARTWORK (source 3).
+   * FALLBACK ONLY: consulted when the seller has authored no name at all. Safe by construction —
+   * vision says "christmas" only when the artwork IS christmas.
+   *
+   * ONLY `designTheme` is admitted, NOT `visualElements` / `seedKeywords`, even though
+   * `deriveSeasonsFrom` reads all three. The two questions are different: SEASONS asks "does any
+   * design text mention an occasion?" (token presence — a noisy list is harmless), the CARD asks
+   * "what IS this design?" (needs NAME-shaped text). Feeding a bag of visual elements to the card
+   * model is how "Pixel Art Tee" became an art-teacher theme, which is the failure this module's
+   * "no design signal ⇒ no card" rule was written to prevent. Widening this is a deliberate decision,
+   * not a tidy-up.
+   */
+  visionDesignTheme?: string | null
+  /** extractDesignName's resolved name, persisted as listing_seo_recommendations.keyword_plan
+   *  .designName (source 4). FALLBACK ONLY, same rank as vision — it IS name-shaped by construction. */
+  resolvedDesignName?: string | null
   /** listing_seo_scores.audience_lean (migration 029): male|female|lean_male|lean_female|unisex. */
   audienceLean?: string | null
   productType?: string | null
@@ -192,43 +209,115 @@ function stableDesignJson(map: Record<string, string> | null | undefined): strin
  * card resampled inside every rating call would re-condition every band on ~12 fresh tokens and make
  * the target set churn with no seller-visible cause.
  *
+ * THE DERIVED TAIL (2026-08-09) — and why it is CONDITIONAL, not simply appended.
+ * The signature must cover every input the card was ACTUALLY built from, or a vision rescan on a
+ * design with no seller name would reuse a card built from the OLD artwork for ever. But
+ * unconditionally hashing the two derived sources would change the signature of every listing that
+ * has them, invalidating stored cards portal-wide — including PO HAND-EDITED ones, which the
+ * sig-match branch exists to protect.
+ *
+ * So the tail is appended ONLY when `resolveDesignSignals` actually FELL BACK to tier 2. The result
+ * is exact in both directions and free of churn:
+ *   - seller-named listing → byte-identical signature to before this change; card preserved; a later
+ *     vision rescan correctly does NOT regenerate it, because vision contributed nothing;
+ *   - vision/plan-only listing → previously had NO card at all, so there is nothing to invalidate,
+ *     and a rescan now correctly DOES regenerate;
+ *   - seller later types a name → tier 1 becomes non-empty, the tail drops off AND the scalar
+ *     enters the hash, so it regenerates. Correct.
+ *
  * node:crypto is fine here — this file is server-only. selection-core.ts uses FNV-1a instead because
  * it must stay importable from a client component.
  */
 export function themeCardSig(
-  ctx: Pick<ThemeCardContext, 'designNameOverride' | 'designNameOverrides' | 'audienceLean'>,
+  ctx: Pick<
+    ThemeCardContext,
+    'designNameOverride' | 'designNameOverrides' | 'visionDesignTheme' | 'resolvedDesignName' | 'audienceLean'
+  >,
 ): string {
-  const raw = [
+  const base = [
     (ctx.designNameOverride || '').trim(),
     stableDesignJson(ctx.designNameOverrides),
     (ctx.audienceLean || '').trim().toLowerCase(),
   ].join('||')
-  return createHash('sha1').update(raw).digest('hex')
+  const derivedTail =
+    resolveDesignSignals(ctx).provenance === 'derived'
+      ? `||${(ctx.resolvedDesignName || '').trim()}||${(ctx.visionDesignTheme || '').trim()}`
+      : ''
+  return createHash('sha1').update(`${base}${derivedTail}`).digest('hex')
+}
+
+/** Where the card's design names came from. Drives BOTH the prompt's authority line and which
+ *  inputs `themeCardSig` hashes — the two must never disagree about what the card was built from. */
+export type DesignSignalProvenance = 'seller' | 'derived' | 'none'
+
+export interface DesignSignals {
+  /** De-duplicated, sanitized, deterministic order. EMPTY ⇒ no card. */
+  names: string[]
+  provenance: DesignSignalProvenance
+}
+
+/** The four design sources, in the ONE priority order the card is allowed to read them. */
+type DesignSignalCtx = Pick<
+  ThemeCardContext,
+  'designNameOverride' | 'designNameOverrides' | 'visionDesignTheme' | 'resolvedDesignName'
+>
+
+/**
+ * THE design-signal resolution. Reads the SAME four sources `deriveSeasonsFrom`
+ * (selectionContext.ts) reads, in a STRICT two-tier order.
+ *
+ * TIER 1 — SELLER-AUTHORED (authoritative): the scalar `design_name_override`, then every value of
+ * the per-design `design_name_overrides` map by sorted key.
+ * TIER 2 — DERIVED (fallback, consulted ONLY when tier 1 is completely empty): the LLM-resolved
+ * plan design name, then the vision `designTheme`.
+ *
+ * THE TIERS ARE EXCLUSIVE, NOT ADDITIVE, and that is load-bearing. A 4-design family whose seller
+ * named all four must not have a fifth, vision-guessed "name" mixed in: `buildThemeCardPrompt` emits
+ * "this family has N SEPARATE designs. The line MUST name EVERY ONE of them", and a hallucinated
+ * fifth entry would make the other four designs' keywords read as a different theme. When the seller
+ * has spoken, the seller is the whole answer.
+ *
+ * WHY TIER 2 EXISTS AT ALL (live defect, 2026-08-09). This function used to read tier 1 only, so
+ * "no design signal" meant "the seller never typed in one specific box" rather than "we genuinely
+ * know nothing about this design". A vision-detected design got NO card ⇒ `rateThemeFit` returned
+ * an EMPTY map ⇒ every `theme_fit` was null ⇒ `effectiveBand` read 2 for the whole pool ⇒ the band
+ * multiplier cancelled out and the target set became pure market ordering, silently.
+ *
+ * PURE.
+ */
+export function resolveDesignSignals(ctx: DesignSignalCtx): DesignSignals {
+  const collect = (...raw: (string | null | undefined)[]): string[] => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const s of raw) {
+      const v = sanitizePromptField(s, DESIGN_NAME_MAX_LEN)
+      if (!v) continue
+      const k = v.toLowerCase()
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(v)
+    }
+    return out
+  }
+
+  const map = ctx.designNameOverrides
+  const mapped = map && typeof map === 'object' ? Object.keys(map).sort().map((k) => map[k]) : []
+  const seller = collect(ctx.designNameOverride, ...mapped)
+  if (seller.length > 0) return { names: seller, provenance: 'seller' }
+
+  const derived = collect(ctx.resolvedDesignName, ctx.visionDesignTheme)
+  if (derived.length > 0) return { names: derived, provenance: 'derived' }
+
+  return { names: [], provenance: 'none' }
 }
 
 /**
- * Every design name the seller has authored for this family, de-duplicated, sanitized, deterministic
- * order (scalar first, then the override map by sorted key). EMPTY means there is no design signal at
- * all — the caller must then skip the card entirely rather than let a model guess a theme from a
- * title, which is exactly how "Pixel Art Tee" became an art-teacher theme.
+ * Every design name resolved for this family. EMPTY means there is no design signal ANYWHERE — the
+ * caller must then skip the card entirely rather than let a model guess a theme from a title, which
+ * is exactly how "Pixel Art Tee" became an art-teacher theme.
  */
-export function resolveDesignNames(
-  ctx: Pick<ThemeCardContext, 'designNameOverride' | 'designNameOverrides'>,
-): string[] {
-  const out: string[] = []
-  const seen = new Set<string>()
-  const push = (s: string | null | undefined) => {
-    const v = sanitizePromptField(s, DESIGN_NAME_MAX_LEN)
-    if (!v) return
-    const k = v.toLowerCase()
-    if (seen.has(k)) return
-    seen.add(k)
-    out.push(v)
-  }
-  push(ctx.designNameOverride)
-  const map = ctx.designNameOverrides
-  if (map && typeof map === 'object') for (const key of Object.keys(map).sort()) push(map[key])
-  return out
+export function resolveDesignNames(ctx: DesignSignalCtx): string[] {
+  return resolveDesignSignals(ctx).names
 }
 
 /**
@@ -244,6 +333,10 @@ export function buildThemeCardPrompt(
   designNames: readonly string[],
   lean: string,
   productType: string,
+  /** Where `designNames` came from. The header must not claim "seller-authored" for a name vision
+   *  or the design-name extractor produced — the model treats that label as an authority claim, and
+   *  an over-claimed authority is exactly what makes a wrong theme unfalsifiable downstream. */
+  provenance: DesignSignalProvenance = 'seller',
 ): { system: string; user: string } {
   const system =
     'You write ONE line stating what an Amazon graphic-apparel design is about. Return ONLY that line: no quotes, no label, no preamble, no list, no trailing period.'
@@ -251,7 +344,11 @@ export function buildThemeCardPrompt(
     designNames.length > 1
       ? `\nThis family has ${designNames.length} SEPARATE designs. The line MUST name EVERY ONE of them. A line naming only some of them would mark the other designs' own keywords as off-theme for their own listings.`
       : ''
-  const user = `DESIGN NAME(S) — seller-authored, AUTHORITATIVE:
+  const header =
+    provenance === 'derived'
+      ? 'DESIGN SIGNAL(S) — detected from the artwork / resolved by the design-name extractor (the seller has not named this design):'
+      : 'DESIGN NAME(S) — seller-authored, AUTHORITATIVE:'
+  const user = `${header}
 ${designNames.map((n) => `- ${n}`).join('\n')}
 AUDIENCE LEAN: ${lean || 'unisex/unknown'}
 PRODUCT TYPE: ${productType || 'apparel / graphic t-shirt'}
@@ -486,10 +583,13 @@ export async function buildThemeCard(ctx: ThemeCardContext): Promise<string | nu
     return null
   }
 
-  // 2. Design signal. BOTH the scalar and the per-design map blank ⇒ the fail-open default.
-  const designNames = resolveDesignNames(ctx)
+  // 2. Design signal. ALL FOUR sources blank ⇒ the fail-open default. This now genuinely means "we
+  //    know nothing about this design", not "the seller never typed in one specific box".
+  const { names: designNames, provenance } = resolveDesignSignals(ctx)
   if (designNames.length === 0) {
-    console.log(`[KW_THEME_CARD] asin=${tag} skipped (no design signal)`)
+    console.log(
+      `[KW_THEME_CARD] asin=${tag} skipped (no design signal — checked seller name, per-design map, resolved plan name AND vision theme)`,
+    )
     return null
   }
 
@@ -525,6 +625,7 @@ export async function buildThemeCard(ctx: ThemeCardContext): Promise<string | nu
       designNames,
       sanitizePromptField(ctx.audienceLean, LEAN_MAX_LEN),
       sanitizePromptField(ctx.productType, 60),
+      provenance,
     )
     const completion = await client.chat.completions.create(
       {
@@ -546,20 +647,34 @@ export async function buildThemeCard(ctx: ThemeCardContext): Promise<string | nu
     }
 
     // Persist. Non-fatal by design: a failed write costs a card regeneration next run, nothing else.
+    //
+    // ROWS-AFFECTED CHECK (2026-08-09): this is an UPDATE ... WHERE parent_asin = key, so when no
+    // listing_seo_scores row exists for that parent it updates ZERO rows, returns NO error, and the
+    // card is silently regenerated — and re-billed — on every single research run for ever. PostgREST
+    // only reports the affected rows when you ask for them, hence `.select('parent_asin')`. Still an
+    // UPDATE and not an upsert: inventing a listing_seo_scores row from the rater would fabricate a
+    // score row for a listing that has never been scored. A missing row is a real upstream problem
+    // and must be SAID, not papered over.
     if (db && key) {
       try {
-        const { error } = await db
+        const { data: updated, error } = await db
           .from('listing_seo_scores')
           .update({ theme_card: card, theme_card_sig: sig })
           .eq('parent_asin', key)
+          .select('parent_asin')
         if (error) console.warn(`[KW_THEME_CARD] asin=${tag} persist failed (non-fatal): ${error.message}`)
+        else if (Array.isArray(updated) && updated.length === 0) {
+          console.warn(
+            `[KW_THEME_CARD] asin=${tag} persist matched ZERO rows — no listing_seo_scores row for this parent, so the card is NOT stored and will be regenerated (and re-billed) on every run until one exists`,
+          )
+        }
       } catch (err) {
         console.warn(`[KW_THEME_CARD] asin=${tag} persist threw (non-fatal): ${errMsg(err)}`)
       }
     }
 
     console.log(
-      `[KW_THEME_CARD] asin=${tag} built sig=${sig.slice(0, 8)} designs=${designNames.length} card=${JSON.stringify(card)}`,
+      `[KW_THEME_CARD] asin=${tag} built sig=${sig.slice(0, 8)} designs=${designNames.length} from=${provenance} card=${JSON.stringify(card)}`,
     )
     return card
   } catch (err) {
@@ -686,6 +801,26 @@ export async function rateThemeFit(
         `[KW_THEME_RATER] asin=${tag} chunk ${c + 1}/${chunks.length} failed (non-fatal; ${chunk.length} keywords stay UNRATED): ${errMsg(err)}`,
       )
     }
+  }
+
+  // HARD-ERROR SURFACING. `instrumentAiHealth` stamps quota/auth failures on THIS client instance,
+  // and the only existing reader is the ai-recommendations route — which never sees this client. So
+  // a quota outage during rating produced ZERO signal anywhere: every persona abstained, every chunk
+  // contributed nothing, the map came back empty, and the selection shipped market-ordered. The
+  // rater still fails OPEN (the caller must never be blocked by a rating outage), but it no longer
+  // fails SILENT.
+  const hard = getAiHardError(client)
+  if (hard) {
+    console.error(JSON.stringify({
+      tag: 'KW_THEME_RATER_AI_DOWN',
+      asin: ctx.asin ?? null,
+      kind: hard,
+      rated: out.size,
+      of: uniq.length,
+      chunks: chunks.length,
+      skippedChunks,
+      message: 'HARD OpenAI error during theme rating — bands are missing because the model was unavailable, NOT because the keywords are on-theme.',
+    }))
   }
 
   console.log(

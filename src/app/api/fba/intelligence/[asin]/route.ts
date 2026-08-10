@@ -161,7 +161,29 @@ export async function GET(
         console.log(`[intelligence] ease-restamp for ${childAsin} deferred — last analysis write < 30min old (cooldown; will retry after it ages)`)
       }
       const needsEase = easeStale && !easeCoolingDown
-      if ((!stored || stored.length <= 1 || needsNativeBackfill || needsEase) && researchedAt) {
+      // THEME-RATING HEAL (2026-08-09) — the theme_fit twin of needsNativeBackfill. A pool that
+      // carries selection ranks but NOT ONE theme band was ordered on market score alone: every
+      // band resolved to the same default, so the band multiplier cancelled out of targetScore, the
+      // off-theme gate could not fire, and nothing could be promoted to CORE. Re-running the sync
+      // cache-HITS the research (0 Jungle Scout credits, exactly like the native backfill) and
+      // re-runs the rater over the stored pool.
+      //
+      // `some(selectionRank != null)` is the live-and-ran proof, not the env var: at off/shadow the
+      // read mapper leaves BOTH fields undefined, so this is structurally unreachable there.
+      //
+      // COOLDOWN IS REQUIRED, not polish — the same reasoning as the ease restamp, one step harsher.
+      // The CLEARING condition depends on an LLM call, so a listing with genuinely no design signal
+      // anywhere (no seller name, no vision, no resolved plan name) can NEVER clear it. Reusing
+      // EASE_RESTAMP_COOLDOWN_MS self-throttles that case to ~2 attempts/hour with no new state, and
+      // the post-promotion re-check below says so out loud instead of churning OpenAI spend silently.
+      const themeUnrated = !!stored && stored.length > 0
+        && stored.some((k) => k.selectionRank != null)
+        && !stored.some((k) => k.themeFit != null)
+      if (themeUnrated && easeCoolingDown) {
+        console.log(`[intelligence] theme-rating heal for ${childAsin} deferred — last analysis write < 30min old (cooldown; will retry after it ages)`)
+      }
+      const needsThemeRating = themeUnrated && !easeCoolingDown
+      if ((!stored || stored.length <= 1 || needsNativeBackfill || needsEase || needsThemeRating) && researchedAt) {
         try {
           // lastAnalyzedAt hoisted above (2026-08-08) — same value this branch used to query inline.
           const researchNewer = !lastAnalyzedAt || new Date(researchedAt).getTime() > new Date(lastAnalyzedAt).getTime()
@@ -176,10 +198,12 @@ export async function GET(
           const poolSize = await freshResearchPoolSize(childAsin)
           // Backfill/restamp variants need only a NON-EMPTY servable cache (equal size is fine — the
           // point is the stamp, not more rows); the thin-pool heal keeps its research-newer + bigger gate.
-          if ((needsNativeBackfill || needsEase) ? poolSize > 0 : (researchNewer && poolSize > (stored?.length ?? 0))) {
+          if ((needsNativeBackfill || needsEase || needsThemeRating) ? poolSize > 0 : (researchNewer && poolSize > (stored?.length ?? 0))) {
             const reason = needsEase
               ? `ease-restamp stored=${(stored ?? []).find((k) => k.selectionRank != null)?.selectionEaseWeight ?? 0} now=${selectionEaseWeight()}`
-              : needsNativeBackfill ? 'native-metric backfill' : 'thin-pool promotion'
+              : needsNativeBackfill ? 'native-metric backfill'
+              : needsThemeRating ? `theme-rating heal — ${stored?.length ?? 0} rows carry a selection rank but ZERO carry a theme band`
+              : 'thin-pool promotion'
             console.log(`[intelligence] self-heal ${childAsin}: stored=${stored?.length ?? 0}, fresh pool=${poolSize} (${reason}) — promoting cached pool (0 credits)`)
             const promoteTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined
             await syncKeywordIntelligence(childAsin, {
@@ -188,7 +212,7 @@ export async function GET(
             })
             const promoted = await getStoredAnalysis(childAsin, readWindow(100))
             // Backfill/restamp run at EQUAL size — accept the re-read whenever it's no smaller.
-            if (promoted && ((needsNativeBackfill || needsEase) ? promoted.length >= (stored?.length ?? 0) : promoted.length > (stored?.length ?? 0))) {
+            if (promoted && ((needsNativeBackfill || needsEase || needsThemeRating) ? promoted.length >= (stored?.length ?? 0) : promoted.length > (stored?.length ?? 0))) {
               stored = promoted
               // storeAnalysis just stamped analyzed_at ≥ researchedAt — reflect it so the auto-chain
               // poll (which requires lastAnalyzedAt ≥ researchedAt) doesn't read a pre-promotion value.
@@ -199,6 +223,12 @@ export async function GET(
               // next load — say so instead of silently churning OpenAI spend.
               if (needsEase && needsEaseRestamp(promoted, selectionEaseWeight(), selectionMode())) {
                 console.warn(`[intelligence] self-heal ${childAsin}: ease-restamp FAILED (write landed on the legacy branch?) — will retry next load`)
+              }
+              // Same loud loop guard for the theme heal. Still unrated after a promotion means the
+              // card could not be resolved (no design signal anywhere) or the rater is down — either
+              // way SAY it, because the cooldown will keep re-attempting and each attempt bills.
+              if (needsThemeRating && promoted.some((k) => k.selectionRank != null) && !promoted.some((k) => k.themeFit != null)) {
+                console.warn(`[intelligence] self-heal ${childAsin}: theme rating FAILED — still zero theme bands after promotion (no resolvable design signal, or the rater is down; see [KW_THEME_CARD] / [KW_THEME_RATER]) — will retry after the cooldown`)
               }
             }
           } else if (researchNewer) {

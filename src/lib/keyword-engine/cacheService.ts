@@ -16,6 +16,7 @@ import { AnalyzedKeyword, EngineResult } from './engine';
 import {
   selectionMode,
   selectRankingTargets,
+  UNRATED_THEME_RUN_ID,
   type SelectionContext,
   type ThemeBand,
 } from './selection-core';
@@ -400,6 +401,29 @@ export async function storeAnalysis(
       opts!.ctx!,
     );
 
+    /* ── UNRATED POOL — NAME IT, NEVER SHIP IT SILENTLY (live defect 2026-08-09) ────────────────
+     * `verdict.ratedCount === 0` means not one keyword in this pool was ever judged against the
+     * design, so `effectiveBand` read `themeFit ?? 2` for every row, the band multiplier became the
+     * SAME constant everywhere, and `targetScore` collapsed to `marketScore + incumbency + ease`.
+     * The 30 ranks below are therefore the 30 biggest MARKET numbers and nothing else — no keyword
+     * was excluded as off-theme (the band-0 gate cannot fire) and none was promoted as CORE (that
+     * needs band 3). That is exactly how "womens graphic t shirts" took seat #1 on a design about
+     * something else entirely.
+     *
+     * FAIL-OPEN, NOT FAIL-CLOSED. The selection is still WRITTEN: a market-ordered target set beats
+     * both the alternative of writing nothing (the seller loses the panel) and the alternative of
+     * failing open to the legacy tier list (which is the gap-amplified ordering KEYWORD_TARGET_SET
+     * exists to delete). What changes is that the row STOPS CLAIMING a theme judgment it never had:
+     *   - selection_reason gets an honest prefix, on the exact string the seller already reads;
+     *   - theme_run_id gets the `kt_unrated` sentinel, so the state is greppable in SQL across the
+     *     whole table instead of living in one log line nobody will search for.
+     * Scoped to rows that actually WON a rank: those are the only rows making the "ranking target"
+     * claim. Deterministic-net reasons ("foreign-language duplicate") are facts, not theme claims,
+     * and prefixing them would be noise.
+     */
+    const poolUnrated = verdict.ratedCount === 0 && verdict.unratedCount > 0;
+    const UNRATED_PREFIX = 'UNRATED POOL — ordered on market score only, no keyword was judged against the design · ';
+
     rows = merged.map((m) => ({
       asin,
       keyword: m.kw.keyword,
@@ -420,12 +444,16 @@ export async function storeAnalysis(
       // Sticky judgment signals.
       theme_fit: m.themeFit,
       theme_about: m.themeAbout,
-      theme_run_id: m.themeRunId,
+      theme_run_id: poolUnrated ? UNRATED_THEME_RUN_ID : m.themeRunId,
       // DERIVED selection — recomputed every run, so null here is a demotion by arithmetic, never a
       // persisted verdict. Non-targets get null: that is the membership predicate, not data loss.
       selection_rank: verdict.rankOf.get(m.kw.keyword) ?? null,
       selection_slot: verdict.slotOf.get(m.kw.keyword) ?? null,
-      selection_reason: verdict.reasonOf.get(m.kw.keyword) ?? null,
+      selection_reason: (() => {
+        const reason = verdict.reasonOf.get(m.kw.keyword) ?? null;
+        if (!reason || !poolUnrated || !verdict.rankOf.has(m.kw.keyword)) return reason;
+        return `${UNRATED_PREFIX}${reason}`;
+      })(),
       // EASE-WEIGHT STAMP (migration 056, PO 2026-08-08). The literal NUMBER 0 — never null — so a
       // rollback to weight 0 restamps to equality after ONE pass (no refire loop). Written ONLY here
       // (the merge branch, beside the ranks it describes); the legacy branch OMITS it so PostgREST
@@ -452,8 +480,33 @@ export async function storeAnalysis(
       // before any read-side flip, so the diff must be attributable).
       easeWeight: opts!.ctx!.easeWeight ?? 0,
       rated: ratings?.size ?? 0,
+      ratedRows: verdict.ratedCount,
+      unratedRows: verdict.unratedCount,
+      poolUnrated,
       carriedForward: merged.filter((m) => m.themeFit !== null && !ratings?.has(m.kw.keyword)).length,
     }));
+
+    // ONE loud line, at ERROR, naming the cause. `rated: 0` already existed on the INFO line above
+    // and was true on the live incident — nobody searches an INFO line for a number that is usually
+    // fine. A degradation that silently reorders the seller's whole target set is an ERROR, and it
+    // says WHICH upstream step to look at rather than only that something is wrong.
+    if (poolUnrated) {
+      console.error(JSON.stringify({
+        tag: 'KW_TARGET_SET_UNRATED',
+        asin,
+        mode,
+        pool: keywords.length,
+        targets: verdict.targets.length,
+        themeRunId: UNRATED_THEME_RUN_ID,
+        message: 'Target set SELECTED but NOT ONE keyword carried a theme band — the 30 ranks are pure market ordering, '
+          + 'no keyword could be excluded as off-theme, and no keyword could be promoted to CORE.',
+        checkInOrder: [
+          '[KW_THEME_CARD] skipped (no design signal) — no design name, vision theme or resolved plan name for this parent',
+          '[KW_THEME_RATER] skipped (no theme card) — the card was null, so ZERO rater calls were made',
+          '[KW_THEME_RATER] chunk N/M contributes NOTHING — the raters ran and died (quota / auth / timeout / bad JSON)',
+        ],
+      }));
+    }
   }
 
   // Batch UPSERT FIRST in chunks of 100 (upsert, not insert: a surviving imported row with the same

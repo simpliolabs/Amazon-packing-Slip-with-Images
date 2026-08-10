@@ -125,6 +125,19 @@ if (TARGET_SLOTS.CORE + TARGET_SLOTS.CATEGORY + TARGET_SLOTS.BACKEND !== RANKING
  *  a median over bands is stable run-to-run, a median over floats is not. */
 export type ThemeBand = 0 | 1 | 2 | 3
 
+/**
+ * Sentinel written to keyword_analysis.theme_run_id when a selection shipped over a pool in which
+ * NOT ONE keyword carried a band. It lives HERE — not in themeRater — because both writers need it
+ * and this module is the dependency-free one they already share; importing themeRater into
+ * cacheService would drag the OpenAI SDK into every module that persists a keyword.
+ *
+ * It exists so the degradation is QUERYABLE rather than merely logged:
+ *   select asin, count(*) from keyword_analysis where theme_run_id = 'kt_unrated' group by asin;
+ * Deliberately inside the `kt_` namespace `newThemeRunId` uses, and deliberately NOT parseable as a
+ * real run (no epoch, no random suffix), so it can never be mistaken for a batch that can be re-run.
+ */
+export const UNRATED_THEME_RUN_ID = 'kt_unrated'
+
 export type TargetSlot = 'CORE' | 'CATEGORY' | 'BACKEND'
 
 export type SelectionMode = 'off' | 'shadow' | 'on'
@@ -248,6 +261,29 @@ export interface TargetVerdict<T extends TargetInput> {
   slotCounts: Record<TargetSlot, number>
   bands: { b0: number; b1: number; b2: number; b3: number }
   eligibleCount: number
+  /**
+   * How many INPUT rows carried a real theme band, and how many did not (`ratedCount + unratedCount
+   * === rows.length`, always, including on every degenerate return).
+   *
+   * WHY THIS IS A RETURNED FACT AND NOT AN INFERENCE FROM `bands` (live defect, 2026-08-09): with
+   * the whole pool unrated, `effectiveBand` resolves `themeFit ?? 2` for every row, so `bands` reads
+   * {b0:0, b1:0, b2:N, b3:0} — INDISTINGUISHABLE from a genuinely all-CATEGORY pool that three
+   * raters actually judged. `targetScore` then multiplies every row by the SAME constant
+   * (THEME_BAND_WEIGHT[2] = 0.85), which is order-preserving, so the theme term cancels out and the
+   * ranking degrades to exactly `marketScore + incumbency + ease` — pure market ordering. The band-0
+   * gate cannot fire (nothing is band 0) and nothing can classify CORE (that needs band 3), so all
+   * 30 seats go to generic category heads in market order. `guard` stays null and `failOpen` stays
+   * false throughout: the selector reports a completely normal, successful selection.
+   *
+   * DELIBERATELY NOT A `TargetGuard`. Any non-null guard makes `resolveRankingTargets` fail OPEN to
+   * the caller's LEGACY tier list, which for an unrated pool is strictly WORSE than the
+   * market-ordered target set (the legacy list is the gap-amplified `coverageGapScore` ordering this
+   * whole module exists to remove). The selection must still ship; it must simply stop pretending it
+   * carries a theme judgment. Naming the state is the caller's job — see cacheService's merge
+   * branch, which stamps the honest reason and the `kt_unrated` run id.
+   */
+  ratedCount: number
+  unratedCount: number
   /** How many net-survivors the volume backstop covered (≤ RANKING_VOLUME_BACKSTOP). Nearly always
    *  saturated, so it is a health check, not a signal. */
   backstopCount: number
@@ -502,10 +538,18 @@ export function selectRankingTargets<T extends TargetInput>(
   const slotOf = new Map<string, TargetSlot>()
   const slotCounts: Record<TargetSlot, number> = { CORE: 0, CATEGORY: 0, BACKEND: 0 }
 
+  // RATING CENSUS — counted over the RAW INPUT, before any net, gate or collapse can shrink it, so
+  // "was this pool judged against the design?" is answered about the POOL and not about whatever
+  // survived. Counted here rather than inside the band loop precisely so every degenerate return
+  // below carries it too: an empty-input or no-eligible verdict must still be able to say whether
+  // the rows it rejected had ever been rated.
+  const ratedCount = (rows ?? []).filter((r) => r.themeFit != null).length
+  const unratedCount = (rows ?? []).length - ratedCount
+
   const degenerate = (guard: TargetGuard): TargetVerdict<T> => ({
     source: 'selector', targets: [], rankOf, slotOf, reasonOf,
     sha: selectionSha([]), guard, slotCounts, bands, eligibleCount: 0,
-    backstopCount: 0, rescuedCount: 0,
+    ratedCount, unratedCount, backstopCount: 0, rescuedCount: 0,
   })
 
   if (!rows || rows.length === 0) return degenerate('empty-input')
@@ -772,6 +816,8 @@ export function selectRankingTargets<T extends TargetInput>(
     // Post-collapse on purpose: DISTINCT eligible intents, not rows. A collapsed-away variant is
     // not a separate missed selection.
     eligibleCount: distinct.length,
+    ratedCount,
+    unratedCount,
     backstopCount: backstop.size,
     // Counted per INTENT, over family MEMBERS — not off the kept row's own flag. A band-0 row the
     // backstop rescued can collapse into a band-1+ sibling that carries `rescued: false`, and
