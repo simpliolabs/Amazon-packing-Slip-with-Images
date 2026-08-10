@@ -57,6 +57,7 @@ import {
   selectRankingTargets,
   legacyTierBuckets,
   resolveRankingTargets,
+  UNRATED_THEME_RUN_ID,
 } from './selection-core'
 import type { TargetInput, TargetSlot, ThemeBand, SelectionContext } from './selection-core'
 import { isSeasonalKeyword, seasonsIn, seasonRelation, isOffSeasonKeyword } from './seasonalTerms'
@@ -2781,3 +2782,99 @@ describe('§EASE — selectionEaseWeight: the call-time flag read at the impure 
   })
 })
 
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+ * §U — THE UNRATED POOL (live defect, 2026-08-09)
+ * ────────────────────────────────────────────────────────────────────────────────────────────────
+ * B0GVV3XL4T came back from a fresh re-research with 86 stored rows, 30 selection ranks, and
+ * theme_fit NULL on every single one. The selector reported a completely clean verdict.
+ *
+ * THE ARITHMETIC THAT MAKES IT INVISIBLE: with every band null, `effectiveBand` resolves
+ * `themeFit ?? 2` for the whole pool, so `targetScore` multiplies EVERY row by the same constant
+ * (THEME_BAND_WEIGHT[2] = 0.85). A uniform positive factor is order-preserving, so the theme term
+ * cancels out entirely and the ranking is `marketScore + incumbency + ease` — pure market ordering.
+ * `bands` then reads {b0:0, b1:0, b2:N, b3:0}, which is IDENTICAL to a genuinely all-CATEGORY pool
+ * that three raters actually judged, so no reader could tell the two apart.
+ *
+ * This section pins the FACT that makes them distinguishable (`ratedCount`/`unratedCount`) and the
+ * two structural consequences the fact has to explain.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+describe('§U — an unrated pool is a NAMED, RETURNED fact, not an inference from `bands`', () => {
+  const unratedPool = (): TargetInput[] => [
+    mk({ keyword: 'womens graphic t shirts', searchVolume: 443_000, competingProducts: 60_000, themeFit: null }),
+    mk({ keyword: 'oversized tshirts for women', searchVolume: 139_000, competingProducts: 40_000, themeFit: null }),
+    mk({ keyword: 'youth padded football shirt', searchVolume: 22_000, competingProducts: 4_000, themeFit: null }),
+    mk({ keyword: 'soccer jersey', searchVolume: 9_000, competingProducts: 3_000, themeFit: null }),
+  ]
+
+  it('reports unratedCount === pool size and ratedCount === 0', () => {
+    const v = selectRankingTargets(unratedPool(), CTX)
+    expect(v.ratedCount).toBe(0)
+    expect(v.unratedCount).toBe(4)
+    expect(v.ratedCount + v.unratedCount).toBe(4)
+  })
+
+  it('THE INDISTINGUISHABILITY: `bands` alone cannot tell unrated from genuinely all-CATEGORY', () => {
+    const unrated = selectRankingTargets(unratedPool(), CTX)
+    const rated = selectRankingTargets(unratedPool().map((r) => ({ ...r, themeFit: 2 as ThemeBand }), ), CTX)
+    // Identical histograms, identical target order — this is exactly why the counts had to exist.
+    expect(unrated.bands).toEqual(rated.bands)
+    expect(kwOf(unrated.targets)).toEqual(kwOf(rated.targets))
+    // ...and the ONLY thing that separates them:
+    expect(unrated.ratedCount).toBe(0)
+    expect(rated.ratedCount).toBe(4)
+  })
+
+  it('a PARTIALLY rated pool is not an unrated pool (the stamp must not fire on it)', () => {
+    const rows = unratedPool()
+    rows[0] = { ...rows[0], themeFit: 0 }              // band 0 IS a rating
+    const v = selectRankingTargets(rows, CTX)
+    expect(v.ratedCount).toBe(1)
+    expect(v.unratedCount).toBe(3)
+  })
+
+  it('CONSEQUENCE 1 — nothing can be excluded as off-theme, so the off-niche rows survive', () => {
+    const v = selectRankingTargets(unratedPool(), CTX)
+    expect(v.bands.b0).toBe(0)
+    expect(kwOf(v.targets)).toContain('youth padded football shirt')
+  })
+
+  it('CONSEQUENCE 2 — nothing classifies CORE, so every seat is CATEGORY in market order', () => {
+    const v = selectRankingTargets(unratedPool(), CTX)
+    expect(v.slotCounts.CORE).toBe(0)
+    expect(kwOf(v.targets)[0]).toBe('womens graphic t shirts')   // the biggest number wins seat #1
+  })
+
+  it('the theme term is arithmetically INERT across a uniformly-unrated pool', () => {
+    const rows = unratedPool()
+    const scores = rows.map((r) => targetScore(r))
+    const bare = rows.map((r) => marketScore(r))
+    // Every score is the SAME constant multiple of the pure market score ⇒ ordering is unchanged.
+    const ratios = scores.map((s, i) => s / bare[i])
+    for (const r of ratios) expect(r).toBeCloseTo(THEME_BAND_WEIGHT[2], 10)
+  })
+
+  it('guard stays null and the verdict looks CLEAN — which is why the caller must stamp it', () => {
+    // Deliberate: an unrated pool must NOT set a guard. `resolveRankingTargets` fails OPEN on any
+    // guard, back to the caller's legacy gap-amplified tier list, which is strictly worse than a
+    // market-ordered target set. The honesty belongs on the persisted row, not in a refusal.
+    const v = selectRankingTargets(unratedPool(), CTX)
+    expect(v.guard).toBeNull()
+    expect(v.targets.length).toBe(4)
+  })
+
+  it('degenerate verdicts still carry the census (empty-input and no-eligible)', () => {
+    expect(selectRankingTargets([], CTX)).toMatchObject({ guard: 'empty-input', ratedCount: 0, unratedCount: 0 })
+    const allForeign = [mk({ keyword: 'camisas para hombres', themeFit: null })]
+    const v = selectRankingTargets(allForeign, CTX)
+    expect(v.guard).toBe('no-eligible')
+    expect(v.unratedCount).toBe(1)      // the rows it REJECTED were unrated — still worth saying
+  })
+
+  it('UNRATED_THEME_RUN_ID is a sentinel, not a parseable run id', () => {
+    expect(UNRATED_THEME_RUN_ID).toBe('kt_unrated')
+    expect(UNRATED_THEME_RUN_ID.startsWith('kt_')).toBe(true)
+    expect(/^kt_\d+_[a-z0-9]+$/.test(UNRATED_THEME_RUN_ID)).toBe(false)   // never mistakable for a real batch
+  })
+})

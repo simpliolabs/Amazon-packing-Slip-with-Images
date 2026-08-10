@@ -18,6 +18,8 @@ import { RESEARCH_TTL_DAYS } from './keywordResearcher'
 import {
   carriesMarketOpportunity,
   hasAnyMarketOpportunity,
+  carriesThemeFit,
+  hasAnyThemeFit,
   rankByMarketOpportunity,
   researchAgeDays,
   deriveMarketDataState,
@@ -147,8 +149,17 @@ describe('researchAgeDays — an unreadable stamp is UNKNOWN, never "0 days old"
 })
 
 describe('deriveMarketDataState — boundaries + precedence', () => {
-  const st = (rows: number, withMo: number, ageDays: number | null): MarketDataState =>
-    deriveMarketDataState({ rows, rowsWithMarketOpportunity: withMo, ageDays, ttlDays: RESEARCH_TTL_DAYS })
+  /** `withFit` / `withRank` default to a RATED, SELECTED pool so every pre-existing case keeps
+   *  asserting exactly what it asserted before the `unrated` state existed. The unrated cases pass
+   *  them explicitly — a default that silently produced 'unrated' would make this whole table lie. */
+  const st = (
+    rows: number, withMo: number, ageDays: number | null,
+    withFit = rows, withRank = rows,
+  ): MarketDataState =>
+    deriveMarketDataState({
+      rows, rowsWithMarketOpportunity: withMo, rowsWithThemeFit: withFit,
+      rowsWithSelectionRank: withRank, ageDays, ttlDays: RESEARCH_TTL_DAYS,
+    })
 
   const table: [string, number, number, number | null, MarketDataState][] = [
     ['no rows at all',                            0,  0, 3,                     'empty'],
@@ -183,20 +194,88 @@ describe('deriveMarketDataState — boundaries + precedence', () => {
     expect(st(10, 10, RESEARCH_TTL_DAYS)).toBe('fresh')
     expect(st(10, 10, RESEARCH_TTL_DAYS + 1)).toBe('stale')
   })
+
+  /* ── `unrated` — the theme_fit half of the same disease ─────────────────────────────────────── */
+
+  const unratedTable: [string, number, number, number, number, number | null, MarketDataState][] = [
+    // rows, withMo, withFit, withRank, ageDays
+    ['THE LIVE SHAPE: 86 scored rows, 30 selected, ZERO rated', 86, 86, 0, 30, 0,  'unrated'],
+    ['still unrated even when the research is FRESH',           86, 86, 0, 30, 0,  'unrated'],
+    ['still unrated when the date is unreadable',               86, 86, 0, 30, null, 'unrated'],
+    ['ONE rated row is enough to clear it',                     86, 86, 1, 30, 0,  'fresh'],
+    ['a fully rated pool is fresh',                             86, 86, 86, 30, 0, 'fresh'],
+    ['NO selection ran ⇒ never unrated (flag off/shadow)',      86, 86, 0, 0,  0,  'fresh'],
+    ['a band-0 verdict IS a rating (counted by the caller)',    86, 86, 86, 30, 0, 'fresh'],
+  ]
+  for (const [label, rows, withMo, withFit, withRank, ageDays, expected] of unratedTable) {
+    it(`unrated: ${label} → ${expected}`, () =>
+      expect(st(rows, withMo, ageDays, withFit, withRank)).toBe(expected))
+  }
+
+  it('PRECEDENCE: unscored OUTRANKS unrated — no market data cannot be fixed by rating it', () => {
+    expect(st(86, 0, 0, 0, 30)).toBe('unscored')
+  })
+
+  it('PRECEDENCE: unrated OUTRANKS stale AND unknown — a pool nobody judged is wrong, not merely old', () => {
+    expect(st(86, 86, RESEARCH_TTL_DAYS + 99, 0, 30)).toBe('unrated')
+    expect(st(86, 86, null, 0, 30)).toBe('unrated')
+  })
+
+  it('FLAG-OFF BYTE-IDENTITY: at off/shadow both target-set counts read 0, so `unrated` is unreachable', () => {
+    // The read mapper leaves theme_fit AND selection_rank undefined unless KEYWORD_TARGET_SET=on.
+    // That pair — 0 rated AND 0 selected — must never produce the banner, or every listing in the
+    // portal would show it the moment the flag is rolled back.
+    for (const age of [0, 1, RESEARCH_TTL_DAYS, RESEARCH_TTL_DAYS + 1, null]) {
+      expect(st(86, 86, age, 0, 0)).not.toBe('unrated')
+    }
+  })
 })
 
 describe('deriveMarketDataHealth — counts + fail-open', () => {
-  const row = (mo: number | null, rank: number | null) => ({ marketOpportunity: mo, selectionRank: rank })
+  const row = (mo: number | null, rank: number | null, fit: number | null = 2) =>
+    ({ marketOpportunity: mo, selectionRank: rank, themeFit: fit })
 
   it('reproduces the LIVE B0GVV3XL4T verdict end to end', () => {
-    const pool = Array.from({ length: 88 }, () => row(null, null))
+    const pool = Array.from({ length: 88 }, () => row(null, null, null))
     const h = deriveMarketDataHealth(pool, daysAgo(46), { ttlDays: RESEARCH_TTL_DAYS, now: NOW })
     expect(h.rows).toBe(88)
     expect(h.rowsWithMarketOpportunity).toBe(0)
     expect(h.rowsWithSelectionRank).toBe(0)
+    expect(h.rowsWithThemeFit).toBe(0)
     expect(h.ageDays).toBe(46)
     expect(h.ttlDays).toBe(RESEARCH_TTL_DAYS)
     expect(h.state).toBe('unscored')
+  })
+
+  it('reproduces the SECOND live shape: market data cured, theme_fit still absent (2026-08-09)', () => {
+    // 86 rows all carrying market_opportunity, 30 holding a selection rank, NOT ONE rated. The
+    // banner must say "never rated against this design", not "fresh".
+    const pool = Array.from({ length: 86 }, (_, i) => row(6, i < 30 ? i + 1 : null, null))
+    const h = deriveMarketDataHealth(pool, daysAgo(0), { ttlDays: RESEARCH_TTL_DAYS, now: NOW })
+    expect(h.rows).toBe(86)
+    expect(h.rowsWithMarketOpportunity).toBe(86)
+    expect(h.rowsWithSelectionRank).toBe(30)
+    expect(h.rowsWithThemeFit).toBe(0)
+    expect(h.state).toBe('unrated')
+  })
+
+  it('a band-0 verdict is a RATING, not an absence — it must clear `unrated`', () => {
+    const pool = Array.from({ length: 5 }, (_, i) => row(6, i + 1, 0))
+    const h = deriveMarketDataHealth(pool, daysAgo(0), { ttlDays: RESEARCH_TTL_DAYS, now: NOW })
+    expect(h.rowsWithThemeFit).toBe(5)
+    expect(h.state).toBe('fresh')
+  })
+
+  it('carriesThemeFit / hasAnyThemeFit mirror the market predicate exactly', () => {
+    expect(carriesThemeFit({ themeFit: 0 })).toBe(true)
+    expect(carriesThemeFit({ themeFit: 3 })).toBe(true)
+    expect(carriesThemeFit({ themeFit: null })).toBe(false)
+    expect(carriesThemeFit({})).toBe(false)              // off/shadow: the key is absent
+    expect(carriesThemeFit({ themeFit: NaN })).toBe(false)
+    expect(carriesThemeFit(null)).toBe(false)
+    expect(hasAnyThemeFit([{ themeFit: null }, { themeFit: 1 }])).toBe(true)
+    expect(hasAnyThemeFit([{ themeFit: null }, {}])).toBe(false)
+    expect(hasAnyThemeFit(null)).toBe(false)
   })
 
   it('counts scored rows and selected targets independently', () => {
@@ -217,7 +296,7 @@ describe('deriveMarketDataHealth — counts + fail-open', () => {
 
   it('empty pool → state empty, all counts 0, researchedAt echoed', () => {
     const h = deriveMarketDataHealth([], daysAgo(3), { ttlDays: RESEARCH_TTL_DAYS, now: NOW })
-    expect(h).toMatchObject({ rows: 0, rowsWithMarketOpportunity: 0, rowsWithSelectionRank: 0, state: 'empty', ageDays: 3 })
+    expect(h).toMatchObject({ rows: 0, rowsWithMarketOpportunity: 0, rowsWithSelectionRank: 0, rowsWithThemeFit: 0, state: 'empty', ageDays: 3 })
   })
 
   it('null rows → empty, never a throw', () => {
@@ -231,7 +310,7 @@ describe('deriveMarketDataHealth — counts + fail-open', () => {
 
   it('unknownMarketDataHealth is the honest zero-value (never a fabricated fresh)', () => {
     expect(unknownMarketDataHealth(RESEARCH_TTL_DAYS)).toEqual({
-      rows: 0, rowsWithMarketOpportunity: 0, rowsWithSelectionRank: 0,
+      rows: 0, rowsWithMarketOpportunity: 0, rowsWithSelectionRank: 0, rowsWithThemeFit: 0,
       researchedAt: null, ageDays: null, ttlDays: RESEARCH_TTL_DAYS, state: 'unknown',
     })
   })

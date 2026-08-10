@@ -170,10 +170,12 @@ interface KeywordIntelligenceResult {
     rows: number
     rowsWithMarketOpportunity: number
     rowsWithSelectionRank: number
+    /** Optional so this mirror still compiles against a payload from a pre-change server. */
+    rowsWithThemeFit?: number
     researchedAt: string | null
     ageDays: number | null
     ttlDays: number
-    state: 'fresh' | 'stale' | 'unscored' | 'empty' | 'unknown'
+    state: 'fresh' | 'stale' | 'unscored' | 'unrated' | 'empty' | 'unknown'
   }
 }
 
@@ -197,7 +199,15 @@ function marketDataBanner(h: NonNullable<KeywordIntelligenceResult['marketDataHe
   const when = h.researchedAt
     ? `researched ${h.ageDays == null ? '' : h.ageDays === 0 ? 'today, ' : `${h.ageDays}d ago, `}${new Date(h.researchedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
     : 'research date unknown'
-  const counts = `${h.rows} keyword${h.rows === 1 ? '' : 's'} stored · ${h.rowsWithMarketOpportunity} with a market opportunity score · ${h.rowsWithSelectionRank} selected as ranking targets · ${when}`
+  const counts = `${h.rows} keyword${h.rows === 1 ? '' : 's'} stored · ${h.rowsWithMarketOpportunity} with a market opportunity score · ${h.rowsWithThemeFit ?? 0} rated against this design · ${h.rowsWithSelectionRank} selected as ranking targets · ${when}`
+  // 'unrated' — a target set WAS chosen, but nothing was ever judged against the design, so the
+  // ranking below is the market's volume order with a theme label on it. Say exactly that: the
+  // seller is looking at a list that LOOKS like a priority order and is not one.
+  if (h.state === 'unrated') return {
+    tone: 'bg-amber-50 border-amber-200 text-amber-900',
+    headline: 'These keywords were never rated against this design — the ranking targets below were picked on market size alone, so off-theme keywords could not be filtered out. Re-research to rate them.',
+    detail: counts,
+  }
   if (h.state === 'unscored') return {
     tone: 'bg-amber-50 border-amber-200 text-amber-900',
     headline: 'No market opportunity data — keywords ranked by volume only. Re-research to get opportunity + ease scores.',

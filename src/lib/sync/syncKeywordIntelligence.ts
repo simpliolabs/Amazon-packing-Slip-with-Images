@@ -37,7 +37,7 @@ import { classifyOffNicheKeywords } from '../keyword-engine/relevanceClassifier'
 // KEYWORD_TARGET_SET (#143). selectionMode is a CALL-TIME env read, so a Coolify flip + restart
 // changes behaviour with no rebuild. loadSelectionContext short-circuits to zero queries at `off`.
 import { selectionMode, resolveRankingTargets, type SelectionContext } from '../keyword-engine/selection-core';
-import { loadSelectionContext, readWindow } from '../keyword-engine/selectionContext';
+import { loadSelectionContextWithSources, readWindow } from '../keyword-engine/selectionContext';
 import { buildThemeCard, rateThemeFit, newThemeRunId } from '../keyword-engine/themeRater';
 import type { ThemeRatings } from '../keyword-engine/cacheService';
 import { createClient } from '@supabase/supabase-js';
@@ -366,8 +366,15 @@ async function applyRelevanceGate<T extends { keyword: string }>(
     const { identityTokensOf, keywordIsRelevant, guaranteedIdentitySynonyms } = await import('../keyword-engine/keywordResearcher');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = supabase as any;
+    // THE DEAD WIRE (fixed 2026-08-09). `design_name_overrides` — the PER-DESIGN map, migration 034 —
+    // was NOT in this select, but line ~409 read `scoreRow.design_name_overrides` and handed the
+    // result to buildThemeCard. It was therefore ALWAYS undefined, so every MULTI-DESIGN family
+    // (scalar null + map populated, which is exactly what the per-design name UI writes) resolved
+    // ZERO design names ⇒ null theme card ⇒ empty rating map ⇒ theme_fit NULL on every row ⇒ the
+    // whole target set ordered on market score alone, with no log and no guard. An inline cast at
+    // the read site hid it from tsc.
     const { data: scoreRow } = await db.from('listing_seo_scores')
-      .select('product_title, design_name_override, audience_lean').eq('parent_asin', resolvedParent).maybeSingle();
+      .select('product_title, design_name_override, design_name_overrides, audience_lean').eq('parent_asin', resolvedParent).maybeSingle();
     const childTitles = (listingRows ?? []).map((r) => r.title).filter(Boolean) as string[];
 
     /* ── KEYWORD_TARGET_SET (#143) ─────────────────────────────────────────────────────────────
@@ -394,7 +401,12 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       if (selectionMode() === 'off') return { keywords: out, ctx: null, ratings: null, themeRunId: null };
 
       try {
-        const ctx = await loadSelectionContext({
+        // ONE load, TWO consumers. `loadSelectionContextWithSources` returns the same four design
+        // signals it derived the seasons from, and the card is built from THOSE — not from a second,
+        // narrower re-read of the score row. Before this, the seasons read four sources and the card
+        // read one-and-a-half, eight lines apart, so a design the seller had never named by hand got
+        // a correct season and no theme card at all. Zero extra queries: every source was loaded.
+        const { ctx, sources } = await loadSelectionContextWithSources({
           supabase: db,
           childAsin: asin,
           parentAsin: resolvedParent,
@@ -405,8 +417,10 @@ async function applyRelevanceGate<T extends { keyword: string }>(
         const card = await buildThemeCard({
           asin,
           parentAsin: resolvedParent,
-          designNameOverride: scoreRow?.design_name_override ?? null,
-          designNameOverrides: (scoreRow as { design_name_overrides?: Record<string, string> | null } | null)?.design_name_overrides ?? null,
+          designNameOverride: sources.designNameOverride ?? null,
+          designNameOverrides: sources.designNameOverridesByKey ?? null,
+          visionDesignTheme: sources.visionDesign?.designTheme ?? null,
+          resolvedDesignName: sources.resolvedDesignName ?? null,
           audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
           supabase: db,
         });

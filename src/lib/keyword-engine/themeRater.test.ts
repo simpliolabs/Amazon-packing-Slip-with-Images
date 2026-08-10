@@ -18,11 +18,13 @@ import {
   combineRaterVerdicts,
   sanitizePromptField,
   resolveDesignNames,
+  resolveDesignSignals,
   normalizeThemeCard,
   themeCardSig,
   RATER_PERSONAS,
   RATER_TEMPERATURE,
   type ThemeRating,
+  type DesignSignalProvenance,
 } from './themeRater'
 
 const CARD = "Valentine's Day cupid romance love gift graphic tee for women"
@@ -210,9 +212,88 @@ describe('resolveDesignNames / themeCardSig / normalizeThemeCard', () => {
     expect(names).toEqual(['Cupid', 'Golf Widow', 'Pixel Arrow'])
   })
 
-  it('returns [] when BOTH design signals are blank — the no-LLM-call fail-open path', () => {
-    expect(resolveDesignNames({ designNameOverride: null, designNameOverrides: null })).toEqual([])
-    expect(resolveDesignNames({ designNameOverride: '   ', designNameOverrides: {} })).toEqual([])
+  it('returns [] only when ALL FOUR design signals are blank — the no-LLM-call fail-open path', () => {
+    expect(resolveDesignNames({
+      designNameOverride: null, designNameOverrides: null,
+      resolvedDesignName: null, visionDesignTheme: null,
+    })).toEqual([])
+    expect(resolveDesignNames({
+      designNameOverride: '   ', designNameOverrides: {},
+      resolvedDesignName: '  ', visionDesignTheme: '',
+    })).toEqual([])
+  })
+
+  /* ── THE FOUR SOURCES (live defect 2026-08-09) ────────────────────────────────────────────────
+   * The card used to read the seller's two boxes only, so a design the seller never named produced
+   * NO card ⇒ an EMPTY rating map ⇒ theme_fit null on every row ⇒ the target set silently degraded
+   * to pure market ordering. These pin the tier rules that close it. */
+
+  const signalTable: [string, Parameters<typeof resolveDesignSignals>[0], string[], DesignSignalProvenance][] = [
+    ['seller scalar wins outright',
+      { designNameOverride: 'Cupid', visionDesignTheme: 'ocean animals', resolvedDesignName: 'Sea Life' },
+      ['Cupid'], 'seller'],
+    ['seller per-design map alone (THE multi-design shape: scalar null, map populated)',
+      { designNameOverride: null, designNameOverrides: { b: 'Golf Widow', a: 'Cupid' } },
+      ['Cupid', 'Golf Widow'], 'seller'],
+    ['VISION ONLY — previously produced no card at all',
+      { designNameOverride: null, designNameOverrides: null, visionDesignTheme: 'ocean animals' },
+      ['ocean animals'], 'derived'],
+    ['RESOLVED PLAN NAME ONLY — previously produced no card at all',
+      { designNameOverride: null, designNameOverrides: {}, resolvedDesignName: 'See You Later Alligator' },
+      ['See You Later Alligator'], 'derived'],
+    ['plan name OUTRANKS vision inside the derived tier',
+      { resolvedDesignName: 'See You Later Alligator', visionDesignTheme: 'ocean animals' },
+      ['See You Later Alligator', 'ocean animals'], 'derived'],
+    ['nothing anywhere',
+      { designNameOverride: null, designNameOverrides: null, resolvedDesignName: null, visionDesignTheme: null },
+      [], 'none'],
+  ]
+  for (const [label, ctx, names, provenance] of signalTable) {
+    it(`design signals: ${label} → [${names.join(' | ')}] (${provenance})`, () => {
+      expect(resolveDesignSignals(ctx)).toEqual({ names, provenance })
+    })
+  }
+
+  it('TIERS ARE EXCLUSIVE: a seller-named family never gets a vision-guessed extra "design"', () => {
+    // buildThemeCardPrompt emits "this family has N SEPARATE designs; name EVERY one". A spurious
+    // 3rd entry would make the two real designs' own keywords read as a different theme (band 0)
+    // on their own listings — the catastrophic-failure case the multi-design clause exists for.
+    const { names, provenance } = resolveDesignSignals({
+      designNameOverride: null,
+      designNameOverrides: { a: 'Cupid', b: 'Golf Widow' },
+      visionDesignTheme: 'pixel art',
+      resolvedDesignName: 'Pixel Arrow',
+    })
+    expect(names).toEqual(['Cupid', 'Golf Widow'])
+    expect(provenance).toBe('seller')
+  })
+
+  it('the prompt does NOT claim "seller-authored" for a derived signal', () => {
+    const seller = buildThemeCardPrompt(['Cupid'], 'lean_female', 'tee', 'seller')
+    const derived = buildThemeCardPrompt(['ocean animals'], 'lean_female', 'tee', 'derived')
+    expect(seller.user).toContain('seller-authored, AUTHORITATIVE')
+    expect(derived.user).not.toContain('seller-authored')
+    expect(derived.user).toContain('detected from the artwork')
+  })
+
+  it('SIG CHURN GUARD: a seller-named listing keeps a BYTE-IDENTICAL sig when vision/plan exist', () => {
+    // The sig-match branch is what preserves a PO HAND-EDITED theme_card. Hashing the derived
+    // sources unconditionally would have invalidated every hand-edited card in the portal at once.
+    const base = { designNameOverride: 'Cupid', designNameOverrides: null, audienceLean: 'lean_female' }
+    expect(themeCardSig({ ...base, visionDesignTheme: 'ocean animals', resolvedDesignName: 'Sea Life' }))
+      .toBe(themeCardSig(base))
+  })
+
+  it('SIG TRACKS THE SOURCES ACTUALLY USED: on a vision-only design, a rescan regenerates the card', () => {
+    const before = themeCardSig({ designNameOverride: null, designNameOverrides: null, visionDesignTheme: 'ocean animals', audienceLean: null })
+    const after = themeCardSig({ designNameOverride: null, designNameOverrides: null, visionDesignTheme: 'space animals', audienceLean: null })
+    expect(after).not.toBe(before)
+  })
+
+  it('SIG: the seller typing a name on a previously vision-only design regenerates the card', () => {
+    const visionOnly = themeCardSig({ designNameOverride: null, designNameOverrides: null, visionDesignTheme: 'ocean animals', audienceLean: null })
+    const named = themeCardSig({ designNameOverride: 'Save The Ocean', designNameOverrides: null, visionDesignTheme: 'ocean animals', audienceLean: null })
+    expect(named).not.toBe(visionOnly)
   })
 
   it('sig is STABLE across jsonb key ordering (a reordered read must not churn the target set)', () => {

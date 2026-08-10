@@ -1,5 +1,12 @@
 /**
- * marketDataHealth.ts — ONE definition of "does this keyword pool carry MARKET data?"
+ * marketDataHealth.ts — ONE definition of "can this keyword pool's ordering be trusted?"
+ *
+ * TWO HALVES, ONE MODULE (2026-08-09, second incident on the SAME ASIN):
+ *   market_opportunity — "is this keyword WINNABLE?"   (migration 055)
+ *   theme_fit          — "is this keyword OURS?"       (migration 049)
+ * Either one missing across the whole pool degrades the ordering to raw market/volume order while
+ * every surface keeps rendering it as a priority order. They are the same disease one column apart,
+ * so they get ONE health signal and ONE banner rather than two that can disagree.
  * ─────────────────────────────────────────────────────────────────────────────
  * PO RULING (verbatim, 2026-08-09): "VOLUME is not the biggest thing we look at but the JS
  * opportunity and ranking ability with the right volume." The 3-factor model
@@ -42,6 +49,17 @@ export interface MarketDataRow {
   marketOpportunity?: number | null
   /** KEYWORD_TARGET_SET selection rank (migration 049). NOT NULL = a chosen ranking target. */
   selectionRank?: number | null
+  /** KEYWORD_TARGET_SET theme band 0-3 (migration 049) — the LLM's judgment of whether the shopper
+   *  typing this phrase wants THIS design. null/undefined/absent = NEVER RATED.
+   *
+   *  THE SECOND HALF OF THE SAME DISEASE. `market_opportunity` answers "is this keyword winnable?";
+   *  `theme_fit` answers "is this keyword OURS?". With every band null, selection-core's
+   *  `effectiveBand` resolves `themeFit ?? 2` for the whole pool, so `THEME_BAND_WEIGHT[2] = 0.85`
+   *  becomes a CONSTANT multiplier that cancels out of the ordering and `targetScore` degrades to
+   *  exactly `marketScore + incumbency + ease` — pure volume/market ordering, wearing a theme label.
+   *  The band-0 gate cannot fire and no row can classify CORE, so all 30 seats go to generic
+   *  category heads in market order. Silent by construction: the selector reports a clean verdict. */
+  themeFit?: number | null
 }
 
 /**
@@ -50,11 +68,16 @@ export interface MarketDataRow {
  *              market that has since moved).
  * `unscored` — rows exist but ZERO carry market_opportunity. THE B0GVV3XL4T state: any ordering of
  *              this pool is volume/composite ordering wearing an opportunity label.
+ * `unrated`  — a target set WAS selected (rows carry selection_rank) but ZERO carry theme_fit: no
+ *              keyword in this pool was ever judged against the design. The 30 "ranking targets" on
+ *              screen are the 30 biggest market numbers, nothing more. Same disease as `unscored`,
+ *              one column over — and unlike `unscored` it is invisible in every number the seller
+ *              sees, which is why it needs its own name.
  * `empty`    — no rows at all.
  * `unknown`  — we could not determine it (a failed read, an unparseable timestamp). Fail-open:
  *              callers must degrade to this, never block a regen or throw.
  */
-export type MarketDataState = 'fresh' | 'stale' | 'unscored' | 'empty' | 'unknown'
+export type MarketDataState = 'fresh' | 'stale' | 'unscored' | 'unrated' | 'empty' | 'unknown'
 
 export interface MarketDataHealth {
   /** Stored pool size. */
@@ -63,6 +86,11 @@ export interface MarketDataHealth {
   rowsWithMarketOpportunity: number
   /** How many were actually SELECTED as ranking targets (selection_rank NOT NULL). */
   rowsWithSelectionRank: number
+  /** How many were JUDGED against the design (theme_fit NOT NULL). Zero alongside a non-zero
+   *  `rowsWithSelectionRank` is the `unrated` state: a target set was selected on market numbers
+   *  alone. At KEYWORD_TARGET_SET=off/shadow the read mapper leaves BOTH fields undefined, so both
+   *  counts are 0 and the state can never be `unrated` — the flag-off path stays byte-identical. */
+  rowsWithThemeFit: number
   /** keyword_cache.fetched_at for this pool — WHEN the research happened. null = unknown. */
   researchedAt: string | null
   /** Whole days since `researchedAt`; null when it is missing or unparseable. */
@@ -87,6 +115,22 @@ export function carriesMarketOpportunity(row: MarketDataRow | null | undefined):
  *  reduces to. PURE. */
 export function hasAnyMarketOpportunity(rows: readonly MarketDataRow[] | null | undefined): boolean {
   return (rows ?? []).some((r) => carriesMarketOpportunity(r))
+}
+
+/**
+ * THE theme-rating predicate, deliberately the same SHAPE as `carriesMarketOpportunity` so the two
+ * halves of "is this pool's ordering honest?" can never be answered by two different rules.
+ * A finite band counts — INCLUDING band 0, which is an off-theme VERDICT, not an absence.
+ * PURE.
+ */
+export function carriesThemeFit(row: MarketDataRow | null | undefined): boolean {
+  const v = row?.themeFit
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+/** True when ANY row was judged against the design. PURE. */
+export function hasAnyThemeFit(rows: readonly MarketDataRow[] | null | undefined): boolean {
+  return (rows ?? []).some((r) => carriesThemeFit(r))
 }
 
 /**
@@ -125,26 +169,46 @@ export function researchAgeDays(researchedAt: string | null | undefined, now: nu
 }
 
 /**
- * State derivation. PRECEDENCE IS LOAD-BEARING: empty → unscored → unknown-age → stale → fresh.
+ * State derivation. PRECEDENCE IS LOAD-BEARING:
+ *   empty → unscored → unrated → unknown-age → stale → fresh.
  *
  * `unscored` OUTRANKS `stale` deliberately. B0GVV3XL4T is BOTH (46 days old AND zero scored rows);
  * if staleness won, the banner would read "research is a bit old" and the seller would never learn
  * that every number on the screen is volume order. The harsher, more actionable truth wins the
  * label — and `researchedAt`/`ageDays` stay on the payload so the UI can still state the date.
  *
+ * `unrated` sits immediately below `unscored` for the same reason and above `stale` for the same
+ * reason: a pool nobody judged against the design is a WRONGNESS, not an ageing. It is deliberately
+ * BELOW `unscored` because a pool with no market data cannot be fixed by rating it — the research
+ * has to be re-run either way, so the more upstream failure owns the headline.
+ *
+ * THE `unrated` GATE IS `rowsWithSelectionRank > 0`, NOT the flag. `selection_rank` is written by
+ * exactly one branch (cacheService's merge branch, which requires a non-null SelectionContext) and
+ * read back only at KEYWORD_TARGET_SET=on, so a non-zero count PROVES both that the feature is live
+ * and that a selection actually ran. Gating on the env var instead would be unreadable here (this
+ * module is pure and importable from a client component) and would fire on every listing at `on`
+ * before the first selection ever ran. At off/shadow the read mapper leaves theme_fit AND
+ * selection_rank undefined, so both counts are 0 and this branch is unreachable — the flag-off path
+ * is byte-identical, which is the whole rollback contract.
+ *
  * The staleness comparison is `ageDays > ttlDays` (STRICTLY greater), mirroring the cache-expiry
- * check at keywordResearcher.ts:1187 exactly — a pool at exactly the TTL is still servable there,
- * so it must not read "stale" here.
+ * check at keywordResearcher.ts exactly — a pool at exactly the TTL is still servable there, so it
+ * must not read "stale" here.
  * PURE.
  */
 export function deriveMarketDataState(input: {
   rows: number
   rowsWithMarketOpportunity: number
+  /** REQUIRED, not defaulted: a silent 0 here would make every pool read "rated" and re-hide the
+   *  exact degradation this state exists to surface. */
+  rowsWithThemeFit: number
+  rowsWithSelectionRank: number
   ageDays: number | null
   ttlDays: number
 }): MarketDataState {
   if (input.rows <= 0) return 'empty'
   if (input.rowsWithMarketOpportunity <= 0) return 'unscored'
+  if (input.rowsWithSelectionRank > 0 && input.rowsWithThemeFit <= 0) return 'unrated'
   if (input.ageDays == null) return 'unknown'
   return input.ageDays > input.ttlDays ? 'stale' : 'fresh'
 }
@@ -153,13 +217,13 @@ export function deriveMarketDataState(input: {
  *  never a fabricated 'fresh'. PURE. */
 export function unknownMarketDataHealth(ttlDays: number): MarketDataHealth {
   return {
-    rows: 0, rowsWithMarketOpportunity: 0, rowsWithSelectionRank: 0,
+    rows: 0, rowsWithMarketOpportunity: 0, rowsWithSelectionRank: 0, rowsWithThemeFit: 0,
     researchedAt: null, ageDays: null, ttlDays, state: 'unknown',
   }
 }
 
 /**
- * Count the stored pool and derive its health. Cheap — three passes over rows already in memory,
+ * Count the stored pool and derive its health. Cheap — four passes over rows already in memory,
  * no extra round trips. Never throws: a malformed row array degrades to `unknown`.
  * PURE (apart from the injectable `now`).
  */
@@ -174,6 +238,7 @@ export function deriveMarketDataHealth(
       rows: list.length,
       rowsWithMarketOpportunity: list.filter((r) => carriesMarketOpportunity(r)).length,
       rowsWithSelectionRank: list.filter((r) => r?.selectionRank != null).length,
+      rowsWithThemeFit: list.filter((r) => carriesThemeFit(r)).length,
     }
     const ageDays = researchAgeDays(researchedAt, opts.now ?? Date.now())
     return {
