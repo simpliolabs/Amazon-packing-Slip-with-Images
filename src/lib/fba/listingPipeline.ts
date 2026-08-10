@@ -7808,7 +7808,34 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // ⇒ enforceMoneyTail installs nothing ⇒ the title stays BYTE-IDENTICAL and honest, which is the
     // correct outcome: no money tail beats a confidently-wrong one. Loud, structured, and greppable
     // so the degradation is never invisible again.
-    const mtRanked = rankByMarketOpportunity(mtCandidates, (e) => e.k)
+    /* BAND BEFORE MARKET (PO 2026-08-09 gold + PO 2026-08-10 "a design's own subject terms are band 3
+     * / CORE by definition"). THE DEAD WIRE THIS CLOSES: `themeFit` is on AnalyzedKeyword
+     * (engine.ts:155) and cacheService maps it onto every row getStoredAnalysis returns (:391) — yet
+     * before this line it was referenced ZERO times in all of listingPipeline.ts. The rater decides
+     * which keywords ARE this design's subject and the generator writing the title never asked, so
+     * the money slot went to whatever scored best on market opportunity alone. Live on B0GVV3XL4T
+     * that produced `... | Graphic T Shirts` — a generic band-2 category head — while the very same
+     * pool's ranks 1-3 were band-3 world-cup terms. The PO's gold for that design is
+     * `... | USA Mexico Canada Football Tee`: the DESIGN's own subject in the money position.
+     *
+     * PREFERENCE ORDER, NOT A FILTER. Take the best band that has any candidate, then run the
+     * EXISTING market ranking within it — so §5's "volume is never the decider" and the
+     * no-silent-volume-fallback rule below are untouched; this only chooses WHICH POOL that ranking
+     * runs over. A design with no band-3 supply still gets its best market-scored tail.
+     *
+     * FAIL-OPEN BY CONSTRUCTION: on an unrated pool every row has themeFit == null, so `mtBanded` is
+     * empty and this collapses to the previous behaviour byte-for-byte. Unrated is a real live state
+     * (KEYWORD_TARGET_SET off/shadow, or research older than the rater) and must not lose its tail. */
+    const mtBandOf = (e: { k: { themeFit?: 0 | 1 | 2 | 3 | null } }): number =>
+      (typeof e.k.themeFit === 'number' ? e.k.themeFit : -1)
+    const mtTopBand = Math.max(-1, ...mtCandidates.map(mtBandOf))
+    const mtBanded = mtTopBand >= 0 ? mtCandidates.filter((e) => mtBandOf(e) === mtTopBand) : []
+    if (mtBanded.length > 0 && mtBanded.length < mtCandidates.length) {
+      console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'MONEY_TAIL_BAND', asin: input.children[0]?.asin ?? '?',
+        topBand: mtTopBand, inBand: mtBanded.length, ofCandidates: mtCandidates.length,
+        note: 'money tail restricted to the design\'s highest theme band before market ordering' }))
+    }
+    const mtRanked = rankByMarketOpportunity(mtBanded.length > 0 ? mtBanded : mtCandidates, (e) => e.k)
     if (mtCandidates.length > 0 && mtRanked.length === 0) {
       console.log('[MONEY_TAIL_NO_MARKET_DATA]', JSON.stringify({
         tag: 'MONEY_TAIL_NO_MARKET_DATA',
