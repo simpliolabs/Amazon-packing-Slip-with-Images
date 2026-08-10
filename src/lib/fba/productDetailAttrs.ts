@@ -20,6 +20,7 @@
  */
 
 import type { PatchValueEntry } from '@/lib/fba/pushFields'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 /**
@@ -222,7 +223,10 @@ export function capItemHighlightRepeats(value: string): string {
     for (const [w, c] of local) counts.set(w, (counts.get(w) ?? 0) + c)
     kept.push(phrase)
   }
-  // TERMINAL LENGTH NET (PO 2026-07-19): Item Highlights must stay ≤75 chars (short feature/benefit phrases,
+  // TERMINAL LENGTH NET (PO 2026-08-10, was ≤75 per PO 2026-07-19): Item Highlights stay within
+  // CONTENT_CONTRACT.itemHighlights.max (125) — Amazon's stated budget for this field, of which the old
+  // 75 discarded 40%. The QUALITY rule is unchanged and is what the 2026-07-19 ruling was really about:
+  // short feature/benefit phrases,
   // not a full sentence). This runs at the PUSH boundary (buildDetailPatchValue) + every generator return +
   // the regen route, so a stale/LLM/stored ~120-char value is truncated to ≤75 at a COMMA boundary (never
   // mid-word) even if it never went through the ≤75 generator gate. Always keeps ≥1 phrase (never blanks).
@@ -230,7 +234,7 @@ export function capItemHighlightRepeats(value: string): string {
   let len = 0
   for (const p of kept) {
     const next = capped.length ? len + 2 + p.length : p.length
-    if (next > 75 && capped.length >= 1) break
+    if (next > CONTENT_CONTRACT.itemHighlights.max && capped.length >= 1) break
     capped.push(p); len = next
   }
   const finalPhrases = capped.length ? capped : kept.slice(0, 1)
