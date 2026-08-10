@@ -52,11 +52,11 @@ export async function GET() {
 
     // Paginated: a single .select() caps at 1000 and would silently mine a fraction of the corpus.
     const PAGE = 1000
-    const rows: { parent_asin: string | null; recommended_title: string | null; title_source: string | null; updated_at: string | null }[] = []
+    const rows: { parent_asin: string | null; recommended_title: string | null; title_source: string | null; generated_at: string | null }[] = []
     for (let from = 0; ; from += PAGE) {
       const { data, error } = await supabase
         .from('listing_seo_recommendations')
-        .select('parent_asin, recommended_title, title_source, updated_at')
+        .select('parent_asin, recommended_title, title_source, generated_at')
         .eq('title_source', 'manual')
         .range(from, from + PAGE - 1)
       if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -81,7 +81,7 @@ export async function GET() {
         left, leftWords: words(left),
         right, rightWords: right ? words(right) : 0,
         hasPipe: pipe >= 0,
-        updatedAt: r.updated_at,
+        updatedAt: r.generated_at,
       })
     }
 
