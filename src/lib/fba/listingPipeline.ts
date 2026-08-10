@@ -8150,6 +8150,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
      * the arguments the loop below is about to run with — a second, drifting copy would let the two
      * nets disagree, and the waste net would strip on a promise the loop never keeps. */
     const moneyCtx = {
+      // PO ruling 2026-08-10: the pipe-right is the MONEY position, so where the title has ROOM the
+      // money tail APPENDS rather than abstaining and letting the band-pad weld a spec fact there.
+      allowAppend: true,
       apparel: apparelProduct, lean, spec: blankSpec,
       // Parity with the census/anchor sites (:7967/:8763): effectiveDesignName first. The net
       // itself treats an unresolvable design as design-right (protected), never guard-off.

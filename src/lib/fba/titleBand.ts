@@ -466,6 +466,21 @@ export interface MoneyTailCtx {
    *  pipe-right carrying ALL of its tokens is a protected BRAND tail (gold #2's shape) — the
    *  brand-tail guard skips rather than evict it. */
   garmentBrand?: string | null
+  /**
+   * May the net APPEND a money tail where none existed? (PO ruling 2026-08-10.)
+   *
+   * The net was replace-only by an explicit conservative choice. Measured consequence on
+   * B0GVV3XL4T: the council produced a pipe-less 61-char title, this door returned 'no-tail' and
+   * abstained, and `enforceTitleBand`'s pad — which runs AFTER — appended " | Crew Neck", a
+   * BLANK_SPECS neck value, to reach the length band. A SPEC FACT took the money position because
+   * the money door declined to. The PO's objection was exact: "WHY did we need the filler CREW NECK
+   * there? crew neck can go on highlights."
+   *
+   * Appending can only ever REPLACE what the pad would otherwise invent: the band check still
+   * rejects any candidate that cannot land inside [70,75] ('no-fit'), and when nothing fits the
+   * title simply stays shorter — which the same ruling says is the right outcome.
+   */
+  allowAppend?: boolean
 }
 
 /**
@@ -578,9 +593,27 @@ export function enforceMoneyTail(
     ? t0.slice(0, pipeIdx).trim()
     : (tailM ? t0.slice(0, tailM.index).trim() : t0)
 
-  // CONSERVATIVE: replace-only, never append. A title with neither a pipe nor a bare trailing
-  // audience tail has no replaceable tail region — skip rather than graft one on.
-  if (pipeIdx < 0 && !tailM) return { title: t0, decision: 'no-tail', note: 'no pipe and no trailing audience tail to replace' }
+  /* APPEND WHEN THERE IS ROOM (PO ruling 2026-08-10, superseding the replace-only conservatism).
+   *
+   * WAS: "replace-only, never append — a title with neither a pipe nor a bare trailing audience tail
+   * has no replaceable tail region, skip rather than graft one on." That was a conservative reading
+   * taken when the reference gold happened to ALREADY have a replaceable tail.
+   *
+   * WHAT IT ACTUALLY DID (measured, B0GVV3XL4T 2026-08-10): the council hands this door a pipe-less
+   * 61-char title, so it returned 'no-tail' and skipped — and `enforceTitleBand`'s pad, which runs
+   * AFTER, then appended " | Crew Neck" (a BLANK_SPECS neck value) to reach the length band. The
+   * money door abstained and a SPEC FACT took the highest-value position in the title. The PO's
+   * verbatim objection: "WHY did we need the filler CREW NECK there? crew neck can go on highlights."
+   *
+   * So: when there is no tail to replace but the title has ROOM for one, APPEND it. The band check
+   * downstream is unchanged — a candidate that cannot land inside the band still returns 'no-fit',
+   * so this can only ever put a keyword where the pad would otherwise have put filler. If no keyword
+   * fits, we still return 'no-tail' and the title simply stays shorter, which per the same ruling is
+   * the correct outcome: a shorter title beats a fact welded into the money slot. */
+  const canAppend = pipeIdx < 0 && !tailM
+  if (canAppend && !ctx.allowAppend) {
+    return { title: t0, decision: 'no-tail', note: 'no pipe and no trailing audience tail to replace (append disabled)' }
+  }
 
   // The tailGender half of the :6031-6034 veto: never put a masc-only keyword on a "for Women" title.
   const tailFem = MONEY_FEM_RE.test(tailStr) || /\bher\b/i.test(tailStr)
