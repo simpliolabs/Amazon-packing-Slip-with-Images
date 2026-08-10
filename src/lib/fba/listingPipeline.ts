@@ -2068,13 +2068,15 @@ export function validateTitle(
  *   - length < 100 chars per bullet (scorer -5 per short bullet, capped at -15)
  *   - bare third-party brand in any bullet (Amazon Jan 2025 listing-suppression risk —
  *     parallel to validateTitle's check; PR #74 closed it for title, this closes it for bullets)
- *   - 3+ top opportunity keywords (CRITICAL ∪ UPGRADE) missing across the whole bullet set
- *     (scorer -2 per missing, capped at -12; threshold matches scorer's "2+" trigger)
+ *
+ * NOT checked (deleted 2026-08-10): opportunity-keyword coverage. Bullets carry NO coverage duty
+ * (SELLER_PROFILE §5) and the scorer stopped docking for it on 2026-08-04, so the `opportunityKws`
+ * parameter was removed rather than left ignored — a parameter callers still populate but nothing
+ * reads is a dead wire, and this session cost months to two of those.
  */
 export function validateBullets(
   bullets: string[],
   brandName: string,
-  opportunityKws: string[] = [],
   /** Distinct capacity tokens across the family (e.g. ['32GB','64GB','128GB']). Non-empty
    *  means broadcast bullets must NOT hardcode any specific capacity — they ship to every
    *  child. Live-verified bug at B0GCF11RKL: bullets 2 and 3 hardcoded "128 GB" though the
@@ -2174,19 +2176,28 @@ export function validateBullets(
     problems.push(`🚫 TRADEMARK INFRINGEMENT RISK: ${detail}. Sports teams, universities, and media franchises cannot be used in customer-facing copy unless you hold an official license. Remove these phrases entirely and rewrite with generic descriptors.`)
   }
 
-  // Opportunity-keyword coverage. The scorer aggregates CRITICAL ∪ UPGRADE and penalizes
-  // when 2+ are missing across the bullets joined together. We trigger the retry at the SAME
-  // >=2 threshold — the shared predicate makes the validator catch EXACTLY what the scorer docks
-  // (do NOT raise this back to 3+ or the validator/scorer divergence that pinned bullets at 9/18 returns).
-  if (opportunityKws.length > 0) {
-    // SHARED predicate so the validator catches EXACTLY what the scorer docks for; trigger at >=2 (the
-    // scorer's first penalty tier) and ask to weave EACH (not "leave 2"). Kills the 9/18 rulebook divergence.
-    const missing = missingBulletKeywords(bullets, opportunityKws)
-    if (missing.length >= 2) {
-      const sample = missing.slice(0, 6).map((k) => `"${k}"`).join(', ')
-      problems.push(`Bullets are missing ${missing.length} of your top opportunity keywords (CRITICAL + UPGRADE): ${sample}. Coverage is by WORD, not by phrase — SPREAD each phrase's key words naturally across DIFFERENT bullets and sentences (the full phrase does NOT need to appear contiguously). Do NOT cram a whole multi-word search string into one sentence — that reads as keyword soup.`)
-    }
-  }
+  /* OPPORTUNITY-KEYWORD REWRITE GATE — DELETED (PO ruling 2026-08-10, "use best recommendation for
+   * higher ranking"; SELLER_PROFILE §5).
+   *
+   * This gate forced a bullets REWRITE whenever 2+ CRITICAL/UPGRADE keywords were absent from the
+   * bullets. It existed to mirror a scorer dock — and that dock was DELETED on 2026-08-04
+   * (syncListingContent.ts, "OPPORTUNITY-KEYWORD COVERAGE DOCK — DELETED"), which left this half an
+   * ORPHAN: the generator kept bending shopper-facing prose to satisfy a penalty that no longer
+   * exists. The comment here still warned about a "9/18 divergence" that its own counterpart had
+   * already cured from the other side.
+   *
+   * It is also wrong on the merits, which is why it goes rather than gets re-tuned. Coverage is a
+   * BINARY GATE and it counts ANYWHERE (§5, "coverage anywhere counts everywhere") — a keyword in the
+   * backend is indexed exactly as well as one in a bullet. So forcing it into bullets buys ZERO extra
+   * indexing while spending the one thing bullets are actually for: prose that converts. Conversion
+   * and CTR are the levers that move rank once a listing is in the candidate set; keyword presence is
+   * the gate, not the ranking. Trading the former for the latter is a strictly losing swap.
+   *
+   * Coverage shortfalls still dock — on the KEYWORD dimension, once, where they belong
+   * (syncListingContent criticalCount, -3/-5/-8), and its message correctly offers backend placement.
+   * The deterministic bullet floor is unchanged and stays DESIGN-NAME ONLY (`bulletCoverageFloor`),
+   * which is the one thing bullets genuinely must carry.
+   */
 
   // PHRASE OVERUSE — the prompt forbids repeating a blend-brand/material >2× but nothing ENFORCED it,
   // so "comfort colors" stuffed 7× across 5 bullets shipped (PO report). Trigger the rewrite at >=3.
@@ -3745,13 +3756,11 @@ async function runBulletsAgent(
   const oppPlusDesign = dedupeBulletVariants(dn
     ? [scrubTrademarks(dn), ...opportunityKws.filter((k) => k.toLowerCase() !== dn.toLowerCase()).map(tmSafeBullet).filter((s): s is string => s !== null)]
     : opportunityKws.map(tmSafeBullet).filter((s): s is string => s !== null))
-  // The VALIDATOR + missing-keyword retry must read the SAME trademark-safe pool as the brief. Scrub-only
-  // marks (super bowl->big game, world cup->world soccer cup, olympics/fifa->dropped) are NOT in
-  // findTrademarkPhrases' curated list, so they survive the tmSafeBullet drop-gate and reach the raw
-  // opportunityKws; the brief writes the SAFE phrasing, so missingBulletKeywords(bullets, RAW) would flag
-  // those marks as permanently missing (the scrubbed bullets can never contain them), firing wasted
-  // corrective retries that pressure re-introducing the trademark. Validate against the safe pool instead.
-  const opportunityKwsSafe = opportunityKws.map(tmSafeBullet).filter((s): s is string => s !== null)
+  // (`opportunityKwsSafe` removed 2026-08-10 with the missing-keyword retry it fed. It existed so the
+  //  validator read the same trademark-SAFE pool as the brief — scrub-only marks like world cup ->
+  //  world soccer cup survive tmSafeBullet's drop-gate, so validating bullets against the RAW pool
+  //  flagged them as permanently missing and fired retries that pressured re-introducing the mark.
+  //  With bullets carrying no coverage duty there is no such validator, so the workaround is moot.)
   // G4 — GIFT & OCCASION audience pool. Role/audience keywords are (correctly) excluded from
   // every other pool as product-identity claims, but they ARE legitimate gift framings
   // ("great gift for teachers") — the one compliant home for these search words in customer
@@ -3919,7 +3928,7 @@ Return ONLY the JSON object.`
   // role-leak guard above runs first because its check is cheap and deterministic; this
   // pass costs one more LLM call only when validateBullets actually finds problems.
   if (bullets.length > 0 && brandName) {
-    let bProblems = validateBullets(bullets, brandName, opportunityKwsSafe, capacityFamilyTokens)
+    let bProblems = validateBullets(bullets, brandName, capacityFamilyTokens)
     for (let attempt = 0; attempt < 2 && bProblems.length > 0; attempt++) {
       try {
         const capacityClause = capacityFamilyTokens.length >= 2
@@ -3947,7 +3956,7 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
         const fp = parseJsonLoose<{ bullets?: string[] }>(fix.choices[0]?.message?.content || '{}')
         const fb = Array.isArray(fp.bullets) ? fp.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
         if (fb.length === 0) break
-        const fbProblems = validateBullets(fb, brandName, opportunityKwsSafe, capacityFamilyTokens)
+        const fbProblems = validateBullets(fb, brandName, capacityFamilyTokens)
         // Accept criteria (PR #79 strictened after live audit found the loose count-only
         // check kept original bullets when rewrite traded one issue type for another):
         //   - take the rewrite when total count drops, OR
@@ -5778,7 +5787,7 @@ function scoreBulletsMetric(bs: string[], brandName: string, designName: string)
   // (2) COHERENCE — deterministic, no LLM.
   const co = 1 - bs.filter(bulletHasCoherenceDefect).length / n
   // (3) STRUCTURE — validateBullets with EMPTY oppKw (its coverage block no-ops), <100-char dock removed.
-  const structProblems = validateBullets(bs, brandName, [], []).filter((p) => !/under \d+ chars/.test(p))
+  const structProblems = validateBullets(bs, brandName, []).filter((p) => !/under \d+ chars/.test(p))
   // LENGTH (PO 2026-07-16 "not good length"): the scorer docks bullets under 80 chars (#3). The <100
   // validateBullets dock is filtered out above (anti-Goodhart, scope B), so add the scorer's 80-char
   // floor here as SUBSTANCE — never keyword coverage, which stays backend's job (excluded by

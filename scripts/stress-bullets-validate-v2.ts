@@ -73,7 +73,7 @@ const capBullets = [
   'CRITICAL FEATURE - Built tough for the road ahead with reliable performance under stress and a long usable lifespan.',
   'DURABLE AND SECURE - Built to withstand harsh conditions, protecting your important data during outdoor shoots and travel.',
 ]
-const capProblems = validateBullets(capBullets, BRAND, [], ['32GB', '64GB', '128GB']).filter((p) => /CAPACITY-FAMILY VIOLATION/.test(p))
+const capProblems = validateBullets(capBullets, BRAND, ['32GB', '64GB', '128GB']).filter((p) => /CAPACITY-FAMILY VIOLATION/.test(p))
 ok(capProblems.length > 0, 'hardcoded "128 GB"/"128GB" in broadcast bullets flagged')
 ok(/bullet 2/.test(capProblems[0]) && /bullet 3/.test(capProblems[0]), 'detail names both offending bullets')
 
@@ -81,7 +81,7 @@ console.log('[7] Capacity-family — capacity-agnostic bullets pass')
 const agnosticBullets = [
   ...withHook,
 ]
-const agnosticOk = validateBullets(agnosticBullets, BRAND, [], ['32GB', '64GB', '128GB']).filter((p) => /CAPACITY-FAMILY/.test(p))
+const agnosticOk = validateBullets(agnosticBullets, BRAND, ['32GB', '64GB', '128GB']).filter((p) => /CAPACITY-FAMILY/.test(p))
 ok(agnosticOk.length === 0, 'agnostic bullets accepted under capacity family')
 
 console.log('[8] Capacity-family — single-capacity (apparel) skips the check')
@@ -92,7 +92,7 @@ const apparelBullets = [
   'DURABLE COTTON - 6.1 oz ring-spun cotton resists pilling and stays vibrant through repeated washes for seasons.',
   'GREAT GIFT - Perfect present for retro-style fans, vintage clothing collectors, and anyone who loves bold graphic tees.',
 ]
-const apparelProblems = validateBullets(apparelBullets, BRAND, [], []).filter((p) => /CAPACITY/.test(p))
+const apparelProblems = validateBullets(apparelBullets, BRAND, []).filter((p) => /CAPACITY/.test(p))
 ok(apparelProblems.length === 0, 'no capacity check fires when capacityFamily is empty')
 
 console.log('[9] Capacity-family — TB/MB tokens also caught')
@@ -100,7 +100,7 @@ const tbBullets = [
   'HIGH-SPEED PERFORMANCE - Reliable 1 TB capacity for endless 8K shoots without changing cards mid-session, ever.',
   ...withHook.slice(1),
 ]
-const tbProblems = validateBullets(tbBullets, BRAND, [], ['1TB', '2TB']).filter((p) => /CAPACITY-FAMILY/.test(p))
+const tbProblems = validateBullets(tbBullets, BRAND, ['1TB', '2TB']).filter((p) => /CAPACITY-FAMILY/.test(p))
 ok(tbProblems.length > 0, 'hardcoded "1 TB" caught')
 
 console.log('[10] All three new checks compose with existing ones (length / brand / coverage)')
@@ -111,7 +111,7 @@ const composedBad = [
   'DURABLE DESIGN - Solid and protective storage hardware for outdoor shoots and travel days across many use cases.',
   'EASY TO USE - Plug and play convenience with any SD card slot for instant capacity expansion across devices.',
 ]
-const composedProblems = validateBullets(composedBad, BRAND, [], ['32GB', '64GB', '128GB'])
+const composedProblems = validateBullets(composedBad, BRAND, ['32GB', '64GB', '128GB'])
 ok(composedProblems.some((p) => /CAPS benefit hook/.test(p)), 'composed: hook check fires')
 ok(composedProblems.some((p) => /LISTING-SUPPRESSION/.test(p)), 'composed: brand check fires')
 ok(composedProblems.some((p) => /pipeline action-type label/.test(p)), 'composed: forced-keyword check fires')

@@ -1011,11 +1011,16 @@ export function scoreListingContent(
         'loom', 'shirt', 'shirts', 'tshirt', 'adult', 'unisex', 'women', 'womens',
       ])
       // Find title keywords NOT covered in bullets (missed opportunities)
-      const titleOnlyKeywords = [...titleTokens].filter(w => !bulletTokSet.has(w) && w.length > 4 && !variantStopWords.has(w))
-      if (titleOnlyKeywords.length > 3) {
-        bulletScore -= 3
-        issues.push({ field: 'bullets', severity: 'info', message: `Bullets are missing ${titleOnlyKeywords.length} keywords from your title (e.g. "${titleOnlyKeywords.slice(0,3).join('", "')}""). Weave these into your bullets — Amazon cross-references title and bullet keywords to determine relevance. Missing overlap = lower ranking for those terms.`, auto_fixable: false })
-      }
+      /* TITLE-OVERLAP BULLET DOCK — DELETED (PO ruling 2026-08-10, SELLER_PROFILE §5).
+       * It docked -3 when >3 title tokens were absent from the bullets, on the stated grounds that
+       * "Amazon cross-references title and bullet keywords to determine relevance. Missing overlap =
+       * lower ranking for those terms." Amazon publishes NOTHING on ranking factors; that claim is
+       * vendor lore, and telling the seller it as fact is the same error §11 exists to prevent
+       * ("indexed for", never "will rank"). It is also the last surviving piece of bullet coverage
+       * duty — its bigger sibling, the opportunity-keyword dock, was deleted 2026-08-04 for exactly
+       * this reason, and the generator's matching rewrite gate went the same day as this line.
+       * A title token absent from the bullets is still indexed BY THE TITLE; there is nothing to fix,
+       * so there was nothing to dock. Bullets score prose quality only. */
     }
   }
   bulletScore = Math.max(0, bulletScore)
