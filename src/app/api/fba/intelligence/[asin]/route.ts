@@ -36,7 +36,7 @@ import { getApiUsageStats, getStoredAnalysis } from '@/lib/keyword-engine';
 // browser must never call selectionMode() (a non-NEXT_PUBLIC_ env var reads undefined there, so it
 // would always say 'off'), and gating the UI on payload row-shape instead would make a rollback
 // need data surgery rather than an env flip.
-import { selectionMode, selectionEaseWeight, needsEaseRestamp, resolveRankingTargets, legacyTierBuckets } from '@/lib/keyword-engine/selection-core';
+import { selectionMode, selectionEaseWeight, themeHealOnRead, needsEaseRestamp, resolveRankingTargets, legacyTierBuckets } from '@/lib/keyword-engine/selection-core';
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
@@ -171,12 +171,31 @@ export async function GET(
       // `some(selectionRank != null)` is the live-and-ran proof, not the env var: at off/shadow the
       // read mapper leaves BOTH fields undefined, so this is structurally unreachable there.
       //
-      // COOLDOWN IS REQUIRED, not polish — the same reasoning as the ease restamp, one step harsher.
-      // The CLEARING condition depends on an LLM call, so a listing with genuinely no design signal
-      // anywhere (no seller name, no vision, no resolved plan name) can NEVER clear it. Reusing
-      // EASE_RESTAMP_COOLDOWN_MS self-throttles that case to ~2 attempts/hour with no new state, and
-      // the post-promotion re-check below says so out loud instead of churning OpenAI spend silently.
-      const themeUnrated = !!stored && stored.length > 0
+      // ⚠️ DISABLED BY DEFAULT — THE COOLDOWN CANNOT ARM (live incident 2026-08-09 02:2xZ).
+      //
+      // Shipped in PR #531 reusing EASE_RESTAMP_COOLDOWN_MS on the stated reasoning that "a FAILED
+      // attempt's legacy write still advances analyzed_at, so the retry self-throttles to ~2/hour".
+      // That reasoning holds for a heal that FAILS. It does NOT hold for a heal that is KILLED:
+      //
+      //   MEASURED on B0GVV3XL4T (86 rows, ranked but wholly unrated): the promotion re-runs the
+      //   sync INCLUDING a full LLM rating of the pool, which took >160s and was cut off by the
+      //   gateway (502 Bad Gateway) BEFORE storeAnalysis. No write ⇒ analyzed_at never advances ⇒
+      //   `easeCoolingDown` is still false on the very next request ⇒ the next page load fires
+      //   another doomed 160s billable job. An unbounded retry loop, one per page view, plus a 502
+      //   for the seller. Control: an already-rated family (B0FKKN8XKV, 102 rows / 97 rated)
+      //   returns the same endpoint in 2.0s, so the cost is the RATING, not the read.
+      //
+      // A retry guard armed by the work's COMPLETION cannot throttle work that never completes.
+      // The durable fix is to arm the cooldown BEFORE the expensive call and to stop doing the
+      // rating inside a GET at all (it belongs off the request path) — that is a design change, so
+      // this stays off until it lands. Default OFF, per the off→shadow→on doctrine this shipped
+      // without. `themeHealOnRead()` unset ⇒ 'off' ⇒ byte-identical to pre-#531 read behaviour.
+      //
+      // NOT a loss of the #531 cure: theme_fit is produced correctly by the normal research/regen
+      // path (that was the dead wire, and it is fixed). This heal only back-filled listings whose
+      // pool was rated before the fix; a re-research does the same thing on the seller's own click.
+      const themeUnrated = themeHealOnRead() !== 'off'
+        && !!stored && stored.length > 0
         && stored.some((k) => k.selectionRank != null)
         && !stored.some((k) => k.themeFit != null)
       if (themeUnrated && easeCoolingDown) {

@@ -309,6 +309,24 @@ export function selectionMode(): SelectionMode {
   return v === 'on' || v === 'shadow' ? v : 'off'
 }
 
+/**
+ * THEME_HEAL_ON_READ — may an Intelligence GET re-rate a ranked-but-unrated pool in-band?
+ *
+ * Default OFF, and this one is not a rollout convenience — it is a load-bearing kill switch.
+ * Shipped ON (unflagged) in PR #531 and taken down the same night: the promotion re-runs a full
+ * LLM rating of the pool inside the request, which on an 86-row family exceeded the gateway
+ * timeout (>160s ⇒ 502) BEFORE the write that arms the cooldown. A retry guard armed by the
+ * work's COMPLETION cannot throttle work that never completes, so every page load re-fired
+ * another doomed billable job. See the incident note at the `themeUnrated` call site.
+ *
+ * Do NOT flip this on until the heal is (a) armed BEFORE the expensive call and (b) off the
+ * request path. `off` is byte-identical to pre-#531 read behaviour.
+ */
+export function themeHealOnRead(): 'off' | 'shadow' | 'on' {
+  const v = (typeof process === 'undefined' ? '' : process.env.THEME_HEAL_ON_READ || '').toLowerCase()
+  return v === 'on' || v === 'shadow' ? v : 'off'
+}
+
 /** Ease-aware weight flag (PO 2026-08-08), same call-time-read discipline as `selectionMode` above:
  *  server-side env change + restart flips it, no rebuild, never module-scope, never NEXT_PUBLIC_.
  *  Read ONLY at the impure boundary (`buildSelectionContext` — THE one SelectionContext derivation,
