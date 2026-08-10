@@ -45,9 +45,11 @@ const RATED_SHARE_FLOOR = 0.8
 /** Same reasoning for market data: the money-tail selector needs real supply, not one scored row. */
 const SCORED_SHARE_FLOOR = 0.5
 
+/** keyword_analysis is keyed by the CHILD asin — it carries no parent column (verified against the
+ *  live table, which rejected an earlier draft of this route outright). The child→parent mapping
+ *  lives in listing_content, so the roll-up is a join, not a group-by. */
 type Row = {
   asin: string | null
-  parent_asin: string | null
   theme_fit: number | null
   market_opportunity: number | null
   selection_rank: number | null
@@ -75,22 +77,34 @@ export async function GET() {
     // fraction of the catalog while looking complete. That exact shape (an unpaginated evidence
     // read smaller than one bulk push) was an adversarial finding on the reconcile loop.
     const PAGE = 1000
-    const rows: Row[] = []
-    for (let from = 0; ; from += PAGE) {
-      const { data, error } = await supabase
-        .from('keyword_analysis')
-        .select('asin, parent_asin, theme_fit, market_opportunity, selection_rank, analyzed_at')
-        .range(from, from + PAGE - 1)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-      const batch = (data ?? []) as Row[]
-      rows.push(...batch)
-      if (batch.length < PAGE) break
+    const page = async <T>(table: string, cols: string): Promise<T[] | { err: string }> => {
+      const out: T[] = []
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase.from(table).select(cols).range(from, from + PAGE - 1)
+        if (error) return { err: `${table}: ${error.message}` }
+        const batch = (data ?? []) as unknown as T[]
+        out.push(...batch)
+        if (batch.length < PAGE) break
+      }
+      return out
     }
+
+    const rowsRes = await page<Row>('keyword_analysis', 'asin, theme_fit, market_opportunity, selection_rank, analyzed_at')
+    if ('err' in rowsRes) return NextResponse.json({ error: rowsRes.err }, { status: 500 })
+    const rows = rowsRes
+
+    // child asin -> parent asin. A child with no parent row censuses under ITSELF rather than being
+    // dropped: a self-parented / #85 null-parented child is a real listing whose pool still gates a
+    // regen, and silently omitting it would under-report the work.
+    const mapRes = await page<{ asin: string | null; parent_asin: string | null }>('listing_content', 'asin, parent_asin')
+    if ('err' in mapRes) return NextResponse.json({ error: mapRes.err }, { status: 500 })
+    const parentOf = new Map<string, string>()
+    for (const m of mapRes) if (m.asin) parentOf.set(m.asin, m.parent_asin || m.asin)
 
     const byParent = new Map<string, Row[]>()
     for (const r of rows) {
-      const key = r.parent_asin || r.asin
-      if (!key) continue
+      if (!r.asin) continue
+      const key = parentOf.get(r.asin) || r.asin
       const list = byParent.get(key)
       if (list) list.push(r)
       else byParent.set(key, [r])
