@@ -4,6 +4,7 @@ import {
   minKeywordBytes,
   shouldPreserveKeywords,
   cappedMinKeywordBytes,
+  priorIsUnhealthy,
   descriptionVisibleLength,
   shouldPreserveDescription,
 } from './backendDegradeGate'
@@ -121,11 +122,17 @@ describe('preserve ratchet — over-cap prior cannot win for ever', () => {
   })
 
   it('and it no longer beats a fresh output at ANY legal size — the ratchet is gone', () => {
+    // STRENGTHENED 2026-08-10 (same day): this originally asserted `toBe(freshBytes < 250)`, i.e. the
+    // clamp's weaker guarantee — a 251-byte prior still won whenever fresh landed under 250, which
+    // `fillBackendToBudget` ALWAYS does (it returns at 244, listingPipeline.ts:603). So the clamp
+    // narrowed the ratchet to a 6-byte window that could never be reached, and the fossil kept
+    // winning. `priorIsUnhealthy` now rejects an over-cap prior outright, so the correct expectation
+    // is FALSE at every size. The old assertion documented the bug, not the fix.
     for (const freshBytes of [220, 230, 240, 244, 248, 249, 250]) {
       expect(
         shouldPreserveKeywords({ prior: rows(251), fresh: rows(freshBytes), contaminatedPrior: false }),
-        `251-byte prior must not beat a ${freshBytes}-byte fresh`,
-      ).toBe(freshBytes < 250)   // only genuinely-thinner fresh loses, and only on merit
+        `an over-cap prior must not beat a ${freshBytes}-byte fresh run`,
+      ).toBe(false)
     }
   })
 
@@ -136,5 +143,59 @@ describe('preserve ratchet — over-cap prior cannot win for ever', () => {
 
   it('a contaminated prior still never wins, over-cap or not', () => {
     expect(shouldPreserveKeywords({ prior: rows(251), fresh: rows(200), contaminatedPrior: true })).toBe(false)
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE PRIOR MUST CLEAR THE SAME BAR IT IS TRUSTED OVER.
+ *
+ * B0GVV3XL4T's stored backend: 251 bytes on 97 of 98 children, all carrying the same
+ * "navy blue royal" colour tail on black/grey/green SKUs, unchanged since June. Every regen
+ * restored it, because the ONLY question ever asked was "is the prior longer?".
+ *
+ * Clamping the byte compare (the first attempt) narrowed the ratchet and left the ratchet: the
+ * preserve is only reachable when the fresh run is degrade-marked, and the byte-based degrade marks
+ * require worst-child < 220 — below any clamped prior — so the fossil still won every time.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+describe('the prior is judged too — the ratchet cure', () => {
+  const rows = (n: number, count = 1) => Array.from({ length: count }, (_, i) => ({ sku: `s${i}`, asin: `a${i}`, keywords: `${'x'.repeat(n - 2)} ${i}` }))
+  /** The live fossil shape: 97 identical + 1 different, all over cap. */
+  const fossil = [
+    ...Array.from({ length: 97 }, (_, i) => ({ sku: `s${i}`, asin: `a${i}`, keywords: 'y'.repeat(251) })),
+    { sku: 's97', asin: 'a97', keywords: 'z'.repeat(246) },
+  ]
+
+  it('flags an over-cap prior', () => {
+    expect(priorIsUnhealthy(rows(251))).toMatch(/over the 250-byte cap/)
+  })
+
+  it('flags a COLLAPSED prior — 97 of 98 sharing one string is the defect, not the safe option', () => {
+    const same = Array.from({ length: 97 }, (_, i) => ({ sku: `s${i}`, asin: `a${i}`, keywords: 'same'.repeat(60) }))
+    const one = [{ sku: 'x', asin: 'x', keywords: 'different'.repeat(20) }]
+    expect(priorIsUnhealthy([...same, ...one])).toMatch(/collapsed: 97\/98/)
+  })
+
+  it('passes a healthy prior — differentiated and within cap', () => {
+    const healthy = Array.from({ length: 5 }, (_, i) => ({ sku: `s${i}`, asin: `a${i}`, keywords: `child ${i} ${'k'.repeat(230)}` }))
+    expect(priorIsUnhealthy(healthy)).toBe(false)
+  })
+
+  it('THE LIVE FOSSIL no longer wins the preserve against ANY fresh output', () => {
+    for (const freshBytes of [190, 200, 214, 220, 240, 244, 250]) {
+      expect(
+        shouldPreserveKeywords({ prior: fossil, fresh: rows(freshBytes, 98), contaminatedPrior: false }),
+        `the 251-byte 97/98-collapsed fossil must not beat a ${freshBytes}-byte fresh run`,
+      ).toBe(false)
+    }
+  })
+
+  it('a HEALTHY longer prior still wins — the rule keeps doing its real job', () => {
+    const healthyPrior = Array.from({ length: 4 }, (_, i) => ({ sku: `s${i}`, asin: `a${i}`, keywords: `child ${i} ${'k'.repeat(240)}` }))
+    expect(shouldPreserveKeywords({ prior: healthyPrior, fresh: rows(200, 4), contaminatedPrior: false })).toBe(true)
+  })
+
+  it('contamination still short-circuits ahead of everything', () => {
+    expect(shouldPreserveKeywords({ prior: rows(248, 4), fresh: rows(200, 4), contaminatedPrior: true })).toBe(false)
   })
 })
