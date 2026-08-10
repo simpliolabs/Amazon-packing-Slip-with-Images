@@ -328,6 +328,25 @@ export function selectionMode(): SelectionMode {
  * Do NOT flip this on until the heal is (a) armed BEFORE the expensive call and (b) off the
  * request path. `off` is byte-identical to pre-#531 read behaviour.
  */
+/**
+ * THEME_PRINT_TEST — the rater's 2-vs-3 boundary (themeRater's PRINT_TEST block).
+ *
+ * DEFAULT ON, which is deliberately NOT this repo's usual off→shadow→on rollout default, so the
+ * reason is recorded here rather than inferred: it implements an explicit PO ruling ("a design's own
+ * subject terms are band 3 / CORE by definition; band 2 is reserved for generic category heads"),
+ * and shipping it off would mean the ruling has no effect until someone remembers to flip a flag.
+ *
+ * The flag therefore exists as a REVERT lever, not a rollout lever: `THEME_PRINT_TEST=off` restores
+ * the pre-ruling prompt byte-for-byte via an env change + restart, with no redeploy — which matters
+ * because a prompt regression otherwise needs a full build cycle to undo. Blast radius is bounded to
+ * PROPOSALS (ratings feed target selection, and nothing reaches Amazon while the reconcile flag is
+ * off and the PO review workflow is in force), so ON-by-default does not risk shipped bytes.
+ */
+export function themePrintTest(): boolean {
+  const v = (typeof process === 'undefined' ? '' : process.env.THEME_PRINT_TEST || '').toLowerCase()
+  return v !== 'off'
+}
+
 export function themeHealOnRead(): 'off' | 'shadow' | 'on' {
   const v = (typeof process === 'undefined' ? '' : process.env.THEME_HEAL_ON_READ || '').toLowerCase()
   return v === 'on' || v === 'shadow' ? v : 'off'
