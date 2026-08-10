@@ -693,8 +693,29 @@ function backendOutputProblems(
   // made the degradation gate PRESERVE stale junk forever (every regen silently no-op'd). The minBytes<190
   // floor above still catches truncation/wipe garbage regardless of color count.
   const differentiationExpected = distinctColors >= 2 || (distinctColors <= 1 && undecoded >= 6)
-  if (apparel && differentiationExpected && distinctStrings < 2) {
-    problems.push(`all ${perChild.length} children share one identical string (${distinctColors} decoded color${distinctColors === 1 ? '' : 's'}, ${undecoded} undecoded) — per-color tails failed or colors could not be decoded`)
+  // MAJORITY, NOT UNANIMITY (2026-08-10). `distinctStrings < 2` demands a PERFECT collapse, so ONE
+  // dissenting child immunises the whole family: B0GVV3XL4T shipped 97 of 98 children byte-identical
+  // (tail "navy blue royal" on black/grey/green SKUs alike) with distinctStrings === 2, and this gate
+  // reported healthy. Combined with the preserve ratchet those bytes could never be replaced, so the
+  // family's backend sat frozen from June to August while every regen silently re-preserved it.
+  //
+  // The honest question is "did per-color differentiation actually happen?", which a modal-share test
+  // answers and an exact-collapse test cannot. >50% of children on ONE string means it did not.
+  // Deliberately a MAJORITY threshold, not "modal > distinctColors-implied share": sizes legitimately
+  // share a string, so a 3-color family whose biggest color is half the SKUs must not be flagged for
+  // that alone — only a string spanning MORE than half the family proves the tail was broadcast.
+  const modalCount = perChild.length
+    ? Math.max(...[...new Map<string, number>(
+        perChild.map((p) => [p.keywords, perChild.filter((q) => q.keywords === p.keywords).length]),
+      ).values()])
+    : 0
+  const modalShare = perChild.length ? modalCount / perChild.length : 0
+  if (apparel && differentiationExpected && modalShare > 0.5) {
+    problems.push(
+      `${modalCount}/${perChild.length} children share ONE identical string (${distinctStrings} distinct total; ` +
+      `${distinctColors} decoded color${distinctColors === 1 ? '' : 's'}, ${undecoded} undecoded) — ` +
+      `per-color tails failed or colors could not be decoded`,
+    )
   }
   return problems
 }
@@ -8275,7 +8296,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     recommended_title: bandTitle(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false, titleMoneyKws, protectHay),
     recommended_bullets: scrubCelebrityNamesArr(scrubTrademarksArr(r.recommended_bullets), 'pipeline:bullets'),
     recommended_description: scrubPub(r.recommended_description, 'description'),
-    per_child_keywords: r.per_child_keywords.map((c) => ({ ...c, keywords: scrubPub(c.keywords, 'backend') })),
+    // RE-CAP AFTER THE SCRUB (2026-08-10) — the same discipline the title door already applies at
+    // :8033 ("CAP FIRST, because this door now runs AFTER scrubTrademarks — whose substitutions
+    // LENGTHEN"). The backend never got it, and `scrubTrademarks` rewriting "world cup" ->
+    // "world soccer cup" pushed the already-capped 250-byte string to 251. That single byte was not
+    // cosmetic: `shouldPreserveKeywords` compared RAW worst-child bytes, so an over-cap prior beat
+    // every possible <=250 fresh output for ever and froze the family's backend (B0GVV3XL4T, 98
+    // children byte-identical June->August). Capping here removes the byte at its source; the
+    // clamp in backendDegradeGate removes its power over already-stored rows.
+    per_child_keywords: r.per_child_keywords.map((c) => ({
+      ...c,
+      keywords: truncateToBytes(scrubPub(c.keywords, 'backend'), CONTENT_CONTRACT.keywords.byteCap),
+    })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
     per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false, null, protectHay) })),

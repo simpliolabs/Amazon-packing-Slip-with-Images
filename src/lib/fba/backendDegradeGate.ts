@@ -48,6 +48,31 @@ export function minKeywordBytes(rows: { keywords?: string }[] | null | undefined
   return lens.length ? Math.min(...lens) : 0
 }
 
+/**
+ * THE SAME measure, but CLAMPED to the contract byte cap — and this clamp is the whole point.
+ *
+ * THE RATCHET (live incident, B0GVV3XL4T, diagnosed 2026-08-10). `shouldPreserveKeywords` compares
+ * raw worst-child bytes. A stored prior can be OVER the 250 cap, because `scrubPub`
+ * (listingPipeline.ts:8260, applied to per_child_keywords at :8278) runs AFTER the fill's 250-byte
+ * cap and `scrubTrademarks` LENGTHENS what it rewrites ("world cup" -> "world soccer cup"). Every
+ * FRESH string, by contrast, is hard-capped at 250 (listingPipeline.ts:596/641,
+ * CONTENT_CONTRACT.keywords.byteCap).
+ *
+ * So a 251-byte prior satisfies `prior > fresh` against EVERY POSSIBLE fresh output, for ever. The
+ * family's backend freezes at whatever it held the day it went over cap, and each later regen
+ * silently rewrites the row with the prior bytes — generated_at advances, the content does not.
+ * Measured: B0GVV3XL4T's 98 children were byte-identical across a full regen even though the
+ * keyword pool had changed completely (0 -> 15+ world-cup rows, band-3 2 -> 25).
+ *
+ * Clamping BOTH sides at the cap makes the comparison answer the question it was always meant to
+ * ask — "is the prior better INDEXED?" — instead of rewarding a prior for the one byte Amazon will
+ * never accept anyway (the push boundary re-caps at 250: pushFields.ts:101/:162/:431).
+ * A prior that is genuinely longer WITHIN the cap still wins, which is the rule's real purpose.
+ */
+export function cappedMinKeywordBytes(rows: { keywords?: string }[] | null | undefined): number {
+  return Math.min(minKeywordBytes(rows), CONTENT_CONTRACT.keywords.byteCap)
+}
+
 /** Better-than-prior preserve decision for a DEGRADE-MARKED keywords regen (2026-07-31 amendment:
  *  preserve only when the prior is STRICTLY better — a fresh 214B must beat a dirty/short prior).
  *  `contaminatedPrior` lets the caller run its contamination predicate (hasDatedEventContamination)
@@ -60,7 +85,10 @@ export function shouldPreserveKeywords(opts: {
 }): boolean {
   if (!opts.prior || opts.prior.length === 0) return false
   if (opts.contaminatedPrior) return false
-  return minKeywordBytes(opts.prior) > minKeywordBytes(opts.fresh)
+  // CLAMPED on both sides (2026-08-10) — see cappedMinKeywordBytes. Comparing RAW bytes let a prior
+  // that was stored over the 250 cap beat every possible fresh output for ever, freezing a family's
+  // backend permanently; the extra byte is one Amazon never receives anyway.
+  return cappedMinKeywordBytes(opts.prior) > cappedMinKeywordBytes(opts.fresh)
 }
 
 /** Visible-character length of an HTML description (tags stripped) — the ONE measurer both

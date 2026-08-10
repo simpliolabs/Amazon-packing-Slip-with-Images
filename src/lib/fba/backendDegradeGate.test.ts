@@ -3,6 +3,7 @@ import {
   tryParsePriorKeywords,
   minKeywordBytes,
   shouldPreserveKeywords,
+  cappedMinKeywordBytes,
   descriptionVisibleLength,
   shouldPreserveDescription,
 } from './backendDegradeGate'
@@ -89,5 +90,51 @@ describe('descriptionVisibleLength + shouldPreserveDescription', () => {
     expect(shouldPreserveDescription('', 'x'.repeat(100))).toBe(false)
     expect(shouldPreserveDescription('   ', 'x'.repeat(100))).toBe(false)
     expect(shouldPreserveDescription(null, '')).toBe(false)
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE PRESERVE RATCHET — an over-cap prior must not beat every possible fresh output for ever.
+ *
+ * LIVE INCIDENT (B0GVV3XL4T, diagnosed 2026-08-10). `scrubPub` runs AFTER the fill's 250-byte cap
+ * and `scrubTrademarks` LENGTHENS what it rewrites ("world cup" -> "world soccer cup"), so the
+ * STORED prior was 251 bytes. Fresh output is hard-capped at 250. The comparator was raw
+ * `minKeywordBytes(prior) > minKeywordBytes(fresh)`, so 251 > (anything <= 250) was TRUE for every
+ * possible regeneration — the family's 98 children stayed byte-identical from June to August while
+ * each regen advanced generated_at and silently re-preserved the fossil. The keyword pool changed
+ * completely underneath it (0 -> 15+ on-theme rows) and none of it could ever reach the bytes.
+ *
+ * Amazon never receives that byte anyway — the push boundary re-caps at 250 (pushFields.ts:101).
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+describe('preserve ratchet — over-cap prior cannot win for ever', () => {
+  const rows = (n: number) => [{ sku: 's', asin: 'a', keywords: 'x'.repeat(n) }]
+
+  it('cappedMinKeywordBytes clamps at the contract byte cap', () => {
+    expect(cappedMinKeywordBytes(rows(251))).toBe(250)
+    expect(cappedMinKeywordBytes(rows(260))).toBe(250)
+    expect(cappedMinKeywordBytes(rows(244))).toBe(244)   // under cap is untouched
+  })
+
+  it('THE BUG: a 251-byte prior no longer beats a 250-byte fresh', () => {
+    expect(shouldPreserveKeywords({ prior: rows(251), fresh: rows(250), contaminatedPrior: false })).toBe(false)
+  })
+
+  it('and it no longer beats a fresh output at ANY legal size — the ratchet is gone', () => {
+    for (const freshBytes of [220, 230, 240, 244, 248, 249, 250]) {
+      expect(
+        shouldPreserveKeywords({ prior: rows(251), fresh: rows(freshBytes), contaminatedPrior: false }),
+        `251-byte prior must not beat a ${freshBytes}-byte fresh`,
+      ).toBe(freshBytes < 250)   // only genuinely-thinner fresh loses, and only on merit
+    }
+  })
+
+  it('the rule still does its REAL job: a genuinely longer prior WITHIN the cap still wins', () => {
+    expect(shouldPreserveKeywords({ prior: rows(248), fresh: rows(200), contaminatedPrior: false })).toBe(true)
+    expect(shouldPreserveKeywords({ prior: rows(230), fresh: rows(244), contaminatedPrior: false })).toBe(false)
+  })
+
+  it('a contaminated prior still never wins, over-cap or not', () => {
+    expect(shouldPreserveKeywords({ prior: rows(251), fresh: rows(200), contaminatedPrior: true })).toBe(false)
   })
 })
