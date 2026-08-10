@@ -1703,7 +1703,7 @@ export function validateItemHighlights(
   // sentence — Amazon's field shows next to a ≤75-char title. Was a 125-char budget, which produced a
   // ~120-char comma-sentence live (B0FKKN8XKV). Cap 75 + ban sentence punctuation so the corrective-retry
   // loop + the deterministic fallback both converge on short phrases.
-  if (s.length > 75) problems.push(`${s.length} characters — keep it ≤75; short feature/benefit phrases, not a sentence`)
+  if (s.length > CONTENT_CONTRACT.itemHighlights.max) problems.push(`${s.length} characters — keep it ≤${CONTENT_CONTRACT.itemHighlights.max}; short feature/benefit phrases, not a sentence`)
   if (/[.!?](\s|$)/.test(s)) problems.push('reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)')
   const counts = new Map<string, number>()
   for (const t of highlightTokens(s)) {
@@ -1790,7 +1790,7 @@ export function buildHighlightsFallback(
     if (new Set(toks).size !== toks.length) continue          // repeats a word within itself
     if (toks.some((t) => used.has(t))) continue               // would repeat an earlier phrase's word — drop it
     const next = phrases.length ? len + 2 + p.length : p.length
-    if (next > 75) continue   // PO 2026-07-19: Item Highlights ≤75 chars (short phrases, not a sentence)
+    if (next > CONTENT_CONTRACT.itemHighlights.max) continue   // Item Highlights budget (PO 2026-08-10: 75 → 125)
     toks.forEach((t) => used.add(t))
     phrases.push(p)
     len = next
@@ -1836,9 +1836,13 @@ export async function buildItemHighlights(
 
   // The PO's rules (2026-07-19), verbatim, as the brief's spine: ≤75 chars, short feature/benefit PHRASES
   // (NOT a full sentence), and do NOT repeat what the title already says (add NEW info — fabric/fit/feel/care).
-  const system = 'You write the Amazon "Item Highlights" field — a short CUSTOMER-FACING line shown next to the title (only when the title is under 75 characters). It is NOT backend keywords and NOT a sentence. '
-    + 'Output 2-3 SHORT feature/benefit PHRASES about MATERIAL, FIT, FEEL, and at most ONE USE-CASE — comma-separated. '
-    + 'HARD RULES: 75 characters MAXIMUM total (aim 65-75); phrases NOT a sentence — NO periods or other sentence punctuation (. ! ?); '
+  // Display: Amazon moved Item Highlights BENEATH the item name on desktop and mobile effective
+  // 2026-08-10 (Seller Central title-update FAQ) — the old "next to the title" wording is stale.
+  // The "<=75-char title" clause is NOT stale and stays: it is Amazon error 100476, a dependency on
+  // the ITEM NAME's length, unrelated to this field's own budget.
+  const system = 'You write the Amazon "Item Highlights" field — a short CUSTOMER-FACING line shown beneath the title (only when the title is under 75 characters). It is NOT backend keywords and NOT a sentence. '
+    + `Output 3-5 SHORT feature/benefit PHRASES about MATERIAL, FIT, FEEL, and at most ONE USE-CASE — comma-separated. `
+    + `HARD RULES: ${CONTENT_CONTRACT.itemHighlights.max} characters MAXIMUM total (aim ${CONTENT_CONTRACT.itemHighlights.fillTarget}-${CONTENT_CONTRACT.itemHighlights.max} — this field is an Amazon SEARCH INPUT, so falling well short of ${CONTENT_CONTRACT.itemHighlights.max} wastes indexed, shopper-visible space); phrases NOT a sentence — NO periods or other sentence punctuation (. ! ?); `
     + 'do NOT repeat the design, theme, niche, or product-type words already in the title — the title already says those; add NEW info the title lacks (fabric, fit, feel, care); '
     + 'no word may appear twice (trivial connectors like for/and/the/a/of/with/in/to are fine); NEVER output a list of search keywords; '
     + 'no prices, promotions or discount language; no third-party brand names, sports teams, leagues or franchises; at least 2 comma-separated phrases. '

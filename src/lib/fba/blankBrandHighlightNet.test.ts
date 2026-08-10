@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import { DEFAULT_BLANK_SPECS, matchBlankSpec, matchBlankSpecRow, ensureBlankBrandInHighlights, applyBlankBrandNetToDetails } from './blankSpecs'
 import { buildDetailPatchValue, capItemHighlightRepeats } from './productDetailAttrs'
+import { CONTENT_CONTRACT } from './contentContract'
+
+/** The ONE budget under test — never a literal, so a contract change cannot leave these tests
+ *  passing against a scenario that no longer exists (exactly what froze T4.5 at 75). */
+const IH_MAX = CONTENT_CONTRACT.itemHighlights.max
 
 // Same guard as blankSpecs.test.ts: never let a unit test touch a real supabase client.
 vi.mock('@supabase/supabase-js', () => ({
@@ -30,7 +35,7 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
     const hl = 'soft ring-spun cotton, relaxed crew neck fit'
     const out = ensureBlankBrandInHighlights(hl, [LOCKED_TITLE_NO_BRAND], CC)
     expect(out.startsWith('authentic Comfort Colors blank')).toBe(true)
-    expect(out.length).toBeLessThanOrEqual(75)
+    expect(out.length).toBeLessThanOrEqual(IH_MAX)
     expect(out.split(',').length).toBeGreaterThanOrEqual(2)
   })
 
@@ -66,12 +71,15 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
     expect(capItemHighlightRepeats(once)).toBe(once)
   })
 
-  it('T4.5 a full 75-char input is re-capped at a comma boundary; the brand survives because it is FIRST', () => {
-    const hl = 'soft garment-dyed cotton feel, relaxed crew neck comfort, all-day easy wear' // 75 chars
-    expect(hl.length).toBeLessThanOrEqual(76)
+  it('T4.5 a FULL-budget input is re-capped at a comma boundary; the brand survives because it is FIRST', () => {
+    // Scaled to the CONTRACT budget (2026-08-10: 75 -> 125). Frozen at 75 this stopped exercising the
+    // re-cap entirely once the budget rose — a test that passes because the scenario no longer occurs.
+    const hl = 'soft garment-dyed cotton feel, relaxed crew neck comfort, all-day easy wear, breathable everyday softness, true to size'
+    expect(hl.length).toBeGreaterThan(IH_MAX - 10)   // genuinely near the ceiling
+    expect(hl.length).toBeLessThanOrEqual(IH_MAX)
     const out = ensureBlankBrandInHighlights(hl, [LOCKED_TITLE_NO_BRAND], CC)
     expect(out.startsWith('authentic Comfort Colors blank')).toBe(true)
-    expect(out.length).toBeLessThanOrEqual(75)
+    expect(out.length).toBeLessThanOrEqual(IH_MAX)
     expect(out.split(',').length).toBeGreaterThanOrEqual(2)
   })
 
@@ -90,8 +98,24 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
   })
 
   it('T4.7 compliance floor: returns the ORIGINAL when insertion would leave <2 phrases', () => {
-    const hl = 'soft breathable ring-spun cotton with a relaxed easygoing everyday feel' // 1 long phrase
+    // The floor is "<2 phrases would remain", NOT a length rule — so the fixture must be long enough
+    // that the brand cannot be added within the CURRENT budget. At the old 75 a 71-char single phrase
+    // did that; at 125 it does not (and the net now correctly INSERTS, which is the raised cap
+    // working). Sized off IH_MAX so this keeps testing the floor at any future budget.
+    const hl = 'soft breathable ring-spun cotton with a relaxed easygoing everyday feel'.padEnd(IH_MAX - 5, ' x')
+    expect(hl.length).toBeGreaterThan(IH_MAX - 10)
     expect(ensureBlankBrandInHighlights(hl, [LOCKED_TITLE_NO_BRAND], CC)).toBe(hl)
+  })
+
+  it('T4.7b THE RAISED CAP: a phrase set that had NO room at 75 now takes the brand at 125', () => {
+    // Regression pin for the 2026-08-10 ruling. Under the old budget this returned the input unchanged
+    // (the brand could not fit), so the blank-brand waterfall silently failed on longer highlights.
+    const hl = 'soft breathable ring-spun cotton with a relaxed easygoing everyday feel'
+    const out = ensureBlankBrandInHighlights(hl, [LOCKED_TITLE_NO_BRAND], CC)
+    expect(out.startsWith('authentic Comfort Colors blank')).toBe(true)
+    expect(out).toContain('ring-spun cotton')          // original content retained, not evicted
+    expect(out.length).toBeLessThanOrEqual(IH_MAX)
+    expect(out.length).toBeGreaterThan(75)             // proves it uses space the old cap denied
   })
 
   it('no blank / no brand / empty hl -> unchanged', () => {
@@ -105,7 +129,7 @@ describe('T4.8 push boundary honors the net (buildDetailPatchValue preserves the
     const stored = 'authentic Comfort Colors blank, soft cotton feel, relaxed crew neck comfort, all-day easy wear'
     const [entry] = buildDetailPatchValue({ spApiKey: 'title_differentiation', scope: 'broadcast' }, stored, 'ATVPDKIKX0DER')
     expect(String(entry.value).startsWith('authentic Comfort Colors blank')).toBe(true)
-    expect(String(entry.value).length).toBeLessThanOrEqual(75)
+    expect(String(entry.value).length).toBeLessThanOrEqual(IH_MAX)
   })
 })
 
@@ -119,7 +143,7 @@ describe('T4.9 applyBlankBrandNetToDetails — the stored-IH re-net for title pa
     const out = applyBlankBrandNetToDetails(details, [LOCKED_TITLE_NO_BRAND], CC)
     expect(out.changed).toBe(true)
     expect(String(out.details[1].recommended_value).startsWith('authentic Comfort Colors blank')).toBe(true)
-    expect(String(out.details[1].recommended_value).length).toBeLessThanOrEqual(75)
+    expect(String(out.details[1].recommended_value).length).toBeLessThanOrEqual(IH_MAX)
     // WATERFALL WINS (SELLER_PROFILE §5, ruling 2026-08-08): the rewritten row is stamped with
     // spec provenance (blank_specs-derived) so the NEXT regen's sticky gate reads it as a
     // legitimate spec re-propose instead of snapping it back and re-netting every regen.
