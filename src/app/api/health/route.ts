@@ -31,6 +31,7 @@ const BEHAVIOR_FLAGS = [
   'RELEVANCE_THEME_V2', // retired in code 2026-08-03 (was live-unset) — listed to surface env residue
   'KEYWORD_TARGET_SET',
   'KEYWORD_EASE_WEIGHT', // numeric weight, not on/off (selection-core.selectionEaseWeight; unset/≤0 ⇒ ease term inert) — echo gap found 2026-08-08
+  'THEME_HEAL_ON_READ', // KILL SWITCH, default off — in-band re-rating 502'd past its own cooldown (2026-08-09); must read 'off' until the heal moves off the request path
   'COVERAGE_CORE',
   'CONTENT_SPINE', // retired in code 2026-07-31 — listed to surface env residue
   'BACKEND_DEGRADE_STRICT', // retired in code 2026-08-03 — listed to surface env residue

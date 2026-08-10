@@ -47,6 +47,7 @@ import {
   EASE_WEIGHT_MAX,
   EASE_VOLUME_FLOOR,
   selectionMode,
+  themeHealOnRead,
   selectionEaseWeight,
   isRankingTarget,
   selectionSha,
@@ -2876,5 +2877,50 @@ describe('§U — an unrated pool is a NAMED, RETURNED fact, not an inference fr
     expect(UNRATED_THEME_RUN_ID).toBe('kt_unrated')
     expect(UNRATED_THEME_RUN_ID.startsWith('kt_')).toBe(true)
     expect(/^kt_\d+_[a-z0-9]+$/.test(UNRATED_THEME_RUN_ID)).toBe(false)   // never mistakable for a real batch
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * §V — themeHealOnRead. THE KILL SWITCH, and why it is pinned rather than merely defaulted.
+ *
+ * PR #531 shipped the in-band theme heal with NO flag, on the reasoning that its cooldown made a
+ * failed attempt self-throttling. Live, the heal exceeded the gateway timeout (>160s ⇒ 502) BEFORE
+ * the write that arms that cooldown, so every page load re-fired another doomed billable LLM job.
+ * A retry guard armed by the work's COMPLETION cannot throttle work that never completes.
+ *
+ * These tests exist so the switch cannot silently drift back on: anything that is not an explicit
+ * 'on'/'shadow' must read 'off', which is byte-identical to pre-#531 behaviour.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+const THEME_HEAL_FLAG = 'THEME_HEAL_ON_READ'
+
+describe('§V themeHealOnRead (kill switch)', () => {
+  const prior = process.env[THEME_HEAL_FLAG]
+  afterEach(() => {
+    if (prior === undefined) delete process.env[THEME_HEAL_FLAG]
+    else process.env[THEME_HEAL_FLAG] = prior
+  })
+
+  it('unset ⇒ off — the shipped default, and the only safe one until the heal leaves the request path', () => {
+    delete process.env[THEME_HEAL_FLAG]
+    expect(themeHealOnRead()).toBe('off')
+  })
+
+  it('garbage/truthy-looking values ⇒ off (never a throw, never an accidental enable)', () => {
+    for (const v of ['', 'true', '1', 'yes', 'enabled', 'ON!', 'OFF', 'shadow-mode']) {
+      process.env[THEME_HEAL_FLAG] = v
+      expect(themeHealOnRead()).toBe('off')
+    }
+  })
+
+  it('only the two explicit words enable it, case-insensitively', () => {
+    for (const v of ['on', 'ON', 'On']) {
+      process.env[THEME_HEAL_FLAG] = v
+      expect(themeHealOnRead()).toBe('on')
+    }
+    for (const v of ['shadow', 'SHADOW']) {
+      process.env[THEME_HEAL_FLAG] = v
+      expect(themeHealOnRead()).toBe('shadow')
+    }
   })
 })
