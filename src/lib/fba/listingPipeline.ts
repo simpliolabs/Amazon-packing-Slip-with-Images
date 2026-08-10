@@ -7835,7 +7835,26 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         topBand: mtTopBand, inBand: mtBanded.length, ofCandidates: mtCandidates.length,
         note: 'money tail restricted to the design\'s highest theme band before market ordering' }))
     }
-    const mtRanked = rankByMarketOpportunity(mtBanded.length > 0 ? mtBanded : mtCandidates, (e) => e.k)
+    /* FALL BACK WHEN THE BAND SUBSET IS UNSCORED (regression I shipped in c3f6043, caught live the
+     * same day on B0GVV3XL4T). `rankByMarketOpportunity` DROPS every row that carries no
+     * market_opportunity (marketDataHealth.ts:154). Narrowing to the top band BEFORE that filter can
+     * therefore hand it a set it empties completely — and an empty `mtRanked` means titleMoneyKws is
+     * [] and NO money tail is installed at all. Observed: the 15:20 run (pre-c3f6043) shipped
+     * `... | Graphic T Shirts`; the 19:02 run (post-c3f6043) shipped `... | Crew Neck`, a BLANK_SPECS
+     * neck value the band-pad inserted into the pipe-right the vanished tail left empty.
+     *
+     * So: rank the banded subset first, and fall back to the FULL candidate set when that yields
+     * nothing scored. The band is a PREFERENCE — it must never be able to cost the listing its tail.
+     * This is the same narrow-then-filter shape (a subset taken immediately before a predicate that
+     * can empty it, with no fallback) that this codebase keeps being bitten by; it deserved the
+     * fallback on the first commit and did not get one. */
+    const mtRankedBanded = mtBanded.length > 0 ? rankByMarketOpportunity(mtBanded, (e) => e.k) : []
+    if (mtBanded.length > 0 && mtRankedBanded.length === 0) {
+      console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'MONEY_TAIL_BAND_UNSCORED', asin: input.children[0]?.asin ?? '?',
+        topBand: mtTopBand, inBand: mtBanded.length,
+        note: 'top-band candidates carry no market_opportunity — falling back to the full candidate set so the tail is not lost' }))
+    }
+    const mtRanked = mtRankedBanded.length > 0 ? mtRankedBanded : rankByMarketOpportunity(mtCandidates, (e) => e.k)
     if (mtCandidates.length > 0 && mtRanked.length === 0) {
       console.log('[MONEY_TAIL_NO_MARKET_DATA]', JSON.stringify({
         tag: 'MONEY_TAIL_NO_MARKET_DATA',
