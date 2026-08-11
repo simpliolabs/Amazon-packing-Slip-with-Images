@@ -43,13 +43,31 @@ describe('measureGoldShape', () => {
     // 12-word left segment the seller rejected on B0GVV3XL4T.
     const mixed = [
       'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',        // piped, 8 left
+      'THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt',        // piped, 7 left
+      'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women',      // piped, 10 left
       'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',     // unpiped, 12 words
     ]
     const s = measureGoldShape(mixed)
-    expect(s.maxLeftWords).toBe(8)        // NOT 12 — the unpiped title contributes no left segment
-    expect(s.leftWordsFrom).toBe(1)       // and the sample size says so honestly
-    expect(s.pipedShare).toBe(0.5)        // still measured over the WHOLE corpus
-    expect(s.count).toBe(2)
+    expect(s.maxLeftWords).toBe(10)       // NOT 12 — the unpiped title contributes no left segment
+    expect(s.leftWordsFrom).toBe(3)       // and the sample size says so honestly
+    expect(s.pipedShare).toBe(0.75)       // still measured over the WHOLE corpus
+    expect(s.count).toBe(4)
+  })
+
+  it('a piped sample of 1-2 is NOT trusted — one atypical lock must not become a hard law', () => {
+    // `goldBriefBlock` states the ceiling to the council as "never more than N". At the live
+    // pipedShare of 0.30 over a 12-row window, the piped subset is routinely 1-2 titles, so without
+    // a minimum the council would be handed a rule derived from a single row. Here the lone piped
+    // gold has a 4-word left segment; trusting it would forbid every design a normal left segment.
+    const thin = [
+      'THE CEO Gator | Tee',                                                             // piped, 4 left
+      'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',     // unpiped, 12
+      'THE CEO Later Gator Tee Shirt Comfort Colors Graphic for Women',                  // unpiped, 11
+    ]
+    const s = measureGoldShape(thin)
+    expect(s.leftWordsFrom).toBe(3)       // fell back to the whole list, not the 1-title subset
+    expect(s.maxLeftWords).toBe(12)       // a mildly inflated ceiling beats a fabricated-precise one
+    expect(s.pipedShare).toBeCloseTo(0.33, 2)
   })
 
   it('empty corpus is a zero shape, never a throw — the brief degrades, it does not crash', () => {

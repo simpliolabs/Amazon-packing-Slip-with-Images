@@ -90,3 +90,22 @@ describe('stripTitleWasteVocabulary — the PO ruling', () => {
     expect(r.title).toBe(clean)
   })
 })
+
+describe('removalPermitted — the ABSOLUTE floor (adversarial review, 2026-08-10)', () => {
+  it('at ON there is still a hard lower bound — the flag lowers the floor, it does not delete it', () => {
+    // The first cut of removalPermitted returned ok for ANY length at 'on', because the only lower
+    // bound in the predicate was the one being relaxed. removalPermitted(1).ok was true.
+    expect(withFlag('on', () => removalPermitted(1).ok)).toBe(false)
+    expect(withFlag('on', () => removalPermitted(49).ok)).toBe(false)
+    expect(withFlag('on', () => removalPermitted(50).ok)).toBe(true)
+  })
+
+  it('the realistic trigger is a MISSING blank_specs row, not a contrived input', () => {
+    // blank_specs fails OPEN when a blank has no row (task #159): candidateSegments then yields
+    // nothing, the pad cannot add a character, and the removal ships at its raw stripped length.
+    const noSpec = { apparel: true, garmentBrand: '', spec: null, garmentSecond: null }
+    const r = withFlag('on', () => stripTitleWasteVocabulary(TITLE, { apparel: true, band: noSpec as never, moneyKws: null, money: null }))
+    expect(r.title.length).toBeGreaterThanOrEqual(50)
+    if (r.decision === 'stripped') expect(/\bunisex\b/i.test(r.title)).toBe(false)
+  })
+})
