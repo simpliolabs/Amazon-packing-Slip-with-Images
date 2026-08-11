@@ -1256,12 +1256,22 @@ const TITLE_V2_ATTR_PAIR_NOUNS = new Set([
   'motivational', 'embroidery', 'sleeve', 'fit', 'style',
 ])
 /**
- * TITLE_SHAPE_JUDGE — off | shadow | on. At `off` the judge is byte-identical to its pre-2026-08-10
- * behaviour, so merging this changes nothing until it is flipped (the standing rule that every
- * behaviour change ships with its own kill switch — PR #531/#532). `shadow` computes the terms and
- * lets callers log them without changing any score.
+ * TITLE_SHAPE_JUDGE — on (DEFAULT) | shadow | off. `TITLE_SHAPE_JUDGE=off` is the kill switch.
+ *
+ * DEFAULTED ON 2026-08-11, deliberately, and this DOES change generated titles on deploy.
+ *
+ * It shipped default-off on 2026-08-10 so the seller could stage it. The staging step was the
+ * problem: with the flag unset, the very next regeneration of B0GVV3XL4T produced
+ *   "THE CEO 2026 World Soccer Cup Unisex Classic Fit Fan Shirt | Short Sleeve"
+ * — an 11-word left segment carrying BOTH banned phrases, with a third spec fact welded into the
+ * money position. The old judge scores that 95/100. So the default was not a safety measure; it was
+ * the reason the defect kept shipping while a tested cure sat inert behind an env var.
+ *
+ * The standing rule is that every behaviour change has a KILL SWITCH, not that every change defaults
+ * to off. The switch is intact — set TITLE_SHAPE_JUDGE=off and the judge reverts byte-for-byte to
+ * its pre-2026-08-10 scoring, no deploy required.
  */
-const titleShapeJudgeMode = (): string => (process.env.TITLE_SHAPE_JUDGE || 'off').toLowerCase()
+const titleShapeJudgeMode = (): string => (process.env.TITLE_SHAPE_JUDGE || 'on').toLowerCase()
 
 /**
  * THE PO'S MEASURED TITLE SHAPE, AS NUMBERS THE PRODUCER'S ARBITER CAN SEE.
