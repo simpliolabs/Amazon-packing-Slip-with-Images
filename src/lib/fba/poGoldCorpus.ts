@@ -88,6 +88,130 @@ export interface GoldShape {
    *  is small (live corpus n=23 at pipedShare 0.30 ⇒ ~7 titles), and a ceiling quoted to the council
    *  as the seller's own number should carry its sample size rather than imply a firm law. */
   leftWordsFrom: number
+  /** Shortest / longest gold. Published because BOTH ends break a hand-typed rule at HEAD: the
+   *  corpus spans 69–78 — one gold under OUR 70 floor, one over AMAZON'S 75 cap. Any length
+   *  pressure must be derived from these, never from the literal "70-75". */
+  lenMin: number
+  lenMax: number
+  /** Separator counts over the WHOLE corpus, printed as "N of count" so the number always carries
+   *  its denominator. This is the line that stops the pipe from ever being mandatory. */
+  sepMix: { pipe: number; comma: number; plain: number }
+  /** Every pipe-right VERBATIM — the strongest few-shot signal available, at zero prompt cost
+   *  beyond the golds already printed. */
+  tails: string[]
+  /** classifyTail() over `tails`. `specOnly: 0` at HEAD is the measured fact that rules out
+   *  "| Short Sleeve" — the seller has never once shipped a spec-only tail. */
+  tailClass: { search: number; brand: number; specOnly: number }
+  /** Adjacency-collapsed garment-noun mentions ("Tee Shirt" = ONE). The current judge's regex
+   *  double-counts it and passes the Espana gold only by accident. */
+  garment: { twice: number; once: number }
+  /** "for Men Women" (gold #7) is NOT the banned "for Men and Women" — never fold them. */
+  audienceMix: { gendered: number; inclusive: number; none: number }
+}
+
+/*
+ * ── GARMENT-SPEC VOCABULARY, TWO LAYERS ─────────────────────────────────────────────
+ *
+ * WHY THIS EXISTS (adversarial break, 2026-08-11): an attacker wrote
+ *   "THE CEO 2026 Soccer Cup Garment Dyed Crew Neck Tee | Comfort Colors Shirt"
+ * — spec-stuffed garbage — and it scored 100/100 with zero recorded problems, because NO predicate
+ * in the repo recognised "crew neck" / "garment dyed" / "short sleeve" as spec vocabulary
+ * (`isTitleWasteVocabulary` is literally two phrases). Every rule scoped to "the money position"
+ * was bypassable by relocation. This is the missing predicate.
+ *
+ * LAYER 1 (here): closed-class ENGLISH garment-spec vocabulary — linguistic categories, not catalog
+ * data, so a static list is legitimate. Ambiguous words ("classic", "crew", "short") are matched
+ * only in their spec COLLOCATION ("classic fit", "crew neck", "short sleeve") — the same distinction
+ * the door's FIT_CLAIM_RE already draws, so "Classic Car Shirt" and "Short Story Tee" stay clean.
+ * LAYER 2 (parameter): the resolved blank's own VALUES via blankSpecFactTokens(blankSpec), passed IN
+ * by the caller — catalog data stays in the DB, and this module keeps zero pipeline imports.
+ */
+const SPEC_CLAIM_RES: readonly RegExp[] = [
+  /\b(?:classic|relaxed|regular|slim|modern|athletic|loose|oversized)\s+fit\b/gi,
+  /\b(?:short|long|three\s?quarter|3\/4|raglan)\s+sleeved?\b/gi,
+  /\b(?:crew|v|scoop|boat|mock)\s?-?\s?neck(?:line)?\b/gi,
+  /\bgarment\s?-?\s?dyed?\b/gi,
+  /\bring\s?-?\s?spun\b/gi,
+  /\bdouble\s?-?\s?needle\b/gi,
+  /\b\d+(?:\.\d+)?\s?oz\b/gi,
+]
+const SPEC_ALWAYS_WORDS = new Set([
+  'sleeveless', 'unisex', 'heavyweight', 'midweight', 'lightweight',
+  'preshrunk', 'tagless', 'seamless', 'polyester', 'spandex', 'elastane',
+])
+
+/** All garment-spec claims present in `text`: collocation matches + always-words + any
+ *  caller-supplied blank VALUES (layer 2). Returns matched phrases lowercased, deduped. PURE. */
+export function specClaimSpans(text: string, specValues: readonly string[] = []): string[] {
+  const t = (text || '').toLowerCase()
+  const out: string[] = []
+  for (const re of SPEC_CLAIM_RES) {
+    for (const m of t.matchAll(new RegExp(re.source, 'gi'))) out.push(m[0].replace(/\s+/g, ' ').trim())
+  }
+  for (const w of t.split(/[^a-z0-9]+/)) if (SPEC_ALWAYS_WORDS.has(w)) out.push(w)
+  for (const v of specValues) {
+    const vv = (v || '').toLowerCase().trim()
+    if (vv && t.includes(vv)) out.push(vv)
+  }
+  return [...new Set(out)]
+}
+
+/** The judge's garment-noun list (TITLE_V2 nounRegex membership, verbatim). Lives HERE so the judge
+ *  can import it — listingPipeline already imports this module; the reverse would be a cycle.
+ *  'jersey' is deliberately absent: the seller's Espana gold counts 'Tee Shirt' as its single
+ *  garment mention, and adding 'jersey' would silently reclassify their own fixture. */
+export const GARMENT_NOUNS = new Set([
+  'shirt', 'shirts', 'tshirt', 'tshirts', 't-shirt', 't-shirts', 'tee', 'tees',
+  'cap', 'hat', 'hoodie', 'sweatshirt', 'tank', 'polo', 'dress', 'jacket', 'beanie',
+])
+
+/** Adjacency-collapsed garment mentions: a RUN of consecutive garment nouns ("Tee Shirt",
+ *  "TShirt Tee") is ONE mention — that is how the seller uses them (noun + variant as a unit).
+ *  Measured over the nine golds: twice in 8, once in 1 (Espana). PURE. */
+export function countGarmentMentions(title: string): number {
+  const toks = (title || '').toLowerCase().split(/[^a-z0-9-]+/).filter(Boolean)
+  let runs = 0
+  let inRun = false
+  for (const tk of toks) {
+    const isNoun = GARMENT_NOUNS.has(tk)
+    if (isNoun && !inRun) runs++
+    inRun = isNoun
+  }
+  return runs
+}
+
+export type TailClass = 'search' | 'brand' | 'specOnly'
+/** Garment brands whose presence makes a tail BRAND-carrying. The seller's §2 ruling: the Comfort
+ *  Colors name IS a selling point; 5 of the 9 canonical gold tails carry it. */
+const TAIL_BRAND_RES: readonly RegExp[] = [/\bcomfort\s+colors?\b/i, /\bbella\s*\+?\s*canvas\b/i, /\bgildan\b/i]
+
+/** Classify a separator-right. `specOnly` = EVERY significant token is spec vocabulary — the class
+ *  the seller has shipped ZERO times (measured), and the class the band-pad kept manufacturing. */
+export function classifyTail(tail: string, specValues: readonly string[] = []): TailClass {
+  const t = (tail || '').trim()
+  if (!t) return 'search'
+  if (TAIL_BRAND_RES.some((re) => re.test(t))) return 'brand'
+  const claims = specClaimSpans(t, specValues)
+  let residue = t.toLowerCase()
+  for (const c of claims) residue = residue.split(c).join(' ')
+  const STOP = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', '&'])
+  const left = residue.split(/[^a-z0-9-]+/).filter((w) => w && w.length > 1 && !STOP.has(w))
+  return left.length === 0 && claims.length > 0 ? 'specOnly' : 'search'
+}
+
+/** For each term: the seller's own verbatim collocations containing it (±2 words of context), or
+ *  none. A term with ZERO attestation is not the seller's vocabulary; a term WITH attestation is
+ *  admissible exactly in the shapes shown. This is what replaces every hand-typed ban list. PURE. */
+export function attestedUse(titles: readonly string[], terms: readonly string[]): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  for (const term of terms) {
+    const esc = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
+    const re = new RegExp('(?:\\S+\\s+){0,2}' + esc + '(?:\\s+\\S+){0,2}', 'gi')
+    const hits: string[] = []
+    for (const title of titles) for (const m of title.matchAll(re)) hits.push(m[0])
+    out.set(term.toLowerCase(), hits)
+  }
+  return out
 }
 
 const wc = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
@@ -121,13 +245,43 @@ export function measureGoldShape(titles: readonly string[]): GoldShape {
   const MIN_PIPED_SAMPLE = 3
   const measured = piped.length >= MIN_PIPED_SAMPLE ? piped : list
   const lefts = measured.map((t) => wc(leftOf(t)))
+  const lens = list.map((t) => t.length)
+
+  // Separator classification, priority pipe > comma > plain: a piped title may legitimately carry a
+  // LIST comma inside a segment ("USA, Mexico & Canada"), so the pipe decides first.
+  const commaJoined = list.filter((t) => !t.includes(' | ') && t.includes(', '))
+
+  // Tails = the pipe-rights, verbatim. Printed to the council as-is: the strongest few-shot signal
+  // available, and it costs nothing — the strings are already on screen inside the golds.
+  const tails = piped.map((t) => t.slice(t.indexOf(' | ') + 3).trim())
+  const tc = { search: 0, brand: 0, specOnly: 0 }
+  for (const tail of tails) tc[classifyTail(tail)]++
+
+  const mentions = list.map((t) => countGarmentMentions(t))
+  const audience = { gendered: 0, inclusive: 0, none: 0 }
+  for (const t of list) {
+    // "for Men and Women" is the seller-banned universal tail; "for Men Women" (gold #7) is NOT
+    // that string and counts as gendered — the seller shipped it, so folding them would misreport
+    // the corpus to the council.
+    if (/\bfor\s+men\s+and\s+women\b/i.test(t)) audience.inclusive++
+    else if (/\bfor\s+(?:men|women)\b/i.test(t)) audience.gendered++
+    else audience.none++
+  }
+
   return {
-    medianLen: median(list.map((t) => t.length)),
+    medianLen: median(lens),
     medianLeftWords: median(lefts),
     maxLeftWords: lefts.length ? Math.max(...lefts) : 0,
     pipedShare: list.length ? +(piped.length / list.length).toFixed(2) : 0,
     count: list.length,
     leftWordsFrom: measured.length,
+    lenMin: lens.length ? Math.min(...lens) : 0,
+    lenMax: lens.length ? Math.max(...lens) : 0,
+    sepMix: { pipe: piped.length, comma: commaJoined.length, plain: list.length - piped.length - commaJoined.length },
+    tails,
+    tailClass: tc,
+    garment: { twice: mentions.filter((m) => m >= 2).length, once: mentions.filter((m) => m === 1).length },
+    audienceMix: audience,
   }
 }
 
