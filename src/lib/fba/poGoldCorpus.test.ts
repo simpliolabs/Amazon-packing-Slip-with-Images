@@ -27,6 +27,17 @@ describe('measureGoldShape', () => {
     expect(s.maxLeftWords).toBe(10)
   })
 
+  it('measures the fields the brief will print — every number computed, none typed (PR-A)', () => {
+    const s = measureGoldShape(SEED_GOLD_TITLES)
+    expect([s.lenMin, s.lenMax]).toEqual([69, 78])            // one under OUR floor, one over AMAZON'S cap
+    expect(s.sepMix).toEqual({ pipe: 5, comma: 2, plain: 2 }) // the pipe is common, never mandatory
+    expect(s.tails.length).toBe(5)                            // every pipe-right, verbatim
+    expect(s.tails[4]).toBe('Funny Comfort Colors Shirt for Men Women')
+    expect(s.tailClass).toEqual({ search: 2, brand: 3, specOnly: 0 })  // ZERO spec-only tails, ever
+    expect(s.garment).toEqual({ twice: 8, once: 1 })          // adjacency-collapsed; Espana is the 1
+    expect(s.audienceMix).toEqual({ gendered: 7, inclusive: 0, none: 2 })
+  })
+
   it('an ALL-UNPIPED corpus falls back to whole-title counts rather than reporting 0', () => {
     // The fallback, not the old convention. Left-segment stats are measured over the PIPED subset
     // (see below), but `loadPoGoldTitles` takes only the newest 12 manual rows and the live corpus is
@@ -74,7 +85,12 @@ describe('measureGoldShape', () => {
   })
 
   it('empty corpus is a zero shape, never a throw — the brief degrades, it does not crash', () => {
-    expect(measureGoldShape([])).toEqual({ medianLen: 0, medianLeftWords: 0, maxLeftWords: 0, pipedShare: 0, count: 0, leftWordsFrom: 0 })
+    expect(measureGoldShape([])).toEqual({
+      medianLen: 0, medianLeftWords: 0, maxLeftWords: 0, pipedShare: 0, count: 0, leftWordsFrom: 0,
+      lenMin: 0, lenMax: 0, sepMix: { pipe: 0, comma: 0, plain: 0 }, tails: [],
+      tailClass: { search: 0, brand: 0, specOnly: 0 }, garment: { twice: 0, once: 0 },
+      audienceMix: { gendered: 0, inclusive: 0, none: 0 },
+    })
   })
 })
 
