@@ -7959,9 +7959,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // reads as market-first but DEGRADES SILENTLY: when no candidate carries market_opportunity
     // every key is -1, the first term is a constant 0, and the whole slot is decided by RAW VOLUME
     // — the single highest-volume head phrase welded into the visible title with no winnability
-    // signal behind it. Live proof (B0GVV3XL4T, probed 2026-08-09): 88 stored rows, ZERO with
-    // market_opportunity, research 46 days stale, and the pool's volume leaders are unwinnable
+    // signal behind it. Historical proof (B0GVV3XL4T, probed 2026-08-09): 88 stored rows, ZERO with
+    // market_opportunity, research 46 days stale, and the pool's volume leaders were unwinnable
     // heads for a niche 2026 tee ("usa soccer jersey" 1.98M/mo).
+    //   ⚠ THAT PROBE IS OBSOLETE — DO NOT CITE IT AS CURRENT STATE. Re-measured 2026-08-11 by the
+    //   seller: the SAME parent now returns 159 rows with 159 scored (analyzed 15:17Z). The 2026-08-09
+    //   numbers survive only as the WORKED EXAMPLE of the degradation this comparator prevents.
+    //   Between those two dates the stale figure was quoted as live fact by three separate analyses
+    //   and produced a wrong conclusion each time ("the money tail can never fire on this ASIN").
+    //   A dated observation in a comment is evidence of a MOMENT, never of the present: re-probe the
+    //   pool before reasoning from it.
     // rankByMarketOpportunity is the shared rule: it DROPS unscored rows, so volume can only ever
     // break a tie BETWEEN two market-scored rows, and it returns [] when nothing is scored. Empty
     // ⇒ enforceMoneyTail installs nothing ⇒ the title stays BYTE-IDENTICAL and honest, which is the
