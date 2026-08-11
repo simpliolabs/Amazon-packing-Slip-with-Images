@@ -3187,7 +3187,10 @@ ${baseSystem}`,
   // real money keyword needed — which is what summoned the pad's "| Short Sleeve". The strip also
   // swallows ONE trailing audience noun the tail drags along ("… Fans").
   if (/\bfor\s+men\s+and\s+women\b/i.test(best)) {
-    best = best.replace(/\s*\bfor\s+men\s+and\s+women\b(\s+\w+)?\s*/i, ' ').replace(/\s{2,}/g, ' ').replace(/\s+[,;.]/g, m => m.trim()).trim()
+    // The trailing-noun swallow is a CLOSED CLASS: an open \w+ would eat a legitimate word whenever
+    // the phrase sits mid-title ("…for Men and Women Graphic Tee" must lose only the tail, never
+    // "Graphic"). Extend the class only with nouns observed dragging behind the tail in the wild.
+    best = best.replace(/\s*\bfor\s+men\s+and\s+women\b(\s+(?:fans?|lovers?|shoppers?|buyers?))?\s*/i, ' ').replace(/\s{2,}/g, ' ').replace(/\s+[,;.]/g, m => m.trim()).trim()
   }
   const stripped = rule1Before !== best
   const hasLeanTail = (() => {
