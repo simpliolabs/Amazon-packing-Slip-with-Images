@@ -4,6 +4,11 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 
 ---
 
+## 0. CREDITS — PO STANDING ORDER (2026-08-11, verbatim: "STOP, NEVER USE credits")
+- The AI/pipeline assistant NEVER triggers any Jungle Scout credit-consuming action: no Intelligence enrich (`forceRefresh:true` is always billable), no keyword re-harvest, no research refresh, no bulk sweeps. Anything needing credits is proposed with an estimated spend and the PO triggers it personally.
+- Before suggesting a regen, CHECK the ASIN's research freshness (`analyzed_at` vs TTL) so the suggestion itself cannot cost credits.
+- Hard guarantee available to the PO: `JUNGLE_SCOUT_ENABLED=off` in Coolify (echoed by /api/health) — no code path can spend while it reads off.
+
 ## 1. BRAND IDENTITY
 - The brand is **THE CEO** (CEO® on packing slips). Every title **starts** with it — position 0, no exceptions (judge docks −20).
 - The brand appears in the **title and brand attribute only**: never in description body prose (stripped, even inside quotes), never in backend keywords (the attribute already indexes it — the byte buys nothing).
