@@ -243,6 +243,11 @@ export const SEED_REJECT_PAIRS: readonly { before: string; sellerSaid: string; a
     sellerSaid: 'STILL BAD',
     after: 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',
   },
+  {
+    before: 'THE CEO 2026 World Soccer Cup Tee for Men and Women Fans | Short Sleeve',
+    sellerSaid: 'Still Bad after regen',
+    after: 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',
+  },
 ] as const
 
 /** The negative few-shot block: what this system wrote, what the seller said, what they wrote

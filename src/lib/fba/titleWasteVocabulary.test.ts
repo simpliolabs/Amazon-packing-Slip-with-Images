@@ -189,17 +189,30 @@ describe('stripTitleWasteVocabulary', () => {
     expect(v.note).toMatch(/freed 7 chars for money keyword/)
   })
 
-  it('strips "Classic Fit" mid-title when the title still lands in 70-75 (arm 2, no keyword)', () => {
-    // 73 chars in, "Classic Fit " out (-12) → 61, and the facts pad lifts it back into the band
-    // from a REAL Gildan fact ("Crew Neck") — arm 2 in full: removal + re-fill judged together.
+  it('arm 2 without a keyword now REFUSES at floor-off — the pad may not mint a spec pipe', () => {
+    // DOCTRINE CHANGE (2026-08-11 mint guard). This case used to land 'stripped' by letting the pad
+    // MINT '| Crew Neck' to reach the band — the tail class the seller has shipped 0 times, and the
+    // literal string of the incident this whole rebuild started from. With that mint refused, the
+    // re-fill cannot reach 70 and the floor-off guard declines byte-identical. The ruling still
+    // lands two other ways: TITLE_RULING_OVER_FLOOR=on ships the clean shorter title, and the
+    // producer no longer writes the waste at all (corpus brief + judge).
     const t = 'THE CEO See You Later Alligator Classic Fit Graphic Tee Shirt Cotton Ring'
     expect(t.length).toBe(73)
     const v = stripTitleWasteVocabulary(t, ctx())
-    expect(v.decision).toBe('stripped')
-    expect(v.title).toBe('THE CEO See You Later Alligator Graphic Tee Shirt Cotton Ring | Crew Neck')
-    expect(v.title).not.toMatch(/classic fit/i)
-    expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
-    expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+    expect(v.decision).toBe('band-guard')
+    expect(v.title).toBe(t)
+    const prev = process.env.TITLE_RULING_OVER_FLOOR
+    process.env.TITLE_RULING_OVER_FLOOR = 'on'
+    try {
+      const on = stripTitleWasteVocabulary(t, ctx())
+      expect(on.decision).toBe('stripped')
+      expect(on.title).not.toMatch(/classic fit/i)
+      expect(on.title).not.toMatch(/\| (Crew Neck|Short Sleeve)$/)   // clean & shorter, never spec-welded
+      expect(on.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+    } finally {
+      if (prev === undefined) delete process.env.TITLE_RULING_OVER_FLOOR
+      else process.env.TITLE_RULING_OVER_FLOOR = prev
+    }
   })
 
   it('REFUSES a removal that satisfies NEITHER arm — byte-identical, and it says why', () => {
@@ -262,12 +275,17 @@ describe('stripTitleWasteVocabulary', () => {
     expect(isTitleWasteVocabulary('Relaxed Fit')).toBe(false)
     expect(isTitleWasteVocabulary('Short Sleeve')).toBe(false)
     // "Classic Fit" is the FIRST candidate `candidateSegments` would offer for this Gildan band ctx
-    // (spec.fit leads the fact order once the brand is empty). It must never appear; the pad falls
-    // through to the next real fact instead.
+    // (spec.fit leads the fact order once the brand is empty). It must never appear — and since the
+    // MINT GUARD (2026-08-11), the fall-through may no longer be another spec fact EITHER when the
+    // pad is CREATING the pipe: '| Short Sleeve' / '| Crew Neck' are the tail class the seller has
+    // shipped 0 times, and the literal strings of both live regressions. A minted pipe may carry a
+    // brand or a garment noun; spec facts may only EXTEND a segment that already exists.
     const padded = enforceTitleBand('THE CEO Later Gator Tee Shirt Cotton Graphic for Women', GILDAN_BAND).title
     expect(padded).not.toMatch(/classic fit/i)
-    expect(padded).toMatch(/Short Sleeve/)
-    expect(padded.length).toBeGreaterThan('THE CEO Later Gator Tee Shirt Cotton Graphic for Women'.length)
+    expect(padded).not.toMatch(/\| (Short Sleeve|Crew Neck)/)
+    // With every candidate for THIS fixture either waste-banned or a spec-only mint, refusing to pad
+    // AT ALL is the correct outcome — an honest 54 beats a welded 73 (the seller's own doctrine).
+    expect(padded.length).toBeGreaterThanOrEqual('THE CEO Later Gator Tee Shirt Cotton Graphic for Women'.length)
   })
 })
 

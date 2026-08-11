@@ -29,6 +29,7 @@ import { CONTENT_CONTRACT } from './contentContract'
 // Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
 // file stays cycle-free and unit-testable in isolation.
 import { BASIC_COLOR_WORDS } from './designName'
+import { classifyTail } from './poGoldCorpus'
 import { hasTrademark } from './trademarkGuard'
 
 /** ONE source per bound — never a new magic number (generation-invariants INVARIANT 5). */
@@ -817,9 +818,17 @@ export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: str
   const head = (m ? t0.slice(0, m.index) : t0).trim()
   const tail = m ? t0.slice(m.index) : ''
   const joiner = head.includes(' | ') ? ' ' : ' | '
+  // MINT GUARD (2026-08-11, live specimen "…| Short Sleeve"): when the pad CREATES a separator that
+  // did not exist, it is authoring the MONEY POSITION — and a segment that is nothing but spec facts
+  // is the one tail class the seller has shipped ZERO times (tailClass.specOnly = 0 across their
+  // corpus). Extending an EXISTING segment with facts stays legal (that is the pad's job), and a
+  // minted BRAND or garment-noun segment stays legal (gold #1's own pad shape) — only the
+  // spec-only mint is refused, so "| Comfort Colors Shirt" pads survive and "| Short Sleeve" dies.
+  const mintingPipe = joiner === ' | '
 
   let best = t0
   for (const seg of candidateSegments(t0, ctx)) {
+    if (mintingPipe && classifyTail(seg) === 'specOnly') continue
     const cand = `${head}${joiner}${seg}${tail}`.replace(/\s{2,}/g, ' ').trim()
     if (cand.length > TITLE_BAND_HI) continue
     if (cand.length >= TITLE_BAND_LO) {

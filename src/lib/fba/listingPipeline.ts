@@ -1450,6 +1450,13 @@ export function titleQualityJudge(title: string, opts: {
         score -= 10
         problems.push(`garment noun mentions=${mentions} (corpus: twice in ${opts.shape.garment.twice} of ${opts.shape.count}) (-10)`)
       }
+      // THE UNIVERSAL TAIL, corpus-measured: audienceMix.inclusive is 0 of 9. The soft -3 elsewhere
+      // let a candidate carrying 23 chars of banned filler WIN on 2026-08-11 and starve the money
+      // slot. Zero-attested constructs dock like the rest of the not-their-voice vocabulary.
+      if (opts.shape.audienceMix.inclusive === 0 && /\bfor\s+men\s+and\s+women\b/i.test(t)) {
+        score -= 15
+        problems.push(`"for Men and Women" — 0 of ${opts.shape.count} seller golds carry it (-15)`)
+      }
     } else if (shape.wasteDock > 0) {
       // No corpus threaded (legacy caller): keep the narrow two-phrase waste dock.
       score -= shape.wasteDock
@@ -3173,8 +3180,14 @@ ${baseSystem}`,
   //           carrier), do NOT append "for Women" — the gift-SKU case (per plan risk register #3).
   const mode = deriveAudienceMode(lean)
   const rule1Before = best
-  if (lean && lean !== 'unisex' && /\bfor\s+men\s+and\s+women\b/i.test(best)) {
-    best = best.replace(/\s*\bfor\s+men\s+and\s+women\b\s*/i, ' ').replace(/\s{2,}/g, ' ').replace(/\s+[,;.]/g, m => m.trim()).trim()
+  // Rule 1 WIDENED 2026-08-11 (live regen: "…Soccer Cup Tee for Men and Women Fans | Short Sleeve").
+  // The universal tail is stripped in EVERY lean state, not only when a lean is set: the seller's
+  // ruling is unconditional ("NEVER emit"; SELLER_PROFILE §4 "is TERRIBLE") and their corpus carries
+  // it 0 times in 9 golds. On the live specimen the 23-char filler consumed exactly the budget the
+  // real money keyword needed — which is what summoned the pad's "| Short Sleeve". The strip also
+  // swallows ONE trailing audience noun the tail drags along ("… Fans").
+  if (/\bfor\s+men\s+and\s+women\b/i.test(best)) {
+    best = best.replace(/\s*\bfor\s+men\s+and\s+women\b(\s+\w+)?\s*/i, ' ').replace(/\s{2,}/g, ' ').replace(/\s+[,;.]/g, m => m.trim()).trim()
   }
   const stripped = rule1Before !== best
   const hasLeanTail = (() => {
