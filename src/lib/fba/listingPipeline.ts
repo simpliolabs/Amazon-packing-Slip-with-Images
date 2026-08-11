@@ -58,6 +58,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
+import { SEED_GOLD_TITLES, measureGoldShape, goldBriefBlock, type GoldShape } from '@/lib/fba/poGoldCorpus'
 import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
@@ -163,6 +164,12 @@ export interface PipelineInput {
    *  researched 46 days ago" is actionable; one that says only "no market data" is not. Best-effort
    *  at the route — a failed read passes null, which only costs the date in one log line. */
   researchedAt?: string | null
+  /** THE SELLER'S OWN LOCKED TITLES + their MEASURED shape (poGoldCorpus.loadPoGoldTitles), loaded
+   *  by the ROUTE because it holds the supabase client and this module deliberately does not.
+   *  Absent ⇒ the three-title seed floor, so a failed load can never leave the council with no
+   *  few-shots. PO 2026-08-10: "I gave you about 70 title recommendations ... that should be a
+   *  strong signal for the council/judge how to put these together." */
+  poGolds?: { titles: string[]; shape: GoldShape } | null
   /** Current title of the representative child — used for product-name token extraction */
   repTitle: string | null
   /** Canonical listing title (listing_seo_scores.product_title — the title the seller & dashboard
@@ -1204,6 +1211,22 @@ function designPhraseCarriesGender(designPhrase: string): { female: boolean; mal
 /** PO gold examples (2026-07-22, provided verbatim). Used as FEW-SHOT in both title branches when
  *  TITLE_QUALITY_V2 is on. Rank order = PO's original list, deduped by exact string. Extend via a
  *  future auto-miner over listing_change_log title edits (memory: title-po-gold-pattern). */
+/**
+ * THE ONE golds block. Was built inline in THREE places (single-design council, humanizer retry,
+ * multi-design niche title) from the hardcoded array — the exact path-divergence shape that makes a
+ * fix land on one branch and miss the others. Now one function, fed by the seller's live corpus.
+ *
+ * Falls back to the seed titles when the route passed nothing, so the council can never lose its
+ * few-shots. Emits the MEASURED shape alongside the examples so the instruction and the examples are
+ * always the same corpus (the 2026-08-10 lesson: "6-7 words" was written from ONE gold while the
+ * seller's measured median was 8).
+ */
+function goldsBriefFor(input: { poGolds?: { titles: string[]; shape: GoldShape } | null }): string {
+  const titles = input.poGolds?.titles?.length ? input.poGolds.titles : [...SEED_GOLD_TITLES]
+  const shape = input.poGolds?.shape ?? measureGoldShape(titles)
+  return goldBriefBlock(titles, shape)
+}
+
 const PO_GOLD_TITLES = [
   'THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt',                    // 72 — Pattern A, idiom expanded
   'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',                 // 75 — Pattern B, high-search category
@@ -3292,7 +3315,7 @@ async function runTitleAgent(
   const v2ExpandedDesign = apparel ? expandIdiomDesignName(designName) : (designName || '')
   const v2IsKnownIdiom = apparel && isIdiomDesign(designName)
   const [system, user] = apparel ? (() => {
-    const goldsBlock = PO_GOLD_TITLES.map((g, i) => `${i + 1}. ${g}`).join('\n')
+    const goldsBlock = goldsBriefFor(input)
     const audOpt = preferredAudience || 'Men and Women'
     const sys = `You are an Amazon SEO title writer specializing in apparel in THE CEO's house style. Match the PATTERN of the PO's approved gold titles exactly. NEVER stuff modifier decorators. Output ONLY the final title string — no quotes, no markdown, no explanation.`
     const usr = `PO GOLD TITLES (match this pattern — includes both idiom-expansion and category-front-load examples):
@@ -3554,7 +3577,7 @@ Rules:
     const displayDesignName = expandIdiomDesignName(designName)
     const isKnownIdiom = isIdiomDesign(designName)
     const [sdSystem, sdUser] = (() => {
-      const goldsBlock = PO_GOLD_TITLES.map((g, i) => `${i + 1}. ${g}`).join('\n')
+      const goldsBlock = goldsBriefFor(input)
       const sys = `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title in THE CEO's house style. Match the PATTERN of the PO's approved gold titles (below) exactly. NEVER stuff modifier decorators. Return ONLY the final title string.`
       const usr = `PO GOLD TITLES (match this pattern):
 ${goldsBlock}
@@ -6388,6 +6411,10 @@ async function buildNicheParentTitle(
   // live child shares the same non-unisex lean; any mismatch OR any unisex/null child forces the parent
   // to 'unisex' so the broadcast title never mis-genders a mixed-lean family (Q4 answer: UNANIMITY).
   parentLean: AudienceLean = null,
+  // The seller's own gold corpus. Passed EXPLICITLY because this is the multi-design title
+  // producer — a separate branch from runTitleAgent, and the branch that historically missed
+  // fixes applied only to its twin (PR #401). Both now read the same corpus.
+  poGolds?: { titles: string[]; shape: GoldShape } | null,
 ): Promise<string> {
   const audienceMode = deriveAudienceMode(parentLean)
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
@@ -6431,7 +6458,7 @@ Their title: ${compTitle || '(none)'}
 Their bullets: ${compBullets.length ? compBullets.join(' | ') : '(none)'}`
   })()
   const baseUser = (() => {
-    const goldsBlock = PO_GOLD_TITLES.map((g, i) => `${i + 1}. ${g}`).join('\n')
+    const goldsBlock = goldsBriefFor({ poGolds })
     return `PO GOLD TITLES (match this pattern — includes single AND multi-design examples):
 ${goldsBlock}
 
@@ -8685,7 +8712,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // a truly mixed-lean family should have audienceLean='unisex' set on the parent; a lean_female/lean_male
       // family value means the seller has already asserted family-level unanimity). Fallback null on non-apparel.
       const parentLean: AudienceLean = apparelProduct ? (input.audienceLean ?? null) : null
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean)
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
