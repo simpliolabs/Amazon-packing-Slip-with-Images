@@ -36,6 +36,48 @@ export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
 export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
 
 /**
+ * TITLE_RULING_OVER_FLOOR — off | on. Default off ⇒ byte-identical to today.
+ *
+ * THE TWO BOUNDS ARE NOT THE SAME KIND OF THING, and treating them as one tier let an unrelated
+ * spec-table cell silently reverse a seller ruling.
+ *
+ *   TITLE_BAND_HI = 75  — Amazon's, externally enforced (Amazon rewrites a longer title; error 100476)
+ *   TITLE_BAND_LO = 70  — OURS, `scoreTitleQuality`'s golden band, enforced by nothing outside this repo
+ *
+ * The three PO-ruling removal guards below (`enforceInclusiveAudience`, `stripVariantColorWords`,
+ * `stripTitleWasteVocabulary`) each re-pad after removing and then veto on BOTH bounds — so our own
+ * scorer's preference can outrank a seller ruling. Measured on B0GVV3XL4T (2026-08-10): removing the
+ * banned word "Unisex" left 54 chars; the facts pad's ENTIRE vocabulary for that Gildan blank topped
+ * out at 69, because the one candidate that reached band ("Classic Fit Shirt", 74) is itself banned
+ * by the SAME ruling. 69 < 70 ⇒ refused byte-identical ⇒ **the banned word shipped**.
+ *
+ * The proof that this is arbitrary rather than principled: change only `blank_specs.fit` from
+ * "Classic" to "Relaxed" and the identical removal is PERMITTED, landing 74. Whether a seller's
+ * editorial ruling is honoured depended on an unrelated cell in a spec table.
+ *
+ * At `on`, a removal may ship a title UNDER our preferred floor but never over Amazon's cap. An
+ * honest 69-char title beats a 73-char one carrying a word the seller banned — which is the seller's
+ * own ruling ("crew neck can go on highlights"), now costed openly: `scoreTitleQuality` will fall on
+ * those listings until a money keyword is available to fill the space properly.
+ */
+const rulingOverFloor = (): boolean => (process.env.TITLE_RULING_OVER_FLOOR || 'off').toLowerCase() === 'on'
+
+/**
+ * May a PO editorial removal ship at this post-pad length? ONE predicate for all three guards — they
+ * carried three byte-identical copies of the bound check, which is how the next edit lands on two of
+ * them. PURE apart from the flag read.
+ */
+export function removalPermitted(paddedLen: number): { ok: boolean; why: string } {
+  if (paddedLen > TITLE_BAND_HI) {
+    return { ok: false, why: `${paddedLen} chars is over Amazon's ${TITLE_BAND_HI} cap` }
+  }
+  if (!rulingOverFloor() && paddedLen < TITLE_BAND_LO) {
+    return { ok: false, why: `${paddedLen} chars is under our ${TITLE_BAND_LO} preferred floor (TITLE_RULING_OVER_FLOOR=off)` }
+  }
+  return { ok: true, why: '' }
+}
+
+/**
  * WHY the verdict is returned even when nothing changed (Phase 0 of the ship-door plan).
  *
  * The net used to be silent on a no-op, which made three very different situations indistinguishable
@@ -931,11 +973,12 @@ export function enforceInclusiveAudience(
   // judge the FINAL bytes. This is why the guard lives here and not in the caller: the removal and
   // the re-fill are one decision, and only their composition can be checked against the band.
   const padded = enforceTitleBand(reduced, ctx.band).title
-  if (padded.length < TITLE_BAND_LO || padded.length > TITLE_BAND_HI) {
+  const verdict = removalPermitted(padded.length)
+  if (!verdict.ok) {
     return {
       title: t0,
       decision: 'band-guard',
-      note: `removal would land ${padded.length} chars, outside [${TITLE_BAND_LO},${TITLE_BAND_HI}] even after the facts pad — refused, byte-identical`,
+      note: `removal would land ${padded.length} chars — ${verdict.why}, even after the facts pad — refused, byte-identical`,
     }
   }
 
@@ -1056,11 +1099,12 @@ export function stripVariantColorWords(
   // Re-fill the freed characters from PRODUCT FACTS, then judge the FINAL bytes — the removal and the
   // re-fill are ONE decision (same reasoning as enforceInclusiveAudience's guard).
   const padded = enforceTitleBand(reduced, ctx.band).title
-  if (padded.length < TITLE_BAND_LO || padded.length > TITLE_BAND_HI) {
+  const verdict = removalPermitted(padded.length)
+  if (!verdict.ok) {
     return {
       title: t0,
       decision: 'band-guard',
-      note: `removing ${removed.join(', ')} would land ${padded.length} chars, outside [${TITLE_BAND_LO},${TITLE_BAND_HI}] even after the facts pad — refused, byte-identical`,
+      note: `removing ${removed.join(', ')} would land ${padded.length} chars — ${verdict.why}, even after the facts pad — refused, byte-identical`,
     }
   }
 
@@ -1220,13 +1264,14 @@ export function stripTitleWasteVocabulary(
   // ARM 2 — "or the title still lands in 70-75", judged on the FINAL bytes after the facts pad,
   // because the removal and the re-fill are ONE decision (same reasoning as the two nets above).
   const padded = enforceTitleBand(reduced, ctx.band).title
-  if (padded.length >= TITLE_BAND_LO && padded.length <= TITLE_BAND_HI) {
+  const verdict = removalPermitted(padded.length)
+  if (verdict.ok) {
     return { title: padded, decision: 'stripped', note: `${what}; ${t0.length} → ${padded.length} chars` }
   }
 
   return {
     title: t0,
     decision: 'band-guard',
-    note: `${what} would land ${padded.length} chars, outside [${TITLE_BAND_LO},${TITLE_BAND_HI}] and no money keyword fits the freed space — refused, byte-identical`,
+    note: `${what} would land ${padded.length} chars — ${verdict.why} — and no money keyword fits the freed space — refused, byte-identical`,
   }
 }

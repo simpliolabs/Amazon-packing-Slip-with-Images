@@ -35,6 +35,7 @@ const BEHAVIOR_FLAGS = [
   'THEME_PRINT_TEST', // rater 2-vs-3 boundary (PO ruling 2026-08-09); DEFAULT ON — 'off' reverts the pre-ruling prompt without a redeploy
   'TITLE_MONEY_TAIL', // DARK FLAG until 2026-08-09: gates the money-tail door (listingPipeline.ts:7719/:8116) that the PO gold's '| ... Football Tee' needs, defaults 'off', and was echoed NOWHERE — so its live value could not be verified, only assumed
   'TITLE_SHAPE_JUDGE', // off|shadow|on, default off — teaches titleQualityJudge the seller's measured left-segment ceiling + their banned vocabulary, and makes the humanizer's adopt gate refuse a LONGER-but-worse rewrite. Echoed from birth so its live value is never assumed (the TITLE_MONEY_TAIL dark-flag lesson).
+  'TITLE_RULING_OVER_FLOOR', // off|on, default off — at 'on' a PO editorial removal (waste vocab / inclusive audience / variant color) may ship UNDER our own 70 preferred floor but never over Amazon's 75 cap. At 'off' our scorer's preference can veto a seller ruling, which is how "Unisex" shipped on B0GVV3XL4T.
   'COVERAGE_CORE',
   'CONTENT_SPINE', // retired in code 2026-07-31 — listed to surface env residue
   'BACKEND_DEGRADE_STRICT', // retired in code 2026-08-03 — listed to surface env residue
