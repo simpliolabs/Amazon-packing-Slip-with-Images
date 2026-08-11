@@ -169,11 +169,16 @@ describe('enforceInclusiveAudience — decision table', () => {
       expected: 'THE CEO Golf Widow Support Womens Graphic Tee Shirt | Comfort Colors Tee',
     },
     {
-      name: 'RULE (b) leaned: the tail NARROWS to the lean — §4 still requires a matching audience word',
+      // MINT GUARD (2026-08-11): this case used to land '| Relaxed Fit for Women' — the pad MINTING
+      // a pipe from a spec fact, the tail class the seller has shipped 0 times (and the exact shape
+      // of the live '| Short Sleeve' regression). The narrow itself is still correct doctrine, but
+      // its re-fill may no longer be a minted spec pipe, so at floor-off the guard refuses. The
+      // phrase's real cure moved UPSTREAM: the council terminal net now strips 'for Men and Women'
+      // in EVERY lean state, so the door only meets it on legacy/locked paths.
+      name: 'RULE (b) leaned: spec-only re-fill is REFUSED — a minted pipe may not be a spec fact',
       title: 'THE CEO Golf Widow Support Group Graphic Tee Shirt for Men and Women',
       ctx: LEAN_F,
-      decision: 'narrowed',
-      expected: 'THE CEO Golf Widow Support Group Graphic Tee Shirt | Relaxed Fit for Women',
+      decision: 'band-guard',
     },
     {
       name: 'RULE (b) leaned, mid-title "Mens Womens": narrows to the ADJECTIVE form in place',
@@ -260,7 +265,10 @@ describe('enforceInclusiveAudience — decision table', () => {
     ]
     for (const [title, ctx] of inputs) {
       const v = enforceInclusiveAudience(title, ctx)
-      expect(['stripped', 'narrowed']).toContain(v.decision)
+      // band-guard is now a legal outcome here: the mint guard refuses a spec-only re-fill, and a
+      // refusal is byte-identical by contract — the band bounds only apply when the net APPLIED.
+      expect(['stripped', 'narrowed', 'band-guard']).toContain(v.decision)
+      if (v.decision === 'band-guard') { expect(v.title).toBe(title); continue }
       expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
       expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
     }
