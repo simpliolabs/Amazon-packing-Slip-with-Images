@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  SEED_GOLD_TITLES, measureGoldShape, goldBriefBlock, loadPoGoldTitles, GOLD_BRIEF_LIMIT,
+  SEED_GOLD_TITLES, SEED_REJECT_PAIRS, measureGoldShape, goldSpecBlock, rejectPairBlock, loadPoGoldTitles, GOLD_BRIEF_LIMIT,
 } from './poGoldCorpus'
 
 describe('measureGoldShape', () => {
@@ -94,30 +94,49 @@ describe('measureGoldShape', () => {
   })
 })
 
-describe('goldBriefBlock', () => {
+describe('goldSpecBlock — every sentence is a measurement', () => {
+  const shape = measureGoldShape(SEED_GOLD_TITLES)
+  const block = goldSpecBlock(SEED_GOLD_TITLES, shape)
+
   it('quotes the MEASURED numbers, so instruction and examples cannot disagree', () => {
-    const shape = measureGoldShape(SEED_GOLD_TITLES)
-    const block = goldBriefBlock(SEED_GOLD_TITLES, shape)
-    expect(block).toContain(`${shape.medianLen} chars`)
-    expect(block).toContain(`${shape.medianLeftWords} words before the separator`)
-    expect(block).toContain(`never more than ${shape.maxLeftWords}`)
+    expect(block).toContain(`length ${shape.lenMin}-${shape.lenMax} characters, median ${shape.medianLen}`)
+    expect(block).toContain(`never more than ${shape.maxLeftWords} (measured over ${shape.leftWordsFrom})`)
     for (const t of SEED_GOLD_TITLES) expect(block).toContain(t)
   })
 
-  it('states the money-position rule and names the spec facts that waste it', () => {
-    const block = goldBriefBlock(SEED_GOLD_TITLES, measureGoldShape(SEED_GOLD_TITLES))
-    expect(block).toContain('MONEY position')
-    expect(block).toMatch(/Crew Neck/)
-    expect(block).toMatch(/Item Highlights/)
+  it('prints every shipped tail verbatim with the measured class counts — 0 spec-only', () => {
+    expect(block).toContain('0 spec-only')
+    for (const tail of shape.tails) expect(block).toContain(`| ${tail}`)
   })
 
-  it('does NOT hard-code the pipe as mandatory — 70% of the seller\'s titles are comma-joined', () => {
-    const block = goldBriefBlock(SEED_GOLD_TITLES, measureGoldShape(SEED_GOLD_TITLES))
-    expect(block).toMatch(/comma or plain join is equally acceptable/)
+  it('the vocabulary table is measured, not asserted: funny is THEIRS, crew neck is NOT', () => {
+    expect(block).toMatch(/"funny" ×2/)
+    expect(block).toMatch(/never once used:.*"crew neck"/)
+    expect(block).toMatch(/never once used:.*"unisex"/)
+  })
+
+  it('does NOT hard-code the pipe as mandatory — the separator mix carries its denominator', () => {
+    expect(block).toContain(`${shape.sepMix.pipe} of ${shape.count} use " | "`)
+    expect(block).not.toMatch(/PATTERN A|Variant\/Attribute/)
   })
 
   it('empty corpus yields an empty block, not a headless instruction', () => {
-    expect(goldBriefBlock([], measureGoldShape([]))).toBe('')
+    expect(goldSpecBlock([], measureGoldShape([]))).toBe('')
+  })
+})
+
+describe('rejectPairBlock — genuine rejections only', () => {
+  it('carries the seller verbatim words for every pair, and no pair fabricates a rejection', () => {
+    const block = rejectPairBlock(SEED_REJECT_PAIRS)
+    expect(block).toContain('crew neck can go on highlights')
+    expect(block).toContain('STILL BAD')
+    // The old alligator gold was REVISED into another gold, never rejected — listing it as a reject
+    // would fabricate seller ground truth (caught by adversarial review before it shipped).
+    expect(block).not.toContain('See You Later Alligator Shirt | Long Sleeve')
+  })
+
+  it('no pairs -> empty string, never a fabricated floor', () => {
+    expect(rejectPairBlock([])).toBe('')
   })
 })
 

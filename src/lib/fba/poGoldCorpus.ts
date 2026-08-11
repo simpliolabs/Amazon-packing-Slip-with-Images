@@ -214,6 +214,100 @@ export function attestedUse(titles: readonly string[], terms: readonly string[])
   return out
 }
 
+/**
+ * GENUINE seller rejections — before-title, the seller's words, and the gold they wrote instead.
+ * All three are the B0GVV3XL4T incident (2026-08-09..11), quoted from the session record.
+ *
+ * NEVER add a REVISED gold here (e.g. the old alligator gold): the seller improving their own title
+ * is not a rejection, and fabricating a rejection event falsifies their ground truth — that exact
+ * mistake was caught by adversarial review before it shipped.
+ */
+export const SEED_REJECT_PAIRS: readonly { before: string; sellerSaid: string; after: string }[] = [
+  {
+    before: 'THE CEO 2026 World Soccer Cup USA Mexico Canada Unisex Tee | Classic Fit',
+    sellerSaid: 'Main money or design word needs to be short and sweet, up to 6-7 words, not entire 65 characters',
+    after: 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',
+  },
+  {
+    before: 'THE CEO 2026 World Soccer Cup USA, Mexico & Canada Unisex Tee | Crew Neck',
+    sellerSaid: 'WAY off from my recommended title. WHY did we need the filler CREW NECK there? crew neck can go on highlights',
+    after: 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',
+  },
+  {
+    before: 'THE CEO 2026 World Soccer Cup Unisex Classic Fit Fan Shirt | Short Sleeve',
+    sellerSaid: 'STILL BAD',
+    after: 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',
+  },
+] as const
+
+/** The negative few-shot block: what this system wrote, what the seller said, what they wrote
+ *  instead. Empty string when no pairs — the brief degrades, it never fabricates. */
+export function rejectPairBlock(pairs: readonly { before: string; sellerSaid: string; after: string }[]): string {
+  if (!pairs.length) return ''
+  const lines: string[] = [
+    'TITLES THIS SYSTEM WROTE THAT THE SELLER REJECTED — with their words. Do not fail the way a ✗ fails.',
+    '',
+  ]
+  for (const p of pairs) {
+    lines.push(`  ✗ ${p.before}`)
+    lines.push(`      seller: "${p.sellerSaid}"`)
+    lines.push(`  ✓ ${p.after}`)
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
+/** Probe list for the vocabulary table: the historically banned modifiers + the door's waste
+ *  phrases + the spec collocations the attack titles used. The corpus decides which side of the
+ *  table each lands on — nothing here is a ban, it is a QUESTION the golds answer. */
+const VOCAB_PROBES: readonly string[] = [
+  'funny', 'novelty', 'graphic', 'retro', 'cute', 'vintage',
+  'unisex', 'classic fit', 'relaxed fit', 'crew neck', 'short sleeve', 'long sleeve', 'garment dyed',
+]
+
+/**
+ * The gold-corpus block for the council brief — REPLACES goldBriefBlock. Every sentence is a
+ * measurement; the only prose is what the numbers mean. This is the cure for the 2026-08-11
+ * regression, where a hand-written PATTERN A template sat below the golds defining the money
+ * position as "[Variant/Attribute]" — the council obeyed the template over the examples, and
+ * shipped "| Short Sleeve".
+ */
+export function goldSpecBlock(titles: readonly string[], shape: GoldShape): string {
+  if (titles.length === 0) return ''
+  const att = attestedUse(titles, VOCAB_PROBES)
+  const attested: string[] = []
+  const unattested: string[] = []
+  for (const [term, hits] of att) {
+    if (hits.length > 0) attested.push(`"${term}" ×${hits.length} (e.g. "${hits[0]}")`)
+    else unattested.push(`"${term}"`)
+  }
+  const m = shape.sepMix
+  const tc = shape.tailClass
+  return [
+    `SELLER-APPROVED TITLES (${shape.count}) — written or locked by hand by this seller, newest first.`,
+    'These are the specification. Do what they do; do not do what they never do.',
+    '',
+    ...titles.map((t) => `  ${t}`),
+    '',
+    'MEASURED ACROSS THEM — every number computed from the titles above, none typed:',
+    `  • length ${shape.lenMin}-${shape.lenMax} characters, median ${shape.medianLen}`,
+    `  • separators: ${m.pipe} of ${shape.count} use " | ", ${m.comma} join with a comma, ${m.plain} run straight through — all three are correct`,
+    `  • identity segment (before a " | "): median ${shape.medianLeftWords} words, never more than ${shape.maxLeftWords} (measured over ${shape.leftWordsFrom})`,
+    `  • the garment noun appears twice (as a pair like "Tee Shirt", or once per position) in ${shape.garment.twice} of ${shape.count}`,
+    `  • audience tails: ${shape.audienceMix.gendered} gendered, ${shape.audienceMix.none} none, ${shape.audienceMix.inclusive} universal`,
+    '',
+    `EVERY " | " TAIL THE SELLER HAS SHIPPED, verbatim — ${tc.search} search-phrase, ${tc.brand} garment-brand, ${tc.specOnly} spec-only:`,
+    ...shape.tails.map((t) => `  | ${t}`),
+    '',
+    'THE SELLER\'S VOCABULARY, measured over the titles above:',
+    attested.length ? `  their words, in their collocations: ${attested.join(', ')}` : null,
+    unattested.length ? `  never once used: ${unattested.join(', ')} — not their voice; do not introduce these` : null,
+    // null (not '') marks a dropped conditional line — '' entries are DELIBERATE blank spacers
+    // between sections and must survive the filter.
+  ].filter((l): l is string => l !== null).join('\n')
+}
+
+
 const wc = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
 const leftOf = (t: string) => { const i = t.indexOf(' | '); return i >= 0 ? t.slice(0, i).trim() : t }
 const median = (ns: number[]) => (ns.length ? [...ns].sort((a, b) => a - b)[Math.floor(ns.length / 2)] : 0)
@@ -330,20 +424,3 @@ export async function loadPoGoldTitles(
   }
 }
 
-/** The few-shot block for the council brief. Quotes the MEASURED shape, so the instruction and the
- *  examples can never disagree — and so a number in the brief is always the seller's, not ours. */
-export function goldBriefBlock(titles: readonly string[], shape: GoldShape): string {
-  if (titles.length === 0) return ''
-  return [
-    `SELLER-APPROVED TITLES (${shape.count}) — these are titles THIS seller wrote or locked themselves.`,
-    'Match their SHAPE, not their words. Measured across them:',
-    `  • typical length ${shape.medianLen} chars`,
-    `  • ${shape.medianLeftWords} words before the separator (never more than ${shape.maxLeftWords}; measured over ${shape.leftWordsFrom})`,
-    `  • ${Math.round(shape.pipedShare * 100)}% use a " | " separator — a comma or plain join is equally acceptable`,
-    'The segment before the separator is BRAND + DESIGN + garment noun and stays SHORT. Everything after',
-    'it is the MONEY position: the phrase shoppers actually search. A spec fact there (Crew Neck, Classic',
-    'Fit, Unisex) is waste — those belong in Item Highlights.',
-    '',
-    ...titles.map((t) => `  ${t}`),
-  ].join('\n')
-}
