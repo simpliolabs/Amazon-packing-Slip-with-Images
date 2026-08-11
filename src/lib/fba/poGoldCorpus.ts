@@ -107,6 +107,11 @@ export interface GoldShape {
   garment: { twice: number; once: number }
   /** "for Men Women" (gold #7) is NOT the banned "for Men and Women" — never fold them. */
   audienceMix: { gendered: number; inclusive: number; none: number }
+  /** VOCAB_PROBES split by the corpus: attested terms are the seller's voice (funny, graphic,
+   *  long sleeve at HEAD); unattested terms appear in ZERO golds and are inadmissible. The judge
+   *  reads THESE — never a hand-typed ban list — so the scorer can never dock the seller's words. */
+  vocabAttested: string[]
+  vocabUnattested: string[]
 }
 
 /*
@@ -339,6 +344,11 @@ export function measureGoldShape(titles: readonly string[]): GoldShape {
   const MIN_PIPED_SAMPLE = 3
   const measured = piped.length >= MIN_PIPED_SAMPLE ? piped : list
   const lefts = measured.map((t) => wc(leftOf(t)))
+  // TRIMMED MAX: with n this small, ONE atypical lock can raise the ceiling for the whole catalog
+  // with no deploy (loadPoGoldTitles reads the newest 12 rows). If the largest left exceeds the
+  // runner-up by more than 2 words, treat it as the outlier it is and use the runner-up.
+  const sortedLefts = [...lefts].sort((a, b) => b - a)
+  const trimmedMax = sortedLefts.length >= 4 && sortedLefts[0] > sortedLefts[1] + 2 ? sortedLefts[1] : (sortedLefts[0] ?? 0)
   const lens = list.map((t) => t.length)
 
   // Separator classification, priority pipe > comma > plain: a piped title may legitimately carry a
@@ -352,6 +362,10 @@ export function measureGoldShape(titles: readonly string[]): GoldShape {
   for (const tail of tails) tc[classifyTail(tail)]++
 
   const mentions = list.map((t) => countGarmentMentions(t))
+  const att = attestedUse(list, VOCAB_PROBES)
+  const vocabA: string[] = []
+  const vocabU: string[] = []
+  for (const [term, hits] of att) (hits.length > 0 ? vocabA : vocabU).push(term)
   const audience = { gendered: 0, inclusive: 0, none: 0 }
   for (const t of list) {
     // "for Men and Women" is the seller-banned universal tail; "for Men Women" (gold #7) is NOT
@@ -365,7 +379,7 @@ export function measureGoldShape(titles: readonly string[]): GoldShape {
   return {
     medianLen: median(lens),
     medianLeftWords: median(lefts),
-    maxLeftWords: lefts.length ? Math.max(...lefts) : 0,
+    maxLeftWords: trimmedMax,
     pipedShare: list.length ? +(piped.length / list.length).toFixed(2) : 0,
     count: list.length,
     leftWordsFrom: measured.length,
@@ -376,6 +390,8 @@ export function measureGoldShape(titles: readonly string[]): GoldShape {
     tailClass: tc,
     garment: { twice: mentions.filter((m) => m >= 2).length, once: mentions.filter((m) => m === 1).length },
     audienceMix: audience,
+    vocabAttested: vocabA,
+    vocabUnattested: vocabU,
   }
 }
 
@@ -406,8 +422,12 @@ export async function loadPoGoldTitles(
     for (const r of data as { recommended_title: string | null }[]) {
       const t = (r.recommended_title ?? '').trim()
       // A gold must look like a shipped title: brand-front and inside the band. A truncated or
-      // placeholder row would teach the council a shape the seller never chose.
+      // placeholder row would teach the council a shape the seller never chose. Brand-front is
+      // required literally: every canonical gold opens with the brand, and a row that does not is
+      // either a fragment or another surface's copy — admitting it would let one bad row move the
+      // measured ceiling for the whole catalog with no deploy.
       if (t.length < 40 || t.length > 80) continue
+      if (!/^the ceo\b/i.test(t)) continue
       const k = t.toLowerCase()
       if (seen.has(k)) continue          // one gold locked across many children is ONE example
       seen.add(k)

@@ -27,6 +27,8 @@ import { buildApparelTitleBrief, titleQualityJudge } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
 const score = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords }).score
+/** PR-C scoring: the full corpus shape threaded, apparel-gated — what the live producers now pass. */
+const scoreC = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true }).score
 
 /** The adversary's winning titles: spec-stuffed garbage that fully complied with the first-draft
  *  brief. ATTACK_A scored 100/100 with ZERO recorded problems. */
@@ -96,17 +98,36 @@ describe('the keystone predicate — specClaimSpans names the poison the judge c
 })
 
 /**
- * THE AFTER CONTRACT — enabled by PR-C, skipped until then. When the judge derives its terms from
- * the corpus (attestation-based vocabulary, corpus-derived length pressure, classifyTail money
- * dock), these must ALL pass, and the BEFORE block above must be updated to match.
+ * THE AFTER CONTRACT — LIVE since PR-C: the judge derives its terms from the corpus (attestation
+ * vocabulary, corpus length floor, classifyTail money dock, adjacency-collapsed noun rule). The
+ * BEFORE block above still passes because it scores WITHOUT `shape` threaded — that legacy arm is
+ * exactly what un-shaped callers still get, and pinning it documents the difference the corpus makes.
  */
-describe.skip('AFTER (PR-C contract): the corpus outranks every hand-written rule', () => {
-  it('no gold is docked by a taste rule (Amazon\'s 75 cap may still flag gold #7 — ship rule)', () => {
+describe('AFTER (PR-C, live): the corpus outranks every hand-written rule', () => {
+  it('every cap-compliant gold scores a clean 100 — zero TASTE docks remain', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
-    const worstGold = Math.min(...SEED_GOLD_TITLES.map(score))
-    for (const bad of [ATTACK_A, ATTACK_B, REJECT_1, REJECT_2]) {
-      expect(score(bad), bad).toBeLessThan(worstGold)
+    for (const g of SEED_GOLD_TITLES) {
+      if (g.length > 75) continue              // gold #7 (78 chars): Amazon's cap is a SHIP rule, not taste
+      expect(scoreC(g), g).toBe(100)
     }
+    // Gold #9 (69 chars, "funny"): scored 80 under the hand-typed rules. The corpus floor is 69 and
+    // "funny" is the seller's attested voice — no dock survives.
+    expect(scoreC(SEED_GOLD_TITLES[8])).toBe(100)
+  })
+
+  it('every attack and reject scores STRICTLY below every cap-compliant gold', () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    const worstCompliantGold = Math.min(...SEED_GOLD_TITLES.filter((g) => g.length <= 75).map(scoreC))
+    for (const bad of [ATTACK_A, ATTACK_B, REJECT_1, REJECT_2]) {
+      expect(scoreC(bad), `${bad} => ${scoreC(bad)} vs gold floor ${worstCompliantGold}`).toBeLessThan(worstCompliantGold)
+    }
+  })
+
+  it('the docks NAME the poison: unattested spec vocabulary + spec-only money position', () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    const r = titleQualityJudge(REJECT_2, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
+    expect(r.problems.join(' ; ')).toMatch(/spec vocabulary the seller never uses/)
+    expect(r.problems.join(' ; ')).toMatch(/money position holds only spec facts/)
   })
 })
 
