@@ -85,12 +85,17 @@ describe('measureGoldShape', () => {
   })
 
   it('empty corpus is a zero shape, never a throw — the brief degrades, it does not crash', () => {
-    expect(measureGoldShape([])).toEqual({
+    const z = measureGoldShape([])
+    expect(z).toMatchObject({
       medianLen: 0, medianLeftWords: 0, maxLeftWords: 0, pipedShare: 0, count: 0, leftWordsFrom: 0,
       lenMin: 0, lenMax: 0, sepMix: { pipe: 0, comma: 0, plain: 0 }, tails: [],
       tailClass: { search: 0, brand: 0, specOnly: 0 }, garment: { twice: 0, once: 0 },
       audienceMix: { gendered: 0, inclusive: 0, none: 0 },
     })
+    // With no titles, NOTHING is attested — every probe lands unattested, which is the safe
+    // direction (an empty corpus must not license any spec vocabulary).
+    expect(z.vocabAttested).toEqual([])
+    expect(z.vocabUnattested.length).toBeGreaterThan(0)
   })
 })
 

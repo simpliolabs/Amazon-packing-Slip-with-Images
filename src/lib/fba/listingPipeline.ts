@@ -58,7 +58,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, goldSpecBlock, measureGoldShape, rejectPairBlock, type GoldShape } from '@/lib/fba/poGoldCorpus'
+import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
@@ -1369,6 +1369,13 @@ export function titleQualityJudge(title: string, opts: {
   /** The seller's measured left-segment ceiling (`GoldShape.maxLeftWords`, poGoldCorpus.ts). Absent
    *  ⇒ no left-segment dock, so every existing caller and test is unaffected. */
   maxLeftWords?: number | null
+  /** The FULL measured corpus shape (PR-C). When present at TITLE_SHAPE_JUDGE=on, the judge derives
+   *  length pressure, the pipe bonus, the noun rule, the money-position dock, and the vocabulary
+   *  docks from IT — never from a hand-typed constant. Absent ⇒ those terms stay legacy. */
+  shape?: GoldShape | null
+  /** Apparel gate for the corpus-derived terms — the multi-design parent path can reach this judge
+   *  on non-apparel, where garment-spec vocabulary rules make no sense. */
+  apparel?: boolean
   /** TITLE_COUNCIL_V3.1a Fix D (2026-07-23, PO Q2 single-tier): RAW audience lean forwarded from
    *  PipelineInput.audienceLean → runTitleAgent (single-design) / parent-lean via UNANIMITY (multi-design).
    *  Undefined/null = caller didn't classify → no audience dock (backward-compatible fail-open). */
@@ -1380,13 +1387,19 @@ export function titleQualityJudge(title: string, opts: {
   const t = title.trim()
   const len = t.length
 
-  // LENGTH BAND (70-75 hard goal, 50-75 acceptable)
-  // Review 2026-07-22: previous dock was too weak — 62-char generics scored 75 (target ≤60). Stiffen
-  // the sub-70 dock so the discrimination target holds: 62 chars = 100 - 30 = 70, plus other docks.
-  if (len < 50) { score -= 45; problems.push(`length ${len} < 50 floor`) }
+  // LENGTH. Amazon's >75 cap is external and docks in EVERY mode. The lower pressure is the part
+  // that was OURS: the hand-typed sub-70 docks scored the seller's own 69-char gold at 80 (PR-C
+  // before-state). At on+shape the floor derives from the corpus (lenMin=69 at HEAD): a title the
+  // seller's own range admits takes NO dock; pressure starts only below their shortest gold.
+  const corpusLen = titleShapeJudgeMode() === 'on' && opts.shape ? opts.shape : null
+  if (len > 75) { score -= 45; problems.push(`length ${len} > 75 Amazon cap`) }
+  else if (corpusLen) {
+    if (len < corpusLen.lenMin - 10) { score -= 30; problems.push(`length ${len} far under the seller's shortest gold (${corpusLen.lenMin})`) }
+    else if (len < corpusLen.lenMin) { score -= 15; problems.push(`length ${len} under the seller's shortest gold (${corpusLen.lenMin})`) }
+  }
+  else if (len < 50) { score -= 45; problems.push(`length ${len} < 50 floor`) }
   else if (len < 65) { score -= 30; problems.push(`length ${len} well under 70 golden`) }
   else if (len < 70) { score -= 15; problems.push(`length ${len} under 70 golden`) }
-  else if (len > 75) { score -= 45; problems.push(`length ${len} > 75 Amazon cap`) }
 
   // FORMAT: Pattern A (pipe) gets +5 as a positive structure signal for match to PO golds 1/3/4/6/7/8.
   // Review 2026-07-22: previously hasPipe was DEAD CODE — computed then read only inside an empty
@@ -1394,19 +1407,51 @@ export function titleQualityJudge(title: string, opts: {
   // same-length pipe rewrite over a legacy comma-string via the widened adopt gate at :5473.
   // Pattern B (front-load, no pipe) is judged by rule presence — no synthetic bonus (matches golds 2/5).
   const hasPipe = / \| /.test(t)
-  if (hasPipe) score += 5
+  // The pipe earns a bonus only to the degree the CORPUS prefers pipes (pipedShare 0.56 at HEAD →
+  // +1). The old flat +5 rewarded structure the seller uses in barely half their titles.
+  if (hasPipe) score += corpusLen ? Math.round(10 * (corpusLen.pipedShare - 0.5)) : 5
 
   // SHAPE TERMS (TITLE_SHAPE_JUDGE=on) — the seller's measured left-segment ceiling and their banned
   // vocabulary, scored HERE so the producer stops writing what the door would have to delete. See
   // `titleShapeTerms` above for the arithmetic that made this the seam. At 'off'/'shadow' the score
   // is byte-identical to the pre-2026-08-10 judge.
   if (titleShapeJudgeMode() === 'on') {
-    const shape = titleShapeTerms(t, opts.maxLeftWords)
+    const ceiling = opts.shape?.maxLeftWords ?? opts.maxLeftWords
+    const shape = titleShapeTerms(t, ceiling)
     if (shape.leftDock > 0) {
       score -= shape.leftDock
-      problems.push(`left segment ${shape.leftWords} words > seller's measured max ${opts.maxLeftWords} (-${shape.leftDock})`)
+      problems.push(`left segment ${shape.leftWords} words > seller's measured max ${ceiling} (-${shape.leftDock})`)
     }
-    if (shape.wasteDock > 0) {
+    if (opts.shape && opts.apparel) {
+      // UNATTESTED SPEC VOCABULARY, position-independent (the adversarial-break lesson: every
+      // position-scoped rule was defeated by relocation). Each spec claim the seller has NEVER used
+      // docks 10; a claim their corpus attests ("long sleeve" ×1 at HEAD) is their voice and free.
+      const attested = new Set(opts.shape.vocabAttested)
+      const alien = specClaimSpans(t).filter((c) => !attested.has(c))
+      if (alien.length > 0) {
+        const dock = Math.min(20, 10 * alien.length)
+        score -= dock
+        problems.push(`spec vocabulary the seller never uses: ${alien.join(', ')} (-${dock})`)
+      }
+      // MONEY POSITION: a pipe-right that is NOTHING but spec facts is the class the seller has
+      // shipped ZERO times (tailClass.specOnly = 0) and the exact shape of every rejected title.
+      if (hasPipe) {
+        const tail = t.slice(t.indexOf(' | ') + 3)
+        if (classifyTail(tail) === 'specOnly') {
+          score -= 25
+          problems.push(`money position holds only spec facts ("| ${tail.trim()}") — the seller has shipped this 0 times (-25)`)
+        }
+      }
+      // GARMENT NOUN, adjacency-collapsed ("Tee Shirt" = ONE mention). The corpus rule: twice in
+      // 8 of 9; the single exception (Espana) is UNPIPED — so a PIPED title with fewer than two
+      // mentions is off-corpus, an unpiped one is not.
+      const mentions = countGarmentMentions(t)
+      if ((hasPipe && mentions < 2) || mentions === 0) {
+        score -= 10
+        problems.push(`garment noun mentions=${mentions} (corpus: twice in ${opts.shape.garment.twice} of ${opts.shape.count}) (-10)`)
+      }
+    } else if (shape.wasteDock > 0) {
+      // No corpus threaded (legacy caller): keep the narrow two-phrase waste dock.
       score -= shape.wasteDock
       problems.push(`title waste vocabulary present (PO §3: "unisex"/"classic fit" belong in Item Highlights) (-${shape.wasteDock})`)
     }
@@ -1415,7 +1460,9 @@ export function titleQualityJudge(title: string, opts: {
   // PRODUCT NOUN ANCHOR — twice preferred (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
   const nounRegex = /\b(shirt|shirts|tshirt|tee|tees|cap|hat|hoodie|sweatshirt|tank|polo|dress|jacket|beanie)\b/gi
   const nounHits = (t.match(nounRegex) || []).length
-  if (nounHits < 2) { score -= 10; problems.push(`product noun appears ${nounHits} time(s); PO gold repeats it (Shirt … Shirt, Tee … Tshirt)`) }
+  // At on+shape the adjacency-collapsed mention rule (below) replaces this raw-token count, which
+  // double-counts "Tee Shirt" and passed the seller's Espana gold only by that accident.
+  if (!(titleShapeJudgeMode() === 'on' && opts.shape && opts.apparel) && nounHits < 2) { score -= 10; problems.push(`product noun appears ${nounHits} time(s); PO gold repeats it (Shirt … Shirt, Tee … Tshirt)`) }
 
   // BAN LIST — modifier stuffing. Attribute-pair exemption (review 2026-07-22): a banned modifier is
   // EXEMPT if immediately followed by a product-noun (or attribute noun) — "Graphic Shirt" / "Long
@@ -1424,9 +1471,14 @@ export function titleQualityJudge(title: string, opts: {
   // (both use "Graphic Shirt" legitimately).
   const bannedFound: string[] = []
   const toks = t.toLowerCase().split(/[\s,|]+/).filter(Boolean)
+  const corpusVoice = titleShapeJudgeMode() === 'on' && opts.shape ? new Set(opts.shape.vocabAttested) : null
   for (let i = 0; i < toks.length; i++) {
     const tok = toks[i]
     if (!TITLE_V2_BANNED_MODIFIERS.has(tok)) continue
+    // THE SELLER'S OWN VOICE IS NEVER BANNED (PR-C): "funny" appears in TWO of their golds, yet the
+    // hand-typed list docked it — which is how the judge scored their canonical golds 55 and 80.
+    // A term the corpus attests is exempt; the list only governs vocabulary the seller never uses.
+    if (corpusVoice?.has(tok)) continue
     const next = toks[i + 1]
     if (next && TITLE_V2_ATTR_PAIR_NOUNS.has(next)) continue   // attribute-pair exemption
     bannedFound.push(tok)
@@ -2997,7 +3049,7 @@ async function titleCouncilAsk(
  *      hardcode — TRADEMARK_RULES now says "world futbol cup");
  *  (5) fail-open uses titleQualityJudge score to pick the best draft, not `drafts[1] || drafts[0]` (the
  *      silent SEO-persona array-index bias). */
-async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null }): Promise<string> {
+async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null; shape?: GoldShape | null; apparel?: boolean }): Promise<string> {
   // Model env split — spec §4.3. Adversary MUST differ from judge (anti-echo). Default adversary =
   // gpt-4o-mini (different family from gpt-5) so an unconfigured deploy still respects the ≠ rule;
   // if operator overrides both to the same model, we log a warning but still run — the ≠ rule is
@@ -3099,9 +3151,11 @@ ${baseSystem}`,
   if (candidates.length === 0) return ''
   let best = candidates[0]
   const maxLeftWords = opts?.maxLeftWords ?? null
-  let bestScore = titleQualityJudge(best, { brandName, lean, maxLeftWords }).score
+  const shape = opts?.shape ?? null
+  const apparel = opts?.apparel ?? false
+  let bestScore = titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel }).score
   for (const c of candidates.slice(1)) {
-    const s = titleQualityJudge(c, { brandName, lean, maxLeftWords }).score
+    const s = titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score
     if (s > bestScore) { best = c; bestScore = s }
   }
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
@@ -3149,7 +3203,7 @@ ${baseSystem}`,
     }
   }
   if (stripped || appended) {
-    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean, maxLeftWords }).score}/100`)
+    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel }).score}/100`)
   }
   // SHAPE OBSERVABILITY — UNCONDITIONAL, and it must stay that way.
   //
@@ -3179,7 +3233,7 @@ ${baseSystem}`,
  *  legacy council + [COUNCIL_V3_DIFF] shadow machinery are deleted — legacy was no longer a
  *  pre-Step-7 baseline anyway (V3.1a changed its brief un-flagged). Rollback is git-revert.
  *  Both title paths (single-design and multi-design) call this wrapper (INVARIANT 1 parity). */
-async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null }): Promise<string> {
+async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null; shape?: GoldShape | null; apparel?: boolean }): Promise<string> {
   return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
 }
 
@@ -3507,7 +3561,7 @@ Rules:
   // flows through the validate + deterministic backstops below, so the hard rules still hold.
   let title: string
   if (apparel) {
-    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean, maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null })
+    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean, maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null, shape: input.poGolds?.shape ?? null, apparel })
   } else {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -3724,6 +3778,8 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
       label: 'Title',
       lean,   // Fix D: adopt-gate scores retry with the lean-aware dock so a rewrite can't silently drop the tail
       maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null,
+      shape: input.poGolds?.shape ?? null,
+      apparel: true,   // this call sits inside the apparel-gated single-design arm
     })
     if (extended && extended !== title) {
       title = extended
@@ -6423,9 +6479,11 @@ async function humanizeTitleTo75(
      *  council, so without this a rewrite that bloats the left segment scores identically to one that
      *  respects it (INVARIANT-1 parity: both producer-side actors read one arbiter). */
     maxLeftWords?: number | null
+    shape?: GoldShape | null
+    apparel?: boolean
   },
 ): Promise<string> {
-  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords } = opts
+  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords, shape = null, apparel = false } = opts
   // RETRY-CASING NORMALIZER: the LLM ships raw casing (live: "THE CEO fishing humor funny t-shirt…" —
   // correct content, lowercase niche). Title-Case only FULLY-LOWERCASE words; any word already carrying
   // an uppercase letter is preserved verbatim ("THE CEO", "T-shirt"); minor connectors stay lowercase
@@ -6481,8 +6539,8 @@ Return ONLY the extended title string.` },
         // count. Adopt a longer rewrite, OR a same-length/shorter one that scores strictly higher
         // on the deterministic titleQualityJudge — safety gates (trademark + brand-front) always
         // enforced.
-        const currentScore = titleQualityJudge(title, { brandName, lean, maxLeftWords }).score
-        const retryScore = titleQualityJudge(retryTitle, { brandName, lean, maxLeftWords }).score
+        const currentScore = titleQualityJudge(title, { brandName, lean, maxLeftWords, shape, apparel }).score
+        const retryScore = titleQualityJudge(retryTitle, { brandName, lean, maxLeftWords, shape, apparel }).score
         // SHAPE-AWARE ADOPT (TITLE_SHAPE_JUDGE=on). Extending toward the band is this function's whole
         // job, so a LONGER rewrite is still progress — but "longer" must not buy a title that scores
         // WORSE. The historical gate adopted ANY longer retry unconditionally, which made this a
@@ -6608,7 +6666,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     })
     return b.user
   })()
-  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null })
+  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null, shape: poGolds?.shape ?? null, apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || '') })
   let title = (judged || '').trim()
   // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
   // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
@@ -6950,6 +7008,8 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     label: 'Parent title',
     lean: parentLean,   // Fix D: same adopt-gate discipline as single-design (INVARIANT-1 parity)
     maxLeftWords: poGolds?.shape.maxLeftWords ?? null,
+    shape: poGolds?.shape ?? null,
+    apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || ''),
   })
   return title
 }
