@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
+import { loadPoGoldTitles } from '@/lib/fba/poGoldCorpus'
 import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { runListingPipeline } from '@/lib/fba/listingPipeline'
@@ -825,7 +826,17 @@ export async function POST(req: NextRequest) {
             site: 'ai-recommendations.pipeline',
           });
 
+          // THE SELLER'S OWN TITLES as the council's few-shots (PO 2026-08-10: "I gave you about 70
+          // title recommendations ... that should be a strong signal for the council/judge"). Loaded
+          // HERE because the route owns the supabase client and listingPipeline deliberately takes no
+          // DB handle. Fail-open inside the loader: a failed read returns the seed corpus, so the
+          // council can never be left with no examples.
+          const poGolds = await loadPoGoldTitles(supabase)
+          console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'GOLD_CORPUS', parent: parent_asin,
+            source: poGolds.source, count: poGolds.shape.count, medianLeftWords: poGolds.shape.medianLeftWords,
+            medianLen: poGolds.shape.medianLen, pipedShare: poGolds.shape.pipedShare }))
           const result = await runListingPipeline({
+            poGolds,
             openai,
             selectionCtx: pipelineSelCtx,
             brandName,
