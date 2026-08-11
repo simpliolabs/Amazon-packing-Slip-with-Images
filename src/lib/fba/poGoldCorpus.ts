@@ -77,10 +77,19 @@ export function measureGoldShape(titles: readonly string[]): GoldShape {
   // inflated population is the MAJORITY. `/api/fba/title-golds` (route.ts:102-104) already measures
   // it this way; this brings the brief's copy into line with the analysis endpoint's.
   //
-  // FALLBACK TO THE WHOLE LIST, NEVER TO ZERO. `loadPoGoldTitles` takes only the newest 12 manual
-  // rows, so an all-unpiped window is genuinely reachable — and a zero shape would make
-  // `goldBriefBlock` instruct the council "never more than 0 words before the separator".
-  const measured = piped.length > 0 ? piped : list
+  // FALLBACK TO THE WHOLE LIST, NEVER TO ZERO — AND NEVER TO A SAMPLE OF ONE.
+  //
+  // `loadPoGoldTitles` takes only the newest 12 manual rows, so at the live pipedShare of 0.30 the
+  // piped subset of a window can easily be 1 or 2 titles. `goldBriefBlock` states the ceiling to the
+  // council as a hard law ("never more than N"), so a one-title sample would let a single atypical
+  // lock — say a 4-word left segment — become a rule applied to every design. The first cut of this
+  // function guarded only the ZERO case and would have shipped exactly that.
+  //
+  // Three is the smallest n that cannot be moved wholesale by one row, and it is also the size of
+  // SEED_GOLD_TITLES, so the seed path (all piped) always qualifies. Below it, fall back to the
+  // whole list: a mildly inflated ceiling is a far cheaper error than a fabricated-precise one.
+  const MIN_PIPED_SAMPLE = 3
+  const measured = piped.length >= MIN_PIPED_SAMPLE ? piped : list
   const lefts = measured.map((t) => wc(leftOf(t)))
   return {
     medianLen: median(list.map((t) => t.length)),

@@ -71,6 +71,17 @@ export function removalPermitted(paddedLen: number): { ok: boolean; why: string 
   if (paddedLen > TITLE_BAND_HI) {
     return { ok: false, why: `${paddedLen} chars is over Amazon's ${TITLE_BAND_HI} cap` }
   }
+  // THE ABSOLUTE FLOOR, both arms. The first cut of this function removed the lower bound ENTIRELY
+  // at 'on' rather than lowering it — `removalPermitted(1)` returned ok — because the only floor in
+  // the predicate was the one being relaxed. The realistic way that bites is not a contrived input:
+  // `blank_specs` fails OPEN when a blank has no row (task #159), so `candidateSegments` yields
+  // nothing, the pad cannot add a character, and the incident title ships at 54 rather than the
+  // "60s" this change quotes to the seller as its honest cost. 50 is CONTENT_CONTRACT.title.floor —
+  // validateTitle's own under-length trigger, already the source of the two bounds above, so this
+  // introduces no new number.
+  if (paddedLen < CONTENT_CONTRACT.title.floor) {
+    return { ok: false, why: `${paddedLen} chars is under the absolute ${CONTENT_CONTRACT.title.floor} floor` }
+  }
   if (!rulingOverFloor() && paddedLen < TITLE_BAND_LO) {
     return { ok: false, why: `${paddedLen} chars is under our ${TITLE_BAND_LO} preferred floor (TITLE_RULING_OVER_FLOOR=off)` }
   }

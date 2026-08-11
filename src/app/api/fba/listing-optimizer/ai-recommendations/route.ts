@@ -832,8 +832,14 @@ export async function POST(req: NextRequest) {
           // DB handle. Fail-open inside the loader: a failed read returns the seed corpus, so the
           // council can never be left with no examples.
           const poGolds = await loadPoGoldTitles(supabase)
+          // maxLeftWords and leftWordsFrom are logged because they are the two numbers with real
+          // authority and neither was observable: maxLeftWords becomes the hard "never more than N"
+          // law in the council brief AND the judge's ceiling, and leftWordsFrom is the sample it was
+          // computed from. A ceiling quoted to the council as the seller's own law must never have to
+          // be inferred from the code — that is the dark-flag mistake in a different costume.
           console.log('[TITLE_GOLD]', JSON.stringify({ tag: 'GOLD_CORPUS', parent: parent_asin,
             source: poGolds.source, count: poGolds.shape.count, medianLeftWords: poGolds.shape.medianLeftWords,
+            maxLeftWords: poGolds.shape.maxLeftWords, leftWordsFrom: poGolds.shape.leftWordsFrom,
             medianLen: poGolds.shape.medianLen, pipedShare: poGolds.shape.pipedShare }))
           const result = await runListingPipeline({
             poGolds,

@@ -3105,14 +3105,21 @@ ${baseSystem}`,
   }
   if (stripped || appended) {
     console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean, maxLeftWords }).score}/100`)
-    // SHAPE OBSERVABILITY — emitted in EVERY mode, so `shadow` shows exactly what `on` would dock
-    // before anyone flips it, and so a live run can be checked without inferring the flag's value
-    // (the TITLE_MONEY_TAIL dark-flag lesson: a gate whose live state can only be assumed).
-    console.log('[TITLE_GOLD]', JSON.stringify({
-      tag: 'SHAPE_JUDGE', mode: titleShapeJudgeMode(), ceiling: maxLeftWords,
-      ...titleShapeTerms(best, maxLeftWords), title: best.slice(0, 90),
-    }))
   }
+  // SHAPE OBSERVABILITY — UNCONDITIONAL, and it must stay that way.
+  //
+  // It was first written nested inside the `if (stripped || appended)` guard above, which meant
+  // shadow mode's ONLY observable could not fire on a listing where neither audience net ran — i.e.
+  // on a unisex / no-lean design, which is exactly B0GVV3XL4T, the ASIN this whole change exists
+  // for. A flag whose shadow arm is silent on its own target listing is a dark flag, which is the
+  // TITLE_MONEY_TAIL lesson this comment originally claimed to be applying.
+  //
+  // Placement is load-bearing: AFTER the terminal nets, so the logged string is the council's real
+  // exit value including any appended audience tail — not the pre-net winner.
+  console.log('[TITLE_GOLD]', JSON.stringify({
+    tag: 'SHAPE_JUDGE', mode: titleShapeJudgeMode(), ceiling: maxLeftWords,
+    ...titleShapeTerms(best, maxLeftWords), title: best.slice(0, 90),
+  }))
   return best
 }
 
@@ -6482,6 +6489,16 @@ Return ONLY the extended title string.` },
           ? (retryTitle.length > title.length && retryScore >= currentScore)
           : retryTitle.length > title.length
         const clean = safetyOk && (longerIsProgress || retryScore > currentScore)
+        // Both branches go to console as well as onProgress: onProgress is SSE-only, so until now
+        // NEITHER the adopt nor the reject decision reached server logs — and at TITLE_SHAPE_JUDGE=on
+        // a longer-but-rejected retry has a genuinely new cause (score veto) that the old reject
+        // string could not distinguish from a trademark/brand-front veto.
+        console.log('[TITLE_GOLD]', JSON.stringify({
+          tag: 'HUMANIZER_ADOPT', label, attempt, adopted: clean,
+          cause: clean ? 'adopted' : (!safetyOk ? 'safety' : 'score'),
+          mode: titleShapeJudgeMode(), lenFrom: title.length, lenTo: retryTitle.length,
+          scoreFrom: currentScore, scoreTo: retryScore,
+        }))
         if (clean) {
           onProgress?.(`${label} retry ${attempt}: len ${title.length}→${retryTitle.length} score ${currentScore}→${retryScore}`)
           title = retryTitle
