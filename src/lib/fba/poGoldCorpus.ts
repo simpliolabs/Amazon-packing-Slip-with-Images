@@ -29,16 +29,46 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 /**
  * SEED GOLDS — the floor, used when the DB read fails or returns nothing.
  *
- * These three are the highest-confidence examples in the whole project: they are the most-cited
- * titles across the entire commit history AND the seller confirmed the signal directly
- * ("17/20 is good") when shown the citation counts. Everything else comes from the live table, so
- * this list stays deliberately tiny — a seed, not a second rulebook to drift out of date.
+ * THE SELLER'S OWN CANONICAL LIST, handed verbatim on 2026-08-11 ("Gold:" — five titles). This
+ * supersedes the previous 3-item seed that was inferred from commit-history citation counts. Two
+ * rulings are embedded in the list itself and must not be "corrected" away:
+ *
+ *   1. The alligator gold RESTRUCTURES the old x20-cited version. Old:
+ *        "THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt"
+ *      New: "Long Sleeve" moved INTO the left as a garment attribute, and the second segment became
+ *      design + garment brand + noun. So the money position holds SEARCH language (design phrase /
+ *      brand / audience); a bare spec phrase no longer LEADS it — while the garment BRAND in the
+ *      tail stays fully legitimate (see the fifth gold).
+ *   2. The comma is a first-class separator (first gold, ", " at a full 75 chars) — alongside the
+ *      pipe (3 of 5) and plain join (the Espana gold). No shape rule may require the pipe.
+ *
+ * Everything else comes from the live table; this list stays the seller's floor, not a rulebook.
  */
 export const SEED_GOLD_TITLES: readonly string[] = [
-  'THE CEO See You Later Alligator Shirt | Long Sleeve Comfort Colors Shirt',      // 72 — cited x20
-  'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',      // 72 — cited x17
-  'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women',    // 74 — cited x14
+  'THE CEO Later Alligator Long Sleeve Shirt, Later Gator Comfort Colors Shirt',    // 75 — comma join
+  'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',    // 75 — plain join
+  'THE CEO Cashflow Cap | Puff Embroidery Cotton Twill Snapback Hat for Men',       // 72 — 4w left
+  'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women',     // 74 — 10w left
+  'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women',      // 73 — 6w left
+  'THE CEO Cupid Valentine Tee Shirt | Comfort Colors Graphic Tshirt for Women',    // 75 — 6w left
+  'THE CEO I Could Be Meaner Tee Shirt | Funny Comfort Colors Shirt for Men Women', // 78 — OVER Amazon's 75; kept verbatim (see note)
+  "THE CEO Darlin' T-Shirt, Comfort Colors Graphic Tee for Women, Rodeo Shirt",     // 74 — DOUBLE comma, three segments
+  'THE CEO The Rod Father T-Shirt Funny Fishing Mens Graphic Tee for Men',          // 69 — UNDER our 70 floor (see note)
 ] as const
+
+/*
+ * WHAT THE NINE THEMSELVES OVERRULE (measured 2026-08-11, not asserted):
+ *   - The corpus spans 69–78 chars. 69 breaks OUR 70 floor; 78 breaks AMAZON'S 75 cap. So the
+ *     hand-written 70-75 "hard goal" is the seller's PREFERENCE ZONE, not their law — the floor has
+ *     no authority over a gold, and the one over-cap gold is kept verbatim as taste even though
+ *     Amazon may rewrite it on ship (capTitle75 still governs what we PUSH; the corpus governs what
+ *     we LEARN).
+ *   - "Funny" appears in TWO golds ("| Funny Comfort Colors Shirt…", "Funny Fishing Mens…") while
+ *     TITLE_V2_BANNED_MODIFIERS still docks it outside a hardcoded attribute-pair list. A ban list
+ *     that docks the seller's own golds is fighting their taste — brief-rebuild input, not a rule to
+ *     re-teach.
+ *   - Separators: 5 pipe / 2 comma (one THREE-segment) / 2 plain. Nothing may require the pipe.
+ */
 
 /** How many golds the brief carries. Enough to teach the shape; small enough to leave prompt budget
  *  for the design's own context. Newest first — the seller's taste is allowed to move. */

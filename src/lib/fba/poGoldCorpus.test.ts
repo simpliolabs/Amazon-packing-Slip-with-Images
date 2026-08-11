@@ -15,13 +15,16 @@ import {
 
 describe('measureGoldShape', () => {
   it('measures the seed corpus rather than asserting a shape', () => {
+    // The seed is the seller's verbatim 2026-08-11 list (nine titles, streamed in one sitting).
+    // Their own range is 69–78 — one UNDER our 70 floor, one OVER Amazon's 75 — so the tests pin
+    // the MEASURED median, not the hand-written band.
     const s = measureGoldShape(SEED_GOLD_TITLES)
-    expect(s.count).toBe(3)
-    expect(s.medianLen).toBeGreaterThanOrEqual(70)
-    expect(s.medianLen).toBeLessThanOrEqual(75)     // the seller ships inside the band
-    expect(s.pipedShare).toBe(1)                    // all three seeds are piped
-    expect(s.medianLeftWords).toBeGreaterThan(0)
-    expect(s.maxLeftWords).toBeGreaterThanOrEqual(s.medianLeftWords)
+    expect(s.count).toBe(9)
+    expect(s.medianLen).toBe(74)
+    expect(s.pipedShare).toBe(0.56)                 // 5 of 9 — the pipe is common, NOT mandatory
+    expect(s.leftWordsFrom).toBe(5)                 // left stats from the piped subset only
+    expect(s.medianLeftWords).toBe(6)               // 4 / 6 / 6 / 8 / 10 piped lefts
+    expect(s.maxLeftWords).toBe(10)
   })
 
   it('an ALL-UNPIPED corpus falls back to whole-title counts rather than reporting 0', () => {
@@ -128,7 +131,11 @@ describe('loadPoGoldTitles — fail-open', () => {
     const ok: any = { from: () => ({ select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: rows, error: null }) }) }) }) }) }
     const r = await loadPoGoldTitles(ok)
     expect(r.source).toBe('db')
-    expect(r.titles.filter((t) => t.includes('Later Gator')).length).toBe(1)   // deduped
+    // The DB row IS seed gold #5 verbatim — dedupe must keep exactly ONE copy of that string.
+    // (Substring counting would be wrong here: seed gold #1 also says 'Later Gator' and is a
+    // DIFFERENT title that must survive.)
+    const exact = 'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women'
+    expect(r.titles.filter((t) => t === exact).length).toBe(1)                 // deduped
     expect(r.titles).not.toContain('too short')
     for (const s of SEED_GOLD_TITLES) expect(r.titles).toContain(s)            // seeds survive
   })
