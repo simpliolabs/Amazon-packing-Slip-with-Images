@@ -23,7 +23,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { SEED_GOLD_TITLES, measureGoldShape, specClaimSpans, attestedUse } from './poGoldCorpus'
-import { titleQualityJudge } from './listingPipeline'
+import { buildApparelTitleBrief, titleQualityJudge } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
 const score = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords }).score
@@ -107,5 +107,38 @@ describe.skip('AFTER (PR-C contract): the corpus outranks every hand-written rul
     for (const bad of [ATTACK_A, ATTACK_B, REJECT_1, REJECT_2]) {
       expect(score(bad), bad).toBeLessThan(worstGold)
     }
+  })
+})
+
+describe('PR-B acceptance — no hand-typed shape rule survives in the rendered brief', () => {
+  const b = buildApparelTitleBrief({
+    brandName: 'THE CEO',
+    roleLine: 'You write Amazon apparel titles for THE CEO.',
+    inputBlock: 'Brand: THE CEO\nDesign phrase: World Soccer Cup',
+  })
+
+  it('the deleted template is GONE: no PATTERN A/B, no [Variant/Attribute] slot, no 70-75 mandate', () => {
+    for (const banned of ['PATTERN A', 'PATTERN B', 'Variant/Attribute', '70-75', 'Category brand goes AFTER', 'Long Sleeve Shirt"']) {
+      expect(b.user, banned).not.toContain(banned)
+      expect(b.system, banned).not.toContain(banned)
+    }
+  })
+
+  it('every shape statement is a measurement from the corpus', () => {
+    expect(b.user).toContain('length 69-78 characters, median 74')
+    expect(b.user).toContain('5 of 9 use " | "')
+    expect(b.user).toContain('0 spec-only')
+    expect(b.user).toContain('never more than 10 (measured over 5)')
+  })
+
+  it('carries the genuine rejects with the seller\'s verbatim words', () => {
+    expect(b.user).toContain('STILL BAD')
+    expect(b.user).toContain('crew neck can go on highlights')
+    expect(b.user).not.toContain('See You Later Alligator Shirt | Long Sleeve')   // never fabricate a rejection
+  })
+
+  it('the honest-short instruction replaces the pad-to-band mandate', () => {
+    expect(b.user).toContain('A shorter honest title IS the correct output')
+    expect(b.user).not.toMatch(/never below 70|hard goal/i)
   })
 })

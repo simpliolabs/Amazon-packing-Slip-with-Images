@@ -58,7 +58,7 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
-import { SEED_GOLD_TITLES, measureGoldShape, goldBriefBlock, type GoldShape } from '@/lib/fba/poGoldCorpus'
+import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, goldSpecBlock, measureGoldShape, rejectPairBlock, type GoldShape } from '@/lib/fba/poGoldCorpus'
 import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
@@ -1212,19 +1212,54 @@ function designPhraseCarriesGender(designPhrase: string): { female: boolean; mal
  *  TITLE_QUALITY_V2 is on. Rank order = PO's original list, deduped by exact string. Extend via a
  *  future auto-miner over listing_change_log title edits (memory: title-po-gold-pattern). */
 /**
- * THE ONE golds block. Was built inline in THREE places (single-design council, humanizer retry,
- * multi-design niche title) from the hardcoded array — the exact path-divergence shape that makes a
- * fix land on one branch and miss the others. Now one function, fed by the seller's live corpus.
+ * ONE apparel title brief for ALL producer surfaces — the single-design council, the humanizer, and
+ * the multi-design parent. Only `roleLine` and `inputBlock` differ per site.
  *
- * Falls back to the seed titles when the route passed nothing, so the council can never lose its
- * few-shots. Emits the MEASURED shape alongside the examples so the instruction and the examples are
- * always the same corpus (the 2026-08-10 lesson: "6-7 words" was written from ONE gold while the
- * seller's measured median was 8).
+ * WHY ONE BUILDER (2026-08-11 rebuild): the previous brief existed as three near-identical copies,
+ * each pasting the seller's golds and then CONTRADICTING them with a hand-written PATTERN A whose
+ * money slot was "[Variant/Attribute]" and whose rules blessed "Long Sleeve Shirt" as a positive
+ * example. The council obeyed the template over the examples — "| Short Sleeve" was compliance, not
+ * failure. Here every SHAPE statement is a measurement from the seller's corpus (goldSpecBlock);
+ * the only hand-written lines are genuine external constraints: Amazon's cap, brand position,
+ * truth, trademark (enforced downstream).
+ *
+ * Exported for the brief snapshot test, which asserts no hand-typed shape rule survives in the
+ * rendered output.
  */
-function goldsBriefFor(input: { poGolds?: { titles: string[]; shape: GoldShape } | null }): string {
-  const titles = input.poGolds?.titles?.length ? input.poGolds.titles : [...SEED_GOLD_TITLES]
-  const shape = input.poGolds?.shape ?? measureGoldShape(titles)
-  return goldBriefBlock(titles, shape)
+export function buildApparelTitleBrief(ctx: {
+  brandName: string
+  roleLine: string
+  inputBlock: string
+  poGolds?: { titles: string[]; shape: GoldShape } | null
+  extraRules?: string[]
+}): { system: string; user: string } {
+  const titles = ctx.poGolds?.titles?.length ? ctx.poGolds.titles : [...SEED_GOLD_TITLES]
+  const shape = ctx.poGolds?.titles?.length && ctx.poGolds.shape ? ctx.poGolds.shape : measureGoldShape(titles)
+  const goldSpec = goldSpecBlock(titles, shape)
+  const rejects = rejectPairBlock(SEED_REJECT_PAIRS)
+  const system = `${ctx.roleLine} Below are the seller's own titles, a measurement of them, and titles this system generated that the seller rejected, with their words. Write a title they would not rewrite. Match their SHAPE, never copy their words. Output ONLY the final title string — no quotes, no markdown, no explanation.`
+  const user = `${goldSpec}
+
+${rejects}
+═══ THIS PRODUCT ═══
+${ctx.inputBlock.trim()}
+
+═══ WHAT GETS THE ${CONTENT_CONTRACT.title.hardCap} CHARACTERS ═══
+Every gold above is TWO POSITIONS. A separator may or may not be drawn between them; the positions exist either way.
+
+IDENTITY — opens the title: ${ctx.brandName} + the design phrase + a garment noun. ${shape.medianLeftWords} words is typical; ${shape.maxLeftWords} is the most the seller has ever spent (count "${ctx.brandName}" as 2). A product fact may appear here ONLY in a form the seller's vocabulary table shows.
+
+MONEY — closes the title: the phrase a shopper actually types — a search phrase from the list above, or the garment brand. A product SPEC (fit, sleeve, neck, weight, fabric, "unisex") is not something a shopper types — the seller's spec-only tail count above is ZERO. A spec may modify the phrase that earns this position; it may never BE the position.
+
+IF NOTHING EARNS THE MONEY POSITION: stop after the identity. A shorter honest title IS the correct output — do not reach for a product fact, an adjective, or a repeated noun to fill space. Facts are not lost: fit/sleeve/neck/fabric are filed in Item Highlights; synonyms and long-tail go to backend keywords.
+
+═══ HARD LIMITS — external, never yield ═══
+- ${CONTENT_CONTRACT.title.hardCap} characters maximum, counted exactly. Amazon rejects a longer item_name (error 100476) and this pipeline refuses the push rather than trimming.
+- "${ctx.brandName}" at position 0.
+- Every word must be TRUE of this product. Search volume for a word does not make it true. Do not invent a motif, material, occasion or audience not given above.
+${(ctx.extraRules ?? []).map((r) => `- ${r}`).join('\n')}${ctx.extraRules?.length ? '\n' : ''}
+Write ONE title. Return only the title string.`
+  return { system, user }
 }
 
 const PO_GOLD_TITLES = [
@@ -2980,7 +3015,7 @@ async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: s
   // ordering directive, so the "design-led" default is no longer echoed 3x.
   const personas: { sys: string; temp: number }[] = [
     {
-      sys: `You are the IDIOM COPYWRITER for THE CEO's apparel line. You OWN the left side of the pipe: brand + design phrase + product noun 1. When the design tag is a known idiom or pun (e.g. "Later Gator" -> "See You Later Alligator"), you MUST use the FULL source phrase, not the tag. Always draft PATTERN A (Brand [Design Phrase] Noun | [Variant] [Category Brand] Noun [audience?]). No modifier stuffing (funny/novelty/graphic/retro/cute/vintage as standalones). Follow every other rule in the brief below.\n\n${baseSystem}`,
+      sys: `You are the IDIOM COPYWRITER for THE CEO's apparel line. You OWN the left side of the pipe: brand + design phrase + product noun 1. When the design tag is a known idiom or pun (e.g. "Later Gator" -> "See You Later Alligator"), PREFER the FULL source phrase when it fits the identity budget -- the seller keeps BOTH forms in play (their corpus locks "Later Alligator" AND "Later Gator" in one title). Draft the SEPARATED shape most of the seller golds use: IDENTITY (brand + design phrase + garment noun), then a separator, then the MONEY phrase. No modifier stuffing (funny/novelty/graphic/retro/cute/vintage as standalones). Follow every other rule in the brief below.\n\n${baseSystem}`,
       temp: 0.8,
     },
     {
@@ -2998,7 +3033,7 @@ TIE-BREAK when multiple compound phrases clear the floor: (a) more vision-overla
 
 HARD RULE — you may ONLY lead with phrases that literally appear in the brief's CANDIDATES / SEEDS / NICHE lists. NEVER invent a theme, audience, or compound phrase not in the brief.
 
-Always draft PATTERN B (Brand [Compound Niche-Theme Phrase OR Major Category Keywords] Noun [Category Brand?] [Design Phrase LAST]). No pipe. The design phrase closes the title. The compound theme sits in the [Major Category Keywords] slot BEFORE the noun; it NEVER displaces the design phrase from the tail. Follow every other rule in the brief below.
+Draft the UNPIPED shape the seller Espana gold uses: the DESIGN PHRASE LEADS (right after the brand), category keywords follow it, one garment mention. No separator. Follow every other rule in the brief below.
 
 ${baseSystem}`,
       temp: 0.3,
@@ -3049,7 +3084,7 @@ ${baseSystem}`,
   // rewrite from scratch and silently unwind Persona 3's audience pin (spec §Fix D verdict refinement #3).
   const judged = await titleCouncilAsk(
     openai,
-    `${baseSystem} You are the JUDGE. Read the brief, the candidates, and the critic review. Pick THE SINGLE PATTERN (A or B) that best matches this design's search-demand profile per the brief, then synthesize the strongest COMPLIANT title in that pattern — you MAY rewrite from scratch. AUDIENCE-MODE CONTRACT: when AUDIENCE MODE=REQUIRED in the brief, you MUST preserve the audience tail matching the Audience: value — even when rewriting from scratch. Only drop the tail if the length budget would push over 75c AND the freed space carries a HIGHER-VALUE candidate. NEVER emit "for Men and Women". When AUDIENCE MODE=OPTIONAL, do NOT force any gendered tail. Output ONLY the final title string — no quotes, no explanation.`,
+    `${baseSystem} You are the JUDGE. Read the brief, the candidates, and the critic review. Pick the candidate whose SHAPE best matches the seller's measured corpus in the brief (separated identity|money, or the unpiped design-leads shape — both are theirs), then synthesize the strongest COMPLIANT title in that shape — you MAY rewrite from scratch. AUDIENCE-MODE CONTRACT: when AUDIENCE MODE=REQUIRED in the brief, you MUST preserve the audience tail matching the Audience: value — even when rewriting from scratch. Only drop the tail if the length budget would push over 75c AND the freed space carries a HIGHER-VALUE candidate. NEVER emit "for Men and Women". When AUDIENCE MODE=OPTIONAL, do NOT force any gendered tail. Output ONLY the final title string — no quotes, no explanation.`,
     `${baseUser}\n\nCandidate titles:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final title.`,
     0.2, 120, JUDGE_MODEL, 60_000,
   )
@@ -3420,43 +3455,25 @@ async function runTitleAgent(
   const v2ExpandedDesign = apparel ? expandIdiomDesignName(designName) : (designName || '')
   const v2IsKnownIdiom = apparel && isIdiomDesign(designName)
   const [system, user] = apparel ? (() => {
-    const goldsBlock = goldsBriefFor(input)
-    const audOpt = preferredAudience || 'Men and Women'
-    const sys = `You are an Amazon SEO title writer specializing in apparel in THE CEO's house style. Match the PATTERN of the PO's approved gold titles exactly. NEVER stuff modifier decorators. Output ONLY the final title string — no quotes, no markdown, no explanation.`
-    const usr = `PO GOLD TITLES (match this pattern — includes both idiom-expansion and category-front-load examples):
-${goldsBlock}
-
-PATTERN A (DEFAULT — pipe format for pun/idiom/statement/theme designs):
-  ${brandName} [Design Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${audOpt && !/^unisex$/i.test(audOpt) ? ` [for ${audOpt}?]` : ''}
-  - Product noun repeats TWICE with SEO variety: "Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat".
-  - Category brand goes AFTER the pipe (e.g. Comfort Colors, Cotton Twill Snapback).
-  - The pipe-right may instead be [ONE high-volume category keyphrase] — the MONEY TAIL ("… Season Tee | Christian Shirts for Women", gold #5). Prefer it when the design's category has a high-search head keyword.
-  - Audience is OPTIONAL — include ONLY when the design is genuinely gender-specific or the space fits naturally. NEVER force "for Men and Women".
-
-PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Spain/Championship, Fathers Day):
-  ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Design Phrase LAST]
-  - Category keywords LEAD; design phrase comes at the END.
-  - Use Pattern B ONLY when at least one keyphrase below has category-head volume that's higher than the design phrase's search intent.
-
-INPUT FOR THIS TITLE:
-Brand: ${brandName}
+    // ONE brief builder — the golds are the spec; only the product block is site-specific.
+    // The audience block renders ONLY what is true: no `|| 'Men and Women'` default (that literal
+    // is the seller-banned universal tail, and the old template printed it as the slot's default
+    // content on every unisex design — the least-attested shape in their corpus).
+    const audBlock = preferredAudience
+      ? `AUDIENCE MODE: ${audienceMode}\nAudience: ${preferredAudience}\n// REQUIRED = a gender lean is set: KEEP the "for ${preferredAudience}" tail; trim a lower-value candidate rather than pad. OPTIONAL = include only if the design is genuinely gender-specific.\n`
+      : `AUDIENCE MODE: ${audienceMode}\n// Universal design — no audience tail unless the design itself is gender-specific. NEVER "for Men and Women".\n`
+    const inputBlock = `Brand: ${brandName}
 Category: ${category}
-${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}AUDIENCE MODE: ${audienceMode}
-Audience: ${audOpt}
-// REQUIRED = a gender lean is set (male/female/lean_male/lean_female). KEEP the 'for Women' or 'for Men' tail; trim a LOWER-value candidate from the RIGHT (variant slot > category-brand slot > secondary category noun) rather than pad. NEVER emit 'for Men and Women' — that is a universal tail, not a lean one.
-// OPTIONAL = universal/unisex. Include a tail ONLY if the design is genuinely gender-specific AND it does not crowd out a higher-value candidate. Do NOT force 'for Men and Women' onto a universal design.
-Design phrase (identity — KEEP this exact phrase somewhere in the title): ${v2ExpandedDesign || '(none)'}${v2IsKnownIdiom ? `\n  ↑ this design is a known idiom/pun; the expansion above IS the source phrase — prefer it over the short design tag.` : ''}
-${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInclude}\n` : ''}${nicheSeedList.length ? `Design-niche keyphrases (weave those that fit): ${nicheSeedList.map((s) => `"${s}"`).join(', ')}\n` : ''}Pre-filtered keyword candidates:
-${candidateList}
-
-RULES (deterministic — checked by title QUALITY judge):
-- Target 70-75 characters (hard goal — never below 70, hard cap 75).
-- Product noun MUST appear TWICE with SEO variety (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
-- NEVER decorate with these words as standalone: Funny, Novelty, Graphic, Retro, Cute, Vintage, Farewell, Goodbye, Going, Away. These belong in the BACKEND, not the title. HOWEVER you MAY use them AS PART OF an attribute descriptor pair — "Graphic Shirt", "Bold Motivational Tshirt", "Puff Embroidery Cap", "Long Sleeve Shirt" — those are legitimate attribute descriptors, not decorators.
-- NEVER force "for Men and Women" — omit gender entirely if the design is universal (idiom / motivational / theme designs are usually universal).
-- NEVER repeat a significant word (other than the product noun once, per rule above).
-${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the #1 ranking keyword.\n` : ''}- Read like a human wrote it. Return ONLY the final title string.`
-    return [sys, usr]
+${attributePin ? `Garment brand (a selling point — the seller's tails carry it): ${attributePin}\n` : ''}${audBlock}Design phrase (identity — KEEP this exact phrase in the title): ${v2ExpandedDesign || '(none)'}${v2IsKnownIdiom ? `\n  ↑ a known idiom/pun; the expansion above IS the source phrase — prefer it over the short tag when it fits the identity budget.` : ''}
+${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInclude}\n` : ''}${nicheSeedList.length ? `Design-niche keyphrases (weave those that fit): ${nicheSeedList.map((s) => `"${s}"`).join(', ')}\n` : ''}Search phrases shoppers type, most valuable first:
+${candidateList}`
+    const b = buildApparelTitleBrief({
+      brandName,
+      roleLine: `You write Amazon apparel titles for ${brandName}.`,
+      inputBlock,
+      poGolds: input.poGolds,
+    })
+    return [b.system, b.user]
   })() : [
     `You are an Amazon SEO title writer${apparel ? ' specializing in apparel' : ''}. Write a title for the ACTUAL product described below — never reframe it as something it is not. Output ONLY the final title string — no quotes, no markdown, no explanation.`,
     `Brand: ${brandName}
@@ -3682,41 +3699,20 @@ Rules:
     const displayDesignName = expandIdiomDesignName(designName)
     const isKnownIdiom = isIdiomDesign(designName)
     const [sdSystem, sdUser] = (() => {
-      const goldsBlock = goldsBriefFor(input)
-      const sys = `You are an Amazon SEO copywriter writing a SINGLE-DESIGN apparel product title in THE CEO's house style. Match the PATTERN of the PO's approved gold titles (below) exactly. NEVER stuff modifier decorators. Return ONLY the final title string.`
-      const usr = `PO GOLD TITLES (match this pattern):
-${goldsBlock}
-
-PATTERN A (DEFAULT — pipe format for pun/idiom/statement/theme designs):
-  ${brandName} [Design Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${aud && !/^unisex$/i.test(aud) ? ` [for ${aud}?]` : ''}
-  - Product noun repeats TWICE with SEO variety: "Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat".
-  - Category brand goes AFTER the pipe (e.g. Comfort Colors, Cotton Twill Snapback).
-  - The pipe-right may instead be [ONE high-volume category keyphrase] — the MONEY TAIL ("… Season Tee | Christian Shirts for Women", gold #5). Prefer it when the design's category has a high-search head keyword.
-  - Audience is OPTIONAL — include ONLY when the design is genuinely gender-specific or the space fits naturally. NEVER force "for Men and Women".
-
-PATTERN B (when the design category has HIGH-SEARCH volume category keywords, e.g. Spain/Championship, Fathers Day):
-  ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Design Phrase LAST]
-  - Category keywords LEAD (Spain Jersey / Fathers Day). Design phrase comes at the END.
-  - Use Pattern B ONLY when at least one keyphrase below has category-head volume that's higher than the design phrase's search intent.
-
-INPUT FOR THIS TITLE:
-Brand: ${brandName}
-${attributePin ? `Category brand (garment brand): ${attributePin}\n` : ''}Product type: ${ptWord}
-AUDIENCE MODE: ${audienceMode}
-Audience: ${aud}
-// REQUIRED = a gender lean is set. KEEP the 'for Women'/'for Men' tail; trim from the RIGHT (variant/category-brand slot) rather than pad. NEVER emit 'for Men and Women'.
-// OPTIONAL = universal. Include audience tail ONLY if design is genuinely gender-specific AND it does not crowd out a higher-value candidate.
-Design phrase (identity — KEEP this exact phrase somewhere in the title): ${displayDesignName || '(none)'}${isKnownIdiom ? `\n  ↑ this design is a known idiom/pun; the expansion above IS the source phrase — prefer it over the short design tag.` : ''}
-Niche keyphrases (weave those that fit — occasion, subject, recipient): ${nichePool.slice(0, 10).join(' | ') || '(none)'}
-
-RULES (deterministic — checked by title QUALITY judge):
-- Target 70-75 characters (hard goal — never below 70, hard cap 75).
-- Product noun MUST appear TWICE with SEO variety (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
-- NEVER decorate with these words as standalone: Funny, Novelty, Graphic, Retro, Cute, Vintage, Farewell, Goodbye, Going, Away. These belong in the BACKEND, not the title. HOWEVER you MAY use them AS PART OF an attribute descriptor pair — "Graphic Shirt", "Bold Motivational Tshirt", "Puff Embroidery Cap", "Long Sleeve Shirt" — those are legitimate attribute descriptors, not decorators.
-- NEVER force "for Men and Women" — omit gender if the design is universal.
-- NEVER repeat a significant word (other than the product noun once, per rule above).
-${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the #1 ranking keyword.\n` : ''}- Read like a human wrote it. Return ONLY the final title string.`
-      return [sys, usr]
+      const audBlock = aud
+        ? `AUDIENCE MODE: ${audienceMode}\nAudience: ${aud}\n// REQUIRED = keep the "for ${aud}" tail; trim from the right rather than pad. OPTIONAL = only if genuinely gender-specific.\n`
+        : `AUDIENCE MODE: ${audienceMode}\n// Universal design — no audience tail unless the design itself is gender-specific. NEVER "for Men and Women".\n`
+      const inputBlock = `Brand: ${brandName}
+${attributePin ? `Garment brand (a selling point — the seller's tails carry it): ${attributePin}\n` : ''}Product type: ${ptWord}
+${audBlock}Design phrase (identity — KEEP this exact phrase in the title): ${displayDesignName || '(none)'}${isKnownIdiom ? `\n  ↑ a known idiom/pun; the expansion above IS the source phrase — prefer it over the short tag when it fits the identity budget.` : ''}
+${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInclude}\n` : ''}Niche keyphrases (weave those that fit — occasion, subject, recipient): ${nichePool.slice(0, 10).join(' | ') || '(none)'}`
+      const b = buildApparelTitleBrief({
+        brandName,
+        roleLine: `You write Amazon apparel titles for ${brandName}. This one is a SINGLE-DESIGN product title.`,
+        inputBlock,
+        poGolds: input.poGolds,
+      })
+      return [b.system, b.user]
     })()
     const extended = await humanizeTitleTo75(openai, title, {
       baseSystem: sdSystem, baseUser: sdUser,
@@ -6571,7 +6567,12 @@ async function buildNicheParentTitle(
   // pattern as single-design (INVARIANT 1: fix on BOTH producers so no branch ships a stale
   // format). The family niche anchor still leads; the PO golds show BOTH single- and multi-design
   // examples so the model sees the shape both ways.
-  const baseSystem = `You are an Amazon SEO copywriter writing the BROADCAST PARENT TITLE for a variation family in THE CEO's house style. Match the PATTERN of the PO's approved gold titles exactly. The parent title captures the FAMILY NICHE and product type; MUST NOT name any specific child design. NEVER stuff modifier decorators. Return ONLY the final title string.`
+  const baseSystem = buildApparelTitleBrief({
+    brandName,
+    roleLine: `You write Amazon apparel titles for ${brandName}. This one is the BROADCAST PARENT TITLE for a variation family: it carries the FAMILY NICHE, never a specific child design.`,
+    inputBlock: '(see user message)',
+    poGolds,
+  }).system
   // COMPETITOR SEO SNAPSHOT (fallback chain Part 1) — CONSTRAINTS-NOT-EXEMPLARS (prompt-leak
   // history #365/#367: instruction text the model can echo becomes product copy). The snapshot is
   // framed as a strategy REFERENCE with explicit prohibitions; every field is trademark-scrubbed
@@ -6589,40 +6590,23 @@ Their title: ${compTitle || '(none)'}
 Their bullets: ${compBullets.length ? compBullets.join(' | ') : '(none)'}`
   })()
   const baseUser = (() => {
-    const goldsBlock = goldsBriefFor({ poGolds })
-    return `PO GOLD TITLES (match this pattern — includes single AND multi-design examples):
-${goldsBlock}
-
-PATTERN A (DEFAULT — pipe format):
-  ${brandName} [Family Niche Phrase] [Product Noun] | [Variant/Attribute] [Category Brand] [Product Noun Variant]${aud ? ` [for ${aud}?]` : ''}
-  - Product noun repeats TWICE with SEO variety ("Shirt … Shirt", "Tee Shirt … Tshirt", "Cap … Hat").
-  - Category brand goes AFTER the pipe (e.g. Comfort Colors).
-  - Audience is OPTIONAL — include ONLY when the family is genuinely gender-specific.
-
-PATTERN B (when the family category has HIGH-SEARCH volume category keywords):
-  ${brandName} [Category Head Keywords] [Product Noun] [Category Brand?] [Niche Phrase LAST]
-  - Category keywords LEAD (Christian / Spain Championship / Fathers Day).
-
-INPUT FOR THIS PARENT TITLE:
-Brand: ${brandName}
-${blankBrand ? `Category brand (garment brand): ${blankBrand}\n` : ''}Product type: ${ptWord}
-AUDIENCE MODE: ${audienceMode}
-Audience: ${aud}
-// REQUIRED = every live child in the family shares a gender lean (UNANIMITY predicate). KEEP the "for ${aud}" tail on the broadcast parent title; trim a LOWER-value candidate from the RIGHT rather than pad. NEVER emit "for Men and Women" on the lean broadcast.
-// OPTIONAL = children disagree OR at least one is unisex/unknown → parent is universal for search-card purposes. Include audience tail ONLY if the family is genuinely gender-specific AND the tail does not crowd out a higher-value niche keyphrase.
-Family niche anchor (LEAD the title with THIS niche phrase; broadcasts to EVERY design; NEVER a specific design name): ${familyNicheClean || '(infer the shared niche from the design names + keywords below)'}
+    const audBlock = aud
+      ? `AUDIENCE MODE: ${audienceMode}\nAudience: ${aud}\n// REQUIRED = every live child shares this lean (UNANIMITY). KEEP the "for ${aud}" tail on the broadcast title; trim a lower-value candidate rather than pad. NEVER "for Men and Women".\n`
+      : `AUDIENCE MODE: ${audienceMode}\n// Children disagree or at least one is unisex → the parent is universal. No audience tail. NEVER "for Men and Women".\n`
+    const inputBlock = `Brand: ${brandName}
+${blankBrand ? `Garment brand (a selling point — the seller's tails carry it): ${blankBrand}\n` : ''}Product type: ${ptWord}
+${audBlock}Family niche anchor (LEAD with THIS niche phrase; broadcasts to EVERY design; NEVER a specific design name): ${familyNicheClean || '(infer the shared niche from the design names + keywords below)'}
 Child design names (DO NOT name any specifically — they belong to individual children): ${designNameList}
-High-value niche keywords (use the niche-wide ones only, skip design-specific motifs): ${upgradeList}${compatList ? `
-Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapshotBlock}
-
-RULES (deterministic — checked by title QUALITY judge):
-- Target 70-75 characters (hard goal — never below 70, hard cap 75).
-- Product noun MUST appear TWICE with SEO variety.
-- NEVER decorate with these words as standalone: Funny, Novelty, Graphic, Retro, Cute, Vintage, Farewell, Goodbye, Going, Away. These belong in the BACKEND, not the title. HOWEVER you MAY use them AS PART OF an attribute descriptor pair — "Graphic Shirt", "Bold Motivational Tshirt", "Puff Embroidery Cap", "Long Sleeve Shirt" — those are legitimate attribute descriptors, not decorators.
-- NEVER force "for Men and Women" — omit gender if the family is universal.
-- NO design names in the parent title — only the shared niche.
-- NEVER repeat a significant word (other than the product noun per rule above).
-- Read like a human wrote it. Return ONLY the final title string.`
+High-value niche keywords (niche-wide only, skip design-specific motifs): ${upgradeList}${compatList ? `
+Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapshotBlock}`
+    const b = buildApparelTitleBrief({
+      brandName,
+      roleLine: `You write Amazon apparel titles for ${brandName}. This one is the BROADCAST PARENT TITLE for a variation family: it carries the FAMILY NICHE, never a specific child design.`,
+      inputBlock,
+      poGolds,
+      extraRules: ['NO design names in the parent title — only the shared niche.'],
+    })
+    return b.user
   })()
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null })
   let title = (judged || '').trim()
