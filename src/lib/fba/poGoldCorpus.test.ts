@@ -24,14 +24,36 @@ describe('measureGoldShape', () => {
     expect(s.maxLeftWords).toBeGreaterThanOrEqual(s.medianLeftWords)
   })
 
-  it('an unpiped title counts its WHOLE length as the left segment', () => {
+  it('an ALL-UNPIPED corpus falls back to whole-title counts rather than reporting 0', () => {
+    // The fallback, not the old convention. Left-segment stats are measured over the PIPED subset
+    // (see below), but `loadPoGoldTitles` takes only the newest 12 manual rows and the live corpus is
+    // ~70% unpiped, so an all-unpiped window is genuinely reachable. Reporting 0 there would make
+    // goldBriefBlock instruct the council "never more than 0 words before the separator".
     const s = measureGoldShape(['THE CEO Later Gator Tee Shirt Comfort Colors Graphic for Women'])
     expect(s.pipedShare).toBe(0)
     expect(s.medianLeftWords).toBe(11)   // THE/CEO/Later/Gator/Tee/Shirt/Comfort/Colors/Graphic/for/Women
+    expect(s.leftWordsFrom).toBe(1)
+  })
+
+  it('left-segment stats come from the PIPED subset — an unpiped title cannot inflate the ceiling', () => {
+    // THE DEFECT THIS PINS. `leftOf` returns the WHOLE title when there is no ' | ', so a long
+    // unpiped gold used to contribute its full word count as though it were a left segment. On the
+    // live corpus (pipedShare 0.30) that inflated population is the MAJORITY, and the brief quoted
+    // the inflated ceiling back to the council as the seller's own law — licensing exactly the
+    // 12-word left segment the seller rejected on B0GVV3XL4T.
+    const mixed = [
+      'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee',        // piped, 8 left
+      'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',     // unpiped, 12 words
+    ]
+    const s = measureGoldShape(mixed)
+    expect(s.maxLeftWords).toBe(8)        // NOT 12 — the unpiped title contributes no left segment
+    expect(s.leftWordsFrom).toBe(1)       // and the sample size says so honestly
+    expect(s.pipedShare).toBe(0.5)        // still measured over the WHOLE corpus
+    expect(s.count).toBe(2)
   })
 
   it('empty corpus is a zero shape, never a throw — the brief degrades, it does not crash', () => {
-    expect(measureGoldShape([])).toEqual({ medianLen: 0, medianLeftWords: 0, maxLeftWords: 0, pipedShare: 0, count: 0 })
+    expect(measureGoldShape([])).toEqual({ medianLen: 0, medianLeftWords: 0, maxLeftWords: 0, pipedShare: 0, count: 0, leftWordsFrom: 0 })
   })
 })
 

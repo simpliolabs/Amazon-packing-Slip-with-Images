@@ -54,6 +54,10 @@ export interface GoldShape {
   /** Share of golds that use a ` | ` pipe at all. */
   pipedShare: number
   count: number
+  /** How many titles the LEFT-segment stats were measured over. Published because the piped subset
+   *  is small (live corpus n=23 at pipedShare 0.30 ⇒ ~7 titles), and a ceiling quoted to the council
+   *  as the seller's own number should carry its sample size rather than imply a firm law. */
+  leftWordsFrom: number
 }
 
 const wc = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
@@ -65,13 +69,26 @@ const median = (ns: number[]) => (ns.length ? [...ns].sort((a, b) => a - b)[Math
  *  into the profile from a single gold while the measured median across the corpus was 8. */
 export function measureGoldShape(titles: readonly string[]): GoldShape {
   const list = titles.filter((t) => t.trim().length > 0)
-  const lefts = list.map((t) => wc(leftOf(t)))
+  const piped = list.filter((t) => t.includes(' | '))
+  // LEFT-SEGMENT STATS COME FROM THE PIPED SUBSET ONLY. An unpiped title HAS no left segment —
+  // `leftOf` returns the whole string — so including one contributes its FULL word count as though
+  // it were a left segment, inflating the ceiling the brief then quotes as the seller's own law.
+  // This is not hypothetical: the live corpus is ~70% unpiped (pipedShare 0.30, n=23), so the
+  // inflated population is the MAJORITY. `/api/fba/title-golds` (route.ts:102-104) already measures
+  // it this way; this brings the brief's copy into line with the analysis endpoint's.
+  //
+  // FALLBACK TO THE WHOLE LIST, NEVER TO ZERO. `loadPoGoldTitles` takes only the newest 12 manual
+  // rows, so an all-unpiped window is genuinely reachable — and a zero shape would make
+  // `goldBriefBlock` instruct the council "never more than 0 words before the separator".
+  const measured = piped.length > 0 ? piped : list
+  const lefts = measured.map((t) => wc(leftOf(t)))
   return {
     medianLen: median(list.map((t) => t.length)),
     medianLeftWords: median(lefts),
     maxLeftWords: lefts.length ? Math.max(...lefts) : 0,
-    pipedShare: list.length ? +(list.filter((t) => t.includes(' | ')).length / list.length).toFixed(2) : 0,
+    pipedShare: list.length ? +(piped.length / list.length).toFixed(2) : 0,
     count: list.length,
+    leftWordsFrom: measured.length,
   }
 }
 
@@ -128,7 +145,7 @@ export function goldBriefBlock(titles: readonly string[], shape: GoldShape): str
     `SELLER-APPROVED TITLES (${shape.count}) — these are titles THIS seller wrote or locked themselves.`,
     'Match their SHAPE, not their words. Measured across them:',
     `  • typical length ${shape.medianLen} chars`,
-    `  • ${shape.medianLeftWords} words before the separator (never more than ${shape.maxLeftWords})`,
+    `  • ${shape.medianLeftWords} words before the separator (never more than ${shape.maxLeftWords}; measured over ${shape.leftWordsFrom})`,
     `  • ${Math.round(shape.pipedShare * 100)}% use a " | " separator — a comma or plain join is equally acceptable`,
     'The segment before the separator is BRAND + DESIGN + garment noun and stays SHORT. Everything after',
     'it is the MONEY position: the phrase shoppers actually search. A spec fact there (Crew Neck, Classic',
