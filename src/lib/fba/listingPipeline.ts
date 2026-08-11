@@ -59,7 +59,7 @@ import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, measureGoldShape, goldBriefBlock, type GoldShape } from '@/lib/fba/poGoldCorpus'
-import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -1255,11 +1255,75 @@ const TITLE_V2_ATTR_PAIR_NOUNS = new Set([
   'cap', 'hat', 'hoodie', 'sweatshirt', 'tank', 'polo', 'dress', 'jacket', 'beanie',
   'motivational', 'embroidery', 'sleeve', 'fit', 'style',
 ])
+/**
+ * TITLE_SHAPE_JUDGE — off | shadow | on. At `off` the judge is byte-identical to its pre-2026-08-10
+ * behaviour, so merging this changes nothing until it is flipped (the standing rule that every
+ * behaviour change ships with its own kill switch — PR #531/#532). `shadow` computes the terms and
+ * lets callers log them without changing any score.
+ */
+const titleShapeJudgeMode = (): string => (process.env.TITLE_SHAPE_JUDGE || 'off').toLowerCase()
+
+/**
+ * THE PO'S MEASURED TITLE SHAPE, AS NUMBERS THE PRODUCER'S ARBITER CAN SEE.
+ *
+ * WHY THIS EXISTS (2026-08-10, after five door-side patches to the same title). Every PO title
+ * ruling in this subsystem lives in a TERMINAL NET at the ship door. None of them lived in
+ * `titleQualityJudge` — the ONE deterministic title measurement in the pipeline, and the arbiter for
+ * BOTH producer-side actors: the council's fail-open winner-pick (:2976) and the humanizer's adopt
+ * gate (:6378). So the producer was scored INDIFFERENT to the exact things the door would then have
+ * to delete, and the two disagreed by construction:
+ *
+ *   the door bans `unisex` / `classic fit`   (TITLE_WASTE_SOURCE, titleBand.ts:1112)
+ *   TITLE_V2_BANNED_MODIFIERS above          never mentioned either one
+ *
+ * The live consequence, reproduced arithmetically: the council wrote "…Canada Unisex Tee" (61 chars,
+ * 12 words, one segment). The door's `stripTitleWasteVocabulary` removed "Unisex" → 54 chars, then
+ * had to re-pad to reach the band; its entire BLANK_SPECS vocabulary topped out at 69 (the only
+ * candidate that reached band, "Classic Fit Shirt", is itself banned as waste at titleBand.ts:133).
+ * 69 < 70, so the guard refused byte-identical and the banned word SHIPPED — a PO editorial ruling
+ * reversed by ONE character of our own preferred floor. Scoring these upstream means the producer
+ * never writes them, which cures the ruling without touching a single guard.
+ *
+ * PURE, and deliberately adds NO new vocabulary: waste comes from `isTitleWasteVocabulary`, the SAME
+ * exported predicate the door removes with, so the producer and the door can never drift apart.
+ */
+export function titleShapeTerms(title: string, maxLeftWords?: number | null): {
+  hasPipe: boolean
+  /** Words left of the separator — null when there is no separator, because an unpiped title has no
+   *  left segment to measure. That null is what protects PO gold #2 and the ~70% unpiped majority. */
+  leftWords: number | null
+  leftDock: number
+  wasteDock: number
+} {
+  const t = (title || '').trim()
+  const pipeIdx = t.indexOf(' | ')
+  const hasPipe = pipeIdx >= 0
+  // C3 is defined on the LEFT SEGMENT, which only exists when a separator does. Scoring an unpiped
+  // title's whole word count as a "left segment" is the exact `leftOf` inflation corrected in
+  // measureGoldShape — re-importing it here would dock every Pattern-B title, i.e. most of the corpus.
+  const leftWords = hasPipe ? (t.slice(0, pipeIdx).trim().split(/\s+/).filter(Boolean).length) : null
+  const ceiling = typeof maxLeftWords === 'number' && maxLeftWords > 0 ? maxLeftWords : null
+  const over = leftWords !== null && ceiling !== null ? Math.max(0, leftWords - ceiling) : 0
+  // -5/word over, capped at -20 so a long left segment can never outweigh brand-front (-20), which
+  // is safety-adjacent. The ceiling is the seller's own measured max, not a number we invented.
+  const leftDock = Math.min(20, over * 5)
+  // -10 when the title carries vocabulary the PO banned. Sized above the pipe bonus (+5) so a title
+  // cannot buy back a PO ban with structure, and level with the audience dock — the other explicit
+  // PO ruling scored here. The PREDICATE IS THE DOOR'S OWN (`isTitleWasteVocabulary`, titleBand.ts):
+  // a second copy of `unisex|classic fit` here is precisely the drift that let the producer and the
+  // door disagree in the first place, so there is exactly one list and both ends read it.
+  const wasteDock = isTitleWasteVocabulary(t) ? 10 : 0
+  return { hasPipe, leftWords, leftDock, wasteDock }
+}
+
 export function titleQualityJudge(title: string, opts: {
   brandName: string
   productType?: string | null
   aud?: string
   designName?: string
+  /** The seller's measured left-segment ceiling (`GoldShape.maxLeftWords`, poGoldCorpus.ts). Absent
+   *  ⇒ no left-segment dock, so every existing caller and test is unaffected. */
+  maxLeftWords?: number | null
   /** TITLE_COUNCIL_V3.1a Fix D (2026-07-23, PO Q2 single-tier): RAW audience lean forwarded from
    *  PipelineInput.audienceLean → runTitleAgent (single-design) / parent-lean via UNANIMITY (multi-design).
    *  Undefined/null = caller didn't classify → no audience dock (backward-compatible fail-open). */
@@ -1286,6 +1350,22 @@ export function titleQualityJudge(title: string, opts: {
   // Pattern B (front-load, no pipe) is judged by rule presence — no synthetic bonus (matches golds 2/5).
   const hasPipe = / \| /.test(t)
   if (hasPipe) score += 5
+
+  // SHAPE TERMS (TITLE_SHAPE_JUDGE=on) — the seller's measured left-segment ceiling and their banned
+  // vocabulary, scored HERE so the producer stops writing what the door would have to delete. See
+  // `titleShapeTerms` above for the arithmetic that made this the seam. At 'off'/'shadow' the score
+  // is byte-identical to the pre-2026-08-10 judge.
+  if (titleShapeJudgeMode() === 'on') {
+    const shape = titleShapeTerms(t, opts.maxLeftWords)
+    if (shape.leftDock > 0) {
+      score -= shape.leftDock
+      problems.push(`left segment ${shape.leftWords} words > seller's measured max ${opts.maxLeftWords} (-${shape.leftDock})`)
+    }
+    if (shape.wasteDock > 0) {
+      score -= shape.wasteDock
+      problems.push(`title waste vocabulary present (PO §3: "unisex"/"classic fit" belong in Item Highlights) (-${shape.wasteDock})`)
+    }
+  }
 
   // PRODUCT NOUN ANCHOR — twice preferred (Shirt … Shirt, Tee Shirt … Tshirt, Cap … Hat).
   const nounRegex = /\b(shirt|shirts|tshirt|tee|tees|cap|hat|hoodie|sweatshirt|tank|polo|dress|jacket|beanie)\b/gi
@@ -2872,7 +2952,7 @@ async function titleCouncilAsk(
  *      hardcode — TRADEMARK_RULES now says "world futbol cup");
  *  (5) fail-open uses titleQualityJudge score to pick the best draft, not `drafts[1] || drafts[0]` (the
  *      silent SEO-persona array-index bias). */
-async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean }): Promise<string> {
+async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null }): Promise<string> {
   // Model env split — spec §4.3. Adversary MUST differ from judge (anti-echo). Default adversary =
   // gpt-4o-mini (different family from gpt-5) so an unconfigured deploy still respects the ≠ rule;
   // if operator overrides both to the same model, we log a warning but still run — the ≠ rule is
@@ -2973,9 +3053,10 @@ ${baseSystem}`,
   const candidates = [judged, ...drafts].filter(Boolean)
   if (candidates.length === 0) return ''
   let best = candidates[0]
-  let bestScore = titleQualityJudge(best, { brandName, lean }).score
+  const maxLeftWords = opts?.maxLeftWords ?? null
+  let bestScore = titleQualityJudge(best, { brandName, lean, maxLeftWords }).score
   for (const c of candidates.slice(1)) {
-    const s = titleQualityJudge(c, { brandName, lean }).score
+    const s = titleQualityJudge(c, { brandName, lean, maxLeftWords }).score
     if (s > bestScore) { best = c; bestScore = s }
   }
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
@@ -3023,7 +3104,14 @@ ${baseSystem}`,
     }
   }
   if (stripped || appended) {
-    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean }).score}/100`)
+    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean, maxLeftWords }).score}/100`)
+    // SHAPE OBSERVABILITY — emitted in EVERY mode, so `shadow` shows exactly what `on` would dock
+    // before anyone flips it, and so a live run can be checked without inferring the flag's value
+    // (the TITLE_MONEY_TAIL dark-flag lesson: a gate whose live state can only be assumed).
+    console.log('[TITLE_GOLD]', JSON.stringify({
+      tag: 'SHAPE_JUDGE', mode: titleShapeJudgeMode(), ceiling: maxLeftWords,
+      ...titleShapeTerms(best, maxLeftWords), title: best.slice(0, 90),
+    }))
   }
   return best
 }
@@ -3039,7 +3127,7 @@ ${baseSystem}`,
  *  legacy council + [COUNCIL_V3_DIFF] shadow machinery are deleted — legacy was no longer a
  *  pre-Step-7 baseline anyway (V3.1a changed its brief un-flagged). Rollback is git-revert.
  *  Both title paths (single-design and multi-design) call this wrapper (INVARIANT 1 parity). */
-async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean }): Promise<string> {
+async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null }): Promise<string> {
   return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
 }
 
@@ -3385,7 +3473,7 @@ Rules:
   // flows through the validate + deterministic backstops below, so the hard rules still hold.
   let title: string
   if (apparel) {
-    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean })
+    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean, maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null })
   } else {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -3622,6 +3710,7 @@ ${mustInclude ? `- KEEP the exact phrase "${mustInclude}" verbatim — it is the
       trigger: 68,
       label: 'Title',
       lean,   // Fix D: adopt-gate scores retry with the lean-aware dock so a rewrite can't silently drop the tail
+      maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null,
     })
     if (extended && extended !== title) {
       title = extended
@@ -6317,9 +6406,13 @@ async function humanizeTitleTo75(
      *  with the lean-aware dock so a humanizer rewrite that DROPS a lean-appropriate tail cannot silently
      *  replace a good one at the same score. Undefined = pre-Fix-D scoring (backward-compatible). */
     lean?: AudienceLean
+    /** Seller's measured left-segment ceiling — the humanizer's adopt gate uses the SAME judge as the
+     *  council, so without this a rewrite that bloats the left segment scores identically to one that
+     *  respects it (INVARIANT-1 parity: both producer-side actors read one arbiter). */
+    maxLeftWords?: number | null
   },
 ): Promise<string> {
-  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean } = opts
+  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords } = opts
   // RETRY-CASING NORMALIZER: the LLM ships raw casing (live: "THE CEO fishing humor funny t-shirt…" —
   // correct content, lowercase niche). Title-Case only FULLY-LOWERCASE words; any word already carrying
   // an uppercase letter is preserved verbatim ("THE CEO", "T-shirt"); minor connectors stay lowercase
@@ -6375,9 +6468,20 @@ Return ONLY the extended title string.` },
         // count. Adopt a longer rewrite, OR a same-length/shorter one that scores strictly higher
         // on the deterministic titleQualityJudge — safety gates (trademark + brand-front) always
         // enforced.
-        const currentScore = titleQualityJudge(title, { brandName, lean }).score
-        const retryScore = titleQualityJudge(retryTitle, { brandName, lean }).score
-        const clean = safetyOk && (retryTitle.length > title.length || retryScore > currentScore)
+        const currentScore = titleQualityJudge(title, { brandName, lean, maxLeftWords }).score
+        const retryScore = titleQualityJudge(retryTitle, { brandName, lean, maxLeftWords }).score
+        // SHAPE-AWARE ADOPT (TITLE_SHAPE_JUDGE=on). Extending toward the band is this function's whole
+        // job, so a LONGER rewrite is still progress — but "longer" must not buy a title that scores
+        // WORSE. The historical gate adopted ANY longer retry unconditionally, which made this a
+        // shape-blind length maximizer sitting AFTER the council: a retry that added a banned word or
+        // bloated the left segment displaced a better title purely for being longer, and nothing
+        // downstream re-consulted the score. Without this, the shape terms added to the judge would be
+        // inert on the exact path that produced the 61-char single-segment title the seller rejected.
+        // At 'off' the expression is byte-identical to the pre-2026-08-10 gate.
+        const longerIsProgress = titleShapeJudgeMode() === 'on'
+          ? (retryTitle.length > title.length && retryScore >= currentScore)
+          : retryTitle.length > title.length
+        const clean = safetyOk && (longerIsProgress || retryScore > currentScore)
         if (clean) {
           onProgress?.(`${label} retry ${attempt}: len ${title.length}→${retryTitle.length} score ${currentScore}→${retryScore}`)
           title = retryTitle
@@ -6493,7 +6597,7 @@ RULES (deterministic — checked by title QUALITY judge):
 - NEVER repeat a significant word (other than the product noun per rule above).
 - Read like a human wrote it. Return ONLY the final title string.`
   })()
-  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean })
+  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null })
   let title = (judged || '').trim()
   // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
   // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
@@ -6834,6 +6938,7 @@ RULES (deterministic — checked by title QUALITY judge):
     trigger: 68,
     label: 'Parent title',
     lean: parentLean,   // Fix D: same adopt-gate discipline as single-design (INVARIANT-1 parity)
+    maxLeftWords: poGolds?.shape.maxLeftWords ?? null,
   })
   return title
 }
