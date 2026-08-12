@@ -51,7 +51,14 @@ export const SEED_GOLD_TITLES: readonly string[] = [
   'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women',     // 74 — 10w left
   'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women',      // 73 — 6w left
   'THE CEO Cupid Valentine Tee Shirt | Comfort Colors Graphic Tshirt for Women',    // 75 — 6w left
-  'THE CEO I Could Be Meaner Tee Shirt | Funny Comfort Colors Shirt for Men Women', // 78 — OVER Amazon's 75; kept verbatim (see note)
+  // PO REVISION 2026-08-12. Was `…Meaner Tee Shirt | Funny Comfort Colors Shirt for Men Women` (78) —
+  // OVER Amazon's 75-char cap, so it could never ship, AND it was printed to the council as an
+  // exemplar directly beneath an instruction reading "75 characters maximum, counted exactly": a
+  // contradiction inside one prompt, teaching the producer that the cap is soft. Asked to resolve it,
+  // the PO rewrote it themselves to 68 — dropping the left "Shirt" (noun ×2 survives as Tee | Shirt)
+  // and ALSO dropping "Men", which we did not propose. Their edit is the ruling.
+  'THE CEO I Could Be Meaner Tee | Funny Comfort Colors Shirt for Women', // 68 — PO-revised, ships
+
   "THE CEO Darlin' T-Shirt, Comfort Colors Graphic Tee for Women, Rodeo Shirt",     // 74 — DOUBLE comma, three segments
   'THE CEO The Rod Father T-Shirt Funny Fishing Mens Graphic Tee for Men',          // 69 — UNDER our 70 floor (see note)
 ] as const

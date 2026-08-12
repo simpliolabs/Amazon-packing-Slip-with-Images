@@ -3160,11 +3160,36 @@ ${baseSystem}`,
   const maxLeftWords = opts?.maxLeftWords ?? null
   const shape = opts?.shape ?? null
   const apparel = opts?.apparel ?? false
-  let bestScore = titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel }).score
+  /* P0 INSTRUMENTATION (2026-08-12) — KEEP THE DIAGNOSIS INSTEAD OF BINNING IT.
+   *
+   * `titleQualityJudge` returns `{ score, problems }` and every one of its five production call
+   * sites read `.score` and threw `.problems` away — while the BACKEND council has had a repair
+   * loop on exactly this signal since PR #75 (`council.reAskJudge(bestScore.problems, …)`, :4817).
+   * So on every regen this pipeline computed a named diagnosis of the title it was about to ship
+   * ("money position holds only spec facts", "identity longer than the seller has ever written")
+   * and deleted it, then the seller told us in their own words what those strings already said.
+   *
+   * Behaviour is UNCHANGED: same candidates, same comparison, same winner. The verdict object was
+   * already being constructed — this only stops discarding half of it. It is the cheapest evidence
+   * available for whether a referee is needed, and it is the input the P8 repair round will feed
+   * back to the writers. handoff/TITLE_ARCHITECTURE.md §7 P0. */
+  let bestVerdict = titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel })
+  let bestScore = bestVerdict.score
   for (const c of candidates.slice(1)) {
-    const s = titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score
-    if (s > bestScore) { best = c; bestScore = s }
+    const v = titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel })
+    if (v.score > bestScore) { best = c; bestScore = v.score; bestVerdict = v }
   }
+  console.log('[TITLE_JUDGE_DIAG]', JSON.stringify({
+    picked: best,
+    score: bestScore,
+    problems: bestVerdict.problems,
+    ballot: candidates.length,
+    // The spread across the candidates the judge was asked to rank. A spread of 0 means the judge
+    // expressed no preference and the winner is just `candidates[0]` — which is the measured state
+    // for the seller's golds and their attack twins alike (separation margin -14, and 0 on the
+    // anagram pair). Logged so that indifference is visible per regen, not only in a test.
+    spread: bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score)),
+  }))
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
 
   // TITLE_COUNCIL_V3.1a Step 8 — TERMINAL SAFETY NET at council exit (PO Q5 = YES).
@@ -7663,6 +7688,11 @@ BACKEND STRING: ${backendSample}`
   } catch { return unchanged }
 }
 
+/* P0 INSTRUMENTATION — one correlation id per trip through the ship door, so a per-stage trace can
+ * be reassembled from the logs of a single regen. Process-local and monotonic; it never affects a
+ * decision, only the label on a log line. */
+let DOOR_SEQ = 0
+
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
   const { brandName, repTitle, onProgress } = input
 
@@ -8338,6 +8368,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * an un-passed call is protected, never guard-off. */
   const bandTitle = (title: string, produced: boolean, moneyKws: readonly string[] | null = null, protectDesign: string | null = null): string => {
     if (!produced || !title) return title
+    /* P0 INSTRUMENTATION (2026-08-12) — RECORD THE BYTES, NOT THEIR LENGTH.
+     *
+     * Nine stages below already log a decision, and all but two record only `from.length` /
+     * `to.length`. That is why this repo cannot answer "who wrote this word": the '| Shirt' the
+     * seller rejected is attributed to the council at :8511 and to the band pad at
+     * poGoldCorpus.ts:226, and BOTH comments cannot be right. A length delta cannot settle it; a
+     * before/after STRING can, and one regen then settles it forever.
+     *
+     * `mark` appends only when a stage actually CHANGED the string, so the trace is exactly the
+     * list of authors, in order, and a clean pass costs one short line. Zero behaviour change —
+     * nothing here is read by any decision. handoff/TITLE_ARCHITECTURE.md §7 P0. */
+    const traceId = `${input.parentAsin ?? 'na'}#${++DOOR_SEQ}`
+    const inTitle = title
+    const trace: Array<{ stage: string; text: string }> = []
+    const mark = (stage: string, text: string): void => {
+      const prev = trace.length > 0 ? trace[trace.length - 1].text : inTitle
+      if (text !== prev) trace.push({ stage, text })
+    }
     /* DEFECT 2 (PO 2026-08-09, §4) — the Title-Case apostrophe artifact ("Women'S T-Shirts"). Runs
      * FIRST because it is LENGTH-NEUTRAL (it can never move a title across the band) and every stage
      * below reads cleaner bytes for it: the gendered-noun probe, the word dedupe and the census all
@@ -8349,6 +8397,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       console.log(JSON.stringify({ tag: 'SHIP_APOSTROPHE_CASE', field: 'title', from: title, to: cased }))
     }
     title = cased
+    mark('APOSTROPHE_CASE', title)
     /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
      * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
      * "Heavyweight" into a midweight blank's title as if it were fact. Claims the blank spec does
@@ -8358,6 +8407,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       console.log(JSON.stringify({ tag: 'SHIP_SPEC_TRUTH', field: 'title', removed: truth.removed, from: title.length, to: truth.title.length }))
     }
     title = truth.title
+    mark('SPEC_TRUTH', title)
     // CAP FIRST, because this door now runs AFTER scrubTrademarks — whose substitutions LENGTHEN the
     // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
     // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
@@ -8378,6 +8428,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', decision: 'refused-trademark-resurrection', title }))
     }
     const capped = deduped.title
+    mark('CAP_AND_DEDUPE', capped)
     /* The context BOTH the waste net's probe and the money-tail loop use. Composed ONCE so the
      * probe ("would removing this waste free space for the keyword?") is answered against exactly
      * the arguments the loop below is about to run with — a second, drifting copy would let the two
@@ -8425,6 +8476,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       from: capped.length, to: waste.title.length, changed: waste.title !== capped, note: waste.note,
     }))
     let moneyed = waste.title
+    mark('WASTE_VOCABULARY', moneyed)
     /* MONEY TAIL (#147) — wire order is spec-truth → cap → dedupe → waste → enforceMoneyTail →
      * enforceTitleBand: when the gold tail lands the title is already in band and the facts-only
      * pad below never fires (curing the "fact tail eats the money slot" leak); when it skips,
@@ -8444,7 +8496,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     if (mtRun.applied) {
       const wonKw = mtRun.attempts[mtRun.attempts.length - 1]?.kw ?? ''
-      if (moneyTailMode === 'on') moneyed = mtRun.title
+      if (moneyTailMode === 'on') { moneyed = mtRun.title; mark('MONEY_TAIL', moneyed) }
       else console.log('[MONEY_TAIL_DIFF]', JSON.stringify({ kw: wonKw, current: moneyed, would: mtRun.title }))
     }
     /* DEFECT B (PO §5, live B0GVVY5TS9 2026-08-09) — A COLOR WORD IN THE SHARED TITLE. §5: "shared
@@ -8468,6 +8520,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note,
     }))
     moneyed = colorNet.title
+    mark('COLOR_STRIP', moneyed)
     /* DEFECT 1 (PO 2026-08-09, §4) — "for Men and Women" is CHARACTER WASTE. Deliberately AFTER the
      * money-tail loop: §4 allows the inclusive tail on a universal design ONLY when nothing better
      * fits that space, and `enforceMoneyTail` is what decides "better" — it already treats the
@@ -8482,6 +8535,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note,
     }))
     moneyed = inc.title
+    mark('INCLUSIVE_AUDIENCE', moneyed)
     const v = enforceTitleBand(moneyed, titleBandCtx(moneyed))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title
@@ -8502,6 +8556,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       note: v.notes[0] ?? '',
     }))
     const banded = v.title === moneyed ? moneyed : v.title
+    mark('BAND_PAD', banded)
     if (v.title !== moneyed) console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
     // ── TERMINAL ACCEPTANCE ON THE MONEY POSITION ─────────────────────────────────────────────
     // LAST, after every net including the pad — so exactly ONE place owns the rule "the money
@@ -8516,6 +8571,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       tag: 'SHIP_MONEY_POSITION', decision: drop.decision,
       from: banded.length, to: drop.title.length, note: drop.note,
     }))
+    mark('MONEY_POSITION_GATE', drop.title)
+    // ONE line per trip. `stages` is the ordered list of every stage that actually rewrote the
+    // string — i.e. the authorship record. An empty `stages` means the door shipped the producer's
+    // bytes untouched, which is the state the architecture is aiming for.
+    console.log('[TITLE_DOOR_TRACE]', JSON.stringify({ id: traceId, in: inTitle, out: drop.title, stages: trace }))
     return drop.title
   }
   /* SHIP CENSUS (Phase 2 of the foundation plan) — MEASURE-ONLY, on the object this function

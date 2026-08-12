@@ -31,6 +31,10 @@ const score = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLef
 /** PR-C scoring: the full corpus shape threaded, apparel-gated — what the live producers now pass. */
 const scoreC = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true }).score
 
+/** Gold #4 — the title the corpus-derived left-word ceiling now rejects, though it is IN the corpus
+ *  the ceiling was derived from. Named once, used by the AFTER contract and by the defect block. */
+const CEILING_VICTIM = 'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women'
+
 /** The adversary's winning titles: spec-stuffed garbage that fully complied with the first-draft
  *  brief. ATTACK_A scored 100/100 with ZERO recorded problems. */
 const ATTACK_A = 'THE CEO 2026 Soccer Cup Garment Dyed Crew Neck Tee | Comfort Colors Shirt'
@@ -39,12 +43,33 @@ const ATTACK_B = 'THE CEO 2026 World Soccer Cup Short Sleeve Tee | Comfort Color
 const REJECT_1 = 'THE CEO 2026 World Soccer Cup Unisex Classic Fit Fan Shirt | Short Sleeve'
 const REJECT_2 = 'THE CEO 2026 World Soccer Cup USA, Mexico & Canada Unisex Tee | Crew Neck'
 
+/* THE CORPUS AS IT STOOD AT PR-A, FROZEN AS LITERALS.
+ *
+ * These BEFORE-state assertions pin exact scores to document a historical defect. They used to read
+ * the LIVE `SEED_GOLD_TITLES`, which means every future seller revision silently rewrote the past —
+ * and on 2026-08-12 it did: the seller trimmed their over-cap gold #7 and seven of these tests went
+ * red, not because the history changed but because the constant did. History is now a literal.
+ * Only the AFTER blocks read the live corpus, which is the only place a corpus change SHOULD land. */
+const CORPUS_AT_PR_A: readonly string[] = [
+  'THE CEO Later Alligator Long Sleeve Shirt, Later Gator Comfort Colors Shirt',
+  'THE CEO Espana Championship Tee Shirt 2026 Spain Jersey Football Soccer Cup',
+  'THE CEO Cashflow Cap | Puff Embroidery Cotton Twill Snapback Hat for Men',
+  'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women',
+  'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women',
+  'THE CEO Cupid Valentine Tee Shirt | Comfort Colors Graphic Tshirt for Women',
+  'THE CEO I Could Be Meaner Tee Shirt | Funny Comfort Colors Shirt for Men Women', // 78 — PO-revised 2026-08-12
+  "THE CEO Darlin' T-Shirt, Comfort Colors Graphic Tee for Women, Rodeo Shirt",
+  'THE CEO The Rod Father T-Shirt Funny Fishing Mens Graphic Tee for Men',
+]
+const SHAPE_AT_PR_A = measureGoldShape(CORPUS_AT_PR_A)
+const scoreA = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLeftWords: SHAPE_AT_PR_A.maxLeftWords }).score
+
 afterEach(() => { delete process.env.TITLE_SHAPE_JUDGE })
 
 describe('BEFORE STATE (pinned at PR-A) — the hand-written rules dock the seller and reward the attack', () => {
   it('the judge docks TWO of the seller\'s own canonical golds', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
-    const scores = SEED_GOLD_TITLES.map(score)
+    const scores = CORPUS_AT_PR_A.map(scoreA)
     // Gold #7 ("| Funny Comfort Colors Shirt…", 78 chars): 55 — docked for Amazon's cap (a real,
     // external rule) AND for "funny" (a taste rule the seller's own corpus attests x2).
     expect(scores[6]).toBe(55)
@@ -58,18 +83,18 @@ describe('BEFORE STATE (pinned at PR-A) — the hand-written rules dock the sell
 
   it('the spec-stuffed ATTACK outscores the seller\'s own golds — the defect in one line', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
-    expect(score(ATTACK_A)).toBe(100)   // zero recorded problems, today
-    expect(score(ATTACK_B)).toBe(90)
+    expect(scoreA(ATTACK_A)).toBe(100)   // zero recorded problems, today
+    expect(scoreA(ATTACK_B)).toBe(90)
     // Both attacks score >= the seller's gold #9 and > gold #7. The scorer prefers fabricated
     // spec-stuffing over the seller's actual taste. THIS is why titles kept coming back wrong.
-    expect(score(ATTACK_A)).toBeGreaterThan(score(SEED_GOLD_TITLES[6]))
-    expect(score(ATTACK_A)).toBeGreaterThan(score(SEED_GOLD_TITLES[8]))
+    expect(scoreA(ATTACK_A)).toBeGreaterThan(scoreA(CORPUS_AT_PR_A[6]))
+    expect(scoreA(ATTACK_A)).toBeGreaterThan(scoreA(CORPUS_AT_PR_A[8]))
   })
 
   it('the seller\'s explicit rejections still score in the 75-80 band — not separated from taste', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
-    expect(score(REJECT_1)).toBe(80)
-    expect(score(REJECT_2)).toBe(75)
+    expect(scoreA(REJECT_1)).toBe(80)
+    expect(scoreA(REJECT_2)).toBe(75)
   })
 })
 
@@ -105,15 +130,27 @@ describe('the keystone predicate — specClaimSpans names the poison the judge c
  * exactly what un-shaped callers still get, and pinning it documents the difference the corpus makes.
  */
 describe('AFTER (PR-C, live): the corpus outranks every hand-written rule', () => {
-  it('every cap-compliant gold scores a clean 100 — zero TASTE docks remain', () => {
+  it('EVERY gold is now cap-compliant — the seller\'s 2026-08-12 revision removed the last exception', () => {
+    // The `if (g.length > 75) continue` guard this test used to carry is GONE, and that is the point:
+    // the corpus no longer contains a title we could never ship. It also removes the contradiction
+    // inside the council prompt, which printed a 78-char exemplar directly beneath "75 characters
+    // maximum, counted exactly".
+    for (const g of SEED_GOLD_TITLES) expect(g.length, g).toBeLessThanOrEqual(75)
+  })
+
+  it('no TASTE dock survives — every gold the derived ceiling admits scores a clean 100', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
+    // Gold #4 is excluded here and ONLY here: it is docked by the corpus-derived left-word ceiling,
+    // not by taste. That dock is a live defect, pinned in its own block below.
     for (const g of SEED_GOLD_TITLES) {
-      if (g.length > 75) continue              // gold #7 (78 chars): Amazon's cap is a SHIP rule, not taste
+      if (g === CEILING_VICTIM) continue
       expect(scoreC(g), g).toBe(100)
     }
-    // Gold #9 (69 chars, "funny"): scored 80 under the hand-typed rules. The corpus floor is 69 and
+    // Gold #9 (69 chars, "funny"): scored 80 under the hand-typed rules. The corpus floor is 68 and
     // "funny" is the seller's attested voice — no dock survives.
     expect(scoreC(SEED_GOLD_TITLES[8])).toBe(100)
+    // Gold #7, revised by the seller to 68 chars, is no longer docked by the cap at all.
+    expect(scoreC(SEED_GOLD_TITLES[6])).toBe(100)
   })
 
   it('every attack and reject scores STRICTLY below every cap-compliant gold', () => {
@@ -132,6 +169,54 @@ describe('AFTER (PR-C, live): the corpus outranks every hand-written rule', () =
   })
 })
 
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * LIVE DEFECT (surfaced 2026-08-12) — A CORPUS-DERIVED LAW THAT REJECTS ITS OWN CORPUS.
+ *
+ * The seller trimmed ONE WORD from gold #7 ("Tee Shirt" -> "Tee"). That flipped an outlier test
+ * inside `measureGoldShape` and dropped `maxLeftWords` from 10 to 7:
+ *
+ *   piped left counts BEFORE: [10, 8, 6, 6, 4]  ->  10 > 8+2 is FALSE  -> trimmedMax = 10
+ *   piped left counts AFTER:  [10, 7, 6, 6, 4]  ->  10 > 7+2 is TRUE   -> trimmedMax = 7  (runner-up)
+ *
+ * `goldBriefBlock` prints that number to the council as a hard law ("never more than N"). So the
+ * brief now instructs the producer never to exceed 7 identity words while displaying, directly
+ * beneath, a 10-word gold. The law and the examples contradict each other inside one prompt — the
+ * same failure mode the 78-char exemplar had, arriving through a different door.
+ *
+ * WHY THIS IS NOT FIXED HERE. `measureGoldShape`'s left-segment statistic has already been amended
+ * twice (the piped-subset correction, then MIN_PIPED_SAMPLE + trimmedMax). A third amendment is the
+ * repeat-fix circuit breaker firing, and the architecture (handoff/TITLE_ARCHITECTURE.md) deletes
+ * the ceiling outright: identity length CANNOT be the rule, because the seller's Rod Father gold and
+ * the keyword soup both run 13 words. Patching the number would make this test green and leave the
+ * wrong idea in place. It is pinned instead, so it cannot drift unnoticed and cannot be forgotten.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+describe('LIVE DEFECT — the derived ceiling rejects a gold it was derived from', () => {
+  it("one trimmed word moved the council's stated ceiling by three", () => {
+    expect(SHAPE_AT_PR_A.maxLeftWords).toBe(10)
+    expect(SHAPE.maxLeftWords).toBe(7)
+  })
+
+  it('gold #4 is IN the corpus and VIOLATES the ceiling measured from it', () => {
+    expect(SEED_GOLD_TITLES).toContain(CEILING_VICTIM)
+    const identityWords = CEILING_VICTIM.slice(0, CEILING_VICTIM.indexOf(' | ')).split(/\s+/).length
+    expect(identityWords).toBe(10)
+    expect(identityWords).toBeGreaterThan(SHAPE.maxLeftWords)
+  })
+
+  it("and the judge therefore docks it — a gold scored below 100 by the seller's own corpus", () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    expect(scoreC(CEILING_VICTIM)).toBe(86)
+  })
+
+  it.fails('THE INVARIANT THAT MUST HOLD: no statistic derived from the corpus may reject a member of it', () => {
+    // Written as `it.fails` because it does not hold today. It starts failing — loudly — the moment
+    // the architecture deletes the ceiling, which is the signal to flip it to a plain `it`.
+    const lefts = SEED_GOLD_TITLES.filter((t) => t.includes(' | '))
+      .map((t) => t.slice(0, t.indexOf(' | ')).split(/\s+/).length)
+    expect(Math.max(...lefts)).toBeLessThanOrEqual(SHAPE.maxLeftWords)
+  })
+})
+
 describe('PR-B acceptance — no hand-typed shape rule survives in the rendered brief', () => {
   const b = buildApparelTitleBrief({
     brandName: 'THE CEO',
@@ -147,10 +232,21 @@ describe('PR-B acceptance — no hand-typed shape rule survives in the rendered 
   })
 
   it('every shape statement is a measurement from the corpus', () => {
-    expect(b.user).toContain('length 69-78 characters, median 74')
+    // These numbers MOVE when the seller edits a gold, and that is correct — they are measurements,
+    // not policy. Updated 2026-08-12 after the seller trimmed gold #7 from 78 to 68 characters.
+    expect(b.user).toContain('length 68-75 characters, median 74')
     expect(b.user).toContain('5 of 9 use " | "')
     expect(b.user).toContain('0 spec-only')
-    expect(b.user).toContain('never more than 10 (measured over 5)')
+    expect(b.user).toContain('never more than 7 (measured over 5)')
+  })
+
+  it('LIVE DEFECT: the brief states a ceiling its own printed exemplars break', () => {
+    // The brief prints "never more than 7" as a hard law, then shows a 10-word gold underneath it.
+    // Pinned so the contradiction is visible in a test run rather than only in a comment. It is
+    // removed by deleting the ceiling (handoff/TITLE_ARCHITECTURE.md), not by re-tuning the number.
+    expect(b.user).toContain('never more than 7')
+    expect(b.user).toContain(CEILING_VICTIM)
+    expect(CEILING_VICTIM.slice(0, CEILING_VICTIM.indexOf(' | ')).split(/\s+/).length).toBe(10)
   })
 
   it('carries the genuine rejects with the seller\'s verbatim words', () => {
