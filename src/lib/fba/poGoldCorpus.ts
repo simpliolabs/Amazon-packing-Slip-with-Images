@@ -199,9 +199,21 @@ export function classifyTail(tail: string, specValues: readonly string[] = []): 
   const claims = specClaimSpans(t, specValues)
   let residue = t.toLowerCase()
   for (const c of claims) residue = residue.split(c).join(' ')
-  const STOP = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', '&'])
+  // AUDIENCE WORDS DO NOT RESCUE A SPEC TAIL (2026-08-11): "| Short Sleeve for Women" is a spec
+  // fact plus a demographic, and the seller has shipped ZERO of those. Their audience tails always
+  // ride a real phrase ("Christian Shirts for Women"), never a bare spec. Treated as connectors so
+  // the residue test sees what is actually left after the spec claim is removed.
+  const STOP = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', '&',
+    'men', 'mens', 'women', 'womens', 'ladies', 'unisex', 'kids', 'youth', 'adult', 'adults'])
   const left = residue.split(/[^a-z0-9-]+/).filter((w) => w && w.length > 1 && !STOP.has(w))
-  return left.length === 0 && claims.length > 0 ? 'specOnly' : 'search'
+  if (left.length === 0 && claims.length > 0) return 'specOnly'
+  // A BARE GARMENT NOUN IS NOT A MONEY PHRASE. Live 2026-08-11: the pad minted "| Shirt" and every
+  // spec-only guard passed it, because "shirt" is not a spec claim. Nobody searches the word "shirt"
+  // alone as a purchase intent, and ZERO of the seller's tails are a bare noun — every one carries a
+  // design phrase, a garment brand, or an audience. Classified with specOnly so ONE predicate covers
+  // "the money position holds nothing worth ranking for".
+  if (left.length > 0 && left.every((w) => GARMENT_NOUNS.has(w))) return 'specOnly'
+  return 'search'
 }
 
 /** For each term: the seller's own verbatim collocations containing it (±2 words of context), or

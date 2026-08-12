@@ -175,10 +175,13 @@ describe('enforceInclusiveAudience — decision table', () => {
       // its re-fill may no longer be a minted spec pipe, so at floor-off the guard refuses. The
       // phrase's real cure moved UPSTREAM: the council terminal net now strips 'for Men and Women'
       // in EVERY lean state, so the door only meets it on legacy/locked paths.
-      name: 'RULE (b) leaned: spec-only re-fill is REFUSED — a minted pipe may not be a spec fact',
+      name: 'RULE (b) leaned: the tail NARROWS to the lean — the ruling no longer loses to the floor',
       title: 'THE CEO Golf Widow Support Group Graphic Tee Shirt for Men and Women',
       ctx: LEAN_F,
-      decision: 'band-guard',
+      decision: 'narrowed',
+      // The net's own re-fill may still be a spec fact; whether that money position SURVIVES is
+      // judged terminally at the door by dropSpecOnlyTail, not here. This test owns the narrow.
+      expected: 'THE CEO Golf Widow Support Group Graphic Tee Shirt | Relaxed Fit for Women',
     },
     {
       name: 'RULE (b) leaned, mid-title "Mens Womens": narrows to the ADJECTIVE form in place',
@@ -194,10 +197,14 @@ describe('enforceInclusiveAudience — decision table', () => {
       decision: 'universal-allowed',
     },
     {
-      name: 'BAND GUARD: a removal that cannot be re-filled to 70 is REFUSED, byte-identical (fail-open)',
+      // 2026-08-11: the floor no longer vetoes a seller ruling (TITLE_RULING_OVER_FLOOR defaults on),
+      // so this case now APPLIES the rule instead of refusing it. The shorter honest title is the
+      // seller's own stated preference; the money position is judged terminally at the door.
+      name: 'the ruling APPLIES even when the facts cannot re-fill to 70',
       title: 'THE CEO Golf Widow Support Group Tee for Men and Women',
       ctx: LEAN_F,
-      decision: 'band-guard',
+      decision: 'narrowed',
+      expected: 'THE CEO Golf Widow Support Group Tee | Comfort Colors Tee for Women',
     },
     {
       name: 'no-phrase: a single-gender tail is not an inclusive phrase',
@@ -224,7 +231,9 @@ describe('enforceInclusiveAudience — decision table', () => {
     expect(v.decision).toBe(decision)
     if (expected !== undefined) {
       expect(v.title).toBe(expected)
-      expect(v.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+      // Amazon's cap is absolute; OUR preferred floor is not (2026-08-11). The floor lost its veto
+      // over seller rulings after it kept a banned word in three consecutive rejected titles, so an
+      // applied ruling may legitimately land under 70 — the seller's own gold ships at 69.
       expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
       expect(v.title).not.toMatch(/\|\s*$/) // never a dangling separator
     } else {

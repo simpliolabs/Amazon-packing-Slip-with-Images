@@ -91,11 +91,15 @@ describe('stripVariantColorWords — the §5 rule on shipped bytes', () => {
     expect(r.note).toContain('1 kept as design vocabulary')
   })
 
-  it('BAND-GUARD: refuses byte-identical when the facts cannot re-fill the freed characters', () => {
+  it('the §5 ruling APPLIES even when the facts cannot re-fill (floor default on, 2026-08-11)', () => {
+    // WAS: "refuses byte-identical". The floor stopped being able to veto a seller ruling after it
+    // kept a banned word in three consecutive live titles the seller rejected. A colour word in the
+    // shared title is a §5 violation whether or not the facts can pad the gap back to 70; the
+    // shorter honest title is the correct output, and the money position is judged at the door.
     const r = stripVariantColorWords(LIVE_AFTER_TM, ctx({ protect: 'World Cup Soccer', band: NO_FACTS }))
-    expect(r.decision).toBe('band-guard')
-    expect(r.title).toBe(LIVE_AFTER_TM)     // byte-identical
-    expect(r.note).toContain('refused, byte-identical')
+    expect(r.decision).toBe('stripped')
+    expect(r.title).not.toMatch(/\bblack\b/i)
+    expect(r.title.length).toBeLessThan(LIVE_AFTER_TM.length)
   })
 
   it('skips non-apparel outright — there a color is a product fact, not a variant attribute', () => {

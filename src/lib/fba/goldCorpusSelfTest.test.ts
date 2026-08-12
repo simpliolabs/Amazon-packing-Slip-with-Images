@@ -23,6 +23,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { SEED_GOLD_TITLES, measureGoldShape, specClaimSpans, attestedUse } from './poGoldCorpus'
+import { dropSpecOnlyTail, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
 import { buildApparelTitleBrief, titleQualityJudge } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
@@ -161,5 +162,39 @@ describe('PR-B acceptance — no hand-typed shape rule survives in the rendered 
   it('the honest-short instruction replaces the pad-to-band mandate', () => {
     expect(b.user).toContain('A shorter honest title IS the correct output')
     expect(b.user).not.toMatch(/never below 70|hard goal/i)
+  })
+})
+
+/**
+ * THE THREE LIVE REJECTIONS, as regression fixtures. Each shipped to the seller and each was
+ * rejected in their own words. The door must now clean all three — and the four seller golds that
+ * carry a legitimate tail must pass through untouched.
+ */
+describe('the seller\'s three rejected titles cannot recur', () => {
+  const band = { apparel: true, garmentBrand: '', spec: { fit: 'Classic Fit', sleeve: 'Short Sleeve', neck: 'Crew Neck' }, garmentSecond: 'Tee' }
+  const chain = (t: string) => {
+    const a = stripInclusiveAudience(t)
+    const w = stripTitleWasteVocabulary(a, { apparel: true, band: band as never, moneyKws: null, money: null }).title
+    return dropSpecOnlyTail(w, { apparel: true, specValues: ['classic fit', 'short sleeve', 'crew neck'] }).title
+  }
+
+  it.each([
+    ['STILL BAD',              'THE CEO 2026 World Soccer Cup Unisex Classic Fit Fan Shirt | Short Sleeve'],
+    ['Still Bad after regen',  'THE CEO 2026 World Soccer Cup Tee for Men and Women Fans | Short Sleeve'],
+    ['EVEN WORSE',             'THE CEO 2026 World Soccer Cup Unisex Tee for Men & Women Fans | Shirt'],
+    ['WAY off',                'THE CEO 2026 World Soccer Cup USA, Mexico & Canada Unisex Tee | Crew Neck'],
+  ])('%s — banned vocabulary, the universal tail, and the weak money position all go', (_verdict, title) => {
+    const out = chain(title)
+    expect(out, 'waste vocabulary').not.toMatch(/\b(unisex|classic\s+fit)\b/i)
+    expect(out, 'universal audience tail').not.toMatch(/\bfor\s+men\s*(?:and|&|\+|,)?\s*women\b/i)
+    expect(out, 'spec-only money position').not.toMatch(/\|\s*(short sleeve|crew neck|classic fit|shirt|tee)\s*$/i)
+    expect(out.length).toBeLessThanOrEqual(75)
+  })
+
+  it('the seller\'s own tails are NEVER dropped — brand and search positions survive', () => {
+    for (const g of SEED_GOLD_TITLES.filter((t) => t.includes(' | '))) {
+      expect(dropSpecOnlyTail(g, { apparel: true }).decision, g).toBe('kept')
+      expect(dropSpecOnlyTail(g, { apparel: true }).title, g).toBe(g)
+    }
   })
 })
