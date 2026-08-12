@@ -247,3 +247,62 @@ These are folded into the phases above as **blocking pre-conditions**, not footn
 - **Test the corpus production actually uses** — acceptance pins `SEED_GOLD_TITLES`, but production runs `loadPoGoldTitles` over the newest 12 manual rows, re-measured at runtime, **with nothing gating entry**: one mediocre lock moves the measured shape for every listing.
 - **Make the rubric DATA, not prompt literals** — today `rejectPairBlock(SEED_REJECT_PAIRS)` ignores `ctx.poGolds` and the ~7 items are string literals, so a new ruling still needs a deploy.
 - **Cost:** re-derive the budget **per design group** and bound the fan-out — `:8833` runs `Promise.all` over design groups with no cap and every LLM call at `maxRetries: 0`.
+
+---
+
+## 9. LIVE PROOF (2026-08-12, B0GVV3XL4T) — THE FIRST BYTE-LEVEL AUTHORSHIP CHAIN
+
+P0 shipped, deployed, and a real regen produced the evidence this document was arguing for from
+inference. **This section supersedes inference with production bytes.**
+
+```
+1  COUNCIL JUDGE PICKS   72   …Tee Shirt | Futbol Cup 2026 Soccer T-Shirt   score 100, problems []
+2  DEDUPE strips repeats 56   …Tee Shirt | Futbol T-Shirt                   (matches "Title 56/75")
+3  FLOOR + HUMANIZER     71   …Tee Shirt | Futbol T-Shirt Fan Tournament    score 70 → 100
+4  SHIP DOOR             71   unchanged — [TITLE_DOOR_TRACE] stages: []
+```
+
+**THE ROOT IS STEP 1.** The money position the judge scored 100/100 with an EMPTY problems array is
+`Futbol Cup 2026 Soccer T-Shirt` — and `cup`, `2026`, `soccer`, `shirt` are ALL already in the
+identity. Four of six words are echoes. Only `futbol` is new. Thirty characters of the highest-value
+real estate buy ONE search term. That is the seller's 2026-08-12 rule 1 ("every character must buy a
+search term") violated at the point of decision, and the scorer cannot see it.
+
+**EVERYTHING DOWNSTREAM WAS CONSEQUENCE, NOT CAUSE:**
+- the dedupe was RIGHT to strip the repeats — keep it, it is a token-level fact with an oracle;
+- removing them left 56 chars, tripping OUR invented 70-char floor;
+- the floor created a vacuum and the humanizer filled it by INVENTING `Fan Tournament`;
+- the door then correctly did nothing at all.
+
+**THE DOOR IS EXONERATED ON THIS PATH.** `stages: []` means all ten stages ran and changed zero
+bytes — already the state this architecture is aiming for. The deletion order in §7 P3 is therefore
+REPRIORITISED: the producer-side humanizer length-extension retry goes first; the door-side nets I
+had listed first were no-ops here.
+
+**SPREAD WAS 48, NOT 0 — A CORRECTION.** I predicted a spread of ~0 would show the judge's
+indifference live. Across its 4 candidates the judge had a 48-point spread and confidently picked the
+top. It is NOT indifferent; it discriminates on the WRONG AXIS, awarding a perfect score with no
+complaints to a title that repeats itself four times. That is a stronger argument for the referee
+than indifference would have been.
+
+**THE POOL WAS NEVER THE PROBLEM.** `titleDebug.candidatesUsed` contained `usa jersey` and
+`mexico football jersey`, and `designGroups` was literally `["HOST-COUNTRIES"]`. The system had the
+gold's own vocabulary and the correct theme tag, and still spent 15 characters on `Fan Tournament`.
+Selection failure, not research failure.
+
+**THE REFEREE'S FIRST PRODUCTION TEST CASE** (real data, not constructed attacks) — from the same
+candidate list it must:
+| candidate | required verdict |
+|---|---|
+| `Futbol Cup 2026 Soccer T-Shirt` | REJECT — 4 of 6 words echo the identity |
+| `Futbol T-Shirt Fan Tournament` | REJECT — `Fan Tournament` invented, unsearched |
+| `USA Mexico Canada Football Tee` | PREFER — all new, all searched, matches `HOST-COUNTRIES` |
+
+**BEFORE → AFTER on the seller's own rejection:**
+```
+BEFORE  THE CEO 2026 World Soccer Cup Unisex Tee for Men & Women Fans | Shirt   69   "EVEN WORSE"
+AFTER   THE CEO 2026 World Soccer Cup Tee Shirt | Futbol T-Shirt Fan Tournament  71
+GOLD    THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee 72
+```
+The IDENTITY is now byte-identical to the seller's gold. The money position is the remaining gap,
+and it is exactly the gap the referee exists to close.
