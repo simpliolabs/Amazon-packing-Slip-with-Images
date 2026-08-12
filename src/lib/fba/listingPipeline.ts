@@ -59,7 +59,7 @@ import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
-import { collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { audienceSpans, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -3203,7 +3203,14 @@ ${baseSystem}`,
     return true
   })()
   let appended = false
-  if (mode === 'REQUIRED' && !hasLeanTail) {
+  // F3 (2026-08-11 adversarial pass): the pipeline was MANUFACTURING the seller's rejected shape.
+  // From a clean draft ending "…Tee Shirt for Men" at lean='female', Rule 1 does not strip (a single
+  // gender is admissible), the anti-lean carrier lexicon contains only {husband, boyfriend} so a
+  // plain "Men" is not a carrier, and this append then produced "…for Men … for Women" — the exact
+  // string the seller called EVEN WORSE. A title that already names ANY audience does not get
+  // another one appended; the span analyzer is the same predicate the door and judge use.
+  const alreadyNamesAudience = audienceSpans(best).length > 0
+  if (mode === 'REQUIRED' && !hasLeanTail && !alreadyNamesAudience) {
     const targetAud = (lean === 'male' || lean === 'lean_male') ? 'Men' : 'Women'
     const wantFemale = targetAud === 'Women'
     const wantMale = targetAud === 'Men'

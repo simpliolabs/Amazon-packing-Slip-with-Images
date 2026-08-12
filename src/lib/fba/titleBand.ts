@@ -898,21 +898,143 @@ export interface InclusiveAudienceCtx {
 const INCLUSIVE_MASC = String.raw`(?:men|mens|men['’]s)`
 const INCLUSIVE_FEM = String.raw`(?:women|womens|women['’]s|ladies|ladies['’])`
 const INCLUSIVE_JOIN = String.raw`(?:\s*(?:and|&|\+|,)\s*|\s+)`
-/** EXPORTED (2026-08-11): the council's terminal net had grown its OWN narrower copy that matched
- *  only "for Men and Women" — so the live regen shipped "for Men & Women Fans" untouched. One
- *  predicate, every caller. Every equivalent the seller named lives HERE and nowhere else. */
-export function hasInclusiveAudience(text: string): boolean {
-  return inclusiveAudienceRe().test(text || '')
+/*
+ * AUDIENCE SPANS — replaces the closed gender-PAIR regex (2026-08-11, adversarial pass).
+ *
+ * WHY THE PAIR REGEX WAS THE WRONG SHAPE. It required two gender nouns from a closed lexicon,
+ * ADJACENT, joined by and/&/+/comma/space. Every confirmed attack beat it with one substitution:
+ *   "for Men or Women"      — the conjunction "or" was not in the join set
+ *   "for Guys and Girls"    — "guys"/"girls" were not in the lexicon
+ *   "for Him and Her"       — pronouns were not in the lexicon
+ *   "for Adults and Kids"   — a non-gender demographic axis
+ *   "…for Men Tee Shirt | Fan Shirt for Women" — the two halves 24 characters apart
+ * And because PR #557 consolidated the producer, the judge and the door onto this ONE predicate,
+ * a single miss blinded all three layers at once. Consolidation removed the drift and removed the
+ * redundancy with it; the answer is not to re-fork the predicate but to make it measure SPANS
+ * instead of matching a pair.
+ *
+ * ADMISSIBILITY COMES FROM THE CORPUS, not a hand-typed allowlist. Across the nine golds the ONLY
+ * attested audience vocabulary is the single-gender closure {men, mens, men's, women, womens,
+ * women's, ladies}, and the only attested DUAL form is gold #7's juxtaposed, title-terminal
+ * "for Men Women". Everything else is unattested and strips.
+ *
+ * PRONOUNS AND SOFT NOUNS ("him", "her", "girls", "boys", "family", "both") count ONLY inside a
+ * `for …` run. That is what protects gold #4, "I Will Praise Him in Every Season Tee | Christian
+ * Shirts for Women" — a devotional "Him" mid-title is not an audience claim.
+ */
+const AUD_ATTESTED = new Set(['men', 'mens', "men's", "men’s", 'women', 'womens', "women's", "women’s", 'ladies'])
+const AUD_HARD = new Set([...AUD_ATTESTED, 'guys', 'gals', 'dudes', 'unisex', 'kids', 'youth', 'teens', 'adults'])
+const AUD_SOFT = new Set(['him', 'her', 'them', 'girls', 'boys', 'family', 'both', 'everyone', 'everybody', 'genders', 'ages', 'adult', 'teen', 'kid'])
+const AUD_JOIN = new Set(['and', '&', '+', 'or', ',', 'the', 'whole', 'all', 'any', 'every'])
+const audValue = (w: string): 'M' | 'F' | 'X' =>
+  /^(men|mens|men['’]s|guys|dudes|boys|him|his)$/.test(w) ? 'M'
+    : /^(women|womens|women['’]s|ladies|gals|girls|her)$/.test(w) ? 'F' : 'X'
+
+export interface AudienceSpan {
+  start: number; end: number; text: string
+  values: string[]        // 'M' | 'F' | 'X'
+  attested: boolean       // every token inside the seller's single-gender closure
+  led: boolean            // introduced by "for"
+  terminal: boolean       // ends the title
 }
-/** Strip every inclusive-audience construct, plus ONE trailing audience noun the phrase drags along
- *  ("… for Men & Women Fans"). Closed class: an open \w+ would eat a real word mid-title. */
+
+/** Every audience claim in the title, with the facts needed to judge admissibility. PURE. */
+export function audienceSpans(text: string): AudienceSpan[] {
+  const t = (text || '')
+  const out: AudienceSpan[] = []
+  const re = /[A-Za-z''’&+,]+/g
+  const toks: { w: string; lo: string; i: number; j: number }[] = []
+  for (const m of t.matchAll(re)) toks.push({ w: m[0], lo: m[0].toLowerCase(), i: m.index ?? 0, j: (m.index ?? 0) + m[0].length })
+  for (let k = 0; k < toks.length; k++) {
+    const led = toks[k].lo === 'for'
+    let p = led ? k + 1 : k
+    // only a `for …` run may admit the soft lexicon; bare hard tokens still count anywhere
+    if (!led && !AUD_HARD.has(toks[p]?.lo ?? '')) continue
+    if (led && !(AUD_HARD.has(toks[p]?.lo ?? '') || AUD_SOFT.has(toks[p]?.lo ?? '') || AUD_JOIN.has(toks[p]?.lo ?? ''))) continue
+    // Skip determiners/quantifiers that lead a `for …` run ("for THE WHOLE family", "for ALL men").
+    // Without this the run terminates before collecting a word and "for the Whole Family" survives —
+    // found by the adversarial pass, and exactly the kind of seam a pair-regex could never express.
+    if (led) while (p < toks.length && AUD_JOIN.has(toks[p].lo) && !AUD_HARD.has(toks[p].lo)) p++
+    const words: string[] = []
+    let q = p
+    while (q < toks.length) {
+      const lo = toks[q].lo
+      const isAud = AUD_HARD.has(lo) || (led && AUD_SOFT.has(lo))
+      const isJoin = AUD_JOIN.has(lo) && words.length > 0 && q + 1 < toks.length
+        && (AUD_HARD.has(toks[q + 1].lo) || (led && AUD_SOFT.has(toks[q + 1].lo)) || AUD_JOIN.has(toks[q + 1].lo))
+      if (!isAud && !isJoin) break
+      if (isAud) words.push(lo)
+      q++
+    }
+    if (words.length === 0) { continue }
+    const start = led ? toks[k].i : toks[p].i
+    const end = toks[q - 1].j
+    out.push({
+      start, end, text: t.slice(start, end),
+      values: [...new Set(words.map(audValue))],
+      attested: words.every((w) => AUD_ATTESTED.has(w)),
+      led,
+      terminal: t.slice(end).trim().replace(/^[.,;|\s]+/, '') === '',
+    })
+    k = q - 1
+  }
+  return out
+}
+
+/** Which spans must go. The seller's rule, expressed as corpus facts rather than a phrase list. */
+function inadmissibleSpans(text: string): AudienceSpan[] {
+  const spans = audienceSpans(text)
+  if (spans.length === 0) return []
+  const bad: AudienceSpan[] = []
+  for (const s of spans) {
+    // (a) unattested vocabulary — guys / kids / him / everyone / family never appear in the golds
+    if (!s.attested) { bad.push(s); continue }
+    // (b) a DUAL-gender span is admissible only in gold #7's exact attested form: juxtaposed
+    //     (no conjunction) AND title-terminal. Any conjoined dual — "and", "&", "+", "or" — is the
+    //     construct the seller banned outright.
+    if (s.values.includes('M') && s.values.includes('F')) {
+      const conjoined = /\b(and|or)\b|[&+,]/i.test(s.text)
+      if (conjoined || !s.terminal) bad.push(s)
+    }
+  }
+  // (c) two spans naming DIFFERENT genders = the title addresses both in pieces. Keep the terminal
+  //     one, delete the rest. This is the headline attack ("…for Men Tee | Fan Shirt for Women"),
+  //     and gold #9's two same-value {M} spans are untouched by construction.
+  const kept = spans.filter((s) => !bad.includes(s))
+  const vals = new Set(kept.flatMap((s) => s.values.filter((v) => v !== 'X')))
+  if (vals.size > 1) {
+    const terminal = kept.filter((s) => s.terminal).pop()
+    for (const s of kept) if (s !== terminal) bad.push(s)
+  }
+  return bad
+}
+
+/** EXPORTED: one predicate for the council net, the judge dock and the door net. */
+export function hasInclusiveAudience(text: string): boolean {
+  return inadmissibleSpans(text).length > 0
+}
+/** Remove every INADMISSIBLE audience span, plus ONE trailing generic-wearer noun the phrase drags
+ *  along ("… for Men & Women Fans"). Closed class: an open \w+ would eat a real word mid-title. */
 export function stripInclusiveAudience(text: string): string {
-  return (text || '')
-    .replace(new RegExp(inclusiveAudienceRe().source + String.raw`(\s+(?:fans?|lovers?|shoppers?|buyers?))?`, 'gi'), ' ')
+  const t = text || ''
+  const bad = inadmissibleSpans(t)
+  if (bad.length === 0) return t
+  let out = ''
+  let cursor = 0
+  for (const s of [...bad].sort((a, b2) => a.start - b2.start)) {
+    out += t.slice(cursor, s.start)
+    cursor = s.end
+    const trail = t.slice(cursor).match(/^\s+(?:fans?|lovers?|shoppers?|buyers?|enthusiasts?)\b/i)
+    if (trail) cursor += trail[0].length
+    out += ' '
+  }
+  out += t.slice(cursor)
+  return out
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+([,;.])/g, '$1')          // tighten punctuation, but NOT the pipe: ' | ' is the
     .replace(/\s*\|\s*/g, ' | ')           // separator's canonical spaced form and must survive
     .replace(/\s*\|\s*$/, '')              // a separator left with nothing after it is not a separator
+    .replace(/[,;]\s*$/, '')
     .trim()
 }
 
