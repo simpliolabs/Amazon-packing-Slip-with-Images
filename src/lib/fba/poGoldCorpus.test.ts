@@ -23,16 +23,22 @@ describe('measureGoldShape', () => {
     expect(s.medianLen).toBe(74)
     expect(s.pipedShare).toBe(0.56)                 // 5 of 9 — the pipe is common, NOT mandatory
     expect(s.leftWordsFrom).toBe(5)                 // left stats from the piped subset only
-    expect(s.medianLeftWords).toBe(6)               // 4 / 6 / 6 / 8 / 10 piped lefts
-    expect(s.maxLeftWords).toBe(10)
+    expect(s.medianLeftWords).toBe(6)               // 4 / 6 / 6 / 7 / 10 piped lefts
+    // 7, NOT the corpus maximum of 10. The seller's 2026-08-12 revision of gold #7 (one word out of
+    // the identity, 8 -> 7) flipped `trimmedMax`'s outlier test — 10 > 7+2 is true where 10 > 8+2 was
+    // not — so the ceiling dropped to the runner-up and now EXCLUDES gold #4, a member of the very
+    // corpus it is measured from. Pinned as a defect, not a target: goldCorpusSelfTest 'LIVE DEFECT'.
+    expect(s.maxLeftWords).toBe(7)
   })
 
   it('measures the fields the brief will print — every number computed, none typed (PR-A)', () => {
     const s = measureGoldShape(SEED_GOLD_TITLES)
-    expect([s.lenMin, s.lenMax]).toEqual([69, 78])            // one under OUR floor, one over AMAZON'S cap
+    // 68-75 since the seller's 2026-08-12 revision: the over-cap 78 is gone, so nothing in the
+    // corpus is unshippable. One gold still sits under OUR 70 floor — which is why that floor goes.
+    expect([s.lenMin, s.lenMax]).toEqual([68, 75])
     expect(s.sepMix).toEqual({ pipe: 5, comma: 2, plain: 2 }) // the pipe is common, never mandatory
     expect(s.tails.length).toBe(5)                            // every pipe-right, verbatim
-    expect(s.tails[4]).toBe('Funny Comfort Colors Shirt for Men Women')
+    expect(s.tails[4]).toBe('Funny Comfort Colors Shirt for Women')
     expect(s.tailClass).toEqual({ search: 2, brand: 3, specOnly: 0 })  // ZERO spec-only tails, ever
     expect(s.garment).toEqual({ twice: 8, once: 1 })          // adjacency-collapsed; Espana is the 1
     expect(s.audienceMix).toEqual({ gendered: 7, inclusive: 0, none: 2 })

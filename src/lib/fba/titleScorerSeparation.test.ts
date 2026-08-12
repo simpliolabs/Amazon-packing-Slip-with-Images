@@ -103,7 +103,17 @@ describe('THE CONTRACT — flip each `it.fails` to `it` when the architecture la
     expect(worstGold).toBeGreaterThan(bestAttack)
   })
 
-  it.fails('CONTRACT 2 — the gold must beat its own stuffed anagram twin (today: FALSE)', () => {
+  /* FLIPPED to a live assertion 2026-08-12 — but it holds for the WRONG REASON, and that is recorded
+   * here rather than celebrated. The seller trimmed one word from gold #7; that flipped an outlier
+   * test inside `measureGoldShape` and dropped the derived identity ceiling from 10 words to 7. The
+   * twin's identity is 10 words, so it is now docked — by a ceiling that also docks the seller's own
+   * gold #4 (see goldCorpusSelfTest, 'LIVE DEFECT'). Separation of +10 is an artefact of a defect,
+   * not evidence the scorer understands allocation.
+   *
+   * EXPECT THIS TO GO RED when the architecture deletes the ceiling. That is correct: the referee
+   * must win this pair on MEANING (is the identity one thing a person says, or a category with a
+   * country list bolted on) — which is the seller's own 2026-08-12 rule — not on a word count. */
+  it('CONTRACT 2 — the gold must beat its own stuffed anagram twin', () => {
     expect(score(ANAGRAM_GOLD)).toBeGreaterThan(score(ANAGRAM_TWIN))
   })
 
@@ -121,7 +131,10 @@ describe('THE CONTRACT — flip each `it.fails` to `it` when the architecture la
     for (const [tag, t] of ATTACKS) expect(score(t), tag).toBeLessThan(100)
   })
 
-  it.fails('CONTRACT 5 — no gold may be docked below every attack (today: gold #7 is)', () => {
+  /* FLIPPED 2026-08-12, and this one holds for the RIGHT reason: the seller revised gold #7 from 78
+   * characters to 68, so the corpus no longer contains a title Amazon would rewrite. The scorer's
+   * lowest-ranked title is no longer one of the seller's own. */
+  it('CONTRACT 5 — no gold may be docked below every attack', () => {
     // The scorer's single lowest-ranked title in this entire 22-string suite is one of the seller's own.
     const worstGold = Math.min(...SEED_GOLD_TITLES.map(score))
     const worstAttack = Math.min(...ATTACKS.map(([, t]) => score(t)))
