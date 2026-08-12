@@ -266,30 +266,76 @@ export function collapseRepeatedWords(
    * it twice in one. So garment-family words are deduped PER SEGMENT (max two segments, i.e. still
    * "×2"); every other significant word keeps the global one-and-only rule. */
   const garmentSegs = new Map<string, Set<number>>()
+  const lastSigIndex = new Map<string, number>()   // significant-word index of each token's last use
+  const firstSeg = new Map<string, number>()       // the segment a token first appeared in
+  const echoed = new Set<string>()                 // tokens already granted their one design echo
+  let sigCount = 0
   let segment = 0
   const isGarment = (bare: string): boolean => MONEY_GARMENT_FAMILY.has(moneyNormTok(bare))
   const kept: string[] = []
   const removed: string[] = []
 
   for (const w of words) {
+    // SEGMENT ADVANCES ON ANY SEPARATOR, NOT ONLY A PIPE (2026-08-11, round-2 adversarial pass).
+    // This counter only incremented on a literal '|', so on a COMMA-joined title every word lived
+    // in segment 0 and the cross-separator garment allowance below could never fire. Measured on
+    // the seller's own canonical gold #1:
+    //   in  "THE CEO Later Alligator Long Sleeve Shirt, Later Gator Comfort Colors Shirt" (75)
+    //   out "THE CEO Later Alligator Long Sleeve Shirt, Gator Comfort Colors"            (63)
+    // — it deleted their design echo ("Later") AND the mandated second garment noun ("Shirt"),
+    // ending on a bare brand. FOUR of the nine golds are non-pipe and the rebuilt brief now teaches
+    // that shape, so this was damaging the spec itself on the most likely output form.
     if (w === '|') { segment++; kept.push(w); continue }
+    // A word ENDING in a comma closes its segment AFTER it is processed — advancing early (and
+    // `continue`-ing) skipped the dedupe for that word entirely and let "Tshirt, Tshirt" back
+    // through, re-opening defect #148. The separator is a boundary, not an exemption.
+    const closesSegment = /[,;]$/.test(w)
     // Compare on letters only, so "Tshirt," and "Tshirt" are the same word and punctuation never
     // hides a duplicate. The ORIGINAL token (with its punctuation) is what gets kept.
     const bare = w.toLowerCase().replace(/[^a-z0-9]/g, '')
-    if (!bare || TITLE_CONNECTORS.has(bare)) { kept.push(w); continue }
+    if (!bare || TITLE_CONNECTORS.has(bare)) { kept.push(w); if (closesSegment) segment++; continue }
     if (seen.has(bare)) {
       const segs = garmentSegs.get(bare)
-      if (segs && !segs.has(segment) && segs.size < 2) {          // the golds' one cross-pipe repeat
+      const prevSig = lastSigIndex.get(bare)
+      const apart = prevSig !== undefined && sigCount - prevSig >= 2
+      // The cross-segment garment allowance now also requires DISTANCE. Commas advance the segment
+      // (so the seller's comma-joined golds are measured correctly), which without this would let
+      // the adjacent "Tshirt, Tshirt" stutter of defect #148 back through on a technicality.
+      if (segs && apart && !segs.has(segment) && segs.size < 2) {  // the golds' one cross-separator repeat
         segs.add(segment)
+        lastSigIndex.set(bare, sigCount)
+        sigCount++
         kept.push(w)
+        if (closesSegment) segment++
+        continue
+      }
+      // DESIGN ECHO (2026-08-11): the seller's gold #1 deliberately repeats its design word across
+      // the separator — "…Later Alligator Long Sleeve Shirt, LATER Gator Comfort Colors Shirt". The
+      // global one-and-only rule deleted that echo and left the title 6 chars shorter and weaker.
+      // A repeat is allowed once when it is in a DIFFERENT segment AND at least two significant words away, so it reads as
+      // structure rather than a stutter; #148's adjacent "Tshirt, Tshirt" stays removed because the
+      // occurrences are neighbours. Distance is measured in kept significant words.
+      const prev = lastSigIndex.get(bare)
+      const farApart = prev !== undefined && sigCount - prev >= 2
+      if (!echoed.has(bare) && !segs && farApart && firstSeg.get(bare) !== segment) {
+        echoed.add(bare)
+        lastSigIndex.set(bare, sigCount)
+        sigCount++
+        kept.push(w)
+        if (closesSegment) segment++
         continue
       }
       removed.push(w)                                             // repeat of a significant word
+      if (closesSegment) segment++
       continue
     }
     seen.add(bare)
+    lastSigIndex.set(bare, sigCount)
+    firstSeg.set(bare, segment)
+    sigCount++
     if (isGarment(bare)) garmentSegs.set(bare, new Set([segment]))
     kept.push(w)
+    if (closesSegment) segment++
   }
 
   if (removed.length === 0) return { title: t0, removed: [] }
