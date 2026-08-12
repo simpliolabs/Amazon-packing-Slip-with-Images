@@ -54,10 +54,24 @@ export const REFEREE_ITEMS: readonly RefereeItem[] = [
   // did not already say?" — that clause made ANY repetition a failure and docked the seller's own
   // deliberate double-idiom. WHETHER A WORD REPEATS IS A TOKEN FACT code settles before the ballot;
   // this item is only about whether the words are ones a shopper actually types.
-  { key: 'tailEarnsSpace', question: 'Is the part after the separator made of phrases a shopper would really type into Amazon search, rather than words added to fill space? (A second, natural form of the design\'s own phrase — e.g. "Later Alligator" and "Later Gator" — is the seller\'s style, not a repeat.)' },
-  { key: 'noInventedFiller', question: 'Is the title free of invented filler — words added to fill space that no shopper searches for (e.g. "Fan Tournament", "Gift Idea", "Crew Neck" on a graphic tee)?' },
+  /* BOTH ITEMS BELOW REWRITTEN 2026-08-12 after the first full 9-gold run. They picked correctly
+   * 9/9, but `tailEarnsSpace` fired on TWO of the seller's own golds and `noInventedFiller` on one:
+   *   "Christian Shirts for Women"                        (gold #4) — a real category search phrase
+   *   "Comfort Colors Graphic Tee for Women, Rodeo Shirt" (gold #8) — brand + garment + audience + noun
+   * Both were written as OPEN questions ("is it filler?"), which let the model invent its own idea
+   * of filler and rule against the corpus. They now ENUMERATE WHAT COUNTS AS EARNING SPACE, drawn
+   * from the seller's attested tails, and reserve NO for the closed list of things they rejected.
+   * An item that docks a gold is a rule the seller never made. */
+  { key: 'tailEarnsSpace', question: 'Is the part after the separator made of phrases a shopper would really type into Amazon search? ALL OF THESE COUNT AS YES, because the seller uses them in their own titles: a category search phrase ("Christian Shirts for Women"), the blank brand ("Comfort Colors"), a second garment word ("Graphic Tee", "Tshirt"), an audience phrase ("for Women", "for Men"), a related product noun ("Rodeo Shirt"), a place or team name, and a second natural form of the design\'s own phrase ("Later Alligator" / "Later Gator"). Answer NO only if a word is there purely to fill space.' },
+  { key: 'noInventedFiller', question: 'Is the title free of INVENTED filler? Filler means ONLY these: garment spec words on a graphic tee ("Crew Neck", "Classic Fit", "Short Sleeve", "Unisex", "Midweight"), empty gift/occasion padding ("Gift Idea", "Perfect Gift", "Novelty"), or a made-up phrase nobody searches ("Fan Tournament"). A real product noun, a brand name, a place name, or an audience phrase is NOT filler.' },
   { key: 'aboutThisDesign', question: 'Is the title unmistakably about THIS design, so a shopper seeing it would know what is printed on the shirt?' },
-  { key: 'sellerVoice', question: 'Reading the seller examples above as the standard, would the SELLER have written this title?' },
+  /* `sellerVoice` DELETED 2026-08-12 — it was the worst item in the set, firing on THREE of the
+   * seller's nine golds. It asked "would the seller have written this?" about titles the seller
+   * demonstrably DID write, and answered no a third of the time. It had no span to anchor against:
+   * a taste question wearing a checklist's clothes, which is the same category error as the scorer
+   * this architecture exists to replace. Removing it should NOT cost discrimination — the golds
+   * already won 9/9 WITH it firing against them, so the decoys were scoring lower still — but that
+   * is a prediction, and the re-run measures it rather than assuming it. */
 ]
 
 export interface CandidateVerdict {
