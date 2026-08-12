@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest'
 import { SEED_GOLD_TITLES } from './poGoldCorpus'
 import { moneyNovelty, resolveSegments, nearestGolds, goldSituation, targetFromDesign } from './titleReferee'
-import { attackTwins, TWIN_CAP, REFEREE_ITEMS } from './titleRefereeLlm'
+import { attackTwins, TWIN_CAP, REFEREE_ITEMS, noveltyFloorFilter, NOVELTY_FLOOR } from './titleRefereeLlm'
 
 /** What the council judge picked and called perfect (score 100, problems []). */
 const LIVE_PICKED  = 'THE CEO 2026 World Soccer Cup Tee Shirt | Futbol Cup 2026 Soccer T-Shirt'
@@ -207,7 +207,62 @@ describe('ADVERSARIAL LINEUP — the gate must not be winnable on length or by d
     expect(REFEREE_ITEMS.length).toBe(6)
     for (const it_ of REFEREE_ITEMS) {
       expect(it_.key).toMatch(/^[a-zA-Z]+$/)
-      expect(it_.question.endsWith('?'), it_.key).toBe(true)
+      // A question, not a directive — some carry a trailing parenthetical clarification.
+      expect(it_.question.includes('?'), it_.key).toBe(true)
+    }
+  })
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE REGRESSION THAT COST A GATE RUN (2026-08-12).
+ *
+ * The first live leave-one-out failed on gold #1. The referee's own tell, verbatim:
+ *     "The tail repeats 'later' instead of only adding new terms."
+ * It had docked the seller's own title for their deliberate double-idiom, because the prompt handed
+ * it a TOKEN FACT ("words already used before the separator: later") and it turned that fact into a
+ * rule. The architecture's line was breached by the prompt itself.
+ *
+ * The cure is structural, not a wording tweak: echo is settled by a strike-only predicate in CODE
+ * before the ballot exists, so the fact can never reach the prompt. These tests hold that shut.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+describe("ECHO IS CODE'S JOB — the gold #1 false fire cannot recur", () => {
+  it("the novelty floor NEVER strikes one of the seller's golds", () => {
+    for (const g of SEED_GOLD_TITLES) {
+      const { kept, struck } = noveltyFloorFilter([{ id: 'g', title: g }])
+      expect(struck, `struck a gold: ${g}`).toEqual([])
+      expect(kept).toHaveLength(1)
+    }
+  })
+
+  it("gold #1 — the exact title the referee docked — survives the floor with room to spare", () => {
+    const g1 = SEED_GOLD_TITLES[0]
+    expect(g1).toContain('Later Alligator')
+    expect(g1).toContain('Later Gator')          // the deliberate double-idiom
+    expect(moneyNovelty(g1).echoed).toEqual(['later'])
+    expect(moneyNovelty(g1).novelty).toBeGreaterThan(NOVELTY_FLOOR)
+    expect(noveltyFloorFilter([{ id: 'g1', title: g1 }]).struck).toEqual([])
+  })
+
+  it('and the LIVE echo defect is struck before the referee ever sees it', () => {
+    const { kept, struck } = noveltyFloorFilter([
+      { id: 'gold', title: LIVE_GOLD },
+      { id: 'echo', title: LIVE_PICKED },
+    ])
+    expect(struck.map((s) => s.id)).toEqual(['echo'])
+    expect(kept.map((k) => k.id)).toEqual(['gold'])
+  })
+
+  it('FAILS OPEN — a floor that would empty the ballot keeps everything instead', () => {
+    // An empty ballot is the one outcome that must never appear silently: this repo's signature
+    // incident class is a silent degrade that reads as success.
+    const allEchoes = [{ id: 'a', title: LIVE_PICKED }]
+    expect(noveltyFloorFilter(allEchoes).kept).toHaveLength(1)
+    expect(noveltyFloorFilter(allEchoes).struck).toEqual([])
+  })
+
+  it('no rubric item mentions repetition — the token fact must not re-enter the prompt', () => {
+    for (const item of REFEREE_ITEMS) {
+      expect(item.question.toLowerCase(), item.key).not.toMatch(/did not already say|already used before/)
     }
   })
 })

@@ -50,7 +50,11 @@ export interface RefereeItem { key: string; question: string }
 export const REFEREE_ITEMS: readonly RefereeItem[] = [
   { key: 'specificSubject', question: 'Does the part BEFORE the separator name a SPECIFIC subject the design is about (a named thing, phrase or event), rather than only the general category it belongs to?' },
   { key: 'oneThingSaid', question: 'Does that same part read as ONE thing a person would actually say, rather than as separate keyword chunks bolted together?' },
-  { key: 'tailEarnsSpace', question: 'Does EVERY word after the separator earn its space — i.e. is it a phrase a shopper would really type, AND does it add something the earlier part did not already say?' },
+  // REWORDED 2026-08-12 after gold #1 failed. Was: "...AND does it add something the earlier part
+  // did not already say?" — that clause made ANY repetition a failure and docked the seller's own
+  // deliberate double-idiom. WHETHER A WORD REPEATS IS A TOKEN FACT code settles before the ballot;
+  // this item is only about whether the words are ones a shopper actually types.
+  { key: 'tailEarnsSpace', question: 'Is the part after the separator made of phrases a shopper would really type into Amazon search, rather than words added to fill space? (A second, natural form of the design\'s own phrase — e.g. "Later Alligator" and "Later Gator" — is the seller\'s style, not a repeat.)' },
   { key: 'noInventedFiller', question: 'Is the title free of invented filler — words added to fill space that no shopper searches for (e.g. "Fan Tournament", "Gift Idea", "Crew Neck" on a graphic tee)?' },
   { key: 'aboutThisDesign', question: 'Is the title unmistakably about THIS design, so a shopper seeing it would know what is printed on the shirt?' },
   { key: 'sellerVoice', question: 'Reading the seller examples above as the standard, would the SELLER have written this title?' },
@@ -78,12 +82,21 @@ const rotate = <T,>(arr: readonly T[], by: number): T[] => [...arr.slice(by), ..
 function refereePrompt(candidates: Candidate[], anchors: GoldSituation[], designPhrase: string, items: readonly RefereeItem[]) {
   const anchorBlock = anchors.map((a, i) => `${i + 1}. ${a.title}`).join('\n')
   const itemBlock = items.map((it, i) => `${String.fromCharCode(97 + i)}) key="${it.key}" — ${it.question}`).join('\n')
+  /* NO CODE FACTS IN THIS PROMPT — measured 2026-08-12; gold #1 failed the gate because of one.
+   *
+   * The first cut printed "words after the separator already used before it: later" as a fact the
+   * referee "may use". It used it as a RULE and docked the seller's own gold #1. Its tell came back
+   * verbatim: "The tail repeats 'later' instead of only adding new terms." That repeat is the
+   * seller's deliberate double-idiom ("Later Alligator … Later Gator", SELLER_PROFILE §3 idiom
+   * expansion) — a rule they made, not a defect. A false fire on a gold is disqualifying on its own.
+   *
+   * The architecture's own line was violated BY THE PROMPT: a token fact crossed into the semantic
+   * judgement and became a rule nobody wrote. Echo is now handled where it belongs — a strike-only
+   * predicate in code, BEFORE the ballot (`noveltyFloorFilter`). The referee sees only survivors and
+   * judges meaning. */
   const candBlock = candidates.map((c) => {
     const seg = resolveSegments(c.title)
-    const nov = moneyNovelty(c.title)
-    // The novelty measurement is given as a FACT the referee may use, never as a rule it must obey.
-    // Code owns "which words repeat" (decidable); the referee owns "does this earn the space".
-    return `id=${c.id}\n  title: ${c.title}\n  before separator: ${seg.identity}\n  after separator: ${seg.money || '(none)'}\n  words after the separator already used before it: ${nov.echoed.length ? nov.echoed.join(', ') : 'none'}`
+    return `id=${c.id}\n  title: ${c.title}\n  before separator: ${seg.identity}\n  after separator: ${seg.money || '(none)'}`
   }).join('\n\n')
 
   const system =
@@ -98,7 +111,10 @@ ${anchorBlock}
 THE DESIGN BEING TITLED: ${designPhrase}
 
 THE SELLER'S TWO RULES, in their words:
-1. EVERY CHARACTER MUST BUY A SEARCH TERM. A word that repeats something already said, or that no shopper would type, is wasted space.
+1. EVERY CHARACTER MUST BUY A SEARCH TERM. A word no shopper would type is wasted space.
+   (Mechanical repetition has already been removed before you see these candidates — do NOT dock a
+   title for reusing a word. The seller deliberately puts a second natural form of the design's own
+   phrase in their titles, e.g. "Later Alligator" and "Later Gator" together, and that is correct.)
 2. THE IDENTITY MUST NAME A SPECIFIC SUBJECT, NOT ITS CATEGORY. "Espana Championship" names a thing; "World Soccer Cup" alone is the category it sits in.
 
 QUESTIONS — answer each one true/false for EVERY candidate, and quote the words that decided it:
@@ -188,6 +204,36 @@ const byId = (cands: Candidate[], id: string): string => cands.find((c) => c.id 
 /** Tie-break fact, not a rule: how much of the money position is NOT a restatement (titleReferee.ts). */
 const novOf = (t: string): number => moneyNovelty(t).novelty
 
+/* ── THE ECHO PREDICATE — code strikes, so the referee is never asked to do a token job ───────────
+ *
+ * MEASURED SAFE BAND, not a chosen number (pinned in titleReferee.test.ts): the seller's nine golds
+ * score 0.75-1.00 money novelty, and the live 2026-08-12 defect the deterministic judge called
+ * 100/100 — "Futbol Cup 2026 Soccer T-Shirt", four of six words echoing the identity — scores 0.25.
+ * A floor at 0.5 therefore strikes the defect and CANNOT strike a gold. The per-item false-fire
+ * floor holds by measurement rather than by hope.
+ *
+ * THIS IS THE ARCHITECTURE'S LINE MADE STRUCTURAL. A filter can only SHRINK the ballot, so it can
+ * never author a defect; and because the strike happens before the prompt is built, the token fact
+ * can no longer leak into the semantic judgement — which is exactly how gold #1 was docked.
+ */
+export const NOVELTY_FLOOR = 0.5
+
+export interface NoveltyFilterResult { kept: Candidate[]; struck: { id: string; title: string; novelty: number }[] }
+
+export function noveltyFloorFilter(candidates: Candidate[], floor = NOVELTY_FLOOR): NoveltyFilterResult {
+  const kept: Candidate[] = []
+  const struck: { id: string; title: string; novelty: number }[] = []
+  for (const c of candidates) {
+    const n = moneyNovelty(c.title).novelty
+    if (n >= floor) kept.push(c)
+    else struck.push({ id: c.id, title: c.title, novelty: Number(n.toFixed(2)) })
+  }
+  // FAIL-OPEN. If the floor would empty the ballot, keep everything and let the referee decide. An
+  // empty ballot is the one outcome that must never be produced silently — this repo's signature
+  // incident class is a silent degrade that reads as success.
+  return kept.length === 0 ? { kept: candidates, struck: [] } : { kept, struck }
+}
+
 /* ── ADVERSARIAL TWINS ─────────────────────────────────────────────────────────────────────────────
  * Built DETERMINISTICALLY from each gold so the lineup is the seller's own title against the exact
  * ways this pipeline has actually gone wrong. Every twin is a REALLOCATION or a SUBSTITUTION of the
@@ -254,6 +300,8 @@ export interface LooCase {
   runs: number
   goldPassed: number | null
   tells: Record<string, string>
+  /** Candidates removed by the code-side echo predicate BEFORE the referee saw the ballot. */
+  struck: { id: string; title: string; novelty: number }[]
   error?: string
 }
 
@@ -292,8 +340,13 @@ export async function leaveOneOut(
     )
     const twins = attackTwins(gold)
     // The gold sits at a rotating position so a positional bias cannot manufacture the score.
-    const lineup: Candidate[] = [...twins]
-    lineup.splice(i % (twins.length + 1), 0, { id: 'gold', label: 'gold', title: gold })
+    const full: Candidate[] = [...twins]
+    full.splice(i % (twins.length + 1), 0, { id: 'gold', label: 'gold', title: gold })
+
+    // CODE STRIKES FIRST. The echo twin dies here on a measured token fact, exactly as it would in
+    // the production ballot, so the referee is never asked to adjudicate something decidable — and
+    // the fact never reaches the prompt, where it previously became a rule and docked gold #1.
+    const { kept: lineup, struck } = noveltyFloorFilter(full)
 
     try {
       const res = await runReferee(lineup, anchors, sit.identity.split(/\s+/).slice(2).join(' '), opts)
@@ -311,13 +364,14 @@ export async function leaveOneOut(
         agreement: res.agreement, runs: res.runs,
         goldPassed: goldVerdict?.passed ?? null,
         tells: Object.fromEntries(res.verdicts.map((v) => [v.id, v.tell])),
+        struck,
       })
     } catch (e) {
       cases.push({
         goldIndex: i, gold, anchors: anchors.map((a) => a.title),
         lineup: lineup.map((c) => ({ id: c.id, label: c.label ?? '', title: c.title })),
         winnerId: '', winnerTitle: '', correct: false, agreement: 0, runs: opts?.runs ?? 3,
-        goldPassed: null, tells: {}, error: String(e),
+        goldPassed: null, tells: {}, struck, error: String(e),
       })
     }
   }
