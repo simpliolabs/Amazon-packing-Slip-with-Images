@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest'
 import { SEED_GOLD_TITLES } from './poGoldCorpus'
 import { moneyNovelty, resolveSegments, nearestGolds, goldSituation, targetFromDesign } from './titleReferee'
+import { attackTwins, TWIN_CAP, REFEREE_ITEMS } from './titleRefereeLlm'
 
 /** What the council judge picked and called perfect (score 100, problems []). */
 const LIVE_PICKED  = 'THE CEO 2026 World Soccer Cup Tee Shirt | Futbol Cup 2026 Soccer T-Shirt'
@@ -158,5 +159,55 @@ describe('NEAREST-GOLD RETRIEVAL — anchor the writer on the RIGHT gold', () =>
     const a = nearestGolds(target).map((g) => g.title)
     const b = nearestGolds(target).map((g) => g.title)
     expect(a).toEqual(b)
+  })
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE LINEUP THE GO/NO-GATE WILL FACE. Pure code — no model call, no key, no cost.
+ *
+ * A HARNESS THAT CAN BE WON THE WRONG WAY MEASURES NOTHING. The first cut of `attackTwins` emitted
+ * twins of 77-130 characters while every gold is <= 75, so a referee could have scored 9/9 purely by
+ * picking the only candidate Amazon would accept — and we would have shipped on a number that meant
+ * nothing. These assertions exist so that shortcut can never reopen.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+describe('ADVERSARIAL LINEUP — the gate must not be winnable on length or by degeneracy', () => {
+  it('every twin of every gold is cap-compliant, so the gold is never the only legal candidate', () => {
+    for (const g of SEED_GOLD_TITLES) {
+      for (const t of attackTwins(g)) {
+        expect(t.title.length, `over cap: ${t.title}`).toBeLessThanOrEqual(TWIN_CAP)
+      }
+    }
+  })
+
+  it('every gold faces at least four distinct twins — a two-candidate lineup is not a test', () => {
+    for (const g of SEED_GOLD_TITLES) {
+      const tw = attackTwins(g)
+      expect(tw.length, g).toBeGreaterThanOrEqual(4)
+      expect(new Set(tw.map((t) => t.title)).size, `duplicate twins for ${g}`).toBe(tw.length)
+      expect(tw.some((t) => t.title === g), `a twin equals the gold for ${g}`).toBe(false)
+    }
+  })
+
+  it('the ALLOCATION twin is the real one: same words, moved across the boundary', () => {
+    const gold = 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee'
+    const alloc = attackTwins(gold).find((t) => t.label === 'allocation')!
+    // The identity swallows money words. Token-identical either side of the split — the case the
+    // whole architecture exists for, because no rule can separate it.
+    expect(alloc.title).toContain('Tee Shirt USA Mexico')
+    expect(moneyNovelty(alloc.title).novelty).toBe(1)   // and novelty CANNOT catch it — by design
+  })
+
+  it('the ECHO twin is caught by CODE, so the referee is never asked to do a token job', () => {
+    const gold = 'THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee'
+    const echo = attackTwins(gold).find((t) => t.label === 'echo')!
+    expect(moneyNovelty(echo.title).novelty).toBeLessThan(0.5)
+  })
+
+  it('the rubric is six items, each answerable yes/no against a quotable span', () => {
+    expect(REFEREE_ITEMS.length).toBe(6)
+    for (const it_ of REFEREE_ITEMS) {
+      expect(it_.key).toMatch(/^[a-zA-Z]+$/)
+      expect(it_.question.endsWith('?'), it_.key).toBe(true)
+    }
   })
 })
