@@ -204,7 +204,7 @@ describe('ADVERSARIAL LINEUP — the gate must not be winnable on length or by d
   })
 
   it('the rubric is six items, each answerable yes/no against a quotable span', () => {
-    expect(REFEREE_ITEMS.length).toBe(6)
+    expect(REFEREE_ITEMS.length).toBe(5)   // sellerVoice deleted: it fired on 3 of 9 golds
     for (const it_ of REFEREE_ITEMS) {
       expect(it_.key).toMatch(/^[a-zA-Z]+$/)
       // A question, not a directive — some carry a trailing parenthetical clarification.
