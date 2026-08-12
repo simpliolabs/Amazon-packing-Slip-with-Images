@@ -61,7 +61,7 @@ export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
  * own ruling ("crew neck can go on highlights"), now costed openly: `scoreTitleQuality` will fall on
  * those listings until a money keyword is available to fill the space properly.
  */
-const rulingOverFloor = (): boolean => (process.env.TITLE_RULING_OVER_FLOOR || 'off').toLowerCase() === 'on'
+const rulingOverFloor = (): boolean => (process.env.TITLE_RULING_OVER_FLOOR || 'on').toLowerCase() !== 'off'
 
 /**
  * May a PO editorial removal ship at this post-pad length? ONE predicate for all three guards — they
@@ -818,17 +818,13 @@ export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: str
   const head = (m ? t0.slice(0, m.index) : t0).trim()
   const tail = m ? t0.slice(m.index) : ''
   const joiner = head.includes(' | ') ? ' ' : ' | '
-  // MINT GUARD (2026-08-11, live specimen "…| Short Sleeve"): when the pad CREATES a separator that
-  // did not exist, it is authoring the MONEY POSITION — and a segment that is nothing but spec facts
-  // is the one tail class the seller has shipped ZERO times (tailClass.specOnly = 0 across their
-  // corpus). Extending an EXISTING segment with facts stays legal (that is the pad's job), and a
-  // minted BRAND or garment-noun segment stays legal (gold #1's own pad shape) — only the
-  // spec-only mint is refused, so "| Comfort Colors Shirt" pads survive and "| Short Sleeve" dies.
-  const mintingPipe = joiner === ' | '
+  // The pad is deliberately UNCONSTRAINED here: its job is to reach the band from product facts.
+  // Whether the money position it produces is worth ranking for is judged ONCE, terminally, by
+  // `dropSpecOnlyTail` at the door — after this pad, so there is exactly one place that owns the
+  // rule instead of a guard inside every operation that can touch a separator.
 
   let best = t0
   for (const seg of candidateSegments(t0, ctx)) {
-    if (mintingPipe && classifyTail(seg) === 'specOnly') continue
     const cand = `${head}${joiner}${seg}${tail}`.replace(/\s{2,}/g, ' ').trim()
     if (cand.length > TITLE_BAND_HI) continue
     if (cand.length >= TITLE_BAND_LO) {
@@ -902,6 +898,24 @@ export interface InclusiveAudienceCtx {
 const INCLUSIVE_MASC = String.raw`(?:men|mens|men['’]s)`
 const INCLUSIVE_FEM = String.raw`(?:women|womens|women['’]s|ladies|ladies['’])`
 const INCLUSIVE_JOIN = String.raw`(?:\s*(?:and|&|\+|,)\s*|\s+)`
+/** EXPORTED (2026-08-11): the council's terminal net had grown its OWN narrower copy that matched
+ *  only "for Men and Women" — so the live regen shipped "for Men & Women Fans" untouched. One
+ *  predicate, every caller. Every equivalent the seller named lives HERE and nowhere else. */
+export function hasInclusiveAudience(text: string): boolean {
+  return inclusiveAudienceRe().test(text || '')
+}
+/** Strip every inclusive-audience construct, plus ONE trailing audience noun the phrase drags along
+ *  ("… for Men & Women Fans"). Closed class: an open \w+ would eat a real word mid-title. */
+export function stripInclusiveAudience(text: string): string {
+  return (text || '')
+    .replace(new RegExp(inclusiveAudienceRe().source + String.raw`(\s+(?:fans?|lovers?|shoppers?|buyers?))?`, 'gi'), ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,;.])/g, '$1')          // tighten punctuation, but NOT the pipe: ' | ' is the
+    .replace(/\s*\|\s*/g, ' | ')           // separator's canonical spaced form and must survive
+    .replace(/\s*\|\s*$/, '')              // a separator left with nothing after it is not a separator
+    .trim()
+}
+
 const inclusiveAudienceRe = (): RegExp => new RegExp(
   String.raw`(?:\bfor\s+)?\b(?:${INCLUSIVE_MASC}${INCLUSIVE_JOIN}${INCLUSIVE_FEM}|${INCLUSIVE_FEM}${INCLUSIVE_JOIN}${INCLUSIVE_MASC})\b`,
   'gi',
@@ -1234,6 +1248,42 @@ export interface TitleWasteCtx {
  * BEFORE it is measured against the band. The one case where it WOULD collide with the tail region
  * is carved out above as 'money-tail-owns'.
  */
+/**
+ * DROP a money position that is not worth ranking for.
+ *
+ * THE HOLE THIS CLOSES (2026-08-11, third live rejection). Every guard so far constrained what the
+ * PAD may write into the money slot. None of them touched a weak tail the COUNCIL wrote itself —
+ * so "| Short Sleeve" and "| Shirt" walked straight through the door on titles the pad never
+ * touched. `classifyTail` already knows the answer: the seller has shipped ZERO spec-only tails and
+ * ZERO bare-garment-noun tails across nine golds.
+ *
+ * The rule: if the money position holds nothing a shopper would type, it is not a money position —
+ * drop it and the separator with it. An honest shorter title is the seller's own stated preference
+ * ("crew neck can go on highlights"). This runs AFTER `enforceMoneyTail` has had its chance, so a
+ * real keyword always wins the slot first; this only fires when nothing better was available.
+ *
+ * PURE, IDEMPOTENT (a dropped result has no separator, so it re-enters as 'no-tail'), FAIL-OPEN.
+ */
+export type SpecTailDecision = 'no-tail' | 'kept' | 'dropped' | 'non-apparel'
+export function dropSpecOnlyTail(
+  title: string,
+  opts: { apparel: boolean; specValues?: readonly string[] },
+): { title: string; decision: SpecTailDecision; note: string } {
+  const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!opts.apparel) return { title: t0, decision: 'non-apparel', note: '' }
+  const i = t0.indexOf(' | ')
+  if (i < 0) return { title: t0, decision: 'no-tail', note: '' }
+  const tail = t0.slice(i + 3).trim()
+  const cls = classifyTail(tail, opts.specValues ?? [])
+  if (cls !== 'specOnly') return { title: t0, decision: 'kept', note: `money position is ${cls}` }
+  const dropped = t0.slice(0, i).trim().replace(/[,;|]+$/, '').trim()
+  return {
+    title: dropped,
+    decision: 'dropped',
+    note: `"| ${tail}" is not a search phrase — 0 of the seller's gold tails are spec-only; dropped (${t0.length} → ${dropped.length} chars)`,
+  }
+}
+
 export function stripTitleWasteVocabulary(
   title: string,
   ctx: TitleWasteCtx,
@@ -1281,17 +1331,24 @@ export function stripTitleWasteVocabulary(
     }
   }
 
-  // ARM 2 — "or the title still lands in 70-75", judged on the FINAL bytes after the facts pad,
-  // because the removal and the re-fill are ONE decision (same reasoning as the two nets above).
+  // ARM 2 — the removal happens, and the facts pad re-fills what it honestly can.
+  //
+  // UNCONDITIONAL AS OF 2026-08-11, and this reverses the original guard deliberately. The seller's
+  // ruling was first written as a TRADE ("strip only when the removal frees space for a keyword, or
+  // the title still lands in the band"), so the strip had to win an arithmetic argument to apply.
+  // It lost that argument three times in a row, and each time the seller rejected the result:
+  //   "Unisex Classic Fit Fan Shirt | Short Sleeve"      → "STILL BAD"
+  //   "…Tee for Men and Women Fans | Short Sleeve"       → "Still Bad after regen"
+  //   "…Unisex Tee for Men & Women Fans | Shirt"         → "EVEN WORSE"
+  // Their corpus is the tiebreaker: "unisex" and "classic fit" appear in ZERO of their nine golds.
+  // An editorial ruling with zero corpus counter-examples is not a preference to be balanced against
+  // length — it is a fact about their voice. A short clean title is the correct output; the length
+  // cure belongs upstream (a real money keyword), never in keeping a word they banned.
   const padded = enforceTitleBand(reduced, ctx.band).title
-  const verdict = removalPermitted(padded.length)
-  if (verdict.ok) {
-    return { title: padded, decision: 'stripped', note: `${what}; ${t0.length} → ${padded.length} chars` }
-  }
-
+  const final = padded.length <= TITLE_BAND_HI ? padded : reduced   // Amazon's cap is still absolute
   return {
-    title: t0,
-    decision: 'band-guard',
-    note: `${what} would land ${padded.length} chars — ${verdict.why} — and no money keyword fits the freed space — refused, byte-identical`,
+    title: final,
+    decision: 'stripped',
+    note: `${what}; ${t0.length} → ${final.length} chars${final.length < TITLE_BAND_LO ? ' (under the preferred floor — an honest short title beats a banned word)' : ''}`,
   }
 }

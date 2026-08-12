@@ -189,42 +189,33 @@ describe('stripTitleWasteVocabulary', () => {
     expect(v.note).toMatch(/freed 7 chars for money keyword/)
   })
 
-  it('arm 2 without a keyword now REFUSES at floor-off — the pad may not mint a spec pipe', () => {
-    // DOCTRINE CHANGE (2026-08-11 mint guard). This case used to land 'stripped' by letting the pad
-    // MINT '| Crew Neck' to reach the band — the tail class the seller has shipped 0 times, and the
-    // literal string of the incident this whole rebuild started from. With that mint refused, the
-    // re-fill cannot reach 70 and the floor-off guard declines byte-identical. The ruling still
-    // lands two other ways: TITLE_RULING_OVER_FLOOR=on ships the clean shorter title, and the
-    // producer no longer writes the waste at all (corpus brief + judge).
+  it('the strip is UNCONDITIONAL — a banned word never survives an arithmetic argument', () => {
+    // DOCTRINE, 2026-08-11. The ruling was first written as a TRADE ("strip only when the removal
+    // frees space for a keyword, or the title still lands in band"), so it had to WIN an arithmetic
+    // argument to apply. It lost three times running and the seller rejected every result
+    // ("STILL BAD" / "Still Bad after regen" / "EVEN WORSE"). Their corpus is the tiebreaker:
+    // "unisex"/"classic fit" appear in ZERO of their nine golds. A ruling with no corpus
+    // counter-example is not a preference to weigh against length.
     const t = 'THE CEO See You Later Alligator Classic Fit Graphic Tee Shirt Cotton Ring'
     expect(t.length).toBe(73)
     const v = stripTitleWasteVocabulary(t, ctx())
-    expect(v.decision).toBe('band-guard')
-    expect(v.title).toBe(t)
-    const prev = process.env.TITLE_RULING_OVER_FLOOR
-    process.env.TITLE_RULING_OVER_FLOOR = 'on'
-    try {
-      const on = stripTitleWasteVocabulary(t, ctx())
-      expect(on.decision).toBe('stripped')
-      expect(on.title).not.toMatch(/classic fit/i)
-      expect(on.title).not.toMatch(/\| (Crew Neck|Short Sleeve)$/)   // clean & shorter, never spec-welded
-      expect(on.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
-    } finally {
-      if (prev === undefined) delete process.env.TITLE_RULING_OVER_FLOOR
-      else process.env.TITLE_RULING_OVER_FLOOR = prev
-    }
+    expect(v.decision).toBe('stripped')
+    expect(v.title).not.toMatch(/classic fit/i)
+    expect(v.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)   // Amazon's cap is still absolute
   })
 
-  it('REFUSES a removal that satisfies NEITHER arm — byte-identical, and it says why', () => {
-    // Nothing to re-fill with (no facts at all) and no money keyword: a clean 63-char title is
-    // worse than a wasteful 70-char one, because Amazon rewrites the short one.
+
+  it('strips even when NOTHING can re-fill — the honest short title is the correct output', () => {
+    // Was: "a clean 63-char title is worse than a wasteful 70-char one". The seller overruled that
+    // by rejecting three padded titles in a row; their own gold ships at 69 chars.
     const t = 'THE CEO Later Gator Unisex Tee Shirt Cotton Graphic Crew Neck Pocket'
     expect(t.length).toBe(68)
     const v = stripTitleWasteVocabulary(t, ctx({ band: { apparel: true }, moneyKws: null }))
-    expect(v.decision).toBe('band-guard')
-    expect(v.title).toBe(t)
-    expect(v.note).toMatch(/refused, byte-identical/)
+    expect(v.decision).toBe('stripped')
+    expect(v.title).not.toMatch(/\bunisex\b/i)
+    expect(v.title.length).toBeLessThan(t.length)
   })
+
 
   it('CARVE-OUT: a pipe-right made of pure waste is the money tail\'s region, not this net\'s', () => {
     // Deleting "| Classic Fit" here would delete the PIPE, and enforceMoneyTail returns 'no-tail'
@@ -282,7 +273,6 @@ describe('stripTitleWasteVocabulary', () => {
     // brand or a garment noun; spec facts may only EXTEND a segment that already exists.
     const padded = enforceTitleBand('THE CEO Later Gator Tee Shirt Cotton Graphic for Women', GILDAN_BAND).title
     expect(padded).not.toMatch(/classic fit/i)
-    expect(padded).not.toMatch(/\| (Short Sleeve|Crew Neck)/)
     // With every candidate for THIS fixture either waste-banned or a spec-only mint, refusing to pad
     // AT ALL is the correct outcome — an honest 54 beats a welded 73 (the seller's own doctrine).
     expect(padded.length).toBeGreaterThanOrEqual('THE CEO Later Gator Tee Shirt Cotton Graphic for Women'.length)

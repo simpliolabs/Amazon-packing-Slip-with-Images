@@ -59,7 +59,7 @@ import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
-import { collapseRepeatedWords, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
@@ -1453,7 +1453,7 @@ export function titleQualityJudge(title: string, opts: {
       // THE UNIVERSAL TAIL, corpus-measured: audienceMix.inclusive is 0 of 9. The soft -3 elsewhere
       // let a candidate carrying 23 chars of banned filler WIN on 2026-08-11 and starve the money
       // slot. Zero-attested constructs dock like the rest of the not-their-voice vocabulary.
-      if (opts.shape.audienceMix.inclusive === 0 && /\bfor\s+men\s+and\s+women\b/i.test(t)) {
+      if (opts.shape.audienceMix.inclusive === 0 && hasInclusiveAudience(t)) {
         score -= 15
         problems.push(`"for Men and Women" — 0 of ${opts.shape.count} seller golds carry it (-15)`)
       }
@@ -3186,12 +3186,12 @@ ${baseSystem}`,
   // it 0 times in 9 golds. On the live specimen the 23-char filler consumed exactly the budget the
   // real money keyword needed — which is what summoned the pad's "| Short Sleeve". The strip also
   // swallows ONE trailing audience noun the tail drags along ("… Fans").
-  if (/\bfor\s+men\s+and\s+women\b/i.test(best)) {
-    // The trailing-noun swallow is a CLOSED CLASS: an open \w+ would eat a legitimate word whenever
-    // the phrase sits mid-title ("…for Men and Women Graphic Tee" must lose only the tail, never
-    // "Graphic"). Extend the class only with nouns observed dragging behind the tail in the wild.
-    best = best.replace(/\s*\bfor\s+men\s+and\s+women\b(\s+(?:fans?|lovers?|shoppers?|buyers?))?\s*/i, ' ').replace(/\s{2,}/g, ' ').replace(/\s+[,;.]/g, m => m.trim()).trim()
-  }
+  // ONE PREDICATE (2026-08-11). This net had grown its own narrower copy matching only the literal
+  // "for Men and Women", so the live regen shipped "for Men & Women Fans" untouched — the same
+  // second-copy drift this whole rebuild exists to delete. `hasInclusiveAudience` /
+  // `stripInclusiveAudience` (titleBand) cover every equivalent the seller named: and / & / + / comma
+  // / juxtaposition / possessives / Ladies.
+  if (hasInclusiveAudience(best)) best = stripInclusiveAudience(best)
   const stripped = rule1Before !== best
   const hasLeanTail = (() => {
     if (lean === 'female' || lean === 'lean_female') {
@@ -8494,9 +8494,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       capped: capped.length !== title.length,
       note: v.notes[0] ?? '',
     }))
-    if (v.title === moneyed) return moneyed
-    console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
-    return v.title
+    const banded = v.title === moneyed ? moneyed : v.title
+    if (v.title !== moneyed) console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
+    // ── TERMINAL ACCEPTANCE ON THE MONEY POSITION ─────────────────────────────────────────────
+    // LAST, after every net including the pad — so exactly ONE place owns the rule "the money
+    // position must be worth ranking for", instead of a guard inside each operation that can touch
+    // a separator. Three live rejections reached the seller through three DIFFERENT writers of the
+    // same defect: the pad minted "| Short Sleeve", the pad extended into "| Shirt Short Sleeve",
+    // and the council wrote "| Shirt" itself. A terminal gate does not care who wrote it.
+    // `enforceMoneyTail` has already had its chance above, so a real keyword always wins the slot
+    // first; this only fires when nothing better was available.
+    const drop = dropSpecOnlyTail(banded, { apparel: apparelProduct, specValues: blankSpecFactTokens(blankSpec) })
+    console.log('[TITLE_GOLD]', JSON.stringify({
+      tag: 'SHIP_MONEY_POSITION', decision: drop.decision,
+      from: banded.length, to: drop.title.length, note: drop.note,
+    }))
+    return drop.title
   }
   /* SHIP CENSUS (Phase 2 of the foundation plan) — MEASURE-ONLY, on the object this function
    * RETURNS, i.e. the exact bytes that persist. It exists because of a same-day live specimen: the

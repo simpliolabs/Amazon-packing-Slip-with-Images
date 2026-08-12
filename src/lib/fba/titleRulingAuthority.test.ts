@@ -37,8 +37,11 @@ describe('removalPermitted — the two bounds are not the same kind of thing', (
     expect(withFlag('on', () => removalPermitted(TITLE_BAND_HI + 1).ok)).toBe(false)
   })
 
-  it('our floor vetoes only at off; at on a ruling may ship a shorter title', () => {
-    expect(removalPermitted(TITLE_BAND_LO - 1).ok).toBe(false)
+  it('our floor vetoes only when EXPLICITLY off; the default is on (2026-08-11)', () => {
+    // The default flipped after the mint guard made the floor veto the last thing keeping banned
+    // vocabulary alive. TITLE_RULING_OVER_FLOOR=off is now the kill switch, not the default.
+    expect(withFlag('off', () => removalPermitted(TITLE_BAND_LO - 1).ok)).toBe(false)
+    expect(removalPermitted(TITLE_BAND_LO - 1).ok).toBe(true)
     expect(withFlag('on', () => removalPermitted(TITLE_BAND_LO - 1).ok)).toBe(true)
   })
 
@@ -49,11 +52,14 @@ describe('removalPermitted — the two bounds are not the same kind of thing', (
 })
 
 describe('stripTitleWasteVocabulary — the PO ruling', () => {
-  it('OFF: reproduces the incident — the ruling loses to the floor and "Unisex" survives', () => {
-    const r = withFlag('off', () => strip(GILDAN, null))
-    expect(r.decision).toBe('band-guard')
-    expect(r.title).toBe(TITLE)                       // byte-identical refusal
-    expect(/\bunisex\b/i.test(r.title)).toBe(true)    // the banned word ships
+  it('THE INCIDENT CANNOT RECUR: the strip is unconditional in BOTH flag arms', () => {
+    // This test used to PIN the defect (band-guard refusal, "Unisex" ships). The seller rejected
+    // that outcome three times, so the strip no longer consults the floor at all.
+    for (const mode of ['off', 'on']) {
+      const r = withFlag(mode, () => strip(GILDAN, null))
+      expect(r.decision, mode).toBe('stripped')
+      expect(/\bunisex\b/i.test(r.title), mode).toBe(false)
+    }
   })
 
   it('OFF: the SAME removal is permitted when one unrelated spec cell changes', () => {
