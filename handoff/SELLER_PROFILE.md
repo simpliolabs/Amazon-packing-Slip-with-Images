@@ -9,6 +9,13 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 - Before suggesting a regen, CHECK the ASIN's research freshness (`analyzed_at` vs TTL) so the suggestion itself cannot cost credits.
 - Hard guarantee available to the PO: `JUNGLE_SCOUT_ENABLED=off` in Coolify (echoed by /api/health) — no code path can spend while it reads off.
 
+## 0b. HOW WORK IS DONE — PO STANDING ORDER (2026-08-12, verbatim: "NEVER patch, Always foundational via /karpathy-dev-principles")
+- **Architecture before code.** When the right shape is unclear, research and propose first; deliver the design and the evidence, not a diff.
+- **The repeat-fix circuit breaker fires on the SECOND fix in an area, not the third.** A recurrence means the first fix treated a symptom.
+- **Fix the decision, not the output.** A deterministic net removes ONE instance of a defect; the component that CHOOSES the output is what determines whether the defect is produced at all. If the decider cannot measure the property being policed, that is the fix.
+- **Adding an Nth entry to a list/regex/net is the disease, not the cure** — prefer deleting or unifying. Say plainly when something is a stopgap.
+- Case study that earned this rule: five consecutive rejected titles (2026-08-11/12). Each fix closed the exact failing string; each regen produced a new variant through a different seam. Root cause was never the string — the scorer that picks the shipped title scored the PO's gold and a keyword-stuffed twin identically (100/100 both).
+
 ## 1. BRAND IDENTITY
 - The brand is **THE CEO** (CEO® on packing slips). Every title **starts** with it — position 0, no exceptions (judge docks −20).
 - The brand appears in the **title and brand attribute only**: never in description body prose (stripped, even inside quotes), never in backend keywords (the attribute already indexes it — the byte buys nothing).
