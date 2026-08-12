@@ -23,7 +23,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { SEED_GOLD_TITLES, classifyTail, measureGoldShape, specClaimSpans, attestedUse } from './poGoldCorpus'
-import { dropSpecOnlyTail, hasInclusiveAudience, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
+import { collapseRepeatedWords, dropSpecOnlyTail, hasInclusiveAudience, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
 import { buildApparelTitleBrief, titleQualityJudge } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
@@ -236,5 +236,39 @@ describe('audience-span analyzer — the attack set', () => {
     expect(classifyTail('USA Mexico Canada Football Tee')).toBe('search')
     expect(classifyTail('Comfort Colors Alligator Tshirt for Women')).toBe('brand')
     expect(classifyTail('Funny Comfort Colors Shirt for Men Women')).toBe('brand')
+  })
+})
+
+/**
+ * ROUND-2 REGRESSION: the door must not damage the seller's own corpus.
+ *
+ * The round-2 adversarial pass found the door MUTILATING gold #1 — collapseRepeatedWords advanced
+ * its segment counter only on a literal '|', so on a COMMA-joined title every word shared segment 0
+ * and the cross-separator allowance could never fire:
+ *   in  "THE CEO Later Alligator Long Sleeve Shirt, Later Gator Comfort Colors Shirt"  (75)
+ *   out "THE CEO Later Alligator Long Sleeve Shirt, Gator Comfort Colors"              (63)
+ * It deleted the design echo AND the mandated second garment noun, ending on a bare brand. FOUR of
+ * the nine golds are non-pipe and the rebuilt brief now teaches that shape, so this was corrupting
+ * the specification on the most likely output form.
+ */
+describe('the door never damages the seller\'s own golds', () => {
+  it('all NINE pass collapseRepeatedWords byte-identical', () => {
+    for (const g of SEED_GOLD_TITLES) {
+      expect(collapseRepeatedWords(g).title, g).toBe(g)
+    }
+  })
+
+  it('…without re-opening defect #148 (the ADJACENT stutter still goes)', () => {
+    // The distinction is DISTANCE, not the separator: a design echo two or more significant words
+    // away is structure ("Later … Later Gator"); an immediate repeat is a stutter.
+    const r = collapseRepeatedWords('THE CEO Golf Widow Tshirt, Tshirt Graphic Tee for Women')
+    expect(r.title).toBe('THE CEO Golf Widow Tshirt, Graphic Tee for Women')
+  })
+
+  it('stays IDEMPOTENT — a second pass changes nothing', () => {
+    for (const t of [...SEED_GOLD_TITLES, 'THE CEO 2026 World Soccer Cup USA Mexico Canada Tee | Football Tee Shirt']) {
+      const once = collapseRepeatedWords(t).title
+      expect(collapseRepeatedWords(once).title, t).toBe(once)
+    }
   })
 })
