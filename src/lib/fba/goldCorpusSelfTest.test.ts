@@ -22,8 +22,8 @@
  * seller called "STILL BAD" / "WAY off".
  */
 import { describe, it, expect, afterEach } from 'vitest'
-import { SEED_GOLD_TITLES, measureGoldShape, specClaimSpans, attestedUse } from './poGoldCorpus'
-import { dropSpecOnlyTail, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
+import { SEED_GOLD_TITLES, classifyTail, measureGoldShape, specClaimSpans, attestedUse } from './poGoldCorpus'
+import { dropSpecOnlyTail, hasInclusiveAudience, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
 import { buildApparelTitleBrief, titleQualityJudge } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
@@ -196,5 +196,45 @@ describe('the seller\'s three rejected titles cannot recur', () => {
       expect(dropSpecOnlyTail(g, { apparel: true }).decision, g).toBe('kept')
       expect(dropSpecOnlyTail(g, { apparel: true }).title, g).toBe(g)
     }
+  })
+})
+
+/**
+ * THE ADVERSARIAL ATTACK SET (2026-08-11). Six confirmed evasions of the closed gender-pair regex,
+ * every one a plausible next thing an LLM council would write. Pinned so the next variant has to be
+ * genuinely novel rather than a synonym swap.
+ */
+describe('audience-span analyzer — the attack set', () => {
+  it.each([
+    ['a second gender appended across the separator', 'THE CEO 2026 World Soccer Cup Tee Shirt for Men | Fan Shirt for Women'],
+    ['the "or" conjunction',                          'THE CEO Soccer Cup Tee | Fan Shirt for Men or Women'],
+    ['unattested synonyms (guys/girls)',              'THE CEO Soccer Cup Tee | Shirt for Guys and Girls'],
+    ['pronouns (him/her)',                            'THE CEO Soccer Cup Tee | Shirt for Him and Her'],
+    ['a non-gender axis (adults/kids)',               'THE CEO Soccer Cup Tee | Shirt for Adults and Kids'],
+    ['a determiner-led run (the Whole Family)',       'THE CEO Soccer Cup Tee | Shirt for the Whole Family'],
+    ['the live rejection, verbatim',                  'THE CEO 2026 World Soccer Cup Unisex Tee for Men & Women Fans | Shirt'],
+  ])('%s', (_name, attack) => {
+    expect(hasInclusiveAudience(attack), attack).toBe(true)
+    const out = stripInclusiveAudience(attack)
+    expect(out, attack).not.toMatch(/\bfor\s+(the\s+)?(men|women|guys|girls|him|her|adults|kids|whole)\b.*\b(women|men|girls|her|kids|family)\b/i)
+  })
+
+  it('EVERY seller gold passes through the analyzer byte-identical — including the dual-gender one', () => {
+    for (const g of SEED_GOLD_TITLES) {
+      expect(hasInclusiveAudience(g), g).toBe(false)
+      expect(stripInclusiveAudience(g), g).toBe(g)
+    }
+  })
+
+  it('"Fan" no longer rescues a worthless money position — the load-bearing token', () => {
+    // Measured before the fix: 'Fan Shirt for Women' classified 'search' and scored 100/100, while
+    // 'Shirt for Women' classified specOnly. One generic wearer-noun carried all six attacks.
+    expect(classifyTail('Fan Shirt for Women')).toBe('specOnly')
+    expect(classifyTail('Shirt for Women')).toBe('specOnly')
+    // …while the seller's real tails keep their exact class
+    expect(classifyTail('Christian Shirts for Women')).toBe('search')
+    expect(classifyTail('USA Mexico Canada Football Tee')).toBe('search')
+    expect(classifyTail('Comfort Colors Alligator Tshirt for Women')).toBe('brand')
+    expect(classifyTail('Funny Comfort Colors Shirt for Men Women')).toBe('brand')
   })
 })

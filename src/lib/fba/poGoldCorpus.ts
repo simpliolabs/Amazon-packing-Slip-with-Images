@@ -199,14 +199,27 @@ export function classifyTail(tail: string, specValues: readonly string[] = []): 
   const claims = specClaimSpans(t, specValues)
   let residue = t.toLowerCase()
   for (const c of claims) residue = residue.split(c).join(' ')
-  // AUDIENCE WORDS DO NOT RESCUE A SPEC TAIL (2026-08-11): "| Short Sleeve for Women" is a spec
-  // fact plus a demographic, and the seller has shipped ZERO of those. Their audience tails always
-  // ride a real phrase ("Christian Shirts for Women"), never a bare spec. Treated as connectors so
-  // the residue test sees what is actually left after the spec claim is removed.
-  const STOP = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', '&',
-    'men', 'mens', 'women', 'womens', 'ladies', 'unisex', 'kids', 'youth', 'adult', 'adults'])
+  // AUDIENCE AND GENERIC-WEARER WORDS ARE NEVER THE MONEY POSITION (widened 2026-08-11 by an
+  // adversarial pass). "| Short Sleeve for Women" is a spec plus a demographic; the seller has
+  // shipped ZERO of those. Their audience tails always ride a REAL phrase ("Christian Shirts for
+  // Women", "Comfort Colors Alligator Tshirt for Women").
+  //
+  // THE LOAD-BEARING TOKEN WAS "fan". Measured at HEAD before this widening:
+  //   classifyTail('Shirt for Women')      -> specOnly   (dropped)
+  //   classifyTail('Fan Shirt for Women')  -> search     (KEPT, and scored 100/100)
+  // One generic wearer-noun rescued every one of the six confirmed attacks. "Fan"/"lover" name the
+  // BUYER, not the product — they are audience words wearing a noun's clothes.
+  const STOP = new Set(['for', 'and', 'or', 'the', 'a', 'an', 'of', 'with', '&', '+',
+    // gender + demographic axes
+    'men', 'mens', 'women', 'womens', 'ladies', 'guys', 'gals', 'girls', 'boys', 'dudes',
+    'him', 'her', 'them', 'unisex', 'kids', 'youth', 'teen', 'teens', 'adult', 'adults',
+    'everyone', 'everybody', 'family', 'both', 'genders', 'ages', 'all', 'any', 'every', 'whole',
+    // generic wearer nouns — they name the buyer, not the product
+    'fan', 'fans', 'lover', 'lovers', 'enthusiast', 'enthusiasts', 'wearer', 'wearers'])
   const left = residue.split(/[^a-z0-9-]+/).filter((w) => w && w.length > 1 && !STOP.has(w))
-  if (left.length === 0 && claims.length > 0) return 'specOnly'
+  // A tail that is NOTHING but audience ("| for Men and Women", "| Fans") is not a money position
+  // either — there is no product language left at all once the audience words are neutralised.
+  if (left.length === 0) return 'specOnly'
   // A BARE GARMENT NOUN IS NOT A MONEY PHRASE. Live 2026-08-11: the pad minted "| Shirt" and every
   // spec-only guard passed it, because "shirt" is not a spec claim. Nobody searches the word "shirt"
   // alone as a purchase intent, and ZERO of the seller's tails are a bare noun — every one carries a
