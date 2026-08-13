@@ -21,7 +21,7 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
-import { garmentNounFor, SHIRT_BASE, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
+import { garmentNounFor, SHIRT_BASE, foreignHeadNoun, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode } from '@/lib/keyword-engine/coverage-core'
 // PO RULING 2026-08-09 — the money tail may never be decided by raw volume. ONE shared pure rule
@@ -3598,13 +3598,35 @@ async function runTitleAgent(
      * Applying the design-CLAIM guard to them as well is double-filtering with the wrong predicate.
      * Fill vocabulary (attributes, upgrade keywords, the mandated keyword) is NOT vetted and keeps
      * the full test unchanged. */
+    /* THE PRODUCT-TYPE STRIKE (PO ruling 2026-08-13).
+     *
+     * Asked whether "USA Mexico Canada" in their World Cup gold was aimed at people searching those
+     * countries or was simply describing the design, the seller answered: "No — it just describes the
+     * design." So the countries belong in the title, but `usa jersey` traffic must NOT be chased — a
+     * shopper who wants a real jersey will not buy a graphic tee. That makes the theme rater's 0 on
+     * `usa jersey` CORRECT, and it makes the blanket `vetted` bypass below too wide: it admitted the
+     * whole keyword, and the council then sourced the right words from a keyword the seller rejects.
+     *
+     * "is a jersey the same product as a tee" is decidable against the listing's own product type —
+     * an external fact, no judgement — so it is code's job, as a STRIKE, never as an edit.
+     *
+     * RESOLVED BY HEAD NOUN, which is what makes it safe. English noun phrases put the head last, so
+     * `usa jersey` is ABOUT a jersey while `new jersey girl shirt` is about a shirt. And an
+     * out-of-family head still passes if it is genuinely the design's own vocabulary — a design about
+     * New Jersey keeps "jersey" — which is the same two-tier fallback the era-claim words already use.
+     * Fill vocabulary is unaffected: it never had the bypass, so `usa jersey` was already dropped. */
+    const ownGarment = garmentFor(productType, input.repTitle || input.canonicalTitle)
     const isGrounded = (kw: string, vetted = false): boolean => {
+      const foreign = foreignHeadNoun(kw, ownGarment)
       const distinctive = kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
         .map((w) => w.replace(/s$/, ''))
         .filter((w) => w.length > 1 && !MINOR_WORDS.has(w) && !FREE.has(w))
       return distinctive.every((w) => {
         if (VISUAL_MOTIF_WORDS.has(w) || VISUAL_MOTIF_WORDS.has(`${w}s`)) return motifVocab.has(w)
         if (ERA_STYLE_CLAIM_WORDS.has(w) || isDecadeClaim(w)) return groundVocab.has(w)
+        // A DIFFERENT product's name is never market vocabulary for THIS product — unless the design
+        // is genuinely about it. Sits ahead of the bypass so a vetted target cannot smuggle it in.
+        if (foreign && w === foreign) return groundVocab.has(w)
         // A vetted ranking target's non-claim words are market vocabulary, not invented artwork.
         if (vetted && titleV4Mode() !== 'off') return true
         return groundVocab.has(w)

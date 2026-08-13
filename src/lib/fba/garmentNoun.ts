@@ -94,6 +94,14 @@ export const GARMENT_HEAD_WORDS: ReadonlySet<string> = new Set([
   'hat', 'cap', 'snapback', 'beanie', 'visor',
   'hoodie', 'sweatshirt', 'crewneck', 'pullover',
   'polo', 'tank', 'top', 'tops',
+  // `jersey` names a garment BY ITSELF and belongs in this list on the docstring's own terms. It is
+  // added for the title's product-type strike (PO ruling 2026-08-13: title words describe the design,
+  // they do not chase a DIFFERENT product's searches — a shopper who wants a real jersey will not buy
+  // a graphic tee). It carries the same place-name ambiguity this list already accepts for `cap` /
+  // `top` / `dress` ("Graduation Cap", "Over the Top", "Dress to Impress"); consumers resolve it by
+  // HEAD NOUN and by design-vocabulary fallback, so "New Jersey Girl Shirt" is about a shirt and a
+  // design genuinely about New Jersey keeps its own word.
+  'jersey', 'jerseys',
   'dress', 'sundress', 'leggings', 'tights', 'socks',
   'jacket', 'coat', 'windbreaker',
   'pajamas', 'pajama', 'pjs', 'apron',
@@ -113,6 +121,46 @@ export function familyScanWords(g: GarmentNoun): Set<string> {
     }
   }
   return out
+}
+
+/** The head nouns of THIS family only, stemmed. Deliberately NOT familyScanWords: that one always
+ *  unions the shirt words (so a hat listing could never treat `tee` as another product) and holds no
+ *  plurals (so `oversized tshirts` read as foreign on a shirt listing). Both were caught by the tests
+ *  below before this shipped. */
+export function ownHeadNouns(g: GarmentNoun): Set<string> {
+  const out = new Set<string>()
+  for (const alias of [...g.aliases, g.noun, g.seedNoun]) {
+    for (const tok of (alias ?? '').toLowerCase().split(/\s+/)) {
+      if (GARMENT_HEAD_WORDS.has(tok)) out.add(tok.replace(/s$/, ''))
+    }
+  }
+  return out
+}
+
+/**
+ * The keyword's HEAD NOUN, when it names a garment this listing does NOT sell.
+ *
+ * Returns the stemmed head noun to strike on, or null when the phrase is about this listing's own
+ * garment or about no garment at all. English noun phrases put the head LAST, which is the whole
+ * safety property: `usa jersey` is about a jersey (foreign -> "jersey"), while `new jersey girl
+ * shirt` is about a shirt (in-family -> null). Scanning for ANY occurrence instead of the head would
+ * strike the second one and cost a New Jersey design its own word.
+ *
+ * Callers decide what a foreign head MEANS. The title's grounding filter falls back to the design
+ * vocabulary, so a design genuinely about New Jersey still keeps "jersey" (PO ruling 2026-08-13:
+ * title words describe the design; they do not chase a different product's searches).
+ *
+ * Pure/total.
+ */
+export function foreignHeadNoun(keyword: string, g: GarmentNoun): string | null {
+  const own = ownHeadNouns(g)
+  const toks = (keyword ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+  for (let i = toks.length - 1; i >= 0; i--) {
+    if (!GARMENT_HEAD_WORDS.has(toks[i])) continue
+    const stem = toks[i].replace(/s$/, '')
+    return own.has(stem) ? null : stem
+  }
+  return null
 }
 
 /**
