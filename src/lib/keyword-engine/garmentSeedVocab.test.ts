@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { buildSeedFromTitle, buildFallbackSeed, deriveNicheSeeds } from './keywordResearcher'
-import { garmentNounFor, familyScanWords, GARMENT_HEAD_WORDS, SHIRT_BASE } from '../fba/garmentNoun'
+import { garmentNounFor, familyScanWords, foreignHeadNoun, GARMENT_HEAD_WORDS, SHIRT_BASE } from '../fba/garmentNoun'
 
 // #156 — the seed-vocabulary net. The old GARMENT_NOUN=on union split multi-word aliases into
 // tokens, making modifiers (dad/graphic/crew/baseball/bucket/winter/kitchen/muscle/…) "apparel
@@ -83,5 +83,60 @@ describe('deriveNicheSeeds — product-word append survives modifier-named theme
       expect(out.length, theme).toBeGreaterThan(0)
       expect(out[0], theme).toMatch(/tshirt|shirt|tee/)
     }
+  })
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE PRODUCT-TYPE STRIKE — PO ruling 2026-08-13.
+ *
+ * "When you put USA Mexico Canada in your gold title — were you going after people searching for
+ * those countries, or just naming what the design is about?"  ->  "No — it just describes the design."
+ *
+ * So the countries belong in the title, but `usa jersey` traffic is NOT to be chased: a shopper who
+ * wants a real jersey will not buy a graphic tee. This is decidable against the listing's own product
+ * type, so it is code's job — as a strike, never as an edit.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+describe('foreignHeadNoun — a DIFFERENT product is struck, by HEAD noun', () => {
+  const shirt = SHIRT_BASE
+
+  it('strikes the keyword the seller told us not to chase', () => {
+    expect(foreignHeadNoun('usa jersey', shirt)).toBe('jersey')
+    expect(foreignHeadNoun('mexico soccer jersey', shirt)).toBe('jersey')
+  })
+
+  it('THE TRAP THIS SHAPE EXISTS TO AVOID: "New Jersey" keeps its shirt', () => {
+    // Scanning for ANY occurrence of a foreign garment word would strike this and cost a New Jersey
+    // design its own word. English puts the head LAST, so this phrase is about a SHIRT.
+    expect(foreignHeadNoun('new jersey girl shirt', shirt)).toBeNull()
+    expect(foreignHeadNoun('new jersey tee', shirt)).toBeNull()
+  })
+
+  it('a bare "new jersey" is left to the DESIGN VOCABULARY, not decided here', () => {
+    // Head IS foreign, so this returns "jersey" — and the title's grounding filter then asks whether
+    // the design is genuinely about it. A New Jersey design has "jersey" in groundVocab and keeps it;
+    // the World Cup design does not, and loses it. The fallback is the ruling, not this predicate.
+    expect(foreignHeadNoun('new jersey', shirt)).toBe('jersey')
+  })
+
+  it('leaves this listing\'s own garment and non-garment phrases alone', () => {
+    for (const kw of ['oversized tshirts for women', 'comfort colors graphic tshirt', 'graphic tee']) {
+      expect(foreignHeadNoun(kw, shirt), kw).toBeNull()
+    }
+    for (const kw of ['futbol', '2026 world soccer cup', 'usa mexico canada', 'football']) {
+      expect(foreignHeadNoun(kw, shirt), kw).toBeNull()
+    }
+  })
+
+  it('is family-relative, not a fixed list — a HAT listing strikes shirts and keeps caps', () => {
+    const hat = garmentNounFor('HAT', 'Snapback Cap')
+    expect(foreignHeadNoun('world cup snapback cap', hat)).toBeNull()
+    expect(foreignHeadNoun('world cup tee', hat)).toBe('tee')
+    // …and the mirror image on the shirt listing.
+    expect(foreignHeadNoun('world cup hat', shirt)).toBe('hat')
+  })
+
+  it('is total — empty and garment-less input never throws', () => {
+    expect(foreignHeadNoun('', shirt)).toBeNull()
+    expect(foreignHeadNoun('   ', shirt)).toBeNull()
   })
 })
