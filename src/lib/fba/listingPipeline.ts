@@ -298,7 +298,10 @@ export interface PipelineResult {
    *  parent_asin, while both the Intelligence tab and the RANK panel resolve to a CHILD).
    *  `selectionSha` lets a later reader prove which selection a stored plan was built from. */
   keywordPlan: { bullets: string[]; designName: string; coupleConcept?: string; perDesign?: { designKey: string; bullets: string[] }[]; selected?: string[]; selectionSha?: string }
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[] }
+  /** `v4` carries the TITLE_V4 shadow measurement per bandTitle trip — shipped vs the title WITHOUT
+   *  the padding, and whether removing it would drop under the seller's corpus floor. On the
+   *  response, not only in a log line, so the refusal rate needs no shell access to read. */
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; v4?: Record<string, unknown>[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
@@ -7763,6 +7766,9 @@ BACKEND STRING: ${backendSample}`
 let DOOR_SEQ = 0
 
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
+  /** Per-run collector for [TITLE_V4_DIFF] entries, surfaced on `debug.v4` so the refusal rate is
+   *  readable from the regen response instead of only from a server-log grep. */
+  const v4Diffs: Record<string, unknown>[] = []
   const { brandName, repTitle, onProgress } = input
 
   // Stage 0a — relevance gate: drop keywords that are not about this product
@@ -8668,7 +8674,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     if (v4Mode !== 'off') {
       const unpadded = moneyed
       const CORPUS_FLOOR = 68        // the seller's shortest gold after their 2026-08-12 revision
-      console.log('[TITLE_V4_DIFF]', JSON.stringify({
+      const entry = {
         mode: v4Mode,
         shipped: drop.title,
         shippedLen: drop.title.length,
@@ -8677,7 +8683,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         padManufactured: drop.title !== unpadded,
         wouldRefuse: unpadded.length < CORPUS_FLOOR,
         floor: CORPUS_FLOOR,
-      }))
+      }
+      console.log('[TITLE_V4_DIFF]', JSON.stringify(entry))
+      // ALSO RIDE OUT ON THE RESPONSE. The log line alone makes every reading of this measurement
+      // depend on someone opening the Coolify log viewer and grepping — a manual step in front of
+      // the one number this phase exists to produce. Surfacing it on `debug` makes the refusal rate
+      // readable from the regen response itself, by anyone, without shell access.
+      v4Diffs.push(entry)
     }
     // ONE line per trip. `stages` is the ordered list of every stage that actually rewrote the
     // string — i.e. the authorship record. An empty `stages` means the door shipped the producer's
@@ -9318,7 +9330,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('title', {
       recommended_title: finalTitle,
       per_child_titles: perChildTitles,
-      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [] },
+      debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [], v4: v4Diffs },
     })
   }
 
@@ -10594,6 +10606,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
     keywordPlan: { bullets: topOpportunityKwsForBullets, designName: effectiveDesignName, coupleConcept: coupleConcept || undefined, perDesign: designGroupContexts.length ? designGroupContexts.map((c) => ({ designKey: c.key, bullets: scopeKwsToGroup(c, topOpportunityKwsForBullets, (k) => k) })) : undefined , ...selectedPlanFields },
-    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [] },
+    debug: { titleProblems, candidatesUsed: candidates.map((c) => c.keyword), titleRetried: retried, designName, designSource, multiDesign: designGroupInfo.isMultiDesign, designGroups: designGroupInfo.groups.map((g) => g.key), nicheSeeds: input.nicheSeeds ?? [], v4: v4Diffs },
   })
 }
