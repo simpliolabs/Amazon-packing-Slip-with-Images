@@ -356,3 +356,31 @@ recovered `usa jersey`; it also stopped dropping `oversized tshirts for women` a
 graphic tees`, which now reach the council. On the verifying regen the council ignored them and
 chose `USA Mexico Canada` anyway — a good outcome, not a guarantee. The component that should
 decide "is this about THIS design" is the referee (9/9 on the leave-one-out gate), still unwired.
+
+### §10 CORRECTION (same day, after the seller ruled)
+
+§10 above called the theme rater "INVERTED". The seller then ruled that title words DESCRIBE the
+design and do not chase a different product's searches — so **the jersey half of that verdict was
+mine, not the rater's**. `usa jersey` scored 0 because a jersey is a different garment, and under
+the ruling that is CORRECT. The hypothesis in §10 ("the rater is judging PRODUCT IDENTITY rather
+than THEME") turned out to be right about the mechanism and wrong about the blame.
+
+What survives §10 unchanged:
+  • the pool is 95% off-theme by volume, and `keywordResearcher.ts:1241` picks the primary bucket
+    by volume — a niche design still cannot surface its own vocabulary;
+  • `futbol` at themeFit 0 is still unexplained, and stays open;
+  • "vetted = themeFit >= 2" is still not built — against the measured distribution it deletes
+    `futbol` and keeps `oversized tshirts for women`.
+
+What it cost me to be wrong about: 2026-08-13's grounding carve-out recovered `usa jersey`, and the
+council wrote "| Futbol USA Mexico Canada" — the right words from a source the seller rejects. PR
+#571 strikes foreign-product keywords by HEAD NOUN, which removes the wrong source.
+
+**THE OPEN PIECE THIS CREATES.** Nothing now supplies "USA" to B0GVV3XL4T. The host countries must
+reach the title as DESIGN VOCABULARY — the design's own subject — not as keyword targets. Once
+usa/mexico/canada are grounded design words, `usa jersey` is STILL struck ("jersey" stays foreign)
+and the country words are still available: the ruling and the mechanism agreeing rather than
+fighting. Whether that knowledge already EXISTS in the stored vision record is a factual question
+that needs a DB read, not a guess (the admin read route is auth-gated and the seller runs SQL).
+Until it is answered, the correct behaviour for a 48-character draft is the seller's own rule —
+refuse and ask — not pad.
