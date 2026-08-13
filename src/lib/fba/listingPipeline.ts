@@ -380,6 +380,24 @@ const AUDIENCE_GIFT_WORDS = new Set([
 // the SELLER's own text corroborates it (canonical/live title or design name) — vision alone
 // is never sufficient for a visual claim. Generic style words are NOT motifs (handled by the
 // grounding vocab); this list is concrete drawable THINGS.
+/* ERA / STYLE CLAIM WORDS — the OTHER thing the design-grounding guard legitimately protects.
+ *
+ * VISUAL_MOTIF_WORDS covers invented OBJECTS ("cassette" on a slogan tee). These cover invented
+ * PERIOD/CONDITION claims — "vintage 90s shirt" on a design that is neither. Both are assertions
+ * about the ARTWORK, and no keyword-relevance classifier checks them, so both must stay grounded in
+ * the seller's own text no matter how strong the search demand is.
+ *
+ * They are named SEPARATELY (2026-08-13) because the guard was doing three jobs under one test:
+ * block invented objects, block invented eras, and — accidentally — delete the real SEARCH
+ * vocabulary of the thing a design is ABOUT. Measured on B0GVV3XL4T: "usa jersey" was dropped from
+ * a World Cup design whose seller gold closes "USA Mexico Canada Football Tee". Separating the
+ * three lets the first two stay strict while the third stops being collateral. */
+const ERA_STYLE_CLAIM_WORDS = new Set([
+  'vintage', 'retro', 'distressed', 'faded', 'antique', 'throwback', 'nostalgic', 'y2k', 'weathered',
+])
+/** "90s", "80s", "1990s" — a decade is a period CLAIM about the artwork, same tier as `vintage`. */
+const isDecadeClaim = (w: string): boolean => /^(19|20)?\d0s$/.test(w)
+
 const VISUAL_MOTIF_WORDS = new Set([
   'heart', 'hearts', 'sunflower', 'sunflowers', 'butterfly', 'butterflies', 'skull', 'skulls',
   'flag', 'flags', 'cross', 'crosses', 'anchor', 'rose', 'roses', 'daisy', 'daisies',
@@ -3560,14 +3578,37 @@ async function runTitleAgent(
     // while keeping legitimately generic phrases ("funny cat shirt", "alligator gift") so the pool is
     // never over-stripped into a too-short title (adversarial review caught the brittle all-words bar).
     const FREE = new Set(['cool', 'funny', 'cute', 'awesome', 'best', 'great', 'perfect', 'novelty', 'graphic', 'gift', 'lover', 'fan', 'apparel', 'clothing', 'outfit', 'wear', 'design', 'tee', 'shirt', 'tshirt', 'sweatshirt', 'hoodie', 'tank', 'top'])
-    const isGrounded = (kw: string): boolean => {
+    /* THREE JOBS, NOW SEPARATED (2026-08-13, TITLE_V4).
+     *
+     *   1. invented OBJECTS      ("cassette" on a slogan tee)   -> motifVocab, seller text only
+     *   2. invented ERAS         ("vintage 90s")                 -> groundVocab, always
+     *   3. everything else       ("usa", "jersey", "mexico")     -> see `vetted` below
+     *
+     * (1) and (2) are assertions about the ARTWORK. No keyword-relevance classifier checks them, so
+     * they stay grounded in the seller's own text however strong the search demand.
+     *
+     * (3) is not a claim about the artwork at all — it is the market vocabulary of the subject the
+     * design is about. MEASURED on B0GVV3XL4T: "usa jersey" was dropped from a World Cup design
+     * whose seller gold closes "USA Mexico Canada Football Tee", leaving four usable candidates and
+     * a 48-character draft ending "| Futbol". The guard was deleting the gold's own words before the
+     * council could see them — which is why the nearest-gold anchor changed nothing.
+     *
+     * `vetted` marks keywords that reached here as CRITICAL/UPGRADE/DEFENDED/REINFORCE ranking
+     * targets for THIS ASIN — they already passed the relevance classifier's theme gate upstream.
+     * Applying the design-CLAIM guard to them as well is double-filtering with the wrong predicate.
+     * Fill vocabulary (attributes, upgrade keywords, the mandated keyword) is NOT vetted and keeps
+     * the full test unchanged. */
+    const isGrounded = (kw: string, vetted = false): boolean => {
       const distinctive = kw.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
         .map((w) => w.replace(/s$/, ''))
         .filter((w) => w.length > 1 && !MINOR_WORDS.has(w) && !FREE.has(w))
-      // Motif nouns get the STRICTER test (seller text only); everything else may be
-      // grounded by the wider vocab (which includes vision + seller titles).
-      return distinctive.every((w) =>
-        (VISUAL_MOTIF_WORDS.has(w) || VISUAL_MOTIF_WORDS.has(`${w}s`)) ? motifVocab.has(w) : groundVocab.has(w))
+      return distinctive.every((w) => {
+        if (VISUAL_MOTIF_WORDS.has(w) || VISUAL_MOTIF_WORDS.has(`${w}s`)) return motifVocab.has(w)
+        if (ERA_STYLE_CLAIM_WORDS.has(w) || isDecadeClaim(w)) return groundVocab.has(w)
+        // A vetted ranking target's non-claim words are market vocabulary, not invented artwork.
+        if (vetted && titleV4Mode() !== 'off') return true
+        return groundVocab.has(w)
+      })
     }
     // The verbatim money keyword (mustInclude) is the PRIMARY leak — it is mandated + hard-validated
     // into the title, bypassing the candidate filter. If it's an ungrounded CLAIM ("vintage 90s shirt")
@@ -3590,14 +3631,14 @@ async function runTitleAgent(
      * truth-guard written to stop invented DESIGN CLAIMS is also deleting the event's real SEARCH
      * vocabulary — and the council is being asked to write the seller's gold with the gold's words
      * removed from the table. */
-    const groundingDropped = candidates.filter((c) => !isGrounded(c.keyword)).map((c) => c.keyword)
+    const groundingDropped = candidates.filter((c) => !isGrounded(c.keyword, true)).map((c) => c.keyword)
     if (groundingDropped.length) {
       console.log('[TITLE_GROUNDING_DROP]', JSON.stringify({ design: designName, kept: candidates.length - groundingDropped.length, dropped: groundingDropped.slice(0, 40) }))
       if (input.__v4Sink) input.__v4Sink.push({ stage: 'grounding-filter', design: designName, keptCount: candidates.length - groundingDropped.length, dropped: groundingDropped.slice(0, 40) })
     }
-    candidates = candidates.filter((c) => isGrounded(c.keyword))
-    upgradeKws = upgradeKws.filter(isGrounded)
-    attributes = attributes.filter(isGrounded)
+    candidates = candidates.filter((c) => isGrounded(c.keyword, true))   // vetted ranking targets
+    upgradeKws = upgradeKws.filter((k) => isGrounded(k))                  // fill — full test, unchanged
+    attributes = attributes.filter((k) => isGrounded(k))                  // fill — full test, unchanged
   }
 
   // TRADEMARK PRE-FILTER (Approach B) — substitute protected marks to their safe phrasing
