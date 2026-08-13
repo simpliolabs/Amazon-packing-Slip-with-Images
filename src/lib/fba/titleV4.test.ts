@@ -39,18 +39,19 @@ const judge = (t: string): number =>
 afterEach(() => { delete process.env.TITLE_V4; delete process.env.TITLE_SHAPE_JUDGE })
 
 describe('THE FLAG — three states, and `off` is the default', () => {
-  it('defaults to off, so merging this PR changes nothing that ships', () => {
+  it('defaults to SHADOW — the measurement starts without anyone setting a variable', () => {
+    // A behaviour-neutral measurement that requires a manual step is a measurement that does not
+    // happen. Shadow ships today's bytes unchanged (asserted below), so this is safe by default.
     delete process.env.TITLE_V4
-    expect(titleV4Mode()).toBe('off')
+    expect(titleV4Mode()).toBe('shadow')
   })
 
-  it('recognises shadow and on, and treats anything else as off', () => {
-    expect(withV4('shadow', titleV4Mode)).toBe('shadow')
+  it('a typo can log, but can NEVER change a shipped title', () => {
     expect(withV4('on', titleV4Mode)).toBe('on')
     expect(withV4('ON', titleV4Mode)).toBe('on')
-    // A typo must fail SAFE — an unrecognised value can never silently enable a behaviour change.
-    expect(withV4('yes', titleV4Mode)).toBe('off')
-    expect(withV4('', titleV4Mode)).toBe('off')
+    expect(withV4('off', titleV4Mode)).toBe('off')     // the kill switch must be typed exactly
+    expect(withV4('yes', titleV4Mode)).toBe('shadow')  // unrecognised -> measure, never enable
+    expect(withV4('', titleV4Mode)).toBe('shadow')
   })
 
   it('SHADOW DOES NOT CHANGE BEHAVIOUR — it only measures', () => {

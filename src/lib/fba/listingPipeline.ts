@@ -1310,10 +1310,18 @@ const titleShapeJudgeMode = (): string => (process.env.TITLE_SHAPE_JUDGE || 'on'
 
 /* ── TITLE_V4 — the phase-3 flag: STOP MANUFACTURING TEXT ──────────────────────────────────────────
  *
- * off    (default) byte-identical to today. Nothing below changes a single shipped character.
- * shadow every deletion is MEASURED and logged — the title that WOULD have shipped without the
- *        padding is computed and written to [TITLE_V4_DIFF] — but today's title still ships.
- * on     the padding is gone for real.
+ * off              byte-identical to today, and silent. The explicit kill switch.
+ * shadow (DEFAULT) every deletion is MEASURED and logged — the title that WOULD have shipped
+ *                  without the padding is written to [TITLE_V4_DIFF] — but today's title still
+ *                  ships, byte-for-byte.
+ * on               the padding is gone for real.
+ *
+ * WHY SHADOW IS THE DEFAULT AND NOT `off`. Shadow does not change a single shipped character —
+ * that is asserted, not asserted-ish: titleV4.test.ts scores all nine golds under shadow and under
+ * off and requires them equal. Defaulting to `off` would mean the refusal rate only starts being
+ * collected after someone remembers to set an environment variable, and the measurement is the
+ * whole point of this phase. A behaviour-neutral measurement that requires a manual step is a
+ * measurement that does not happen. `off` remains as the explicit kill switch.
  *
  * WHY SHADOW FIRST, AND WHY IT IS CHEAP HERE. The "new" title under every one of these deletions is
  * simply the string as it stood BEFORE the padding ran — which the code already holds. So shadow
@@ -1324,8 +1332,10 @@ const titleShapeJudgeMode = (): string => (process.env.TITLE_SHAPE_JUDGE || 'on'
  * own ruling ("never ship short — always ask me", 2026-08-12) would hold a listing back. My estimate
  * was 33-54 chars on one traced chain; an estimate is not a rate. */
 export const titleV4Mode = (): 'off' | 'shadow' | 'on' => {
-  const v = (process.env.TITLE_V4 || 'off').toLowerCase()
-  return v === 'on' ? 'on' : v === 'shadow' ? 'shadow' : 'off'
+  const v = (process.env.TITLE_V4 || 'shadow').toLowerCase()
+  // Anything unrecognised falls to SHADOW, never to `on`: a typo can log, but it can never change a
+  // shipped title. `off` must be typed exactly, because silencing the measurement is a real decision.
+  return v === 'on' ? 'on' : v === 'off' ? 'off' : 'shadow'
 }
 /** True when the padding must not run for real. Shadow still runs it (so shipping is unchanged) and
  *  logs what it would have suppressed. */
