@@ -1,0 +1,95 @@
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * TITLE_V4 — STOP MANUFACTURING TEXT. Phase 3 of handoff/TITLE_ARCHITECTURE.md.
+ *
+ * Four pieces of deterministic code are withdrawn at `on`, and every one of them is on the record as
+ * an AUTHOR of a title the seller rejected, or as a law that contradicts the seller's own corpus:
+ *
+ *   1. the humanizer length-extension retry  — measured author of "Fan Tournament" (B0GVV3XL4T,
+ *      2026-08-12: council wrote 56 chars, this stretched to 71, judge paid 70 -> 100 for length)
+ *   2. the facts pad in enforceTitleBand     — the repo's own attribution for "| Crew Neck" and
+ *      "| Short Sleeve", and the laundering vector that turns a droppable spec tail into a
+ *      protected brand tail
+ *   3. the council's Rule-2 audience append  — recorded as the SOLE author of "for Men … for Women"
+ *   4. the corpus-derived identity ceiling   — returns 7 while the brief prints a 10-word gold
+ *      beneath it, and docks that gold to 86
+ *
+ * THE GOVERNING RULE THEY ALL BREAK, in the seller's words (2026-08-12): "never ship short — always
+ * ask me". And the architecture's asymmetry: CODE MAY FILTER, NEVER ADD. All five rejected titles
+ * were authored by an addition.
+ *
+ * THIS FILE PROVES BOTH DIRECTIONS: `off` changes nothing, `on` withdraws exactly these four and
+ * nothing else.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+import { describe, it, expect, afterEach } from 'vitest'
+import { SEED_GOLD_TITLES, measureGoldShape } from './poGoldCorpus'
+import { titleQualityJudge, titleV4Mode } from './listingPipeline'
+
+const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
+/** Gold #4 — ten identity words, and the title the derived ceiling of 7 currently docks. */
+const CEILING_VICTIM = 'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women'
+
+const withV4 = <T,>(mode: string, fn: () => T): T => {
+  const prev = process.env.TITLE_V4
+  process.env.TITLE_V4 = mode
+  try { return fn() } finally { if (prev === undefined) delete process.env.TITLE_V4; else process.env.TITLE_V4 = prev }
+}
+const judge = (t: string): number =>
+  titleQualityJudge(t, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true }).score
+
+afterEach(() => { delete process.env.TITLE_V4; delete process.env.TITLE_SHAPE_JUDGE })
+
+describe('THE FLAG — three states, and `off` is the default', () => {
+  it('defaults to off, so merging this PR changes nothing that ships', () => {
+    delete process.env.TITLE_V4
+    expect(titleV4Mode()).toBe('off')
+  })
+
+  it('recognises shadow and on, and treats anything else as off', () => {
+    expect(withV4('shadow', titleV4Mode)).toBe('shadow')
+    expect(withV4('on', titleV4Mode)).toBe('on')
+    expect(withV4('ON', titleV4Mode)).toBe('on')
+    // A typo must fail SAFE — an unrecognised value can never silently enable a behaviour change.
+    expect(withV4('yes', titleV4Mode)).toBe('off')
+    expect(withV4('', titleV4Mode)).toBe('off')
+  })
+
+  it('SHADOW DOES NOT CHANGE BEHAVIOUR — it only measures', () => {
+    // The whole point of shadow: the seller sees the refusal rate BEFORE a listing moves. If shadow
+    // altered a score, the number it reports would be about a system that never shipped.
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    for (const g of SEED_GOLD_TITLES) {
+      expect(withV4('shadow', () => judge(g)), g).toBe(withV4('off', () => judge(g)))
+    }
+  })
+})
+
+describe('THE IDENTITY CEILING — withdrawn at `on`, and the seller stops being docked', () => {
+  it('OFF: the derived ceiling docks the seller\'s own gold #4 (the defect, pinned)', () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    expect(SEED_GOLD_TITLES).toContain(CEILING_VICTIM)
+    expect(SHAPE.maxLeftWords).toBe(7)                                   // derived from the corpus…
+    const identityWords = CEILING_VICTIM.slice(0, CEILING_VICTIM.indexOf(' | ')).split(/\s+/).length
+    expect(identityWords).toBe(10)                                       // …and this gold breaks it
+    expect(withV4('off', () => judge(CEILING_VICTIM))).toBe(86)
+  })
+
+  it('ON: every one of the nine golds scores a clean 100 — no seller title is docked', () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    for (const g of SEED_GOLD_TITLES) {
+      expect(withV4('on', () => judge(g)), g).toBe(100)
+    }
+  })
+
+  it('and the ceiling could never have been repaired by re-tuning the number', () => {
+    // The seller's Rod Father gold and pure keyword soup BOTH run 13 identity words. No word count
+    // separates them, so identity LENGTH was never the rule — "is this one thing a person says" is,
+    // and that question belongs to the referee.
+    const rodFather = SEED_GOLD_TITLES.find((t) => t.includes('Rod Father'))!
+    const soup = 'THE CEO 2026 World Soccer Cup USA Mexico Canada Football Graphic Tee Shirt'
+    const idWords = (t: string): number => {
+      const cut = [t.indexOf(' | '), t.indexOf(', ')].filter((i) => i >= 0)
+      return (cut.length ? t.slice(0, Math.min(...cut)) : t).split(/\s+/).length
+    }
+    expect(idWords(rodFather)).toBe(idWords(soup))
+  })
+})
