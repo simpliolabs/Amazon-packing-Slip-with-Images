@@ -368,3 +368,32 @@ describe('the door never damages the seller\'s own golds', () => {
     }
   })
 })
+
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE FEEL INJECTOR IS DELETED (2026-08-12, task #169) — and this is the guard that keeps it dead.
+ *
+ * It inserted 'Soft' / 'Comfy' / 'Cozy' / 'Cool' before the garment brand on any apparel title under
+ * 50 characters, hash-picked from the design name, purely to lift the length. It was added for an
+ * 80-char floor superseded twice, neither ban list caught it, and this session's own fixes ARMED it
+ * by making sub-50-char titles common.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+describe("FEEL INJECTOR — deleted, and unable to return by the corpus's own evidence", () => {
+  const FEEL_WORDS = ['soft', 'comfy', 'cozy', 'cool', 'comfortable', 'premium']
+
+  it('the seller has NEVER used any of these words in nine gold titles', () => {
+    const att = attestedUse(SEED_GOLD_TITLES, FEEL_WORDS)
+    for (const w of FEEL_WORDS) {
+      expect(att.get(w)!.length, `"${w}" is attested — re-check before treating it as banned`).toBe(0)
+    }
+  })
+
+  it('so injecting one is adding vocabulary that is not a fact, not a search term, and not theirs', () => {
+    // The architecture's governing asymmetry: code may FILTER, never ADD. Every one of the five
+    // titles the seller rejected was authored by an ADDITION.
+    for (const g of SEED_GOLD_TITLES) {
+      for (const w of FEEL_WORDS) {
+        expect(g.toLowerCase(), `${w} appeared in a gold`).not.toContain(w)
+      }
+    }
+  })
+})
