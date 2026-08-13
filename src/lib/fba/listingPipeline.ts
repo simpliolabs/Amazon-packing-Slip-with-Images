@@ -3575,6 +3575,26 @@ async function runTitleAgent(
     // backend). NOTE: attributePin (the blank/garment brand) is NOT design-gated — it's a real PRODUCT
     // attribute, not a design claim, so grounding is the wrong test for it; it's trusted + added above.
     if (mustInclude && !isGrounded(mustInclude)) mustInclude = undefined
+    /* WHAT THE DESIGN-GROUNDING FILTER REMOVES, recorded on the response.
+     *
+     * MEASURED NEED, 2026-08-13. `titleDebug.candidatesUsed` is built in runListingPipeline from the
+     * UNFILTERED array, so it shows keywords the council never received — and it is what led to the
+     * conclusion "the pool had `usa jersey`, the council ignored it". The council may never have been
+     * shown it. Reading a pre-filter list and calling it what the model saw is the same class of
+     * error as measuring the wrong pipeline stage.
+     *
+     * The suspicion this settles: for the 2026 World Soccer Cup design, `groundVocab` is built from
+     * the design name, the live title and the niche seeds — 2026 / world / soccer / cup / futbol /
+     * tournament / fan. The seller's OWN gold for that design closes with "USA Mexico Canada
+     * Football Tee". If `usa` / `mexico` / `canada` / `jersey` are absent from that vocabulary, a
+     * truth-guard written to stop invented DESIGN CLAIMS is also deleting the event's real SEARCH
+     * vocabulary — and the council is being asked to write the seller's gold with the gold's words
+     * removed from the table. */
+    const groundingDropped = candidates.filter((c) => !isGrounded(c.keyword)).map((c) => c.keyword)
+    if (groundingDropped.length) {
+      console.log('[TITLE_GROUNDING_DROP]', JSON.stringify({ design: designName, kept: candidates.length - groundingDropped.length, dropped: groundingDropped.slice(0, 40) }))
+      if (input.__v4Sink) input.__v4Sink.push({ stage: 'grounding-filter', design: designName, keptCount: candidates.length - groundingDropped.length, dropped: groundingDropped.slice(0, 40) })
+    }
     candidates = candidates.filter((c) => isGrounded(c.keyword))
     upgradeKws = upgradeKws.filter(isGrounded)
     attributes = attributes.filter(isGrounded)
