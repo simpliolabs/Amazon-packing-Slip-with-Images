@@ -3835,27 +3835,28 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
     }
   }
 
-  // Deterministic backstop (apparel): a sub-50-char title wastes real keyword space even under the
-  // 75-char cap (the validator's floor is 50). Lead the garment brand with a FEEL adjective —
-  // "Soft/Comfy/Cozy/Cool Comfort Colors" — which reads better AND lifts the title toward 50-75.
-  // The word VARIES by a stable design hash so it's never hardcoded to one (PO: "if can be Comfy,
-  // it can be Soft, Cool etc") yet stays consistent for a given product. Only when short, only when
-  // there's a garment brand in the title, and only if no feel word is already in front of it.
-  if (apparel && title.length < 50 && attributePin) {
-    const pinEsc = attributePin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const m = title.match(new RegExp(`\\b${pinEsc}\\b`, 'i'))
-    if (m && m.index != null && !/\b(comfy|soft|cozy|cool|cute|premium|comfortable)\b/i.test(title.slice(0, m.index))) {
-      const FEEL = ['Soft', 'Comfy', 'Cozy', 'Cool']
-      const seed = (designName || title).split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-      const mod = FEEL[seed % FEEL.length]
-      const padded = `${title.slice(0, m.index)}${mod} ${title.slice(m.index)}`.replace(/\s{2,}/g, ' ').trim()
-      if (padded.length <= 75) {
-        title = padded
-        problems = validateTitle(title, brandName, mustInclude, attributePin, upgradeKws, designName, season.effective)
-      }
-    }
-  }
-
+  /* THE FEEL INJECTOR IS DELETED (2026-08-12, task #169).
+   *
+   * WHAT IT DID: on any apparel title under 50 characters it inserted one of
+   * ['Soft','Comfy','Cozy','Cool'] in front of the garment brand, chosen by a hash of the design
+   * name, purely to lift the length toward a band.
+   *
+   * WHY IT IS GONE, in four measured facts:
+   *   1. NONE of the seller's nine gold titles contains any of those words.
+   *   2. Neither ban list catches them, so nothing downstream could ever remove one.
+   *   3. It was added 2026-06-09 to satisfy a then-live 80-char floor that has since been
+   *      superseded TWICE — it outlived its own reason and nobody noticed.
+   *   4. It was ARMED by this session's own fixes: the unconditional waste-vocabulary strip and the
+   *      terminal spec-tail drop made sub-50-char titles common (the measured B0GVV3XL4T chain
+   *      lands at 33-54), so a dormant hazard became a live one.
+   *
+   * It also violates the seller's 2026-08-12 ruling outright — "the floor refuses, it never pads"
+   * — and the architecture's governing asymmetry: code may FILTER, never ADD. Every one of the five
+   * titles the seller rejected was authored by an ADDITION, and this is an addition of words that
+   * are not facts, not search terms, and not theirs.
+   *
+   * NOTHING REPLACES IT. A title that lands short is now a signal (thin keyword research), handled
+   * by the ship gate, not a hole to be filled with adjectives. */
   // Deterministic backstop: the LLM keeps stacking product-type synonyms on keyword-heavy
   // non-apparel titles despite the prompt + candidate de-dup — so collapse them mechanically.
   if (!apparel) {
