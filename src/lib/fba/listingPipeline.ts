@@ -59,6 +59,8 @@ import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
+// NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
+import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
 import { audienceSpans, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
@@ -1244,13 +1246,66 @@ export function buildApparelTitleBrief(ctx: {
   inputBlock: string
   poGolds?: { titles: string[]; shape: GoldShape } | null
   extraRules?: string[]
+  /** The design being titled — enables NEAREST-GOLD ANCHORING (see below). Absent => no anchor, and
+   *  the brief is byte-identical to the pre-2026-08-13 version. */
+  designPhrase?: string | null
+  garmentNoun?: string | null
+  lean?: AudienceLean
 }): { system: string; user: string } {
   const titles = ctx.poGolds?.titles?.length ? ctx.poGolds.titles : [...SEED_GOLD_TITLES]
   const shape = ctx.poGolds?.titles?.length && ctx.poGolds.shape ? ctx.poGolds.shape : measureGoldShape(titles)
   const goldSpec = goldSpecBlock(titles, shape)
   const rejects = rejectPairBlock(SEED_REJECT_PAIRS)
+
+  /* ── NEAREST-GOLD ANCHOR ───────────────────────────────────────────────────────────────────────
+   *
+   * WHY, MEASURED LIVE 2026-08-13 on B0GVV3XL4T. The council's actual draft was:
+   *
+   *     THE CEO 2026 World Soccer Cup Tee Shirt | futbol          (48 chars)
+   *
+   * A ONE-WORD money position, lowercase. The padder then invented "Tournament Supporters" to reach
+   * 70, and the shadow diff recorded wouldRefuse: TRUE — deleting the padder WITHOUT fixing this
+   * would hold the listing back rather than improve it. The padding was the symptom; a 48-character
+   * draft is the cause.
+   *
+   * The pool for that design already held `usa jersey` and `mexico football jersey`, and the design
+   * group was tagged HOST-COUNTRIES. The words were there. What was missing was an ANCHOR: all nine
+   * golds are shown at once, so the model averages a shape instead of following the ONE gold that
+   * matches this situation — here the Espana gold, an event with a proper-noun cluster and a plain
+   * join, the closest thing in the corpus to a World Cup design.
+   *
+   * Retrieved demonstrations beat showing everything, with the largest gains on generation (Liu et
+   * al., DeeLIO/ACL 2022, arXiv:2101.06804). The anchor sits LAST, immediately before the
+   * instruction — the recency position (Lu et al., arXiv:2104.08786).
+   *
+   * PURE, DETERMINISTIC, FAIL-OPEN: `nearestGolds` is a scoring function over derived features — no
+   * LLM, no I/O. With no designPhrase the block is empty and the brief is unchanged. Nothing here
+   * can make a title worse by being absent. */
+  const anchorBlock = (() => {
+    if (!ctx.designPhrase) return ''
+    try {
+      const near = nearestGolds(targetFromDesign({
+        designPhrase: ctx.designPhrase,
+        garmentNoun: ctx.garmentNoun ?? null,
+        lean: ctx.lean === 'female' || ctx.lean === 'male' ? ctx.lean : null,
+      }), titles, 2)
+      if (near.length === 0) return ''
+      const lines = near.map((g, i) => [
+        `${i + 1}. ${g.title}`,
+        `   identity: ${g.identity}`,
+        `   money position: ${g.money || '(none — the whole title is the identity)'}`,
+      ].join('\n')).join('\n')
+      return [
+        '',
+        'THE CLOSEST MATCH IN THEIR OWN CORPUS to the design you are titling — follow THIS one, not the average of all of them:',
+        lines,
+        'Note how much of the 75 characters their money position earns. A one-word tail wastes the most valuable part of the title.',
+        '',
+      ].join('\n')
+    } catch { return '' }   // fail-open: an anchor that throws must never cost a title
+  })()
   const system = `${ctx.roleLine} Below are the seller's own titles, a measurement of them, and titles this system generated that the seller rejected, with their words. Write a title they would not rewrite. Match their SHAPE, never copy their words. Output ONLY the final title string — no quotes, no markdown, no explanation.`
-  const user = `${goldSpec}
+  const user = `${goldSpec}${anchorBlock}
 
 ${rejects}
 ═══ THIS PRODUCT ═══
@@ -3642,6 +3697,12 @@ ${candidateList}`
       roleLine: `You write Amazon apparel titles for ${brandName}.`,
       inputBlock,
       poGolds: input.poGolds,
+      // NEAREST-GOLD ANCHOR — the design decides WHICH gold is shown last, in the recency position.
+      // v2ExpandedDesign is the idiom-expanded form when there is one, else the raw design name —
+      // the same string this brief already teaches as the identity.
+      designPhrase: v2ExpandedDesign || designName || null,
+      garmentNoun: input.productType ?? null,
+      lean,
     })
     return [b.system, b.user]
   })() : [
@@ -3881,6 +3942,9 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
         roleLine: `You write Amazon apparel titles for ${brandName}. This one is a SINGLE-DESIGN product title.`,
         inputBlock,
         poGolds: input.poGolds,
+        designPhrase: displayDesignName || designName || null,
+        garmentNoun: ptWord || null,
+        lean,
       })
       return [b.system, b.user]
     })()
@@ -6789,6 +6853,11 @@ async function buildNicheParentTitle(
     roleLine: `You write Amazon apparel titles for ${brandName}. This one is the BROADCAST PARENT TITLE for a variation family: it carries the FAMILY NICHE, never a specific child design.`,
     inputBlock: '(see user message)',
     poGolds,
+    // PATH PARITY (PR #401): the parent producer is a separate branch and must receive the anchor
+    // too. Its "design" is the FAMILY NICHE — the parent title never carries a child design name.
+    designPhrase: familyNiche || null,
+    garmentNoun: productType || null,
+    lean: parentLean,
   }).system
   // COMPETITOR SEO SNAPSHOT (fallback chain Part 1) — CONSTRAINTS-NOT-EXEMPLARS (prompt-leak
   // history #365/#367: instruction text the model can echo becomes product copy). The snapshot is
@@ -6822,6 +6891,9 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       inputBlock,
       poGolds,
       extraRules: ['NO design names in the parent title — only the shared niche.'],
+      designPhrase: familyNiche || null,
+      garmentNoun: productType || null,
+      lean: parentLean,
     })
     return b.user
   })()

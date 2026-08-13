@@ -22,7 +22,7 @@
  * ────────────────────────────────────────────────────────────────────────────────────────────── */
 import { describe, it, expect, afterEach } from 'vitest'
 import { SEED_GOLD_TITLES, measureGoldShape } from './poGoldCorpus'
-import { titleQualityJudge, titleV4Mode } from './listingPipeline'
+import { titleQualityJudge, titleV4Mode, buildApparelTitleBrief } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
 /** Gold #4 — ten identity words, and the title the derived ceiling of 7 currently docks. */
@@ -92,5 +92,62 @@ describe('THE IDENTITY CEILING — withdrawn at `on`, and the seller stops being
       return (cut.length ? t.slice(0, Math.min(...cut)) : t).split(/\s+/).length
     }
     expect(idWords(rodFather)).toBe(idWords(soup))
+  })
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE NEAREST-GOLD ANCHOR — the fix for the ROOT, not the symptom.
+ *
+ * MEASURED LIVE 2026-08-13 on B0GVV3XL4T. The council's own draft was:
+ *
+ *     THE CEO 2026 World Soccer Cup Tee Shirt | futbol          (48 chars)
+ *
+ * A ONE-WORD money position, lowercase. The padder then invented "Tournament Supporters" to reach
+ * 70, and the shadow diff recorded wouldRefuse: TRUE — so deleting the padder WITHOUT fixing this
+ * would hold the listing back rather than improve it. The padding was never the root; a 48-character
+ * draft is.
+ *
+ * The pool already held `usa jersey` and `mexico football jersey`. The words were there. What was
+ * missing was an ANCHOR — all nine golds shown at once, so the model averages a shape instead of
+ * following the ONE that matches.
+ * ────────────────────────────────────────────────────────────────────────────────────────────── */
+describe('NEAREST-GOLD ANCHOR — follow the matching gold, not the average of nine', () => {
+  const brief = (designPhrase: string | null) => buildApparelTitleBrief({
+    brandName: 'THE CEO',
+    roleLine: 'You write Amazon apparel titles for THE CEO.',
+    inputBlock: 'Brand: THE CEO',
+    designPhrase,
+    garmentNoun: 'tee',
+    lean: null,
+  }).user
+
+  it('a World-Cup-shaped design is anchored on the ESPANA gold', () => {
+    // The event gold with a proper-noun cluster and a plain join — the closest thing in the corpus
+    // to a World Cup design, and NOT one of the piped apparel golds every failing draft imitated.
+    const u = brief('2026 World Soccer Cup')
+    expect(u).toContain('THE CLOSEST MATCH IN THEIR OWN CORPUS')
+    expect(u).toContain('Espana Championship')
+  })
+
+  it('a first-person statement design is anchored somewhere else entirely', () => {
+    const u = brief('I Could Be Meaner')
+    expect(u).toContain('THE CLOSEST MATCH IN THEIR OWN CORPUS')
+    const anchorSection = u.slice(u.indexOf('THE CLOSEST MATCH'))
+    expect(anchorSection).not.toContain('Espana Championship')
+  })
+
+  it('names the failure the live draft committed — a one-word tail', () => {
+    expect(brief('2026 World Soccer Cup')).toContain('A one-word tail wastes the most valuable part of the title')
+  })
+
+  it('FAIL-OPEN: no design phrase means no anchor and a byte-identical brief', () => {
+    // An anchor that cannot be built must never cost a title. Absence is a no-op, not a degrade.
+    const withNone = brief(null)
+    expect(withNone).not.toContain('THE CLOSEST MATCH IN THEIR OWN CORPUS')
+    expect(withNone).toBe(buildApparelTitleBrief({
+      brandName: 'THE CEO',
+      roleLine: 'You write Amazon apparel titles for THE CEO.',
+      inputBlock: 'Brand: THE CEO',
+    }).user)
   })
 })
