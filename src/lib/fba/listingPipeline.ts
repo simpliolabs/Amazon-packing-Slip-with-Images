@@ -135,6 +135,15 @@ export interface PipelineActionPlanItem {
 export interface PipelineChild { sku: string; asin: string; color: string | null; size: string | null; title?: string | null }
 
 export interface PipelineInput {
+  /** TITLE_V4 diagnostics sink, set by runListingPipeline for the duration of one run.
+   *
+   *  WHY IT LIVES ON `input` AND NOT IN A MODULE VARIABLE: BOTH title producers — runTitleAgent
+   *  (single-design) and buildNicheParentTitle (multi-design) — are top-level functions that already
+   *  receive this object, so one field reaches both paths with no signature churn. A module-level
+   *  array would be shared across concurrent regens and would silently mix two listings' numbers.
+   *  This repo's path-parity lesson is that an instrument wired to one producer reports confidently
+   *  about the other while measuring nothing. */
+  __v4Sink?: Record<string, unknown>[]
   openai: OpenAI
   brandName: string
   category: string
@@ -3881,6 +3890,7 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
       brandName,
       postProcess: (raw) => capTitle75(scrubTrademarks(raw)),
       onProgress: input.onProgress,   // SSE keepalive parity with the parent call — the 1-2 gpt-5 extension calls must not run the stream silent (stream-idle-drop risk)
+      v4Sink: input.__v4Sink,         // PATH PARITY: the single-design producer must report the same measurement as the parent one
       trigger: 68,
       label: 'Title',
       lean,   // Fix D: adopt-gate scores retry with the lean-aware dock so a rewrite can't silently drop the tail
@@ -6578,6 +6588,9 @@ async function humanizeTitleTo75(
     postProcess: (raw: string) => string
     onProgress?: (m: string) => void
     trigger?: number
+    /** Per-run collector for TITLE_V4 diffs. The humanizer pads BEFORE the ship door, so the door's
+     *  own diff cannot see it — measuring only the door reports a falsely reassuring zero. */
+    v4Sink?: Record<string, unknown>[]
     label?: string
     /** TITLE_COUNCIL_V3.1a Fix D: RAW audience lean. When passed, the V2 adopt gate scores current-vs-retry
      *  with the lean-aware dock so a humanizer rewrite that DROPS a lean-appropriate tail cannot silently
@@ -6591,7 +6604,7 @@ async function humanizeTitleTo75(
     apparel?: boolean
   },
 ): Promise<string> {
-  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords, shape = null, apparel = false } = opts
+  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords, shape = null, apparel = false, v4Sink } = opts
   // RETRY-CASING NORMALIZER: the LLM ships raw casing (live: "THE CEO fishing humor funny t-shirt…" —
   // correct content, lowercase niche). Title-Case only FULLY-LOWERCASE words; any word already carrying
   // an uppercase letter is preserved verbatim ("THE CEO", "T-shirt"); minor connectors stay lowercase
@@ -6695,6 +6708,27 @@ Return ONLY the extended title string.` },
       }
     }
   }
+  /* THE HUMANIZER'S OWN TITLE_V4 DIFF — recorded even when the loop did not run.
+   *
+   * MEASURED 2026-08-13, and it is why this exists: a live shadow regen reported
+   * `padManufactured: false, wouldRefuse: false` while the stream simultaneously showed
+   * "Title retry 1: len 48->73". Both were true — the DOOR padded nothing because the HUMANIZER had
+   * already padded, one stage earlier, and the door's diff cannot see behind itself. An instrument
+   * that measures the wrong stage does not report "unknown", it reports a confident zero.
+   *
+   * `wouldRefuse` here is the real question the seller asked: with the padding gone, does the
+   * council's own draft clear their corpus floor, or does the listing get held back? */
+  if (v4Sink && titleV4Mode() !== 'off') {
+    const CORPUS_FLOOR = 68
+    v4Sink.push({
+      stage: 'humanizer', label,
+      shipped: title, shippedLen: title.length,
+      withoutPad: v4PreRetry, withoutPadLen: v4PreRetry.length,
+      padManufactured: title !== v4PreRetry,
+      wouldRefuse: v4PreRetry.length < CORPUS_FLOOR,
+      floor: CORPUS_FLOOR,
+    })
+  }
   return title
 }
 
@@ -6720,6 +6754,11 @@ async function buildNicheParentTitle(
   // producer — a separate branch from runTitleAgent, and the branch that historically missed
   // fixes applied only to its twin (PR #401). Both now read the same corpus.
   poGolds?: { titles: string[]; shape: GoldShape } | null,
+  // TITLE_V4 diagnostics sink. Passed EXPLICITLY for the same reason poGolds is: this is the
+  // multi-design producer, a separate branch from runTitleAgent, and the branch that historically
+  // missed fixes applied only to its twin (PR #401). An instrument wired to one producer reports
+  // confidently about the other while measuring nothing.
+  v4Sink?: Record<string, unknown>[],
 ): Promise<string> {
   const audienceMode = deriveAudienceMode(parentLean)
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
@@ -7126,6 +7165,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     onProgress,
     trigger: 68,
     label: 'Parent title',
+    v4Sink,
     lean: parentLean,   // Fix D: same adopt-gate discipline as single-design (INVARIANT-1 parity)
     maxLeftWords: poGolds?.shape.maxLeftWords ?? null,
     shape: poGolds?.shape ?? null,
@@ -7769,6 +7809,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   /** Per-run collector for [TITLE_V4_DIFF] entries, surfaced on `debug.v4` so the refusal rate is
    *  readable from the regen response instead of only from a server-log grep. */
   const v4Diffs: Record<string, unknown>[] = []
+  // Reach BOTH title producers. `input` is per-call, so this cannot mix two regens' measurements.
+  input.__v4Sink = v4Diffs
   const { brandName, repTitle, onProgress } = input
 
   // Stage 0a — relevance gate: drop keywords that are not about this product
@@ -9110,7 +9152,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // a truly mixed-lean family should have audienceLean='unisex' set on the parent; a lean_female/lean_male
       // family value means the seller has already asserted family-level unanimity). Fallback null on non-apparel.
       const parentLean: AudienceLean = apparelProduct ? (input.audienceLean ?? null) : null
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds)
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.__v4Sink)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
