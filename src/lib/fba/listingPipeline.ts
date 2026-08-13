@@ -1308,6 +1308,39 @@ const TITLE_V2_ATTR_PAIR_NOUNS = new Set([
  */
 const titleShapeJudgeMode = (): string => (process.env.TITLE_SHAPE_JUDGE || 'on').toLowerCase()
 
+/* ── TITLE_V4 — the phase-3 flag: STOP MANUFACTURING TEXT ──────────────────────────────────────────
+ *
+ * off              byte-identical to today, and silent. The explicit kill switch.
+ * shadow (DEFAULT) every deletion is MEASURED and logged — the title that WOULD have shipped
+ *                  without the padding is written to [TITLE_V4_DIFF] — but today's title still
+ *                  ships, byte-for-byte.
+ * on               the padding is gone for real.
+ *
+ * WHY SHADOW IS THE DEFAULT AND NOT `off`. Shadow does not change a single shipped character —
+ * that is asserted, not asserted-ish: titleV4.test.ts scores all nine golds under shadow and under
+ * off and requires them equal. Defaulting to `off` would mean the refusal rate only starts being
+ * collected after someone remembers to set an environment variable, and the measurement is the
+ * whole point of this phase. A behaviour-neutral measurement that requires a manual step is a
+ * measurement that does not happen. `off` remains as the explicit kill switch.
+ *
+ * WHY SHADOW FIRST, AND WHY IT IS CHEAP HERE. The "new" title under every one of these deletions is
+ * simply the string as it stood BEFORE the padding ran — which the code already holds. So shadow
+ * costs one captured variable and one log line per stage, not a second generation pass.
+ *
+ * WHAT IT MEASURES, and it is the number the seller asked for before any of this reaches a listing:
+ * how often removing the padding drops a title under the corpus floor, i.e. how often the seller's
+ * own ruling ("never ship short — always ask me", 2026-08-12) would hold a listing back. My estimate
+ * was 33-54 chars on one traced chain; an estimate is not a rate. */
+export const titleV4Mode = (): 'off' | 'shadow' | 'on' => {
+  const v = (process.env.TITLE_V4 || 'shadow').toLowerCase()
+  // Anything unrecognised falls to SHADOW, never to `on`: a typo can log, but it can never change a
+  // shipped title. `off` must be typed exactly, because silencing the measurement is a real decision.
+  return v === 'on' ? 'on' : v === 'off' ? 'off' : 'shadow'
+}
+/** True when the padding must not run for real. Shadow still runs it (so shipping is unchanged) and
+ *  logs what it would have suppressed. */
+const v4Applies = (): boolean => titleV4Mode() === 'on'
+
 /**
  * THE PO'S MEASURED TITLE SHAPE, AS NUMBERS THE PRODUCER'S ARBITER CAN SEE.
  *
@@ -1391,6 +1424,12 @@ export function titleQualityJudge(title: string, opts: {
   // that was OURS: the hand-typed sub-70 docks scored the seller's own 69-char gold at 80 (PR-C
   // before-state). At on+shape the floor derives from the corpus (lenMin=69 at HEAD): a title the
   // seller's own range admits takes NO dock; pressure starts only below their shortest gold.
+  /* `corpusLen` is the seller's MEASURED LENGTH RANGE, and it must survive TITLE_V4 untouched.
+   * Withdrawing it does NOT relax anything — it falls through to the hardcoded `len < 70` docks
+   * below, i.e. it RE-CREATES the 70-char floor this change exists to delete, and immediately docks
+   * the seller's 69-char Rod Father gold. (Caught by titleV4.test.ts before commit; the first cut of
+   * this change gated the wrong variable.) The identity CEILING is a different thing and is
+   * withdrawn at its own site below. */
   const corpusLen = titleShapeJudgeMode() === 'on' && opts.shape ? opts.shape : null
   if (len > 75) { score -= 45; problems.push(`length ${len} > 75 Amazon cap`) }
   else if (corpusLen) {
@@ -1416,7 +1455,17 @@ export function titleQualityJudge(title: string, opts: {
   // `titleShapeTerms` above for the arithmetic that made this the seam. At 'off'/'shadow' the score
   // is byte-identical to the pre-2026-08-10 judge.
   if (titleShapeJudgeMode() === 'on') {
-    const ceiling = opts.shape?.maxLeftWords ?? opts.maxLeftWords
+    /* THE DERIVED IDENTITY CEILING — withdrawn at TITLE_V4=on (2026-08-12).
+     *
+     * MEASURED SELF-CONTRADICTION: `measureGoldShape`'s outlier trim returns maxLeftWords=7, the
+     * brief prints that to the council as a hard law, and gold #4 — printed as an exemplar directly
+     * beneath it — has a TEN-word identity. The judge duly docks the seller's own gold to 86. A
+     * corpus-derived law that rejects a member of its own corpus is not a law.
+     *
+     * It cannot be repaired by re-tuning the number: the seller's Rod Father gold and pure keyword
+     * soup BOTH run 13 identity words, so no word count separates them. Identity LENGTH was never
+     * the rule — "is this one thing a person says" is, and that question belongs to the referee. */
+    const ceiling = v4Applies() ? null : (opts.shape?.maxLeftWords ?? opts.maxLeftWords)
     const shape = titleShapeTerms(t, ceiling)
     if (shape.leftDock > 0) {
       score -= shape.leftDock
@@ -3243,7 +3292,14 @@ ${baseSystem}`,
     // Anti-lean: only block append when the title carries the OPPOSITE gender's carrier tokens.
     const antiLean = (wantFemale && carriers.male && !carriers.female) || (wantMale && carriers.female && !carriers.male)
     const tail = ` for ${targetAud}`
-    if (!antiLean && (best.length + tail.length) <= 75) {
+    /* THE RULE-2 APPEND — suppressed at TITLE_V4=on (2026-08-12).
+     *
+     * listingPipeline.ts:3206-3211 records this as the SOLE AUTHOR of "…for Men … for Women", the
+     * string the seller called EVEN WORSE. It is deterministic code adding audience words to reach a
+     * shape — an ADDITION, and every one of the five rejected titles was authored by an addition.
+     * Under the seller's 2026-08-12 rule 1 an audience phrase earns its place only when a shopper
+     * types it; that is a judgement, and the referee owns it. Code no longer bolts one on. */
+    if (!antiLean && (best.length + tail.length) <= 75 && !v4Applies()) {
       const preAppend = best
       best = `${best}${tail}`
       appended = true
@@ -6543,7 +6599,19 @@ async function humanizeTitleTo75(
       : (i > 0 && RETRY_MINOR_WORDS.has(w)) ? w
       : w.charAt(0).toUpperCase() + w.slice(1),
   ).join(' ')
-  if (title && title.length < trigger) {
+  /* THE LENGTH-EXTENSION RETRY — deleted at TITLE_V4=on (2026-08-12).
+   *
+   * THIS IS THE MEASURED AUTHOR OF THE LIVE DEFECT. On B0GVV3XL4T the council wrote 56 characters,
+   * this loop stretched it to 71 by inventing "Fan Tournament", and the deterministic judge rewarded
+   * the padding 70 -> 100 purely for the extra length. The ship door then changed nothing
+   * ([TITLE_DOOR_TRACE] stages: []), so every byte of that defect was authored here.
+   *
+   * The code's own comment already called it "a shape-blind length maximizer sitting AFTER the
+   * council". It exists only to reach a floor the seller has now abolished: "the floor refuses, it
+   * never pads". A title that lands short is a signal that keyword research is thin — the ship gate
+   * surfaces it; nothing fills it. */
+  const v4PreRetry = title
+  if (title && title.length < trigger && !v4Applies()) {
     for (let attempt = 1; attempt <= 2 && title.length < trigger; attempt++) {
       try {
         // UNUSED-KEYWORD FEED (recomputed each pass against the current title): pool phrases that still
@@ -8537,7 +8605,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }))
     moneyed = inc.title
     mark('INCLUSIVE_AUDIENCE', moneyed)
-    const v = enforceTitleBand(moneyed, titleBandCtx(moneyed))
+    /* THE FACTS PAD — suppressed at TITLE_V4=on (2026-08-12).
+     *
+     * The repo's own attribution makes this the author of TWO of the five rejected titles: it minted
+     * "| Crew Neck" (titleBand.ts:702-706) and "| Short Sleeve" (:3186-3188) to reach a length band.
+     * It is also the LAUNDERING vector — appending two words converts a droppable spec-only tail into
+     * a protected brand tail (classifyTail: "Short Sleeve" = specOnly, "Short Sleeve Comfort Colors
+     * Tee" = brand).
+     *
+     * The seller abolished its reason on 2026-08-12: "never ship short — always ask me". A title that
+     * cannot reach the band is now a REFUSAL, surfaced, not a hole packed with facts. */
+    const v4NoPad = v4Applies()
+    const v = v4NoPad
+      ? { title: moneyed, decision: 'v4-no-pad', notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
+      : enforceTitleBand(moneyed, titleBandCtx(moneyed))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title
     // and no log line — "the net works", "the net never fired" and "the net fired and did nothing"
@@ -8573,6 +8654,31 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       from: banded.length, to: drop.title.length, note: drop.note,
     }))
     mark('MONEY_POSITION_GATE', drop.title)
+    /* ── TITLE_V4 SHADOW MEASUREMENT — the number the seller asked for BEFORE anything changes ────
+     *
+     * `moneyed` is the title as it stood BEFORE the facts pad; `drop.title` is what ships today. The
+     * difference is exactly what the pad manufactured, and whether removing it drops the title under
+     * the seller's own corpus floor (their shortest gold is 69 — the Rod Father).
+     *
+     * At shadow this logs and ships today's bytes unchanged. At `on` the pad never ran, so the two
+     * are the same string and `wouldRefuse` becomes a real refusal handled upstream. Logged on EVERY
+     * trip, including no-ops: a flag whose shadow arm is silent on its own target listing is a dark
+     * flag — the TITLE_MONEY_TAIL lesson this repo already paid for once. */
+    const v4Mode = titleV4Mode()
+    if (v4Mode !== 'off') {
+      const unpadded = moneyed
+      const CORPUS_FLOOR = 68        // the seller's shortest gold after their 2026-08-12 revision
+      console.log('[TITLE_V4_DIFF]', JSON.stringify({
+        mode: v4Mode,
+        shipped: drop.title,
+        shippedLen: drop.title.length,
+        withoutPad: unpadded,
+        withoutPadLen: unpadded.length,
+        padManufactured: drop.title !== unpadded,
+        wouldRefuse: unpadded.length < CORPUS_FLOOR,
+        floor: CORPUS_FLOOR,
+      }))
+    }
     // ONE line per trip. `stages` is the ordered list of every stage that actually rewrote the
     // string — i.e. the authorship record. An empty `stages` means the door shipped the producer's
     // bytes untouched, which is the state the architecture is aiming for.
