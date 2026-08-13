@@ -306,3 +306,53 @@ GOLD    THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee
 ```
 The IDENTITY is now byte-identical to the seller's gold. The money position is the remaining gap,
 and it is exactly the gap the referee exists to close.
+
+---
+
+## 10. THE POOL IS OFF-THEME, AND THE THEME RATER IS INVERTED (measured 2026-08-13, B0GVV3XL4T)
+
+The seller asked why "Comfort Colors" bleeds into a World Cup design's keywords. Measured from the
+live intelligence endpoint, it is not really about Comfort Colors:
+
+```
+75 keywords total
+27 on-theme (soccer/World Cup/countries)      111,294 volume
+48 off-theme (generic women's apparel)      1,966,669 volume   <- 95% of the pool
+```
+
+Top of the pool for a 2026 World Cup tee: `oversized tshirts for women` 385,892 · `t shirts for
+women` 284,479 · `womens t shirts` 206,724. The design's own vocabulary — `futbol` 14,038,
+`mexico soccer jersey` 14,038, `fifa world cup 2026` 9,565 — is an order of magnitude below.
+
+**MECHANISM.** `keywordResearcher.ts:1528` stores the pool sorted `searchVolume DESC`, and `:1241`
+takes `allSorted.slice(0, 10)` as the PRIMARY bucket. On a niche design the top 10 by volume are
+category head terms by construction, so the design can never surface its own words.
+
+**AND THE GUARD MEANT TO PREVENT THIS IS SCORING BACKWARDS:**
+
+```
+usa jersey                     themeFit 0     <- the seller's own gold word
+futbol                         themeFit 0     <- the design's core term
+oversized tshirts for women    themeFit 2
+comfort colors graphic tshirt  themeFit 2
+t shirts                       themeFit 2
+```
+
+Distribution over 75 rows: {0: 20, 1: 3, 2: 39, 3: 13}.
+
+**HYPOTHESIS (not yet verified):** the rater is judging PRODUCT IDENTITY, not THEME. `usa jersey`
+is a jersey rather than a graphic tee, so it rates 0; `oversized tshirts for women` is the right
+garment, so it rates 2. Under the seller's own rule that is inverted — their gold uses the host
+countries as MODIFIERS on a Tee (`| USA Mexico Canada Football Tee`).
+
+**WHAT THIS KILLED BEFORE IT SHIPPED.** The planned narrowing of the grounding carve-out was
+"vetted = actionType AND themeFit >= 2". Measured against this distribution, that would have
+DELETED `futbol` and `usa jersey` and KEPT `oversized tshirts for women` — the exact inversion of
+the defect it was meant to fix. It is not being built. Measuring the distribution before choosing
+the threshold is the only reason that was caught.
+
+**OPEN RISK FROM 2026-08-13's CARVE-OUT.** Exempting vetted targets from the vocabulary test
+recovered `usa jersey`; it also stopped dropping `oversized tshirts for women` and `oversized
+graphic tees`, which now reach the council. On the verifying regen the council ignored them and
+chose `USA Mexico Canada` anyway — a good outcome, not a guarantee. The component that should
+decide "is this about THIS design" is the referee (9/9 on the leave-one-out gate), still unwired.
