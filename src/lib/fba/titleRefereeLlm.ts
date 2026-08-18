@@ -194,7 +194,22 @@ export async function runReferee(
   opts?: { runs?: number; model?: string },
 ): Promise<RefereeResult> {
   const runs = opts?.runs ?? 3
-  const model = opts?.model || process.env.TITLE_REFEREE_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
+  /* PINNED TO THE MODEL THE GATE ACTUALLY PASSED ON (2026-08-18).
+   *
+   * The leave-one-out go/no-go — the evidence this referee is allowed to exist at all — was run on
+   * gpt-4.1-mini: 9/9 correct, 0.89 agreement, 0 false fires. The default here was 'gpt-5', a model
+   * the gate never evaluated. So the moment anything wired this in, production would have been
+   * deciding titles with an UNVALIDATED referee while the passing evidence pointed at a different
+   * one — and every future measurement would have been against a system nobody tested.
+   *
+   * It is also the cheaper model, but that is not the argument. The argument is that a gate result
+   * transfers only to the thing that was gated.
+   *
+   * TITLE_COUNCIL_MODEL is dropped from the chain deliberately: the referee is a DIFFERENT ROLE
+   * from the council (adversary != judge is the whole point of the split), so inheriting the
+   * council's model silently re-couples them. An explicit TITLE_REFEREE_MODEL still overrides for
+   * a deliberate re-gate. */
+  const model = opts?.model || process.env.TITLE_REFEREE_MODEL || 'gpt-4.1-mini'
   const wins = new Map<string, number>()
   let last: CandidateVerdict[] = []
 
