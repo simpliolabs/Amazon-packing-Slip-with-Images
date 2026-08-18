@@ -56,3 +56,41 @@ export async function resolveToChildAsin(
 
   return null
 }
+
+/**
+ * Resolve an ASIN (parent OR child) to the PARENT the family pushes under.
+ *
+ * WHY THIS EXISTS (2026-08-18, task #105). The listing PAGE already resolves a pasted child ASIN to
+ * its parent and redirects (page.tsx ~:346-355, shipped as #106). The PUSH path never did. So a
+ * child ASIN reaching push-content was used verbatim as `parent_asin`, family discovery found no
+ * rows whose parent_asin matched a CHILD, and the push refused with "No SKUs found for this parent.
+ * Run a Sync first." — a message that blames a missing sync for what is actually a resolution gap.
+ *
+ * The seller confirmed the case: B0GML74MJQ is a child of B0GML5V7KZ. The task text read "family
+ * discovery finds only 1 row (parent==child)", which described the symptom and pointed at discovery;
+ * the defect is one layer earlier, in what discovery was ASKED about.
+ *
+ * ONE RESOLVER, BOTH DIRECTIONS. This deliberately delegates to resolveToChildAsin rather than
+ * running its own queries: that function already encodes the hard-won details — the FBA+FBM twin
+ * case that makes .single() throw, the rollup fallback, the listing_content fallback. A second
+ * implementation would be a second set of edge cases to keep in sync, which is exactly the
+ * asymmetry that produced this bug.
+ *
+ * FAIL-OPEN: unresolvable (orphan, unsynced, null parent) returns the input unchanged, so behaviour
+ * for every ASIN that resolves today is byte-identical and a resolution failure degrades to exactly
+ * what happens now.
+ */
+export async function resolveToParentAsin(
+  inputAsin: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+): Promise<{ parentAsin: string; resolvedFrom: string | null }> {
+  const r = await resolveToChildAsin(inputAsin, supabase)
+  const parent = r?.parentAsin
+  // A self-parented row (parent_asin === asin) resolves to itself — correct, and not a redirect.
+  if (parent && parent !== inputAsin) {
+    console.log(`[resolveAsin] child ${inputAsin} -> parent ${parent} (push/verify path)`)
+    return { parentAsin: parent, resolvedFrom: inputAsin }
+  }
+  return { parentAsin: inputAsin, resolvedFrom: null }
+}
