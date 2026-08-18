@@ -23,7 +23,7 @@ import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
 import { garmentNounFor, SHIRT_BASE, foreignHeadNoun, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
-import { coverageMode } from '@/lib/keyword-engine/coverage-core'
+import { coverageMode, makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
 // PO RULING 2026-08-09 — the money tail may never be decided by raw volume. ONE shared pure rule
 // (also read by the intelligence GET's health signal and the RANK council brief) so the three
 // surfaces cannot disagree about whether a pool carries market data.
@@ -2179,14 +2179,46 @@ export async function buildItemHighlights(
     .slice(0, 6)
     .map((d) => `- ${d.field_name}: ${d.recommended_value.trim()}`)
   const ownBrands = ownBrandTokenSet(brandName)
+  /* IH-2 (PO 2026-08-18): "it should be taking descriptive terms from the Keyword bank if not used
+   * in title, Such as 'Graphic Tee for Women'".
+   *
+   * THE PLACEMENT DOCTRINE, EXTENDED — one rule, not a new list. The system already answers "which
+   * field holds which keyword" for the other three surfaces: TITLE takes the one money keyword,
+   * BACKEND takes the CRITICAL/UPGRADE overflow, BULLETS stay clean benefit prose and are NOT a
+   * coverage surface. Item Highlights had no stated place in that scheme, so the pool arrived here
+   * as unfiltered "context" and the field never earned its indexed, shopper-visible space.
+   *
+   * ITS PLACE: spec-grounded descriptors PLUS the descriptive residual the TITLE could not fit.
+   * That is why the filter below is "not already covered by the title" and not "highest volume" —
+   * a term the title already carries is not residual, it is a repeat, and repeats are precisely what
+   * this field must avoid (the prompt's own rule, and Amazon's 2x word cap).
+   *
+   * ONE PREDICATE, NOT A SECOND ONE. `makeCoverageChecker` is the repo's single coverage seam
+   * (coverage-core), the same tokeniser the scorer and the RANK panel use — so "the title already
+   * says this" means the same thing in this field as it does on every screen. Its garment folding is
+   * what makes the seller's own example work: "graphic tee for women" is NOT considered covered by a
+   * title that never mentions women, even though both contain a garment noun.
+   *
+   * The haystack is netTitles when present — on a locked listing the shipped IH sits beside the
+   * seller's LOCKED title, not the fresh one the pipeline just produced, and residual is only
+   * meaningful against the title that will actually be on the page.
+   *
+   * Widened 3 -> 8 because the list is now FILTERED to terms that can legitimately be placed;
+   * previously three unfiltered rows could all be title repeats, leaving the model nothing usable.
+   * The hard gates below and the terminal net still bound what survives. */
+  const ihTitleHay = ((netTitles && netTitles.length ? netTitles : [finalTitle])
+    .filter(Boolean) as string[]).join(' ')
+  const titleCovers = makeCoverageChecker(ihTitleHay)
   const contextKws = [...pool]
     .sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
     .map((k) => scrubTrademarks((k.keyword || '').trim()).toLowerCase())
     .filter((kw) => kw
       && !season.isOffSeason(kw)
       && findThirdPartyBrands(kw, ownBrands).length === 0
-      && !(capacityFamily && CAPACITY_RE.test(kw)))
-    .slice(0, 3)
+      && !(capacityFamily && CAPACITY_RE.test(kw))
+      // THE IH-2 FILTER: only the residual the title could not carry.
+      && !titleCovers(kw))
+    .slice(0, 8)
   season.diff('item-highlights', pool.map((k) => (k.keyword || '').trim()).filter(Boolean))
 
   // The PO's rules (2026-07-19), verbatim, as the brief's spine: ≤75 chars, short feature/benefit PHRASES
@@ -2213,7 +2245,14 @@ export async function buildItemHighlights(
     ...factRows,
     `- Product type: ${apparelProduct ? 'apparel (garment)' : 'non-apparel'}`,
     capacityFamily ? '- This family spans MULTIPLE storage capacities — never mention a specific GB/TB.' : '',
-    contextKws.length ? `Top search phrases (CONTEXT for what shoppers want and the ONE use-case — do NOT copy them as a keyword list):\n${contextKws.map((k) => `- ${k}`).join('\n')}` : '',
+    /* IH-2: these are now the descriptive RESIDUAL — real shopper phrasing the TITLE could not
+     * carry (filtered by the shared coverage predicate above). They are eligible to be WORDED IN,
+     * not merely inferred from, which is the seller's ask: "taking descriptive terms from the
+     * Keyword bank if not used in title, Such as 'Graphic Tee for Women'".
+     * The anti-keyword-list rule STAYS and matters more now that these are placeable: the field is
+     * customer-facing prose, so a phrase is woven in naturally or left out. Truth is unaffected —
+     * spec claims still come only from the FACT rows above, never from a search phrase. */
+    contextKws.length ? `Descriptive phrases shoppers search that your TITLE does NOT already cover — you MAY word ONE OR TWO of these in naturally where they read as a feature/benefit (an audience or garment descriptor, e.g. "graphic tee for women"). Never paste them as a list, never let one become a spec claim, and never repeat a word the rest of the line already uses:\n${contextKws.map((k) => `- ${k}`).join('\n')}` : '',
     'Write the Item Highlights string now.',
   ].filter(Boolean).join('\n')
 
