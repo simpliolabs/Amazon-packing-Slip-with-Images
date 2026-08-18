@@ -529,6 +529,15 @@ export default function ListingDetailPage() {
   const [editTitle, setEditTitle] = useState<string>('')
   const [titleScore, setTitleScore] = useState<{ titleScore: number; maxTitleScore: number; overallScore: number; ruleProblems: string[]; suppressionRisk: boolean } | null>(null)
   const [titleScoreLoading, setTitleScoreLoading] = useState(false)
+  /* ITEM HIGHLIGHT editor (IH-1, PO 2026-08-18: "if i ship highlights by itself, i should have a
+   * way to make changes to it like we do for TITLE"). Mirrors the title editor's three hooks
+   * deliberately — same shape, same lifecycle — so there is ONE interaction pattern to learn and
+   * one to maintain, rather than a second bespoke editor. */
+  const [ihCheck, setIhCheck] = useState<{
+    ok: boolean; problems: string[]; chars: number; maxChars: number; overCap: boolean
+    repeatedWords: string[]; maxWordRepeats: number; wouldShip: string; willShipUnchanged: boolean
+  } | null>(null)
+  const [ihCheckLoading, setIhCheckLoading] = useState(false)
   // ── Live push progress — populated from NDJSON stream events. Each entry tracks one SKU's
   // state as the route patches it in the loop. Replaces the old all-or-nothing 'Pushing…'
   // spinner with a per-SKU readout, AND eliminates the proxy-502 failure mode entirely
@@ -1602,6 +1611,16 @@ export default function ListingDetailPage() {
         setEditTitle(d?.broadcast && typeof d.proposedValue === 'string' ? d.proposedValue : '')
         setTitleScore(null)
       }
+      /* IH-1: seed the editable Item Highlight box with the proposed value so the seller edits from
+       * the recommendation rather than a blank field. `detailOverride` is REUSED rather than adding a
+       * parallel state: buildPushBody already forwards it as `detail_value_override`, so the typed
+       * value reaches Amazon through the push path that already exists and is already tested. */
+      if (field === 'details' && /item\s*highlight/i.test(detailField ?? '')) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const d = data as any
+        setDetailOverride(typeof d?.proposedValue === 'string' ? d.proposedValue : '')
+        setIhCheck(null)
+      }
     } catch (e) {
       setPushError(e instanceof Error ? e.message : 'Preview failed')
     }
@@ -1622,6 +1641,23 @@ export default function ListingDetailPage() {
       setTitleScore(resp.ok ? data : null)
     } catch { setTitleScore(null) }
     setTitleScoreLoading(false)
+  }, [asin])
+
+  /** Check the seller's TYPED Item Highlight against the SAME deterministic gates the generator runs,
+   *  plus a preview of what the push boundary would actually ship. Read-only: no writes, no LLM, no
+   *  Jungle Scout, no Amazon call. Mirrors scoreTitle so the two editors behave identically. */
+  const checkHighlight = useCallback(async (text: string) => {
+    if (!text.trim()) { setIhCheck(null); return }
+    setIhCheckLoading(true)
+    try {
+      const resp = await fetch('/api/fba/listing-optimizer/check-item-highlight', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: asin, value: text.trim() }),
+      })
+      const data = await resp.json()
+      setIhCheck(resp.ok ? data : null)
+    } catch { setIhCheck(null) }
+    setIhCheckLoading(false)
   }, [asin])
 
   /** Build the exact push-content POST body — shared by the streaming push (confirmPush)
@@ -5444,6 +5480,48 @@ export default function ListingDetailPage() {
                                     {titleScore.ruleProblems.slice(0, 6).map((p, i) => <li key={i}>{p}</li>)}
                                   </ul>
                                 ) : <p className="text-emerald-700 mt-1">✓ No Amazon-rule violations.</p>}
+                              </div>
+                            )}
+                          </div>
+                        ) : pushPreview.field === 'details' && /item\s*highlight/i.test(pushPreview.detail_field ?? '') ? (
+                          /* IH-1 (PO 2026-08-18): the Item Highlight editor, mirroring the title editor
+                           * above. Same shape on purpose — edit in place, check, then ship YOUR version.
+                           * The typed value rides the EXISTING detail_value_override push path, and the
+                           * check runs the SAME gates the generator does (one rule since PR #578, so the
+                           * box can no longer green-light something the push boundary would trim). */
+                          <div className="space-y-2">
+                            <textarea
+                              value={detailOverride}
+                              onChange={(e) => { setDetailOverride(e.target.value); setIhCheck(null) }}
+                              rows={3}
+                              maxLength={200}
+                              className="w-full text-xs text-slate-900 border border-slate-300 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 resize-y"
+                              placeholder="Type or edit the Item Highlight to push to all SKUs…"
+                            />
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`text-[10px] font-medium ${detailOverride.length > 75 ? 'text-amber-600' : 'text-slate-500'}`}>
+                                {detailOverride.length}/75 chars{detailOverride.length > 75 ? ' · over the 75-char field cap' : ''}
+                              </span>
+                              <button onClick={() => checkHighlight(detailOverride)} disabled={ihCheckLoading || !detailOverride.trim()}
+                                className="text-[10px] bg-slate-700 hover:bg-slate-800 text-white px-2 py-0.5 rounded font-medium disabled:opacity-50">
+                                {ihCheckLoading ? 'Checking…' : 'Check Amazon rules'}
+                              </button>
+                            </div>
+                            {ihCheck && (
+                              <div className={`text-[11px] rounded-md p-2 border ${ihCheck.ok && ihCheck.willShipUnchanged ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+                                {ihCheck.problems.length > 0 ? (
+                                  <ul className="list-disc pl-4 space-y-0.5 text-slate-700">
+                                    {ihCheck.problems.slice(0, 6).map((p, i) => <li key={i}>{p}</li>)}
+                                  </ul>
+                                ) : <p className="text-emerald-700">✓ No Amazon-rule violations.</p>}
+                                {/* The honest bit: what the push boundary will ACTUALLY write. A value can
+                                  * pass the gates and still be trimmed, so never imply otherwise. */}
+                                {!ihCheck.willShipUnchanged && (
+                                  <p className="mt-1.5 text-amber-800">
+                                    <b>Will ship trimmed</b> (repeated words above {ihCheck.maxWordRepeats}x are dropped at the push boundary):
+                                    <span className="block mt-0.5 font-mono text-[10px] text-slate-800 break-words">{ihCheck.wouldShip}</span>
+                                  </p>
+                                )}
                               </div>
                             )}
                           </div>
