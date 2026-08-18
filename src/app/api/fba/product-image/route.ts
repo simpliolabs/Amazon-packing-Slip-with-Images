@@ -20,28 +20,15 @@
  * `visionSig` population does not force JS refresh; see the [KW_FINGERPRINT_STAMP] log there.
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { getAccessToken } from '@/lib/amazon/auth'
 import { createAdminClient } from '@/lib/supabase/server'
-
-const ENDPOINT = process.env.AMAZON_ENDPOINT || 'https://sellingpartnerapi-na.amazon.com'
-const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
+import { fetchCatalogImageUrl } from '@/lib/amazon/catalogImage'
 
 export async function GET(req: NextRequest) {
   const asin = new URL(req.url).searchParams.get('asin')
   if (!asin) return NextResponse.json({ error: 'asin is required' }, { status: 400 })
   try {
-    const token = await getAccessToken()
-    const url =
-      `${ENDPOINT}/catalog/2022-04-01/items/${encodeURIComponent(asin)}` +
-      `?marketplaceIds=${MARKETPLACE_ID}&includedData=images`
-    const resp = await fetch(url, { headers: { 'x-amz-access-token': token } })
-    if (!resp.ok) return NextResponse.json({ image_url: null })
-    const json = (await resp.json()) as {
-      images?: { images?: { link: string; height: number; width: number }[] }[]
-    }
-    const imgs = json.images?.[0]?.images ?? []
-    const best = [...imgs].sort((a, b) => b.height * b.width - a.height * a.width)[0]
-    const link = best?.link ?? null
+    // ONE shared fetcher with the admin backfill route (catalogImage.ts) — same pick, no drift.
+    const link = await fetchCatalogImageUrl(asin)
 
     // BEST-EFFORT PERSIST — never affects the browser response. Two guards keep this narrow:
     //   1. `.is('image_url', null)` — only fills a NULL slot; a manually-set or previously-persisted
