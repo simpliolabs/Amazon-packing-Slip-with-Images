@@ -50,7 +50,7 @@ import { guaranteedIdentitySynonyms, identitySynonymPhrases, getSeedPool, normal
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck } from '@/lib/fba/productDetailAttrs'
+import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
 import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
@@ -2060,14 +2060,14 @@ export function validateItemHighlights(
   // loop + the deterministic fallback both converge on short phrases.
   if (s.length > CONTENT_CONTRACT.itemHighlights.max) problems.push(`${s.length} characters — keep it ≤${CONTENT_CONTRACT.itemHighlights.max}; short feature/benefit phrases, not a sentence`)
   if (/[.!?](\s|$)/.test(s)) problems.push('reads as a full sentence — use short comma-separated feature/benefit phrases with NO sentence punctuation (. ! ?)')
-  const counts = new Map<string, number>()
-  for (const t of highlightTokens(s)) {
-    if (HIGHLIGHT_STOPWORDS.has(t)) continue
-    const norm = normHighlightToken(t)
-    counts.set(norm, (counts.get(norm) ?? 0) + 1)
-  }
-  const repeated = [...counts.entries()].filter(([, c]) => c > 1).map(([w]) => w)
-  if (repeated.length) problems.push(`these words appear more than once: ${repeated.join(', ')} — no non-trivial word may repeat`)
+  /* ONE RULE, shared with the push boundary (productDetailAttrs.ihRepeatViolations, 2026-08-18).
+   * This used to count locally with `c > 1` — STRICTER than Amazon, which allows a word twice. The
+   * generator therefore rejected values `capItemHighlightRepeats` would have shipped unchanged, so
+   * the corrective-retry loop chased a constraint that does not exist and the fallback dropped
+   * phrases it never needed to. It also blocked the seller's "Graphic Tee for Women" case, where
+   * `tee` folds to `shirt`. The validator and the door must answer the same question the same way. */
+  const repeated = ihRepeatViolations(s)
+  if (repeated.length) problems.push(`these words appear more than ${IH_MAX_WORD_REPEATS}x: ${repeated.join(', ')} — Amazon rejects the SKU above that`)
   if (scrubTrademarks(s).trim() !== s.trim()) problems.push('contains a protected trademark (e.g. "World Cup" — the safe phrasing is "World Futbol Cup")')
   const brands = findThirdPartyBrands(s, ownBrandTokenSet(brandName))
   if (brands.length) problems.push(`contains third-party brand(s)/team(s): ${brands.join(', ')}`)
