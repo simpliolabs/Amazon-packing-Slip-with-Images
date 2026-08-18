@@ -555,6 +555,26 @@ export async function POST(req: NextRequest) {
       else storedFingerprint = (fpRow as { kw_ref_fingerprint?: string | null } | null)?.kw_ref_fingerprint ?? ''
     } catch { fingerprintColumnExists = false }
     const signalChanged = fingerprintColumnExists && !!(competitorAsin || designNameOv || visionSig) && refFingerprint !== storedFingerprint
+    // FIRST-POPULATION GUARD (2026-08-18). Split the "did anything change" trigger from the "should
+    // we spend Jungle Scout credits" trigger — they are different questions. The seller has a
+    // standing NEVER-USE-CREDITS order (SELLER_PROFILE §0 / [[never-use-credits-directive]]) and
+    // the vision→credit chain the workflow surfaced earlier this session is: a listing that had no
+    // vision record gets one for the first time (ingestion catches up), which flips visionSig from
+    // empty to a value, which advances the fingerprint, which under the pre-fix `forceRefresh:
+    // signalChanged` line makes the NEXT regen force a billable Jungle Scout re-harvest — spending
+    // credits the seller has ruled out, on an ingestion event that carries zero new content.
+    //
+    // The correct semantic: force JS refresh ONLY when a signal genuinely CHANGED its content —
+    // never when it went from empty to first-populated. Real value → different value is a real
+    // change (a re-scan detected new artwork; a seller pointed at a different competitor). Empty →
+    // value is ingestion drift; storedFingerprint just gets stamped and next regen is stable.
+    const [storedComp, storedDesign, storedVision] = (storedFingerprint || '').split('|')
+    const shouldForceResearch = signalChanged && (
+      (competitorAsin && competitorAsin !== (storedComp || '')) ||
+      (designNameOv && designNameOv !== (storedDesign || '')) ||
+      // vision: value → different value only. empty → value is first-population, not a content change.
+      (!!visionSig && !!storedVision && visionSig !== storedVision)
+    )
 
     if (!existingKws || existingKws.length === 0 || signalChanged) {
       // Empty OR a changed reference signal — (re-)research now, before AI generation.
@@ -563,15 +583,19 @@ export async function POST(req: NextRequest) {
           const { syncKeywordIntelligence } = await import('@/lib/sync/syncKeywordIntelligence')
           await syncKeywordIntelligence(syncAsin, {
             includeJungleScout: true,
-            forceRefresh: signalChanged,   // a changed signal must RE-research, not return the stale universe
+            forceRefresh: shouldForceResearch,   // genuine content change only (not empty→first-population, see FIRST-POPULATION GUARD above)
             parentAsin: parent_asin,
             listingTitle: children[0]?.title || undefined,
           })
-          // Stamp the signals this universe was built with so the next regen doesn't re-research needlessly.
+          // Stamp the signals this universe was built with so the next regen doesn't re-evaluate
+          // this drift again. We stamp even when shouldForceResearch=false so a first-population
+          // of visionSig gets recorded and the SUBSEQUENT genuine content change (value → other
+          // value) can be detected against a non-empty storedVision. Without this stamp, the same
+          // empty→value transition would be re-evaluated on every regen forever.
           if (fingerprintColumnExists) {
             await supabase.from('listing_seo_scores').update({ kw_ref_fingerprint: refFingerprint } as never).eq('parent_asin', parent_asin)
           }
-          console.log(`[ai-recommendations] Keyword intelligence synced for ${syncAsin} (forceRefresh=${signalChanged}, fp=${refFingerprint})`)
+          console.log(`[ai-recommendations] Keyword intelligence synced for ${syncAsin} (forceRefresh=${shouldForceResearch}, signalChanged=${signalChanged}, fp=${refFingerprint})`)
         }
       } catch (syncErr) {
         console.warn('[ai-recommendations] Auto-sync failed, proceeding without keyword data:', syncErr)
