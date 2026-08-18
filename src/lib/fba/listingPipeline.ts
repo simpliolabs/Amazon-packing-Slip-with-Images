@@ -1440,6 +1440,50 @@ export const titleV4Mode = (): 'off' | 'shadow' | 'on' => {
  *  logs what it would have suppressed. */
 const v4Applies = (): boolean => titleV4Mode() === 'on'
 
+/* ── TITLE_REFEREE — SHADOW ONLY, AND `off` IS THE DEFAULT ─────────────────────────────────────
+ *
+ * off (DEFAULT) | shadow | on
+ *
+ * WHY `off` IS THE DEFAULT HERE AND `shadow` WAS THE DEFAULT FOR TITLE_V4. Shadow for V4 cost one
+ * captured variable and one log line — the "new" title was a string the code already held. Shadow
+ * HERE costs a REAL MODEL CALL on the regen path. A measurement that spends money must be switched
+ * on deliberately, so unset means nothing happens and nothing is billed.
+ *
+ * THE 2026-08-09 INCIDENT IS THE REASON FOR EVERY GUARD BELOW. An in-band LLM heal ran >160s, the
+ * gateway 502'd it BEFORE the write that would have armed its own cooldown, so every page load
+ * re-fired a doomed billable job. The lessons, applied:
+ *
+ *   1. BOUNDED BY CONSTRUCTION. This runs at most ONCE per council invocation — no loop, no retry,
+ *      no cooldown to arm. That is what makes it a different shape from the heal: there is no state
+ *      whose absence can cause a re-fire. (Stating it plainly rather than claiming to have applied
+ *      an arming pattern that does not fit.)
+ *   2. SAMPLED, DETERMINISTICALLY. Only a fraction of regens pay for it, chosen by hashing the
+ *      candidate set — so the same listing samples the same way on every run, which makes the
+ *      shadow data reproducible instead of a lottery.
+ *   3. HARD TIMEOUT. A hung call can never hold a regen open.
+ *   4. FAIL-OPEN, ALWAYS. Any error, timeout or malformed verdict ships the council's own pick,
+ *      unchanged, and logs why. The referee cannot make a regen fail.
+ *   5. AT `shadow` IT DECIDES NOTHING. It is asked, its answer is logged as [TITLE_REFEREE_DIFF],
+ *      and the council's winner ships byte-identical. `on` is deliberately NOT implemented in this
+ *      change — wiring a decider is a separate, reviewable step that should follow the data.
+ */
+export const titleRefereeMode = (): 'off' | 'shadow' | 'on' => {
+  const v = (process.env.TITLE_REFEREE || '').trim().toLowerCase()
+  return v === 'shadow' ? 'shadow' : v === 'on' ? 'on' : 'off'
+}
+/** 1-in-N regens pay for the shadow call. Deterministic per candidate set, so a given listing is
+ *  always sampled the same way and the resulting data is reproducible. */
+const REFEREE_SAMPLE_1_IN = Number(process.env.TITLE_REFEREE_SAMPLE || 5) || 5
+const REFEREE_TIMEOUT_MS = 25_000
+/** Stable string hash — NOT Math.random: a random sample makes every measurement unrepeatable. */
+const stableHash = (s: string): number => {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+  return Math.abs(h)
+}
+const refereeSampled = (key: string): boolean =>
+  REFEREE_SAMPLE_1_IN <= 1 || stableHash(key) % REFEREE_SAMPLE_1_IN === 0
+
 /**
  * THE PO'S MEASURED TITLE SHAPE, AS NUMBERS THE PRODUCER'S ARBITER CAN SEE.
  *
@@ -3378,6 +3422,77 @@ ${baseSystem}`,
     spread: bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score)),
   }))
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
+
+  /* THE REFEREE, IN SHADOW. Asked AFTER the council has already picked, and its answer changes
+   * nothing — `best` ships byte-identical below. See titleRefereeMode() for why every guard here
+   * exists and why `off` is the default.
+   *
+   * WHAT THIS MEASURES, and it is the number that decides whether the referee is ever wired: how
+   * often the referee's winner DIFFERS from the deterministic judge's. The judge is known to be
+   * indifferent — measured separation margin -44, and a 100-100 tie on the gold-vs-stuffed-anagram
+   * pair, which is the whole reason a referee was built. If the referee agrees with the judge on
+   * essentially every real regen, it is not worth its cost and this stops here. If it disagrees on
+   * the cases where the judge's spread is 0, that is the evidence to wire it.
+   *
+   * CODE STRIKES FIRST, exactly as in the offline gate: noveltyFloorFilter removes candidates that
+   * are decidable on a measured token fact, so the referee is never asked to adjudicate something
+   * code already knows — and that fact never reaches the prompt, where it once became a rule and
+   * docked one of the seller's own golds. */
+  if (titleRefereeMode() !== 'off' && candidates.length > 1) {
+    const sampleKey = candidates.join('|')
+    if (!refereeSampled(sampleKey)) {
+      console.log('[TITLE_REFEREE_DIFF]', JSON.stringify({ skipped: 'not-sampled', oneIn: REFEREE_SAMPLE_1_IN }))
+    } else {
+      try {
+        const { runReferee, noveltyFloorFilter } = await import('@/lib/fba/titleRefereeLlm')
+        const { nearestGolds, targetFromDesign } = await import('@/lib/fba/titleReferee')
+        const lineup = candidates.map((t, i) => ({ id: `c${i}`, title: t }))
+        const { kept, struck } = noveltyFloorFilter(lineup)
+        if (kept.length > 1) {
+          /* The design phrase is the identity minus the brand — the same slice the offline gate
+           * feeds (`sit.identity.split(/\s+/).slice(2)`), so shadow and gate ask the referee the
+           * same question shape. `lean` is threaded so the anchor picks a gold with a matching
+           * audience rather than one that merely looks similar. */
+          const designPhrase = best.split(/\s+/).slice(2).join(' ').split(' | ')[0] ?? ''
+          /* AudienceLean carries HARD ('female') and SOFT ('lean_female') variants; the referee's
+           * situation model only has the hard three. Collapsing soft to hard is right HERE and
+           * would be wrong in the producer: the anchor is asking "which gold is this design most
+           * like", and a lean_female design is most like a female gold. The producer keeps the
+           * distinction because soft lean must not force a gendered tail. */
+          const refLean: 'male' | 'female' | 'unisex' | null =
+            lean === 'female' || lean === 'lean_female' ? 'female'
+            : lean === 'male' || lean === 'lean_male' ? 'male'
+            : lean === 'unisex' ? 'unisex' : null
+          const target = targetFromDesign({ designPhrase, lean: refLean })
+          const anchors = nearestGolds(target, SEED_GOLD_TITLES)
+          const res = await Promise.race([
+            runReferee(kept, anchors, designPhrase, { runs: 1 }),
+            new Promise<null>((r) => setTimeout(() => r(null), REFEREE_TIMEOUT_MS)),
+          ])
+          const refWinner = res ? kept.find((c) => c.id === res.winnerId)?.title ?? null : null
+          console.log('[TITLE_REFEREE_DIFF]', JSON.stringify({
+            judgePicked: best,
+            judgeScore: bestScore,
+            // A judge spread of 0 means the judge expressed NO preference — those are exactly the
+            // regens where a referee would be carrying the decision, so they are logged explicitly.
+            judgeSpread: bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score)),
+            refereePicked: refWinner,
+            agree: refWinner === null ? null : refWinner === best,
+            agreement: res?.agreement ?? null,
+            model: res?.model ?? null,
+            ballot: kept.length,
+            struckByCode: struck.length,
+            timedOut: res === null,
+          }))
+        }
+      } catch (e) {
+        // FAIL-OPEN. The council's pick ships regardless; a referee problem is a measurement
+        // problem, never a content problem.
+        console.warn('[TITLE_REFEREE_DIFF] shadow call failed (council pick ships unchanged):', e instanceof Error ? e.message : e)
+      }
+    }
+  }
+
 
   // TITLE_COUNCIL_V3.1a Step 8 — TERMINAL SAFETY NET at council exit (PO Q5 = YES).
   // Two tiny rules applied in order to the fail-open winner:
