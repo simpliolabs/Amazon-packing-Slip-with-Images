@@ -17,6 +17,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
+import { resolveToParentAsin } from '@/lib/fba/resolveAsin'
 import { getAccessToken } from '@/lib/amazon/auth'
 import { FIELD_CONFIG, isPushField, type PushField } from '@/lib/fba/pushFields'
 import { resolveDetailAttribute } from '@/lib/fba/productDetailAttrs'
@@ -32,9 +33,22 @@ import { getBearerUser, resolveUserName } from '@/lib/fba/claims'
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url)
-    const parentAsin = url.searchParams.get('parent_asin')
+    const inputAsin = url.searchParams.get('parent_asin')
     const rawField = url.searchParams.get('field') ?? 'keywords'
-    if (!parentAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+    if (!inputAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+    /* RESOLVE CHILD -> PARENT BEFORE ANY DISCOVERY (task #105, 2026-08-18).
+     *
+     * The listing PAGE has resolved a pasted child ASIN to its parent since #106; this path never
+     * did. A child arriving here was used verbatim as parent_asin, so family discovery asked for
+     * rows whose parent_asin equals a CHILD, found none, and the push refused with "No SKUs found
+     * for this parent. Run a Sync first." — blaming a missing sync for a resolution gap. The
+     * seller's case: B0GML74MJQ is a child of B0GML5V7KZ.
+     *
+     * Resolving HERE, once, at the entry — not inside each discovery query — is what stops the two
+     * paths drifting again: everything downstream sees a parent, exactly as it always assumed.
+     * Fail-open: unresolvable returns the input unchanged, so every ASIN that works today is
+     * byte-identical. */
+    const { parentAsin, resolvedFrom } = await resolveToParentAsin(inputAsin, await createAdminClient())
 
     // ── DEBUG branch (?debug=1&field=details&detail_field=…) — diagnose enum resolution.
     //    Read-only: resolves the productType and introspects the LIVE product-type schema so we
@@ -163,8 +177,14 @@ export async function POST(req: NextRequest) {
     requestPushCancel(body.cancel_token)
     return NextResponse.json({ ok: true })
   }
-  const { parent_asin, confirm, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = body
-  if (!parent_asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+  const { parent_asin: inputParentAsin, confirm, field: rawField, detail_field: detailField, skus, title_override, detail_value_override } = body
+  if (!inputParentAsin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
+  /* PATH PARITY WITH THE GET PREVIEW (task #105). Resolving only on the preview would be the exact
+   * asymmetry the doctrine rejects — the seller would see a correct preview and then a push that
+   * refuses, which is worse than both paths failing. Same resolver, same entry position, same
+   * fail-open. Awaited before `confirm` is even checked so every downstream read, the SKU loop and
+   * the push_jobs row all carry the parent. */
+  const { parentAsin: parent_asin } = await resolveToParentAsin(inputParentAsin, await createAdminClient())
   if (confirm !== true) {
     return NextResponse.json({ error: 'Refusing to write without explicit confirm:true. Use GET to preview first.' }, { status: 400 })
   }
