@@ -536,19 +536,33 @@ function stripOppositeGenderTokens(s: string, lean: 'male' | 'female'): string {
   return out
 }
 
-/** Top-N opportunity phrases by SEARCH VOLUME (not sales) — the volume-priority seed for
- *  fillBackendToBudget. The backend pool is sales-PRIMARY sorted, so a high-volume/low-sales phrase
- *  like "graphic tees for women" (710K) can sit far down the pool and never be reached before the
- *  244-byte stop; this re-ranks a small head by volume so the score-movers win the byte budget.
- *  Strings only — the fill appends bytes and the ORDER carries the priority. */
+/** Top-N opportunity phrases handed to fillBackendToBudget as its PRIORITY SEED. Strings only —
+ *  the fill appends bytes and the ORDER carries the priority, so whatever leads this list wins the
+ *  most valuable backend real estate.
+ *
+ *  IT NO LONGER RE-SORTS BY RAW VOLUME (2026-08-18). The original docstring justified a volume
+ *  re-sort with "the backend pool is sales-PRIMARY sorted, so a high-volume/low-sales phrase can sit
+ *  far down the pool and never be reached before the 244-byte stop". That premise DIED with #143:
+ *  `backendPool` is now sorted with `targetRankGap` as the PRIMARY key, under a comment that reads
+ *  "Targets lead so they claim bytes first". The pool head IS the decided priority.
+ *
+ *  So re-sorting it by `searchVolume` DESC discarded the referee's decision for exactly the eight
+ *  slots that matter most, and replaced it with the one signal the seller has ruled against twice:
+ *  raw volume. That is how a niche design loses its own vocabulary — measured on B0GVV3XL4T, where
+ *  the pool carries 95% of its volume in generic apparel heads ("oversized tshirts for women",
+ *  385K) that no shopper of a World Cup tee is typing. Volume-DESC is the same mechanism recorded
+ *  in the harvest defect: the design can never outrank the category.
+ *
+ *  It is also the same DOCTRINE violation as the title length-pad: a deterministic step overriding
+ *  the decider AFTER the ballot closed. Code may filter and propose; it may not overrule.
+ *
+ *  Volume survives as a TIE-BREAK only — inside one decision rank it is a real signal, and the pool
+ *  comparator already exhausts its own keys before ties remain. Taking the head in POOL ORDER means
+ *  targets lead, CRITICAL follows, and volume still separates equals. */
 const topVolumeBackendPhrases = (
   pool: { keyword: string; searchVolume?: number | null }[],
   n = 8,
-): string[] =>
-  [...pool]
-    .sort((a, b) => (b.searchVolume || 0) - (a.searchVolume || 0))
-    .slice(0, n)
-    .map((k) => k.keyword)
+): string[] => pool.slice(0, n).map((k) => k.keyword)
 
 /** Fill each child's backend string toward the 250-byte budget (PO: "NOT utilizing all
  *  250 characters" — the agent's ~240 target landed at 228, leaving ~20 bytes of free
