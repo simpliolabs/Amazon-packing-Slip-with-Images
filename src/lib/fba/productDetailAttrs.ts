@@ -203,6 +203,58 @@ export const SINGLE_DESIGN_ONLY_LEAK_REASON =
  * count as one); drop the offending later phrase(s). Never blanks the field.
  */
 const IH_TRIVIAL = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'in', 'to', 'great', 'her', 'his', 'on', 'or', 'your'])
+
+/* ── THE ONE ITEM-HIGHLIGHT REPEAT RULE ────────────────────────────────────────────────────────
+ *
+ * Until 2026-08-18 there were TWO, and they disagreed on every axis:
+ *
+ *                        threshold          tokenizer            stopwords
+ *   generator validator  c > 1  (ONCE)      highlightTokens      HIGHLIGHT_STOPWORDS
+ *   push boundary        > 2    (TWICE)     local split          IH_TRIVIAL
+ *
+ * Amazon's rule is TWICE — documented above from a real SKU rejection. So the GENERATOR was
+ * enforcing a rule stricter than the marketplace, rejecting values the push boundary would have
+ * shipped without complaint. The corrective-retry loop burned turns chasing a constraint that does
+ * not exist, and the deterministic fallback dropped descriptive phrases it never needed to drop.
+ *
+ * That directly fought the seller's own request (2026-08-18) to source MORE descriptive terms from
+ * the keyword bank — their example, "Graphic Tee for Women", folds `tee` to `shirt`, so on any
+ * highlight that already names the garment once the stricter rule refused a phrase Amazon accepts.
+ *
+ * ONE predicate, exported, used by both. Threshold = Amazon's. Folding = the push boundary's (the
+ * side that has actually been rejected, so its folding is the tested one). The two stopword sets are
+ * UNIONED rather than one being picked: each contains words the other lacks ('on'/'or'/'your' only
+ * in IH_TRIVIAL), and a word wrongly counted as significant is a false rejection — the failure
+ * direction that costs the seller a legal phrase.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** Amazon's cap: a non-trivial word may appear at most this many times in one Item Highlight. */
+export const IH_MAX_WORD_REPEATS = 2
+
+/** Canonical fold — plurals and the tshirt/shirt family collapse to one token. */
+export const ihFoldWord = (w: string): string => {
+  let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (b === 'tshirt' || b === 'tshirts') b = 'shirt'
+  return b.replace(/s$/, '')
+}
+
+/** Words that never count toward the repeat cap. Union of both historical sets — see the block
+ *  comment above for why union rather than a pick. */
+export const IH_INSIGNIFICANT: ReadonlySet<string> = new Set([
+  ...IH_TRIVIAL,
+  'great', 'her', 'his',   // from the generator's HIGHLIGHT_STOPWORDS
+])
+
+/** THE rule. Returns the folded words that exceed Amazon's cap (empty = compliant).
+ *  One implementation, so the generator can never reject what the push boundary would ship. */
+export function ihRepeatViolations(value: string): string[] {
+  const counts = new Map<string, number>()
+  for (const w of (value || '').split(/[\s/,-]+/).map(ihFoldWord)) {
+    if (w.length <= 1 || IH_INSIGNIFICANT.has(w)) continue
+    counts.set(w, (counts.get(w) ?? 0) + 1)
+  }
+  return [...counts.entries()].filter(([, c]) => c > IH_MAX_WORD_REPEATS).map(([w]) => w)
+}
 export function capItemHighlightRepeats(value: string): string {
   const fold = (w: string): string => {
     let b = w.toLowerCase().replace(/[^a-z0-9]/g, '')
