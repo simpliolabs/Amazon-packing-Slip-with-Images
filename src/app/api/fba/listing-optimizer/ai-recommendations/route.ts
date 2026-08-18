@@ -32,6 +32,7 @@ import { tryParsePriorKeywords, shouldPreserveKeywords, shouldPreserveDescriptio
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { isOffNicheKeyword, hasDatedEventContamination } from '@/lib/keyword-engine/nicheGuards'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
+import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
 import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
 // CONTENT-RECONCILE (PO 2026-08-08, SELLER_PROFILE §10): ONE shared helper, called from BOTH
@@ -1638,7 +1639,31 @@ export async function POST(req: NextRequest) {
             priorPerChildDescriptions = (lockRow as { per_child_descriptions?: unknown } | null)?.per_child_descriptions ?? null
             const locked = (lockRow as { title_source?: string } | null)?.title_source === 'manual'
             if (locked && regenerate_section !== 'title') {
-              const kept = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
+              /* THE LOCK IS NOT A BYPASS OF THE SHIP DOOR (2026-08-18).
+               *
+               * This assignment runs AFTER the pipeline's scrubPublished has already cleaned
+               * `rec.recommended_title`, so before this change a manually-locked title re-entered the
+               * result UNSCRUBBED and no regen could ever heal it — `lock-title/route.ts` stores what
+               * the seller typed verbatim at both of its write sites (the seed upsert and the update),
+               * with no trademark or celebrity guard anywhere on that path.
+               *
+               * That made the lock a permanent hole in an otherwise closed door: a locked title
+               * containing "World Cup" would ship "World Cup" for ever, while an identical
+               * AI-generated title was rewritten to "World Futbol Cup" on every single run.
+               *
+               * The fix is NOT a new net — it is making the EXISTING door apply to the one path that
+               * walked around it. Same two functions the pipeline's own `scrubPub` composes
+               * (listingPipeline.ts: `scrubCelebrityNames(scrubTrademarks(s), ...)`), same order, and
+               * both are idempotent so a clean title is byte-identical through this.
+               *
+               * NOT scrubbed at the lock WRITE site on purpose: the seller's typed string is preserved
+               * as they wrote it (their intent, their audit row), and the scrub belongs at the PUBLISH
+               * boundary — the distinction memory records as research-boundary vs publish-boundary. */
+              const typed = String((lockRow as { recommended_title?: string }).recommended_title ?? '').trim()
+              const kept = typed ? scrubCelebrityNames(scrubTrademarks(typed), 'lock:title') : ''
+              if (kept && kept !== typed) {
+                console.log(`[ai-recommendations] LOCK SCRUB ${parent_asin} — the locked title carried a guarded phrase; shipped the scrubbed form: ${JSON.stringify({ typed, kept })}`)
+              }
               if (kept) rec.recommended_title = kept
               const keptPct = (lockRow as { per_child_titles?: unknown }).per_child_titles
               if (Array.isArray(keptPct) && keptPct.length) rec.per_child_titles = keptPct as typeof rec.per_child_titles

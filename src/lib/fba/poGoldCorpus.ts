@@ -25,6 +25,8 @@
  * lose its few-shots because a query failed.
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
+import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 
 /**
  * SEED GOLDS — the floor, used when the DB read fails or returns nothing.
@@ -465,6 +467,24 @@ export async function loadPoGoldTitles(
       // measured ceiling for the whole catalog with no deploy.
       if (t.length < 40 || t.length > 80) continue
       if (!/^the ceo\b/i.test(t)) continue
+      /* A GOLD MUST SURVIVE THE SHIP DOOR UNCHANGED (2026-08-18).
+       *
+       * The guards above test SHAPE — length, brand-front, uniqueness. None of them test whether the
+       * row is a title we are actually allowed to publish. `lock-title/route.ts` writes whatever the
+       * seller types, unscrubbed, at both of its write sites, and every one of those rows lands in
+       * THIS query (it selects on `title_source = 'manual'`). So a locked title carrying a trademark
+       * or a celebrity name was eligible to become a GOLD — the reference corpus that teaches the
+       * council its measured shape, its vocabulary, and its ceiling.
+       *
+       * That is the worst possible place for an unguarded string: one bad row moves the measured
+       * shape for the entire catalog with no deploy, and it teaches the council to reproduce exactly
+       * the phrase the publish door will then rewrite — so the council is trained to fight the door.
+       *
+       * The test is deliberately IDENTITY, not repair: if scrubbing changes the string at all, the
+       * row is not a gold. We do not silently admit the scrubbed variant, because the seller never
+       * chose that string — they chose the one the door will not allow. Skipping is the honest
+       * outcome, and the corpus falls back to the seed when too few rows survive. */
+      if (scrubCelebrityNames(scrubTrademarks(t), 'gold:corpus') !== t) continue
       const k = t.toLowerCase()
       if (seen.has(k)) continue          // one gold locked across many children is ONE example
       seen.add(k)
