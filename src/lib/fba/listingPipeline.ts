@@ -56,7 +56,7 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
-import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
+import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
@@ -7810,6 +7810,14 @@ export async function expandShortBulletsTerminal(
  * on any path. Step 3 wires it into the section-regen returns; the full-path call sites are swapped in
  * Step 6. Keywords are intentionally NOT handled here (the keywords-only path already runs its chain).
  */
+/** Compose a backend token-ban predicate with the capability ban (task #41 / GAP 2): a
+ *  non-customizable listing's fill may never add custom/personalized/photo tokens. Returns the
+ *  base predicate untouched when customizable (empty extra set — zero overhead). */
+function composeCapabilityBan(base: (w: string) => boolean, customizable: boolean): (w: string) => boolean {
+  const extra = new Set(capabilityBanTokens(customizable))
+  return extra.size ? (w: string) => base(w) || extra.has(w.toLowerCase()) : base
+}
+
 export async function applyTerminalNets(
   field: 'bullets' | 'description',
   value: string[] | string,
@@ -7823,6 +7831,11 @@ export async function applyTerminalNets(
     /** blankSpec.unisex — drives the sizing-clarity guarantee (PO 2026-08-06: unisex blanks
      *  marketed to women MUST say so in bullets/description/features, NEVER the title). */
     unisex?: boolean
+    /** blankSpec fabric truth (task #41 / GAP 2) — drives enforceFabricTruth, the terminal net that
+     *  rewrites false weight-class claims to the blank's true class and strips unverifiable
+     *  stretch claims. Absent spec ⇒ weight adjectives are REMOVED (never claimed unconfirmed). */
+    weightNote?: string
+    stretch?: string
   },
 ): Promise<string[] | string> {
   if (field === 'bullets') {
@@ -7835,6 +7848,9 @@ export async function applyTerminalNets(
       garmentBrand: ctx.garmentBrand,
     })
     if (ctx.unisex) bullets = ensureUnisexFitClause(bullets)
+    // FABRIC TRUTH last (INVARIANT 2): the expander above is an LLM and can re-introduce a false
+    // weight claim; the deterministic net has the final word on every path.
+    bullets = bullets.map((b) => enforceFabricTruth(b, { weightNote: ctx.weightNote, stretch: ctx.stretch }))
     return bullets
   }
   // description
@@ -7843,6 +7859,11 @@ export async function applyTerminalNets(
   if (ctx.brandName) d = scrubDescriptionBody(d, { brand: ctx.brandName, garmentBrand: ctx.garmentBrand })
   if (ctx.unisex) d = capDescriptionVisible(injectUnisexFitNote(d))
   if (ctx.brandName) d = await reExpandDescriptionIfShort(ctx.openai, d, { finalTitle: ctx.finalTitle, brand: ctx.brandName, garmentBrand: ctx.garmentBrand })
+  // FABRIC TRUTH last (INVARIANT 2) — the re-expander is an LLM and can re-inject a false weight
+  // claim. Re-cap ONLY when the net changed the bytes (a weight-class replacement can lengthen the
+  // text); an untouched description passes through byte-identical (the pinned passthrough contract).
+  const truthed = enforceFabricTruth(d, { weightNote: ctx.weightNote, stretch: ctx.stretch })
+  d = truthed === d ? d : capDescriptionVisible(truthed)
   return d
 }
 
@@ -10034,7 +10055,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // loop; the bullets-only path never did, so a section-regen could ship broadcast bullets < 150. Wire
     // the SAME terminal net here. apparel-gated to match the full-path guard.
     if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
-      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true }
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true, weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch }
       bullets = await applyTerminalNets('bullets', bullets, spineCtx) as string[]
     }
     // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
@@ -10286,7 +10307,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // garment-noun candidate against the title (which stably indexes the product type), not against
         // bullets — bullets are transient prose and their "graphic"/"gift"/etc. would wrongly block
         // high-volume opportunity phrases from ever landing in backend where Content step 2 needs them.
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, groupBan, groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(groupBan, input.customizable === true), groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -10311,7 +10332,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(banBackendTok, input.customizable === true), restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -10379,7 +10400,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, banBackendTok, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
+        keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(banBackendTok, input.customizable === true), idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
       }))
       return out
     }
@@ -10438,7 +10459,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // so a section-regen could ship brand-in-body / "screen-printed" / sub-900 broadcast copy. Wire the
     // SAME terminal net here, before the per-design fan-out and the existing capDescriptionVisible below.
     {
-      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true }
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true, weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch }
       if (descriptionOnly && brandName) {
         descriptionOnly = await applyTerminalNets('description', descriptionOnly, spineCtx) as string
       }
@@ -10493,7 +10514,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const ban = extraBan ? (w: string) => banBackendTok(w) || extraBan(w) : banBackendTok
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(p.keywords, input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, ban, idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
+      keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(ban, input.customizable === true), idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
     }))
     return out
   }
@@ -10983,6 +11004,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // FINAL length cap on the SHIPPED description bytes (broadcast + per-child): the editorial audit + the
   // per-design fan-out are LLM rewrites that can re-expand past 980 with nothing else re-capping (the
   // "1600-char description" regression). Re-cap LAST so the shipped description is always Amazon-lean.
+  // FABRIC TRUTH on every shipped prose surface (task #41 / GAP 2) — broadcast AND the per-child
+  // bytes the push PATCHes (INVARIANT 5). Deterministic + idempotent; runs before the final caps
+  // because a weight-class replacement can lengthen the text by a few characters.
+  const fabricSpec = { weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch }
+  if (Array.isArray(bullets)) bullets = bullets.map((b) => enforceFabricTruth(b, fabricSpec))
+  description = enforceFabricTruth(description, fabricSpec)
+  if (perChildBullets) perChildBullets = perChildBullets.map((c) => ({ ...c, bullets: (c.bullets || []).map((b) => enforceFabricTruth(b, fabricSpec)) }))
+  if (perChildDescriptions) perChildDescriptions = perChildDescriptions.map((c) => ({ ...c, description: enforceFabricTruth(c.description, fabricSpec) }))
   description = capDescriptionVisible(description)
   if (perChildDescriptions) perChildDescriptions = perChildDescriptions.map((c) => ({ ...c, description: capDescriptionVisible(c.description) }))
 
