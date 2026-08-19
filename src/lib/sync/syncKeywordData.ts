@@ -19,6 +19,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import type { PoolKey } from '@/lib/keyword-engine/poolKey';
 import { getAccessToken } from '@/lib/amazon/auth';
 import { gunzipSync } from 'zlib';
 import {
@@ -241,7 +242,10 @@ async function findSiblingKeywords(asin: string): Promise<SQPKeywordRow[]> {
 
 // ─── Main Sync Function ───────────────────────────────────────────────────────
 
-export async function syncKeywordData(asin: string): Promise<EngineResult> {
+export async function syncKeywordData(asin: PoolKey, queryAsin?: string): Promise<EngineResult> {
+  // #174: `asin` is the family POOL key (storage); `queryAsin` is the sellable child the SQP report
+  // is actually fetched for. A parent hub has no SQP report of its own.
+  const fetchAsin = queryAsin || asin;
   // Step 1: Check cache
   const cached = await getCachedKeywords(asin, 'sqp');
   let rawKeywords: SQPKeywordRow[];
@@ -252,22 +256,22 @@ export async function syncKeywordData(asin: string): Promise<EngineResult> {
   } else {
     // Step 2: Fetch from SP-API
     try {
-      rawKeywords = await fetchSQPFromAPI(asin);
-      await logApiCall('sqp', 'GET_BRAND_ANALYTICS_SEARCH_TERMS_REPORT', [asin], 200);
+      rawKeywords = await fetchSQPFromAPI(fetchAsin);
+      await logApiCall('sqp', 'GET_BRAND_ANALYTICS_SEARCH_TERMS_REPORT', [fetchAsin], 200);
 
       if (rawKeywords.length > 0) {
         // Cache the raw response
         await setCachedKeywords(asin, 'sqp', rawKeywords);
       } else {
         // No SQP data — fall back to sibling inheritance
-        rawKeywords = await findSiblingKeywords(asin);
+        rawKeywords = await findSiblingKeywords(fetchAsin);
         dataSource = 'inherited';
       }
     } catch (err) {
       console.error(`[syncKeywordData] SQP fetch failed for ${asin}:`, err);
       await logApiCall('sqp', 'GET_BRAND_ANALYTICS_SEARCH_TERMS_REPORT', [asin], 500);
       // Fall back to sibling inheritance on error
-      rawKeywords = await findSiblingKeywords(asin);
+      rawKeywords = await findSiblingKeywords(fetchAsin);
       dataSource = 'inherited';
     }
   }

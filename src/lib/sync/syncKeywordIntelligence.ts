@@ -90,6 +90,9 @@ export interface IntelligenceOptions {
   parentAsin?: string;
   /** Listing title (fallback seed for keyword research) */
   listingTitle?: string;
+  /** #174: the SELLABLE child for ASIN-parameterized external queries (SQP report, JS
+   *  keywords_by_asin, presence rows). Storage stays under the PoolKey `asin`. */
+  queryAsin?: string;
   /** Seller-typed seed for the research pipeline (Intelligence tab "Re-research" box) — beats
    *  every derived seed. Costs 3 JS credits per run like any fresh research. */
   manualSeed?: string;
@@ -104,8 +107,9 @@ export interface IntelligenceOptions {
  *   3. Fresh SQP fetch → engine → store
  *   4. researchKeywords() (if JS enabled) → 3-bucket pipeline → merge
  */
+import type { PoolKey } from '@/lib/keyword-engine/poolKey';
 export async function syncKeywordIntelligence(
-  asin: string,
+  asin: PoolKey,
   options: IntelligenceOptions = {}
 ): Promise<EngineResult> {
   const {
@@ -115,6 +119,7 @@ export async function syncKeywordIntelligence(
     parentAsin,
     listingTitle,
     manualSeed,
+    queryAsin,
   } = options;
 
   // Path 1: Return stored analysis if available and not forcing refresh
@@ -149,7 +154,7 @@ export async function syncKeywordIntelligence(
   }
 
   // Path 2 & 3: Run SQP sync (handles cache check internally)
-  const sqpResult = await syncKeywordData(asin);
+  const sqpResult = await syncKeywordData(asin, queryAsin);
 
   // Path 4: Augment with Jungle Scout research pipeline
   const jsStatus = await getJungleScoutStatus();
@@ -168,7 +173,7 @@ export async function syncKeywordIntelligence(
         // NOT .single(): an ASIN has FBA+FBM twin rows and .single() errors on 2+ matches,
         // which silently fed {} to the engine → every keyword flagged "nowhere" (B0FK8NM9RT).
         // ALL twin rows are passed — presence is OR'd per row (divergent twins can't shadow).
-        const listingRows = await loadListingRowsForPresence(supabase, asin);
+        const listingRows = await loadListingRowsForPresence(supabase, queryAsin || asin);
 
         // Source the ENRICHED research pool (keyword_research cache) when present — it carries the
         // #270 seed-pool niche merge + #280 universes (tagged fromUniverse), which the raw per-ASIN
@@ -261,6 +266,7 @@ export async function syncKeywordIntelligence(
         manualSeed,
         categorySeed,
         productType: resolvedProductType,
+        queryAsin,
       });
 
       // Instrument the research pool size so an empty/thin pool is VISIBLE in prod logs — the
@@ -268,7 +274,7 @@ export async function syncKeywordIntelligence(
       console.log(`[syncKeywordIntelligence] research pool for ${asin}: ${researchResult.allKeywords.length} kw (seed source: ${researchResult.source})`);
       if (researchResult.allKeywords.length > 0) {
         // Fetch listing content for presence check (twin-safe; all rows, OR'd per row)
-        const listingRows = await loadListingRowsForPresence(supabase, asin);
+        const listingRows = await loadListingRowsForPresence(supabase, queryAsin || asin);
 
         // Relevance gate + never-collapse floor (shared helper, applied identically to the cache-hit
         // path above so the two can't drift; gates BEFORE the engine + storage).

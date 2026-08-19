@@ -16,6 +16,7 @@ import { getStoredAnalysis } from '@/lib/keyword-engine'
 import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selection-core'
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
+import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
 import { buildItemHighlights } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
@@ -60,7 +61,8 @@ export async function POST(req: NextRequest) {
     const designAnchor = designName || detailValueToString((scoreRow as { design_name_override?: string } | null)?.design_name_override)
 
     const resolved = await resolveToChildAsin(parent_asin.toUpperCase(), supabase)
-    const analysis = (resolved ? await getStoredAnalysis(resolved.childAsin, readWindow(100)) : []) ?? []
+    // ONE POOL KEY (#174): read the family drawer, not the resolved child's.
+    const analysis = (resolved ? await getStoredAnalysis(poolKeyFromResolved(resolved, parent_asin.toUpperCase()), readWindow(100)) : []) ?? []
     // KEYWORD_TARGET_SET (#143). This route BYPASSES runListingPipeline entirely, so it must resolve
     // its own targets — buildItemHighlights sorts contextKws by coverageGapScore, which is the
     // gap-amplified score this PR exists to stop trusting. Without this, the one surface that skips

@@ -172,7 +172,11 @@ export async function fetchKeywordsByASIN(
     for (const asin of batch) {
       const keywords = result.get(asin) ?? [];
       if (keywords.length > 0) {
-        await setCachedKeywords(asin, 'jungle_scout', keywords);
+        // #174 boundary note: `batch` carries the keys its callers minted — the researcher
+        // passes the family PoolKey; the competitor force-harvest passes the competitor's own
+        // ASIN (a deliberately separate keyword_cache namespace). Neither must be re-resolved
+        // here, so this is the one documented cast at the harvest boundary.
+        await setCachedKeywords(asin as import('@/lib/keyword-engine/poolKey').PoolKey, 'jungle_scout', keywords);
         console.log(`[jungleScoutClient] Cached ${keywords.length} keywords for ASIN ${asin}`);
       }
     }
