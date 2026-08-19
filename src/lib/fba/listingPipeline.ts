@@ -3443,6 +3443,26 @@ ${baseSystem}`,
     if (!refereeSampled(sampleKey)) {
       console.log('[TITLE_REFEREE_DIFF]', JSON.stringify({ skipped: 'not-sampled', oneIn: REFEREE_SAMPLE_1_IN }))
     } else {
+      /* FIRE-AND-FORGET (2026-08-19 hotfix). The first live regen with this shadow ran ELEVEN
+       * MINUTES against a ~4-minute baseline, and the await below was the author: the shadow call
+       * was awaited INSIDE the council, the title's corrective loop re-runs the council up to 2
+       * extra times (:4006), multi-design multiplies per group, and at TITLE_REFEREE_SAMPLE=1 every
+       * one of those invocations paid the full call — serially, on the path the seller was watching.
+       *
+       * A shadow measurement must never extend the path it measures. The referee's answer changes
+       * NOTHING here (the council's pick has already shipped by the time it resolves), so there is
+       * nothing to wait for. The 25s Promise.race stays as the inner bound; a container restart
+       * mid-call loses one log line and nothing else — acceptable for a measurement, and why this
+       * pattern is safe here but was NOT safe for the 2026-08-09 heal (which had a WRITE after the
+       * call whose loss re-armed the loop; this has no write and no loop).
+       *
+       * `best`/`bestScore`/the judge spread are captured NOW, synchronously, so the log reflects
+       * the decision as it was made even though the line prints later. */
+      const capturedBest = best
+      const capturedScore = bestScore
+      const capturedSpread = bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score))
+      const startedAt = Date.now()
+      void (async () => {
       try {
         const { runReferee, noveltyFloorFilter } = await import('@/lib/fba/titleRefereeLlm')
         const { nearestGolds, targetFromDesign } = await import('@/lib/fba/titleReferee')
@@ -3471,25 +3491,29 @@ ${baseSystem}`,
           ])
           const refWinner = res ? kept.find((c) => c.id === res.winnerId)?.title ?? null : null
           console.log('[TITLE_REFEREE_DIFF]', JSON.stringify({
-            judgePicked: best,
-            judgeScore: bestScore,
+            judgePicked: capturedBest,
+            judgeScore: capturedScore,
             // A judge spread of 0 means the judge expressed NO preference — those are exactly the
             // regens where a referee would be carrying the decision, so they are logged explicitly.
-            judgeSpread: bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score)),
+            judgeSpread: capturedSpread,
             refereePicked: refWinner,
-            agree: refWinner === null ? null : refWinner === best,
+            agree: refWinner === null ? null : refWinner === capturedBest,
             agreement: res?.agreement ?? null,
             model: res?.model ?? null,
             ballot: kept.length,
             struckByCode: struck.length,
             timedOut: res === null,
+            // Cost made visible: without this the latency that caused the 11-minute regen would
+            // have stayed invisible in its own diagnostic.
+            elapsedMs: Date.now() - startedAt,
           }))
         }
       } catch (e) {
-        // FAIL-OPEN. The council's pick ships regardless; a referee problem is a measurement
-        // problem, never a content problem.
-        console.warn('[TITLE_REFEREE_DIFF] shadow call failed (council pick ships unchanged):', e instanceof Error ? e.message : e)
+        // FAIL-OPEN. The council's pick shipped long before this resolves; a referee problem is a
+        // measurement problem, never a content problem.
+        console.warn('[TITLE_REFEREE_DIFF] shadow call failed (council pick shipped unchanged):', e instanceof Error ? e.message : e)
       }
+      })()
     }
   }
 
