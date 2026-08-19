@@ -288,3 +288,69 @@ export function applyBlankBrandNetToDetails(
   const out = arr.map((p, i) => (i === idx ? { ...p, recommended_value: netted, value_source: 'spec' } : p))
   return { details: out, changed: true }
 }
+
+// ─── FABRIC-TRUTH TERMINAL NET (task #41 / GAP 2, 2026-08-19) ────────────────────────────────────
+// The craft review caught "midweight" ×3 shipped for a Gildan 64000 (lightweight 4.5 oz) — the
+// LLM contradicting the system's own spec catalog. The title brief already carries a GARMENT TRUTH
+// prompt clause; a prompt is a request, never a guarantee (generation-invariants INVARIANT 2), so
+// this deterministic net runs LAST on the shipped bytes of every prose surface. It also repairs
+// the dangling-conjunction amputation artifact ("layers cleanly under flannels, or.") that phrase
+// scrubs leave behind.
+
+const WEIGHT_CLASS_RE = /\b(?:light|mid|middle|heavy)[\s-]?weight\b/gi
+
+/** The blank's true weight class word, from its weightNote — or null when the blank is unconfirmed. */
+export function trueWeightClass(spec?: Pick<BlankSpec, 'weightNote'> | null): 'lightweight' | 'midweight' | 'heavyweight' | null {
+  const note = spec?.weightNote?.toLowerCase() ?? ''
+  if (/\blight/.test(note)) return 'lightweight'
+  if (/\bmid|\bmiddle/.test(note)) return 'midweight'
+  if (/\bheavy/.test(note)) return 'heavyweight'
+  return null
+}
+
+/**
+ * Deterministic, idempotent, pure. Enforces on any prose surface (bullet, description HTML, IH):
+ *  1. WEIGHT: every weight-class adjective is rewritten to the blank's TRUE class; when the blank
+ *     is unconfirmed (no weightNote), the adjective is removed — an unverifiable claim never ships.
+ *  2. STRETCH: stretch-positive claims ("stretchy", "4-way stretch") are removed unless the spec
+ *     explicitly declares a stretchy fabric (the current catalog is Low Stretch or silent).
+ *  3. TIDY: dangling conjunctions left by phrase removal — ", or." / ", and…" before a sentence
+ *     end — collapse to a clean period, and doubled whitespace is folded.
+ * HTML-safe: replacements never touch tags (the patterns match prose words only).
+ */
+export function enforceFabricTruth(text: string, spec?: Pick<BlankSpec, 'weightNote' | 'stretch'> | null): string {
+  if (!text) return text
+  let t = text
+  const wt = trueWeightClass(spec)
+  t = t.replace(WEIGHT_CLASS_RE, () => wt ?? '')
+  // Stretch claims: allowed ONLY when the spec positively declares stretch (not "Low Stretch").
+  const stretchOk = !!spec?.stretch && !/low|no\b/i.test(spec.stretch)
+  if (!stretchOk) {
+    t = t.replace(/(?:\bwith\s+|\band\s+)?\b(?:(?:2|4|two|four)[\s-]?way\s+)?stretch(?:y|able|iness)?\b/gi, '')
+  }
+  // Tidy: fold whitespace runs the removals leave, fix " ," / " ." gaps, then repair dangling
+  // conjunctions before a sentence end ("…flannels, or." → "…flannels.").
+  t = t.replace(/[ \t]{2,}/g, ' ').replace(/ +([,.;])/g, '$1')
+  t = t.replace(/,\s*(?:or|and|but|with|plus|for)\s*\./gi, '.')
+  t = t.replace(/,\s*(?:or|and|but|with|plus|for)\s*(<\/(?:p|li)>)/gi, '.$1')
+  return t
+}
+
+/**
+ * Backend capability ban (GAP 2's third HIGH): tokens asserting a personalization capability the
+ * listing does not have. When customizable=true the set is empty — :8088's prompt clause already
+ * ENCOURAGES these terms for genuinely Amazon-Custom listings, and the fill's fact tokens add them.
+ */
+export function capabilityBanTokens(customizable: boolean): string[] {
+  if (customizable) return []
+  return ['custom', 'customs', 'customize', 'customized', 'customizable', 'personalize', 'personalized', 'monogram', 'monogrammed', 'photo']
+}
+
+/** Strip capability-claim tokens from a backend string BEFORE the budget fill re-pads it, so a
+ *  non-customizable listing's backend never carries the claim and the fill replaces the freed
+ *  bytes with pool keywords. Token-exact, whitespace-normalized, idempotent. */
+export function stripCapabilityClaims(backend: string, customizable: boolean): string {
+  if (!backend || customizable) return backend
+  const ban = new Set(capabilityBanTokens(false))
+  return backend.split(/\s+/).filter((tok) => !ban.has(tok.toLowerCase().replace(/[^a-z0-9']/g, ''))).join(' ')
+}
