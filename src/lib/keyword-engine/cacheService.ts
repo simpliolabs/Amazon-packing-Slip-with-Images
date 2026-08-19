@@ -582,11 +582,23 @@ export async function storeAnalysis(
     console.warn(`[storeAnalysis] no chunk persisted for ${asin} — SKIPPING stale-prune to preserve the existing pool`);
     return;
   }
+  // SOURCE-SCOPED (2026-08-19, task #177, PO-caught live): prune ONLY the sources this run actually
+  // refreshed. The unscoped delete was a pool destroyer: a regen's forced sync while Jungle Scout
+  // was KILL-SWITCHED OFF produced 2 SQP rows and then deleted all 83 freshly-harvested
+  // jungle_scout rows as "not refreshed this run" — a run that COULD NOT refresh a source must
+  // never delete that source's rows (the #352 abort-and-preserve doctrine at the pool layer).
+  // The paid harvest survived only because keyword_cache still held the research blob.
+  const refreshedSources = [...new Set(keywords.map((k) => k.dataSource).filter(Boolean))];
+  if (refreshedSources.length === 0) {
+    console.warn(`[storeAnalysis] no data_source on this run's rows for ${asin} — SKIPPING stale-prune (nothing provably refreshed)`);
+    return;
+  }
   await supabase
     .from('keyword_analysis')
     .delete()
     .eq('asin', asin)
     .neq('data_source', 'import')
+    .in('data_source', refreshedSources)
     .lt('analyzed_at', runTs);
 }
 
