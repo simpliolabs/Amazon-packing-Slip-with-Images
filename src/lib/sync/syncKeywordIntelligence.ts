@@ -158,7 +158,18 @@ export async function syncKeywordIntelligence(
 
   // Path 4: Augment with Jungle Scout research pipeline
   const jsStatus = await getJungleScoutStatus();
-  if (includeJungleScout && jsStatus.enabled) {
+  // #177 (PO-caught live): the kill switch gates SPENDING, never READING. With JS disabled, a
+  // servable paid-for research cache must still promote (researchKeywords cache-HIT = zero JS
+  // calls) — skipping this whole path while disabled is how a forced sync collapsed an 83-row
+  // pool to 2 SQP rows and the seller's paid harvest sat unreadable in keyword_cache. When
+  // disabled: enter ONLY if the cache is servable, and force the cache path (no harvest).
+  const { freshResearchPoolSize } = await import('@/lib/keyword-engine/keywordResearcher');
+  const cachedResearchSize = jsStatus.enabled ? -1 : await freshResearchPoolSize(asin);
+  const effectiveForceRefresh = forceRefresh && jsStatus.enabled;
+  if (includeJungleScout && !jsStatus.enabled && cachedResearchSize > 0) {
+    console.log(`[syncKeywordIntelligence] JS disabled but research cache is servable (${cachedResearchSize} kw) — promoting from cache, no credits can be spent.`);
+  }
+  if (includeJungleScout && (jsStatus.enabled || cachedResearchSize > 0)) {
     try {
       // Parent for the relevance gate (used by BOTH the cache-hit and fresh-research paths below).
       const resolvedParent = (parentAsin || await getParentAsin(asin)) || asin;
@@ -167,7 +178,7 @@ export async function syncKeywordIntelligence(
       const cachedAge = rawCached ? await getKeywordCacheAge(asin, 'jungle_scout') : Infinity;
       const JS_REFRESH_TTL_HOURS = 24;
 
-      if (rawCached && cachedAge < JS_REFRESH_TTL_HOURS && !forceRefresh) {
+      if (rawCached && cachedAge < JS_REFRESH_TTL_HOURS && !effectiveForceRefresh) {
         console.log(`[syncKeywordIntelligence] JS cache HIT for ${asin} (${Math.round(cachedAge)}h old). Skipping JS API call.`);
         // Re-run engine on cached data to get fresh presence analysis.
         // NOT .single(): an ASIN has FBA+FBM twin rows and .single() errors on 2+ matches,
@@ -261,7 +272,7 @@ export async function syncKeywordIntelligence(
         console.warn('[syncKeywordIntelligence] category-seed resolution failed (non-fatal):', e instanceof Error ? e.message : e);
       }
       const researchResult = await researchKeywords(asin, resolvedParent || asin, {
-        forceRefresh,
+        forceRefresh: effectiveForceRefresh,
         listingTitle,
         manualSeed,
         categorySeed,
