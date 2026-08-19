@@ -21,7 +21,7 @@ import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { loadPoGoldTitles } from '@/lib/fba/poGoldCorpus'
 import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
-import { runListingPipeline } from '@/lib/fba/listingPipeline'
+import { runListingPipeline, reconcilePlacedInBackendFirst } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 // Shared preserve rules (#157, 2026-08-03): the 2026-07-22 review's claim that the keywords partial
 // "already throws in all modes" was FALSE — the producing gate's floor is 190 (BACKEND_DEGRADE_STRICT
@@ -181,6 +181,8 @@ export interface KeywordReconciliation {
   action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'
   search_volume: number
   placed_in: string[]
+  /** PLAN, not truth: where an UNplaced keyword goes next regen (backend-first). placed_in is TRUTH only. */
+  planned_in?: string[]
   exact_text: string
   why: string
 }
@@ -2162,7 +2164,19 @@ export async function GET(req: NextRequest) {
       // action_plan copy block — the field-level scrubs above never reached these). Identifier keys
       // (sku/asin/element/...) are skipped inside scrubTrademarksDeep, so SKU codes like
       // "France-World-Cup-TS-Parent" are never rewritten. Idempotent heal-on-read, same as the rest.
-      keyword_reconciliation: scrubTrademarksDeep(keyword_reconciliation),
+      // PLACED_IN HEAL-ON-READ (2026-08-19, GAP 1): recompute placement TRUTH against the exact bytes
+      // this response serves (the scrubbed recommendation), so every historical row's report stops
+      // claiming placements its bytes don't carry — no regen required. Same deterministic function the
+      // pipeline runs at write; deriveActionPlan (#358) is the precedent for deriving on serve.
+      keyword_reconciliation: scrubTrademarksDeep(reconcilePlacedInBackendFirst(
+        keyword_reconciliation,
+        typeof recommended_title_scrubbed === 'string' ? recommended_title_scrubbed : '',
+        Array.isArray(recommended_bullets_scrubbed) ? recommended_bullets_scrubbed : [],
+        typeof recommended_description_scrubbed === 'string' ? recommended_description_scrubbed : '',
+        per_child_keywords_scrubbed,
+        per_child_bullets_scrubbed,
+        per_child_descriptions_scrubbed,
+      )),
       action_plan: action_plan_out,
       product_details_improvements: scrubTrademarksDeep(product_details_improvements),
       field_pushed_at,

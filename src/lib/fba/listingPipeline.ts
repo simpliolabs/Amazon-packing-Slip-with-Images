@@ -90,34 +90,44 @@ export interface PipelineCannibalizationWarning { keyword: string; affected_skus
  *  parse before the stamp sites run — the invariant is structural, not prompt-behavioral.
  *  Persisted on the JSONB item — no migration. */
 export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; value_source?: 'spec' | 'audience' | 'ruling' }
-export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; exact_text: string; why: string }
+export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; planned_in?: string[]; exact_text: string; why: string }
 
-// Backend-first placement net (Step 3, task #60): the LLM audit still tends to claim bullet_1..3 for
-// keywords the generator actually routed to BACKEND (Content step 2). Re-derive placed_in from the
-// FINALIZED content so the UI's rank work-list never promises a bullets-weave the pipeline won't
-// deliver — the false "Regenerate to weave them in" loop. Any keyword the copy does not literally carry
-// lands in backend_keywords (overflow's sanctioned home). Uses the LEGACY generator primitive so it
-// reflects what the copy LITERALLY carries; emits 'bullet_1'/'backend_keywords' tokens the page's norm()
-// understands.
-function reconcilePlacedInBackendFirst(
+// Backend-first placement net (Step 3, task #60; TRUTH/PLAN split 2026-08-19, GAP 1 of the B0DSQPZY9S
+// craft review): the LLM audit still tends to claim bullet_1..3 for keywords the generator actually
+// routed to BACKEND (Content step 2). Re-derive placement from the FINALIZED content so the UI's rank
+// work-list never promises a bullets-weave the pipeline won't deliver — the false "Regenerate to weave
+// them in" loop. TWO fields, two meanings, never mixed again:
+//   placed_in  = TRUTH — surfaces whose bytes literally carry the keyword. NEVER fabricated: the old
+//                `|| placed.length === 0 → backend_keywords` fallback reported an uncovered keyword as
+//                indexed, so the seller's report lied ("aritzia dupes" claimed placed while in no field).
+//   planned_in = PLAN — where an UNplaced keyword should go on the next regen (backend, overflow's
+//                sanctioned home). The rank work-list routes off placed_in ∪ planned_in, so unplaced
+//                keywords still surface as regen tasks instead of vanishing.
+// Haystacks include the per-child multi-design bytes (the ones that actually PATCH Amazon — coherence
+// INVARIANT 5), not just the broadcast copy. Uses the LEGACY generator primitive so it reflects what the
+// copy LITERALLY carries; emits 'bullet_1'/'backend_keywords' tokens the page's norm() understands.
+export function reconcilePlacedInBackendFirst(
   recon: PipelineKeywordReconciliation[],
   finalTitle: string,
   bullets: string[],
   description: string,
   perChild: PipelinePerChildKeywords[],
+  perChildBullets?: { bullets: string[] }[],
+  perChildDescriptions?: { description: string }[],
 ): PipelineKeywordReconciliation[] {
   const backendHay = perChild.map((c) => c.keywords || '').join(' ')
-  const bulletsHay = bullets.join(' ')
+  const bulletsHay = [bullets.join(' '), ...(perChildBullets ?? []).map((c) => (c.bullets || []).join(' '))].join(' ')
+  const descriptionHay = [description || '', ...(perChildDescriptions ?? []).map((c) => c.description || '')].join(' ')
   return recon.map((kr) => {
     if (!kr.keyword) return kr
     const kw = [kr.keyword]
     const placed: string[] = []
     if (missingBulletKeywords([finalTitle || ''], kw).length === 0) placed.push('title')
     if (missingBulletKeywords([bulletsHay], kw).length === 0) placed.push('bullet_1')
-    if (missingBulletKeywords([description || ''], kw).length === 0) placed.push('description')
-    // Backend is the fallback home: index it there when the prose doesn't carry it (or nothing does).
-    if (missingBulletKeywords([backendHay], kw).length === 0 || placed.length === 0) placed.push('backend_keywords')
-    return { ...kr, placed_in: placed }
+    if (missingBulletKeywords([descriptionHay], kw).length === 0) placed.push('description')
+    if (missingBulletKeywords([backendHay], kw).length === 0) placed.push('backend_keywords')
+    // Truth stays truth; an uncovered keyword gets a PLAN, never a fabricated placement claim.
+    return { ...kr, placed_in: placed, planned_in: placed.length === 0 ? ['backend_keywords'] : undefined }
   })
 }
 export interface PipelineAplusModuleAction { module_type: string; action: 'ADD' | 'EDIT' | 'KEEP'; content_brief: string; position: number }
@@ -10990,7 +11000,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     variant_corrections: Array.isArray(audit.variant_corrections) ? audit.variant_corrections : [],
     cannibalization_warnings: Array.isArray(audit.cannibalization_warnings) ? audit.cannibalization_warnings : [],
     product_details_improvements: pdiFinal,
-    keyword_reconciliation: reconcilePlacedInBackendFirst(Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [], finalTitle, bullets, description, perChild),
+    keyword_reconciliation: reconcilePlacedInBackendFirst(Array.isArray(audit.keyword_reconciliation) ? audit.keyword_reconciliation : [], finalTitle, bullets, description, perChild, perChildBullets, perChildDescriptions),
     action_plan: actionPlan,
     irrelevant_keywords: irrelevantKeywords,
     // #92/#93 — exactly the bullet set the generator targeted + the real design name, for the scorer.
