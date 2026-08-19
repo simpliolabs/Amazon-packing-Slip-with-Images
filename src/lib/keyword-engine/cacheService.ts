@@ -45,8 +45,9 @@ const CACHE_TTL_DAYS = 30;
  * Check if fresh cached keyword data exists for an ASIN + source.
  * Returns null if cache miss or expired.
  */
+import type { PoolKey } from './poolKey';
 export async function getCachedKeywords(
-  asin: string,
+  asin: PoolKey,
   source: 'sqp' | 'jungle_scout'
 ): Promise<unknown[] | null> {
   const { data, error } = await supabase
@@ -79,7 +80,7 @@ export async function getCachedKeywords(
  * Uses upsert to handle re-fetches cleanly.
  */
 export async function setCachedKeywords(
-  asin: string,
+  asin: PoolKey,
   source: 'sqp' | 'jungle_scout',
   keywordData: unknown[]
 ): Promise<void> {
@@ -266,7 +267,7 @@ async function readPriorNativeMetrics(
  * Uses upsert on (asin, keyword) to handle re-analysis cleanly.
  */
 export async function storeAnalysis(
-  asin: string,
+  asin: PoolKey,
   keywords: AnalyzedKeyword[],
   opts?: StoreAnalysisOpts
 ): Promise<void> {
@@ -594,7 +595,7 @@ export async function storeAnalysis(
  * Returns null if no analysis exists yet.
  */
 export async function getStoredAnalysis(
-  asin: string,
+  asin: PoolKey,
   topN = 25
 ): Promise<AnalyzedKeyword[] | null> {
   // §P PRECONDITION (selection-core.test.ts). `persistedIsComplete`'s saturation test

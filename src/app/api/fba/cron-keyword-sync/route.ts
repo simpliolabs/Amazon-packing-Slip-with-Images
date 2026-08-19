@@ -20,6 +20,8 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 800 // a single SQP report poll is 5-8 min; allow headroom for one in-flight fetch
 
 import { NextRequest, NextResponse } from 'next/server'
+import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
+import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { createAdminClient } from '@/lib/supabase/server'
 import { syncKeywordData } from '@/lib/sync/syncKeywordData'
 
@@ -58,7 +60,11 @@ export async function GET(request: NextRequest) {
   for (const asin of asins) {
     if (refreshed.length >= MAX_PER_RUN || Date.now() - start > BUDGET_MS) break
     try {
-      await syncKeywordData(asin) // fresh SQP fetch → captureShareSnapshots writes the monthly row
+      // #174: stale rows are keyed by whatever key WROTE them (post-migration: the parent).
+      // ONE resolve yields both halves: the family pool key (storage) and the sellable child
+      // (the SQP report's real subject — a parent hub has no report of its own).
+      const r = await resolveToChildAsin(asin, supabase)
+      await syncKeywordData(poolKeyFromResolved(r, asin), r?.childAsin) // fresh SQP fetch → captureShareSnapshots writes the monthly row
       refreshed.push(asin)
     } catch (e) {
       errors.push({ asin, error: e instanceof Error ? e.message : String(e) })

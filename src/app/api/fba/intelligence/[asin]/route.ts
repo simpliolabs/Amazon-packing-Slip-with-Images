@@ -40,6 +40,7 @@ import { selectionMode, selectionEaseWeight, themeHealOnRead, needsEaseRestamp, 
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
+import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey';
 import { checkPresenceAny } from '@/lib/keyword-engine/checkPresence';
 // COHERENCE Invariant 6: at COVERAGE_CORE=on the Present-In tab decides coverage via the SAME shared
 // field-agnostic predicate the RANK panel uses, so the two read screens are identical by construction.
@@ -87,6 +88,11 @@ export async function GET(
     }
 
     const { childAsin, parentAsin } = resolved;
+    // ONE POOL KEY (#174): every keyword_analysis / keyword_cache touch below uses the FAMILY pool
+    // key (parent-keyed, one rule in poolKey.ts) — never the resolved child, whose meaning here
+    // drifted per call site and orphaned pools. Content reads (listing rows, rank snapshots) keep
+    // childAsin: those really are per-child data.
+    const poolKey = poolKeyFromResolved(resolved, inputAsin);
 
     let result;
 
@@ -103,7 +109,7 @@ export async function GET(
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data: aRow } = await (supabase as any).from('keyword_analysis')
-          .select('analyzed_at').eq('asin', childAsin)
+          .select('analyzed_at').eq('asin', poolKey)
           .order('analyzed_at', { ascending: false }).limit(1).maybeSingle()
         lastAnalyzedAt = (aRow as { analyzed_at?: string } | null)?.analyzed_at ?? null
       } catch { /* best-effort — null just means the auto-chain falls back to its timeout */ }
@@ -111,7 +117,7 @@ export async function GET(
       // Fast path: return stored analysis without any API calls.
       // readWindow widens to RANKING_CANDIDATE_POOL at `on` ONLY, so all 30 targets are inside
       // the window (§P precondition). At off/shadow it returns 100 unchanged — byte-identical.
-      let stored = await getStoredAnalysis(childAsin, readWindow(100));
+      let stored = await getStoredAnalysis(poolKey, readWindow(100));
 
       // Real research timestamp (keyword_cache.fetched_at) — drives the self-heal below AND lets the
       // UI detect when a background re-research completed (auto-chain). analyzedAt is the RESPONSE
@@ -120,7 +126,7 @@ export async function GET(
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data: cr } = await (supabase as any).from('keyword_cache')
-          .select('fetched_at').eq('asin', childAsin).eq('source', 'keyword_research').maybeSingle()
+          .select('fetched_at').eq('asin', poolKey).eq('source', 'keyword_research').maybeSingle()
         researchedAt = (cr as { fetched_at?: string } | null)?.fetched_at ?? null
       } catch { /* best-effort — null just disables self-heal + completion detection */ }
 
@@ -221,7 +227,7 @@ export async function GET(
           // stamp, not more rows) and the research-newer requirement is waived (analysis is newer by
           // definition; the CACHE being servable is the gate).
           const { freshResearchPoolSize } = await import('@/lib/keyword-engine/keywordResearcher')
-          const poolSize = await freshResearchPoolSize(childAsin)
+          const poolSize = await freshResearchPoolSize(poolKey)
           // Backfill/restamp variants need only a NON-EMPTY servable cache (equal size is fine — the
           // point is the stamp, not more rows); the thin-pool heal keeps its research-newer + bigger gate.
           if ((needsNativeBackfill || needsEase || needsThemeRating) ? poolSize > 0 : (researchNewer && poolSize > (stored?.length ?? 0))) {
@@ -232,11 +238,12 @@ export async function GET(
               : 'thin-pool promotion'
             console.log(`[intelligence] self-heal ${childAsin}: stored=${stored?.length ?? 0}, fresh pool=${poolSize} (${reason}) — promoting cached pool (0 credits)`)
             const promoteTitle = (await loadRepresentativeListingRow(supabase, childAsin))?.title || undefined
-            await syncKeywordIntelligence(childAsin, {
+            await syncKeywordIntelligence(poolKey, {
               forceRefresh: false, includeJungleScout: true, useStoredAnalysis: false,
               parentAsin: parentAsin || undefined, listingTitle: promoteTitle,
+              queryAsin: childAsin,
             })
-            const promoted = await getStoredAnalysis(childAsin, readWindow(100))
+            const promoted = await getStoredAnalysis(poolKey, readWindow(100))
             // Backfill/restamp run at EQUAL size — accept the re-read whenever it's no smaller.
             if (promoted && ((needsNativeBackfill || needsEase || needsThemeRating) ? promoted.length >= (stored?.length ?? 0) : promoted.length > (stored?.length ?? 0))) {
               stored = promoted
@@ -361,7 +368,7 @@ export async function GET(
         try {
           const { enrichResearchWithNiche } = await import('@/lib/keyword-engine/keywordResearcher');
           // Pass parentAsin: vision identity is stored under the parent, so the child-only read missed it.
-          nicheEnrich = await enrichResearchWithNiche(childAsin, parentAsin || undefined);
+          nicheEnrich = await enrichResearchWithNiche(poolKey, parentAsin || undefined);
           console.log(`[intelligence] niche enrich for ${childAsin}: ${nicheEnrich.note} (${nicheEnrich.creditsUsed} credits)`);
         } catch (e) {
           console.warn('[intelligence] niche enrich failed (non-fatal):', e instanceof Error ? e.message : e);
@@ -369,10 +376,11 @@ export async function GET(
       }
 
       // Full sync path — use resolved child ASIN
-      result = await syncKeywordIntelligence(childAsin, {
+      result = await syncKeywordIntelligence(poolKey, {
         forceRefresh: enrichNiche ? false : forceRefresh,
         includeJungleScout: true,
         useStoredAnalysis: enrichNiche ? false : !forceRefresh,
+        queryAsin: childAsin,
         competitorAsin,
         parentAsin: parentAsin || undefined,
         listingTitle,
@@ -525,6 +533,8 @@ export async function POST(
     }
 
     const { childAsin } = resolved;
+    // ONE POOL KEY (#174) — same rule as the GET; the background sync writes the family drawer.
+    const poolKey = poolKeyFromResolved(resolved, inputAsin);
 
     // Get competitor ASIN for reverse lookup fallback
     const { data: scoreData } = await supabase
@@ -547,9 +557,10 @@ export async function POST(
     } catch { /* no body — legacy trigger */ }
 
     // Fire and forget — run sync in background using resolved child ASIN
-    syncKeywordIntelligence(childAsin, {
+    syncKeywordIntelligence(poolKey, {
       forceRefresh: true,
       manualSeed,
+      queryAsin: childAsin,
       competitorAsin,
       parentAsin: inputAsin,
       listingTitle,

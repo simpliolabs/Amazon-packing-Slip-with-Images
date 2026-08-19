@@ -18,16 +18,13 @@ export async function POST(request: NextRequest) {
 
     const supabase = await createAdminClient();
 
-    // If parentAsin given, resolve to top_child_asin first
-    let targetAsin = asin;
-    if (!targetAsin && parentAsin) {
-      const { data: rollup } = await supabase
-        .from('parent_asin_rollup')
-        .select('top_child_asin')
-        .eq('parent_asin', parentAsin)
-        .single();
-      targetAsin = (rollup as { top_child_asin: string | null } | null)?.top_child_asin || parentAsin;
-    }
+    // ONE POOL KEY (#174): the old parent_asin_rollup lookup here was the THIRD resolver for this
+    // table — it aimed the delete at the mutable sales-pointer key, so "clearing the parent" removed
+    // ZERO rows while the real drawers survived (verified live on B0DSQPZY9S). One resolver, one key.
+    // NOTE this route is a CREDIT TRIGGER, not a cleanup: deleting keyword_cache removes the
+    // poolSize>0 guard, and the next Run AI Audit falls through to a billable Jungle Scout pull.
+    const { resolveKeywordPoolKey } = await import('@/lib/keyword-engine/poolKey');
+    const targetAsin = await resolveKeywordPoolKey(asin || parentAsin, supabase);
 
     // Clear keyword_cache (raw JS API data)
     const { error: cacheErr } = await supabase

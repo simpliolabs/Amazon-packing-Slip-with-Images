@@ -10,6 +10,7 @@
  * also needs reviews / conversion / sales velocity / price, which this tool cannot change.
  */
 import type OpenAI from 'openai'
+import { poolKeyFromResolved, type PoolKey } from '@/lib/keyword-engine/poolKey'
 import { createHash } from 'node:crypto'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { selectionMode, isRankingTarget } from '@/lib/keyword-engine/selection-core'
@@ -422,10 +423,14 @@ export async function buildFreeCore(childAsin: string, parentAsin: string | null
   // fallback than resolveToChildAsin — so the keyword SET can still differ on edge cases. Unifying those
   // resolvers is a tracked follow-up; this is NOT a byte-for-byte parity guarantee with the scorer.
   const haystack = await buildHaystack(parentAsin, childAsin, supabase)
+  // ONE POOL KEY (#174): every keyword_analysis read below uses the FAMILY drawer (parent-keyed),
+  // not the resolved child — the fingerprint, the theme run id and the pool rows must all come
+  // from the one pool every writer fills or the stamp compares apples to an empty drawer.
+  const poolKey = poolKeyFromResolved({ childAsin, parentAsin: parentAsin || null }, childAsin)
   // ONE recipe, shared with contentFingerprint() — see fingerprintOf.
-  const fingerprint = await fingerprintOf(haystack, await newestThemeRunId(childAsin, supabase), await keywordPoolStamp(childAsin, supabase))
+  const fingerprint = await fingerprintOf(haystack, await newestThemeRunId(poolKey, supabase), await keywordPoolStamp(poolKey, supabase))
 
-  let kws = await getStoredAnalysis(childAsin, readWindow(100))
+  let kws = await getStoredAnalysis(poolKey, readWindow(100))
   if (!kws || kws.length === 0) {
     return { analyzed: false, reason: 'no_keywords', rows: [], top10: [], coverage: { covered: 0, total: 0 }, criticalGaps: 0, contentFingerprint: fingerprint, baselineVerdict: buildBaselineVerdict(0, 0, 0) }
   }

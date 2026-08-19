@@ -1975,7 +1975,7 @@ function makeTargetPolicy(analysis: readonly { selectionRank?: number | null }[]
   if (selectionMode() !== 'on') return INERT_TARGET_POLICY
   const ranked = analysis.filter((k) => isRankingTarget(k)).length
   if (ranked === 0) {
-    console.log(`[KW_TARGET_GEN] asin=${asin ?? '?'} INERT — no persisted selection_rank in the pool (pre-049 or never rated); generators run unchanged`)
+    console.log(`[KW_TARGET_GEN] pool=${asin ?? '?'} INERT — no persisted selection_rank in the pool (pre-049 or never rated); generators run unchanged`)
     return INERT_TARGET_POLICY
   }
   return {
@@ -8357,7 +8357,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // KEYWORD_TARGET_SET (#143): built ONCE beside the season policy and threaded to every producer.
   // Inert at off/shadow, and inert at `on` when the pool carries no persisted ranks (pre-049 /
   // never rated) — so it can never filter a pool to zero.
-  const targets = makeTargetPolicy(analysis, input.children[0]?.asin ?? null)
+  // #174: label with the FAMILY key (parent) — children[0] printed a third ASIN that appears in
+  // no pool read or write, which is exactly how the key-split stayed invisible.
+  const targets = makeTargetPolicy(analysis, input.parentAsin ?? input.children[0]?.asin ?? null)
   // Spread into every keywordPlan write. EMPTY at off/shadow, so the persisted jsonb is
   // byte-identical and no consumer sees a new key until the flag is on.
   const selectedKws = targets.live ? targets.keep(analysis).map((k) => k.keyword) : []
@@ -8380,7 +8382,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // reinstate the exact volume-sorted pin this filter exists to remove.
     : (targets.live ? (targets.keep(cleanGated).length > 0 ? targets.keep(cleanGated) : cleanGated) : cleanGated)
   if (targets.live && pinPool.length === 0) {
-    console.log(`[KW_TARGET_PIN_FALLBACK] asin=${input.children[0]?.asin ?? '?'} no CORE-slot target; pinning from ${targets.keep(cleanGated).length > 0 ? 'any-target' : 'legacy'} pool`)
+    console.log(`[KW_TARGET_PIN_FALLBACK] pool=${input.parentAsin ?? input.children[0]?.asin ?? '?'} no CORE-slot target; pinning from ${targets.keep(cleanGated).length > 0 ? 'any-target' : 'legacy'} pool`)
   }
   // MARKET TRUTH ON THE PIN (PO ruling 2026-08-09, SELLER_PROFILE §5: "VOLUME is not the biggest
   // thing we look at but the JS opportunity and ranking ability with the right volume"). Raw volume
@@ -8396,7 +8398,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const pinScored = pinCandidates.filter((k) => carriesMarketOpportunity(k))
   if (pinCandidates.length > 0 && pinScored.length === 0) {
     console.warn(JSON.stringify({ tag: 'TITLE_PIN_NO_MARKET_DATA', parent: input.parentAsin ?? null,
-      asin: input.children[0]?.asin ?? null, candidates: pinCandidates.length,
+      pool: input.parentAsin ?? input.children[0]?.asin ?? null, candidates: pinCandidates.length,
       note: 'no candidate carries market_opportunity — pin fell back to volume order; re-research to score the pool' }))
   }
   const mustIncludeKw = (pinScored.length > 0 ? pinScored : pinCandidates)

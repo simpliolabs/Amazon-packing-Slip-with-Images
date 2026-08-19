@@ -124,8 +124,9 @@ export const EMPTY_POOL_THRESHOLD = 10;
  * @param parentAsin - The parent ASIN (for DB updates)
  * @param options - Configuration
  */
+import type { PoolKey } from './poolKey';
 export async function researchKeywords(
-  asin: string,
+  asin: PoolKey,
   parentAsin: string,
   options: {
     forceRefresh?: boolean;
@@ -140,9 +141,13 @@ export async function researchKeywords(
     /** SP-API productType (SHIRT/HAT/SWEATSHIRT/…) — drives the shared garment-noun resolver so a
      *  HAT stops being seeded as a t-shirt. Flag-gated (GARMENT_NOUN); off → shirt-defaulted. */
     productType?: string;
+    /** #174: the SELLABLE child to point ASIN-parameterized external queries at (JS keywords_by_asin
+     *  ranks a sellable child, never a parent hub). STORAGE stays under the PoolKey `asin`; this is
+     *  only the query subject. Defaults to `asin` (correct for self-parented families). */
+    queryAsin?: string;
   } = {}
 ): Promise<KeywordResearchResult> {
-  const { forceRefresh = false, listingTitle, manualSeed, categorySeed, productType } = options;
+  const { forceRefresh = false, listingTitle, manualSeed, categorySeed, productType, queryAsin } = options;
   // Shared garment-noun resolver, flag-gated. Flag off/shadow → SHIRT_BASE (byte-identical to the
   // legacy shirt defaults). Flag on → real per-family resolution. Shadow mode logs the delta.
   const gReal = garmentNounFor(productType, listingTitle);
@@ -448,8 +453,10 @@ export async function researchKeywords(
   // overlay genuinely means "not ranking" — which the rank tracker records as null.
   let ourRankedCount = 0;
   try {
-    const ourMap = await fetchKeywordsByASIN([asin]);
-    const ourKeywords = ourMap.get(asin) ?? [];
+    // #174: query the SELLABLE child (a parent hub ranks for nothing); pool storage stays parent-keyed.
+    const ourQueryAsin = queryAsin || asin;
+    const ourMap = await fetchKeywordsByASIN([ourQueryAsin]);
+    const ourKeywords = ourMap.get(ourQueryAsin) ?? [];
     creditsUsed++;
     const ourByKw = new Map(ourKeywords.map((k) => [k.keyword.toLowerCase(), k]));
     const overlay = (rows: JungleScoutKeywordRow[]) => {
@@ -1169,7 +1176,7 @@ async function storeCompetitorMeta(parentAsin: string, meta: CompetitorMeta): Pr
 
 // ─── Research Cache ─────────────────────────────────────────────────────────
 
-async function cacheResearch(asin: string, result: KeywordResearchResult): Promise<void> {
+async function cacheResearch(asin: PoolKey, result: KeywordResearchResult): Promise<void> {
   try {
     // keyword_cache columns: id, asin, source, keyword_data, fetched_at, expires_at,
     // competitor_asin, competitor_brand, sov_percentage
@@ -1207,7 +1214,7 @@ async function cacheResearch(asin: string, result: KeywordResearchResult): Promi
  *  merge (#270) + universes (#280, tagged fromUniverse). Returns null on miss/expiry/error — every
  *  null path lets the caller fall back to the raw pull. Spends NO JS credits. Exported so the sync's
  *  cache-hit path can re-store the enriched pool instead of the raw per-ASIN pull (the #283 fix). */
-export async function getCachedResearch(asin: string): Promise<KeywordResearchResult | null> {
+export async function getCachedResearch(asin: PoolKey): Promise<KeywordResearchResult | null> {
   try {
     // Only select columns that actually exist in keyword_cache
     const { data } = await supabase
@@ -1269,7 +1276,7 @@ export async function getCachedResearch(asin: string): Promise<KeywordResearchRe
  *     returns on an empty merge and never advances analyzed_at, which would otherwise re-fire).
  * Pure read; spends nothing.
  */
-export async function freshResearchPoolSize(asin: string): Promise<number> {
+export async function freshResearchPoolSize(asin: PoolKey): Promise<number> {
   return (await getCachedResearch(asin))?.allKeywords.length ?? 0
 }
 
@@ -1488,7 +1495,7 @@ export interface NicheEnrichResult {
  *
  * Credits: 0 if every niche is already cached; max 2 (the niche universes — primary already paid).
  */
-export async function enrichResearchWithNiche(asin: string, parentAsin?: string): Promise<NicheEnrichResult> {
+export async function enrichResearchWithNiche(asin: PoolKey, parentAsin?: string): Promise<NicheEnrichResult> {
   const base: NicheEnrichResult = { creditsUsed: 0, seedsQueried: [], seedsSkippedCached: [], addedKeywordCount: 0, totalKeywordCount: 0, note: '' }
   const cached = await getCachedResearch(asin)
   if (!cached) return { ...base, note: 'No existing research to enrich — run a full research first.' }

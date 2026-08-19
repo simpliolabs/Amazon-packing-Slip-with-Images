@@ -22,6 +22,7 @@ import { loadPoGoldTitles } from '@/lib/fba/poGoldCorpus'
 import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { runListingPipeline, reconcilePlacedInBackendFirst } from '@/lib/fba/listingPipeline'
+import { resolveKeywordPoolKey, type PoolKey } from '@/lib/keyword-engine/poolKey'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 // Shared preserve rules (#157, 2026-08-03): the 2026-07-22 review's claim that the keywords partial
 // "already throws in all modes" was FALSE — the producing gate's floor is 190 (BACKEND_DEGRADE_STRICT
@@ -233,36 +234,14 @@ export interface AiRecommendations {
 async function buildKeywordContext(
   supabase: ReturnType<typeof getAdminSupabase>,
   parentAsin: string,
-  children: ChildRow[]
+  children: ChildRow[],
+  poolKey: PoolKey
 ): Promise<{ contextBlock: string; opportunitiesUsed: number; brandAnchorKeyword: string | null }> {
-  // ASIN resolution: use top_child_asin from listing_seo_scores (has keyword data)
-  let lookupAsin = children[0]?.asin
-  
-  const { data: scoreRow } = await supabase
-    .from('listing_seo_scores')
-    .select('top_child_asin')
-    .eq('parent_asin', parentAsin)
-    .single()
-  
-  if (scoreRow?.top_child_asin) {
-    lookupAsin = scoreRow.top_child_asin
-  }
-
-  if (!lookupAsin) {
-    return { contextBlock: '', opportunitiesUsed: 0, brandAnchorKeyword: null }
-  }
-
-  // Try the resolved ASIN first, then fallback to parent_asin, then children[0]
-  let analysis = await getStoredAnalysis(lookupAsin, readWindow(50))
-  if (!analysis || analysis.length === 0) {
-    analysis = await getStoredAnalysis(parentAsin, readWindow(50))
-  }
-  if (!analysis || analysis.length === 0) {
-    const firstChild = children[0]?.asin
-    if (firstChild && firstChild !== lookupAsin) {
-      analysis = await getStoredAnalysis(firstChild, readWindow(50))
-    }
-  }
+  // ONE POOL KEY (#174): the lookupAsin -> parentAsin -> children[0] fallback ladder that lived
+  // here was the FOURTH resolver for the same table — it existed only because the key was
+  // ambiguous, and it ADDED ambiguity (a read could succeed under a key no writer used). With one
+  // family key there is exactly one drawer to open; an empty read is a true empty, not a retry.
+  let analysis = await getStoredAnalysis(poolKey, readWindow(50))
 
   if (!analysis || analysis.length === 0) {
     return {
@@ -510,10 +489,16 @@ export async function POST(req: NextRequest) {
     // analyzed_at DESC, not 'id' (2026-08-08): the same 1-row probe now also yields the NEWEST
     // analysis timestamp for the freshness barrier below — empty-check semantics unchanged, zero
     // extra DB reads on the warm path.
+    // ONE POOL KEY (#174): resolved ONCE per request; every keyword_analysis / keyword_cache
+    // touch below (probe, sync, barrier, pipeline analysis load, noise-filter) uses THIS key.
+    // The old key here — top_child_asin, a MUTABLE max(units_sold_30d) sales pointer — silently
+    // orphaned the family pool whenever the best-seller changed (B0DSQPZY9S was harvested TWICE
+    // on 2026-07-24 under two different keys because of it).
+    const poolKey = await resolveKeywordPoolKey(parent_asin, supabase)
     const { data: existingKws } = await supabase
       .from('keyword_analysis')
       .select('analyzed_at')
-      .eq('asin', (await supabase.from('listing_seo_scores').select('top_child_asin').eq('parent_asin', parent_asin).single()).data?.top_child_asin || children[0]?.asin)
+      .eq('asin', poolKey)
       .order('analyzed_at', { ascending: false })
       .limit(1)
     
@@ -528,7 +513,8 @@ export async function POST(req: NextRequest) {
       .select('top_child_asin, competitor_asin, design_name_override')
       .eq('parent_asin', parent_asin)
       .single()
-    const syncAsin = scoreRow2?.top_child_asin || children[0]?.asin
+    // The pool key IS the sync key — scoreRow2 stays only for the competitor/design fingerprint.
+    const syncAsin = poolKey
     const competitorAsin = (scoreRow2 as { competitor_asin?: string | null } | null)?.competitor_asin || ''
     const designNameOv = (scoreRow2 as { design_name_override?: string | null } | null)?.design_name_override || ''
     // VISION SIGNAL (2026-07-18): a fresh design scan writes product_identity but does NOT move the
@@ -584,9 +570,10 @@ export async function POST(req: NextRequest) {
       try {
         if (syncAsin) {
           const { syncKeywordIntelligence } = await import('@/lib/sync/syncKeywordIntelligence')
-          await syncKeywordIntelligence(syncAsin, {
+          const syncRes = await syncKeywordIntelligence(syncAsin, {
             includeJungleScout: true,
             forceRefresh: shouldForceResearch,   // genuine content change only (not empty→first-population, see FIRST-POPULATION GUARD above)
+            queryAsin: children[0]?.asin,        // #174: sellable child for ASIN-parameterized fetches; storage under the pool key
             parentAsin: parent_asin,
             listingTitle: children[0]?.title || undefined,
           })
@@ -598,7 +585,15 @@ export async function POST(req: NextRequest) {
           if (fingerprintColumnExists) {
             await supabase.from('listing_seo_scores').update({ kw_ref_fingerprint: refFingerprint } as never).eq('parent_asin', parent_asin)
           }
-          console.log(`[ai-recommendations] Keyword intelligence synced for ${syncAsin} (forceRefresh=${shouldForceResearch}, signalChanged=${signalChanged}, fp=${refFingerprint})`)
+          // TRUTHFUL BANNER (#174): the old line printed "synced" UNCONDITIONALLY — including the
+          // live case where zero rows were persisted under a key nobody writes — which is exactly
+          // how the empty-pool state stayed invisible. Report the count; an empty sync is a WARN.
+          const syncedCount = syncRes?.allKeywords?.length ?? 0
+          if (syncedCount > 0) {
+            console.log(`[ai-recommendations] Keyword intelligence synced: ${syncedCount} keywords under ${syncAsin} (forceRefresh=${shouldForceResearch}, signalChanged=${signalChanged}, fp=${refFingerprint})`)
+          } else {
+            console.warn(`[ai-recommendations] Keyword intelligence sync returned ZERO keywords for ${syncAsin} — pool is empty, generators will run without market data (forceRefresh=${shouldForceResearch}, signalChanged=${signalChanged})`)
+          }
         }
       } catch (syncErr) {
         console.warn('[ai-recommendations] Auto-sync failed, proceeding without keyword data:', syncErr)
@@ -637,6 +632,7 @@ export async function POST(req: NextRequest) {
               forceRefresh: false,
               useStoredAnalysis: false,
               includeJungleScout: true,
+              queryAsin: children[0]?.asin,
               parentAsin: parent_asin,
               listingTitle: children[0]?.title || undefined,
             })
@@ -651,7 +647,8 @@ export async function POST(req: NextRequest) {
     const { contextBlock: keywordContext, opportunitiesUsed, brandAnchorKeyword } = await buildKeywordContext(
       supabase,
       parent_asin,
-      children as ChildRow[]
+      children as ChildRow[],
+      poolKey
     )
 
     // V2: Build structured input JSON matching the system prompt's Section 2 schema
@@ -699,7 +696,8 @@ export async function POST(req: NextRequest) {
       .eq('parent_asin', parent_asin)
       .single()
     const pipelineScoreRow = pipelineScoreRowRaw as { top_child_asin?: string | null; product_title?: string | null; audience_lean?: string | null; design_name_override?: string | null } | null
-    const analysisAsin = pipelineScoreRow?.top_child_asin || children[0]?.asin
+    // ONE POOL KEY (#174): the pipeline reads the same family drawer every writer fills.
+    const analysisAsin = poolKey
     // 150, not 50: coverageGapScore (DB: opportunity_score) is gap-amplified, so right after the seller PUSHES
     // keywords the covered terms collapse to raw/3 and sink BELOW the top-50 cut — the
     // next regen then never even saw the listing's best (now-covered) terms. The pipeline's

@@ -97,6 +97,11 @@ export async function POST(req: NextRequest) {
       .select('top_child_asin')
       .eq('parent_asin', parent_asin)
       .maybeSingle()
+    // #174 ONE POOL KEY: imports STORE under the family pool key (parent) — the old top_child_asin
+    // key was the mutable sales pointer, so an import could land in a drawer no generator reads and
+    // silently vanish. The CONTENT read below (honest presence flags) still needs a SELLABLE child.
+    const { resolveKeywordPoolKey } = await import('@/lib/keyword-engine/poolKey')
+    const poolKey = await resolveKeywordPoolKey(parent_asin, supabase)
     let analysisAsin = (scoreRow as { top_child_asin?: string } | null)?.top_child_asin ?? null
     if (!analysisAsin) {
       const { data: anyChild } = await supabase
@@ -122,7 +127,7 @@ export async function POST(req: NextRequest) {
     const { data: existingRows } = await db
       .from('keyword_analysis')
       .select('keyword')
-      .eq('asin', analysisAsin)
+      .eq('asin', poolKey)
     const existing = new Set(((existingRows ?? []) as { keyword: string }[]).map((r) => r.keyword.toLowerCase().trim()))
 
     const seen = new Set<string>()
@@ -152,13 +157,13 @@ export async function POST(req: NextRequest) {
     }
 
     // The engine drops sub-MIN_SEARCH_VOLUME (10) noise itself; presence runs against OUR live content.
-    const result = runKeywordEngine(analysisAsin, jsRows, (listing ?? {}) as Parameters<typeof runKeywordEngine>[2], 'jungle_scout')
+    const result = runKeywordEngine(poolKey, jsRows, (listing ?? {}) as Parameters<typeof runKeywordEngine>[2], 'jungle_scout')
     const skippedLowVolume = jsRows.length - result.allKeywords.length
 
     // ADDITIVE insert (NOT cacheService.storeAnalysis — that deletes the whole ASIN's analysis).
     // data_source 'import' = honest provenance (migration 024 extends the CHECK).
     const rows = result.allKeywords.map((kw) => ({
-      asin: analysisAsin,
+      asin: poolKey,
       keyword: kw.keyword,
       opportunity_score: kw.coverageGapScore,
       action_type: kw.actionType,
@@ -201,7 +206,7 @@ export async function POST(req: NextRequest) {
       .map((k) => ({ keyword: k.keyword, priority: Math.round(k.coverageGapScore), volume: k.searchVolume, action: k.actionType }))
 
     return NextResponse.json({
-      asin: analysisAsin,
+      asin: poolKey,
       imported: inserted,
       skippedExisting,
       skippedLowVolume,
