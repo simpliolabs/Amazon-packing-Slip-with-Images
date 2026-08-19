@@ -194,9 +194,11 @@ export function OptimizerView({
               {aiRecs.keyword_reconciliation && aiRecs.keyword_reconciliation.length > 0 && (() => {
                 const placementGroups: Record<string, { text: string; keywords: { keyword: string; action_type: string; search_volume: number; why: string }[] }> = {}
                 for (const kr of aiRecs.keyword_reconciliation!) {
-                  const key = [...kr.placed_in].sort().join(' + ')
+                  // placed_in is TRUTH (server-derived). Empty = the draft doesn't carry it — label honestly,
+                  // and never show the LLM's exact_text quote for it (it quotes text that isn't in any field).
+                  const key = kr.placed_in.length ? [...kr.placed_in].sort().join(' + ') : 'not indexed yet'
                   if (!placementGroups[key]) {
-                    placementGroups[key] = { text: kr.exact_text, keywords: [] }
+                    placementGroups[key] = { text: kr.placed_in.length ? kr.exact_text : '', keywords: [] }
                   }
                   placementGroups[key].keywords.push({ keyword: kr.keyword, action_type: kr.action_type, search_volume: kr.search_volume, why: kr.why })
                 }

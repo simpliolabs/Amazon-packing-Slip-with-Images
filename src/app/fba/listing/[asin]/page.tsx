@@ -45,7 +45,7 @@ interface SeoScoreRow {
 
 interface KeywordReconciliation {
   keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'
-  search_volume: number; placed_in: string[]; exact_text: string; why: string
+  search_volume: number; placed_in: string[]; planned_in?: string[]; exact_text: string; why: string
 }
 
 interface PerChildKeywords { sku: string; asin: string; keywords: string }
@@ -2371,15 +2371,21 @@ export default function ListingDetailPage() {
 
   // ─── Grouped Reconciliation Logic ─────────────────────────────────────────
 
+  // placed_in is TRUTH (surfaces whose bytes carry the keyword — server-derived). Empty placed_in means
+  // NOT in the draft at all: those go in the honest 'not_indexed' group instead of borrowing a fabricated
+  // backend chip, and their LLM exact_text quote is suppressed (it quotes text that isn't in any field).
+  const NOT_INDEXED_KEY = 'not_indexed'
   const placementGroups = (() => {
     if (!aiRecs?.keyword_reconciliation?.length) return null
     const groups: Record<string, { text: string; keywords: { keyword: string; action_type: string; search_volume: number; why: string }[] }> = {}
     for (const kr of aiRecs.keyword_reconciliation) {
-      const key = [...kr.placed_in].sort().join(' + ')
-      if (!groups[key]) groups[key] = { text: kr.exact_text, keywords: [] }
+      const key = kr.placed_in.length ? [...kr.placed_in].sort().join(' + ') : NOT_INDEXED_KEY
+      if (!groups[key]) groups[key] = { text: key === NOT_INDEXED_KEY ? '' : kr.exact_text, keywords: [] }
       groups[key].keywords.push({ keyword: kr.keyword, action_type: kr.action_type, search_volume: kr.search_volume, why: kr.why })
     }
     const sortedKeys = Object.keys(groups).sort((a, b) => {
+      if (a === NOT_INDEXED_KEY && b !== NOT_INDEXED_KEY) return -1
+      if (a !== NOT_INDEXED_KEY && b === NOT_INDEXED_KEY) return 1
       if (a.includes('title') && !b.includes('title')) return -1
       if (!a.includes('title') && b.includes('title')) return 1
       if (a.includes('bullet') && !b.includes('bullet')) return -1
@@ -3235,7 +3241,9 @@ export default function ListingDetailPage() {
           for (const kr of aiRecs?.keyword_reconciliation ?? []) {
             if (kr.action_type !== 'CRITICAL' && kr.action_type !== 'UPGRADE') continue
             if (!kr.keyword || coveredKw.has(nk(kr.keyword))) continue   // missing keyword OR rank already covers it → not a content move
-            for (const p of kr.placed_in ?? []) { const n = norm(p); if (n) winnable[n] = true }
+            // placed_in is TRUTH; planned_in is the PLAN for keywords the draft doesn't carry yet.
+            // Routing wants both: an unplaced keyword must still map to the section that fixes it.
+            for (const p of [...(kr.placed_in ?? []), ...(kr.planned_in ?? [])]) { const n = norm(p); if (n) winnable[n] = true }
           }
           for (const s of ['title', 'bullets', 'backend'] as const) out[s] = winnable[s] ? 'winnable' : covered[s] ? 'done' : null
           return out
@@ -3260,7 +3268,8 @@ export default function ListingDetailPage() {
           for (const kr of aiRecs?.keyword_reconciliation ?? []) {
             if (kr.action_type !== 'CRITICAL' && kr.action_type !== 'UPGRADE') continue
             if (!kr.keyword || coveredKw.has(nk(kr.keyword))) continue   // missing keyword OR rank already covers it → not a task
-            for (const p of kr.placed_in ?? []) { const n = norm(p); if (n) bySection[n].add(kr.keyword) }
+            // Same truth/plan union as rankSectionChip: unplaced keywords route via planned_in.
+            for (const p of [...(kr.placed_in ?? []), ...(kr.planned_in ?? [])]) { const n = norm(p); if (n) bySection[n].add(kr.keyword) }
           }
           // "drafted" must be judged against EXACTLY what a Ship writes live. Bullets ship the one broadcast
           // recommended_bullets. Title is the trap: for a capacity family the Ship distributes a DIFFERENT
@@ -4207,11 +4216,12 @@ export default function ListingDetailPage() {
               <div className="space-y-4">
                 {placementGroups.sortedKeys.map(groupKey => {
                   const group = placementGroups.groups[groupKey]
-                  const placements = groupKey.split(' + ')
+                  const notIndexed = groupKey === NOT_INDEXED_KEY
+                  const placements = notIndexed ? [] : groupKey.split(' + ')
                   const totalVol = group.keywords.reduce((s, k) => s + (k.search_volume || 0), 0)
                   const hasCritical = group.keywords.some(k => k.action_type === 'CRITICAL')
                   const hasUpgrade = group.keywords.some(k => k.action_type === 'UPGRADE' || k.action_type === 'TITLE UPGRADE')
-                  const borderClass = hasCritical ? 'border-red-300 bg-red-50/30' : hasUpgrade ? 'border-amber-300 bg-amber-50/30' : 'border-green-300 bg-green-50/30'
+                  const borderClass = notIndexed ? 'border-amber-400 bg-amber-50/50' : hasCritical ? 'border-red-300 bg-red-50/30' : hasUpgrade ? 'border-amber-300 bg-amber-50/30' : 'border-green-300 bg-green-50/30'
                   const copyLabel = `placement-${groupKey}`
 
                   return (
@@ -4219,6 +4229,11 @@ export default function ListingDetailPage() {
                       {/* Placement header */}
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex flex-wrap gap-1.5">
+                          {notIndexed && (
+                            <span className="text-xs font-bold bg-amber-600 text-white px-2.5 py-1 rounded uppercase tracking-wide">
+                              Not in draft — routes to backend on regenerate
+                            </span>
+                          )}
                           {placements.map((loc, j) => (
                             <span key={j} className="text-xs font-bold bg-violet-700 text-white px-2.5 py-1 rounded uppercase tracking-wide">
                               {loc.replace(/_/g, ' ')}
@@ -4227,18 +4242,25 @@ export default function ListingDetailPage() {
                         </div>
                         <div className="flex items-center gap-3">
                           <span className="text-xs text-slate-500">{group.keywords.length} keywords &middot; {totalVol.toLocaleString()} searches/mo</span>
-                          <button
-                            onClick={() => copy(group.text, copyLabel)}
-                            className="text-[10px] bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-2 py-1 rounded transition-colors">
-                            {copied === copyLabel ? 'Copied!' : 'Copy'}
-                          </button>
+                          {!notIndexed && (
+                            <button
+                              onClick={() => copy(group.text, copyLabel)}
+                              className="text-[10px] bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-2 py-1 rounded transition-colors">
+                              {copied === copyLabel ? 'Copied!' : 'Copy'}
+                            </button>
+                          )}
                         </div>
                       </div>
 
-                      {/* The actual text */}
-                      <div className="bg-white rounded-lg border border-slate-200 p-3 mb-3">
-                        <p className="text-sm text-slate-800 leading-relaxed">{group.text}</p>
-                      </div>
+                      {/* The actual text — suppressed for the not-indexed group (there is no real text to quote) */}
+                      {!notIndexed && (
+                        <div className="bg-white rounded-lg border border-slate-200 p-3 mb-3">
+                          <p className="text-sm text-slate-800 leading-relaxed">{group.text}</p>
+                        </div>
+                      )}
+                      {notIndexed && (
+                        <p className="text-xs text-amber-800 mb-3">These keywords are not carried by any field of the current draft. A regenerate places them in backend keywords (the sanctioned overflow home) — or they may not fit the byte budget, in which case they stay listed here honestly.</p>
+                      )}
 
                       {/* Keyword pills */}
                       <div className="flex flex-wrap gap-2">

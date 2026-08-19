@@ -3232,10 +3232,11 @@ export default function FBAIntelligencePage() {
                                   // Group keywords by their primary placement (first item in placed_in)
                                   const placementGroups: Record<string, { text: string; keywords: { keyword: string; action_type: string; search_volume: number; why: string }[] }> = {}
                                   for (const kr of rec.keyword_reconciliation!) {
-                                    // Use a canonical key from all placements combined
-                                    const key = kr.placed_in.sort().join(' + ')
+                                    // placed_in is TRUTH (server-derived). Empty = not carried by the draft —
+                                    // label honestly and never show the LLM's exact_text for it (fabricated quote).
+                                    const key = kr.placed_in.length ? kr.placed_in.sort().join(' + ') : 'not indexed yet'
                                     if (!placementGroups[key]) {
-                                      placementGroups[key] = { text: kr.exact_text, keywords: [] }
+                                      placementGroups[key] = { text: kr.placed_in.length ? kr.exact_text : '', keywords: [] }
                                     }
                                     placementGroups[key].keywords.push({ keyword: kr.keyword, action_type: kr.action_type, search_volume: kr.search_volume, why: kr.why })
                                   }
