@@ -360,6 +360,13 @@ const CORE_ELEMENT_ORDER = ['title', 'bullet_1', 'bullet_2', 'bullet_3', 'bullet
 export function deriveActionPlan(
   rec: RecRow & { recommended_keywords?: string | null; action_plan?: unknown },
   contentRows: DeriveContentRow[],
+  /** #175 (PO 2026-08-20: "each time I ship, a different item goes RED — very confusing"): the
+   *  Amazon Catalog read-back lags an accepted push by 15min-6hr, so a mismatch right after a Ship
+   *  is EXPECTED, not a defect. When the element's field has an accepted push that is (a) NEWER
+   *  than the recommendation (so the mismatch can't mean "new rec not shipped yet") and (b) within
+   *  the 6h propagation window, the verdict is PROPAGATING (amber), never a false RED. Serve-time
+   *  only — the persist paths derive right after a regen, where the rec is always newer. */
+  shipSignals?: { pushedAt: Record<string, string>; generatedAt?: string | null },
 ): PlanItem[] {
   const rows = dedupByAsin(contentRows.filter((r) => r && r.sku && r.asin))
   const stored: PlanItem[] = Array.isArray(rec.action_plan) ? (rec.action_plan as PlanItem[]) : []
@@ -456,24 +463,47 @@ export function deriveActionPlan(
     // DIFFERENT verdict (cooling's "measuring — locked", sectionOptimal's "already strong") must not
     // ride under a contradicting derived verdict. Keep notes/seo_impact always; keep instruction/
     // priority only when the stored verdict agrees with the derived one.
-    const derivedVerdict = done ? 'DONE' : 'REPLACE'
+    let derivedVerdict = done ? 'DONE' : 'REPLACE'
+    let propagatingSince: string | null = null
+    if (derivedVerdict === 'REPLACE' && shipSignals?.pushedAt) {
+      const pushField = el.element === 'title' ? 'title'
+        : el.element.startsWith('bullet') ? 'bullets'
+        : el.element === 'description' ? 'description'
+        : el.element === 'keywords' || el.element === 'backend_keywords' ? 'keywords'
+        : null
+      const pushedAtStr = pushField ? shipSignals.pushedAt[pushField] : undefined
+      if (pushedAtStr) {
+        const pushed = new Date(pushedAtStr).getTime()
+        const gen = shipSignals.generatedAt ? new Date(shipSignals.generatedAt).getTime() : 0
+        const PROPAGATION_WINDOW_MS = 6 * 3600 * 1000
+        if (Number.isFinite(pushed) && pushed > gen && Date.now() - pushed < PROPAGATION_WINDOW_MS) {
+          derivedVerdict = 'PROPAGATING'
+          propagatingSince = pushedAtStr
+        }
+      }
+    }
     const priorAgrees = prior != null && String(prior.verdict ?? '') === derivedVerdict
     const advisory: PlanItem = prior
       ? (priorAgrees ? { ...prior } : Object.fromEntries(Object.entries(prior).filter(([k]) => k !== 'instruction' && k !== 'priority')))
       : {}
+    const minsAgo = propagatingSince ? Math.max(1, Math.round((Date.now() - new Date(propagatingSince).getTime()) / 60000)) : 0
     derivedByEl.set(el.element, {
-      priority: derivedVerdict === 'DONE' ? 'NONE' : 'MEDIUM',
+      priority: derivedVerdict === 'DONE' || derivedVerdict === 'PROPAGATING' ? 'NONE' : 'MEDIUM',
       instruction: derivedVerdict === 'DONE'
         ? 'No action required — the live content already matches. The copy box stays below if you need it.'
-        : 'Ship the recommended version below so every variant matches.',
+        : derivedVerdict === 'PROPAGATING'
+          ? 'No action needed — Amazon accepted this push and is still applying it. Re-check after propagation; do NOT re-ship.'
+          : 'Ship the recommended version below so every variant matches.',
       ...advisory,
       element: el.element,
       verdict: derivedVerdict,
       current_status: done
         ? `Live ${label} matches the recommended version across all ${compared} cached variant${compared === 1 ? '' : 's'}.`
-        : compared === 0
-          ? `No cached variant content to compare yet — sync or push to establish live state.`
-          : `Your live ${label} differs from the recommended version below.`,
+        : derivedVerdict === 'PROPAGATING'
+          ? `Accepted by Amazon ${minsAgo}m ago — propagating (variation families can take up to 6 hours). The cached read still shows the pre-push value; this is expected, not a failure.`
+          : compared === 0
+            ? `No cached variant content to compare yet — sync or push to establish live state.`
+            : `Your live ${label} differs from the recommended version below.`,
       replacement_content: el.display,
     })
   }

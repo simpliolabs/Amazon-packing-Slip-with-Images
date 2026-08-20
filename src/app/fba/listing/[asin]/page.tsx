@@ -75,7 +75,7 @@ interface AplusModuleAction {
 
 interface ActionPlanItem {
   element: string; level: 'parent' | 'per_child'
-  verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP'
+  verdict: 'REPLACE' | 'EDIT' | 'CREATE' | 'DONE' | 'SKIP' | 'PROPAGATING'
   priority: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE'
   current_status: string; instruction: string
   replacement_content?: string | string[] | Record<string, unknown>[] | null
@@ -3108,13 +3108,14 @@ export default function ListingDetailPage() {
         // Calm, SaaS-style cards: white with a colored LEFT accent per verdict (no full-bleed fills).
         const verdictStyles: Record<string, string> = {
           REPLACE: 'border-l-red-400',
+          PROPAGATING: 'border-l-amber-400',
           EDIT: 'border-l-amber-400',
           CREATE: 'border-l-blue-400',
           DONE: 'border-l-green-400',
           SKIP: 'border-l-slate-300',
         }
         const verdictDot: Record<string, string> = {
-          REPLACE: 'bg-red-500', EDIT: 'bg-amber-500', CREATE: 'bg-blue-500', DONE: 'bg-green-500', SKIP: 'bg-slate-400',
+          REPLACE: 'bg-red-500', PROPAGATING: 'bg-amber-500', EDIT: 'bg-amber-500', CREATE: 'bg-blue-500', DONE: 'bg-green-500', SKIP: 'bg-slate-400',
         }
         const priorityBadge: Record<string, string> = {
           HIGH: 'bg-red-100 text-red-700',
