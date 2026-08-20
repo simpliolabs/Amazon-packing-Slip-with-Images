@@ -72,9 +72,17 @@ export function composeItemHighlight(
   const MAX = CONTENT_CONTRACT.itemHighlights.max - RESERVE
   const AIM = CONTENT_CONTRACT.itemHighlights.fillTarget - RESERVE
 
+  // FIT GATE on RATED pools (2026-08-20, the "Disney World Shirts"/"Band Tees" drift): when the
+  // rater has judged a meaningful share of the pool, TRUST the judgment — candidates must carry
+  // themeFit >= 1, so off-design harvest noise (high-volume, unrated or fit-0) cannot compose.
+  // Unrated/legacy pools keep volume ordering (there is no judgment to trust).
+  const ratedShare = pool.length ? pool.filter((r) => typeof r.themeFit === 'number').length / pool.length : 0
+  const requireFit = ratedShare >= 0.3
+
   // Candidates: 2-5 word pool phrases the titles don't cover, ranked theme-fit DESC then volume DESC.
   const candidates = pool
     .filter((r) => !!r.keyword)
+    .filter((r) => !requireFit || (typeof r.themeFit === 'number' && r.themeFit >= 1))
     .map((r) => ({ ...r, keyword: r.keyword.trim() }))
     .filter((r) => {
       const words = r.keyword.split(/\s+/).length
