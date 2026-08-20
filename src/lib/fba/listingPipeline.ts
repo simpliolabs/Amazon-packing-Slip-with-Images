@@ -2211,6 +2211,19 @@ export function buildHighlightsFallback(
 
 // Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
 // material/fit/feature/use-case phrases, no word repeated, <=125 chars.
+/** THE 85%% FLOOR ON EVERY PATH (PO 2026-08-21, "44 is NEVER approved, MIN 85%% of MAX 125"):
+ *  a generated Item Highlight under CONTENT_CONTRACT.itemHighlights.min NEVER ships — from ANY
+ *  producer (composer, LLM, spec fallback). Returning '' engages the callers' keep-old-value
+ *  semantics (regen route + pipeline both treat empty as "hold the stored value"), so an
+ *  under-floor family is NOT-READY, never shipped short and never blanked. */
+function ihFloorDoor(line: string): string {
+  if (line && line.length < CONTENT_CONTRACT.itemHighlights.min) {
+    console.warn(JSON.stringify({ tag: 'IH_UNDER_FLOOR_HOLD', len: line.length, min: CONTENT_CONTRACT.itemHighlights.min, held: line.slice(0, 100) }))
+    return ''
+  }
+  return line
+}
+
 export async function buildItemHighlights(
   openai: OpenAI, finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
   pool: AnalyzedKeyword[], brandName: string, apparelProduct: boolean, capacityFamily: boolean,
@@ -2380,7 +2393,7 @@ export async function buildItemHighlights(
     if (composed) {
       console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: composed.length, ih: composed.slice(0, 140) }))
       const titlesForNetC = netTitles ?? [finalTitle]
-      return capItemHighlightRepeats(ensureBlankBrandInHighlights(composed, titlesForNetC, blankBrand))
+      return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(composed, titlesForNetC, blankBrand)))
     }
     console.log(JSON.stringify({ tag: 'IH_COMPOSER_THIN', note: 'pool below MIN_CANDIDATES — LLM/spec fallback chain runs' }))
   }
@@ -2415,10 +2428,10 @@ export async function buildItemHighlights(
   // spec fallback (Invariant 1: one net, every path) — and the cap re-runs after any insertion so
   // the shipped bytes always hold ≤75 chars / ≤2 per word.
   const titlesForNet = netTitles ?? [finalTitle]
-  if (problems.length === 0) return capItemHighlightRepeats(ensureBlankBrandInHighlights(out, titlesForNet, blankBrand))
-  return capItemHighlightRepeats(ensureBlankBrandInHighlights(
+  if (problems.length === 0) return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(out, titlesForNet, blankBrand)))
+  return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(
     buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective, unisexFit),
-    titlesForNet, blankBrand))
+    titlesForNet, blankBrand)))
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
