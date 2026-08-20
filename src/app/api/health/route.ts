@@ -64,7 +64,14 @@ export async function GET() {
   return NextResponse.json(
     {
       ok: true,
-      sha: process.env.BUILD_SHA || 'unknown',
+      // BUILD_SHA first (baked at build — works for local/docker builds), then Coolify's RUNTIME
+      // SOURCE_COMMIT: since Coolify v4.1.2 the build stage no longer sees the commit env, so every
+      // deploy read "unknown" (2026-08-19/20 — deploy verification fell back to builtAt timestamps).
+      // The runtime container env carries the deployed commit on every Coolify deploy; short form to
+      // match git rev-parse --short. Probed live via docker exec 2026-08-20.
+      sha: (process.env.BUILD_SHA && process.env.BUILD_SHA !== 'unknown')
+        ? process.env.BUILD_SHA
+        : (process.env.SOURCE_COMMIT ? process.env.SOURCE_COMMIT.slice(0, 7) : 'unknown'),
       builtAt: process.env.BUILD_TIME || 'unknown',
       now: new Date().toISOString(),
       flags: {
