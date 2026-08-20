@@ -61,7 +61,7 @@ const significantFolded = (phrase: string): string[] =>
 export function composeItemHighlight(
   pool: ComposerPoolRow[],
   titles: string[],
-  opts?: { relaxedOrUnisexCut?: boolean; spec?: Pick<BlankSpec, 'weightNote' | 'stretch'> | null; garmentFamily?: 'tee' | 'sweatshirt' | 'hoodie' | 'hat' | null; allowedBrand?: string | null },
+  opts?: { relaxedOrUnisexCut?: boolean; spec?: Pick<BlankSpec, 'weightNote' | 'stretch'> | null; garmentFamily?: 'tee' | 'sweatshirt' | 'hoodie' | 'hat' | 'none' | null; allowedBrand?: string | null },
 ): string | null {
   const titleCovers = makeCoverageChecker(titles.filter(Boolean).join(' '))
   // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
@@ -110,6 +110,10 @@ export function composeItemHighlight(
         }
       }
       // (c) wrong-garment truth — a tee family never claims sweatshirt/hoodie vocab, and vice versa.
+      // 'none' = NON-APPAREL (PO ruling 2026-08-21: B0GCF11RKL is Electronics — its pool's apparel
+      // keywords were the contamination, and the composer put "T Shirts for Women" on a memory
+      // card). A non-apparel family composes NO garment vocabulary at all.
+      if (opts?.garmentFamily === 'none' && GARMENT_SURFACE_RE.test(r.keyword)) return false
       if (opts?.garmentFamily === 'tee' && /\b(?:sweatshirts?|hoodies?|crewnecks?)\b/i.test(r.keyword)) return false
       if ((opts?.garmentFamily === 'sweatshirt' || opts?.garmentFamily === 'hoodie') && /\b(?:tees?|t[\s-]?shirts?|tshirts?)\b/i.test(r.keyword)) return false
       return words >= 2 && words <= 5 && !titleCovers(r.keyword)
