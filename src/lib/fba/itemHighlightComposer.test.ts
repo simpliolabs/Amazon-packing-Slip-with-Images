@@ -170,3 +170,19 @@ describe('over-sized spacing variants (fleet-pass catch)', () => {
     expect(out).toContain('Can be worn as Oversized')   // demand still surfaces via the FACT
   })
 })
+
+describe("non-apparel families (PO 2026-08-21: B0GCF11RKL is Electronics)", () => {
+  it("garmentFamily 'none' composes ZERO garment vocabulary — only the product's own phrases", () => {
+    const mixedPool = [
+      { keyword: 'sd card 32gb', searchVolume: 9000, themeFit: 3 },
+      { keyword: 'sdhc memory card', searchVolume: 8000, themeFit: 3 },
+      { keyword: 'camera storage card', searchVolume: 4000, themeFit: 2 },
+      { keyword: 'high speed micro sd', searchVolume: 3000, themeFit: 2 },
+      { keyword: 't shirts for women', searchVolume: 150000, themeFit: 1 },
+      { keyword: 'graphic tees for teens', searchVolume: 90000, themeFit: 1 },
+    ]
+    const out = composeItemHighlight(mixedPool, ['32GB SDHC Memory Card 2-Pack'], { garmentFamily: 'none' })!
+    expect(out.toLowerCase()).toContain('sd card')
+    expect(out.toLowerCase()).not.toMatch(/shirt|tee|apparel|top|clothing/)
+  })
+})

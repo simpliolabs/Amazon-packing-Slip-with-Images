@@ -2370,7 +2370,9 @@ export async function buildItemHighlights(
         relaxedOrUnisexCut: unisexFit || /relaxed/i.test(details.map((d) => `${d.current_value ?? ''}`).join(' ')),
         // Truth filters (Darlin' F-grade): the blank's fabric spec + the family's garment class.
         spec: blankBrand?.spec ?? null,
-        garmentFamily: /sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee',
+        // NON-APPAREL families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocab —
+        // 'none' inverts the wrong-garment filter to drop every garment-noun candidate.
+        garmentFamily: !apparelProduct ? 'none' : /sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee',
         // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
         allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
       },
