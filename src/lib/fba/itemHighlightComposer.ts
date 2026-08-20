@@ -24,6 +24,8 @@
 import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
 import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations } from './productDetailAttrs'
+import { scrubTrademarks } from './trademarkGuard'
+import { trueWeightClass, type BlankSpec } from './blankSpecs'
 
 export interface ComposerPoolRow {
   keyword: string
@@ -31,6 +33,10 @@ export interface ComposerPoolRow {
   themeFit?: number | null
 }
 
+/** Competitor blank/apparel makers — never composable unless the family's own allowed brand.
+ *  The trademark lexicon covers franchises/marks, not blanks (the Darlin' pool composed
+ *  "Pro Club Shirts" straight through it). */
+const APPAREL_BRAND_RE = /\b(?:pro\s?club|gildan|hanes|fruit\sof\sthe\sloom|next\slevel|bella\s?canvas|american\sapparel|champion|carhartt|comfort\scolors)\b/i
 const MIN_CANDIDATES = 3
 const GARMENT_SURFACE_RE = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|apparel|tops?|clothing|hoodies?|sweatshirts?|garments?)\b/i
 
@@ -55,7 +61,7 @@ const significantFolded = (phrase: string): string[] =>
 export function composeItemHighlight(
   pool: ComposerPoolRow[],
   titles: string[],
-  opts?: { relaxedOrUnisexCut?: boolean },
+  opts?: { relaxedOrUnisexCut?: boolean; spec?: Pick<BlankSpec, 'weightNote' | 'stretch'> | null; garmentFamily?: 'tee' | 'sweatshirt' | 'hoodie' | 'hat' | null; allowedBrand?: string | null },
 ): string | null {
   const titleCovers = makeCoverageChecker(titles.filter(Boolean).join(' '))
   // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
@@ -75,6 +81,29 @@ export function composeItemHighlight(
       // PO ruling 2026-08-20: a bare "Oversized <garment>" pool phrase is a CUT claim — excluded
       // here always; oversized demand surfaces only as the sanctioned wear-style fact below.
       if (/\boversized\b/i.test(r.keyword)) return false
+      // TRUTH FILTERS (2026-08-20, the Darlin' F-grade: "Pro Club Shirts, Heavyweight T Shirts,
+      // Comfort Colors Sweatshirt" composed straight from a dirty pool — the composer is a mirror;
+      // these keep a rotten pool from composing lies):
+      // (a) third-party marks — the trademark door must pass the phrase byte-identical;
+      if (scrubTrademarks(r.keyword) !== r.keyword) return false
+      // (a2) competitor APPAREL brands — outside the trademark lexicon (it covers franchises, not
+      // blanks): a pool row naming another maker never composes. The family's own allowed blank
+      // brand (brand_in_copy, e.g. Comfort Colors) is exempted by name.
+      {
+        const bm = r.keyword.match(APPAREL_BRAND_RE)
+        if (bm && bm[0].toLowerCase() !== (opts?.allowedBrand ?? '').toLowerCase()) return false
+      }
+      // (b) fabric-class truth — a weight-class word must match the blank (unknown blank ⇒ none);
+      {
+        const m = r.keyword.match(/\b(light|mid|middle|heavy)[\s-]?weight\b/i)
+        if (m) {
+          const wt = trueWeightClass(opts?.spec)
+          if (!wt || !wt.startsWith(m[1].toLowerCase().slice(0, 3))) return false
+        }
+      }
+      // (c) wrong-garment truth — a tee family never claims sweatshirt/hoodie vocab, and vice versa.
+      if (opts?.garmentFamily === 'tee' && /\b(?:sweatshirts?|hoodies?|crewnecks?)\b/i.test(r.keyword)) return false
+      if ((opts?.garmentFamily === 'sweatshirt' || opts?.garmentFamily === 'hoodie') && /\b(?:tees?|t[\s-]?shirts?|tshirts?)\b/i.test(r.keyword)) return false
       return words >= 2 && words <= 5 && !titleCovers(r.keyword)
     })
     .sort((a, b) => {
@@ -123,5 +152,7 @@ export function composeItemHighlight(
     picked.push(OVERSIZED_FACT)
   }
 
-  return picked.join(', ')
+  // Scrub parity with the LLM path (defense in depth — candidates are already door-clean, but the
+  // wear-fact join and future edits must never reopen the trademark door).
+  return scrubTrademarks(picked.join(', '))
 }

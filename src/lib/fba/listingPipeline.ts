@@ -2366,7 +2366,14 @@ export async function buildItemHighlights(
     const composed = composeItemHighlight(
       pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: (k as { themeFit?: number | null }).themeFit ?? null })),
       (netTitles ?? [finalTitle]).filter((t): t is string => !!t),
-      { relaxedOrUnisexCut: unisexFit || /relaxed/i.test(details.map((d) => `${d.current_value ?? ''}`).join(' ')) },
+      {
+        relaxedOrUnisexCut: unisexFit || /relaxed/i.test(details.map((d) => `${d.current_value ?? ''}`).join(' ')),
+        // Truth filters (Darlin' F-grade): the blank's fabric spec + the family's garment class.
+        spec: blankBrand?.spec ?? null,
+        garmentFamily: /sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee',
+        // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
+        allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
+      },
     )
     if (composed) {
       console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: composed.length, ih: composed.slice(0, 140) }))
