@@ -118,3 +118,40 @@ describe('truth filters (the Darlin F-grade, 2026-08-20)', () => {
     expect(out.toLowerCase()).toContain('midweight cotton tops')
   })
 })
+
+describe('fit gate on rated pools (the Disney World / Band Tees drift)', () => {
+  it('on a RATED pool, unrated high-volume noise cannot compose', () => {
+    const ratedPool = [
+      { keyword: 'usa soccer shirt women', searchVolume: 500, themeFit: 3 },
+      { keyword: 'futbol fan tee', searchVolume: 400, themeFit: 3 },
+      { keyword: 'soccer graphic tops', searchVolume: 300, themeFit: 2 },
+      { keyword: 'world futbol apparel', searchVolume: 200, themeFit: 2 },
+      { keyword: 'disney world shirts', searchVolume: 90000, themeFit: null },
+      { keyword: 'band tees', searchVolume: 80000, themeFit: 0 },
+    ]
+    const out = composeItemHighlight(ratedPool, ['THE CEO Futbol Tee'])!
+    expect(out.toLowerCase()).not.toContain('disney')
+    expect(out.toLowerCase()).not.toContain('band tees')
+    expect(out.toLowerCase()).toContain('soccer')
+  })
+
+  it('an UNRATED pool keeps volume ordering (no judgment to trust)', () => {
+    const unrated = [
+      { keyword: 'gator lover gift', searchVolume: 300, themeFit: null },
+      { keyword: 'funny reptile tee', searchVolume: 200, themeFit: null },
+      { keyword: 'swamp animal tops', searchVolume: 100, themeFit: null },
+    ]
+    expect(composeItemHighlight(unrated, ['THE CEO Design Shirt'])).toBeTruthy()
+  })
+
+  it('a franchise mark in a pool row never composes (trademark door, Disney rule)', () => {
+    const ratedPool = [
+      { keyword: 'disney world shirts', searchVolume: 90000, themeFit: 3 },
+      { keyword: 'usa soccer shirt women', searchVolume: 500, themeFit: 3 },
+      { keyword: 'futbol fan tee', searchVolume: 400, themeFit: 3 },
+      { keyword: 'soccer graphic tops', searchVolume: 300, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(ratedPool, ['THE CEO Futbol Tee'])!
+    expect(out.toLowerCase()).not.toContain('disney')
+  })
+})

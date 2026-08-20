@@ -26,6 +26,19 @@ const TRADEMARK_RULES: { mark: string; sub: string }[] = [
   { mark: 'mlb', sub: '' },
   { mark: 'nhl', sub: '' },
   { mark: 'ncaa', sub: '' },
+  // MEDIA/PARK MARKS (2026-08-20): the fresh futbol harvest surfaced "disney world shirts" and the
+  // composer's trademark door passed it — the lexicon covered leagues but no media franchises. The
+  // empty sub follows the league precedent: scrub paths drop the mark; the composer's byte-identity
+  // door rejects the whole phrase (a candidate naming a franchise never composes).
+  { mark: 'disney(?:\\s*(?:land|world))?', sub: '' },
+  { mark: 'marvel', sub: '' },
+  { mark: 'star\\s*wars', sub: '' },
+  { mark: 'harry\\s*potter', sub: '' },
+  { mark: 'pokemon', sub: '' },
+  { mark: 'nintendo', sub: '' },
+  { mark: 'hello\\s*kitty', sub: '' },
+  { mark: 'nike', sub: '' },
+  { mark: 'adidas', sub: '' },
 ]
 
 /** Casing helper: keep the substitution's case roughly matching the matched text so a Title-Case
