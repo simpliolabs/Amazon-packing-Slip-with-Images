@@ -2371,6 +2371,15 @@ export async function buildItemHighlights(
     problems = gate(out)
     console.log(JSON.stringify({ tag: 'IH_RETRY', draftLen: out.length, draft: out.slice(0, 140), problems }))
   }
+  // OVER-LENGTH ALONE IS NOT FATAL (2026-08-20, the 128-char confession): the gate was discarding a
+  // perfect class-structure draft for being 3 chars over, shipping the generic fallback instead. The
+  // return path's capItemHighlightRepeats already enforces the 125 budget DETERMINISTICALLY at a
+  // comma boundary (INVARIANT 2: the net, not the LLM, owns the measurable) — so a draft whose ONLY
+  // sin is length flows to the cap. Any other violation still falls back.
+  if (problems.length > 0 && problems.every((p) => /characters/.test(p))) {
+    console.log(JSON.stringify({ tag: 'IH_ACCEPT_OVERLength', len: out.length, note: 'length-only violation — comma-boundary cap enforces the budget' }))
+    problems = []
+  }
   if (problems.length > 0) console.warn(JSON.stringify({ tag: 'IH_FALLBACK', reason: problems }))
   // Deterministic repeated-words cap on EVERY return path (the LLM ignored the "no repeats" rule and
   // shipped "comfort colors" ×3 on a Comfort-Colors blank; the fallback is repeat-safe by construction but
