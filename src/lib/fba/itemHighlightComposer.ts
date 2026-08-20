@@ -73,7 +73,7 @@ const significantFolded = (phrase: string): string[] =>
 export function composeItemHighlight(
   pool: ComposerPoolRow[],
   titles: string[],
-  opts?: { relaxedOrUnisexCut?: boolean; spec?: Pick<BlankSpec, 'weightNote' | 'stretch'> | null; garmentFamily?: 'tee' | 'sweatshirt' | 'hoodie' | 'hat' | 'none' | null; allowedBrand?: string | null },
+  opts?: { relaxedOrUnisexCut?: boolean; spec?: Pick<BlankSpec, 'weightNote' | 'stretch' | 'material' | 'fit' | 'neck' | 'sleeve' | 'dye'> | null; garmentFamily?: 'tee' | 'sweatshirt' | 'hoodie' | 'hat' | 'none' | null; allowedBrand?: string | null },
 ): string | null {
   const titleCovers = makeCoverageChecker(titles.filter(Boolean).join(' '))
   // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
@@ -175,6 +175,35 @@ export function composeItemHighlight(
   ) {
     picked.push(OVERSIZED_FACT)
   }
+
+  // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125": an under-min line
+  // never ships. Pad toward the floor with TRUE spec facts (blank_specs values — never invented),
+  // each passing the same novelty + repeat gates as pool phrases. A family that cannot truthfully
+  // reach the floor returns NOT-READY (null) — the caller's fallback/hold path decides, but a
+  // short line is not a shippable outcome from here.
+  const MIN = CONTENT_CONTRACT.itemHighlights.min
+  if (lineLen() < MIN && opts?.spec) {
+    const sp = opts.spec
+    const factFillers = [
+      sp.material || '',
+      sp.fit ? `${sp.fit} Fit` : '',
+      sp.neck || '',
+      sp.sleeve || '',
+      sp.dye ? `${sp.dye} Fabric` : '',
+    ].filter(Boolean)
+    for (const f of factFillers) {
+      if (lineLen() >= MIN) break
+      const phrase = titleCasePhrase(f)
+      if (picked.includes(phrase)) continue
+      const folded = significantFolded(f)
+      if (!folded.some((w) => !usedFolded.has(w))) continue
+      if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
+      if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
+      picked.push(phrase)
+      folded.forEach((w) => usedFolded.add(w))
+    }
+  }
+  if (lineLen() < MIN) return null
 
   // Scrub parity with the LLM path (defense in depth — candidates are already door-clean, but the
   // wear-fact join and future edits must never reopen the trademark door).

@@ -72,5 +72,8 @@ export const CONTENT_CONTRACT = {
   itemHighlights: {
     max: 125,               // Amazon's stated Item Highlights budget — the hard cap, all nets
     fillTarget: 110,        // band LOW edge: aim 110-125 so the field is actually used, not merely legal
+    min: 107,               // PO RULING 2026-08-21 verbatim "44 is NEVER approved, MIN 85% of MAX 125":
+                            // ceil(0.85*125). An under-min line is NOT SHIPPABLE — the composer pads
+                            // with TRUE spec facts or returns not-ready; it never ships short.
   },
 } as const
