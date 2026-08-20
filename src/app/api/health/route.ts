@@ -56,6 +56,8 @@ const BEHAVIOR_FLAGS = [
   'PUSH_HEAL_FEEDS_FALLBACK',
   'AUTO_RESHIP_ENABLED',
   'JUNGLE_SCOUT_ENABLED',
+  'TITLE_COUNCIL_MODEL', // model PIN for council judges/adversaries (bullets + backend judges inherit it, default 'gpt-5') — #176 found the judges failing EVERY run with the failure swallowed; the pinned model must be readable in prod or a bad pin is invisible
+  'BULLETS_COUNCIL_MODEL', // bullets-council override of the above (default: TITLE_COUNCIL_MODEL || gpt-5)
 ] as const
 
 export async function GET() {

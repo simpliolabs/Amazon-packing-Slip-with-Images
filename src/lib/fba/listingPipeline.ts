@@ -3639,7 +3639,7 @@ async function runBulletsCouncil(openai: OpenAI, baseSystem: string, baseUser: s
   // reject `temperature` and use `max_completion_tokens` — params branch by model (same as the title
   // council). Per-call timeout + NO retries so a hung call can't stall past Cloudflare's ~100s idle
   // window (a keepalive fires BETWEEN stages, not during a call; each call finishes under its own cap).
-  const askBullets = async (system: string, user: string, temperature: number, model = 'gpt-4.1-mini', timeoutMs = 20_000): Promise<string[]> => {
+  const askBullets = async (system: string, user: string, temperature: number, model = 'gpt-4.1-mini', timeoutMs = 20_000, label = 'proposer'): Promise<string[]> => {
     try {
       const isGpt5 = /^(gpt-5|o\d)/.test(model)
       const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }]
@@ -3649,9 +3649,17 @@ async function runBulletsCouncil(openai: OpenAI, baseSystem: string, baseUser: s
           : { model, messages, temperature, max_tokens: 1200, response_format: { type: 'json_object' as const } },
         { timeout: timeoutMs, maxRetries: 0 },
       )
-      const parsed = parseJsonLoose<{ bullets?: string[] }>(r.choices[0]?.message?.content || '{}')
+      const content = r.choices[0]?.message?.content || ''
+      // #176: an empty judge was invisible for weeks because failures were swallowed here. A
+      // reasoning model can exhaust max_completion_tokens on REASONING and return empty content
+      // with finish_reason 'length' — log the cause, never just the silence.
+      if (!content.trim()) console.warn(`[bullets-council] ${label} (${model}) returned EMPTY content — finish_reason=${r.choices[0]?.finish_reason ?? '?'}`)
+      const parsed = parseJsonLoose<{ bullets?: string[] }>(content || '{}')
       return Array.isArray(parsed.bullets) ? parsed.bullets.filter((b) => typeof b === 'string').map((b) => b.trim()).filter(Boolean).slice(0, 5) : []
-    } catch { return [] }
+    } catch (e) {
+      console.warn(`[bullets-council] ${label} (${model}) call FAILED: ${e instanceof Error ? e.message : String(e)}`)
+      return []
+    }
   }
   const askText = async (system: string, user: string, model: string, timeoutMs: number): Promise<string> => {
     try {
@@ -3683,11 +3691,24 @@ async function runBulletsCouncil(openai: OpenAI, baseSystem: string, baseUser: s
     COUNCIL_MODEL, 60_000,
   )
   onProgress?.('Bullets council: judge synthesizing the winner...')            // keepalive
-  const judged = await askBullets(
-    baseSystem + ' You are the JUDGE: merge the strongest, ACCURATE elements into ONE final set of 5 bullets that covers EVERY required keyphrase from the brief, each starting with a CAPS benefit hook, none implying a role/occasion not in the title. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.',
-    `${baseUser}\n\nCandidate sets:\n${numbered}\n\nCritic review:\n${critique}\n\nReturn ONLY the single best final set as {"bullets":[...]}.`,
-    0.2, COUNCIL_MODEL, 60_000,
-  )
+  const judgeSysB = baseSystem + ' You are the JUDGE: merge the strongest, ACCURATE elements into ONE final set of 5 bullets that covers EVERY required keyphrase from the brief, each starting with a CAPS benefit hook, none implying a role/occasion not in the title. Return ONLY JSON {"bullets":["b1","b2","b3","b4","b5"]}.'
+  const judgeUserB = `${baseUser}
+
+Candidate sets:
+${numbered}
+
+Critic review:
+${critique}
+
+Return ONLY the single best final set as {"bullets":[...]}.`
+  let judged = await askBullets(judgeSysB, judgeUserB, 0.2, COUNCIL_MODEL, 60_000, 'judge')
+  // #176: the judge failed EVERY live run while the proposers succeeded — same messages, different
+  // model. Before abandoning judgment, retry ONCE on the proposers' proven workhorse model: a
+  // downgraded judge still JUDGES (merges + covers keyphrases), which beats an unjudged draft.
+  if (judged.length === 0 && COUNCIL_MODEL !== 'gpt-4.1-mini') {
+    judged = await askBullets(judgeSysB, judgeUserB, 0.2, 'gpt-4.1-mini', 30_000, 'judge-retry')
+    if (judged.length > 0) console.log('[bullets-council] judge succeeded on gpt-4.1-mini downgrade retry')
+  }
   // Fail open to the SEO/coverage draft (persona #1), NOT the creative one (#0): if the judge errors or
   // returns empty/invalid JSON, the coverage-optimized draft is the safest fallback. Logged so it's visible.
   if (judged.length === 0) console.warn('[bullets-council] judge returned empty — failing open to the SEO/coverage draft')
@@ -4848,7 +4869,9 @@ async function runBackendCouncil(
           : { model, messages, temperature, max_tokens: 1000, response_format: { type: 'json_object' as const } },
         { timeout: timeoutMs, maxRetries: 0 },
       )
-      const parsed = parseJsonLoose<{ candidates?: { keyword?: unknown; volume?: unknown }[] }>(r.choices[0]?.message?.content || '{}')
+      const contentB = r.choices[0]?.message?.content || ''
+      if (!contentB.trim()) console.warn(`[backend-council] call (${model}) returned EMPTY content — finish_reason=${r.choices[0]?.finish_reason ?? '?'}`)
+      const parsed = parseJsonLoose<{ candidates?: { keyword?: unknown; volume?: unknown }[] }>(contentB || '{}')
       return (Array.isArray(parsed.candidates) ? parsed.candidates : [])
         .filter((c) => !!c && typeof c.keyword === 'string' && c.keyword.trim().length > 0)
         .map((c) => {
@@ -4856,7 +4879,10 @@ async function runBackendCouncil(
           return { keyword: String(c.keyword).trim().toLowerCase(), volume: Number.isFinite(v) && v > 0 ? Math.round(v) : 0 }
         })
         .slice(0, 40)
-    } catch { return [] }
+    } catch (e) {
+      console.warn(`[backend-council] call (${model}) FAILED: ${e instanceof Error ? e.message : String(e)}`)
+      return []
+    }
   }
   const JUDGE_MODEL = process.env.TITLE_COUNCIL_MODEL || 'gpt-5'
   const poolLines = poolRemaining.slice(0, 40).map((k) => `- ${k.keyword} (${k.searchVolume ?? 0}/mo${k.actionType === 'CRITICAL' ? ', CRITICAL' : ''})`).join('\n')
@@ -4890,7 +4916,13 @@ ${numbered}
 
 Return the single final pack, ranked in the exact order the words should be placed.`
   onProgress?.('Backend council: judge packing the survivors...')          // keepalive
-  const judged = await askCandidates(judgeSys, judgeUser, 0.2, JUDGE_MODEL, 60_000)
+  let judged = await askCandidates(judgeSys, judgeUser, 0.2, JUDGE_MODEL, 60_000)
+  // #176: same downgrade retry as the bullets council — a judged pack on the workhorse model
+  // beats an unjudged demand list.
+  if (judged.length === 0 && JUDGE_MODEL !== 'gpt-4.1-mini') {
+    judged = await askCandidates(judgeSys, judgeUser, 0.2, 'gpt-4.1-mini', 30_000)
+    if (judged.length > 0) console.log('[backend-council] judge succeeded on gpt-4.1-mini downgrade retry')
+  }
   // Fail open to proposer (i)'s DEMAND list (pool-backed, the safest volumes), NOT the invented
   // long-tail list — mirrors the bullets council's fail-open-to-SEO-draft rationale. Logged.
   if (judged.length === 0) console.warn('[backend-council] judge returned empty — failing open to the demand-proposer list')
