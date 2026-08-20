@@ -5523,7 +5523,7 @@ export default function ListingDetailPage() {
                             />
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className={`text-[10px] font-medium ${detailOverride.length > 75 ? 'text-amber-600' : 'text-slate-500'}`}>
-                                {detailOverride.length}/75 chars{detailOverride.length > 75 ? ' · over the 75-char field cap' : ''}
+                                {detailOverride.length}/125 chars{detailOverride.length > 125 ? ' · over the 125-char field cap' : detailOverride.length > 0 && detailOverride.length < 110 ? ' · under 110 — budget left for another phrase' : ''}
                               </span>
                               <button onClick={() => checkHighlight(detailOverride)} disabled={ihCheckLoading || !detailOverride.trim()}
                                 className="text-[10px] bg-slate-700 hover:bg-slate-800 text-white px-2 py-0.5 rounded font-medium disabled:opacity-50">

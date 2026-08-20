@@ -2108,7 +2108,8 @@ export function validateItemHighlights(
   designSeasons: readonly string[] = [],
 ): string[] {
   const problems: string[] = []
-  // PO 2026-07-19: Item Highlights must be SHORT feature/benefit phrases (≤75 chars total), NOT a full
+  // PO 2026-07-19 (phrase-quality rule) + PO 2026-08-10 (budget 75 → 125, CONTENT_CONTRACT.itemHighlights):
+  // Item Highlights must be SHORT feature/benefit phrases within the 125-char Amazon budget, NOT a full
   // sentence — Amazon's field shows next to a ≤75-char title. Was a 125-char budget, which produced a
   // ~120-char comma-sentence live (B0FKKN8XKV). Cap 75 + ban sentence punctuation so the corrective-retry
   // loop + the deterministic fallback both converge on short phrases.
@@ -2275,7 +2276,7 @@ export async function buildItemHighlights(
     .slice(0, 8)
   season.diff('item-highlights', pool.map((k) => (k.keyword || '').trim()).filter(Boolean))
 
-  // The PO's rules (2026-07-19), verbatim, as the brief's spine: ≤75 chars, short feature/benefit PHRASES
+  // The PO's rules as the brief's spine: the CONTENT_CONTRACT.itemHighlights budget (125 max, aim 110-125 per PO 2026-08-10), short feature/benefit PHRASES (PO 2026-07-19)
   // (NOT a full sentence), and do NOT repeat what the title already says (add NEW info — fabric/fit/feel/care).
   // Display: Amazon moved Item Highlights BENEATH the item name on desktop and mobile effective
   // 2026-08-10 (Seller Central title-update FAQ) — the old "next to the title" wording is stale.
