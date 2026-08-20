@@ -57,6 +57,7 @@ import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrity
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
+import { composeItemHighlight } from '@/lib/fba/itemHighlightComposer'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
@@ -2358,6 +2359,22 @@ export async function buildItemHighlights(
   }
   // Draft → validate (incl. keyword-list gate) → ONE corrective retry → deterministic spec-based fallback.
   // scrubTrademarks runs BEFORE validation on every LLM output (the scrubbed string is what ships).
+  // ARCHITECTURE A (PO sign-off 2026-08-20): the pool-first composer goes FIRST — deterministic,
+  // verbatim ranking keywords, beige impossible. The LLM chain below survives only as the
+  // thin-pool degradation path (composer returns null under MIN_CANDIDATES).
+  {
+    const composed = composeItemHighlight(
+      pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: (k as { themeFit?: number | null }).themeFit ?? null })),
+      (netTitles ?? [finalTitle]).filter((t): t is string => !!t),
+      { relaxedOrUnisexCut: unisexFit || /relaxed/i.test(details.map((d) => `${d.current_value ?? ''}`).join(' ')) },
+    )
+    if (composed) {
+      console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: composed.length, ih: composed.slice(0, 140) }))
+      const titlesForNetC = netTitles ?? [finalTitle]
+      return capItemHighlightRepeats(ensureBlankBrandInHighlights(composed, titlesForNetC, blankBrand))
+    }
+    console.log(JSON.stringify({ tag: 'IH_COMPOSER_THIN', note: 'pool below MIN_CANDIDATES — LLM/spec fallback chain runs' }))
+  }
   let out = scrubTrademarks(await ask('')).trim()
   let problems = gate(out)
   // #IH-VISIBILITY (2026-08-20): the draft->gate->retry->fallback chain decided SILENTLY — the
