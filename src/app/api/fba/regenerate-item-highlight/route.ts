@@ -87,6 +87,19 @@ export async function POST(req: NextRequest) {
       // Fail-open: an empty result would starve the prompt of context entirely.
       if (targeted.length > 0) hlAnalysis = targeted
     }
+    // THEME-FIT RE-HYDRATION (2026-08-20): the targeting projection can drop themeFit, which made
+    // 92%-rated pools read as UNRATED downstream — the composer's rated-pool guarantees (fit gate,
+    // never-fall-to-LLM) silently disarmed and the LLM improvised past the PO's rulings ("Walt
+    // Shirt", "Oversized Crew Neck"). Re-hydrate from the raw pool by keyword: one deterministic
+    // seam, correct regardless of which projection stripped the field.
+    {
+      const fitByKw = new Map(analysis.map((k) => [k.keyword.toLowerCase(), k.themeFit ?? null]))
+      hlAnalysis = hlAnalysis.map((k) => (
+        (k as { themeFit?: number | null }).themeFit == null
+          ? { ...k, themeFit: fitByKw.get(k.keyword.toLowerCase()) ?? null }
+          : k
+      ))
+    }
 
     // Facts the highlight grounds in: the stored detail rows (the DB lookup). Shape matches the
     // generator's `details` param exactly (Parameters<>[3]) so the compiler enforces it.
