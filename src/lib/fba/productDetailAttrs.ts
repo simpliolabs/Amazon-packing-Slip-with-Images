@@ -280,8 +280,8 @@ export function capItemHighlightRepeats(value: string): string {
   // 75 discarded 40%. The QUALITY rule is unchanged and is what the 2026-07-19 ruling was really about:
   // short feature/benefit phrases,
   // not a full sentence). This runs at the PUSH boundary (buildDetailPatchValue) + every generator return +
-  // the regen route, so a stale/LLM/stored ~120-char value is truncated to ≤75 at a COMMA boundary (never
-  // mid-word) even if it never went through the ≤75 generator gate. Always keeps ≥1 phrase (never blanks).
+  // the regen route, so an over-budget stale/LLM/stored value is truncated to the contract max at a
+  // COMMA boundary (never mid-word) even if it skipped the generator gate. Always keeps >=1 phrase (never blanks).
   const capped: string[] = []
   let len = 0
   for (const p of kept) {

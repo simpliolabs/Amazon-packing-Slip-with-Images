@@ -25,10 +25,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { validateItemHighlights, deriveDesignSeasons } from '@/lib/fba/listingPipeline'
 import { capItemHighlightRepeats, ihRepeatViolations, IH_MAX_WORD_REPEATS } from '@/lib/fba/productDetailAttrs'
+import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 
-/** Amazon shows this field beside a <=75-char title; the generator's own cap is 75. Kept as a named
- *  constant so the UI counter and this check can never drift apart. */
-const IH_MAX_CHARS = 75
+/** ONE budget constant (generation-invariants INVARIANT 5): Amazon's Item Highlights budget is 125
+ *  chars (CONTENT_CONTRACT.itemHighlights.max — PO ruling 2026-08-10; sellercentral G200390640).
+ *  This route shipped 2026-08-18 with a hardcoded 75 — the RETIRED pre-08-10 cap — so the editor
+ *  told the seller a 77-char value was over budget while the validator and terminal net accepted
+ *  up to 125. The 75 belongs to the TITLE (and the 100476 heal) only. PO-caught 2026-08-20. */
+const IH_MAX_CHARS = CONTENT_CONTRACT.itemHighlights.max
 
 function getAdminSupabase() {
   return createClient(
