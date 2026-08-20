@@ -155,3 +155,18 @@ describe('fit gate on rated pools (the Disney World / Band Tees drift)', () => {
     expect(out.toLowerCase()).not.toContain('disney')
   })
 })
+
+describe('over-sized spacing variants (fleet-pass catch)', () => {
+  it('"Over Sized" and "over-sized" pool phrases are cut claims — excluded like "oversized"', () => {
+    const ratedPool = [
+      { keyword: 'over sized t shirt women', searchVolume: 9000, themeFit: 3 },
+      { keyword: 'over-sized graphic tee', searchVolume: 8000, themeFit: 3 },
+      { keyword: 'motivational shirts women', searchVolume: 500, themeFit: 3 },
+      { keyword: 'positive message tops', searchVolume: 400, themeFit: 3 },
+      { keyword: 'inspirational tee ladies', searchVolume: 300, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(ratedPool, ['THE CEO Design Shirt'], { relaxedOrUnisexCut: true })!
+    expect(out.toLowerCase()).not.toMatch(/over[\s-]?sized? t|over[\s-]?sized? g/)
+    expect(out).toContain('Can be worn as Oversized')   // demand still surfaces via the FACT
+  })
+})

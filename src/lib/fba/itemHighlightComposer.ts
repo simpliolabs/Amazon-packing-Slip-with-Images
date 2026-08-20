@@ -67,7 +67,7 @@ export function composeItemHighlight(
   // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
   // reaches the band first and the fact never fits (test-caught design gap).
   const OVERSIZED_FACT = 'Can be worn as Oversized'
-  const factEligible = !!opts?.relaxedOrUnisexCut && pool.some((r) => /\boversized\b/i.test(r.keyword))
+  const factEligible = !!opts?.relaxedOrUnisexCut && pool.some((r) => /\bover[\s-]?sized?\b/i.test(r.keyword))
   const RESERVE = factEligible ? OVERSIZED_FACT.length + 2 : 0
   const MAX = CONTENT_CONTRACT.itemHighlights.max - RESERVE
   const AIM = CONTENT_CONTRACT.itemHighlights.fillTarget - RESERVE
@@ -88,7 +88,7 @@ export function composeItemHighlight(
       const words = r.keyword.split(/\s+/).length
       // PO ruling 2026-08-20: a bare "Oversized <garment>" pool phrase is a CUT claim — excluded
       // here always; oversized demand surfaces only as the sanctioned wear-style fact below.
-      if (/\boversized\b/i.test(r.keyword)) return false
+      if (/\bover[\s-]?sized?\b/i.test(r.keyword)) return false
       // TRUTH FILTERS (2026-08-20, the Darlin' F-grade: "Pro Club Shirts, Heavyweight T Shirts,
       // Comfort Colors Sweatshirt" composed straight from a dirty pool — the composer is a mirror;
       // these keep a rotten pool from composing lies):
