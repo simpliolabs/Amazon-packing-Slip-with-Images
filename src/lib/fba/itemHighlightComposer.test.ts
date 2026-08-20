@@ -85,3 +85,36 @@ describe('composeItemHighlight — Architecture A', () => {
     expect(a).toBe(b)
   })
 })
+
+describe('truth filters (the Darlin F-grade, 2026-08-20)', () => {
+  const DIRTY_POOL = [
+    { keyword: 'rodeo outfit women', searchVolume: 400, themeFit: 3 },
+    { keyword: 'hello darlin shirt', searchVolume: 350, themeFit: 3 },
+    { keyword: 'western graphic tops', searchVolume: 300, themeFit: 3 },
+    { keyword: 'cowgirl tee ladies', searchVolume: 250, themeFit: 3 },
+    { keyword: 'pro club shirts', searchVolume: 9000, themeFit: null },
+    { keyword: 'heavyweight t shirts', searchVolume: 8000, themeFit: null },
+    { keyword: 'comfort colors sweatshirt', searchVolume: 7000, themeFit: null },
+  ]
+  const CC_SPEC = { weightNote: 'midweight 6.1 oz garment-dyed', stretch: 'Low Stretch' }
+
+  it('drops third-party-brand rows via the trademark door', () => {
+    const out = composeItemHighlight(DIRTY_POOL, ['THE CEO Darlin Tee'], { spec: CC_SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })!
+    expect(out.toLowerCase()).not.toContain('pro club')
+  })
+
+  it('drops fabric-class lies (heavyweight on a midweight blank) and wrong-garment vocab (sweatshirt on a tee family)', () => {
+    const out = composeItemHighlight(DIRTY_POOL, ['THE CEO Darlin Tee'], { spec: CC_SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })!
+    expect(out.toLowerCase()).not.toContain('heavyweight')
+    expect(out.toLowerCase()).not.toContain('sweatshirt')
+    expect(out.toLowerCase()).toContain('rodeo')
+  })
+
+  it('a TRUE weight-class phrase survives (midweight row on a midweight blank)', () => {
+    const out = composeItemHighlight(
+      [...DIRTY_POOL, { keyword: 'midweight cotton tops', searchVolume: 100, themeFit: 2 }],
+      ['THE CEO Darlin Tee'], { spec: CC_SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' },
+    )!
+    expect(out.toLowerCase()).toContain('midweight cotton tops')
+  })
+})
