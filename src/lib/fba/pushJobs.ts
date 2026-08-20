@@ -50,6 +50,7 @@ let chain: Promise<void> = Promise.resolve()
 /** Fire-and-forget: append a job to the in-process run queue. Safe to call twice
  *  for the same id — runJob's atomic queued→running claim makes the second a no-op. */
 export function enqueueJobRun(jobId: string): void {
+  console.log(`[push-jobs] enqueueJobRun ${jobId} — appending to chain`)
   chain = chain.then(() => runJob(jobId)).catch((e) => {
     console.error('[push-jobs] runner crashed (chain preserved):', e)
   })
@@ -61,14 +62,20 @@ async function runJob(jobId: string): Promise<void> {
   // Atomic claim: only queued→running transitions win. A duplicate kick (POST + poll
   // self-heal racing) or an already-finished job matches 0 rows and we walk away.
   const nowIso = new Date().toISOString()
-  const { data: claimed } = await supabase
+  console.log(`[push-jobs] runJob ${jobId} — attempting claim`)
+  const { data: claimed, error: claimErr } = await supabase
     .from('push_jobs')
     .update({ status: 'running', started_at: nowIso, heartbeat_at: nowIso } as never)
     .eq('id', jobId)
     .eq('status', 'queued')
     .select('*')
+  // 2026-08-20: 15 jobs sat queued for 80+ minutes with ZERO log output — the claim's error was
+  // discarded and a no-claim walked away silently. A silent runner is indistinguishable from a
+  // dead one; every branch now says which it is.
+  if (claimErr) { console.error(`[push-jobs] runJob ${jobId} — CLAIM FAILED: ${claimErr.message}`); return }
   const job = (claimed as PushJobRow[] | null)?.[0]
-  if (!job) return
+  if (!job) { console.log(`[push-jobs] runJob ${jobId} — no claim (already running/finished elsewhere)`); return }
+  console.log(`[push-jobs] runJob ${jobId} — CLAIMED (${job.payload?.field ?? '?'} for ${job.parent_asin ?? '?'})`)
 
   // Heartbeat on an interval, not just on events: executePush has quiet stretches
   // (initial diff load, the post-push re-score) where no events fire for a while —
