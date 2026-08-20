@@ -2311,7 +2311,10 @@ export async function buildItemHighlights(
      * The anti-keyword-list rule STAYS and matters more now that these are placeable: the field is
      * customer-facing prose, so a phrase is woven in naturally or left out. Truth is unaffected —
      * spec claims still come only from the FACT rows above, never from a search phrase. */
-    contextKws.length ? `Descriptive phrases shoppers search that your TITLE does NOT already cover — you MAY word ONE OR TWO of these in naturally where they read as a feature/benefit (an audience or garment descriptor, e.g. "graphic tee for women"). Never paste them as a list, never let one become a spec claim, and never repeat a word the rest of the line already uses:\n${contextKws.map((k) => `- ${k}`).join('\n')}` : '',
+    /* PO 2026-08-20 (ranking-keyword classes): the bank is the PRIMARY material — the system prompt
+     * builds its 5-6 class phrases FROM these near-verbatim. Truth rule unchanged: spec claims still
+     * come only from the FACT rows above, never from a search phrase. */
+    contextKws.length ? `UNUSED-KEYWORD BANK — real shopper searches your TITLE does not cover. Build the class phrases FROM these, keeping their wording near-verbatim (the exact token sequence is what ranks); vary garment/audience words across phrases, never letting one become a spec claim:\n${contextKws.map((k) => `- ${k}`).join('\n')}` : '',
     'Write the Item Highlights string now.',
   ].filter(Boolean).join('\n')
 
