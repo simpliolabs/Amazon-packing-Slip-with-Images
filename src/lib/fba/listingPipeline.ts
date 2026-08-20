@@ -2282,15 +2282,19 @@ export async function buildItemHighlights(
   // 2026-08-10 (Seller Central title-update FAQ) — the old "next to the title" wording is stale.
   // The "<=75-char title" clause is NOT stale and stays: it is Amazon error 100476, a dependency on
   // the ITEM NAME's length, unrelated to this field's own budget.
-  const system = 'You write the Amazon "Item Highlights" field — a short CUSTOMER-FACING line shown beneath the title (only when the title is under 75 characters). It is NOT backend keywords and NOT a sentence. '
-    + `Output 3-5 SHORT feature/benefit PHRASES about MATERIAL, FIT, FEEL, and at most ONE USE-CASE — comma-separated. `
-    + `HARD RULES: ${CONTENT_CONTRACT.itemHighlights.max} characters MAXIMUM total (aim ${CONTENT_CONTRACT.itemHighlights.fillTarget}-${CONTENT_CONTRACT.itemHighlights.max} — this field is an Amazon SEARCH INPUT, so falling well short of ${CONTENT_CONTRACT.itemHighlights.max} wastes indexed, shopper-visible space); phrases NOT a sentence — NO periods or other sentence punctuation (. ! ?); `
-    + 'do NOT repeat the design, theme, niche, or product-type words already in the title — the title already says those; add NEW info the title lacks (fabric, fit, feel, care); '
-    + 'no word may appear twice (trivial connectors like for/and/the/a/of/with/in/to are fine); NEVER output a list of search keywords; '
-    + 'no prices, promotions or discount language; no third-party brand names, sports teams, leagues or franchises; at least 2 comma-separated phrases. '
-    + 'STYLE (the seller rejects bare fact-joins): every phrase must read like polished product copy — pair the fact with a feel or benefit word. '
-    + '"soft ring-spun cotton", "relaxed crew-neck fit", "all-day comfort" are RIGHT; "Cotton tee, Crew Neck, for women" is WRONG (bare facts, and it echoes the title). '
-    + 'Good example (63 chars): "100% cotton fabric, relaxed crew-neck fit, soft everyday comfort". '
+  // PHRASE-CLASS STRUCTURE (PO 2026-08-20, from a live competitor exemplar in the seller's own
+  // niche): the field is a searchable SUB-HEADLINE — 5-6 comma phrases, each a DISTINCT search-intent
+  // CLASS, built from the unused-keyword bank + spec facts. The prior brief demanded benefit-prose
+  // and carried a 63-char example that trained undershoot at HALF the 110-125 band. Rules stated as
+  // CONSTRAINTS with a placeholder-shape example — never a vocabulary exemplar (leak lesson #365).
+  const system = 'You write the Amazon "Item Highlights" field — a searchable SUB-HEADLINE shown beneath the title and fully indexed by Amazon search. It is NOT a sentence. '
+    + `Output 5-6 comma-separated phrases, EACH from a DIFFERENT class: (1) category head, (2) category + audience, (3) design-class or garment attribute, (4) tone/genre word that truthfully fits the design, (5) fabric/fit FACT from the product facts given, (6) category-synonym + audience-synonym. `
+    + 'THE PHRASES ARE RANKING KEYWORDS (PO 2026-08-20): the unused-keyword bank below contains real shopper searches with real volume — build each class phrase FROM those keywords, keeping their wording near-VERBATIM (adjust only casing/grammar); a bank keyword used as-is beats a paraphrase, because the exact token sequence is what ranks. '
+    + `HARD RULES: ${CONTENT_CONTRACT.itemHighlights.max} characters MAXIMUM total (aim ${CONTENT_CONTRACT.itemHighlights.fillTarget}-${CONTENT_CONTRACT.itemHighlights.max} — under-filling wastes indexed, shopper-visible space); NO sentence punctuation (. ! ?); `
+    + 'SYNONYM SPREAD is the point: vary the garment noun across phrases (shirt / tee / apparel / top / short sleeve) and the audience word (men/guys, women/ladies) so DISTINCT search tokens get indexed — never repeat the EXACT garment or audience word the title uses, and no significant word may appear twice in this field; '
+    + 'fabric/fit claims ONLY from the product facts provided — never invent a material, weight, or stretch; '
+    + 'no prices or promo language; no third-party brand names, sports teams, leagues or franchises; standard capitalization, no ALL CAPS words. '
+    + `SHAPE example with placeholders (~118 chars — hit this fullness): "<tone> <category> Shirts, <category-synonym> for <audience>, <design-class> Short Sleeve, <tone-synonym>, <fabric fact>, <category-variant> for <audience-synonym>". `
     + 'Return ONLY the Item Highlights string — no quotes, no explanation.'
   const user = [
     'Product facts:',

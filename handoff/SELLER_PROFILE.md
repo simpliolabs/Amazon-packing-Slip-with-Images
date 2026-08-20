@@ -178,3 +178,17 @@ Seed for task #104 (PO-editable rulesets). Review once, correct anything, then i
 
 ---
 *Update rule: when the PO states a new business decision in any session, it gets added here in the same turn the code changes — this document and the enforcement move together.*
+
+### Item Highlights structure ruling (PO 2026-08-20, competitor exemplar endorsement)
+The PO endorsed the phrase-class structure observed on a live competitor in the seller's own alligator niche
+(118 chars, exactly in the 110-125 band): **5-6 comma phrases, each a distinct search-intent CLASS** —
+category head / category+audience / design-class+garment attribute / tone-genre / fabric fact / category-synonym+audience-synonym.
+The craft is **deliberate synonym spread**: vary the garment noun (shirt/tee/apparel/top/short sleeve) and audience
+word (men/guys, women/ladies) across phrases so distinct search tokens index — never repeat the title's exact words.
+Fabric claims remain blank_specs-grounded (the competitor's "Cotton Blend" would be FALSE on Gildan 64000).
+**The phrases are RANKING KEYWORDS** (PO sharpening, same day): each class phrase is built from the unused
+rated-pool keywords near-VERBATIM — real searches with real volume — not paraphrased descriptors.
+RECONCILING the 2026-08-04 "never a bare fact-join" rejection: bare SPEC-joins ("Cotton tee, Crew Neck, for women")
+remain rejected; RANKING-KEYWORD class phrases ("Funny T Shirts", "Novelty Tees for Guys") are the endorsed shape —
+the difference is pool-backed search volume, not prose polish. Supersedes the benefit-prose-only style; the
+2026-07-19 phrase-quality rule (no sentences) and the 2026-08-10 125-char budget stand. Encoded as CONSTRAINTS in the generator brief (never the competitor's literal text — leak lesson).
