@@ -2131,7 +2131,9 @@ export async function GET(req: NextRequest) {
       per_child_descriptions: per_child_descriptions_scrubbed,
       recommended_keywords: JSON.stringify(per_child_keywords_scrubbed),
       action_plan: action_plan_out,
-    }, (contentRows ?? []) as DeriveContentRow[]) as unknown as ActionPlanItem[]
+    }, (contentRows ?? []) as DeriveContentRow[],
+    // #175: the amber PROPAGATING window — serve-time only (see deriveActionPlan).
+    { pushedAt: field_pushed_at, generatedAt: (data.generated_at as string | null) ?? null }) as unknown as ActionPlanItem[]
   } catch (e) { console.warn('[ai-recommendations GET] derive failed — serving stored plan:', e instanceof Error ? e.message : e) }
 
   // Item Highlights write-gate: compute the single client-facing boolean server-side so the client
