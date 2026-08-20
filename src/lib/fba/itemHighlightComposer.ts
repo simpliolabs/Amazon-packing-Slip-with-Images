@@ -40,9 +40,21 @@ const APPAREL_BRAND_RE = /\b(?:pro\s?club|gild[ae]n|guildan|softstyle|heavy\s?co
 const MIN_CANDIDATES = 3
 const GARMENT_SURFACE_RE = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|apparel|tops?|clothing|hoodies?|sweatshirts?|garments?)\b/i
 
+/** Acronyms/initialisms keep their canonical ALL-CAPS form — "Sd Card 32gb" and "Usa Soccer"
+ *  read amateur on a customer-facing line (found on the Electronics family, 2026-08-21). */
+const ACRONYM_CASE: Record<string, string> = {
+  sd: 'SD', sdhc: 'SDHC', sdxc: 'SDXC', microsd: 'MicroSD', usb: 'USB', hdmi: 'HDMI',
+  usa: 'USA', uk: 'UK', led: 'LED', hd: 'HD', tv: 'TV', gps: 'GPS', diy: 'DIY',
+}
 /** Title Case a pool phrase without disturbing its wording (the token sequence is what ranks). */
 const titleCasePhrase = (p: string): string =>
-  p.split(/\s+/).map((w) => (IH_INSIGNIFICANT.has(w.toLowerCase()) ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(' ')
+  p.split(/\s+/).map((w) => {
+    const lower = w.toLowerCase()
+    if (ACRONYM_CASE[lower]) return ACRONYM_CASE[lower]
+    const unit = lower.match(/^(\d+)(gb|tb|mb|k)$/)          // 32gb → 32GB, 4k → 4K
+    if (unit) return unit[1] + unit[2].toUpperCase()
+    return IH_INSIGNIFICANT.has(lower) ? lower : w.charAt(0).toUpperCase() + w.slice(1)
+  }).join(' ')
     .replace(/^./, (c) => c.toUpperCase())
 
 /** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without

@@ -186,3 +186,18 @@ describe("non-apparel families (PO 2026-08-21: B0GCF11RKL is Electronics)", () =
     expect(out.toLowerCase()).not.toMatch(/shirt|tee|apparel|top|clothing/)
   })
 })
+
+describe('acronym casing (customer-facing polish, 2026-08-21)', () => {
+  it('SD/SDHC/USA and size units keep canonical caps', () => {
+    const pool = [
+      { keyword: 'sd card 32gb', searchVolume: 9000, themeFit: 3 },
+      { keyword: 'sdhc memory card', searchVolume: 8000, themeFit: 3 },
+      { keyword: 'usa flag storage case', searchVolume: 3000, themeFit: 2 },
+      { keyword: 'high speed microsd', searchVolume: 2000, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(pool, ['32GB Memory 2-Pack'], { garmentFamily: 'none' })!
+    expect(out).toContain('SD Card 32GB')
+    expect(out).toContain('SDHC Memory Card')
+    expect(out).toContain('USA Flag')
+  })
+})
