@@ -2360,11 +2360,18 @@ export async function buildItemHighlights(
   // scrubTrademarks runs BEFORE validation on every LLM output (the scrubbed string is what ships).
   let out = scrubTrademarks(await ask('')).trim()
   let problems = gate(out)
+  // #IH-VISIBILITY (2026-08-20): the draft->gate->retry->fallback chain decided SILENTLY — the
+  // catalog-contamination remediation regen shipped the generic fallback with no trace of WHY
+  // (empty draft from a swallowed API error? gate rejection? which rule?). One decision line per
+  // stage, same treatment that cracked the silent council judges (#176).
+  console.log(JSON.stringify({ tag: 'IH_DRAFT', design: designName || null, draftLen: out.length, draft: out.slice(0, 140), problems }))
   if (problems.length > 0) {
     const correction = `Your previous attempt was rejected:\n"${out}"\nViolations:\n${problems.map((p) => `- ${p}`).join('\n')}\nRewrite the Item Highlights string fixing EVERY violation. Return ONLY the string.`
     out = scrubTrademarks(await ask(correction)).trim()
     problems = gate(out)
+    console.log(JSON.stringify({ tag: 'IH_RETRY', draftLen: out.length, draft: out.slice(0, 140), problems }))
   }
+  if (problems.length > 0) console.warn(JSON.stringify({ tag: 'IH_FALLBACK', reason: problems }))
   // Deterministic repeated-words cap on EVERY return path (the LLM ignored the "no repeats" rule and
   // shipped "comfort colors" ×3 on a Comfort-Colors blank; the fallback is repeat-safe by construction but
   // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant AND
