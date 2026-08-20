@@ -1,0 +1,127 @@
+/**
+ * itemHighlightComposer.ts — Architecture A (PO sign-off 2026-08-20): the pool-first Item
+ * Highlights composer. DETERMINISTIC, no LLM.
+ *
+ * WHY. The PO rejected the brief-driven batch outright ("THESE ARE TERRIBLE!!!"): the LLM led
+ * every family with beige filler ("Casual Apparel"), followed one template skeleton, mashed specs
+ * ("Cotton Relaxed Unisex Fit") and used ONE pool phrase where the pool held five. The endorsed
+ * competitor line is the family's TOP RANKING KEYWORDS arranged with variety — an ALLOCATION the
+ * pool's own measured data already decides. So code composes: the line is verbatim pool phrases BY
+ * CONSTRUCTION and beige is structurally impossible (there is no slot for invented classes).
+ *
+ * SELECTION: theme-fit first (3 → 0, null last), then volume; only phrases the shipping TITLES do
+ * not already cover (the repo's ONE coverage predicate); each pick must add a new folded
+ * significant token (near-dupes can't stack); garment-noun surface variety is rewarded (shirts /
+ * tees / apparel / top as DISTINCT indexed tokens — the competitor craft); the running line
+ * respects Amazon's ≤2 per-word rule and the 125-char contract budget, aiming into the 110-125
+ * fill band. The PO's wear-style fact "Can be worn as Oversized" (ruling 2026-08-20) joins when
+ * the blank is a relaxed/unisex cut, the pool shows oversized demand, and budget allows.
+ *
+ * Thin pools (<MIN_CANDIDATES usable phrases) return null — the caller's existing LLM/spec
+ * fallback chain remains the degradation path. Downstream nets (repeat cap, blank-brand waterfall)
+ * still run on the returned string; this module never re-implements them.
+ */
+import { CONTENT_CONTRACT } from './contentContract'
+import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
+import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations } from './productDetailAttrs'
+
+export interface ComposerPoolRow {
+  keyword: string
+  searchVolume?: number | null
+  themeFit?: number | null
+}
+
+const MIN_CANDIDATES = 3
+const GARMENT_SURFACE_RE = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|apparel|tops?|clothing|hoodies?|sweatshirts?|garments?)\b/i
+
+/** Title Case a pool phrase without disturbing its wording (the token sequence is what ranks). */
+const titleCasePhrase = (p: string): string =>
+  p.split(/\s+/).map((w) => (IH_INSIGNIFICANT.has(w.toLowerCase()) ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1))).join(' ')
+    .replace(/^./, (c) => c.toUpperCase())
+
+/** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
+ *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
+ *  the exact permutation-spam the PO rejected. */
+const GENDER_FOLDS: Record<string, string> = { women: 'woman', men: 'man', ladies: 'lady', gals: 'gal' }
+const significantFolded = (phrase: string): string[] =>
+  phrase.toLowerCase().split(/\s+/)
+    .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
+    .filter((w) => w && !IH_INSIGNIFICANT.has(w))
+
+/**
+ * Compose the Item Highlights line from the rated pool. Returns null when the pool cannot carry
+ * the structure (caller falls back). `titles` = every title the shipped IH will sit beside.
+ */
+export function composeItemHighlight(
+  pool: ComposerPoolRow[],
+  titles: string[],
+  opts?: { relaxedOrUnisexCut?: boolean },
+): string | null {
+  const titleCovers = makeCoverageChecker(titles.filter(Boolean).join(' '))
+  // The PO wear-style fact reserves its budget UP FRONT when eligible — otherwise the greedy fill
+  // reaches the band first and the fact never fits (test-caught design gap).
+  const OVERSIZED_FACT = 'Can be worn as Oversized'
+  const factEligible = !!opts?.relaxedOrUnisexCut && pool.some((r) => /\boversized\b/i.test(r.keyword))
+  const RESERVE = factEligible ? OVERSIZED_FACT.length + 2 : 0
+  const MAX = CONTENT_CONTRACT.itemHighlights.max - RESERVE
+  const AIM = CONTENT_CONTRACT.itemHighlights.fillTarget - RESERVE
+
+  // Candidates: 2-5 word pool phrases the titles don't cover, ranked theme-fit DESC then volume DESC.
+  const candidates = pool
+    .filter((r) => !!r.keyword)
+    .map((r) => ({ ...r, keyword: r.keyword.trim() }))
+    .filter((r) => {
+      const words = r.keyword.split(/\s+/).length
+      // PO ruling 2026-08-20: a bare "Oversized <garment>" pool phrase is a CUT claim — excluded
+      // here always; oversized demand surfaces only as the sanctioned wear-style fact below.
+      if (/\boversized\b/i.test(r.keyword)) return false
+      return words >= 2 && words <= 5 && !titleCovers(r.keyword)
+    })
+    .sort((a, b) => {
+      const tf = (x: ComposerPoolRow) => (typeof x.themeFit === 'number' ? x.themeFit : -1)
+      if (tf(b) !== tf(a)) return tf(b) - tf(a)
+      return (b.searchVolume ?? 0) - (a.searchVolume ?? 0)
+    })
+  if (candidates.length < MIN_CANDIDATES) return null
+
+  const picked: string[] = []
+  const usedFolded = new Set<string>()
+  const usedGarmentSurfaces = new Set<string>()
+  const lineLen = () => picked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
+
+  // Two passes: first prefer candidates introducing a NEW garment surface (the variety craft),
+  // then fill remaining budget with any novel candidate.
+  for (const preferNewGarment of [true, false]) {
+    for (const c of candidates) {
+      if (picked.length >= 7 || lineLen() >= AIM) break
+      const phrase = titleCasePhrase(c.keyword)
+      if (picked.includes(phrase)) continue
+      const folded = significantFolded(c.keyword)
+      if (!folded.some((w) => !usedFolded.has(w))) continue            // must add something new
+      const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
+      if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
+      if (preferNewGarment && !gm) continue
+      const nextLen = lineLen() + (picked.length ? 2 : 0) + phrase.length
+      if (nextLen > MAX) continue
+      const draft = [...picked, phrase].join(', ')
+      if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
+      picked.push(phrase)
+      folded.forEach((w) => usedFolded.add(w))
+      if (gm) usedGarmentSurfaces.add(gm)
+    }
+  }
+  if (picked.length < MIN_CANDIDATES) return null
+
+  // PO ruling 2026-08-20: the wear-style FACT for relaxed/unisex cuts (budget reserved above).
+  // Never bare "Oversized <garment>" from here — cut claims are blank_specs territory and such
+  // pool phrases are excluded in the candidate filter.
+  if (
+    factEligible &&
+    !usedFolded.has(ihFoldWord('oversized')) &&
+    ihRepeatViolations([...picked, OVERSIZED_FACT].join(', ')).length === 0
+  ) {
+    picked.push(OVERSIZED_FACT)
+  }
+
+  return picked.join(', ')
+}

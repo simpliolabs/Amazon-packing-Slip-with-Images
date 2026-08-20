@@ -192,3 +192,13 @@ RECONCILING the 2026-08-04 "never a bare fact-join" rejection: bare SPEC-joins (
 remain rejected; RANKING-KEYWORD class phrases ("Funny T Shirts", "Novelty Tees for Guys") are the endorsed shape —
 the difference is pool-backed search volume, not prose polish. Supersedes the benefit-prose-only style; the
 2026-07-19 phrase-quality rule (no sentences) and the 2026-08-10 125-char budget stand. Encoded as CONSTRAINTS in the generator brief (never the competitor's literal text — leak lesson).
+
+### IH batch REJECTED + the "worn as Oversized" ruling (PO 2026-08-20, verbatim "THESE ARE TERRIBLE!!!")
+REJECT exemplar (recorded verbatim): "Casual Apparel, Alligator Clothing Women, Comfort Colors Shirts with Designs, Funny Tee, Cotton Relaxed Unisex Fit".
+What made the batch terrible (applies to all 26): (1) BEIGE FILLER classes — "Casual Apparel" led nearly every family; zero
+search value, zero character; (2) template skeleton — the same phrase order and connective tissue on every family (the
+placeholder-shape example became a rigid fill-in-the-blanks); (3) clunky non-phrases ("Shirts with Designs", "Cotton Relaxed
+Unisex Fit" spec-mash); (4) pool keywords UNDER-used — one verbatim pool phrase per line where the pool held five good ones.
+The endorsed competitor line is NOT a filled template: it is the family's TOP RANKING KEYWORDS arranged with variety and tone.
+**OVERSIZED ruling**: when the blank is not inherently oversized, the truthful usable framing is "Can be worn as Oversized" —
+a wear-style claim, not a cut claim. Never bare "Oversized <garment>" unless blank_specs say the cut IS oversized.
