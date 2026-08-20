@@ -2366,12 +2366,7 @@ export async function buildItemHighlights(
   // stage, same treatment that cracked the silent council judges (#176).
   console.log(JSON.stringify({ tag: 'IH_DRAFT', design: designName || null, draftLen: out.length, draft: out.slice(0, 140), problems }))
   if (problems.length > 0) {
-    const correction = `Your previous attempt was rejected:
-"${out}"
-Violations:
-${problems.map((p) => `- ${p}`).join('
-')}
-Rewrite the Item Highlights string fixing EVERY violation. Return ONLY the string.`
+    const correction = `Your previous attempt was rejected:\n"${out}"\nViolations:\n${problems.map((p) => `- ${p}`).join('\n')}\nRewrite the Item Highlights string fixing EVERY violation. Return ONLY the string.`
     out = scrubTrademarks(await ask(correction)).trim()
     problems = gate(out)
     console.log(JSON.stringify({ tag: 'IH_RETRY', draftLen: out.length, draft: out.slice(0, 140), problems }))
