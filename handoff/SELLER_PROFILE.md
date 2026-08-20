@@ -202,3 +202,11 @@ Unisex Fit" spec-mash); (4) pool keywords UNDER-used — one verbatim pool phras
 The endorsed competitor line is NOT a filled template: it is the family's TOP RANKING KEYWORDS arranged with variety and tone.
 **OVERSIZED ruling**: when the blank is not inherently oversized, the truthful usable framing is "Can be worn as Oversized" —
 a wear-style claim, not a cut claim. Never bare "Oversized <garment>" unless blank_specs say the cut IS oversized.
+
+### IH minimum-fill ruling (PO 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125")
+Floor = ceil(0.85 x 125) = **107 chars** (CONTENT_CONTRACT.itemHighlights.min — the ONE constant).
+An under-floor Item Highlight is NOT SHIPPABLE, ever. The composer pads toward the floor with TRUE
+blank_specs facts only (material / fit / neck / sleeve / dye); a family whose truthful material cannot
+reach the floor is NOT-READY — held, never shipped short. Same exchange: the Electronics family
+(B0GCF11RKL) is Electronics, NOT apparel — non-apparel families compose ZERO garment vocabulary
+(garmentFamily 'none'), and nothing ships there without a verified live-state read first.
