@@ -2395,7 +2395,18 @@ export async function buildItemHighlights(
       const titlesForNetC = netTitles ?? [finalTitle]
       return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(composed, titlesForNetC, blankBrand)))
     }
-    console.log(JSON.stringify({ tag: 'IH_COMPOSER_THIN', note: 'pool below MIN_CANDIDATES — LLM/spec fallback chain runs' }))
+    // RATED POOLS NEVER FALL TO THE LLM (PO rulings 2026-08-21): the first floor-door pass showed
+    // the LLM fallback weaving cut claims ("Oversized Crew Neck Top") and franchise REMAINDERS
+    // ("Walt Shirt" — the scrubbed residue of a Disney pool row) that the composer's truth rules
+    // forbid. When the rater has judged the pool and the composed truth still cannot reach the
+    // floor, the family is NOT-READY — hold the stored value; never let an LLM improvise past the
+    // rules. The LLM/spec chain below remains ONLY for unrated legacy pools.
+    const ratedShareIH = pool.length ? pool.filter((k) => typeof (k as { themeFit?: number | null }).themeFit === 'number').length / pool.length : 0
+    if (ratedShareIH >= 0.3) {
+      console.warn(JSON.stringify({ tag: 'IH_RATED_POOL_NOT_READY', ratedShare: Math.round(ratedShareIH * 100), note: 'composer could not reach the floor from rated truth — holding stored value' }))
+      return ''
+    }
+    console.log(JSON.stringify({ tag: 'IH_COMPOSER_THIN', note: 'UNRATED pool below composer viability — LLM/spec fallback chain runs' }))
   }
   let out = scrubTrademarks(await ask('')).trim()
   let problems = gate(out)
