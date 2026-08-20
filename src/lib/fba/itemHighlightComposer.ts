@@ -36,7 +36,7 @@ export interface ComposerPoolRow {
 /** Competitor blank/apparel makers — never composable unless the family's own allowed brand.
  *  The trademark lexicon covers franchises/marks, not blanks (the Darlin' pool composed
  *  "Pro Club Shirts" straight through it). */
-const APPAREL_BRAND_RE = /\b(?:pro\s?club|gildan|hanes|fruit\sof\sthe\sloom|next\slevel|bella\s?canvas|american\sapparel|champion|carhartt|comfort\scolors)\b/i
+const APPAREL_BRAND_RE = /\b(?:pro\s?club|gild[ae]n|guildan|softstyle|heavy\s?cotton\s?brand|hanes|fruit\s+of\s+the\s+loom|next\s+level|bella\s?canvas|american\s+apparel|champion|carhartt|comfort\s+colors)\b/i
 const MIN_CANDIDATES = 3
 const GARMENT_SURFACE_RE = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|apparel|tops?|clothing|hoodies?|sweatshirts?|garments?)\b/i
 
