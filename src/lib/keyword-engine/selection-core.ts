@@ -138,6 +138,23 @@ export type ThemeBand = 0 | 1 | 2 | 3
  */
 export const UNRATED_THEME_RUN_ID = 'kt_unrated'
 
+/**
+ * THE ONE lookup key for a theme rating. `rateThemeFit` keys its result map by this, and every
+ * reader (`storeAnalysis`, `rerateFromCache`) looks ratings up by this — never by the raw string.
+ *
+ * WHY (live 2026-08-21, B0DQ5YZH38 / B0F6VTY79T / B0DSCDZC6K). The rater was asked the JS-harvested
+ * keyword verbatim and keyed its answer on `keyword.trim()`; `storeAnalysis` then looked the answer
+ * up with the MERGED row's keyword — and `mergeKeywordResults` (syncKeywordIntelligence.ts:663) keys
+ * its merge on `toLowerCase()` with SQP taking precedence, so a dual-source keyword reaches the
+ * writer carrying Amazon's SQP casing/whitespace, not the string the rater was asked. The lookup
+ * missed, the row inherited its prior (null) band, and a pool the rater HAD judged persisted as
+ * unrated. Same home as UNRATED_THEME_RUN_ID, for the same reason: both writers need it and this
+ * module is the dependency-free one they already share.
+ */
+export function themeRatingKey(keyword: string | null | undefined): string {
+  return (keyword || '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
 export type TargetSlot = 'CORE' | 'CATEGORY' | 'BACKEND'
 
 export type SelectionMode = 'off' | 'shadow' | 'on'

@@ -17,6 +17,7 @@ import {
   selectionMode,
   selectRankingTargets,
   UNRATED_THEME_RUN_ID,
+  themeRatingKey,
   type SelectionContext,
   type ThemeBand,
 } from './selection-core';
@@ -103,7 +104,7 @@ export async function setCachedKeywords(
 
 // ─── Analysis Storage ─────────────────────────────────────────────────────────
 
-/** What the rater produced this run, keyed by keyword. */
+/** What the rater produced this run, keyed by themeRatingKey(keyword) — look up by that, never raw. */
 export type ThemeRatings = ReadonlyMap<string, { band: ThemeBand; about: string }>;
 
 /**
@@ -365,10 +366,12 @@ export async function storeAnalysis(
   } else {
     // MERGE: this run's ratings win; anything unrated inherits the prior band. An LLM that rated
     // 40 of 118 keywords must not blank the other 78.
+    // LOOKUP BY themeRatingKey, never by raw text (live 2026-08-21): the merged row may carry the
+    // SQP spelling of a keyword the rater was asked in its JS spelling — see themeRatingKey.
     const ratings = opts?.ratings ?? null;
     const runId = opts?.themeRunId ?? null;
     const merged = keywords.map((kw) => {
-      const fresh = ratings?.get(kw.keyword);
+      const fresh = ratings?.get(themeRatingKey(kw.keyword));
       const prev = prior.map.get(kw.keyword);
       return {
         kw,
@@ -484,7 +487,7 @@ export async function storeAnalysis(
       ratedRows: verdict.ratedCount,
       unratedRows: verdict.unratedCount,
       poolUnrated,
-      carriedForward: merged.filter((m) => m.themeFit !== null && !ratings?.has(m.kw.keyword)).length,
+      carriedForward: merged.filter((m) => m.themeFit !== null && !ratings?.has(themeRatingKey(m.kw.keyword))).length,
     }));
 
     // ONE loud line, at ERROR, naming the cause. `rated: 0` already existed on the INFO line above

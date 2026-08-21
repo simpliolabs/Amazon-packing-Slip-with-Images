@@ -37,8 +37,8 @@ import { classifyOffNicheKeywords } from '../keyword-engine/relevanceClassifier'
 // KEYWORD_TARGET_SET (#143). selectionMode is a CALL-TIME env read, so a Coolify flip + restart
 // changes behaviour with no rebuild. loadSelectionContext short-circuits to zero queries at `off`.
 import { selectionMode, resolveRankingTargets, type SelectionContext } from '../keyword-engine/selection-core';
-import { loadSelectionContextWithSources, readWindow } from '../keyword-engine/selectionContext';
-import { buildThemeCard, rateThemeFit, newThemeRunId } from '../keyword-engine/themeRater';
+import { readWindow } from '../keyword-engine/selectionContext';
+import { rateFamilyThemeFit, type ThemeScoreRow } from '../keyword-engine/themeRatingRun';
 import type { ThemeRatings } from '../keyword-engine/cacheService';
 import { createClient } from '@supabase/supabase-js';
 
@@ -418,43 +418,24 @@ async function applyRelevanceGate<T extends { keyword: string }>(
       if (selectionMode() === 'off') return { keywords: out, ctx: null, ratings: null, themeRunId: null };
 
       try {
-        // ONE load, TWO consumers. `loadSelectionContextWithSources` returns the same four design
-        // signals it derived the seasons from, and the card is built from THOSE — not from a second,
-        // narrower re-read of the score row. Before this, the seasons read four sources and the card
-        // read one-and-a-half, eight lines apart, so a design the seller had never named by hand got
-        // a correct season and no theme card at all. Zero extra queries: every source was loaded.
-        const { ctx, sources } = await loadSelectionContextWithSources({
+        // ONE shared function for card + context + rater (themeRatingRun.ts): the same four design
+        // signals feed the seasons and the card, and the run-vs-failure contract lives there — a
+        // result that rated < THEME_RATE_MIN_SHARE of what it asked comes back with `ratings: null`
+        // and NO run id (after one bounded retry), so storeAnalysis carries every prior band forward
+        // untouched instead of recording a run that judged nothing (live 2026-08-21: three families
+        // with a run id on every row and a band on none). The ctx still stands either way — it
+        // carries the haystack + apparel verdict + seasons, so selection still runs; unrated bands
+        // read as 2 and are never hard-gated.
+        const r = await rateFamilyThemeFit({
           supabase: db,
-          childAsin: asin,
+          asin,
           parentAsin: resolvedParent,
-          scoreRow,
-          haystack: apparelCtx,
+          scoreRow: (scoreRow as ThemeScoreRow | null) ?? null,
+          titles: [scoreRow?.product_title, listingTitle, ...childTitles],
+          keywords: out.map((k) => k.keyword),
           site: 'syncKeywordIntelligence.gate',
         });
-        const card = await buildThemeCard({
-          asin,
-          parentAsin: resolvedParent,
-          designNameOverride: sources.designNameOverride ?? null,
-          designNameOverrides: sources.designNameOverridesByKey ?? null,
-          visionDesignTheme: sources.visionDesign?.designTheme ?? null,
-          resolvedDesignName: sources.resolvedDesignName ?? null,
-          audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
-          supabase: db,
-        });
-        // No card ⇒ no design signal ⇒ nothing trustworthy to rate against. The ctx still stands
-        // (it carries the haystack + apparel verdict + seasons), so selection still runs — every
-        // band is simply null, which the selector treats as 2 and never hard-gates.
-        const ratings = await rateThemeFit(out.map((k) => k.keyword), card, {
-          asin,
-          currentTitle: scoreRow?.product_title || listingTitle || null,
-          audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
-        });
-        return {
-          keywords: out,
-          ctx,
-          ratings: ratings.size > 0 ? ratings : null,
-          themeRunId: ratings.size > 0 ? newThemeRunId() : null,
-        };
+        return { keywords: out, ctx: r.ctx, ratings: r.ratings, themeRunId: r.themeRunId };
       } catch (e) {
         // FAIL-OPEN: ctx null ⇒ storeAnalysis writes the legacy payload and preserves whatever
         // signals are already stored. Never an INERT ctx, which would look like a real answer.
