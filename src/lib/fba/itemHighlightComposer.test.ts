@@ -9,16 +9,22 @@
  *  - 2026-08-21 "44 is NEVER approved, MIN 85% of MAX 125": floor = 107 (CONTENT_CONTRACT.min).
  *    Under-floor pads with TRUE blank_specs facts; unreachable floor ⇒ null (NOT-READY, never short).
  *  - 2026-08-21 Electronics: garmentFamily 'none' composes zero garment vocabulary.
+ *  - 2026-08-21 TRUTH STAGE (14-family review): garment-noun truth, capability claims, audience
+ *    truth, theme-fit >= 2 on rated pools, oversized = Comfort Colors ONLY, brand waterfall INSIDE
+ *    the composer (never a post-net rewrite).
  */
 import { describe, it, expect } from 'vitest'
-import { composeItemHighlight } from './itemHighlightComposer'
+import { composeItemHighlight, ihTruthVerdict, ihAudienceOf } from './itemHighlightComposer'
+import { ensureBlankBrandInHighlights, DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { CONTENT_CONTRACT } from './contentContract'
 
 const MIN = CONTENT_CONTRACT.itemHighlights.min
 const MAX = CONTENT_CONTRACT.itemHighlights.max
 
 /** A CC-like spec: the filler bank (material/fit/neck/sleeve/dye) the floor pad draws from. */
-const SPEC = { material: '100% Ring-Spun Cotton', fit: 'Relaxed', neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed', weightNote: 'midweight 6.1 oz garment-dyed', stretch: 'Low Stretch' }
+const SPEC = { brand: 'Comfort Colors', material: '100% Ring-Spun Cotton', fit: 'Relaxed', neck: 'Crew Neck', sleeve: 'Short Sleeve', dye: 'Garment-Dyed', weightNote: 'midweight 6.1 oz garment-dyed', stretch: 'Low Stretch' }
+/** Gildan 64000 — Classic fit, brand never in copy. */
+const GILDAN_SPEC = { brand: 'Gildan', brandInCopy: false, material: 'Ring-Spun Cotton', fit: 'Classic', neck: 'Crew Neck', sleeve: 'Short Sleeve', weightNote: 'lightweight 4.5 oz ring-spun' }
 
 const GATOR_TITLES = ["THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women"]
 const GATOR_POOL = [
@@ -73,12 +79,23 @@ describe('composeItemHighlight — Architecture A under the 85% floor', () => {
     }
   })
 
-  it('the wear-style fact joins for relaxed/unisex cuts with pool demand; bare over(-)sized never composes', () => {
-    const out = composeItemHighlight(GATOR_POOL, GATOR_TITLES, { ...OPTS, relaxedOrUnisexCut: true })!
+  it('the wear-style fact joins ONLY on a Comfort Colors (Relaxed) spec with pool demand; bare over(-)sized never composes', () => {
+    const out = composeItemHighlight(GATOR_POOL, GATOR_TITLES, OPTS)!
     expect(out).toContain('Can be worn as Oversized')
     expect(out.toLowerCase()).not.toMatch(/over[\s-]?sized? t/)
-    const noDemand = composeItemHighlight(GATOR_POOL.filter((r) => !/over[\s-]?sized?/i.test(r.keyword)), GATOR_TITLES, { ...OPTS, relaxedOrUnisexCut: true })
+    const noDemand = composeItemHighlight(GATOR_POOL.filter((r) => !/over[\s-]?sized?/i.test(r.keyword)), GATOR_TITLES, OPTS)
     if (noDemand) expect(noDemand).not.toContain('Can be worn as Oversized')
+  })
+
+  it('PO RULING 2026-08-21 ("A: comfort colors"): the oversized wear-fact is ABSENT on a Gildan Classic-fit spec even with pool demand (Trump families)', () => {
+    const out = composeItemHighlight(GATOR_POOL, GATOR_TITLES, { spec: GILDAN_SPEC, garmentFamily: 'tee', allowedBrand: null })
+    expect(out).toBeTruthy()
+    expect(out!.toLowerCase()).not.toContain('oversized')
+    // unisex alone no longer qualifies: a spec with no brand (mixed-blank intersection) is not CC
+    const { brand: _b, ...noBrand } = SPEC
+    void _b
+    const mixed = composeItemHighlight(GATOR_POOL, GATOR_TITLES, { spec: noBrand, garmentFamily: 'tee', allowedBrand: null })
+    if (mixed) expect(mixed).not.toContain('Can be worn as Oversized')
   })
 
   it('UNDER-FLOOR IS NOT SHIPPABLE: a thin pool with no spec fillers returns null, never a short line', () => {
@@ -198,5 +215,159 @@ describe('non-apparel + casing', () => {
       expect(out).toContain('SD Card 32GB')
       expect(out).toContain('SDHC')
     }
+  })
+})
+
+/* ─── TRUTH STAGE (PO 2026-08-21, 14-family review) — one pin per live defect ─────────────────── */
+
+const TRUTH_TEE = { garmentFamily: 'tee' as const, spec: GILDAN_SPEC, allowedBrand: null, audience: ihAudienceOf('tee') }
+const TRUTH_KIDS = { garmentFamily: 'kids_tee' as const, spec: GILDAN_SPEC, allowedBrand: null, audience: ihAudienceOf('kids_tee') }
+
+describe('ihTruthVerdict — garment-noun truth', () => {
+  it('B0H7CMPZR3: a Gildan 64000 TEE never composes "France Soccer Jersey" (a tee is not a jersey)', () => {
+    expect(ihTruthVerdict('france soccer jersey', TRUTH_TEE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    const pool = [
+      { keyword: 'france soccer jersey', searchVolume: 90000, themeFit: 3 },
+      { keyword: 'france soccer shirt women', searchVolume: 500, themeFit: 3 },
+      { keyword: 'les bleus fan tee', searchVolume: 400, themeFit: 3 },
+      { keyword: 'french football tops', searchVolume: 300, themeFit: 2 },
+      { keyword: 'soccer fan apparel ladies', searchVolume: 250, themeFit: 2 },
+      { keyword: 'world futbol graphic shirts', searchVolume: 200, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(pool, ['THE CEO France Futbol Tee'], { spec: GILDAN_SPEC, garmentFamily: 'tee', allowedBrand: null })
+    if (out) expect(out.toLowerCase()).not.toContain('jersey')
+  })
+
+  it('B0DMXMH266: "Hooded Fishing Shirts" is rejected on a crew tee; hooded is hoodie-only', () => {
+    expect(ihTruthVerdict('hooded fishing shirts for men', TRUTH_TEE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    const HOODIE = { ...TRUTH_TEE, garmentFamily: 'hoodie' as const, audience: ihAudienceOf('hoodie') }
+    expect(ihTruthVerdict('hooded sweatshirt for fishing', HOODIE)).toEqual({ ok: true })
+    expect(ihTruthVerdict('fishing hoodies for men', HOODIE)).toEqual({ ok: true })
+    // the literal allowed set: hoodie ⇒ {hoodie(s), hooded sweatshirt(s)} — a bare "sweatshirt" is the other class
+    expect(ihTruthVerdict('fishing sweatshirt', HOODIE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(ihTruthVerdict('fishing hoodie for men', { ...TRUTH_TEE, garmentFamily: 'sweatshirt', audience: ihAudienceOf('sweatshirt') })).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+  })
+
+  it("the family's own nouns pass: shirt/tee/t-shirt/tshirt/top on tees; sweatshirt/crewneck/pullover on sweatshirts", () => {
+    for (const p of ['fishing shirts for men', 'funny tees', 'graphic t-shirts', 'novelty tshirt', 'cute tops', 'tops & tees']) {
+      expect(ihTruthVerdict(p, TRUTH_TEE)).toEqual({ ok: true })
+    }
+    for (const p of ['funny sweatshirts', 'holiday crewneck', 'cozy pullover']) {
+      expect(ihTruthVerdict(p, { ...TRUTH_TEE, garmentFamily: 'sweatshirt' })).toEqual({ ok: true })
+    }
+    // the wrong direction still rejects (as already coded): tee vocab on a sweatshirt, sweatshirt vocab on a tee
+    expect(ihTruthVerdict('funny tees', { ...TRUTH_TEE, garmentFamily: 'sweatshirt' })).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(ihTruthVerdict('holiday crewneck', TRUTH_TEE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    // other garments are never a tee
+    for (const p of ['mens tank top', 'golf polo', 'summer dress']) expect(ihTruthVerdict(p, TRUTH_TEE).ok).toBe(false)
+  })
+
+  it("non-apparel ('none') still composes zero garment vocabulary; unresolved (null) family has no noun rule", () => {
+    expect(ihTruthVerdict('t shirts for women', { ...TRUTH_TEE, garmentFamily: 'none', audience: null })).toEqual({ ok: false, reason: 'garment-vocab-on-non-apparel' })
+    expect(ihTruthVerdict('soccer jersey', { ...TRUTH_TEE, garmentFamily: null, audience: null })).toEqual({ ok: true })
+  })
+})
+
+describe('ihTruthVerdict — capability claims (no BlankSpec states a capability today ⇒ always rejected)', () => {
+  it('B0DMXMH266: "Sun Protection" never composes on a Gildan tee', () => {
+    expect(ihTruthVerdict('sun protection fishing shirt', TRUTH_TEE)).toEqual({ ok: false, reason: 'capability-claim' })
+  })
+  it('the full ban list: UPF / SPF / moisture-wicking / quick-dry / waterproof / water-resistant / thermal / insulated / breathable mesh / antimicrobial / odor-resistant / compression', () => {
+    for (const p of ['upf 50 shirts', 'spf fishing tee', 'moisture wicking shirts', 'moisture-wicking tee', 'quick dry shirts', 'quick-dry tops', 'waterproof shirt', 'water resistant tee', 'thermal shirts', 'insulated top', 'breathable mesh shirt', 'antimicrobial tee', 'odor resistant shirts', 'compression shirts']) {
+      expect(ihTruthVerdict(p, TRUTH_TEE)).toEqual({ ok: false, reason: 'capability-claim' })
+    }
+    expect(ihTruthVerdict('breathable cotton shirt', TRUTH_TEE)).toEqual({ ok: true })   // "breathable" alone is not the banned "breathable mesh"
+  })
+})
+
+describe('ihTruthVerdict — audience truth (derived from garmentFamily, never a title)', () => {
+  it('B0DP5H8QBT (kids_tee 64000B): women / plus-size / men / ladies / adult phrases are rejected', () => {
+    expect(ihAudienceOf('kids_tee')).toBe('kids')
+    for (const p of ['motivational shirts women', 't shirts for women', 'plus size tees', 'plus-size tops', 'mens graphic tee', 'ladies tops', 'adult humor shirt', 'shirts for woman']) {
+      expect(ihTruthVerdict(p, TRUTH_KIDS)).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+    }
+    expect(ihTruthVerdict('kids dinosaur shirt', TRUTH_KIDS)).toEqual({ ok: true })
+  })
+  it("a women's (adult) family rejects kids / toddler / youth / boys / girls / baby phrases", () => {
+    expect(ihAudienceOf('tee')).toBe('adult')
+    for (const p of ['kids dinosaur shirt', 'kid graphic tee', 'toddler tees', 'youth shirts', 'boys tops', 'girls tshirt', 'baby shirt']) {
+      expect(ihTruthVerdict(p, TRUTH_TEE)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+    }
+    expect(ihTruthVerdict('motivational shirts women', TRUTH_TEE)).toEqual({ ok: true })
+  })
+  it('the kids family line carries no adult-audience phrase end to end', () => {
+    const pool = [
+      { keyword: 'motivational shirts women', searchVolume: 9000, themeFit: 3 },
+      { keyword: 't shirts for women', searchVolume: 8000, themeFit: 3 },
+      { keyword: 'plus size graphic tees', searchVolume: 7000, themeFit: 3 },
+      { keyword: 'kids motivational shirt', searchVolume: 500, themeFit: 3 },
+      { keyword: 'positive quote tees for kids', searchVolume: 400, themeFit: 3 },
+      { keyword: 'inspirational youth tops', searchVolume: 300, themeFit: 3 },
+      { keyword: 'school spirit tshirt', searchVolume: 250, themeFit: 2 },
+      { keyword: 'growth mindset apparel', searchVolume: 200, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(pool, ['THE CEO Be Kind Kids Tee'], { spec: GILDAN_SPEC, garmentFamily: 'kids_tee', allowedBrand: null })
+    if (out) expect(out.toLowerCase()).not.toMatch(/\b(?:women|woman|womens|ladies|men|mens|adult|plus[\s-]?size)\b/)
+  })
+})
+
+describe('minimum theme fit 2 on rated pools (B0DQ5YZH38: fit-1 "Band Tees" led the line)', () => {
+  it('a fit-1 phrase never composes on a rated pool, even with budget to spare', () => {
+    const pool = [
+      { keyword: 'band tees', searchVolume: 80000, themeFit: 1 },
+      { keyword: 'rock concert shirt women', searchVolume: 500, themeFit: 3 },
+      { keyword: 'vintage music tee', searchVolume: 400, themeFit: 3 },
+      { keyword: 'guitar graphic tops', searchVolume: 300, themeFit: 3 },
+      { keyword: 'music lover apparel', searchVolume: 200, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(pool, ['THE CEO Rock On Design'], { spec: SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })
+    if (out) expect(out.toLowerCase()).not.toContain('band tees')
+  })
+})
+
+describe('brand waterfall INSIDE the composer (B0FKFHSCS9: 1717 by override, title lacks the brand)', () => {
+  const CC = DEFAULT_BLANK_SPECS[0]
+  const NO_BRAND_TITLE = 'THE CEO Later Gator Tee Shirt | Alligator Tshirt for Women'
+  const POOL_WITH_BRAND = [
+    { keyword: 'later gator shirt women', searchVolume: 450, themeFit: 3 },
+    { keyword: 'see you later alligator', searchVolume: 900, themeFit: 3 },
+    { keyword: 'comfort colors graphic tee', searchVolume: 5000, themeFit: 3 },
+    { keyword: 'comfort colors shirts ladies', searchVolume: 4000, themeFit: 3 },
+    { keyword: 'funny gator apparel', searchVolume: 250, themeFit: 3 },
+    { keyword: 'novelty animal tops', searchVolume: 200, themeFit: 2 },
+    { keyword: 'swamp humor clothing', searchVolume: 150, themeFit: 2 },
+  ]
+
+  it('picks exactly ONE brand-bearing POOL phrase when the title lacks the brand; the net passes the line through byte-identical', () => {
+    const out = composeItemHighlight(POOL_WITH_BRAND, [NO_BRAND_TITLE], { spec: SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })!
+    expect(out).toBeTruthy()
+    expect((out.match(/comfort\s*colors/gi) ?? []).length).toBe(1)
+    expect(out).toContain('Comfort Colors Graphic Tee')          // the higher-volume fit-3 pool candidate wins
+    expect(out).not.toMatch(/authentic/i)                        // never the post-net rewrite
+    expect(ensureBlankBrandInHighlights(out, [NO_BRAND_TITLE], CC)).toBe(out)
+    expect(out.length).toBeGreaterThanOrEqual(MIN)
+    expect(out.length).toBeLessThanOrEqual(MAX)
+  })
+
+  it('falls back to the deterministic spec phrase "<Brand> <garment noun>" when no pool candidate carries the brand', () => {
+    const pool = POOL_WITH_BRAND.filter((r) => !/comfort/i.test(r.keyword))
+    const out = composeItemHighlight(pool, [NO_BRAND_TITLE], { spec: SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })!
+    expect(out).toBeTruthy()
+    expect(out).toContain('Comfort Colors Tee')
+    expect((out.match(/comfort\s*colors/gi) ?? []).length).toBe(1)
+    expect(ensureBlankBrandInHighlights(out, [NO_BRAND_TITLE], CC)).toBe(out)
+    const ls = composeItemHighlight(pool, [NO_BRAND_TITLE], { spec: { ...SPEC, sleeve: 'Long Sleeve' }, garmentFamily: 'long_sleeve_tee', allowedBrand: 'Comfort Colors' })!
+    expect(ls).toContain('Comfort Colors Long Sleeve Shirt')
+  })
+
+  it('when EVERY title already carries the brand, no brand phrase is forced (brand-once still holds)', () => {
+    const out = composeItemHighlight(POOL_WITH_BRAND, [GATOR_TITLES[0]], { spec: SPEC, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })!
+    expect((out.match(/comfort\s*colors/gi) ?? []).length).toBeLessThanOrEqual(1)
+    expect(out).not.toContain('Comfort Colors Tee,')
+  })
+
+  it('a brand-forbidden blank (Gildan, allowedBrand null) never gets a brand phrase', () => {
+    const out = composeItemHighlight(POOL_WITH_BRAND, [NO_BRAND_TITLE], { spec: GILDAN_SPEC, garmentFamily: 'tee', allowedBrand: null })
+    if (out) expect(out.toLowerCase()).not.toMatch(/comfort colors|gildan/)
   })
 })

@@ -56,8 +56,8 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
-import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, composerGarmentFamily, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
-import { composeItemHighlight, humanizeSpecToken, titleCasePhrase } from '@/lib/fba/itemHighlightComposer'
+import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
+import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighlightComposer'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
@@ -2076,29 +2076,18 @@ function deduplicatePhrases(title: string): string {
 }
 
 // ─── ITEM HIGHLIGHTS (Amazon's companion to the 75-char title, July 27 2026) ────
-// Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
-// material/fit/feature/use-case phrases, no word repeated, <=125 chars. The old deterministic
-// builder joined top-opportunity KEYWORDS ("canada tee shirt for men, canada t shirt, the ceo
-// soccer tee, ...") — word repetition + near-duplicate keyword soup that violates Amazon's
-// Item Highlights rules (PO caught it on the live output). Rebuilt on the pipeline's
-// established idiom: LLM draft (gpt-4.1-mini) → deterministic validator → ONE corrective
-// retry → deterministic attribute-built fallback. Every path runs scrubTrademarks before its
-// output can reach the pushable rails ("world cup shirts" → "world soccer cup").
+// Item Highlights is a customer-facing, fully indexed companion field, NOT backend keywords
+// (PO 2026-07-02). ONE producer: the deterministic pool-first composer (Architecture A, PO
+// 2026-08-20) behind its truth stage (PO 2026-08-21). The LLM draft → validator → corrective
+// retry → spec-mash fallback chain that used to sit behind it is RETIRED (PO 2026-08-21: every
+// LLM line in the 14-family regen was the rejected style — beige "casual apparel", a trademark
+// "salt life", a fabric lie "polycotton"); when the composer cannot compose, the field HOLDS with
+// ONE named reason. `validateItemHighlights` below remains the seller-facing checker (the
+// check-item-highlight route) for hand-edited values.
 
-// Trivial connectors the repetition gate ignores. men/women/cotton/etc. are deliberately NOT
-// here — they count as real words and are allowed only once.
-const HIGHLIGHT_STOPWORDS = new Set(['for', 'and', 'the', 'a', 'an', 'of', 'with', 'in', 'to', 'great', 'her', 'his'])
 // Pricing/promo language never belongs in a customer-facing highlight. "% off" and "$" match
 // anywhere (a \b next to "$" could never fire — it is not a word char); the words need boundaries.
 const HIGHLIGHT_PROMO_RE = /\b(?:sale|discount|cheap|free|deal)\b|% ?off|\$/i
-
-const highlightTokens = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
-// Same word-unification the title validator uses (its lines above): singular/plural and
-// tshirt/shirt are the SAME word — the PO's live case was "tee shirt / t shirt / shirts" x6.
-const normHighlightToken = (t: string): string => {
-  const n = t.replace(/s$/, '')
-  return n === 'tshirt' ? 'shirt' : n
-}
 
 /** Deterministic Item Highlights gates — ALL must pass. Returns the violations (empty = compliant).
  *  Callers scrub trademarks BEFORE validating (the scrubbed string is what ships), so the
@@ -2139,90 +2128,10 @@ export function validateItemHighlights(
   return problems
 }
 
-/** Deterministic FALLBACK — compliant by construction: assemble short phrases ONLY from the
- *  attribute values actually present (material/fit/neck/sleeve/department) + the design + a
- *  personalization phrase when the title claims it, pass each candidate through the SAME gates,
- *  drop any later phrase that would repeat an earlier phrase's word, and stop at a phrase
- *  boundary <=125. A generic two-phrase tail keeps it from ever falling under 2 phrases. */
-export function buildHighlightsFallback(
-  finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
-  brandName: string, apparelProduct: boolean, capacityFamily: boolean,
-  /** See validateItemHighlights — default [] keeps the historical blanket strip. */
-  designSeasons: readonly string[] = [],
-  unisexFit = false,
-): string {
-  const val = (re: RegExp): string => {
-    const row = details.find((d) => re.test(d.field_name) && (d.recommended_value || '').trim().length > 0 && d.recommended_value.trim().length <= 40)
-    // THE SEAM (live B0GQ6PGR2N: "easy short_sleeve style" shipped): enum detail rows store the
-    // Amazon API MACHINE TOKEN ("short_sleeve") — push requires it, the editor prettifies at
-    // display only — so every spec value entering customer copy is humanized HERE, once.
-    return row ? humanizeSpecToken(row.recommended_value.trim()) : ''
-  }
-  const material = val(/^(?:material|fabric)/i)
-  const fit = val(/\bfit\b/i)
-  // Prefer the Neck row over the collar_style row — "crew neck" reads as copy, "round collar" doesn't.
-  const neck = val(/neck/i) || val(/collar/i)
-  const sleeve = val(/sleeve/i)
-  // (garment-noun + department candidates removed 2026-08-04 — they echoed the title, and IH's rule
-  // is to add NEW information; the composed-copy candidates below carry the field now.)
-  const candidates: string[] = []
-  if (apparelProduct) {
-    /* COMPOSED COPY, not a fact-join (PO 2026-08-04: "Cotton tee, Cupid Valentine design, Relaxed
-     * fit, Crew Neck, for women" was rejected as very poorly written — and it echoed the title's
-     * design/garment/audience words, which the LLM path is explicitly forbidden to do). Each fact
-     * is paired with a SAFE generic feel word (soft/comfort/easy — never a performance claim the
-     * spec doesn't back), and the title-echoing candidates (design name, garment noun, department)
-     * are gone: the title already says those, IH must add NEW information. */
-    if (material) candidates.push(`soft ${material.toLowerCase()} feel`)
-    if (fit && neck) candidates.push(`${fit.toLowerCase().replace(/\s*\bfit\b\s*/i, ' ').trim()} ${neck.toLowerCase()} comfort`.replace(/\s{2,}/g, ' '))
-    else if (fit) candidates.push(/\bfit\b/i.test(fit) ? fit.toLowerCase() : `${fit.toLowerCase()} fit`)
-    else if (neck) candidates.push(neck.toLowerCase())
-    if (unisexFit && !candidates.some((c) => /unisex/i.test(c))) candidates.splice(1, 0, 'relaxed unisex fit')
-    if (sleeve) candidates.push(`easy ${sleeve.toLowerCase()} style`)
-    if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('made-to-order personalization')
-    candidates.push('all-day everyday wear', 'great for gifting')
-  } else {
-    if (material) candidates.push(material)
-    if (designName) candidates.push(`${designName} design`)
-    if (/\b(?:personalized|custom)\b/i.test(finalTitle)) candidates.push('custom personalization')
-    // Guaranteed generic tail so the field always carries >= 2 phrases even with zero attribute rows.
-    candidates.push('made for everyday use', 'great for gifting')
-  }
-
-  const ownBrands = ownBrandTokenSet(brandName)
-  const used = new Set<string>()
-  const phrases: string[] = []
-  let len = 0
-  for (const raw of candidates) {
-    const p = scrubTrademarks(raw).replace(/\s{2,}/g, ' ').trim()
-    if (!p) continue
-    const lc = p.toLowerCase()
-    if (findThirdPartyBrands(p, ownBrands).length > 0) continue
-    if (SEASONAL_TERMS.some((t) => lc.includes(t) && isOffSeasonKeyword(t, designSeasons))) continue
-    if (HIGHLIGHT_PROMO_RE.test(p)) continue
-    if (capacityFamily && CAPACITY_RE.test(p)) continue
-    const toks = highlightTokens(p).filter((t) => !HIGHLIGHT_STOPWORDS.has(t)).map(normHighlightToken)
-    if (new Set(toks).size !== toks.length) continue          // repeats a word within itself
-    if (toks.some((t) => used.has(t))) continue               // would repeat an earlier phrase's word — drop it
-    const next = phrases.length ? len + 2 + p.length : p.length
-    if (next > CONTENT_CONTRACT.itemHighlights.max) continue   // Item Highlights budget (PO 2026-08-10: 75 → 125)
-    toks.forEach((t) => used.add(t))
-    phrases.push(p)
-    len = next
-  }
-  // Ship in the SAME customer-facing case as the composer path (titleCasePhrase is length-preserving,
-  // so the budget math above still holds) — the lowercase composition otherwise re-flattens the
-  // humanized spec tokens ("Short Sleeve") this fallback exists to render correctly.
-  return phrases.map((p) => titleCasePhrase(p)).join(', ')
-}
-
-// Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
-// material/fit/feature/use-case phrases, no word repeated, <=125 chars.
 /** THE 85%% FLOOR ON EVERY PATH (PO 2026-08-21, "44 is NEVER approved, MIN 85%% of MAX 125"):
- *  a generated Item Highlight under CONTENT_CONTRACT.itemHighlights.min NEVER ships — from ANY
- *  producer (composer, LLM, spec fallback). Returning '' engages the callers' keep-old-value
- *  semantics (regen route + pipeline both treat empty as "hold the stored value"), so an
- *  under-floor family is NOT-READY, never shipped short and never blanked. */
+ *  a generated Item Highlight under CONTENT_CONTRACT.itemHighlights.min NEVER ships. Returning ''
+ *  engages the callers' keep-old-value semantics (regen route + pipeline both treat empty as "hold
+ *  the stored value"), so an under-floor family is NOT-READY, never shipped short and never blanked. */
 function ihFloorDoor(line: string): string {
   if (line && line.length < CONTENT_CONTRACT.itemHighlights.min) {
     console.warn(JSON.stringify({ tag: 'IH_UNDER_FLOOR_HOLD', len: line.length, min: CONTENT_CONTRACT.itemHighlights.min, held: line.slice(0, 100) }))
@@ -2231,228 +2140,69 @@ function ihFloorDoor(line: string): string {
   return line
 }
 
-export async function buildItemHighlights(
-  openai: OpenAI, finalTitle: string, designName: string, details: PipelineProductDetailImprovement[],
-  pool: AnalyzedKeyword[], brandName: string, apparelProduct: boolean, capacityFamily: boolean,
-  /** Season policy for THIS regen (makeSeasonPolicy). Defaults to the blanket policy so the
-   *  out-of-file caller (regenerate-item-highlight/route.ts, 8 args) is byte-identical to today. */
-  season: SeasonPolicy = BLANKET_SEASON_POLICY,
-  /** blankSpec.unisex — adds the unisex-fit fact to the brief + fallback (PO 2026-08-06).
-   *  Defaults false so the out-of-file regen-route caller stays byte-identical. */
-  unisexFit = false,
-  /** Matched blank ROW for the blank-brand waterfall net (PO 2026-08-08). null = no matched blank
-   *  (or a caller that predates the net) → the net no-ops, byte-identical to today. */
-  blankBrand: BlankSpecRow | null = null,
+/** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action. */
+export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec'
+export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
+  'unrated-pool': 'Held: pool is unrated — run a theme rating / research first',
+  'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
+  'under-floor': `Held: truthful phrases + blank facts cannot reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor — harvest more keywords for this family`,
+  'no-spec': 'Held: no blank spec resolved for this family — set its blank (child SKU style code or a family override)',
+}
+
+export interface ItemHighlightsInput {
+  finalTitle: string
+  /** The family's ranking targets (BACKEND-slot terms already excluded by the caller). */
+  pool: AnalyzedKeyword[]
+  apparelProduct: boolean
+  /** The family's resolved blank ROW — spec = the mixed-blank intersection, garmentFamily from the
+   *  child SKUs (PO 2026-08-21). null = unresolved ⇒ no spec facts, no brand, title-guessed garment. */
+  blankBrand: BlankSpecRow | null
   /** The title(s) the shipped IH will actually sit beside — the PO's LOCKED title when
-   *  title_source='manual' (the fresh finalTitle is discarded at persist on locked listings), else
-   *  finalTitle. null = default to [finalTitle]. */
-  netTitles: (string | null | undefined)[] | null = null,
-): Promise<string> {
-  // Product FACTS for the brief: the attribute rows the pipeline already computed (Material /
-  // Fit Type / Neck / Sleeve / Department / Style / Target Gender). Keywords are CONTEXT only.
-  const factRows = details
-    .filter((d) => /material|fabric|\bfit\b|neck|collar|sleeve|department|style|pattern|closure|gender/i.test(d.field_name) && (d.recommended_value || '').trim())
-    .slice(0, 6)
-    .map((d) => `- ${d.field_name}: ${d.recommended_value.trim()}`)
-  const ownBrands = ownBrandTokenSet(brandName)
-  /* IH-2 (PO 2026-08-18): "it should be taking descriptive terms from the Keyword bank if not used
-   * in title, Such as 'Graphic Tee for Women'".
-   *
-   * THE PLACEMENT DOCTRINE, EXTENDED — one rule, not a new list. The system already answers "which
-   * field holds which keyword" for the other three surfaces: TITLE takes the one money keyword,
-   * BACKEND takes the CRITICAL/UPGRADE overflow, BULLETS stay clean benefit prose and are NOT a
-   * coverage surface. Item Highlights had no stated place in that scheme, so the pool arrived here
-   * as unfiltered "context" and the field never earned its indexed, shopper-visible space.
-   *
-   * ITS PLACE: spec-grounded descriptors PLUS the descriptive residual the TITLE could not fit.
-   * That is why the filter below is "not already covered by the title" and not "highest volume" —
-   * a term the title already carries is not residual, it is a repeat, and repeats are precisely what
-   * this field must avoid (the prompt's own rule, and Amazon's 2x word cap).
-   *
-   * ONE PREDICATE, NOT A SECOND ONE. `makeCoverageChecker` is the repo's single coverage seam
-   * (coverage-core), the same tokeniser the scorer and the RANK panel use — so "the title already
-   * says this" means the same thing in this field as it does on every screen. Its garment folding is
-   * what makes the seller's own example work: "graphic tee for women" is NOT considered covered by a
-   * title that never mentions women, even though both contain a garment noun.
-   *
-   * The haystack is netTitles when present — on a locked listing the shipped IH sits beside the
-   * seller's LOCKED title, not the fresh one the pipeline just produced, and residual is only
-   * meaningful against the title that will actually be on the page.
-   *
-   * Widened 3 -> 8 because the list is now FILTERED to terms that can legitimately be placed;
-   * previously three unfiltered rows could all be title repeats, leaving the model nothing usable.
-   * The hard gates below and the terminal net still bound what survives. */
-  const ihTitleHay = ((netTitles && netTitles.length ? netTitles : [finalTitle])
-    .filter(Boolean) as string[]).join(' ')
-  const titleCovers = makeCoverageChecker(ihTitleHay)
-  const contextKws = [...pool]
-    .sort((a, b) => (b.coverageGapScore || 0) - (a.coverageGapScore || 0))
-    .map((k) => scrubTrademarks((k.keyword || '').trim()).toLowerCase())
-    .filter((kw) => kw
-      && !season.isOffSeason(kw)
-      && findThirdPartyBrands(kw, ownBrands).length === 0
-      && !(capacityFamily && CAPACITY_RE.test(kw))
-      // THE IH-2 FILTER: only the residual the title could not carry.
-      && !titleCovers(kw))
-    .slice(0, 8)
-  season.diff('item-highlights', pool.map((k) => (k.keyword || '').trim()).filter(Boolean))
+   *  title_source='manual' (the fresh finalTitle is discarded at persist on locked listings), plus
+   *  every per-child title on a multi-design family. null = [finalTitle]. */
+  netTitles: (string | null | undefined)[] | null
+}
 
-  // The PO's rules as the brief's spine: the CONTENT_CONTRACT.itemHighlights budget (125 max, aim 110-125 per PO 2026-08-10), short feature/benefit PHRASES (PO 2026-07-19)
-  // (NOT a full sentence), and do NOT repeat what the title already says (add NEW info — fabric/fit/feel/care).
-  // Display: Amazon moved Item Highlights BENEATH the item name on desktop and mobile effective
-  // 2026-08-10 (Seller Central title-update FAQ) — the old "next to the title" wording is stale.
-  // The "<=75-char title" clause is NOT stale and stays: it is Amazon error 100476, a dependency on
-  // the ITEM NAME's length, unrelated to this field's own budget.
-  // PHRASE-CLASS STRUCTURE (PO 2026-08-20, from a live competitor exemplar in the seller's own
-  // niche): the field is a searchable SUB-HEADLINE — 5-6 comma phrases, each a DISTINCT search-intent
-  // CLASS, built from the unused-keyword bank + spec facts. The prior brief demanded benefit-prose
-  // and carried a 63-char example that trained undershoot at HALF the 110-125 band. Rules stated as
-  // CONSTRAINTS with a placeholder-shape example — never a vocabulary exemplar (leak lesson #365).
-  const system = 'You write the Amazon "Item Highlights" field — a searchable SUB-HEADLINE shown beneath the title and fully indexed by Amazon search. It is NOT a sentence. '
-    + `Output 5-6 comma-separated phrases, EACH from a DIFFERENT class: (1) category head, (2) category + audience, (3) design-class or garment attribute, (4) tone/genre word that truthfully fits the design, (5) fabric/fit FACT from the product facts given, (6) category-synonym + audience-synonym. `
-    + 'THE PHRASES ARE RANKING KEYWORDS (PO 2026-08-20): the unused-keyword bank below contains real shopper searches with real volume — build each class phrase FROM those keywords, keeping their wording near-VERBATIM (adjust only casing/grammar); a bank keyword used as-is beats a paraphrase, because the exact token sequence is what ranks. '
-    + `HARD RULES: ${CONTENT_CONTRACT.itemHighlights.max} characters MAXIMUM total (aim ${CONTENT_CONTRACT.itemHighlights.fillTarget}-${CONTENT_CONTRACT.itemHighlights.max} — under-filling wastes indexed, shopper-visible space); NO sentence punctuation (. ! ?); `
-    + 'SYNONYM SPREAD is the point: vary the garment noun across phrases (shirt / tee / apparel / top / short sleeve) and the audience word (men/guys, women/ladies) so DISTINCT search tokens get indexed — never repeat the EXACT garment or audience word the title uses, and no significant word may appear twice in this field; '
-    + 'fabric/fit claims ONLY from the product facts provided — never invent a material, weight, or stretch; '
-    + 'no prices or promo language; no third-party brand names, sports teams, leagues or franchises; standard capitalization, no ALL CAPS words. '
-    + `SHAPE example with placeholders (~118 chars — hit this fullness): "<tone> <category> Shirts, <category-synonym> for <audience>, <design-class> Short Sleeve, <tone-synonym>, <fabric fact>, <category-variant> for <audience-synonym>". `
-    + 'Return ONLY the Item Highlights string — no quotes, no explanation.'
-  const user = [
-    'Product facts:',
-    `- Title: ${finalTitle}`,
-    unisexFit ? '- Fit note: unisex sizing, runs relaxed (a TRUE spec fact — "relaxed unisex fit" is a great phrase)' : '',
-    designName ? `- Design name: ${designName}` : '',
-    ...factRows,
-    `- Product type: ${apparelProduct ? 'apparel (garment)' : 'non-apparel'}`,
-    capacityFamily ? '- This family spans MULTIPLE storage capacities — never mention a specific GB/TB.' : '',
-    /* IH-2: these are now the descriptive RESIDUAL — real shopper phrasing the TITLE could not
-     * carry (filtered by the shared coverage predicate above). They are eligible to be WORDED IN,
-     * not merely inferred from, which is the seller's ask: "taking descriptive terms from the
-     * Keyword bank if not used in title, Such as 'Graphic Tee for Women'".
-     * The anti-keyword-list rule STAYS and matters more now that these are placeable: the field is
-     * customer-facing prose, so a phrase is woven in naturally or left out. Truth is unaffected —
-     * spec claims still come only from the FACT rows above, never from a search phrase. */
-    /* PO 2026-08-20 (ranking-keyword classes): the bank is the PRIMARY material — the system prompt
-     * builds its 5-6 class phrases FROM these near-verbatim. Truth rule unchanged: spec claims still
-     * come only from the FACT rows above, never from a search phrase. */
-    contextKws.length ? `UNUSED-KEYWORD BANK — real shopper searches your TITLE does not cover. Build the class phrases FROM these, keeping their wording near-verbatim (the exact token sequence is what ranks); vary garment/audience words across phrases, never letting one become a spec claim:\n${contextKws.map((k) => `- ${k}`).join('\n')}` : '',
-    'Write the Item Highlights string now.',
-  ].filter(Boolean).join('\n')
-
-  // Same single-call client pattern as the other agents: short timeout, NO retries (a hung call
-  // must not stall the keepalive-less tail of the pipeline), fail open to '' on any error.
-  const ask = async (corrective: string): Promise<string> => {
-    try {
-      const r = await openai.chat.completions.create(
-        {
-          model: 'gpt-4.1-mini',
-          messages: [
-            { role: 'system' as const, content: system },
-            { role: 'user' as const, content: corrective ? `${user}\n\n${corrective}` : user },
-          ],
-          temperature: 0.4,
-          max_tokens: 40,   // ≤75 chars of output — cannot spill into a long sentence
-        },
-        { timeout: 15_000, maxRetries: 0 },
-      )
-      return (r.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
-    } catch { return '' }
+/**
+ * THE Item Highlights producer — shared byte-for-byte by the pipeline and the
+ * regenerate-item-highlight route (Invariant 1: one function ships the field on every path).
+ * Deterministic; never touches an LLM. `value` = the shipped bytes, or '' (= HOLD the stored value)
+ * with `hold` naming why.
+ */
+export function buildItemHighlights(input: ItemHighlightsInput): { value: string; hold: IhHoldReason | null } {
+  const { finalTitle, pool, apparelProduct, blankBrand } = input
+  const titles = (input.netTitles ?? [finalTitle]).filter((t): t is string => !!t)
+  const res = composeItemHighlightDetailed(
+    pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: k.themeFit ?? null })),
+    titles,
+    {
+      // Truth stage inputs: the blank's facts + the family's garment class (UNFOLDED — kids_tee
+      // drives the audience rule; long_sleeve_tee names its own brand spec phrase). NON-APPAREL
+      // families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocabulary. The
+      // title regex remains the fallback for an unresolved blank only.
+      spec: blankBrand?.spec ?? null,
+      garmentFamily: !apparelProduct ? 'none' : (blankBrand?.garmentFamily ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee')),
+      // Audience comes from the BLANK's family only (PO: never inferred from a title) — an
+      // unresolved blank has no audience rule rather than a title-guessed one.
+      audience: ihAudienceOf(blankBrand?.garmentFamily ?? null),
+      // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
+      allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
+    },
+  )
+  if (res.line) {
+    console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: res.line.length, ih: res.line.slice(0, 140) }))
+    // Defense in depth on the shipped bytes: the brand net is a no-op on a composer line (the
+    // waterfall is satisfied inside it — T4.10), the repeat cap is idempotent on it, and the floor
+    // door holds anything that somehow came out short.
+    const value = ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand)))
+    return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
   }
-
-  // KEYWORD-LIST DETECTOR (2026-07-18, PO: "NOT SEO friendly … confirm via Vision and DB"): the LLM
-  // sometimes ignores "NEVER a keyword list" and emits search permutations ("… comfort colors tshirt women,
-  // comfort colors t-shirts, plain t shirts") — Amazon accepts it but it's spam, not a customer highlight.
-  // Detect it (>=3 comma-phrases each carrying a garment noun — a real highlight names ATTRIBUTES/use-cases,
-  // not the product type in every phrase) and force the clean, SPEC-GROUNDED buildHighlightsFallback (built
-  // from the DB fact rows: Material/Fit/Neck/Sleeve/Department + the design). This is the deterministic
-  // "ground in DB + design, never a keyword list" the field was specified to do.
-  const isKeywordList = (s: string): boolean => {
-    const phrases = s.split(',').map((p) => p.trim()).filter(Boolean)
-    const garmentRe = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|hoodies?|sweatshirts?|tank ?tops?)\b/i
-    return phrases.length >= 3 && phrases.filter((p) => garmentRe.test(p)).length >= 3
-  }
-  const gate = (s: string): string[] => {
-    if (!s) return ['empty response']
-    const p = validateItemHighlights(s, brandName, capacityFamily, season.effective)
-    if (isKeywordList(s)) p.push('reads as a keyword LIST (product-type permutations) — Item Highlights must name the MATERIAL, FIT, FEATURES + ONE use-case in human phrases grounded in the product facts, NEVER a search-keyword list')
-    return p
-  }
-  // Draft → validate (incl. keyword-list gate) → ONE corrective retry → deterministic spec-based fallback.
-  // scrubTrademarks runs BEFORE validation on every LLM output (the scrubbed string is what ships).
-  // ARCHITECTURE A (PO sign-off 2026-08-20): the pool-first composer goes FIRST — deterministic,
-  // verbatim ranking keywords, beige impossible. The LLM chain below survives only as the
-  // thin-pool degradation path (composer returns null under MIN_CANDIDATES).
-  {
-    const composed = composeItemHighlight(
-      pool.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: (k as { themeFit?: number | null }).themeFit ?? null })),
-      (netTitles ?? [finalTitle]).filter((t): t is string => !!t),
-      {
-        relaxedOrUnisexCut: unisexFit || /relaxed/i.test(details.map((d) => `${d.current_value ?? ''}`).join(' ')),
-        // Truth filters (Darlin' F-grade): the blank's fabric spec + the family's garment class.
-        spec: blankBrand?.spec ?? null,
-        // NON-APPAREL families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocab —
-        // 'none' inverts the wrong-garment filter to drop every garment-noun candidate.
-        // GARMENT FROM THE BLANK (PO 2026-08-21, SKU rule): the resolved row's garment_family
-        // (long_sleeve_tee/kids_tee fold to 'tee') beats the title guess; the title regex remains
-        // the fallback for an unresolved blank. Both callers pass the row, so no signature churn.
-        garmentFamily: !apparelProduct ? 'none' : (composerGarmentFamily(blankBrand?.garmentFamily) ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee')),
-        // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
-        allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
-      },
-    )
-    if (composed) {
-      console.log(JSON.stringify({ tag: 'IH_COMPOSED', len: composed.length, ih: composed.slice(0, 140) }))
-      const titlesForNetC = netTitles ?? [finalTitle]
-      return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(composed, titlesForNetC, blankBrand)))
-    }
-    // RATED POOLS NEVER FALL TO THE LLM (PO rulings 2026-08-21): the first floor-door pass showed
-    // the LLM fallback weaving cut claims ("Oversized Crew Neck Top") and franchise REMAINDERS
-    // ("Walt Shirt" — the scrubbed residue of a Disney pool row) that the composer's truth rules
-    // forbid. When the rater has judged the pool and the composed truth still cannot reach the
-    // floor, the family is NOT-READY — hold the stored value; never let an LLM improvise past the
-    // rules. The LLM/spec chain below remains ONLY for unrated legacy pools.
-    const ratedShareIH = pool.length ? pool.filter((k) => typeof (k as { themeFit?: number | null }).themeFit === 'number').length / pool.length : 0
-    if (ratedShareIH >= 0.3) {
-      console.warn(JSON.stringify({ tag: 'IH_RATED_POOL_NOT_READY', ratedShare: Math.round(ratedShareIH * 100), note: 'composer could not reach the floor from rated truth — holding stored value' }))
-      return ''
-    }
-    console.log(JSON.stringify({ tag: 'IH_COMPOSER_THIN', note: 'UNRATED pool below composer viability — LLM/spec fallback chain runs' }))
-  }
-  let out = scrubTrademarks(await ask('')).trim()
-  let problems = gate(out)
-  // #IH-VISIBILITY (2026-08-20): the draft->gate->retry->fallback chain decided SILENTLY — the
-  // catalog-contamination remediation regen shipped the generic fallback with no trace of WHY
-  // (empty draft from a swallowed API error? gate rejection? which rule?). One decision line per
-  // stage, same treatment that cracked the silent council judges (#176).
-  console.log(JSON.stringify({ tag: 'IH_DRAFT', design: designName || null, draftLen: out.length, draft: out.slice(0, 140), problems }))
-  if (problems.length > 0) {
-    const correction = `Your previous attempt was rejected:\n"${out}"\nViolations:\n${problems.map((p) => `- ${p}`).join('\n')}\nRewrite the Item Highlights string fixing EVERY violation. Return ONLY the string.`
-    out = scrubTrademarks(await ask(correction)).trim()
-    problems = gate(out)
-    console.log(JSON.stringify({ tag: 'IH_RETRY', draftLen: out.length, draft: out.slice(0, 140), problems }))
-  }
-  // OVER-LENGTH ALONE IS NOT FATAL (2026-08-20, the 128-char confession): the gate was discarding a
-  // perfect class-structure draft for being 3 chars over, shipping the generic fallback instead. The
-  // return path's capItemHighlightRepeats already enforces the 125 budget DETERMINISTICALLY at a
-  // comma boundary (INVARIANT 2: the net, not the LLM, owns the measurable) — so a draft whose ONLY
-  // sin is length flows to the cap. Any other violation still falls back.
-  if (problems.length > 0 && problems.every((p) => /characters/.test(p))) {
-    console.log(JSON.stringify({ tag: 'IH_ACCEPT_OVERLength', len: out.length, note: 'length-only violation — comma-boundary cap enforces the budget' }))
-    problems = []
-  }
-  if (problems.length > 0) console.warn(JSON.stringify({ tag: 'IH_FALLBACK', reason: problems }))
-  // Deterministic repeated-words cap on EVERY return path (the LLM ignored the "no repeats" rule and
-  // shipped "comfort colors" ×3 on a Comfort-Colors blank; the fallback is repeat-safe by construction but
-  // capping it too is free insurance) — guarantees the generated Item Highlight is Amazon-compliant AND
-  // (via the keyword-list gate above) a real spec-grounded highlight, not a truncated keyword list.
-  // BLANK-BRAND WATERFALL (PO 2026-08-08): the net wraps BOTH producer paths — LLM output AND the
-  // spec fallback (Invariant 1: one net, every path) — and the cap re-runs after any insertion so
-  // the shipped bytes always hold ≤75 chars / ≤2 per word.
-  const titlesForNet = netTitles ?? [finalTitle]
-  if (problems.length === 0) return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(out, titlesForNet, blankBrand)))
-  return ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(
-    buildHighlightsFallback(finalTitle, designName, details, brandName, apparelProduct, capacityFamily, season.effective, unisexFit),
-    titlesForNet, blankBrand)))
+  // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on.
+  const hold: IhHoldReason = res.stage === 'under-floor-after-pad'
+    ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
+    : (res.rated ? 'thin-candidates' : 'unrated-pool')
+  console.warn(JSON.stringify({ tag: 'IH_HOLD', reason: hold, stage: res.stage, rated: res.rated }))
+  return { value: '', hold }
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
@@ -10963,7 +10713,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // material/fit/feature/use-case phrases, no word repeated, <=125 chars. pdiFinal at this point
     // carries the Material/Fit/Neck/Sleeve/Department facts (highlight duplicates already filtered
     // out above); capacityFamilyTokens is the pipeline's real capacity-family signal.
-    onProgress('Composing Item Highlights...')   // keepalive before the LLM call
+    onProgress('Composing Item Highlights...')
     // broadcastDesignAnchor (parity-audit): identical to effectiveDesignName for single-design ('')
     // and per-design multi-design families, but a unified-set (couple) family keeps its shared
     // concept in the highlight instead of losing it to the zeroed multi-design name.
@@ -10996,15 +10746,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const ihNetTitles = input.lockedTitle
       ? [input.lockedTitle]
       : [finalTitle, ...(perChildTitles ?? []).map((c) => c.title)]
-    let hl = await buildItemHighlights(input.openai, finalTitle, broadcastDesignAnchor, pdiFinal, hlPool, input.brandName, apparelProduct, capacityFamilyTokens.length >= 2, season, blankSpec?.unisex === true, blankBrandNetRow, ihNetTitles)
-    // The highlight LLM can still echo "oversized" from its context keywords even with the corrected Fit
-    // factRow; scrub it to the true fit and collapse any duplicate word it creates ("oversized relaxed" →
-    // "relaxed relaxed" → "relaxed") so the pushable Item Highlight can't ship a fit contradiction.
-    // capItemHighlightRepeats RE-WRAPS the scrub (adversarial LOW): scrubFitClaims runs AFTER the
-    // generator's terminal cap and can lengthen the string ("boxy"→"Relaxed", +3/occurrence past 75)
-    // or repeat the fit word 3x across phrases — the cap is idempotent, so re-running it is free and
-    // restores the ≤75 / ≤2-per-word guarantee on the bytes that persist.
-    if (hl && blankSpec?.fit) hl = capItemHighlightRepeats(scrubFitClaims(hl, blankSpec.fit).replace(/\b(\w+)(\s+\1)\b/gi, '$1'))
+    // ONE producer, no post-net rewrite (PO 2026-08-21): the composer's truth stage owns every fit /
+    // garment / audience / capability claim in the line, and its "Can be worn as Oversized" fact is
+    // a Comfort-Colors-only PO ruling — the old LLM-era scrubFitClaims pass here rewrote that
+    // sanctioned fact into "Can be worn as Relaxed" on THIS path only (the regen route never ran
+    // it). The route and the pipeline now ship byte-identical output for the same inputs.
+    const { value: hl } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })
     if (hl) {
       pdiFinal.push({
         field_name: highlightsAttr.title,

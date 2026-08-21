@@ -118,6 +118,17 @@ describe('ensureBlankBrandInHighlights — the PO 2026-08-08 blank-brand waterfa
     expect(out.length).toBeGreaterThan(75)             // proves it uses space the old cap denied
   })
 
+  it('T4.10 COMPOSER WATERFALL (PO 2026-08-21, B0FKFHSCS9): a line that already carries the brand passes through BYTE-IDENTICAL — never truncated, never re-ordered', () => {
+    // The composer now satisfies the waterfall INSIDE the line (one brand-bearing phrase); the net
+    // must be a pure no-op on it. Live defect: the net rewrote a good 125-char composed line into
+    // "authentic Comfort Colors blank, …" and the cap truncated the tail.
+    const composed = 'Later Gator Shirt Women, See You Later Alligator, Funny Gator Apparel, Comfort Colors Graphic Tee, Novelty Animal Tops'
+    expect(composed.length).toBeGreaterThan(IH_MAX - 15)
+    expect(ensureBlankBrandInHighlights(composed, [LOCKED_TITLE_NO_BRAND], CC)).toBe(composed)
+    const specPhrase = 'Later Gator Shirt Women, See You Later Alligator, Funny Gator Apparel, Novelty Animal Tops, Comfort Colors Tee, Crew Neck'
+    expect(ensureBlankBrandInHighlights(specPhrase, [LOCKED_TITLE_NO_BRAND, 'Another child title'], CC)).toBe(specPhrase)
+  })
+
   it('no blank / no brand / empty hl -> unchanged', () => {
     expect(ensureBlankBrandInHighlights('a, b', [LOCKED_TITLE_NO_BRAND], null)).toBe('a, b')
     expect(ensureBlankBrandInHighlights('', [LOCKED_TITLE_NO_BRAND], CC)).toBe('')
