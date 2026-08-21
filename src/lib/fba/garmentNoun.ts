@@ -10,6 +10,10 @@
  * (hat → "snapback cap") — never cross it (a shirt-templated hat title can never flip back to
  * 'shirt').
  *
+ * BLANK FIRST (PO 2026-08-21, SELLER_PROFILE.md "Keyword universe follows the BLANK"): for keyword
+ * seeding, the resolved blank's garment_family (blank_specs, SKU-first) OUTRANKS the productType —
+ * `resolveGarment` below. The productType path stays byte-identical as the fallback.
+ *
  * DEPENDENCY-SAFE: this is a leaf — imports nothing from listingPipeline/keywordResearcher, so
  * both (and syncKeywordIntelligence) can import it with zero cycle risk.
  *
@@ -32,6 +36,9 @@
  *  MEMORY_CARD never can. */
 export const APPAREL_PRODUCT_TYPES = /(?:^|_)(SHIRT|SWEATSHIRT|SWEATER|HOODIE|DRESS|SKIRT|PANTS|SHORTS|SOCKS|HAT|COAT|JACKET|UNDERPANTS|UNDERWEAR|BRA|PAJAMAS|SLEEPWEAR|SWIMWEAR|LEOTARD|TIGHTS|LEGGINGS|BODYSUIT|ONESIE|ROMPER|BLOUSE|CARDIGAN|VEST|ROBE|COSTUME|OUTFIT|TRACKSUIT|OVERALLS|SUIT|KURTA|SAREE|SALWAR_SUIT_SET|APPAREL)(?:_|$)/
 
+/** Which truth fixed a garment family (see resolveGarment). */
+export type GarmentSource = 'blank' | 'productType'
+
 export interface GarmentNoun {
   /** canonical group key: shirt | headwear | sweatshirt | hoodie | tank | dress | ... */
   family: string
@@ -47,6 +54,10 @@ export interface GarmentNoun {
   aliases: string[]
   /** broadCategorySeed replacement; {aud} filled at call ('graphic tees for women') */
   categoryHead: (aud: string) => string
+  /** Which truth fixed the family. Absent on SHIRT_BASE / the productType path; 'blank' when
+   *  blank_specs.garment_family did (resolveGarment) — PROOF of the garment, so consumers whose
+   *  legacy guard was "only if the title says tee" may trust the family instead. */
+  source?: GarmentSource
 }
 
 /** The FROZEN shirt/default tuple — byte-identical to every current call-site literal.
@@ -65,12 +76,24 @@ export const GARMENT_SHIRT_FROZEN = Object.freeze({ ...SHIRT_BASE, categoryHead:
 // Ordered mapping: first matching productType regex wins. Each entry is the family base BEFORE
 // the title-aware overlay (which only sets seedNoun/ptWord/display from an in-family alias found
 // in the title). Additive — the shirt/default base is the fallthrough, never rewritten.
-type FamilyBase = Omit<GarmentNoun, 'seedNoun' | 'ptWord' | 'display'> & { defaultSeed: string; defaultDisplay: string }
+type FamilyBase = Omit<GarmentNoun, 'seedNoun' | 'ptWord' | 'display'> & {
+  defaultSeed: string
+  defaultDisplay: string
+  /** The title phrases that may UPGRADE seedNoun/ptWord/display. Defaults to `aliases`. A blank-
+   *  sourced family narrows this so the title can refine WITHIN the blank's truth ("long sleeve
+   *  tee") but never erase it (a bare "tee" in the title must not demote a 6014 to a short-sleeve
+   *  seed). `aliases` stays the full membership list for the head-noun scans. */
+  overlay?: string[]
+}
+// Named so the BLANK path below can reuse the SAME objects (a blank-sourced sweatshirt is
+// byte-identical to a productType-sourced one except for `source`).
+const HOODIE_BASE: FamilyBase = { family: 'hoodie', noun: 'hoodie', aliases: ['pullover hoodie', 'hooded sweatshirt', 'hoodie'], defaultSeed: 'hoodie', defaultDisplay: 'Hoodie', categoryHead: (aud) => `graphic hoodies for ${aud}` }
+const SWEATSHIRT_BASE: FamilyBase = { family: 'sweatshirt', noun: 'sweatshirt', aliases: ['crewneck sweatshirt', 'crew neck sweatshirt', 'pullover', 'crewneck', 'sweatshirt'], defaultSeed: 'sweatshirt', defaultDisplay: 'Sweatshirt', categoryHead: (aud) => `graphic sweatshirts for ${aud}` }
 const FAMILY_TABLE: { test: RegExp; base: FamilyBase }[] = [
   { test: /(?:^|_)(HAT|CAP|VISOR)(?:_|$)/, base: { family: 'headwear', noun: 'hat', aliases: ['snapback cap', 'dad hat', 'trucker hat', 'bucket hat', 'baseball cap', 'snapback', 'cap', 'visor', 'hat'], defaultSeed: 'hat', defaultDisplay: 'Hat', categoryHead: (aud) => `hats for ${aud}` } },
   { test: /(?:^|_)(BEANIE|KNIT_CAP)(?:_|$)/, base: { family: 'beanie', noun: 'beanie', aliases: ['knit beanie', 'winter hat', 'knit hat', 'knit cap', 'beanie'], defaultSeed: 'beanie', defaultDisplay: 'Beanie', categoryHead: (aud) => `beanies for ${aud}` } },
-  { test: /(?:^|_)(HOODIE)(?:_|$)/, base: { family: 'hoodie', noun: 'hoodie', aliases: ['pullover hoodie', 'hooded sweatshirt', 'hoodie'], defaultSeed: 'hoodie', defaultDisplay: 'Hoodie', categoryHead: (aud) => `graphic hoodies for ${aud}` } },
-  { test: /(?:^|_)(SWEATSHIRT|SWEATER)(?:_|$)/, base: { family: 'sweatshirt', noun: 'sweatshirt', aliases: ['crewneck sweatshirt', 'crew neck sweatshirt', 'pullover', 'crewneck', 'sweatshirt'], defaultSeed: 'sweatshirt', defaultDisplay: 'Sweatshirt', categoryHead: (aud) => `graphic sweatshirts for ${aud}` } },
+  { test: /(?:^|_)(HOODIE)(?:_|$)/, base: HOODIE_BASE },
+  { test: /(?:^|_)(SWEATSHIRT|SWEATER)(?:_|$)/, base: SWEATSHIRT_BASE },
   { test: /(?:^|_)(POLO)(?:_|$)/, base: { family: 'polo', noun: 'polo shirt', aliases: ['polo shirt', 'polo'], defaultSeed: 'polo shirt', defaultDisplay: 'Polo Shirt', categoryHead: (aud) => `polo shirts for ${aud}` } },
   { test: /(?:^|_)(TANK_TOP|TANK)(?:_|$)/, base: { family: 'tank', noun: 'tank top', aliases: ['muscle tank', 'muscle tee', 'tank top', 'tank'], defaultSeed: 'tank top', defaultDisplay: 'Tank Top', categoryHead: (aud) => `tank tops for ${aud}` } },
   { test: /(?:^|_)(DRESS)(?:_|$)/, base: { family: 'dress', noun: 'dress', aliases: ['t-shirt dress', 'sundress', 'dress'], defaultSeed: 'dress', defaultDisplay: 'Dress', categoryHead: (aud) => `dresses for ${aud}` } },
@@ -175,19 +198,25 @@ export function foreignHeadNoun(keyword: string, g: GarmentNoun): string | null 
 export function garmentNounFor(productType?: string | null, title?: string | null): GarmentNoun {
   const pt = (productType ?? '').trim().toUpperCase()
   const base = pt ? FAMILY_TABLE.find((f) => f.test.test(pt))?.base : undefined
-  if (!base) {
-    // shirt/null/PRODUCT/unknown → the frozen shirt base, title-aware only for tee vs t-shirt.
-    const t = (title ?? '').toLowerCase()
-    const teeInTitle = /\btees?\b/.test(t) && !/\bt-?shirts?\b/.test(t)
-    return teeInTitle
-      ? { ...SHIRT_BASE, seedNoun: 'tee', ptWord: 'tee' }
-      : SHIRT_BASE
-  }
-  // Title-aware overlay: first in-family alias present in the title wins (longest aliases first
-  // so "snapback cap" beats "cap"). Else the family default.
+  if (!base) return shirtFor(title)
+  return fromBase(base, title)
+}
+
+/** shirt/null/PRODUCT/unknown → the frozen shirt base, title-aware only for tee vs t-shirt. */
+function shirtFor(title?: string | null): GarmentNoun {
   const t = (title ?? '').toLowerCase()
-  const sortedAliases = [...base.aliases].sort((a, b) => b.length - a.length)
-  const found = sortedAliases.find((a) => t.includes(a))
+  const teeInTitle = /\btees?\b/.test(t) && !/\bt-?shirts?\b/.test(t)
+  return teeInTitle
+    ? { ...SHIRT_BASE, seedNoun: 'tee', ptWord: 'tee' }
+    : SHIRT_BASE
+}
+
+/** Title-aware overlay: first in-family overlay phrase present in the title wins (longest first so
+ *  "snapback cap" beats "cap"). Else the family default. */
+function fromBase(base: FamilyBase, title?: string | null): GarmentNoun {
+  const t = (title ?? '').toLowerCase()
+  const sorted = [...(base.overlay ?? base.aliases)].sort((a, b) => b.length - a.length)
+  const found = sorted.find((a) => t.includes(a))
   const seedNoun = found ?? base.defaultSeed
   const display = found
     ? found.replace(/\b\w/g, (c) => c.toUpperCase())
@@ -201,4 +230,79 @@ export function garmentNounFor(productType?: string | null, title?: string | nul
     aliases: base.aliases,
     categoryHead: base.categoryHead,
   }
+}
+
+// ─── BLANK-FIRST RESOLUTION (PO ruling 2026-08-21, SELLER_PROFILE.md "Keyword universe follows the
+// BLANK, not Amazon's productType") ─────────────────────────────────────────────────────────────
+//
+// B0GQ6PGR2N is a Comfort Colors 6014 long-sleeve TEE whose Amazon productType is SWEATSHIRT.
+// garmentNounFor(productType) fixed the family from that productType, so the keyword seeding
+// emitted a sweatshirt universe ("graphic sweatshirts for women" head, "<design> sweatshirt"
+// niche head) onto a tee — 47 of its 52 harvested keywords were sweatshirt vocabulary. The
+// resolved blank (blank_specs.garment_family, SKU-first — the PO's own rule) is the product
+// truth; Amazon's productType is the FALLBACK when no blank resolves. This table maps each
+// garment_family to the GarmentNoun shape every seed builder already consumes, so the cure is
+// one input swap at the seed-derivation site, not a new vocabulary.
+
+export interface GarmentResolution extends GarmentNoun {
+  /** 'blank' = blank_specs.garment_family drove the family; 'productType' = the legacy path. */
+  source: GarmentSource
+  /** The garment_family that drove a 'blank' resolution; null on the productType path. */
+  blankFamily: string | null
+}
+
+/** Long-sleeve tee = the SHIRT family (same head nouns, same scans, same niche-head namespace as
+ *  its short-sleeve siblings — the design niche is shared) with a long-sleeve seed + category
+ *  head so the universe carries long-sleeve vocabulary instead of sweatshirt vocabulary. The
+ *  overlay is long-sleeve phrases ONLY: the title may refine to "long sleeve tee" but a bare
+ *  "tee"/"shirt" in the title can never drop the sleeve. */
+const LONG_SLEEVE_OVERLAY = ['long sleeve t-shirt', 'long sleeve tshirt', 'long sleeve tee', 'long sleeve shirt', 'longsleeve shirt', 'longsleeve tee']
+const LONG_SLEEVE_TEE_BASE: FamilyBase = {
+  family: 'shirt',
+  noun: 'shirt',
+  aliases: [...LONG_SLEEVE_OVERLAY, 'long sleeve', ...SHIRT_BASE.aliases],
+  overlay: LONG_SLEEVE_OVERLAY,
+  defaultSeed: 'long sleeve shirt',
+  defaultDisplay: 'Long Sleeve Shirt',
+  categoryHead: (aud) => `long sleeve shirts for ${aud}`,
+}
+/** Kids tee = the SHIRT family with a kids/youth audience head. The category head ignores the
+ *  title-inferred adult audience (a kids family never seeds "for women" — SELLER_PROFILE IH truth
+ *  ruling 2026-08-21). */
+const KIDS_OVERLAY = ['toddler shirt', 'toddler tee', 'youth shirt', 'youth tee', 'kids shirt', 'kids tee', 'boys shirt', 'girls shirt']
+const KIDS_TEE_BASE: FamilyBase = {
+  family: 'shirt',
+  noun: 'kids shirt',
+  aliases: [...KIDS_OVERLAY, ...SHIRT_BASE.aliases],
+  overlay: KIDS_OVERLAY,
+  defaultSeed: 'kids shirt',
+  defaultDisplay: 'Kids Tee Shirt',
+  categoryHead: () => 'graphic tees for kids',
+}
+
+/** blank_specs.garment_family → the family base. 'shirt' = the frozen SHIRT_BASE path (tee vs
+ *  t-shirt title overlay), byte-identical to the no-blank shirt resolution. Unknown values (a
+ *  future family the catalog gains before this table does) fall through to the productType path
+ *  — fail-open, never a guess. */
+const BLANK_FAMILY_BASES: Readonly<Record<string, FamilyBase | 'shirt'>> = {
+  tee: 'shirt',
+  long_sleeve_tee: LONG_SLEEVE_TEE_BASE,
+  kids_tee: KIDS_TEE_BASE,
+  sweatshirt: SWEATSHIRT_BASE,
+  hoodie: HOODIE_BASE,
+}
+
+/**
+ * THE garment resolver for keyword seeding: the resolved blank's garment_family when one resolved
+ * for the family, else Amazon's productType + title exactly as garmentNounFor (byte-identical —
+ * the no-blank path IS garmentNounFor). Pure/total; the GARMENT_NOUN flag stays with the consumer.
+ */
+export function resolveGarment(opts: { productType?: string | null; title?: string | null; blankFamily?: string | null }): GarmentResolution {
+  const bf = (opts.blankFamily ?? '').trim().toLowerCase()
+  const base = bf ? BLANK_FAMILY_BASES[bf] : undefined
+  if (base) {
+    const g = base === 'shirt' ? shirtFor(opts.title) : fromBase(base, opts.title)
+    return { ...g, source: 'blank', blankFamily: bf }
+  }
+  return { ...garmentNounFor(opts.productType, opts.title), source: 'productType', blankFamily: null }
 }
