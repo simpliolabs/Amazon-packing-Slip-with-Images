@@ -1,110 +1,201 @@
 /**
- * Item Highlight PER DESIGN (PO 2026-08-21, B0DQ5YZH38 BD/BM/DQ/RIACG/RK).
+ * Item Highlight on MULTI-DESIGN families = ONE SHARED LINE (PO 2026-08-21, B0DQ5YZH38
+ * BD Boss Definition / BM Beast Mode / DQ Don't Quit / RIACG Relax I'm a CEO / RK Real King).
  *
- * Pins: (1) each design's line is composed from the family pool MINUS phrases naming OTHER designs
- * (a BM line never carries "don't quit"; a DQ line never carries "beast mode"); shared family phrases
- * survive on every design; (2) a ONE-group family composes byte-identically to buildItemHighlights
- * (the single-design path is untouched — it never enters the per-design function); (3) the per-design
- * storage shape mirrors per_child_titles (one entry per SKU, designKey/designName labels, '' + hold
- * for a held design); (4) the sticky gate NEVER snaps a per-design marker row to an accepted broadcast
- * push — the broadcast value on a multi-design family is never design-specific.
+ * The ruling: design names are stripped (each child's title already carries its design) and every
+ * phrase must be TRUE FOR EVERY DESIGN — the pool is rated against EACH design's card and a phrase
+ * composes only when its fit is >= 2 under EVERY design (min over designs).
+ *
+ * Pins: (1) min-over-designs — a phrase fit 3/3/3/3/1 is excluded, 2/2/3/2/2 composes; (2) a
+ * partially rated pool HOLDS `designs-unrated` naming the missing keys — never a line from a partial
+ * judgment; (3) union-title coverage — a phrase covered by ONE design's title never composes;
+ * (4) the ONE line is identical on every per-child entry; (5) every design's name tokens are
+ * excluded even when rated fit 3 everywhere; (6) single-design parity — buildItemHighlights ignores
+ * the per-design column, and a one-group family equals buildItemHighlights on the same inputs;
+ * (7) the sticky gate never snaps a per-design marker row to an accepted broadcast push.
  */
 import { describe, it, expect, vi } from 'vitest'
 
 const create = vi.fn(async () => { throw new Error('OpenAI must never be called by the Item Highlights producer') })
 vi.mock('openai', () => ({ default: class MockOpenAI { chat = { completions: { create } } } }))
 
-import { buildItemHighlights, buildItemHighlightsPerDesign } from './listingPipeline'
+import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from './listingPipeline'
 import { DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { applyStickyDetails } from './stickyDetails'
-import { buildForeignDesignTokens, isForeignToDesign } from './designScope'
+import { collapseSharedIhRows, perDesignIhRows } from './perDesignItemHighlights'
+import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
+import { DESIGN_RATED_MIN_SHARE, minFitOverDesigns, unratedDesignKeys, parseThemeFitByDesign } from '@/lib/keyword-engine/themeFitByDesign'
+import { THEME_RATE_MIN_SHARE } from '@/lib/keyword-engine/themeRatingRun'
 import type { AnalyzedKeyword } from '@/lib/keyword-engine'
 
-const kw = (keyword: string, searchVolume: number, themeFit: number | null = 3): AnalyzedKeyword =>
-  ({ keyword, searchVolume, themeFit } as unknown as AnalyzedKeyword)
+const KEYS = ['BD', 'BM', 'DQ', 'RIACG', 'RK'] as const
+type Fits = Partial<Record<(typeof KEYS)[number], 0 | 1 | 2 | 3>>
+
+/** A pool row rated under each design (a missing key = never rated under that design). */
+const kw = (keyword: string, searchVolume: number, fits: Fits | number | null = 3): AnalyzedKeyword => {
+  const byDesign = fits === null ? null
+    : typeof fits === 'number' ? Object.fromEntries(KEYS.map((k) => [k, { fit: fits, about: 'gym' }]))
+      : Object.fromEntries(Object.entries(fits).map(([k, f]) => [k, { fit: f, about: 'gym' }]))
+  return { keyword, searchVolume, themeFit: 3, themeFitByDesign: byDesign } as unknown as AnalyzedKeyword
+}
 
 const GILDAN = DEFAULT_BLANK_SPECS[1]
 
-/** A B0DQ5YZH38-shaped family pool: shared gym/motivation phrases + phrases naming ONE design each. */
-const POOL: AnalyzedKeyword[] = [
-  kw('beast mode shirt', 9000), kw('beast mode gym tee', 4000),
-  kw("don't quit shirt", 7000), kw('dont quit motivational tee', 3500),
-  kw('real king shirt', 6000), kw('real king graphic tee', 2500),
-  kw('gym motivation shirts', 8000), kw('workout graphic tees', 7500), kw('motivational tops for men', 5000),
-  kw('lifting apparel for men', 4500), kw('fitness clothing men', 4000), kw('weightlifting shirts', 3800),
-  kw('gym humor tshirts', 3000), kw('funny workout apparel', 2800), kw('bodybuilding tops', 2600),
+const BD = { key: 'BD', designName: 'Boss Definition', skus: [{ sku: 'BD64000L-BK', asin: 'B0BD000001' }], titles: ['THE CEO Boss Definition Shirt for Men Funny Office Tee'] }
+const BM = { key: 'BM', designName: 'Beast Mode', skus: [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }, { sku: 'BM64000M-BK', asin: 'B0BM000002' }], titles: ['THE CEO Beast Mode Shirt for Men Workout Tee'] }
+const DQ = { key: 'DQ', designName: "Don't Quit", skus: [{ sku: 'DQ64000L-BK', asin: 'B0DQ000001' }], titles: ["THE CEO Don't Quit Gym Motivation Shirt for Men Tee"] }
+const RIACG = { key: 'RIACG', designName: "Relax I'm a CEO", skus: [{ sku: 'RIACG64000L-BK', asin: 'B0RI000001' }], titles: ["THE CEO Relax I'm a CEO Shirt for Men Funny Boss Tee"] }
+const RK = { key: 'RK', designName: 'Real King', skus: [{ sku: 'RK64000L-BK', asin: 'B0RK000001' }], titles: ['THE CEO Real King Graffiti Shirt for Men Crown Tee'] }
+const GROUPS = [BD, BM, DQ, RIACG, RK]
+const FAMILY_TITLE = 'Funny Shirts for Men Graphic Tees'
+
+/** Shared category phrases true for every design (>= 2 everywhere) + the ruling's two twins. */
+const SHARED: AnalyzedKeyword[] = [
+  kw('graphic tees for men', 9000, { BD: 3, BM: 3, DQ: 3, RIACG: 3, RK: 3 }),
+  kw('funny tshirts men', 8000, { BD: 3, BM: 2, DQ: 2, RIACG: 3, RK: 2 }),
+  kw('novelty shirts for guys', 7000, { BD: 2, BM: 2, DQ: 3, RIACG: 2, RK: 2 }),     // the 2/2/3/2/2 twin
+  kw('mens graphic apparel', 6500, { BD: 3, BM: 3, DQ: 3, RIACG: 3, RK: 2 }),
+  kw('sarcastic shirts for men', 6000, { BD: 3, BM: 2, DQ: 2, RIACG: 3, RK: 2 }),
+  kw('humor tops for men', 5500, 2),
+  kw('cool tshirts for men', 5000, 2),
+  kw('statement tee shirts', 4500, 2),
+  kw('attitude shirts men', 4000, 2),
+  kw('mens novelty clothing', 3800, 2),
 ]
-const BM = { key: 'BM', designName: 'Beast Mode', skus: [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }, { sku: 'BM64000M-BK', asin: 'B0BM000002' }], titles: ['THE CEO Beast Mode Gym Shirt for Men Workout Tee'] }
-const DQ = { key: 'DQ', designName: "Don't Quit", skus: [{ sku: 'DQ64000L-BK', asin: 'B0DQ000001' }], titles: ["THE CEO Don't Quit Motivational Shirt for Men Gym Tee"] }
-const RK = { key: 'RK', designName: 'Real King', skus: [{ sku: 'RK64000L-BK', asin: 'B0RK000001' }], titles: ['THE CEO Real King Graphic Shirt for Men Lifting Tee'] }
-const FAMILY_TITLE = 'Funny Gym Shirts for Men Motivational Workout Tees'
+const WOMEN = kw('motivational shirts women', 9500, { BD: 3, BM: 3, DQ: 3, RIACG: 3, RK: 1 })   // the 3/3/3/3/1 twin
+const POOL: AnalyzedKeyword[] = [...SHARED, WOMEN]
 
-describe('buildItemHighlightsPerDesign — per-group composition excludes the OTHER designs', () => {
-  const r = buildItemHighlightsPerDesign({ groups: [BM, DQ, RK], pool: POOL, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
-  const line = (key: string) => r.perDesign.find((d) => d.designKey === key)!.value.toLowerCase()
+const build = (pool: AnalyzedKeyword[], groups = GROUPS) =>
+  buildItemHighlightsPerDesign({ groups, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
 
-  it('composes one line per design group, each non-empty on this pool', () => {
-    expect(r.perDesign.map((d) => d.designKey)).toEqual(['BM', 'DQ', 'RK'])
-    for (const d of r.perDesign) expect(d.value.length).toBeGreaterThanOrEqual(107)
+describe('the shared line — min over designs (PO 2026-08-21)', () => {
+  const r = build(POOL)
+  const line = r.shared.value.toLowerCase()
+
+  it('composes ONE line, >= 107 chars, with no OpenAI call', () => {
+    expect(r.shared.hold).toBeNull()
+    expect(r.shared.value.length).toBeGreaterThanOrEqual(107)
+    expect(r.shared.designKeys).toEqual(['BD', 'BM', 'DQ', 'RIACG', 'RK'])
     expect(create).not.toHaveBeenCalled()
   })
 
-  it("a BM line never carries \"don't quit\" or \"real king\"; a DQ line never carries \"beast mode\" or \"real king\"; RK never the other two", () => {
-    expect(line('BM')).not.toMatch(/quit|real king/)
-    expect(line('DQ')).not.toMatch(/beast|real king/)
-    expect(line('RK')).not.toMatch(/beast|quit/)
+  it('a phrase fit 3/3/3/3/1 ("Motivational Shirts Women" — fit 1 on the Real King graffiti tee) is EXCLUDED', () => {
+    expect(minFitOverDesigns(WOMEN, [...KEYS])).toBe(1)
+    expect(line).not.toContain('motivational shirts women')
   })
 
-  it("each design's OWN name phrases are composable when its title does not already cover them", () => {
-    // The BM title covers "beast mode" so the composer excludes it by coverage (novel phrases beside the
-    // title), but the partition itself must NOT have dropped BM's own tokens — prove at the seam.
-    const foreignFor = buildForeignDesignTokens(
-      [BM, DQ, RK].map((g) => ({ key: g.key, name: g.designName })),
-      { familyTitleText: FAMILY_TITLE, poolKeywords: POOL.map((k) => k.keyword), strictNames: true },
-    )
-    expect(isForeignToDesign('beast mode shirt', foreignFor('BM'))).toBe(false)
-    expect(isForeignToDesign("don't quit shirt", foreignFor('BM'))).toBe(true)
-    expect(isForeignToDesign('beast mode shirt', foreignFor('DQ'))).toBe(true)
-    expect(isForeignToDesign('gym motivation shirts', foreignFor('DQ'))).toBe(false)  // shared family phrase
+  it('a phrase fit 2/2/3/2/2 composes (true for every design)', () => {
+    expect(minFitOverDesigns(SHARED[2], [...KEYS])).toBe(2)
+    expect(line).toContain('novelty shirts for guys')
   })
 
-  it('the storage shape mirrors per_child_titles: one entry per SKU, labeled with designKey/designName', () => {
-    expect(r.perChild.map((e) => e.sku)).toEqual(['BM64000L-BK', 'BM64000M-BK', 'DQ64000L-BK', 'RK64000L-BK'])
-    const bm = r.perChild.filter((e) => e.designKey === 'BM')
-    expect(bm).toHaveLength(2)
-    expect(bm[0].item_highlight).toBe(bm[1].item_highlight)
-    expect(bm[0].designName).toBe('Beast Mode')
-    expect(bm[0].asin).toBe('B0BM000001')
-    expect(bm[0].hold).toBeNull()
+  it('the ONE line is identical on every design and every per-child entry', () => {
+    expect(new Set(r.perDesign.map((d) => d.value)).size).toBe(1)
+    expect(r.perChild.map((e) => e.sku)).toEqual(['BD64000L-BK', 'BM64000L-BK', 'BM64000M-BK', 'DQ64000L-BK', 'RIACG64000L-BK', 'RK64000L-BK'])
+    for (const e of r.perChild) {
+      expect(e.item_highlight).toBe(r.shared.value)
+      expect(e.hold).toBeNull()
+    }
+    expect(r.perChild.find((e) => e.sku === 'RK64000L-BK')?.designName).toBe('Real King')
   })
 
-  it('the vision identity extends a design vocabulary: phrases naming another design ONLY via its identity seeds are foreign too', () => {
-    const pool = [...POOL, kw('lion crown tee', 5000), kw('lion king of the gym shirt', 4200)]
-    const rk = { ...RK, identityPhrases: ['lion wearing a crown', 'lion', 'crown', 'king'] }
-    const out = buildItemHighlightsPerDesign({ groups: [BM, DQ, rk], pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
-    expect(out.perDesign.find((d) => d.designKey === 'BM')!.value.toLowerCase()).not.toMatch(/lion|crown/)
-    expect(out.perDesign.find((d) => d.designKey === 'DQ')!.value.toLowerCase()).not.toMatch(/lion|crown/)
+  it('the UI collapses the identical per-design rows into ONE "shared across N designs" row', () => {
+    const rows = perDesignIhRows(r.perChild)
+    expect(rows).toHaveLength(5)
+    const collapsed = collapseSharedIhRows(rows)
+    expect(collapsed).toHaveLength(1)
+    expect(collapsed[0].designs.map((d) => d.designKey)).toEqual(['BD', 'BM', 'DQ', 'RIACG', 'RK'])
+    expect(collapsed[0].skuCount).toBe(6)
+    expect(collapsed[0].line).toBe(r.shared.value)
+    // The capability stays: rows that differ do not collapse.
+    const differing = collapseSharedIhRows([...rows.slice(0, 4), { ...rows[4], line: 'Something Else' }])
+    expect(differing).toHaveLength(2)
   })
 })
 
-describe('buildItemHighlightsPerDesign — hold semantics per group + single-group parity', () => {
-  it('a design whose scoped pool cannot compose HOLDS with a named reason; the other designs still ship', () => {
-    // Only one shared phrase + the DQ-only phrases: after the partition BM/RK have too few candidates.
-    const thinPool = [kw("don't quit shirt", 7000), kw('dont quit motivational tee', 3500), kw('dont quit gym tops', 3000), kw('never quit workout apparel', 2800), kw('dont quit lifting shirts', 2500), kw('dont quit fitness clothing', 2400), kw('gym motivation shirts', 8000)]
-    const r = buildItemHighlightsPerDesign({ groups: [BM, DQ], pool: thinPool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
-    const bm = r.perDesign.find((d) => d.designKey === 'BM')!
-    expect(bm.value).toBe('')
-    expect(bm.hold).not.toBeNull()
-    expect(r.perChild.filter((e) => e.designKey === 'BM').every((e) => e.item_highlight === '' && e.hold === bm.hold)).toBe(true)
-    // BM's SKUs are never handed DQ's line.
-    expect(r.perChild.filter((e) => e.designKey === 'BM').every((e) => !/quit/i.test(e.item_highlight))).toBe(true)
+describe('the shared line — partial rating HOLDS, names the missing designs (never a partial judgment)', () => {
+  it('a pool with NO rating under RK holds `designs-unrated` with ["RK"]; no line anywhere', () => {
+    const partial = POOL.map((k) => {
+      const { RK: _rk, ...rest } = (k.themeFitByDesign ?? {}) as Record<string, { fit: 0 | 1 | 2 | 3 }>
+      return { ...k, themeFitByDesign: rest } as AnalyzedKeyword
+    })
+    expect(unratedDesignKeys(partial, [...KEYS])).toEqual(['RK'])
+    const r = build(partial)
+    expect(r.shared.hold).toBe('designs-unrated')
+    expect(r.shared.missingDesigns).toEqual(['RK'])
+    expect(r.shared.value).toBe('')
+    for (const d of r.perDesign) { expect(d.value).toBe(''); expect(d.hold).toBe('designs-unrated'); expect(d.missingDesigns).toEqual(['RK']) }
+    for (const e of r.perChild) { expect(e.item_highlight).toBe(''); expect(e.hold).toBe('designs-unrated') }
+    expect(IH_HOLD_MESSAGES['designs-unrated']).toMatch(/per_design: true/)
   })
 
-  it('ONE group composes byte-identically to buildItemHighlights with the same titles/pool (no partition ⇒ no drift)', () => {
-    const single = buildItemHighlights({ finalTitle: BM.titles[0], pool: POOL, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
-    const viaPerDesign = buildItemHighlightsPerDesign({ groups: [BM], pool: POOL, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
-    expect(viaPerDesign.perDesign[0].value).toBe(single.value)
-    expect(viaPerDesign.perDesign[0].hold).toBe(single.hold)
+  it('a design rated on fewer than 30% of the rows is unrated (the rater\'s own acceptance share)', () => {
+    expect(DESIGN_RATED_MIN_SHARE).toBe(THEME_RATE_MIN_SHARE)
+    const thin = POOL.map((k, i) => {
+      if (i < 2) return k
+      const { RK: _rk, ...rest } = (k.themeFitByDesign ?? {}) as Record<string, { fit: 0 | 1 | 2 | 3 }>
+      return { ...k, themeFitByDesign: rest } as AnalyzedKeyword
+    })
+    expect(unratedDesignKeys(thin, [...KEYS])).toEqual(['RK'])   // 2/11 < 30%
+    expect(build(thin).shared.hold).toBe('designs-unrated')
+  })
+
+  it('a row missing ANY design\'s rating has a null shared fit (excluded by the fit gate), even when every design is rated overall', () => {
+    const row = kw('edge phrase shirts', 100, { BD: 3, BM: 3, DQ: 3, RIACG: 3 })
+    expect(minFitOverDesigns(row, [...KEYS])).toBeNull()
+    const r = build([...POOL, row])
+    expect(r.shared.hold).toBeNull()
+    expect(r.shared.value.toLowerCase()).not.toContain('edge phrase')
+  })
+
+  it('a completely unrated pool (no per-design column at all — pre-061 rows) holds with every key named', () => {
+    const r = build(POOL.map((k) => ({ ...k, themeFitByDesign: null } as AnalyzedKeyword)))
+    expect(r.shared.hold).toBe('designs-unrated')
+    expect(r.shared.missingDesigns).toEqual(['BD', 'BM', 'DQ', 'RIACG', 'RK'])
+  })
+})
+
+describe('the shared line — union-title coverage + every design name stripped', () => {
+  it('a phrase covered by ONLY ONE design\'s title (DQ: "gym motivation shirts") never composes for the family', () => {
+    const phrase = kw('gym motivation shirts', 9999, 3)
+    expect(makeCoverageChecker(DQ.titles[0])('gym motivation shirts')).toBe(true)
+    expect(makeCoverageChecker(BM.titles[0])('gym motivation shirts')).toBe(false)
+    const r = build([phrase, ...POOL])
+    expect(r.shared.hold).toBeNull()
+    expect(r.shared.value.toLowerCase()).not.toContain('gym motivation shirts')
+  })
+
+  it('a phrase naming ANY design ("beast mode shirt", "real king tee") is excluded even when rated fit 3 under every design', () => {
+    const r = build([kw('beast mode shirt', 9999, 3), kw('real king tee', 9998, 3), kw('dont quit shirts', 9997, 3), ...POOL])
+    expect(r.shared.hold).toBeNull()
+    expect(r.shared.value.toLowerCase()).not.toMatch(/beast|king|quit/)
+    expect(r.shared.foreignDropped).toBe(3)
+  })
+})
+
+describe('single-design parity (pin) + the per-design column parser', () => {
+  it('buildItemHighlights ignores themeFitByDesign entirely — a single-design family is byte-identical with or without it', () => {
+    const plain = SHARED.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3 } as unknown as AnalyzedKeyword))
+    const withCol = SHARED.map((k) => ({ keyword: k.keyword, searchVolume: k.searchVolume, themeFit: 3, themeFitByDesign: { RK: { fit: 0, about: 'x' } } } as unknown as AnalyzedKeyword))
+    const a = buildItemHighlights({ finalTitle: BM.titles[0], pool: plain, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
+    const b = buildItemHighlights({ finalTitle: BM.titles[0], pool: withCol, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
+    expect(a.value.length).toBeGreaterThanOrEqual(107)
+    expect(b).toEqual(a)
+  })
+
+  it('ONE group rated under its own key composes byte-identically to buildItemHighlights (no partition, min over one design = its fit)', () => {
+    const pool = SHARED.map((k) => ({ ...k, themeFit: k.themeFitByDesign!.BM.fit } as AnalyzedKeyword))
+    const single = buildItemHighlights({ finalTitle: BM.titles[0], pool, apparelProduct: true, blankBrand: GILDAN, netTitles: BM.titles })
+    const via = build(pool, [BM])
+    expect(via.perDesign[0].value).toBe(single.value)
+    expect(via.perDesign[0].hold).toBe(single.hold)
+  })
+
+  it('parseThemeFitByDesign keeps only well-formed {fit: 0-3} entries', () => {
+    expect(parseThemeFitByDesign(null)).toBeNull()
+    expect(parseThemeFitByDesign([])).toBeNull()
+    expect(parseThemeFitByDesign({ BM: { fit: 3, about: 'gym' }, RK: { fit: 7 }, DQ: 'x', BD: { fit: 0 } }))
+      .toEqual({ BM: { fit: 3, about: 'gym' }, BD: { fit: 0, about: null } })
   })
 })
 

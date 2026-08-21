@@ -8,7 +8,7 @@ import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
 import { groupByDesign, isMultiDesign, resolveMultiDesign, perChildValueResolver, perDesignEntries, type PerDesignGroup } from '@/lib/fba/perDesign'
-import { perDesignIhRows, type PerChildItemHighlight, type PerDesignIhRow } from '@/lib/fba/perDesignItemHighlights'
+import { perDesignIhRows, collapseSharedIhRows, type PerChildItemHighlight, type PerDesignIhRow } from '@/lib/fba/perDesignItemHighlights'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
 import { ParentManualUpdateModal } from './ParentManualUpdateModal'
@@ -4178,16 +4178,25 @@ export default function ListingDetailPage() {
                               </div>
                             </div>
                             {perDesignIh ? (
-                              /* One line per DESIGN (PO 2026-08-21): design · line · length · hold reason. */
+                              /* PO 2026-08-21: ONE shared line across every design (design names stripped, every phrase
+                                 true under EVERY design) — identical per-design rows collapse into one "shared across N
+                                 designs" row naming the designs it covers. Rows that ever differ still render per design. */
                               <div className="mt-1 divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white">
-                                {ihRows.map((r) => (
-                                  <div key={r.designKey} className={`px-2 py-1.5 ${r.line ? '' : 'bg-amber-50/60'}`}>
+                                {collapseSharedIhRows(ihRows).map((r, ri) => (
+                                  <div key={`${ri}-${r.designs[0]?.designKey ?? ''}`} className={`px-2 py-1.5 ${r.line ? '' : 'bg-amber-50/60'}`}>
                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                      <span className="text-[10px] font-semibold text-slate-800 truncate max-w-[12rem]" title={r.designKey}>{r.designName}</span>
+                                      {r.designs.length > 1 ? (
+                                        <span className="text-[10px] font-semibold text-slate-800" title={r.designs.map((d) => `${d.designName} (${d.designKey})`).join(' · ')}>
+                                          Shared across {r.designs.length} designs
+                                          <span className="font-normal text-slate-500"> — {r.designs.map((d) => d.designName).join(', ')}</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] font-semibold text-slate-800 truncate max-w-[12rem]" title={r.designs[0]?.designKey}>{r.designs[0]?.designName}</span>
+                                      )}
                                       <span className="text-[10px] text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
                                       {r.line && <span className={`text-[10px] ${r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}`}>· {r.line.length}/125</span>}
                                       {r.line && r.onAmazon && <span className="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">✓ On Amazon</span>}
-                                      {!r.line && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title="This design ships NO Item Highlight until a truthful line composes — it is never given another design's line.">Held{r.hold ? ` · ${r.hold}` : ''}</span>}
+                                      {!r.line && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={r.hold === 'designs-unrated' ? 'The pool is not rated against every design yet — run the per-design theme rating (keyword-pool/rerate { per_design: true }), then Regen.' : 'These designs ship NO Item Highlight until a truthful line composes — never another design’s line.'}>Held{r.hold ? ` · ${r.hold}` : ''}</span>}
                                     </div>
                                     {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push (no-line-for-design)</p>}
                                   </div>

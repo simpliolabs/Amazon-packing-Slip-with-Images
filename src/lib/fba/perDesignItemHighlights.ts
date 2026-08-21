@@ -9,6 +9,13 @@
  * SAME model for the IH: `per_child_item_highlights` (migration 060) — a JSONB array of one entry per
  * SKU, each carrying its design's line (or '' + a named hold), labeled with designName/designKey.
  *
+ * REFINED THE SAME DAY (PO 2026-08-21, "Strip the design for MULTI design that is in the NAME/title"):
+ * the family ships ONE SHARED line — design names stripped, every phrase rated >= 2 under EVERY
+ * design (theme_fit_by_design, migration 061, min over designs). The storage shape is unchanged: the
+ * shared line is written to EVERY entry (identical by construction), so the per-SKU push seam below
+ * still resolves each SKU's "own" line; `collapseSharedIhRows` folds identical rows for the UI and
+ * per-design rows render only if they ever differ.
+ *
  * PUSH SAFETY (the invariant every seam enforces):
  *  - the broadcast IH detail row on a per-design family carries NO line (recommended_value '' and
  *    `per_design: true`), so nothing can broadcast one design's line to all;
@@ -61,6 +68,32 @@ export function perDesignIhRows(entries: PerChildItemHighlight[] | null | undefi
     if (!(e.item_highlight && e.pushed_value === e.item_highlight)) row.allPushed = false
   }
   return order.map((k) => { const r = byKey.get(k)!; const { allPushed, ...rest } = r; return { ...rest, onAmazon: allPushed && !!rest.line } })
+}
+
+/** A collapsed view: designs whose (line, hold) are IDENTICAL share one row. Under the shared-line
+ *  ruling (PO 2026-08-21) every multi-design family collapses to ONE row "shared across N designs";
+ *  the per-design capability stays — rows that ever differ render separately. */
+export interface SharedIhRow {
+  line: string
+  hold: IhHoldReason | null
+  designs: PerDesignIhRow[]
+  skuCount: number
+  /** TRUE when every SKU of every design in the row has the line on Amazon. */
+  onAmazon: boolean
+}
+
+export function collapseSharedIhRows(rows: PerDesignIhRow[]): SharedIhRow[] {
+  const order: string[] = []
+  const byKey = new Map<string, SharedIhRow>()
+  for (const r of rows) {
+    const k = `${r.hold ?? ''}|${r.line}`
+    let row = byKey.get(k)
+    if (!row) { row = { line: r.line, hold: r.hold, designs: [], skuCount: 0, onAmazon: true }; byKey.set(k, row); order.push(k) }
+    row.designs.push(r)
+    row.skuCount += r.skuCount
+    if (!(r.line && r.onAmazon)) row.onAmazon = false
+  }
+  return order.map((k) => byKey.get(k)!)
 }
 
 /** TRUE when the stored IH detail row is the per-design marker (no broadcast line by construction). */

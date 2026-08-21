@@ -21,6 +21,7 @@ import {
   type SelectionContext,
   type ThemeBand,
 } from './selection-core';
+import { parseThemeFitByDesign } from './themeFitByDesign';
 
 // Lazy Proxy (2026-08-03, tests-into-CI): a module-top createClient THROWS without env, which made
 // every test suite importing this module un-runnable locally and in CI. The Proxy defers client
@@ -688,6 +689,9 @@ export async function getStoredAnalysis(
     themeFit: targetsLive ? ((row.theme_fit ?? null) as AnalyzedKeyword['themeFit']) : undefined,
     themeAbout: targetsLive ? ((row.theme_about ?? null) as string | null) : undefined,
     themeRunId: targetsLive ? ((row.theme_run_id ?? null) as string | null) : undefined,
+    // PER-DESIGN fit (migration 061) — the shared multi-design Item Highlight's input. Parsed
+    // defensively (only {fit: 0-3} entries survive); a pre-061 row has no column → null.
+    themeFitByDesign: targetsLive ? parseThemeFitByDesign((row as Record<string, unknown>).theme_fit_by_design) : undefined,
     selectionRank: targetsLive ? ((row.selection_rank ?? null) as number | null) : undefined,
     selectionSlot: targetsLive ? ((row.selection_slot ?? null) as AnalyzedKeyword['selectionSlot']) : undefined,
     selectionReason: targetsLive ? ((row.selection_reason ?? null) as string | null) : undefined,
