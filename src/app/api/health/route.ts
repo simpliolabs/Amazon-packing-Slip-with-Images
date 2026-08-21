@@ -12,6 +12,7 @@
  */
 import { NextResponse } from 'next/server'
 import { describeContentReconcileMode } from '@/lib/fba/contentReconcile'
+import { describeVariantDeathAlarm } from '@/lib/fba/variantDeathAlarm'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -58,6 +59,7 @@ const BEHAVIOR_FLAGS = [
   'JUNGLE_SCOUT_ENABLED',
   'TITLE_COUNCIL_MODEL', // model PIN for council judges/adversaries (bullets + backend judges inherit it, default 'gpt-5') — #176 found the judges failing EVERY run with the failure swallowed; the pinned model must be readable in prod or a bad pin is invisible
   'BULLETS_COUNCIL_MODEL', // bullets-council override of the above (default: TITLE_COUNCIL_MODEL || gpt-5)
+  'VARIANT_DEATH_ALARM', // on (DEFAULT — read-only alarm card) | off — per-family dead-variant detector (variantDeathAlarm.ts): a child SKU whose content_synced_at froze >14d behind its siblings' max is surfaced as a revenue-leak card on the listing page (the Later Gator XL/2XL Orchid two-months-unbuyable incident). UNSET = ON, so it is echoed as the EFFECTIVE mode below — a raw null would read as 'off' to the flag census, the opposite of the truth.
 ] as const
 
 export async function GET() {
@@ -92,6 +94,8 @@ export async function GET() {
         TITLE_V4: process.env.TITLE_V4
           ? (process.env.TITLE_V4 || '').toLowerCase()
           : 'shadow (default)',
+        // Default ON (read-only alarm) — same effective-mode reasoning as the three above.
+        VARIANT_DEATH_ALARM: describeVariantDeathAlarm(),
       },
     },
     { headers: { 'Cache-Control': 'no-store, max-age=0' } },

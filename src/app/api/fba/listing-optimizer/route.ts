@@ -21,6 +21,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { syncListingContent, ensureListingScored, syncSingleAsinContent, type SingleAsinSyncOutcome } from '@/lib/sync/syncListingContent'
 import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
 import { NEEDS_ATTENTION_VERDICTS, type OutcomeChip, type OutcomeVerdict } from '@/lib/fba/outcomePresentation'
+import { attachVariantDeath, type VariantDeathReport } from '@/lib/fba/variantDeathAlarm'
 
 // ── Shared shapes ───────────────────────────────────────────────────────────────────────
 
@@ -96,7 +97,7 @@ async function assembleSurvivors(
   supabase: Awaited<ReturnType<typeof createAdminClient>>,
   scoredRows: ScoreRow[],
   seenPa: Set<string>,
-): Promise<(ScoreRow & { children: ChildRow[]; last_pushed_at: string | null })[]> {
+): Promise<(ScoreRow & { children: ChildRow[]; last_pushed_at: string | null; variant_death: VariantDeathReport | null })[]> {
   const ids = scoredRows.map((s) => s.parent_asin)
   if (ids.length === 0) return []
 
@@ -125,13 +126,16 @@ async function assembleSurvivors(
   }
 
   // Ghost filter (>=1 live child = FOUNDATIONAL INVARIANT; child_count lies) + cross-batch dedup.
-  const out: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null })[] = []
+  // variant_death: the per-family dead-variant report (VARIANT-DEATH ALARM, read-side only) is
+  // attached HERE from the children already in hand — attachVariantDeath is the ONE seam this
+  // and the ?ensure= path both call, so the two row-assembly paths can never diverge.
+  const out: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null; variant_death: VariantDeathReport | null })[] = []
   for (const score of scoredRows) {
     if (seenPa.has(score.parent_asin)) continue
     const children = childMap[score.parent_asin] || []
     if (children.length === 0) continue
     seenPa.add(score.parent_asin)
-    out.push({ ...score, children, last_pushed_at: lastPushedMap[score.parent_asin] || null })
+    out.push(attachVariantDeath({ ...score, children, last_pushed_at: lastPushedMap[score.parent_asin] || null }))
   }
   return out
 }
@@ -403,7 +407,7 @@ export async function GET(req: Request) {
     // lightweight stubs from listing_content — never synchronously scored (Risk R-UX6).
     let scoredRows: ScoreRow[] = []
     let stubs: { asin: string; title: string | null; stub: true }[] | undefined
-    let pageRows: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null })[] = []
+    let pageRows: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null; variant_death: VariantDeathReport | null })[] = []
     let nextCursor: string | null = null
     // Search miss on a valid ASIN where even the on-demand attempt (incl. SP-API discovery) found
     // nothing — lets the frontend render the "Pull from Amazon" empty state instead of a dead-end.
@@ -474,7 +478,8 @@ export async function GET(req: Request) {
                 .order('pushed_at', { ascending: false })
                 .limit(1)
               const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
-              pageRows = [{ ...(sr as ScoreRow), children: kids, last_pushed_at: lastPushed }]
+              // SAME variant_death seam as assembleSurvivors / ?ensure= (three assembly paths, ONE seam).
+              pageRows = [attachVariantDeath({ ...(sr as ScoreRow), children: kids, last_pushed_at: lastPushed })]
             }
           }
         } catch (e) { console.warn('[listing-optimizer] on-demand ASIN score failed:', e instanceof Error ? e.message : e) }
@@ -486,7 +491,7 @@ export async function GET(req: Request) {
       // keep paging the stable (sort-key DESC, parent_asin ASC) tuple, accumulating POST-ghost-filter
       // survivors until we have > limit (or the table is exhausted / a safety cap is hit).
       const seenPa = new Set<string>()
-      const survivors: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null })[] = []
+      const survivors: (ScoreRow & { children: ChildRow[]; last_pushed_at: string | null; variant_death: VariantDeathReport | null })[] = []
       const PAGE = Math.max(limit + 1, 50)        // raw rows per DB round-trip
       const MAX_FETCH = Math.max(limit * 20, 600) // safety cap vs a pathologically ghost-heavy tail
       let rawCursor: Cursor | null = cursor
@@ -558,7 +563,9 @@ export async function GET(req: Request) {
               .order('pushed_at', { ascending: false })
               .limit(1)
             const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
-            pageRows.unshift({ ...(sr as ScoreRow), children: ensuredKids, last_pushed_at: lastPushed })
+            // SAME variant_death seam as assembleSurvivors (dual-path parity — the [asin] page's
+            // row usually arrives via THIS unshift, so an attach on the batch path alone is not done).
+            pageRows.unshift(attachVariantDeath({ ...(sr as ScoreRow), children: ensuredKids, last_pushed_at: lastPushed }))
           }
         }
       } catch (e) { console.warn('[listing-optimizer] ensure-score failed:', e instanceof Error ? e.message : e) }
