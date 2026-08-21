@@ -54,12 +54,17 @@ describe('the listing_seo_scores select MUST carry BOTH design-name columns', ()
   })
 
   it('the theme card is fed from the loader\'s resolved sources, not a second narrower read', () => {
-    const src = read('lib', 'sync', 'syncKeywordIntelligence.ts')
+    // 2026-08-21: the wiring moved from the sync gate into themeRatingRun.ts — the ONE copy both the
+    // sync and rerateFromCache call. The tripwire follows it: the card must still read the SAME
+    // object the seasons were derived from, and nobody else may build a card of their own.
+    const src = read('lib', 'keyword-engine', 'themeRatingRun.ts')
     expect(src).toContain('loadSelectionContextWithSources')
-    // The card must read the SAME object the seasons were derived from.
     expect(src).toMatch(/designNameOverrides:\s*sources\.designNameOverridesByKey/)
     expect(src).toMatch(/visionDesignTheme:\s*sources\.visionDesign/)
     expect(src).toMatch(/resolvedDesignName:\s*sources\.resolvedDesignName/)
+    const sync = read('lib', 'sync', 'syncKeywordIntelligence.ts')
+    expect(sync).toContain('rateFamilyThemeFit(')
+    expect(sync).not.toContain('buildThemeCard(')
   })
 })
 

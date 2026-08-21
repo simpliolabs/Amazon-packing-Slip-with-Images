@@ -17,6 +17,7 @@ import { describe, it, expect } from 'vitest'
 import { composeItemHighlight, ihTruthVerdict, ihAudienceOf } from './itemHighlightComposer'
 import { ensureBlankBrandInHighlights, DEFAULT_BLANK_SPECS } from './blankSpecs'
 import { CONTENT_CONTRACT } from './contentContract'
+import { scrubTrademarks } from './trademarkGuard'
 
 const MIN = CONTENT_CONTRACT.itemHighlights.min
 const MAX = CONTENT_CONTRACT.itemHighlights.max
@@ -182,6 +183,34 @@ describe('truth filters', () => {
     expect(out.toLowerCase()).not.toContain('sweatshirt')
     expect(out.toLowerCase()).not.toContain('disney')
     expect(out.toLowerCase()).toContain('rodeo')
+  })
+
+  it('FISHING/OUTDOOR competitor brands + the Salt Life mark never compose (live pools 2026-08-21)', () => {
+    const FISHING_POOL = [
+      { keyword: 'huk shirts for men', searchVolume: 90000, themeFit: 3 },
+      { keyword: 'salt life shirts', searchVolume: 80000, themeFit: 3 },
+      { keyword: 'columbia fishing shirts', searchVolume: 70000, themeFit: 3 },
+      { keyword: 'under armour fishing shirt', searchVolume: 60000, themeFit: 3 },
+      { keyword: 'magellan fishing shirts', searchVolume: 50000, themeFit: 3 },
+      { keyword: 'simms fishing shirt', searchVolume: 40000, themeFit: 3 },
+      { keyword: 'aftco shirts', searchVolume: 30000, themeFit: 3 },
+      { keyword: 'pelagic fishing shirts', searchVolume: 30000, themeFit: 3 },
+      { keyword: 'bassdash shirts', searchVolume: 20000, themeFit: 3 },
+      { keyword: 'bass fishing shirt', searchVolume: 400, themeFit: 3 },
+      { keyword: 'funny fishing shirt', searchVolume: 350, themeFit: 3 },
+      { keyword: 'fishing gifts for dad', searchVolume: 300, themeFit: 3 },
+      { keyword: 'angler graphic tee', searchVolume: 250, themeFit: 3 },
+    ]
+    const out = (composeItemHighlight(FISHING_POOL, ['THE CEO Bass Fishing Shirt'], OPTS) ?? '').toLowerCase()
+    for (const brand of ['huk', 'salt life', 'columbia', 'under armour', 'magellan', 'simms', 'aftco', 'pelagic', 'bassdash']) {
+      expect(out).not.toContain(brand)
+    }
+    // The verdict names the stage, so the IH_COMPOSER_NULL line can say which door shut.
+    expect(ihTruthVerdict('huk shirts for men', TRUTH_TEE)).toEqual({ ok: false, reason: 'competitor-brand' })
+    expect(ihTruthVerdict('under armor shirts', TRUTH_TEE)).toEqual({ ok: false, reason: 'competitor-brand' })
+    // Salt Life is a registered MARK, not a blank maker: the trademark door rejects it byte-identically.
+    expect(scrubTrademarks('salt life shirts')).not.toBe('salt life shirts')
+    expect(scrubTrademarks('Salt Life Shirts')).not.toMatch(/salt\s*life/i)
   })
 
   it('a TRUE weight-class phrase passes the filter on a matching blank (composes when budget allows)', () => {

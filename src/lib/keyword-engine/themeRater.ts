@@ -37,7 +37,9 @@ import OpenAI from 'openai'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { resolveOpenAIKey } from '../openai/credentials'
 import { instrumentAiHealth, getAiHardError } from '../openai/errorClass'
-import { selectionMode, themePrintTest, type ThemeBand } from './selection-core'
+import { selectionMode, themePrintTest, themeRatingKey, type ThemeBand } from './selection-core'
+
+export { themeRatingKey }
 
 /* ── CONSTANTS (ONE home per budget — no magic numbers at call sites) ─────────────────────────── */
 
@@ -730,7 +732,8 @@ export async function buildThemeCard(ctx: ThemeCardContext): Promise<string | nu
 /* ── EXPORT 2 — THE 3-RATER BAND ASSIGNMENT ──────────────────────────────────────────────────── */
 
 /**
- * Assign every keyword ONE ordinal band 0-3 against the theme card. Returns keyword → {band, about}.
+ * Assign every keyword ONE ordinal band 0-3 against the theme card. Returns
+ * themeRatingKey(keyword) → {band, about} — readers MUST look up by themeRatingKey, never raw text.
  * Keywords absent from the returned map are UNRATED, which selection-core reads as band 2 and NEVER
  * hard-gates (`effectiveBand`: `themeFit ?? 2`). Omission is always the safe direction.
  *
@@ -761,7 +764,16 @@ export async function rateThemeFit(
     console.log(`[KW_THEME_RATER] asin=${tag} skipped (no theme card)`)
     return out
   }
-  const uniq = [...new Set((keywords || []).map((k) => (k || '').trim()).filter(Boolean))]
+  // De-duplicate on the LOOKUP key (case + whitespace folded), keeping the first spelling seen for
+  // the prompt. Two spellings of one phrase are one question to the raters and one answer in `out`.
+  const seen = new Set<string>()
+  const uniq: string[] = []
+  for (const k of keywords || []) {
+    const key = themeRatingKey(k)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    uniq.push((k || '').trim())
+  }
   if (uniq.length === 0) return out
 
   const lean = sanitizePromptField(ctx.audienceLean, LEAN_MAX_LEN)
@@ -824,7 +836,8 @@ export async function rateThemeFit(
       }
 
       const merged = combineRaterVerdicts(usable, chunk)
-      for (const [kw, rating] of merged) out.set(kw, rating)
+      // Keyed by themeRatingKey — the same key every reader uses (see themeRatingKey).
+      for (const [kw, rating] of merged) out.set(themeRatingKey(kw), rating)
 
       const hist = { b0: 0, b1: 0, b2: 0, b3: 0 }
       for (const r of merged.values()) hist[`b${r.band}` as 'b0' | 'b1' | 'b2' | 'b3']++

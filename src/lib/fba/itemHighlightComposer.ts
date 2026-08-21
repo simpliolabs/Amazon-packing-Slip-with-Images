@@ -45,8 +45,12 @@ export interface ComposerPoolRow {
 
 /** Competitor blank/apparel makers — never composable unless the family's own allowed brand.
  *  The trademark lexicon covers franchises/marks, not blanks (the Darlin' pool composed
- *  "Pro Club Shirts" straight through it). */
-const APPAREL_BRAND_RE = /\b(?:pro\s?club|gild[ae]n|guildan|softstyle|heavy\s?cotton\s?brand|hanes|fruit\s+of\s+the\s+loom|next\s+level|bella\s?canvas|american\s+apparel|champion|carhartt|comfort\s+colors)\b/i
+ *  "Pro Club Shirts" straight through it).
+ *  FISHING / OUTDOOR APPAREL (2026-08-21, seen in live pools: "huk shirts for men", "magellan
+ *  fishing shirts"): a shopper typing a maker's name wants THAT maker — never this blank. Scoped to
+ *  the composer's truth stage only: "columbia" / "magellan" double as place/design words elsewhere
+ *  (listingPipeline.ts:968), and declining to COMPOSE a phrase is a hold, not a publish. */
+const APPAREL_BRAND_RE = /\b(?:pro\s?club|gild[ae]n|guildan|softstyle|heavy\s?cotton\s?brand|hanes|fruit\s+of\s+the\s+loom|next\s+level|bella\s?canvas|american\s+apparel|champion|carhartt|comfort\s+colors|huk|bassdash|columbia|under\s*armou?r|magellan|simms|aftco|pelagic)\b/i
 const MIN_CANDIDATES = 3
 /** Rated pools compose themeFit >= 2 ONLY (PO 2026-08-21, B0DQ5YZH38: fit-1 "Band Tees" led a line). */
 const MIN_THEME_FIT = 2

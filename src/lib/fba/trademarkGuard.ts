@@ -39,6 +39,10 @@ const TRADEMARK_RULES: { mark: string; sub: string }[] = [
   { mark: 'hello\\s*kitty', sub: '' },
   { mark: 'nike', sub: '' },
   { mark: 'adidas', sub: '' },
+  // REGISTERED APPAREL MARK (2026-08-21): "salt life shirts" surfaced in a live fishing-family pool.
+  // A mark, not a blank maker — so it lives here (every published field + the composer's
+  // byte-identity door), not in the composer's APPAREL_BRAND_RE.
+  { mark: 'salt\\s*life', sub: '' },
 ]
 
 /** Casing helper: keep the substitution's case roughly matching the matched text so a Title-Case
