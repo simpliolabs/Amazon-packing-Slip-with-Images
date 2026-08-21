@@ -15,6 +15,7 @@ import RankAnalysisPanel from './RankAnalysisPanel'
 import type { RankAnalysisResult } from '@/lib/fba/rankAnalysis'
 import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSparkline'
 import { presentOutcome, MEASURE_TARGET, type OutcomeChip } from '@/lib/fba/outcomePresentation'
+import type { VariantDeathReport } from '@/lib/fba/variantDeathAlarm' // ONE shared derivation — server attaches, this page only renders
 import { priorityDisplay, priorityTooltip } from '@/lib/fba/priorityDisplay'  // market-first Priority cell (PO 2026-08-08)
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
@@ -41,6 +42,9 @@ interface SeoScoreRow {
   image_url: string | null; total_units_30d: number; scored_at: string
   audience_lean?: string | null
   children: ChildContentRow[]
+  /** VARIANT-DEATH ALARM (variantDeathAlarm.ts): per-family dead-variant report, derived
+   *  server-side in the listing-optimizer GET. null = flag off; absent on legacy payloads. */
+  variant_death?: VariantDeathReport | null
 }
 
 interface KeywordReconciliation {
@@ -2899,6 +2903,41 @@ export default function ListingDetailPage() {
           </span>
         </div>
       </div>
+
+      {/* ══ VARIANT-DEATH ALARM — child SKUs whose content sync FROZE while siblings advanced ══
+          The Later Gator XL/2XL Orchid signature: a dead (unbuyable) offer stops being touched by
+          scans, so its content_synced_at freezes while every sibling keeps advancing. Derivation
+          lives in variantDeathAlarm.ts (ONE shared seam, attached server-side; VARIANT_DEATH_ALARM
+          flag gates it there) — this card only renders the report. Read-only: no writes, no cron. */}
+      {score.variant_death && score.variant_death.lagging.length > 0 && (() => { const vd = score.variant_death!; return (
+        <div className="bg-white border border-slate-200 border-l-4 border-l-red-500 rounded-2xl shadow-sm p-4 flex items-start gap-3">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-red-700">
+              {vd.lagging.length} variant{vd.lagging.length === 1 ? '' : 's'} may be unbuyable — sync froze while siblings advanced
+            </p>
+            <p className="text-xs text-slate-600 mt-0.5">
+              These SKUs stopped updating while the rest of the family kept syncing — the signature of a
+              dead offer (no live offer = shoppers can&apos;t buy that size/color, and the money walks silently).
+              Check each offer in Seller Central; once it&apos;s buyable again, <b>Sync Now</b> clears this alarm.
+            </p>
+            <ul className="mt-2 space-y-1">
+              {vd.lagging.map((l) => (
+                <li key={l.sku} className="text-xs text-slate-700 flex items-center gap-2 flex-wrap">
+                  <span className="font-mono font-semibold">{l.sku}</span>
+                  <span className="font-mono text-slate-400">{l.asin}</span>
+                  {l.lag_days === null
+                    ? <span className="text-red-700 font-medium">never synced</span>
+                    : <span>last synced {l.content_synced_at ? new Date(l.content_synced_at).toLocaleDateString() : '—'} <span className="text-red-700 font-medium">({l.lag_days}d behind the family)</span></span>}
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-slate-400 mt-2">
+              Family last synced {vd.family_max_synced_at ? new Date(vd.family_max_synced_at).toLocaleDateString() : '—'} · {vd.rows_considered} SKU{vd.rows_considered === 1 ? '' : 's'} checked{vd.shellRows > 0 ? ` · ${vd.shellRows} placeholder row${vd.shellRows === 1 ? '' : 's'} (offerless backfill) excluded` : ''}
+            </p>
+          </div>
+        </div>
+      )})()}
 
       {/* ══ ORPHAN / REPARENTED — split by severity ══
           Orphan: truly disconnected (no parent on Amazon) → Re-link button (writes via SP-API).
