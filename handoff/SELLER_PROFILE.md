@@ -210,3 +210,8 @@ blank_specs facts only (material / fit / neck / sleeve / dye); a family whose tr
 reach the floor is NOT-READY — held, never shipped short. Same exchange: the Electronics family
 (B0GCF11RKL) is Electronics, NOT apparel — non-apparel families compose ZERO garment vocabulary
 (garmentFamily 'none'), and nothing ships there without a verified live-state read first.
+
+### Blank identity is stated in the CHILD SKU (PO ruling 2026-08-21)
+PO, answering the held-IH families: the garment blank is "**as stated in Children SKU**" — the style code in the SKU (`1717` CC tee, `6014` CC long sleeve, `64000` Gildan Softstyle, `G64400` Gildan long sleeve, `1800x`/`18000` Gildan crewneck sweatshirt, `18500` Gildan hoodie, `BC3001` Bella+Canvas 3001), never inferred from a title brand word. Families whose SKUs carry no style code (`MAHATS*`, `AJK-*`, Amazon-opaque SKUs) get an explicit PO-maintained family override.
+SKU-verified family map (2026-08-21): B0DSCDZC6K = Gildan 18000 sweatshirt + 18500 hoodies (mixed; PO typed "6014" — SKU says 1800x); B0GR6VGCBJ = CC 6014 LS (PO typed 1717 — SKU says 6014; SKU rule wins pending objection); B0H7CMPZR3 / B0DMXMH266 / B0F6VTY79T = 64000; B0FC8R484P + B0FC9BQZT2 = 64000 by override (MAHATS); B0DP5H8QBT = kids (Gildan youth or Rabbit Skins — PO to pick; HELD); B0GW9V8SLK = G64400; B0GR1K3TXF = 64000 (85) + BC3001 (41) mixed; B0GWFFK1W7 = 1717 (+ PO wants "Comfort Colors" in its title); B0FKFHSCS9 = 1717 by override (AJK); B0DQ5YZH38 = 64000 + 64400 LS subset (mixed sleeve); B0GQ6PGR2N = CC 6014 LS.
+Mixed-blank families: spec facts used in copy = the INTERSECTION across the family's resolved blanks (a fact that differs between children — sleeve, neck — is never claimed).
