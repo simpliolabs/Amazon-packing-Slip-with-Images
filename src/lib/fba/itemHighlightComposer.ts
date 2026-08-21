@@ -109,7 +109,8 @@ const allowedGarmentClasses = (gf: ComposerGarmentFamily | undefined): ReadonlyS
   return null
 }
 
-const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|ladies|men|mens|adults?|plus[\s-]?size)\b/i
+// `womans`/`mans`/`lady` added 2026-08-21: "Womans Shirts" composed onto the kids family B0DP5H8QBT.
+const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\s-]?size)\b/i
 const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/i
 
 /**
