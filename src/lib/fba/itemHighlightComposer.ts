@@ -106,10 +106,14 @@ export function composeItemHighlight(
   const requireFit = ratedShare >= 0.3
 
   // Candidates: 2-5 word pool phrases the titles don't cover, ranked theme-fit DESC then volume DESC.
+  // 2026-08-21: every null branch below names itself — two 6014 families returned null WITH a full
+  // spec available and nobody could say which filter starved them. A silent null is a guess factory.
+  const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, afterFit: 0, candidates: 0, picked: 0, lineLen: 0 }
+  const nullOut = (stage: string): null => { console.log(JSON.stringify({ tag: 'IH_COMPOSER_NULL', stage, ...why })); return null }
   const candidates = pool
     .filter((r) => !!r.keyword)
     .filter((r) => !requireFit || (typeof r.themeFit === 'number' && r.themeFit >= 1))
-    .map((r) => ({ ...r, keyword: r.keyword.trim() }))
+    .map((r) => { why.afterFit++; return { ...r, keyword: r.keyword.trim() } })
     .filter((r) => {
       const words = r.keyword.split(/\s+/).length
       // PO ruling 2026-08-20: a bare "Oversized <garment>" pool phrase is a CUT claim — excluded
@@ -149,12 +153,16 @@ export function composeItemHighlight(
       if (tf(b) !== tf(a)) return tf(b) - tf(a)
       return (b.searchVolume ?? 0) - (a.searchVolume ?? 0)
     })
-  if (candidates.length < MIN_CANDIDATES) return null
+  why.candidates = candidates.length
+  if (candidates.length < MIN_CANDIDATES) return nullOut('too-few-candidates')
 
   const picked: string[] = []
   const usedFolded = new Set<string>()
   const usedGarmentSurfaces = new Set<string>()
   const lineLen = () => picked.reduce((n, p, i) => n + p.length + (i ? 2 : 0), 0)
+  const brandRe = opts?.allowedBrand
+    ? new RegExp('\\b' + opts.allowedBrand.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*') + '\\b', 'i')
+    : null
 
   // Two passes: first prefer candidates introducing a NEW garment surface (the variety craft),
   // then fill remaining budget with any novel candidate.
@@ -172,12 +180,17 @@ export function composeItemHighlight(
       if (nextLen > MAX) continue
       const draft = [...picked, phrase].join(', ')
       if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
+      // PO ruling 2026-08-21 (B0GWFFK1W7 "comfort colors tshirt, comfort colors graphic tee…" —
+      // "repeating CC 2 times"): the blank brand appears in AT MOST ONE picked phrase. Amazon's
+      // ≤2-per-word cap allows two; the PO does not.
+      if (brandRe && brandRe.test(phrase) && picked.some((pp) => brandRe.test(pp))) continue
       picked.push(phrase)
       folded.forEach((w) => usedFolded.add(w))
       if (gm) usedGarmentSurfaces.add(gm)
     }
   }
-  if (picked.length < MIN_CANDIDATES) return null
+  why.picked = picked.length
+  if (picked.length < MIN_CANDIDATES) return nullOut('too-few-picked')
 
   // PO ruling 2026-08-20: the wear-style FACT for relaxed/unisex cuts (budget reserved above).
   // Never bare "Oversized <garment>" from here — cut claims are blank_specs territory and such
@@ -217,7 +230,8 @@ export function composeItemHighlight(
       folded.forEach((w) => usedFolded.add(w))
     }
   }
-  if (lineLen() < MIN) return null
+  why.picked = picked.length; why.lineLen = lineLen()
+  if (lineLen() < MIN) return nullOut('under-floor-after-pad')
 
   // Scrub parity with the LLM path (defense in depth — candidates are already door-clean, but the
   // wear-fact join and future edits must never reopen the trademark door).
