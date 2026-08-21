@@ -171,6 +171,21 @@ export async function getProductImageUrl(asin: string): Promise<string | null> {
     return (catalogRow as { image_url: string }).image_url;
   }
 
+  // LIVE CATALOG FALLBACK (2026-08-21): catalog_products is never written by this app, so CHILD
+  // ASINs (per-design identity scans) always missed here and every design group reported
+  // 'no-image' (B0DQ5YZH38 x5). Ask the SP-API Catalog for the image — rate-limited, never
+  // credit-metered, zero Jungle Scout involvement. Fail-open: a miss stays null, logged.
+  try {
+    const { fetchCatalogImageUrl } = await import('@/lib/amazon/catalogImage');
+    const link = await fetchCatalogImageUrl(asin);
+    if (link) {
+      console.log(`[visionScanner] catalog fallback image for ${asin}`);
+      return link;
+    }
+    console.warn(`[visionScanner] no image in DB or catalog for ${asin}`);
+  } catch (e) {
+    console.warn(`[visionScanner] catalog image fallback failed for ${asin}:`, e instanceof Error ? e.message : e);
+  }
   return null;
 }
 
