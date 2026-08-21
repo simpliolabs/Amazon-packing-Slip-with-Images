@@ -25,8 +25,10 @@
  * capability claims, audience truth, competitor blanks, weight class. The brand waterfall is
  * satisfied INSIDE the line (one brand-bearing phrase) so no post-net ever rewrites the composer.
  *
- * Thin/unrated pools return null — the caller HOLDS the field with a named reason (the LLM
- * fallback is RETIRED). Downstream nets (repeat cap, blank-brand net) still run on the returned
+ * UNRATED pools (ratedShare < 0.3) return null BEFORE selection (PO ruling 2026-08-21: volume
+ * order with no judgment is the "Disney World Shirts" drift class — hold, never improvise); thin
+ * pools return null after it. The caller HOLDS the field with a named reason (the LLM fallback is
+ * RETIRED). Downstream nets (repeat cap, blank-brand net) still run on the returned
  * string as defense in depth; this module never re-implements them.
  */
 import { CONTENT_CONTRACT } from './contentContract'
@@ -85,19 +87,25 @@ export function ihAudienceOf(gf: ComposerGarmentFamily | undefined): 'kids' | 'a
  *  "tank top" match as one noun. `crewnecks?` is the one-word sweatshirt noun ("crew neck" two
  *  words is a neck style and not a noun). */
 const GARMENT_NOUN_RE = /\b(?:hooded[\s-]?sweatshirts?|tank[\s-]?tops?|t[\s-]?shirts?|tshirts?|tees?|shirts?|tops?|sweatshirts?|crewnecks?|pullovers?|hoodies?|hoodys?|hooded|jerseys?|tanks?|polos?|dress(?:es)?|sweaters?|jackets?|onesies?|bodysuits?|rompers?|leggings)\b/gi
-/** A matched noun → its garment class. */
+/** A matched noun → its garment class. `crewneck` is its own class: a crew neck contradicts a hood. */
 const garmentNounClass = (m: string): string => {
   const k = m.toLowerCase().replace(/[\s-]+/g, '')
   if (/^(?:t?shirts?|tees?|tops?)$/.test(k)) return 'tee'
-  if (/^(?:sweatshirts?|crewnecks?|pullovers?)$/.test(k)) return 'sweatshirt'
+  if (/^(?:sweatshirts?|pullovers?)$/.test(k)) return 'sweatshirt'
+  if (/^crewnecks?$/.test(k)) return 'crewneck'
   if (/^(?:hoodies?|hoodys?|hooded|hoodedsweatshirts?)$/.test(k)) return 'hoodie'
   return k.replace(/s$/, '')
 }
-/** The garment classes each family may name. null = no noun rule (unresolved blank / hat). */
-const allowedGarmentClass = (gf: ComposerGarmentFamily | undefined): string | null => {
-  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'kids_tee') return 'tee'
-  if (gf === 'sweatshirt') return 'sweatshirt'
-  if (gf === 'hoodie') return 'hoodie'
+const TEE_CLASSES: ReadonlySet<string> = new Set(['tee'])
+const SWEATSHIRT_CLASSES: ReadonlySet<string> = new Set(['sweatshirt', 'crewneck'])
+const HOODIE_CLASSES: ReadonlySet<string> = new Set(['hoodie', 'sweatshirt'])
+/** The garment classes each family may name. A hoodie IS a hooded sweatshirt (coordinator ruling
+ *  2026-08-21): hoodie families accept hoodie / hooded sweatshirt / sweatshirt / pullover — only
+ *  tee nouns (and a crew neck) are foreign to them. null = no noun rule (unresolved blank / hat). */
+const allowedGarmentClasses = (gf: ComposerGarmentFamily | undefined): ReadonlySet<string> | null => {
+  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'kids_tee') return TEE_CLASSES
+  if (gf === 'sweatshirt') return SWEATSHIRT_CLASSES
+  if (gf === 'hoodie') return HOODIE_CLASSES
   return null
 }
 
@@ -116,10 +124,10 @@ export function ihTruthVerdict(phrase: string, ctx: IhTruthCtx): { ok: true } | 
   if (gf === 'none') {
     if (GARMENT_SURFACE_RE.test(phrase)) return { ok: false, reason: 'garment-vocab-on-non-apparel' }
   } else {
-    const allowed = allowedGarmentClass(gf)
+    const allowed = allowedGarmentClasses(gf)
     if (allowed) {
       for (const m of phrase.matchAll(GARMENT_NOUN_RE)) {
-        if (garmentNounClass(m[0]) !== allowed) return { ok: false, reason: 'wrong-garment-noun' }
+        if (!allowed.has(garmentNounClass(m[0]))) return { ok: false, reason: 'wrong-garment-noun' }
       }
     }
   }
@@ -180,7 +188,7 @@ const significantFolded = (phrase: string): string[] =>
     .filter((w) => w && !IH_INSIGNIFICANT.has(w))
 
 export interface ComposerOpts {
-  spec?: Pick<BlankSpec, 'brand' | 'weightNote' | 'stretch' | 'material' | 'fit' | 'neck' | 'sleeve' | 'dye'> | null
+  spec?: Pick<BlankSpec, 'brand' | 'weightNote' | 'stretch' | 'material' | 'fit' | 'neck' | 'sleeve' | 'dye' | 'unisex'> | null
   garmentFamily?: ComposerGarmentFamily
   /** The blank brand copy may name (brand_in_copy) — null for Gildan-class blanks. */
   allowedBrand?: string | null
@@ -190,13 +198,10 @@ export interface ComposerOpts {
 }
 
 /** The composer's null stages — the caller maps them to a PO-facing hold reason. */
-export type ComposerNullStage = 'too-few-candidates' | 'too-few-picked' | 'under-floor-after-pad'
+export type ComposerNullStage = 'unrated-pool' | 'too-few-candidates' | 'too-few-picked' | 'under-floor-after-pad'
 export interface ComposerResult {
   line: string | null
   stage: ComposerNullStage | null
-  /** TRUE when the rater has judged enough of the pool that its verdict governs (the fit gate
-   *  was armed) — the caller's unrated-pool vs thin-candidates distinction, ONE threshold. */
-  rated: boolean
 }
 
 /**
@@ -243,11 +248,12 @@ export function composeItemHighlightDetailed(
   const namedTitles = titles.filter((t) => !!t && !!t.trim())
   const needBrand = !!opts?.allowedBrand && !(namedTitles.length > 0 && namedTitles.every(carriesBrand))
 
-  // FIT GATE on RATED pools (2026-08-20, the "Disney World Shirts"/"Band Tees" drift): when the
-  // rater has judged a meaningful share of the pool, TRUST the judgment — candidates must carry
+  // FIT GATE (2026-08-20, the "Disney World Shirts"/"Band Tees" drift): candidates must carry
   // themeFit >= MIN_THEME_FIT (2 since 2026-08-21: a fit-1 phrase is "plausible", not on-design),
   // so off-design harvest noise (high-volume, unrated or fit-0/1) cannot compose.
-  // Unrated/legacy pools keep volume ordering (there is no judgment to trust).
+  // UNRATED POOLS HOLD (PO ruling 2026-08-21): when the rater has judged under 30% of the pool
+  // there is no judgment to trust — volume-ordered composition IS the drift class — so the pool
+  // returns null here, before selection; the caller holds with "needs research / theme rating".
   const ratedShare = pool.length ? pool.filter((r) => typeof r.themeFit === 'number').length / pool.length : 0
   const requireFit = ratedShare >= 0.3
 
@@ -258,11 +264,12 @@ export function composeItemHighlightDetailed(
   const why = { pool: pool.length, ratedShare: Math.round(ratedShare * 100), requireFit, needBrand, afterFit: 0, candidates: 0, picked: 0, lineLen: 0, truthDrops }
   const nullOut = (stage: ComposerNullStage): ComposerResult => {
     console.log(JSON.stringify({ tag: 'IH_COMPOSER_NULL', stage, ...why }))
-    return { line: null, stage, rated: requireFit }
+    return { line: null, stage }
   }
+  if (!requireFit) return nullOut('unrated-pool')
   const candidates = pool
     .filter((r) => !!r.keyword)
-    .filter((r) => !requireFit || (typeof r.themeFit === 'number' && r.themeFit >= MIN_THEME_FIT))
+    .filter((r) => typeof r.themeFit === 'number' && r.themeFit >= MIN_THEME_FIT)
     .map((r) => { why.afterFit++; return { ...r, keyword: r.keyword.trim() } })
     .filter((r) => {
       const words = r.keyword.split(/\s+/).length
@@ -356,7 +363,9 @@ export function composeItemHighlightDetailed(
 
   // PO RULING 2026-08-21, verbatim "44 is NEVER approved, MIN 85% of MAX 125": an under-min line
   // never ships. Pad toward the floor with TRUE spec facts (blank_specs values — never invented),
-  // each passing the same novelty + repeat gates as pool phrases. A family that cannot truthfully
+  // each passing the same novelty + repeat gates as pool phrases. "Unisex Fit" joins the bank when
+  // blank_specs.unisex is TRUE (PO 2026-08-06: unisex sizing explicit in features/highlights,
+  // never the title) — a mixed-blank intersection carries it only when every blank claims it. A family that cannot truthfully
   // reach the floor returns NOT-READY (null) — the caller's fallback/hold path decides, but a
   // short line is not a shippable outcome from here.
   const MIN = CONTENT_CONTRACT.itemHighlights.min
@@ -365,6 +374,7 @@ export function composeItemHighlightDetailed(
     const factFillers = [
       sp.material || '',
       sp.fit ? `${sp.fit} Fit` : '',
+      sp.unisex === true ? 'Unisex Fit' : '',
       sp.neck || '',
       sp.sleeve || '',
       sp.dye ? `${sp.dye} Fabric` : '',
@@ -386,5 +396,5 @@ export function composeItemHighlightDetailed(
 
   // Trademark door on the final bytes (defense in depth — candidates are already door-clean, but
   // the wear-fact / brand / filler joins and future edits must never reopen it).
-  return { line: scrubTrademarks(picked.join(', ')), stage: null, rated: requireFit }
+  return { line: scrubTrademarks(picked.join(', ')), stage: null }
 }

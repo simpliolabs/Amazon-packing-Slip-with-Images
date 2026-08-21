@@ -121,6 +121,24 @@ describe('composeItemHighlight — Architecture A under the 85% floor', () => {
     }
   })
 
+  it('PO 2026-08-06: "Unisex Fit" joins the floor-pad filler bank ONLY when blank_specs.unisex is TRUE', () => {
+    const smallPool = [
+      { keyword: 'rodeo outfit women', searchVolume: 400, themeFit: 3 },
+      { keyword: 'hello darlin shirt', searchVolume: 350, themeFit: 3 },
+      { keyword: 'cowgirl graphic tops', searchVolume: 300, themeFit: 3 },
+    ]
+    // the CC spec with the DB unisex flag set (migration 054) — the pad draws material, fit, then the unisex fact
+    const thinSpec = { ...SPEC, unisex: true }
+    const withUnisex = composeItemHighlight(smallPool, ['THE CEO Darlin Tee | Comfort Colors Shirt'], { spec: thinSpec, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })
+    expect(withUnisex).toBeTruthy()
+    expect(withUnisex).toContain('Unisex Fit')
+    expect(withUnisex!.length).toBeGreaterThanOrEqual(MIN)
+    const { unisex: _u, ...noUnisex } = thinSpec
+    void _u
+    const without = composeItemHighlight(smallPool, ['THE CEO Darlin Tee | Comfort Colors Shirt'], { spec: noUnisex, garmentFamily: 'tee', allowedBrand: 'Comfort Colors' })
+    if (without) expect(without).not.toContain('Unisex Fit')
+  })
+
   it('is deterministic', () => {
     const a = composeItemHighlight(GATOR_POOL, GATOR_TITLES, OPTS)
     const b = composeItemHighlight(GATOR_POOL, GATOR_TITLES, OPTS)
@@ -180,7 +198,19 @@ describe('truth filters', () => {
   })
 })
 
-describe('fit gate on rated pools', () => {
+describe('unrated pools HOLD (PO ruling 2026-08-21: never improvise from volume order)', () => {
+  it('a pool the rater has judged under 30% of returns null BEFORE selection — even when every phrase would otherwise compose', () => {
+    const unrated = GATOR_POOL.map((r) => ({ ...r, themeFit: null }))
+    expect(composeItemHighlight(unrated, GATOR_TITLES, OPTS)).toBeNull()
+    // 2 of 8 rated = 25% < 30% — still unrated
+    const barely = GATOR_POOL.map((r, i) => ({ ...r, themeFit: i < 2 ? 3 : null }))
+    expect(composeItemHighlight(barely, GATOR_TITLES, OPTS)).toBeNull()
+    // 3 of 8 = 37.5% — the rater's verdict governs and only the rated fit-3 phrases may compose
+    const rated = GATOR_POOL.map((r, i) => ({ ...r, themeFit: i < 3 ? 3 : null }))
+    const out = composeItemHighlight(rated, GATOR_TITLES, OPTS)
+    if (out) expect(out.toLowerCase()).not.toContain('casual apparel')
+  })
+
   it('unrated high-volume noise cannot compose when the pool is meaningfully rated', () => {
     const ratedPool = [
       { keyword: 'usa soccer shirt women', searchVolume: 500, themeFit: 3 },
@@ -240,11 +270,15 @@ describe('ihTruthVerdict — garment-noun truth', () => {
 
   it('B0DMXMH266: "Hooded Fishing Shirts" is rejected on a crew tee; hooded is hoodie-only', () => {
     expect(ihTruthVerdict('hooded fishing shirts for men', TRUTH_TEE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    // A hoodie IS a hooded sweatshirt (coordinator ruling 2026-08-21): hoodie families accept
+    // hoodie(s) / hooded sweatshirt(s) / sweatshirt(s) / pullover(s); only tee nouns (and a crew neck) are foreign.
     const HOODIE = { ...TRUTH_TEE, garmentFamily: 'hoodie' as const, audience: ihAudienceOf('hoodie') }
-    expect(ihTruthVerdict('hooded sweatshirt for fishing', HOODIE)).toEqual({ ok: true })
-    expect(ihTruthVerdict('fishing hoodies for men', HOODIE)).toEqual({ ok: true })
-    // the literal allowed set: hoodie ⇒ {hoodie(s), hooded sweatshirt(s)} — a bare "sweatshirt" is the other class
-    expect(ihTruthVerdict('fishing sweatshirt', HOODIE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    for (const p of ['hooded sweatshirt for fishing', 'fishing hoodies for men', 'fishing sweatshirt', 'cozy pullover hoodie', 'fleece pullovers']) {
+      expect(ihTruthVerdict(p, HOODIE)).toEqual({ ok: true })
+    }
+    expect(ihTruthVerdict('fishing tees for men', HOODIE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(ihTruthVerdict('fishing t shirt', HOODIE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(ihTruthVerdict('holiday crewneck', HOODIE)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
     expect(ihTruthVerdict('fishing hoodie for men', { ...TRUTH_TEE, garmentFamily: 'sweatshirt', audience: ihAudienceOf('sweatshirt') })).toEqual({ ok: false, reason: 'wrong-garment-noun' })
   })
 

@@ -27,11 +27,15 @@ const GILDAN = DEFAULT_BLANK_SPECS[1]
 const TITLE = 'THE CEO Later Gator Tee Shirt | Comfort Colors Alligator Tshirt for Women'
 
 describe('buildItemHighlights — composer-null ⇒ HOLD with a named reason, never an LLM line', () => {
-  it('B0F6VTY79T / B0DSCDZC6K (unrated pools): an unrated pool that cannot compose HOLDS as unrated-pool — zero OpenAI calls', () => {
-    const unrated = [kw('salt life shirts for men', 90000, null), kw('casual apparel', 80000, null)]
+  it('B0F6VTY79T / B0DSCDZC6K (unrated pools): an unrated pool HOLDS as unrated-pool even when its phrases would compose — zero OpenAI calls', () => {
+    const unrated = [
+      kw('later gator shirt women', 450, null), kw('see you later alligator', 900, null), kw('alligator clothing women', 300, null),
+      kw('funny gator apparel', 250, null), kw('novelty animal tops', 200, null), kw('swamp humor clothing', 150, null),
+    ]
     const r = buildItemHighlights({ finalTitle: TITLE, pool: unrated, apparelProduct: true, blankBrand: GILDAN, netTitles: [TITLE] })
     expect(r.value).toBe('')
     expect(r.hold).toBe<IhHoldReason>('unrated-pool')
+    expect(IH_HOLD_MESSAGES[r.hold!]).toBe('Held: pool is unrated — run research/theme rating first')
     expect(create).not.toHaveBeenCalled()
   })
 

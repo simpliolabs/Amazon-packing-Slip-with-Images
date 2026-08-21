@@ -2143,7 +2143,7 @@ function ihFloorDoor(line: string): string {
 /** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action. */
 export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec'
 export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
-  'unrated-pool': 'Held: pool is unrated — run a theme rating / research first',
+  'unrated-pool': 'Held: pool is unrated — run research/theme rating first',
   'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
   'under-floor': `Held: truthful phrases + blank facts cannot reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor — harvest more keywords for this family`,
   'no-spec': 'Held: no blank spec resolved for this family — set its blank (child SKU style code or a family override)',
@@ -2197,11 +2197,12 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
     const value = ihFloorDoor(capItemHighlightRepeats(ensureBlankBrandInHighlights(res.line, titles, blankBrand)))
     return value ? { value, hold: null } : { value: '', hold: 'under-floor' }
   }
-  // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on.
-  const hold: IhHoldReason = res.stage === 'under-floor-after-pad'
-    ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
-    : (res.rated ? 'thin-candidates' : 'unrated-pool')
-  console.warn(JSON.stringify({ tag: 'IH_HOLD', reason: hold, stage: res.stage, rated: res.rated }))
+  // HOLD (PO 2026-08-21): no LLM draft, no spec-mash — a named reason the PO can act on. An
+  // unrated pool holds BEFORE selection (the composer never volume-orders without a judgment).
+  const hold: IhHoldReason = res.stage === 'unrated-pool' ? 'unrated-pool'
+    : res.stage === 'under-floor-after-pad' ? (blankBrand?.spec ? 'under-floor' : 'no-spec')
+      : 'thin-candidates'
+  console.warn(JSON.stringify({ tag: 'IH_HOLD', reason: hold, stage: res.stage }))
   return { value: '', hold }
 }
 
