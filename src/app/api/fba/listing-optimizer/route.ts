@@ -21,7 +21,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { syncListingContent, ensureListingScored, syncSingleAsinContent, type SingleAsinSyncOutcome } from '@/lib/sync/syncListingContent'
 import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
 import { NEEDS_ATTENTION_VERDICTS, type OutcomeChip, type OutcomeVerdict } from '@/lib/fba/outcomePresentation'
-import { attachVariantDeath, type VariantDeathReport } from '@/lib/fba/variantDeathAlarm'
+import { attachVariantDeath, loadOfferEvidence, type VariantDeathReport } from '@/lib/fba/variantDeathAlarm'
 
 // ── Shared shapes ───────────────────────────────────────────────────────────────────────
 
@@ -125,6 +125,12 @@ async function assembleSurvivors(
     if (!lastPushedMap[row.parent_asin]) lastPushedMap[row.parent_asin] = row.pushed_at // first = latest (DESC)
   }
 
+  // Offer evidence for the offer_dead prong: ONE listing_health read over every child SKU in
+  // the batch (read-only; fail-open → [] keeps that prong silent, never breaks the page).
+  const offerEvidence = await loadOfferEvidence(
+    supabase, Object.values(childMap).flat().map((c) => c.sku),
+  )
+
   // Ghost filter (>=1 live child = FOUNDATIONAL INVARIANT; child_count lies) + cross-batch dedup.
   // variant_death: the per-family dead-variant report (VARIANT-DEATH ALARM, read-side only) is
   // attached HERE from the children already in hand — attachVariantDeath is the ONE seam this
@@ -135,7 +141,7 @@ async function assembleSurvivors(
     const children = childMap[score.parent_asin] || []
     if (children.length === 0) continue
     seenPa.add(score.parent_asin)
-    out.push(attachVariantDeath({ ...score, children, last_pushed_at: lastPushedMap[score.parent_asin] || null }))
+    out.push(attachVariantDeath({ ...score, children, last_pushed_at: lastPushedMap[score.parent_asin] || null }, offerEvidence))
   }
   return out
 }
@@ -478,8 +484,10 @@ export async function GET(req: Request) {
                 .order('pushed_at', { ascending: false })
                 .limit(1)
               const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
-              // SAME variant_death seam as assembleSurvivors / ?ensure= (three assembly paths, ONE seam).
-              pageRows = [attachVariantDeath({ ...(sr as ScoreRow), children: kids, last_pushed_at: lastPushed })]
+              // SAME variant_death seam as assembleSurvivors / ?ensure= (three assembly paths, ONE seam),
+              // SAME offer-evidence join (loadOfferEvidence over this family's SKUs).
+              const kidEvidence = await loadOfferEvidence(supabase, kids.map((k) => k.sku))
+              pageRows = [attachVariantDeath({ ...(sr as ScoreRow), children: kids, last_pushed_at: lastPushed }, kidEvidence)]
             }
           }
         } catch (e) { console.warn('[listing-optimizer] on-demand ASIN score failed:', e instanceof Error ? e.message : e) }
@@ -564,8 +572,10 @@ export async function GET(req: Request) {
               .limit(1)
             const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
             // SAME variant_death seam as assembleSurvivors (dual-path parity — the [asin] page's
-            // row usually arrives via THIS unshift, so an attach on the batch path alone is not done).
-            pageRows.unshift(attachVariantDeath({ ...(sr as ScoreRow), children: ensuredKids, last_pushed_at: lastPushed }))
+            // row usually arrives via THIS unshift, so an attach on the batch path alone is not done),
+            // SAME offer-evidence join (loadOfferEvidence over this family's SKUs).
+            const ensuredEvidence = await loadOfferEvidence(supabase, ensuredKids.map((k) => k.sku))
+            pageRows.unshift(attachVariantDeath({ ...(sr as ScoreRow), children: ensuredKids, last_pushed_at: lastPushed }, ensuredEvidence))
           }
         }
       } catch (e) { console.warn('[listing-optimizer] ensure-score failed:', e instanceof Error ? e.message : e) }

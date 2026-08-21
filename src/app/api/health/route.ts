@@ -59,7 +59,7 @@ const BEHAVIOR_FLAGS = [
   'JUNGLE_SCOUT_ENABLED',
   'TITLE_COUNCIL_MODEL', // model PIN for council judges/adversaries (bullets + backend judges inherit it, default 'gpt-5') — #176 found the judges failing EVERY run with the failure swallowed; the pinned model must be readable in prod or a bad pin is invisible
   'BULLETS_COUNCIL_MODEL', // bullets-council override of the above (default: TITLE_COUNCIL_MODEL || gpt-5)
-  'VARIANT_DEATH_ALARM', // on (DEFAULT — read-only alarm card) | off — per-family dead-variant detector (variantDeathAlarm.ts): a child SKU whose content_synced_at froze >14d behind its siblings' max is surfaced as a revenue-leak card on the listing page (the Later Gator XL/2XL Orchid two-months-unbuyable incident). UNSET = ON, so it is echoed as the EFFECTIVE mode below — a raw null would read as 'off' to the flag census, the opposite of the truth.
+  'VARIANT_DEATH_ALARM', // on (DEFAULT — read-only alarm card) | off — per-family dead-variant detector (variantDeathAlarm.ts): a child SKU whose content_synced_at froze >14d behind its siblings' max (sync_lag) OR whose stored listing_health offer evidence says no live offer (offer_dead; fail-open on a missing row) is surfaced as a revenue-leak card on the listing page, each SKU labelled with its reason (the Later Gator XL/2XL Orchid two-months-unbuyable incident). UNSET = ON, so it is echoed as the EFFECTIVE mode below — a raw null would read as 'off' to the flag census, the opposite of the truth.
 ] as const
 
 export async function GET() {
