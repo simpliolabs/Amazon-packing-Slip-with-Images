@@ -231,3 +231,6 @@ Encoded (2026-08-21, feat/ih-per-design): `per_child_item_highlights` (migration
 
 ### Keyword universe follows the BLANK, not Amazon's productType (PO 2026-08-21)
 PO on B0GQ6PGR2N: "is a long sleeve Comfort Colors 6014". Its Amazon productType is SWEATSHIRT, which drove a sweatshirt keyword universe (47 of 52 keywords) onto a long-sleeve tee. Garment truth = the resolved blank's garment_family (SKU-first, PO's own rule); Amazon's productType is the fallback when no blank resolves.
+
+### Multi-design highlight = ONE shared line, design names stripped, true for EVERY design (PO 2026-08-21, refining the per-design ruling)
+PO: "Do we need per-design HL for SEO?" → the design name is already indexed by each child's per-design TITLE; the highlight adds category/adjacent phrases. PO ruling: "Strip the design for MULTI design that is in the NAME/title" and per-design RATING approved (zero credits). Encoding: for multi-design families the pool is rated against EACH design's card; a phrase composes only if its fit is >= 2 under EVERY design (min-over-designs), with all designs' name tokens excluded; the resulting ONE line is pushed to every SKU (per-design plumbing carries it; identical by construction). Per-design HARVESTS (credits) are not required — decide per design later by sales.
