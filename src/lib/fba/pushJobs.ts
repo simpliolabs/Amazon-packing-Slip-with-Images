@@ -198,7 +198,12 @@ async function runJob(jobId: string): Promise<void> {
 export async function markStaleJobs(): Promise<void> {
   const supabase = await createAdminClient()
   const cutoff = new Date(Date.now() - STALE_RUNNING_MS).toISOString()
-  await supabase
+  // 2026-08-21: `.lt(heartbeat_at)` alone NEVER matches a NULL heartbeat, so a 'running' row that
+  // died before its first beat (or predates heartbeats) was immortal — and kickQueuedJobs treats any
+  // 'running' row as "the queue is busy", so ONE ghost wedged the whole queue forever, silently.
+  // Liveness = a RECENT heartbeat; age out NULL-heartbeat rows by started_at, and a running row with
+  // neither timestamp is malformed and flips unconditionally.
+  const { data: flipped, error } = await supabase
     .from('push_jobs')
     .update({
       status: 'interrupted',
@@ -206,7 +211,11 @@ export async function markStaleJobs(): Promise<void> {
       finished_at: new Date().toISOString(),
     } as never)
     .eq('status', 'running')
-    .lt('heartbeat_at', cutoff)
+    .or(`heartbeat_at.lt.${cutoff},and(heartbeat_at.is.null,started_at.lt.${cutoff}),and(heartbeat_at.is.null,started_at.is.null)`)
+    .select('id')
+  if (error) { console.error(`[push-jobs] markStaleJobs FAILED: ${error.message}`); return }
+  const ids = (flipped as { id: string }[] | null) ?? []
+  if (ids.length) console.warn(`[push-jobs] watchdog flipped ${ids.length} dead running job(s) to interrupted: ${ids.map((r) => r.id).join(', ')}`)
 }
 
 /** READ-side self-heal: after a deploy the new process has an empty in-memory chain while
@@ -214,12 +223,17 @@ export async function markStaleJobs(): Promise<void> {
  *  job. Called from the poll endpoint, so the status bar's own polling restarts the queue. */
 export async function kickQueuedJobs(): Promise<void> {
   const supabase = await createAdminClient()
-  const { data: running } = await supabase
+  // Every no-kick branch says WHY (except the healthy empty-queue case — that would log on every
+  // poll). A silently-skipped kick is how 20+ queued jobs sat invisible behind one ghost row.
+  const { data: running, error: runErr } = await supabase
     .from('push_jobs').select('id').eq('status', 'running').limit(1)
-  if ((running as { id: string }[] | null)?.length) return
-  const { data: queued } = await supabase
+  if (runErr) { console.error(`[push-jobs] kick: running-check FAILED: ${runErr.message}`); return }
+  const blocker = (running as { id: string }[] | null)?.[0]
+  if (blocker) { console.log(`[push-jobs] kick: queue busy — running job ${blocker.id}`); return }
+  const { data: queued, error: qErr } = await supabase
     .from('push_jobs').select('id').eq('status', 'queued')
     .order('created_at', { ascending: true }).limit(1)
+  if (qErr) { console.error(`[push-jobs] kick: queued-check FAILED: ${qErr.message}`); return }
   const next = (queued as { id: string }[] | null)?.[0]
   if (next) enqueueJobRun(next.id)
 }
