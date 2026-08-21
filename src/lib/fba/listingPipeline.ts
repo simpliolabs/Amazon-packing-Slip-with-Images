@@ -57,7 +57,7 @@ import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrity
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
-import { composeItemHighlight } from '@/lib/fba/itemHighlightComposer'
+import { composeItemHighlight, humanizeSpecToken, titleCasePhrase } from '@/lib/fba/itemHighlightComposer'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
@@ -2152,7 +2152,10 @@ export function buildHighlightsFallback(
 ): string {
   const val = (re: RegExp): string => {
     const row = details.find((d) => re.test(d.field_name) && (d.recommended_value || '').trim().length > 0 && d.recommended_value.trim().length <= 40)
-    return row ? row.recommended_value.trim() : ''
+    // THE SEAM (live B0GQ6PGR2N: "easy short_sleeve style" shipped): enum detail rows store the
+    // Amazon API MACHINE TOKEN ("short_sleeve") — push requires it, the editor prettifies at
+    // display only — so every spec value entering customer copy is humanized HERE, once.
+    return row ? humanizeSpecToken(row.recommended_value.trim()) : ''
   }
   const material = val(/^(?:material|fabric)/i)
   const fit = val(/\bfit\b/i)
@@ -2206,7 +2209,10 @@ export function buildHighlightsFallback(
     phrases.push(p)
     len = next
   }
-  return phrases.join(', ')
+  // Ship in the SAME customer-facing case as the composer path (titleCasePhrase is length-preserving,
+  // so the budget math above still holds) — the lowercase composition otherwise re-flattens the
+  // humanized spec tokens ("Short Sleeve") this fallback exists to render correctly.
+  return phrases.map((p) => titleCasePhrase(p)).join(', ')
 }
 
 // Item Highlights is a customer-facing companion field, NOT backend keywords (PO 2026-07-02):
