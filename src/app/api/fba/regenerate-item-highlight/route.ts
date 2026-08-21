@@ -7,6 +7,9 @@
  * PO 2026-08-21) — then persists the updated product_details_improvements row. Isolated: does NOT
  * run the full pipeline. Auth is enforced by the /api/fba middleware (task #49). Never blanks the
  * field: a HOLD answers 422 with the named reason and keeps the stored value.
+ * MULTI-DESIGN (PO 2026-08-21): composes one line PER DESIGN (buildItemHighlightsPerDesign — the
+ * same producer the pipeline ships) into per_child_item_highlights; the broadcast row becomes a
+ * per-design marker with no line. READ-ONLY identity (no vision call) — see designGroupIdentity.ts.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -15,9 +18,12 @@ import { selectionMode, resolveRankingTargets } from '@/lib/keyword-engine/selec
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin'
 import { poolKeyFromResolved } from '@/lib/keyword-engine/poolKey'
-import { buildItemHighlights, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
+import { buildItemHighlights, buildItemHighlightsPerDesign, IH_HOLD_MESSAGES } from '@/lib/fba/listingPipeline'
 import { detailValueToString, isItemHighlightsField, capItemHighlightRepeats } from '@/lib/fba/productDetailAttrs'
 import { resolveBlankRowForNet } from '@/lib/fba/blankSpecs'
+import { resolveMultiDesign } from '@/lib/fba/perDesign'
+import { identityPhrases, readDesignGroupIdentity } from '@/lib/fba/designGroupIdentity'
+import { perDesignIhRows } from '@/lib/fba/perDesignItemHighlights'
 
 function admin() {
   return createClient(
@@ -35,7 +41,7 @@ export async function POST(req: NextRequest) {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: rec } = await (supabase as any).from('listing_seo_recommendations')
-      .select('recommended_title, product_details_improvements, keyword_plan')
+      .select('recommended_title, product_details_improvements, keyword_plan, per_child_titles')
       .eq('parent_asin', parent_asin).maybeSingle()
     if (!rec) return NextResponse.json({ error: 'No recommendations found — run an AI audit first.' }, { status: 404 })
 
@@ -97,11 +103,73 @@ export async function POST(req: NextRequest) {
     // `title` here is rec.recommended_title, which IS the PO's locked title when
     // title_source='manual' (lock-title route stores it there) — exactly the title the net must
     // test. Best-effort: any read failure leaves blankRow null → net no-ops.
+    const storedPct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { title?: string }[]
     const blankRow = await resolveBlankRowForNet(supabase, {
       parentAsin: parent_asin,
       childAsin: resolved?.childAsin ?? null,
-      titles: [title],
+      // Every title the IH will sit beside — per-child titles included on multi-design families.
+      titles: [title, ...storedPct.map((t) => String(t?.title ?? ''))],
     })
+
+    // ── MULTI-DESIGN (PO 2026-08-21): one line PER DESIGN through the SAME producer the pipeline
+    // ships. Groups = the stored per_child_titles' design keys (the ONE grouping — never a second
+    // resolver); identity per design = the READ-ONLY cached vision identity of the group's first
+    // scanned child (this route never spends a vision call — POST scan-identity {per_design:true}
+    // populates it). The broadcast row becomes the per-design MARKER (no line).
+    const pct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }[]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: scoreRow } = await (supabase as any).from('listing_seo_scores').select('is_multi_design_override').eq('parent_asin', parent_asin).maybeSingle()
+    const multi = resolveMultiDesign(pct, (scoreRow as { is_multi_design_override?: boolean | null } | null)?.is_multi_design_override ?? null)
+    const byKey = new Map<string, { key: string; designName: string; skus: { sku: string; asin: string }[]; titles: string[] }>()
+    if (multi) {
+      for (const r of pct) {
+        const key = r.designKey || r.designName || ''
+        if (!key) continue
+        const g = byKey.get(key) ?? { key, designName: r.designName || key, skus: [], titles: [] }
+        g.skus.push({ sku: r.sku, asin: r.asin })
+        if (r.title && !g.titles.includes(r.title)) g.titles.push(r.title)
+        byKey.set(key, g)
+      }
+    }
+    if (multi && byKey.size < 2) {
+      // Multi-design by override/detector but no per-design titles stored yet: a broadcast line here
+      // would be the exact lie the ruling forbids (and the push seam would refuse it) — say so.
+      return NextResponse.json({ error: 'Multi-design family without per-design titles yet — run a full AI audit first so each design gets its own title, then regenerate the Item Highlight per design.', hold: 'no-design-groups' }, { status: 422 })
+    }
+    if (multi && byKey.size >= 2) {
+      const groups = await Promise.all([...byKey.values()].map(async (g) => {
+        const gi = await readDesignGroupIdentity(g).catch(() => null)
+        return { ...g, identityPhrases: identityPhrases(gi?.identity ?? null) }
+      }))
+      const built = buildItemHighlightsPerDesign({
+        groups, pool: hlAnalysis, apparelProduct: apparel, blankBrand: blankRow,
+        familyTitleText: title,
+      })
+      const composed = built.perDesign.filter((d) => d.value)
+      if (composed.length === 0) {
+        const reasons = [...new Set(built.perDesign.map((d) => d.hold).filter((h): h is NonNullable<typeof h> => !!h))]
+        return NextResponse.json({
+          error: `Every design HELD: ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')} — kept the existing values.`,
+          hold: reasons[0] ?? 'under-floor', per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
+        }, { status: 422 })
+      }
+      const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: '', per_design: true } : p))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const db = supabase as any
+      const { error: updErr } = await db.from('listing_seo_recommendations')
+        .update({ product_details_improvements: updated, per_child_item_highlights: built.perChild }).eq('parent_asin', parent_asin)
+      if (updErr) {
+        // Missing migration 060: persisting the marker WITHOUT the lines would blank the field — refuse loudly instead.
+        console.error(`[regenerate-item-highlight] per-design persist failed for ${parent_asin} (run migration 060): ${updErr.message}`)
+        return NextResponse.json({ error: `Could not save the per-design Item Highlights (${updErr.message}). Apply migration 060 (per_child_item_highlights) and retry.` }, { status: 500 })
+      }
+      return NextResponse.json({
+        per_design: perDesignIhRows(built.perChild),
+        per_child_item_highlights: built.perChild,
+        product_details_improvements: updated,
+        composed: composed.length, held: built.perDesign.length - composed.length,
+      })
+    }
 
     // Path parity (Invariant 1): the SAME inputs the pipeline hands the producer — pool, blank row,
     // the title the IH will sit beside. Deterministic; no client, no LLM.
@@ -113,10 +181,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `${IH_HOLD_MESSAGES[reason]} — kept the existing value.`, hold: reason }, { status: 422 })
     }
 
-    const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: hl } : p))
+    // Single-design: the broadcast row carries the line; any stale per-design marker/array is cleared
+    // (a family forced back to single-design must not keep per-design lines the push would prefer).
+    const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: hl, per_design: false } : p))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (supabase as any).from('listing_seo_recommendations')
-      .update({ product_details_improvements: updated }).eq('parent_asin', parent_asin)
+    const db = supabase as any
+    let { error: updErr } = await db.from('listing_seo_recommendations')
+      .update({ product_details_improvements: updated, per_child_item_highlights: null }).eq('parent_asin', parent_asin)
+    if (updErr) {   // pre-migration-060 DB: save the row alone (missing-column tolerance)
+      ;({ error: updErr } = await db.from('listing_seo_recommendations').update({ product_details_improvements: updated }).eq('parent_asin', parent_asin))
+    }
+    if (updErr) return NextResponse.json({ error: `Could not save: ${updErr.message}` }, { status: 500 })
 
     return NextResponse.json({ item_highlight: hl, product_details_improvements: updated })
   } catch (e) {

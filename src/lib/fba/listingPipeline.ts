@@ -58,6 +58,8 @@ import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpand
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
 import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighlightComposer'
+import { buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign } from '@/lib/fba/designScope'
+import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
@@ -65,7 +67,7 @@ import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
 import { audienceSpans, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
-import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
+import { scanDesignGroupIdentity, identityPhrases } from '@/lib/fba/designGroupIdentity'
 // Per-design content ANCHOR (fix/content-anchor-not-color): deriveDesignLabel recovers the real
 // design name from the SKU designKey; isGarmentColor gates the literal shirt color OUT of the anchor
 // so per-design content is about the DESIGN ('Rude Potato'), not the color ('Blue Spruce').
@@ -90,7 +92,13 @@ export interface PipelineCannibalizationWarning { keyword: string; affected_skus
  *  UNFORGEABLE: the pdiFinal normalize map DELETES any value_source arriving on the blind-cast LLM
  *  parse before the stamp sites run — the invariant is structural, not prompt-behavioral.
  *  Persisted on the JSONB item — no migration. */
-export interface PipelineProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; value_source?: 'spec' | 'audience' | 'ruling' }
+export interface PipelineProductDetailImprovement {
+  field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; value_source?: 'spec' | 'audience' | 'ruling'
+  /** Item Highlight on a MULTI-DESIGN family (PO 2026-08-21): the row is a per-design MARKER —
+   *  recommended_value is '' by construction and the lines live in per_child_item_highlights. A
+   *  broadcast push of this row is impossible (the push seam resolves per SKU from the array). */
+  per_design?: boolean
+}
 export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; planned_in?: string[]; exact_text: string; why: string }
 
 // Backend-first placement net (Step 3, task #60; TRUTH/PLAN split 2026-08-19, GAP 1 of the B0DSQPZY9S
@@ -301,6 +309,10 @@ export interface PipelineResult {
    *  designName/designKey label each entry's design group (for the per-design editor cards). */
   per_child_bullets?: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[]
   per_child_descriptions?: { sku: string; asin: string; description: string; designName?: string; designKey?: string }[]
+  /** Per-DESIGN Item Highlights (migration 060, PO 2026-08-21) — same fan-out model as per_child_*:
+   *  one entry per SKU carrying ITS design's composed line ('' + hold when the design holds).
+   *  Undefined for single-design / non-apparel families (they use the broadcast IH detail row). */
+  per_child_item_highlights?: PerChildItemHighlight[]
   recommended_description: string
   variant_corrections: PipelineVariantCorrection[]
   cannibalization_warnings: PipelineCannibalizationWarning[]
@@ -866,7 +878,11 @@ export function designKeyForSku(sku: string): string {
   // CUSTOM-CUP + a BC group → wrong per-design titles, dropped single override, leaked colour).
   if (/^[A-Z]*\d{3,}/.test(k)) {
     const suffix = k
-      .replace(/^[A-Z]*\d{3,}(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S)?-?/i, '')  // 640002XL- / BC30012XL- → ''
+      // `L?` before the size (2026-08-21): live SKUs carry a LADIES marker glued to the size —
+      // BB64000LXL-BK (B0DQ96CGPL), RIAC64000L2XL-BK / RIAC64000LM-BK (B0DSBJ7GQD) — which the old
+      // pattern read as size "L" + a remainder "XL-BK" whose "XL-" then passed as a colour code,
+      // yielding the colour ("BK") as the design key. A bare "L" still matches as before.
+      .replace(/^[A-Z]*\d{3,}(?:L?(?:2XL|3XL|4XL|5XL|6XL|XL|XS|L|M|S))?-?/i, '')  // 640002XL- / BC30012XL- / 64000LXL- → ''
       .replace(/^[A-Z]{2,4}(?:-|$)/, '')                                    // leading colour code (BK / SC) → ''
       .replace(/-?TS$/i, '')                                               // trailing product-type token
       .replace(/[-_\s]+$/, '').replace(/^[-_\s]+/, '')
@@ -880,16 +896,39 @@ export function designKeyForSku(sku: string): string {
   return k.replace(/\d{3,}.*$/, '').replace(/[-_\s]+$/, '') || k.replace(/[-_\s]+$/, '')
 }
 export interface DesignGroup { key: string; skus: { sku: string; asin: string }[] }
-export function detectDesignGroups(children: { sku: string; asin: string }[]): { isMultiDesign: boolean; groups: DesignGroup[] } {
+/** A SKU whose design key came from a STYLE-CODE SKU (letters + 3+ digit blank code: RF64000L-WH,
+ *  640002XL-BK-Custom-Cup-TS). Under that convention the key IS the seller's explicit design code
+ *  (prefix before the style code, or the suffix design token) — it never needs a sibling to prove
+ *  it is a design. Prefix-encoded SKUs (DAR-CCG-2XL-BAY) still do. */
+const SKU_HAS_STYLE_CODE_RE = /^[A-Z]*\d{3,}/
+/** The variation hub names itself (…-Parent, PARENT-…); it is never a design. */
+const SKU_IS_HUB_RE = /(?:^|[-_\s])PARENT(?:$|[-_\s])/i
+export function detectDesignGroups(children: { sku: string; asin: string }[], opts?: { parentAsin?: string | null }): { isMultiDesign: boolean; groups: DesignGroup[] } {
   const m = new Map<string, { sku: string; asin: string }[]>()
+  const parentAsin = (opts?.parentAsin ?? '').trim().toUpperCase()
   for (const c of children) {
+    // The family's own hub row (self-parented listing_content row, or a SKU that names itself the
+    // parent) is not a design — and must never seed a singleton "design" group.
+    if ((parentAsin && (c.asin ?? '').toUpperCase() === parentAsin) || SKU_IS_HUB_RE.test(c.sku ?? '')) continue
     const k = designKeyForSku(c.sku)
     if (!k) continue
     if (!m.has(k)) m.set(k, [])
     m.get(k)!.push({ sku: c.sku, asin: c.asin })
   }
-  // A real design spans multiple sizes (≥2 SKUs); a singleton key is the parent hub / outlier.
-  const groups = [...m.entries()].filter(([, skus]) => skus.length >= 2).map(([key, skus]) => ({ key, skus }))
+  // A real design spans multiple sizes (≥2 SKUs); a singleton key USED to be dropped as "the parent
+  // hub / outlier" — which un-classified B0F6VTY79T (RF×4 + BTFFTW×1 + FF×1: only RF survived, so
+  // the family read SINGLE-design and its one broadcast Item Highlight was false on two designs;
+  // PO 2026-08-21), hid BD on B0DQ5YZH38 and made B0DQ96CGPL (BB/BD/BM/PY/TC, one SKU each) single.
+  // RULE NOW: a singleton key counts as a design when its SKU follows the STYLE-CODE convention
+  // (the key is the seller's explicit design code by construction) AND the family has at least one
+  // other design group to be multi WITH. The hub is excluded above by identity, not by count.
+  // Prefix-encoded families (Darlin' DAR-CCG) keep the ≥2 rule — a lone odd prefix there is an outlier.
+  const anchors = [...m.entries()].filter(([, skus]) => skus.length >= 2)
+  const styleSingletons = [...m.entries()].filter(([, skus]) => skus.length === 1 && SKU_HAS_STYLE_CODE_RE.test((skus[0].sku || '').trim().toUpperCase()))
+  const keep = new Set<string>(anchors.map(([k]) => k))
+  if (anchors.length + styleSingletons.length >= 2) for (const [k] of styleSingletons) keep.add(k)
+  // Preserve first-seen order (bullets/description fan-out + the couple concept read group order).
+  const groups = [...m.entries()].filter(([k]) => keep.has(k)).map(([key, skus]) => ({ key, skus }))
   return { isMultiDesign: groups.length >= 2, groups }
 }
 
@@ -2206,6 +2245,74 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
   return { value: '', hold }
 }
 
+// ─── Item Highlights PER DESIGN (PO 2026-08-21, multi-design families) ─────────────────────────
+
+export interface ItemHighlightDesignGroup {
+  key: string
+  designName: string
+  skus: { sku: string; asin: string }[]
+  /** The title(s) THIS design ships (its per-child title) — the coverage exclusion and the brand
+   *  waterfall must see the titles the line will sit beside, never the family broadcast. */
+  titles: string[]
+  /** The design's vision identity phrases (designTheme + seedKeywords). Extends the design's own
+   *  vocabulary for the cross-design partition; [] when no identity is cached. */
+  identityPhrases?: string[]
+}
+
+export interface PerDesignItemHighlightsInput {
+  groups: ItemHighlightDesignGroup[]
+  /** The family's ranking targets (BACKEND-slot terms already excluded by the caller). */
+  pool: AnalyzedKeyword[]
+  apparelProduct: boolean
+  blankBrand: BlankSpecRow | null
+  /** Family-level title text whose tokens are niche (never foreign): canonical + prior title. */
+  familyTitleText: string
+}
+
+export interface PerDesignItemHighlight {
+  designKey: string
+  designName: string
+  skus: { sku: string; asin: string }[]
+  value: string
+  hold: IhHoldReason | null
+  /** How many pool phrases the cross-design partition removed for this design (observability). */
+  foreignDropped: number
+}
+
+/**
+ * THE per-design Item Highlights producer — shared by the pipeline's multi-design branch and the
+ * regenerate-item-highlight route (Invariant 1: one function ships the field on every path).
+ * Composes ONCE PER DESIGN GROUP through the SAME buildItemHighlights the single-design path ships
+ * (same truth stage, same floor, same hold semantics), with two per-design inputs:
+ *   1. titles = the group's own shipped title(s) (coverage exclusion + brand waterfall per group);
+ *   2. pool = the family pool MINUS every phrase carrying a token foreign to this design — a token
+ *      unique to ANOTHER design's name/identity (designScope.ts, the seam bullets/description
+ *      already scope through). A BM line never carries "don't quit"; shared family phrases stay.
+ * Single-design families never reach this function, so they are byte-identical to today.
+ */
+export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput): { perDesign: PerDesignItemHighlight[]; perChild: PerChildItemHighlight[] } {
+  const { groups, pool, apparelProduct, blankBrand } = input
+  const foreignFor = buildForeignDesignTokens(
+    groups.map((g) => ({ key: g.key, name: g.designName, identity: g.identityPhrases ?? [] })),
+    // STRICT NAMES: the IH truth rule — another design's name never composes, however full of it the
+    // pool is (a pool harvested on the BM identity is full of "beast mode"; DQ still never says it).
+    { familyTitleText: input.familyTitleText, poolKeywords: pool.map((k) => k.keyword), strictNames: true },
+  )
+  const perDesign: PerDesignItemHighlight[] = groups.map((g) => {
+    const foreign = foreignFor(g.key)
+    const scoped = pool.filter((k) => !isForeignToDesign(k.keyword, foreign))
+    const titles = g.titles.filter((t) => !!t && !!t.trim())
+    const r = buildItemHighlights({ finalTitle: titles[0] ?? '', pool: scoped, apparelProduct, blankBrand, netTitles: titles.length ? titles : null })
+    console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', key: g.key, design: g.designName, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
+    return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped: pool.length - scoped.length }
+  })
+  const perChild: PerChildItemHighlight[] = []
+  for (const d of perDesign) {
+    for (const s of d.skus) perChild.push({ sku: s.sku, asin: s.asin, item_highlight: d.value, designName: d.designName, designKey: d.designKey, hold: d.hold })
+  }
+  return { perDesign, perChild }
+}
+
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
 
 export function validateTitle(
@@ -2872,18 +2979,8 @@ function collapseProductPhrases(title: string): string {
  *  the same token as "men"/"women", or a gendered keyphrase gets appended on top of the audience
  *  tail (live B0DMXMH266 parent: "Mens Tees for Men" — "men" three times). bulletTokens already
  *  splits "men's" down to "men", so only the fused plurals need mapping. */
-const genderNormTok = (t: string): string => (t === 'mens' ? 'men' : t === 'womens' ? 'women' : t)
-
-/** Fill-dedup normalizer: gender variants + a light plural fold ("tees"≈"tee", "shirts"≈"shirt")
- *  so the fill never appends a near-duplicate of a word already in the title. Set-membership only —
- *  the folded form is never rendered. */
-const fillNormTok = (t: string): string => {
-  const g = genderNormTok(t)
-  const p = g.length > 3 ? g.replace(/s$/, '') : g
-  // "t-shirt" tokenizes to "shirt" (the 1-char "t" is dropped) but the fused "tshirt" survives
-  // whole — fold them together or the fill ships "Graphic T-Shirts, Tshirt" (live B0DMXMH266).
-  return p === 'tshirt' ? 'shirt' : p
-}
+// genderNormTok / fillNormTok moved to designScope.ts (2026-08-21) — the cross-design pool partition
+// and the title fill must fold tokens identically, so ONE module owns the fold. Imported above.
 
 /** A BARE gender word must never ship as fill content — it reads as a dangling fragment
  *  (live B0DMXMH266 child: "...Funny Fishing Humor Tee, Mens"). Audience belongs in the
@@ -8553,7 +8650,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // designs (SKU-prefix groups), the next commit branches title generation per design + per-design
   // vision; the parent keeps a general title. For now we only OBSERVE it (no behavior change) so the
   // detection can be verified live before the per-design title build engages.
-  const autoDetected = apparelProduct ? detectDesignGroups(input.children) : { isMultiDesign: false, groups: [] }
+  const autoDetected = apparelProduct ? detectDesignGroups(input.children, { parentAsin: input.parentAsin }) : { isMultiDesign: false, groups: [] }
   const designGroupInfo = input.isMultiDesignOverride === true
     ? { ...autoDetected, isMultiDesign: true }
     : input.isMultiDesignOverride === false
@@ -9098,6 +9195,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // these are generated + stored for the UI/push to read; nothing per-design reaches Amazon.
     per_child_bullets: r.per_child_bullets?.map((c) => ({ ...c, bullets: c.bullets.map((b) => scrubPub(b, 'per-child-bullets')) })),
     per_child_descriptions: r.per_child_descriptions?.map((c) => ({ ...c, description: scrubPub(c.description, 'per-child-description') })),
+    // Per-design Item Highlights ship per SKU (PO 2026-08-21) — same publish-boundary scrub + the
+    // repeat cap the single-design row gets (capItemHighlightRepeats is idempotent on composer output).
+    per_child_item_highlights: r.per_child_item_highlights?.map((c) => ({ ...c, item_highlight: c.item_highlight ? capItemHighlightRepeats(scrubPub(c.item_highlight, 'per-child-item-highlight')) : '' })),
     // Audit blobs are seller-facing copy too (PO-caught 2026-07-02: raw mark in an action_plan copy
     // block). Deep-scrub every string value; identifier keys (sku/asin/element/...) are skipped
     // inside scrubTrademarksDeep so SKU codes are never rewritten.
@@ -9164,10 +9264,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // description stages below; stay undefined for single-design/non-apparel so the broadcast ships.
   let perChildBullets: { sku: string; asin: string; bullets: string[]; designName?: string; designKey?: string }[] | undefined
   let perChildDescriptions: { sku: string; asin: string; description: string; designName?: string; designKey?: string }[] | undefined
+  // Per-DESIGN Item Highlights (PO 2026-08-21): populated by the IH block on multi-design families only.
+  let perChildItemHighlights: PerChildItemHighlight[] | undefined
   // Per-design contexts captured FROM the title loop so the bullets/description stages can reuse the
   // (costly) per-group design-name + vision resolution WITHOUT recomputing it. Populated only when the
   // multi-design title branch runs (full regen or a title-only partial); empty otherwise.
-  let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput; key: string }[] = []
+  let designGroupContexts: { skus: { sku: string; asin: string }[]; designName: string; title: string; groupInput: PipelineInput; key: string; identityPhrases?: string[] }[] = []
   // Phase 2: the unified-set couple anchor (e.g. "Rude Potato & Sweet Potato Couple Matching"),
   // resolved in the unified-set branch and reused by the shared bullets + description stages below
   // so they anchor on the SAME couple concept the title leads with. Empty unless unifiedSet ran.
@@ -9221,7 +9323,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // BOTH the per-design title loop (multi-design, !unifiedSet) and the Phase-2 unified-set path so the
     // couple concept names the SAME design names the per-design path would have produced. (Extracted
     // verbatim from the Phase-1 loop body; buildTitleFor is the only part the unified path does NOT do.)
-    const resolveGroupDesignName = async (group: DesignGroup): Promise<{ group: DesignGroup; groupInput: PipelineInput; groupDesignName: string }> => {
+    const resolveGroupDesignName = async (group: DesignGroup): Promise<{ group: DesignGroup; groupInput: PipelineInput; groupDesignName: string; groupIdentityPhrases: string[] }> => {
       const groupChildren = group.skus
         .map((s) => input.children.find((c) => c.sku === s.sku))
         .filter((c): c is NonNullable<typeof c> => Boolean(c))
@@ -9235,11 +9337,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // old `if (!colorAttrName)` gate skipped it whenever a Color attribute existed — but the
       // color is exactly the wrong anchor, so vision must never be skipped on its account). Its
       // designTheme is the vision's name-like read of what is drawn on the shirt ('Rude Potato').
+      // PER-DESIGN IDENTITY (PO 2026-08-21, ONE seam — designGroupIdentity.ts): the first child of
+      // the group THAT HAS AN IMAGE is scanned (skus[0]'s catalog row may carry none), cache-first.
       let groupVision = input.visionDesign
+      let groupIdentityPhrases: string[] = []
       try {
-        const url = repAsin ? await getProductImageUrl(repAsin) : null
-        const identity = url && repAsin ? await scanProductImage(repAsin, url, { openai: input.openai }) : null
+        const gi = await scanDesignGroupIdentity(group, { openai: input.openai })
+        const identity = gi.identity
         if (identity) {
+          groupIdentityPhrases = identityPhrases(identity)
           // Feed the per-group vision read into groupInput.visionDesign so extractDesignName's LLM
           // refine USES it (title + vision -> a clean design name). We do NOT pre-extract a name from
           // designTheme here — letting extractDesignName refine yields 'Only Fins', not the verbose theme.
@@ -9275,7 +9381,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // through — per-design content must anchor on the design, never the shirt color.
       let groupDesignName = extracted.name
       if (!groupDesignName?.trim() || isGarmentColor(groupDesignName)) groupDesignName = keyLabel || groupDesignName || ''
-      return { group, groupInput, groupDesignName }
+      return { group, groupInput, groupDesignName, groupIdentityPhrases }
     }
     if (unifiedSet) {
       // UNIFIED-SET (couple / matching). The family is ONE concept split across halves — do NOT
@@ -9304,11 +9410,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
       perChildTitles = []
       const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
-        const { groupInput, groupDesignName } = await resolveGroupDesignName(group)
+        const { groupInput, groupDesignName, groupIdentityPhrases } = await resolveGroupDesignName(group)
         const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName, season)
         // groupInput is returned so the bullets/description stages can reuse the resolved per-group
         // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
-        return { group, groupInput, groupDesignName, ...r }
+        return { group, groupInput, groupDesignName, groupIdentityPhrases, ...r }
       }))
       const allDesignNames: string[] = []
       for (const gr of groupResults) {
@@ -9319,7 +9425,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       }
       // Capture per-group contexts (skus + resolved design name + title + groupInput) so the bullets +
       // description stages generate PER DESIGN reusing this work — no second design-name/vision pass.
-      designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput, key: gr.group.key }))
+      designGroupContexts = groupResults.map((gr) => ({ skus: gr.group.skus, designName: gr.groupDesignName, title: gr.title, groupInput: gr.groupInput, key: gr.group.key, identityPhrases: gr.groupIdentityPhrases }))
       // FAMILY-NICHE ANCHOR (H "Seam 2"): the multi-design parent had NO positive niche anchor, so a
       // weak council pass shipped dead filler ("...Graphic Shirts for Men") with no niche pull. Derive
       // ONE niche noun ("funny fishing shirt") from the scalar FAMILY design_name_override via
@@ -9781,38 +9887,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // shared by >=2 design names are NICHE words ("fishing") and never foreign. Group scoping also
   // drops keywords the group's OWN title already covers — the family pools deduped against the
   // PARENT title, which the children don't carry.
-  const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(bulletTokens(c.designName).map(fillNormTok))]))
-  const nameTokCounts = new Map<string, number>()
-  for (const s of groupNameToks.values()) for (const t of s) nameTokCounts.set(t, (nameTokCounts.get(t) ?? 0) + 1)
-  // NICHE-VOCABULARY EXEMPTIONS (review-caught, both directions):
-  // - A token unique to ONE design's name can still be the family's niche word ("Fishing Trip" on
-  //   a fishing family) — gutting the siblings' pools of it starves them. Tokens frequent in the
-  //   FAMILY KEYWORD POOL (>=10% of keywords, min 3) or present in the family's title are niche.
-  // - The old ">=2 design names ⇒ niche" rule resurrected the original bug the other way: two
-  //   Argentina-variant designs among 12 made "argentina" free for the other 10. Now a token must
-  //   appear in >=50% of the design names (min 2) to count as niche BY NAME-SHARING alone.
-  const nicheExemptToks = new Set<string>()
-  for (const t of bulletTokens(`${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`).map(fillNormTok)) nicheExemptToks.add(t)
-  {
-    const tokKwCount = new Map<string, number>()
-    for (const k of analysis) for (const t of new Set(bulletTokens(k.keyword).map(fillNormTok))) tokKwCount.set(t, (tokKwCount.get(t) ?? 0) + 1)
-    const poolThresh = Math.max(3, Math.ceil(analysis.length * 0.1))
-    for (const [t, c] of tokKwCount) if (c >= poolThresh) nicheExemptToks.add(t)
-  }
-  const nameShareThresh = Math.max(2, Math.ceil(groupNameToks.size * 0.5))
-  const foreignToksFor = (key: string): Set<string> => {
-    const own = groupNameToks.get(key) ?? new Set<string>()
-    const foreign = new Set<string>()
-    for (const [k2, s] of groupNameToks) {
-      if (k2 === key) continue
-      for (const t of s) {
-        if (own.has(t) || nicheExemptToks.has(t)) continue
-        if ((nameTokCounts.get(t) ?? 0) >= nameShareThresh) continue
-        foreign.add(t)
-      }
-    }
-    return foreign
-  }
+  // ONE SEAM (2026-08-21, designScope.ts): the foreign-token partition is shared with the per-design
+  // Item Highlight composer, so bullets/description/backend AND the IH exclude the same other-design
+  // tokens. Extracted verbatim; the exemption rules are documented in designScope.ts.
+  // Raw per-design name tokens — the backend fan-out's SIBLING-DESIGN BLEED ban reads this directly
+  // (stricter than the partition: no niche exemption there; its own groupHay corroboration is the exemption).
+  const groupNameToks = new Map(designGroupContexts.map((c) => [c.key, new Set(designScopeTokens(c.designName))]))
+  const foreignToksFor = buildForeignDesignTokens(
+    designGroupContexts.map((c) => ({ key: c.key, name: c.designName })),
+    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: analysis.map((k) => k.keyword) },
+  )
   // dropTitleCovered: bullets/description pools dedupe against the group's OWN title (token
   // coverage, not raw substring — "gator" inside "alligator" is NOT coverage; review-caught).
   // The BACKEND pool must NOT drop title-covered keywords: the PO-chosen hybrid deliberately
@@ -10752,14 +10836,43 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // a Comfort-Colors-only PO ruling — the old LLM-era scrubFitClaims pass here rewrote that
     // sanctioned fact into "Can be worn as Relaxed" on THIS path only (the regen route never ran
     // it). The route and the pipeline now ship byte-identical output for the same inputs.
-    const { value: hl } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })
-    if (hl) {
-      pdiFinal.push({
-        field_name: highlightsAttr.title,
-        current_value: null,
-        recommended_value: hl,
-        reason: 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of short customer-facing phrases — material, fit, features, use-case — shown near the title. Human-readable phrases, not a keyword list.',
+    const IH_REASON = 'NEW Amazon field (launches July 27, 2026 with the 75-char title limit): up to 125 characters of short customer-facing phrases — material, fit, features, use-case — shown near the title. Human-readable phrases, not a keyword list.'
+    if (apparelMultiDesign && designGroupContexts.length >= 2) {
+      // PER DESIGN (PO 2026-08-21, B0DQ5YZH38): ONE line per design group through the SAME producer,
+      // scoped to the group's own titles + the family pool minus other designs' tokens. The
+      // broadcast detail row becomes a per-design MARKER with NO line — a broadcast Ship can never
+      // push one design's line to every SKU (the push seam resolves per SKU from the array).
+      onProgress(`Composing ${designGroupContexts.length} per-design Item Highlights...`)
+      const built = buildItemHighlightsPerDesign({
+        groups: designGroupContexts.map((c) => ({
+          key: c.key, designName: c.designName, skus: c.skus,
+          titles: [...new Set((perChildTitles ?? []).filter((t) => t.designKey === c.key).map((t) => t.title).concat(c.title ? [c.title] : []))],
+          identityPhrases: c.identityPhrases ?? [],
+        })),
+        pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow,
+        familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`,
       })
+      perChildItemHighlights = built.perChild
+      const composed = built.perDesign.filter((d) => d.value).length
+      if (composed > 0) {
+        pdiFinal.push({
+          field_name: highlightsAttr.title,
+          current_value: null,
+          recommended_value: '',
+          per_design: true,
+          reason: `${IH_REASON} MULTI-DESIGN family: one line per design (${composed}/${built.perDesign.length} composed) — each SKU ships its own design's line; designs that hold are skipped, never given another design's line.`,
+        })
+      }
+    } else {
+      const { value: hl } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })
+      if (hl) {
+        pdiFinal.push({
+          field_name: highlightsAttr.title,
+          current_value: null,
+          recommended_value: hl,
+          reason: IH_REASON,
+        })
+      }
     }
   }
 
@@ -10898,6 +11011,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     per_child_titles: perChildTitles,
     per_child_bullets: perChildBullets,
     per_child_descriptions: perChildDescriptions,
+    per_child_item_highlights: perChildItemHighlights,
     recommended_description: description,
     variant_corrections: Array.isArray(audit.variant_corrections) ? audit.variant_corrections : [],
     cannibalization_warnings: Array.isArray(audit.cannibalization_warnings) ? audit.cannibalization_warnings : [],

@@ -47,6 +47,7 @@ import {
   type DetailAttribute, type ItemHighlightsApiState,
 } from '@/lib/fba/productDetailAttrs'
 import { resolveMultiDesign } from '@/lib/fba/perDesign'
+import { buildPerSkuItemHighlightMap, markPushedItemHighlights, perDesignMarkerCurrent, NO_LINE_FOR_DESIGN, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { coerceDetailValue, inspectProductTypeAttribute, attributeExistsInSchema, containerKeyFallback, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, bustProductTypeSchemaCache, applyLiveDetailSubfieldHint, type DetailValueShape } from '@/lib/fba/productTypeDefinitions'
 import { calibrateVariants } from '@/lib/fba/detailCalibration'
@@ -263,6 +264,12 @@ interface DiffRow {
    *  offerless row. The push SKIPS these: PATCHing a SKU with no live offer makes Amazon CREATE a
    *  phantom "Missing offer" ASIN instead of updating (the 2026-06-16 B0GHH4MQ7N incident). */
   notLive?: boolean
+  /** PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): this SKU's design has no composed line (held) — the
+   *  push SKIPS it; it is never given another design's line nor the broadcast value. */
+  skipReason?: 'no-line-for-design'
+  /** The design this row's proposed line belongs to (per-design IH rows only; for the modal). */
+  designKey?: string
+  designName?: string
   /** TIER-2 proactive pre-fill (self-healing-push): the parent hub's known-missing broadcast attrs are
    *  resolved (live SP-API GETs) + written LAZILY in the push loop (executePush), never on the modal-open
    *  GET preview path (adversarial review 2026-06-28). loadDiff only flags the parent row via isParent;
@@ -685,6 +692,58 @@ interface DetailContext {
    *  failure was the push re-resolving on a transient blip, getting generic 'PRODUCT', and
    *  Amazon rejecting all 82 patches ("The provided value for 'neck' is invalid"). */
   productType?: string | null
+  /** PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21, multi-design families): the stored
+   *  per_child_item_highlights entries. When set, `recommendedValue` is ONLY a representative line
+   *  (calibration probes / messages) — every write resolves the SKU's OWN design line through
+   *  buildPerSkuItemHighlightMap, and a SKU whose design has no line is SKIPPED
+   *  ('no-line-for-design'). A typed override is refused up front (no broadcast is possible). */
+  perDesignEntries?: PerChildItemHighlight[] | null
+}
+
+/** Push-seam refusals for the per-design Item Highlight (exported for the route + tests). */
+export const PER_DESIGN_IH_OVERRIDE_REASON =
+  "This family's Item Highlight ships PER DESIGN — one typed value cannot be broadcast to every design. Use ↻ Regen to recompose each design's line."
+export const PER_DESIGN_IH_BROADCAST_REASON =
+  'Multi-design family: the Item Highlight ships one line PER DESIGN (PO 2026-08-21). This recommendation is a single broadcast line composed from one design — it would be false on the others, so it cannot be pushed. Run ↻ Regen (or a full audit) to compose one line per design.'
+export const PER_DESIGN_IH_ALL_HELD_REASON =
+  "Every design's Item Highlight is HELD (no truthful line could be composed) — nothing to push. Rate/harvest the pool, then ↻ Regen."
+
+
+/** READ per_child_item_highlights (migration 060) tolerant of the column being absent: a pre-060
+ *  DB fails this one select, never the caller's. Exported for the write-through + verify paths. */
+export async function readPerDesignItemHighlights(supabase: SupabaseClient, parentAsin: string): Promise<PerChildItemHighlight[]> {
+  try {
+    const { data, error } = await supabase
+      .from('listing_seo_recommendations')
+      .select('per_child_item_highlights')
+      .eq('parent_asin', parentAsin)
+      .maybeSingle()
+    if (error) { console.warn(`[push-content] per_child_item_highlights read failed for ${parentAsin} (migration 060 applied?): ${error.message}`); return [] }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = (data as any)?.per_child_item_highlights
+    return Array.isArray(raw) ? (raw as PerChildItemHighlight[]) : []
+  } catch (e) { console.warn('[push-content] per_child_item_highlights read threw:', e instanceof Error ? e.message : e); return [] }
+}
+
+/** Stamp the per-design MARKER row's current_value mirror (perDesignMarkerCurrent): the Features gap
+ *  closes only when EVERY composed design's line is on Amazon. recommended_value stays '' — the marker
+ *  never carries a line. Best-effort; re-reads the row so a concurrent write is not clobbered. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function stampPerDesignMarker(db: any, parentAsin: string, detailField: string, entries: PerChildItemHighlight[]): Promise<void> {
+  try {
+    const { data: recR } = await db.from('listing_seo_recommendations').select('product_details_improvements').eq('parent_asin', parentAsin).single()
+    const pdi = ((recR?.product_details_improvements ?? []) as Record<string, unknown>[])
+    const wantField = normalizeFieldName(detailField)
+    const mirror = perDesignMarkerCurrent(entries)
+    let touched = false
+    for (const p of pdi) {
+      if (normalizeFieldName(String(p.field_name ?? '')) !== wantField) continue
+      if (p.per_design !== true) continue
+      if ((p.current_value ?? null) !== mirror) { p.current_value = mirror; touched = true }
+      if (p.recommended_value !== '') { p.recommended_value = ''; touched = true }   // invariant: the marker never carries a line
+    }
+    if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parentAsin)
+  } catch (e) { console.warn('[push-content/details] per-design marker stamp failed (non-fatal):', e instanceof Error ? e.message : e) }
 }
 
 /** Load + validate the audit's recommendation for one detail attribute. Returns null on
@@ -698,15 +757,40 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
     .select('product_details_improvements, per_child_titles')
     .eq('parent_asin', parentAsin)
     .single()
+  // per_child_item_highlights is migration 060 — a pre-060 DB 400s the whole select, so read it in a
+  // SEPARATE best-effort query (the same missing-column tolerance the per_child_* writes use).
+  const perDesignEntries = await readPerDesignItemHighlights(supabase, parentAsin)
   // product_details_improvements is JSONB; not in generated types yet. The regen now resolves + persists
   // sp_api_key/attr_scope/pushable per item (schema-driven), so read those.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: unknown; sp_api_key?: string; attr_scope?: string; pushable?: boolean }[]
+  const details = ((recRow as any)?.product_details_improvements ?? []) as { field_name?: string; recommended_value?: unknown; sp_api_key?: string; attr_scope?: string; pushable?: boolean; per_design?: boolean }[]
   const wanted = normalizeFieldName(detailField)
   const match = details.find((d) => normalizeFieldName(detailValueToString(d.field_name)) === wanted)
   // Historical rows can carry NON-STRING values (the LLM emitted an array/number — crashed
   // the B0GCF11RKL listing page); normalize before any .trim() so the push path never throws.
-  const matchValue = detailValueToString(match?.recommended_value)
+  let matchValue = detailValueToString(match?.recommended_value)
+  // ── PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21) — resolved BEFORE the empty-value check because the
+  // per-design marker row carries NO broadcast line by construction. Three refusals, all at the seam:
+  //   (a) a typed override on a per-design family (no broadcast is possible);
+  //   (b) a BROADCAST IH on a family the seller/detector says is multi-design (the pre-ruling lie);
+  //   (c) every design held (nothing composed).
+  const isIh = !!match && isItemHighlightsField(detailValueToString(match.field_name), match.sp_api_key)
+  const perDesignLines = perDesignEntries.filter((e) => (e.item_highlight || '').trim())
+  const perDesignMode = isIh && (match?.per_design === true || perDesignLines.length > 0)
+  if (perDesignMode) {
+    if ((valueOverride ?? '').trim()) return { ctx: null, error: PER_DESIGN_IH_OVERRIDE_REASON }
+    if (perDesignLines.length === 0) return { ctx: null, error: PER_DESIGN_IH_ALL_HELD_REASON }
+    matchValue = perDesignLines[0].item_highlight.trim()   // representative ONLY (probes/messages)
+  } else if (isIh) {
+    const { data: scoreRow } = await supabase
+      .from('listing_seo_scores')
+      .select('is_multi_design_override')
+      .eq('parent_asin', parentAsin)
+      .maybeSingle()
+    const override = (scoreRow as { is_multi_design_override?: boolean | null } | null)?.is_multi_design_override ?? null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (resolveMultiDesign((recRow as any)?.per_child_titles, override)) return { ctx: null, error: PER_DESIGN_IH_BROADCAST_REASON }
+  }
   if (!match || !matchValue.trim()) {
     return { ctx: null, error: `No AI recommendation found for "${detailField}". Run an AI audit first.` }
   }
@@ -830,7 +914,7 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
     return { ctx: null, error: `Amazon returned no product type for any of this family's first SKUs — they may have no live listing. Nothing was pushed. Verify the family's SKUs on Amazon (Listing Issues → Missing Offer) and try again.` }
   }
 
-  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape, productType: resolvedPt }, error: null }
+  return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape, productType: resolvedPt, perDesignEntries: perDesignMode ? perDesignEntries : null }, error: null }
 }
 
 /** Which of a composite's candidate sub-fields does the LIVE listing already populate?
@@ -968,25 +1052,37 @@ export async function loadDetailDiff(parentAsin: string, ctx: DetailContext): Pr
   const expanded = await expandDetailSkuSet(parentAsin, sellerId, token)
   if (expanded.length === 0) return []
 
-  // Build the diff: one row per SKU, current fetched live, proposed = recommendedValue.
+  // Build the diff: one row per SKU, current fetched live, proposed = recommendedValue — or, for a
+  // PER-DESIGN Item Highlight (PO 2026-08-21), the SKU's OWN design line from the stored array. A SKU
+  // whose design has no line gets proposed '' + skipReason (never another design's line, never the
+  // representative recommendedValue) and is not counted as changed.
   const proposedStr = ctx.recommendedValue
   const isParentSet = new Set(expanded.filter((r) => r.isParent).map((r) => r.sku))
+  const perDesign = ctx.perDesignEntries
+    ? buildPerSkuItemHighlightMap(ctx.perDesignEntries, expanded.map((r) => ({ sku: r.sku, asin: r.asin })), parentAsin)
+    : null
+  const designOf = new Map<string, { designKey?: string | null; designName?: string | null }>()
+  for (const e of ctx.perDesignEntries ?? []) { designOf.set(e.sku, e); if (e.asin && !designOf.has(`asin:${e.asin}`)) designOf.set(`asin:${e.asin}`, e) }
 
   const diff: DiffRow[] = []
   for (const r of expanded) {
     const current = await fetchCurrentDetail(sellerId, token, r.sku, ctx.attribute.spApiKey)
+    const own = perDesign ? (perDesign.values.get(r.sku) ?? '') : proposedStr
+    const d = perDesign ? (designOf.get(r.sku) ?? designOf.get(`asin:${r.asin}`)) : undefined
     diff.push({
       sku: r.sku, asin: r.asin,
       current,
-      proposed: proposedStr,
-      raw: proposedStr,
-      bytes: getByteLength(proposedStr),
-      chars: proposedStr.length,
-      changed: proposedStr.length > 0 && current !== proposedStr,
+      proposed: own,
+      raw: own || null,
+      bytes: getByteLength(own),
+      chars: own.length,
+      changed: own.length > 0 && current !== own,
       isParent: isParentSet.has(r.sku) || undefined,
       // Propagate the ground-truth phantom-gate signal so single-attribute detail push (executePush
       // details branch) can skip offerless-backfilled rows — parity with content-path's own notLive.
       notLive: r.notLive === true ? true : false,
+      ...(perDesign && !own ? { skipReason: NO_LINE_FOR_DESIGN } : {}),
+      ...(d ? { designKey: d.designKey ?? undefined, designName: d.designName ?? undefined } : {}),
     })
   }
   return diff
@@ -3536,7 +3632,9 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               type: 'result',
               parent_asin, field: 'details', detail_field: ctx.detailField, attribute_key: ctx.attribute.spApiKey,
               pushed: 0, failed: 0, total: 0,
-              message: `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
+              message: ctx.perDesignEntries
+                ? `Nothing to push — every SKU already carries its own design's ${ctx.detailField}${rawDetailDiff.some((d) => d.skipReason) ? ` (${rawDetailDiff.filter((d) => d.skipReason).length} SKU(s) skipped: their design has no composed line)` : ''}.`
+                : `Nothing to push — every SKU already has ${ctx.detailField} = "${ctx.recommendedValue}".`,
               results: [],
             })
             return
@@ -3593,6 +3691,9 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // Variants now span every candidate SUB-FIELD too (SHIRT sleeve: `type` before
           // `length_description`), each carrying its own coerced enum member.
           let calibratedValueFor: ((v: string) => Record<string, unknown>[] | undefined) = () => undefined
+          // Calibration probes validate against the first diff SKU's OWN value (per-design IH: its
+          // design's line; otherwise the broadcast value) — the probe is a VALIDATION_PREVIEW, no write.
+          const calibValue = (ctx.perDesignEntries && typeof diff[0].raw === 'string' && diff[0].raw) ? diff[0].raw : ctx.recommendedValue
           if (ctx.valueShape) {
             let shape = ctx.valueShape
             const formKey = `${productType}|${ctx.attribute.spApiKey}`
@@ -3625,12 +3726,12 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             // (accepted-then-dropped) and cache it process-lifetime.
             const calibrate = (probeVariants: { id: string; value: Record<string, unknown>[] }[], errs: string[]) =>
               calibrateVariants(probeVariants,
-                (v) => patchSkuDetail(sellerId, token, productType, diff[0].sku, ctx.attribute, ctx.recommendedValue, 'VALIDATION_PREVIEW', shape, v.value),
+                (v) => patchSkuDetail(sellerId, token, productType, diff[0].sku, ctx.attribute, calibValue, 'VALIDATION_PREVIEW', shape, v.value),
                 {
-                  onProbe: () => emit({ type: 'progress', sku: diff[0].sku, status: 'validating', current: diff[0].current, proposed: ctx.recommendedValue }),
+                  onProbe: () => emit({ type: 'progress', sku: diff[0].sku, status: 'validating', current: diff[0].current, proposed: calibValue }),
                   interProbeDelayMs: PATCH_DELAY_MS,
                 }).then((res) => { errs.push(...res.errors); return res })
-            let variants = buildShapedDetailValueVariants(shape, ctx.recommendedValue, MARKETPLACE_ID)
+            let variants = buildShapedDetailValueVariants(shape, calibValue, MARKETPLACE_ID)
             let winId = cachedId && variants.some((v) => v.id === cachedId) ? cachedId : null
             if (!winId) {
               const errs: string[] = []
@@ -3648,7 +3749,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                   const freshShape = await getDetailValueShape(productType, ctx.attribute.spApiKey, ptOpts)
                   if (freshShape) {
                     shape = freshShape
-                    variants = buildShapedDetailValueVariants(shape, ctx.recommendedValue, MARKETPLACE_ID)
+                    variants = buildShapedDetailValueVariants(shape, calibValue, MARKETPLACE_ID)
                     const retryErrs: string[] = []
                     const retry = await calibrate(variants, retryErrs)
                     winId = retry.winId
@@ -3704,7 +3805,15 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               emit({ type: 'progress', sku: item.sku, status: 'skipped_manual_parent', error: reason })
               continue
             }
-            const newValueStr = ctx.recommendedValue
+            // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): the SKU's OWN design line (loadDetailDiff
+            // resolved it from per_child_item_highlights). A held design's SKU never reaches Amazon.
+            if (ctx.perDesignEntries && (item.skipReason === NO_LINE_FOR_DESIGN || !item.raw)) {
+              const reason = 'Skipped — this SKU\'s design has no composed Item Highlight (held); it is never given another design\'s line.'
+              results.push({ sku: item.sku, status: 'skipped', submissionId: null, error: reason, isParent })
+              emit({ type: 'progress', sku: item.sku, status: 'skipped', error: reason })
+              continue
+            }
+            const newValueStr = ctx.perDesignEntries ? String(item.raw) : ctx.recommendedValue
             emit({ type: 'progress', sku: item.sku, status: 'validating', current: item.current, proposed: newValueStr })
             let preview = await patchSkuDetail(sellerId, token, productType, item.sku, ctx.attribute, newValueStr, 'VALIDATION_PREVIEW', ctx.valueShape, calibratedValueFor(newValueStr))
             // AUTO-HEAL 100476 (2026-07-20): when the IH preview is rejected because this SKU's LIVE
@@ -3771,6 +3880,15 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
             results.push({ sku: s.sku, status: 'skipped', submissionId: null, error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped so the push cannot create a phantom. Complete its offer in Seller Central, then re-push.', isParent })
             emit({ type: 'progress', sku: s.sku, status: 'skipped', error: 'Not a live Amazon listing yet (Missing offer/incomplete) — skipped.' })
           }
+          // PER-DESIGN IH: surface the SKUs whose design has no composed line (held) — they never
+          // entered `diff` (proposed '' ⇒ changed:false) so the seller sees WHICH were skipped and why.
+          if (ctx.perDesignEntries) {
+            for (const d of rawDetailDiff.filter((r) => r.skipReason === NO_LINE_FOR_DESIGN && r.asin !== parent_asin)) {
+              const reason = `Skipped (${NO_LINE_FOR_DESIGN}) — ${d.designName || d.designKey || 'this design'} has no composed Item Highlight; never given another design's line.`
+              results.push({ sku: d.sku, status: 'skipped', submissionId: null, error: reason, isParent: false })
+              emit({ type: 'progress', sku: d.sku, status: 'skipped', error: reason })
+            }
+          }
 
           // Pass/fail over the buyable CHILDREN; the parent hub's outcome is a non-blocking note.
           const { accepted, failed, childTotal, parentNote } = summarizePush(results)
@@ -3794,6 +3912,15 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // stays RED" dead-end — the score never moved on push (PO question: "8 → 12/12?").
           if (accepted > 0) {
             try {
+              if (ctx.perDesignEntries) {
+                // PER-DESIGN write-through: stamp each ACCEPTED SKU's entry with pushed_value = its own
+                // line. The marker row's recommended_value stays '' — it can never carry a design line.
+                const acceptedRows = results.filter((r) => r.status === 'accepted').map((r) => ({ sku: r.sku, asin: workingDiff.find((d) => d.sku === r.sku)?.asin ?? null, value: String(workingDiff.find((d) => d.sku === r.sku)?.raw ?? '') })).filter((r) => r.value)
+                const fresh = await readPerDesignItemHighlights(supabase, parent_asin)
+                const marked = markPushedItemHighlights(fresh, acceptedRows)
+                if (marked.changed) await db.from('listing_seo_recommendations').update({ per_child_item_highlights: marked.entries }).eq('parent_asin', parent_asin)
+                await stampPerDesignMarker(db, parent_asin, ctx.detailField, marked.entries)
+              } else {
               const { data: recR } = await db.from('listing_seo_recommendations').select('product_details_improvements').eq('parent_asin', parent_asin).single()
               const pdi = ((recR?.product_details_improvements ?? []) as Record<string, unknown>[])
               let touched = false
@@ -3807,6 +3934,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
                 }
               }
               if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
+              }
             } catch (e) { console.warn('[push-content/details] write-through failed (non-fatal):', e) }
             emit({ type: 'rescore', message: 'Re-scoring listing…' })
             try {
@@ -3855,7 +3983,11 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
               const { enqueueVerification } = await import('@/lib/fba/verificationQueue')
               await enqueueVerification({
                 parent_asin, field: `details:${ctx.attribute.spApiKey}`,
-                detail_field: ctx.detailField, expected_value: ctx.recommendedValue,
+                // PER-DESIGN IH: NO expected_value — the verify cron re-pushes stale SKUs with
+                // detail_value_override = expected_value, which would broadcast ONE design's line;
+                // null makes the re-push resolve each SKU's own line from the stored array (and the
+                // seam refuses any override on a per-design family regardless).
+                detail_field: ctx.detailField, expected_value: ctx.perDesignEntries ? null : ctx.recommendedValue,
               })
             } catch (e) { console.warn('[push-content/details] verify enqueue failed (non-fatal):', e) }
           }
@@ -3868,7 +4000,7 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           if (accepted > 0 && !cancelled) {
             await logPushChange(db, {
               parent_asin, field: `details:${ctx.attribute.spApiKey}`, actor, accepted, failed,
-              after_value: ctx.recommendedValue,
+              after_value: ctx.perDesignEntries ? `[per-design: ${[...new Set(workingDiff.filter((d) => d.raw).map((d) => String(d.raw)))].length} lines]` : ctx.recommendedValue,
               submission_id: results.find((r) => r.status === 'accepted')?.submissionId ?? null,
             })
             await logAudit({
@@ -4295,6 +4427,19 @@ interface BulkFieldPlan {
   valueShape: DetailValueShape | null
   /** Calibrated patch value for this field's value, or undefined (flat builder). */
   patchValue?: Record<string, unknown>[]
+  /** The calibrated write-form id (composites) so a per-SKU value can be re-shaped identically. */
+  winId?: string | null
+  /** PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): `value` is a representative line only; each SKU's
+   *  own line comes from these entries (buildPerSkuItemHighlightMap). Null for broadcast fields. */
+  perDesignEntries?: PerChildItemHighlight[] | null
+}
+
+/** Specialize a plan to ONE SKU's value (per-design IH): flat attrs rebuild the patch value from
+ *  the value; calibrated composites re-shape it under the SAME write form the probe crowned. */
+function specializePlanValue(p: BulkFieldPlan, value: string): BulkFieldPlan {
+  if (!p.valueShape) return { ...p, value, patchValue: buildDetailPatchValue(p.attribute, value, MARKETPLACE_ID) as unknown as Record<string, unknown>[] }
+  const shaped = p.winId ? buildShapedDetailValueVariants(p.valueShape, value, MARKETPLACE_ID).find((v) => v.id === p.winId)?.value : undefined
+  return { ...p, value, patchValue: shaped ?? p.patchValue }
 }
 
 export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit): Promise<void> {
@@ -4319,7 +4464,7 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
       if (!ctx) { skipped.push({ field: f, reason: error || 'not pushable' }); continue }
       if (ctx.enumInvalid) { skipped.push({ field: f, reason: `"${ctx.recommendedValue}" isn't an accepted Amazon value — set it via the single Ship picker` }); continue }
       productType = productType ?? ctx.productType ?? null
-      plans.push({ field: f, attribute: ctx.attribute, value: ctx.recommendedValue, valueShape: ctx.valueShape ?? null })
+      plans.push({ field: f, attribute: ctx.attribute, value: ctx.recommendedValue, valueShape: ctx.valueShape ?? null, perDesignEntries: ctx.perDesignEntries ?? null })
     }
     if (!productType) {
       emit({ type: 'error', error: skipped.length ? `Nothing to push. ${skipped.map((s) => `${s.field}: ${s.reason}`).join(' · ')}` : 'Could not resolve the product type — try again in a minute.' })
@@ -4382,9 +4527,22 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
           : 'Amazon rejected every known write form (calibration failed)' })
         p.patchValue = undefined; p.value = '__CALIBRATION_FAILED__'
       }
-      else p.patchValue = variants[winIdx].value
+      else { p.patchValue = variants[winIdx].value; p.winId = variants[winIdx].id }
     }
     const livePlans = checkedPlans.filter((p) => p.value !== '__CALIBRATION_FAILED__')
+    // PER-DESIGN value maps (PO 2026-08-21): field → (sku → its own design's line). A SKU absent from
+    // its field's map is SKIPPED for that field — never given the representative/other design's line.
+    const perDesignMaps = new Map<string, Map<string, string>>()
+    for (const p of livePlans) {
+      if (p.perDesignEntries) perDesignMaps.set(p.field, buildPerSkuItemHighlightMap(p.perDesignEntries, skuSet.map((x) => ({ sku: x.sku, asin: x.asin })), parent_asin).values)
+    }
+    /** ACCEPTED (or verified-already-correct) per-design writes, for the entries' write-through. */
+    const perDesignAccepted = new Map<string, { sku: string; asin: string | null; value: string }[]>()
+    const notePerDesign = (field: string, sku: string, asin: string | null, value: string) => {
+      if (!perDesignMaps.has(field)) return
+      const arr = perDesignAccepted.get(field) ?? []
+      arr.push({ sku, asin, value }); perDesignAccepted.set(field, arr)
+    }
     if (livePlans.length === 0) {
       emit({ type: 'error', error: `Nothing to push. ${skipped.map((s) => `${s.field}: ${s.reason}`).join(' · ')}` })
       return
@@ -4418,10 +4576,31 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
     for (const s of skuSet) {
       if (pushCancelled(params.cancel_token)) { cancelled = true; break }
       const currents = await fetchSkuDetails(sellerId, token, s.sku, spKeys)
-      const changedKeys = changedDetailFields(currents, desired, spKeys)
+      // THIS SKU's desired values: broadcast fields as planned; per-design fields from the SKU's own
+      // line (absent ⇒ the field is dropped for this SKU — 'no-line-for-design').
+      const desiredSku: Record<string, string> = {}
+      const skuKeys: string[] = []
+      for (const p of livePlans) {
+        const pdMap = perDesignMaps.get(p.field)
+        if (pdMap) {
+          const own = pdMap.get(s.sku)
+          if (!own) { console.log(JSON.stringify({ tag: 'IH_PER_DESIGN_SKIP', sku: s.sku, field: p.field, reason: NO_LINE_FOR_DESIGN })); continue }
+          desiredSku[p.attribute.spApiKey] = own
+        } else desiredSku[p.attribute.spApiKey] = desired[p.attribute.spApiKey]
+        skuKeys.push(p.attribute.spApiKey)
+      }
+      const changedKeys = changedDetailFields(currents, desiredSku, skuKeys)
+      // Per-design fields already correct on this SKU count as VERIFIED (live read = truth) for the
+      // entries' write-through, mirroring the broadcast no-op ship-truth rule in Phase 4.
+      for (const p of livePlans) {
+        const k = p.attribute.spApiKey
+        if (perDesignMaps.has(p.field) && desiredSku[k] && !changedKeys.includes(k)) notePerDesign(p.field, s.sku, s.asin ?? null, desiredSku[k])
+      }
       if (changedKeys.length === 0) { emit({ type: 'progress', sku: s.sku, status: 'skipped' }); continue }   // already correct — one event per SKU so the progress bar still reaches 100%
       skusTouched++
-      const changedPlans = livePlans.filter((p) => changedKeys.includes(p.attribute.spApiKey))
+      const changedPlans = livePlans
+        .filter((p) => changedKeys.includes(p.attribute.spApiKey))
+        .map((p) => (perDesignMaps.has(p.field) ? specializePlanValue(p, desiredSku[p.attribute.spApiKey]) : p))
       emit({ type: 'progress', sku: s.sku, status: 'validating', fields: changedPlans.map((p) => p.field) })
 
       const ops = changedPlans.map(opFor)
@@ -4443,7 +4622,8 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
 
       for (const r of perFieldStatus) {
         tally[r.field][r.ok ? 'accepted' : 'failed']++
-        await logPush({ parent_asin, sku: s.sku, field: `details:${r.spApiKey}`, previous_value: currents[r.spApiKey] ?? '', new_value: desired[r.spApiKey], submission_id: r.submissionId, status: r.ok ? 'accepted' : 'failed', error_message: r.ok ? null : r.error })
+        if (r.ok) notePerDesign(r.field, s.sku, s.asin ?? null, desiredSku[r.spApiKey])
+        await logPush({ parent_asin, sku: s.sku, field: `details:${r.spApiKey}`, previous_value: currents[r.spApiKey] ?? '', new_value: desiredSku[r.spApiKey], submission_id: r.submissionId, status: r.ok ? 'accepted' : 'failed', error_message: r.ok ? null : r.error })
       }
       const skuFailed = perFieldStatus.filter((r) => !r.ok)
       emit({ type: 'progress', sku: s.sku, status: skuFailed.length === 0 ? 'accepted' : (skuFailed.length === perFieldStatus.length ? 'failed' : 'partial'),
@@ -4468,12 +4648,21 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
         const pdi = ((recR?.product_details_improvements ?? []) as Record<string, unknown>[])
         let touched = false
         for (const p of [...acceptedFields, ...verifiedFields]) {
+          if (perDesignMaps.has(p.field)) continue   // per-design: the marker row NEVER carries a line
           const wantField = normalizeFieldName(p.field)
           for (const row of pdi) {
             if (normalizeFieldName(String(row.field_name ?? '')) === wantField) { row.current_value = p.value; row.recommended_value = p.value; row.enum_valid = true; touched = true }
           }
         }
         if (touched) await db.from('listing_seo_recommendations').update({ product_details_improvements: pdi }).eq('parent_asin', parent_asin)
+        // PER-DESIGN write-through: stamp each accepted/verified SKU's entry with its own line.
+        const pdRows = [...perDesignAccepted.values()].flat()
+        if (pdRows.length > 0) {
+          const fresh = await readPerDesignItemHighlights(supabase, parent_asin)
+          const marked = markPushedItemHighlights(fresh, pdRows)
+          if (marked.changed) await db.from('listing_seo_recommendations').update({ per_child_item_highlights: marked.entries }).eq('parent_asin', parent_asin)
+          for (const f of perDesignMaps.keys()) await stampPerDesignMarker(db, parent_asin, f, marked.entries)
+        }
       } catch (e) { console.warn('[bulk-details] write-through failed (non-fatal):', e) }
     }
     if (acceptedFields.length > 0) {
@@ -4519,7 +4708,8 @@ export async function executeBulkDetailsPush(params: PushParams, emit: PushEmit)
         for (const p of acceptedFields) {
           await enqueueVerification({
             parent_asin, field: `details:${p.attribute.spApiKey}`,
-            detail_field: p.field, expected_value: p.value,
+            // PER-DESIGN IH: no expected_value (the cron re-push would broadcast it as an override).
+            detail_field: p.field, expected_value: perDesignMaps.has(p.field) ? null : p.value,
           })
         }
       } catch (e) { console.warn('[bulk-details] verify enqueue failed (non-fatal):', e) }

@@ -23,6 +23,7 @@ import { FIELD_CONFIG, isPushField, type PushField } from '@/lib/fba/pushFields'
 import { resolveDetailAttribute } from '@/lib/fba/productDetailAttrs'
 import { inspectProductTypeAttribute, resolveSpApiKeyFromTitle, getDetailValueShape, buildShapedDetailValue, buildShapedDetailValueVariants, getAttributeSubschema } from '@/lib/fba/productTypeDefinitions'
 import { getProductType } from '@/lib/amazon/productType'
+import { perDesignIhRows } from '@/lib/fba/perDesignItemHighlights'
 import {
   executePush, executeBulkDetailsPush, executeBulkCorePush, getSellerId, loadDiff, loadDetailContext, loadDetailDiff, requestPushCancel,
   ENDPOINT, MARKETPLACE_ID, SYSTEM_ACTOR, type PushEmit, type PushActor,
@@ -100,6 +101,11 @@ export async function GET(req: NextRequest) {
       if (diff.length === 0) {
         return NextResponse.json({ error: 'No SKUs found for this parent. Run a Sync first.' }, { status: 404 })
       }
+      // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): the modal must show one row per DESIGN (+ the
+      // per-SKU diff), never a single broadcast value — proposedValue is null and broadcast:false so
+      // the existing per-child modal branch renders each SKU's own line.
+      const perDesign = ctx.perDesignEntries ? perDesignIhRows(ctx.perDesignEntries) : null
+      const skippedNoLine = diff.filter((d) => d.skipReason === 'no-line-for-design').length
       return NextResponse.json({
         parent_asin: parentAsin,
         field: 'details' as const,
@@ -107,12 +113,14 @@ export async function GET(req: NextRequest) {
         detail_field: ctx.detailField,
         attribute_key: ctx.attribute.spApiKey,
         label: `Detail · ${ctx.detailField}`,
-        // Details are always broadcast in v1 (per-variant attrs are blocked upstream).
-        broadcast: true,
-        configBroadcast: true,
+        // Details are broadcast — EXCEPT the per-design Item Highlight (one line per design).
+        broadcast: !perDesign,
+        configBroadcast: !perDesign,
         count: diff.length,
         changed: diff.filter((d) => d.changed).length,
-        proposedValue: ctx.recommendedValue,
+        proposedValue: perDesign ? null : ctx.recommendedValue,
+        per_design: perDesign,
+        skipped_no_line: perDesign ? skippedNoLine : undefined,
         // Enum (Feature B): the accepted vocabulary for this attribute + what we
         // normalized the audit's value FROM, so the modal can show "Unisex Adult → Unisex".
         acceptedValues: ctx.acceptedValues ?? null,

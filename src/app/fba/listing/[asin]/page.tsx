@@ -8,6 +8,7 @@ import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
 import { groupByDesign, isMultiDesign, resolveMultiDesign, perChildValueResolver, perDesignEntries, type PerDesignGroup } from '@/lib/fba/perDesign'
+import { perDesignIhRows, type PerChildItemHighlight, type PerDesignIhRow } from '@/lib/fba/perDesignItemHighlights'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
 import { ParentManualUpdateModal } from './ParentManualUpdateModal'
@@ -56,7 +57,7 @@ interface PerChildKeywords { sku: string; asin: string; keywords: string }
 
 interface VariantCorrection { sku: string; field: string; current: string; replace_with: string; reason: string }
 interface CannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
-interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; sp_api_key?: string; attr_scope?: 'broadcast' | 'per-variant'; pushable?: boolean }
+interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; sp_api_key?: string; attr_scope?: 'broadcast' | 'per-variant'; pushable?: boolean; /** Item Highlight on a multi-design family: per-design MARKER (no broadcast line; lines in per_child_item_highlights). */ per_design?: boolean }
 
 /** Some Amazon enums store machine tokens, not labels — SHIRT sleeve accepts "short_sleeve"
  *  while the editor displays "Short Sleeve" (PO: "Short_sleeve should be Short Sleeve").
@@ -101,6 +102,8 @@ interface AiRecommendations {
   per_child_titles?: PerChildTitle[]
   per_child_bullets?: PerChildBullets[]
   per_child_descriptions?: PerChildDescription[]
+  /** Per-design Item Highlights (migration 060, PO 2026-08-21) — multi-design families only. */
+  per_child_item_highlights?: PerChildItemHighlight[]
   recommended_description: string; variant_corrections: VariantCorrection[]
   cannibalization_warnings?: CannibalizationWarning[]
   product_details_improvements?: ProductDetailImprovement[]
@@ -439,7 +442,7 @@ export default function ListingDetailPage() {
   // attribute key (see lib/fba/productDetailAttrs.ts).
   type PushField = 'title' | 'bullets' | 'description' | 'keywords' | 'details'
   const FIELD_LABEL: Record<PushField, string> = { title: 'Title', bullets: 'Bullets', description: 'Description', keywords: 'Backend Keywords', details: 'Product Detail' }
-  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string }
+  interface PushDiffRow { sku: string; current: string; proposed: string; bytes: number; chars: number; changed: boolean; isParent?: boolean; asin?: string; skipReason?: 'no-line-for-design'; designKey?: string; designName?: string }
   interface PushResultRow { sku: string; status: string; submissionId: string | null; error?: string; isParent?: boolean }
   interface PushPreview {
     field: PushField; label: string; broadcast: boolean; count: number; changed: number;
@@ -449,6 +452,9 @@ export default function ListingDetailPage() {
     /** Feature B — for enum attributes: Amazon's accepted vocabulary and the value we
      *  normalized FROM (e.g. "Unisex Adult") when the audit's value wasn't accepted. */
     acceptedValues?: string[] | null; normalizedFrom?: string | null
+    /** PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): one row per design; diff[] carries each SKU's own
+     *  line; skipped_no_line = SKUs whose design holds (never given another design's line). */
+    per_design?: PerDesignIhRow[] | null; skipped_no_line?: number
     /** Part 2b — true = uncoercible dropdown; the modal shows a seller-picker over acceptedValues. */
     enum_invalid?: boolean
   }
@@ -552,7 +558,7 @@ export default function ListingDetailPage() {
   // ── Auto Push (PO): one click pushes EVERY ready Product-Detail field. The seller stays on
   // the trigger; the tool does the legwork field by field with live status. Each field goes
   // through the SAME per-field endpoint as a manual push (validation, write-through, re-score).
-  interface BulkPushItem { field: string; value: string; status: 'ready' | 'pushing' | 'done' | 'failed'; note?: string; skip?: boolean; accepted?: string[] }
+  interface BulkPushItem { field: string; value: string; status: 'ready' | 'pushing' | 'done' | 'failed'; note?: string; skip?: boolean; accepted?: string[]; /** Per-design Item Highlight: N lines, not one editable value (the server refuses an override). */ perDesign?: boolean }
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkItems, setBulkItems] = useState<BulkPushItem[]>([])
   const [bulkRunning, setBulkRunning] = useState(false)
@@ -1909,9 +1915,15 @@ export default function ListingDetailPage() {
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ parent_asin: asin }),
       })
-      const data = await resp.json() as { error?: string; product_details_improvements?: AiRecommendations['product_details_improvements'] }
+      const data = await resp.json() as { error?: string; product_details_improvements?: AiRecommendations['product_details_improvements']; per_child_item_highlights?: PerChildItemHighlight[] }
       if (!resp.ok) throw new Error(data.error || 'Regenerate failed')
-      if (data.product_details_improvements) setAiRecs((prev) => prev ? { ...prev, product_details_improvements: data.product_details_improvements } : prev)
+      if (data.product_details_improvements) setAiRecs((prev) => prev ? {
+        ...prev,
+        product_details_improvements: data.product_details_improvements,
+        // PER-DESIGN (PO 2026-08-21): the route returns one line per design; a single-design regen
+        // returns none → clear any stale per-design array so the card reads the broadcast row.
+        per_child_item_highlights: data.per_child_item_highlights ?? [],
+      } : prev)
     } catch (e) {
       window.alert(e instanceof Error ? e.message : 'Regenerate failed')
     } finally {
@@ -1925,11 +1937,20 @@ export default function ListingDetailPage() {
     // STYLE LEAK GATE (B) — the seller's manual override is authoritative over the auto-detector (both
     // directions); falls back to per_child_titles when unset. Same predicate the per-row + server gates use.
     const multi = resolveMultiDesign(aiRecs?.per_child_titles, isMultiDesignOverride)
+    // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): the marker row has no broadcast value — it is ready
+    // when at least one design has a composed line that is not yet on Amazon (per-design mirror).
+    const pdIh = perDesignIhRows(aiRecs?.per_child_item_highlights)
+    const perDesignIhReady = pdIh.some((r) => r.line && !r.onAmazon)
+    const isPerDesignIh = (pd: ProductDetailImprovement) => isItemHighlightsField(pd.field_name, pd.sp_api_key) && (pd.per_design === true || pdIh.some((r) => !!r.line))
     return rows.filter((pd) =>
       (pd.pushable ?? isPushableDetail(pd.field_name)) &&
       pd.enum_valid !== false &&
-      (pd.recommended_value ?? '').trim() !== '' &&
-      (pd.current_value ?? '').trim() !== pd.recommended_value.trim() &&
+      (isPerDesignIh(pd)
+        ? perDesignIhReady
+        : (pd.recommended_value ?? '').trim() !== '' && (pd.current_value ?? '').trim() !== pd.recommended_value.trim()) &&
+      // A BROADCAST Item Highlight on a multi-design family is the pre-ruling lie — never bulk-push it
+      // (the server seam refuses it too: PER_DESIGN_IH_BROADCAST_REASON).
+      !(multi && isItemHighlightsField(pd.field_name, pd.sp_api_key) && !isPerDesignIh(pd)) &&
       // Item Highlights: excluded from Auto Push while Amazon's API refuses writes. Driven by the
       // server probe flag (item_highlights_writable), NOT a hardcoded date. undefined (legacy GET)
       // → treat as blocked so old cached responses stay safe. Only an explicit `true` unblocks.
@@ -1950,11 +1971,20 @@ export default function ListingDetailPage() {
       window.alert('A push is still running (see the progress pill, bottom-right). Let it finish before starting Auto Push.')
       return
     }
-    setBulkItems(bulkEligibleDetails.map((pd) => ({ field: pd.field_name, value: prettyDetailValue(pd.recommended_value, pd.enum_accepted), status: 'ready' as const, accepted: pd.enum_accepted })))
+    const pdIhRows = perDesignIhRows(aiRecs?.per_child_item_highlights)
+    setBulkItems(bulkEligibleDetails.map((pd) => {
+      const perDesign = isItemHighlightsField(pd.field_name, pd.sp_api_key) && (pd.per_design === true || pdIhRows.some((r) => !!r.line))
+      return {
+        field: pd.field_name,
+        // Per-design IH: a read-only summary (never sent as an override — see detail_overrides below).
+        value: perDesign ? `${pdIhRows.filter((r) => !!r.line).length} per-design line(s)` : prettyDetailValue(pd.recommended_value, pd.enum_accepted),
+        status: 'ready' as const, accepted: pd.enum_accepted, perDesign,
+      }
+    }))
     setBulkFinished(false)
     setBulkProgress({ done: 0, total: 0 })
     setBulkOpen(true)
-  }, [bulkEligibleDetails, bulkRunning])
+  }, [bulkEligibleDetails, bulkRunning, aiRecs?.per_child_item_highlights])
 
   /** ONE batched call: all selected detail attributes pushed PER SKU (each SKU gets a single
    *  multi-attribute PATCH) — ~7× fewer Amazon calls than field-at-a-time. The server batches
@@ -2043,7 +2073,8 @@ export default function ListingDetailPage() {
     //    streaming, so the push survives tab-close/deploys and serializes with every other employee's
     //    pushes under the global 5-rps bucket (no more mid-stream drop). Flag OFF = today's streaming path.
     if (await isPushQueueOn()) {
-      const overrides = Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value]))
+      // Per-design IH items carry a summary, not a value — NEVER an override (the server refuses one).
+      const overrides = Object.fromEntries(items.filter((it) => !it.skip && !it.perDesign).map((it) => [it.field, it.value]))
       const outcome = await runBulkViaQueue({ field: 'details_bulk', detail_fields: fields, detail_overrides: overrides }, setBulkProgress)
       const pf = outcome.perField
       if (pf && pf.length) {
@@ -2076,7 +2107,7 @@ export default function ListingDetailPage() {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         // Send each (possibly-edited) value as a per-field override — the server re-validates/
         // coerces it (a wrong manual value is flagged + skipped, never pushed). PO: edit before bulk.
-        body: JSON.stringify({ parent_asin: asin, field: 'details_bulk', detail_fields: fields, detail_overrides: Object.fromEntries(items.filter((it) => !it.skip).map((it) => [it.field, it.value])), confirm: true, cancel_token: cancelToken }),
+        body: JSON.stringify({ parent_asin: asin, field: 'details_bulk', detail_fields: fields, detail_overrides: Object.fromEntries(items.filter((it) => !it.skip && !it.perDesign).map((it) => [it.field, it.value])), confirm: true, cancel_token: cancelToken }),
       })
       if (!resp.ok) { const data = await readJsonOrThrowGateway(resp, 'push') as { error?: string }; throw new Error(data.error || `HTTP ${resp.status}`) }
       if (!resp.body) throw new Error('Connection dropped before stream.')
@@ -4082,13 +4113,24 @@ export default function ListingDetailPage() {
                         // seller's manual override is authoritative over the auto-detector (resolveMultiDesign),
                         // so force-single un-suppresses and force-multi suppresses regardless of per_child_titles.
                         // Single-design is untouched. Server re-checks (loadDetailContext).
-                        const styleLeak = resolveMultiDesign(aiRecs?.per_child_titles, isMultiDesignOverride) && (isSingleDesignOnlyKey(pd.sp_api_key) || isSingleDesignOnlyDetail(pd.field_name))
-                        const pushable = !styleLeak && (pd.pushable ?? isPushableDetail(pd.field_name))
-                        const blockedReason = pushable ? null : styleLeak ? SINGLE_DESIGN_ONLY_LEAK_REASON : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
+                        const familyMulti = resolveMultiDesign(aiRecs?.per_child_titles, isMultiDesignOverride)
+                        const styleLeak = familyMulti && (isSingleDesignOnlyKey(pd.sp_api_key) || isSingleDesignOnlyDetail(pd.field_name))
+                        // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): on a multi-design family the row is a
+                        // marker — the lines live in per_child_item_highlights, one per design. A stale
+                        // BROADCAST IH on a multi-design family is blocked (false on every other design).
+                        const isIhRow = isItemHighlightsField(pd.field_name, pd.sp_api_key)
+                        const ihRows = isIhRow ? perDesignIhRows(aiRecs?.per_child_item_highlights) : []
+                        const perDesignIh = isIhRow && (pd.per_design === true || ihRows.some((r) => !!r.line))
+                        const ihBroadcastLeak = isIhRow && familyMulti && !perDesignIh
+                        const pushable = !styleLeak && !ihBroadcastLeak && (pd.pushable ?? isPushableDetail(pd.field_name)) && (!perDesignIh || ihRows.some((r) => !!r.line))
+                        const blockedReason = pushable ? null : styleLeak ? SINGLE_DESIGN_ONLY_LEAK_REASON : ihBroadcastLeak ? 'Multi-design family: the Item Highlight ships one line PER DESIGN — this single line would be false on the other designs. Click ↻ Regen to compose one per design.' : perDesignIh ? 'Every design is held — no truthful line could be composed yet.' : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
                         // Pushed/up-to-date state (PO: "no notice after PUSH"): the push write-through
                         // sets current_value = recommended_value (server-side at push; mirrored locally
                         // by the modal + Auto Push), so equality IS the "this is on Amazon" signal.
-                        const upToDate = pushable && (pd.recommended_value ?? '').trim() !== '' && (pd.current_value ?? '').trim() === (pd.recommended_value ?? '').trim()
+                        // Per-design: every composed design's line carries its pushed_value mirror.
+                        const upToDate = pushable && (perDesignIh
+                          ? ihRows.filter((r) => !!r.line).every((r) => r.onAmazon)
+                          : (pd.recommended_value ?? '').trim() !== '' && (pd.current_value ?? '').trim() === (pd.recommended_value ?? '').trim())
                         return (
                           <div key={i} className={`rounded-lg p-2.5 ${upToDate ? 'bg-emerald-50 border border-emerald-200' : pushable ? 'bg-emerald-50/40 border border-emerald-100' : 'bg-slate-50'}`}>
                             <div className="flex items-center justify-between mb-0.5 gap-2">
@@ -4135,8 +4177,26 @@ export default function ListingDetailPage() {
                                 )}
                               </div>
                             </div>
-                            <p className="text-xs text-slate-700">{prettyDetailValue(pd.recommended_value, pd.enum_accepted)}</p>
-                            {pd.current_value && pd.current_value !== pd.recommended_value && (
+                            {perDesignIh ? (
+                              /* One line per DESIGN (PO 2026-08-21): design · line · length · hold reason. */
+                              <div className="mt-1 divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white">
+                                {ihRows.map((r) => (
+                                  <div key={r.designKey} className={`px-2 py-1.5 ${r.line ? '' : 'bg-amber-50/60'}`}>
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="text-[10px] font-semibold text-slate-800 truncate max-w-[12rem]" title={r.designKey}>{r.designName}</span>
+                                      <span className="text-[10px] text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
+                                      {r.line && <span className={`text-[10px] ${r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}`}>· {r.line.length}/125</span>}
+                                      {r.line && r.onAmazon && <span className="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">✓ On Amazon</span>}
+                                      {!r.line && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title="This design ships NO Item Highlight until a truthful line composes — it is never given another design's line.">Held{r.hold ? ` · ${r.hold}` : ''}</span>}
+                                    </div>
+                                    {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push (no-line-for-design)</p>}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-700">{prettyDetailValue(pd.recommended_value, pd.enum_accepted)}</p>
+                            )}
+                            {!perDesignIh && pd.current_value && pd.current_value !== pd.recommended_value && (
                               <p className="text-[10px] text-slate-400 line-through mt-1 break-words">{prettyDetailValue(pd.current_value, pd.enum_accepted)}</p>
                             )}
                             {pd.sp_api_key && aiRecs?.field_pushed_at?.[`details:${pd.sp_api_key}`] && (
@@ -5229,8 +5289,8 @@ export default function ListingDetailPage() {
                             Enum fields get a dropdown of Amazon's accepted values; free-text gets an input.
                             The server re-validates/coerces every value (loadDetailContext) — a bad manual
                             value is flagged + skipped, never pushed. */}
-                        {bulkRunning || bulkFinished ? (
-                          <p className="text-[11px] text-slate-500 truncate">{it.value}</p>
+                        {bulkRunning || bulkFinished || it.perDesign ? (
+                          <p className="text-[11px] text-slate-500 truncate" title={it.perDesign ? 'Multi-design family: each SKU ships its own design line (edit via Regen, not here).' : undefined}>{it.value}</p>
                         ) : it.accepted && it.accepted.length > 0 ? (
                           <select
                             value={it.accepted.some((a) => a === it.value) ? it.value : '__custom__'}
@@ -5496,7 +5556,9 @@ export default function ListingDetailPage() {
                     <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
                       <p className="text-xs text-amber-900 leading-relaxed">
                         <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-semibold mr-1.5 whitespace-nowrap">Per-child</span>
-                        {pushPreview.field === 'keywords'
+                        {pushPreview.field === 'details' && pushPreview.per_design
+                          ? <>Multi-design family — each SKU gets <b>its own design&apos;s</b> {pushPreview.detail_field}. <b>{pushPreview.changed}</b> of {pushPreview.count} will change{(pushPreview.skipped_no_line ?? 0) > 0 ? <>; <b>{pushPreview.skipped_no_line}</b> skipped (their design has no composed line — never given another design&apos;s)</> : null}.</>
+                          : pushPreview.field === 'keywords'
                           ? <>Each of <b>{pushPreview.count}</b> SKUs (incl. matching FBA + FBM) gets its <b>own</b> backend search terms. <b>{pushPreview.changed}</b> will change — not customer-visible.</>
                           : pushPreview.field === 'title'
                           ? <>Each of <b>{pushPreview.count}</b> SKUs gets its <b>own</b> title — different SKUs get different titles (e.g. each capacity variant carries its own GB). Review each row below before confirming. <b>{pushPreview.changed}</b> will change.</>
@@ -5694,8 +5756,29 @@ export default function ListingDetailPage() {
                       )}
                     </>
                   ) : (
-                    /* Per-child: full current → proposed diff per SKU. Sort parent row to the top,
-                       then by SKU for stable ordering, so the modal mirrors the section card above. */
+                    <>
+                    {/* PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): one row per design ABOVE the per-SKU diff —
+                        design · line · length · hold; a held design ships nothing (skipped at push). */}
+                    {pushPreview.field === 'details' && pushPreview.per_design && (
+                      <div className="bg-white rounded-md border-2 border-emerald-300 p-3 mb-3">
+                        <p className="text-[10px] font-bold text-emerald-800 uppercase mb-1.5">New {pushPreview.detail_field} → one line per design</p>
+                        <div className="divide-y divide-slate-100">
+                          {pushPreview.per_design.map((r) => (
+                            <div key={r.designKey} className={`py-1.5 ${r.line ? '' : 'opacity-80'}`}>
+                              <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                                <span className="font-semibold text-slate-800" title={r.designKey}>{r.designName}</span>
+                                <span className="text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
+                                {r.line && <span className={r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}>· {r.line.length}/125 chars</span>}
+                                {!r.line && <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium">Held{r.hold ? ` · ${r.hold}` : ''} — skipped (no-line-for-design)</span>}
+                              </div>
+                              {r.line && <p className="text-xs text-emerald-800 break-words">{r.line}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {/* Per-child: full current → proposed diff per SKU. Sort parent row to the top,
+                       then by SKU for stable ordering, so the modal mirrors the section card above. */}
                     <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 mb-4 max-h-[45vh] overflow-y-auto">
                       {pushPreview.diff
                         .filter(d => d.changed)
@@ -5714,6 +5797,7 @@ export default function ListingDetailPage() {
                               {d.isParent && <span className="text-[10px] font-bold text-violet-700 uppercase tracking-wide bg-violet-100 px-1.5 py-0.5 rounded">PARENT</span>}
                               <span>{d.sku}</span>
                               <span className="text-slate-400">({sizeLabel})</span>
+                              {d.designName && <span className="text-[10px] font-sans font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded" title={d.designKey ?? ''}>{d.designName}</span>}
                             </div>
                             <p className="text-slate-400 line-through mb-0.5 break-words">{(pushPreview.field === 'details' ? prettyDetailValue(d.current) : d.current) || '(empty — Amazon will validate the new value)'}</p>
                             <p className={`break-words ${d.isParent ? 'text-violet-800' : 'text-emerald-700'}`}>{pushPreview.field === 'details' ? prettyDetailValue(d.proposed) : d.proposed}</p>
@@ -5721,6 +5805,7 @@ export default function ListingDetailPage() {
                         )
                       })}
                     </div>
+                    </>
                   )}
 
                   {/* ── Verify on Amazon (also on preview, so a seller who pushed earlier

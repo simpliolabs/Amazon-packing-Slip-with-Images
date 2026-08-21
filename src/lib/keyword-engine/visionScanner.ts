@@ -177,8 +177,11 @@ export async function getProductImageUrl(asin: string): Promise<string | null> {
 /**
  * Get cached product identity from the database.
  * Returns null if not cached or if cache is older than 30 days.
+ * Exported (2026-08-21) so the per-design readers (designGroupIdentity.ts) can read a design's
+ * cached identity WITHOUT triggering a scan — the LLM-free regenerate-item-highlight route must
+ * never spend a vision call.
  */
-async function getCachedIdentity(asin: string): Promise<ProductIdentity | null> {
+export async function getCachedIdentity(asin: string): Promise<ProductIdentity | null> {
   const { data } = await supabase
     .from('product_identity')
     .select('identity_data, scanned_at')
