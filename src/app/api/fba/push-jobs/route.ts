@@ -131,6 +131,11 @@ export async function GET(req: NextRequest) {
   try { await kickQueuedJobs() } catch { /* best-effort */ }
 
   const jobId = url.searchParams.get('id')
+  // 2026-08-21: the hardcoded newest-20 window hid queued/running rows during the ghost-wedge
+  // incident — a stuck job older than 20 newer rows was invisible to every API read while it
+  // blocked the whole queue. Callers may now widen the window; the default keeps the status
+  // bar's payload exactly as before.
+  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10) || 20))
   const supabase = await createAdminClient()
   let q = supabase
     .from('push_jobs')
@@ -138,7 +143,7 @@ export async function GET(req: NextRequest) {
     // flag-on modal poll maps back onto the field rows — without it a rejected field renders green.
     .select('id, parent_asin, field, detail_field, status, total, accepted, failed, message, progress, created_at, started_at, finished_at')
     .order('created_at', { ascending: false })
-    .limit(20)
+    .limit(limit)
   // Poll-by-id (the modal): match the exact job regardless of how many newer rows exist for the parent
   // (a parent-only, newest-20 filter would drop the target once ≥20 newer jobs appear → an infinite poll).
   if (jobId) q = q.eq('id', jobId)
