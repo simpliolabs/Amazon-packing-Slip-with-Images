@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   DEFAULT_BLANK_SPECS, rowToSpec, extractStyleCode, intersectBlankSpecs, resolveFamilyBlank,
-  resolveBlankRowForNet, resolveFamilyBlankForNet, composerGarmentFamily, type BlankSpecRow,
+  resolveBlankRowForNet, resolveFamilyBlankForNet, type BlankSpecRow,
 } from './blankSpecs'
 
 /* SKU-FIRST BLANK RESOLUTION (PO ruling 2026-08-21, SELLER_PROFILE.md "Blank identity is stated in
@@ -119,9 +119,19 @@ describe('intersectBlankSpecs — a fact ships only when EVERY resolved blank ag
   it('single spec is returned verbatim', () => {
     expect(intersectBlankSpecs([byCode('1717').spec])).toEqual(byCode('1717').spec)
   })
-  it('64000 + 3001: brand/fit/material/weight dropped, Short Sleeve + Crew Neck kept, brandInCopy false', () => {
+  it('64000 + 3001 (B0GR1K3TXF, PO 2026-08-21 semantic intersection): brand/fit dropped; Short Sleeve + Crew Neck kept; the SHARED material fact "Ring-Spun Cotton" survives (substring of "100% Airlume Combed Ring-Spun Cotton"); weightNote keeps the agreed class word', () => {
     const s = intersectBlankSpecs([byCode('64000').spec, byCode('3001').spec])!
-    expect(s).toEqual({ brandInCopy: false, sleeve: 'Short Sleeve', neck: 'Crew Neck' })
+    expect(s).toEqual({ brandInCopy: false, sleeve: 'Short Sleeve', neck: 'Crew Neck', material: 'Ring-Spun Cotton', weightNote: 'lightweight' })
+  })
+  it('semantic material: 1717 + 64000 share "Ring-Spun Cotton"; weight classes DISAGREE (mid vs light) so weightNote is dropped; unrelated materials are dropped', () => {
+    const s = intersectBlankSpecs([byCode('1717').spec, byCode('64000').spec])!
+    expect(s.material).toBe('Ring-Spun Cotton')
+    expect(s.weightNote).toBeUndefined()
+    const poly = intersectBlankSpecs([byCode('64000').spec, byCode('18000').spec])!
+    expect(poly.material).toBeUndefined()
+    expect(poly.weightNote).toBeUndefined()
+    // fit / neck / sleeve stay EXACT-match: "Classic" vs "Retail" never intersects
+    expect(intersectBlankSpecs([byCode('64000').spec, byCode('3001').spec])!.fit).toBeUndefined()
   })
   it('64000 + 64400: sleeve dropped, everything else (same blank family) kept', () => {
     const s = intersectBlankSpecs([byCode('64000').spec, byCode('64400').spec])!
@@ -142,13 +152,13 @@ describe('intersectBlankSpecs — a fact ships only when EVERY resolved blank ag
 })
 
 describe('resolveFamilyBlank — per-child style codes → override → legacy regex → null', () => {
-  it('85×64000 + 41×BC3001 → mixed; dominant 64000; intersection keeps Short Sleeve / Crew Neck only', () => {
+  it('85×64000 + 41×BC3001 → mixed; dominant 64000; intersection keeps Short Sleeve / Crew Neck + the shared Ring-Spun Cotton / lightweight facts', () => {
     const r = resolveFamilyBlank(ROWS, [...skus('64000', 85), ...skus('BC3001', 41)], null, 'THE CEO Funny Shirt SHIRT')
     expect(r.source).toBe('sku')
     expect(r.mixed).toBe(true)
     expect(r.byStyle).toEqual({ '64000': 85, '3001': 41 })
     expect(r.dominant?.styleCode).toBe('64000')
-    expect(r.spec).toEqual({ brandInCopy: false, sleeve: 'Short Sleeve', neck: 'Crew Neck' })
+    expect(r.spec).toEqual({ brandInCopy: false, sleeve: 'Short Sleeve', neck: 'Crew Neck', material: 'Ring-Spun Cotton', weightNote: 'lightweight' })
     expect(r.garmentFamily).toBe('tee')
   })
 
@@ -193,8 +203,7 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
     const r = resolveFamilyBlank(ROWS, [{ sku: '1V-C6WM-US5T' }, { sku: '2W-D7XN-VT6U' }], '64000B', 'THE CEO Kids Dinosaur Shirt')
     expect(r.source).toBe('override')
     expect(r.dominant?.styleCode).toBe('64000B')
-    expect(r.garmentFamily).toBe('kids_tee')
-    expect(composerGarmentFamily(r.garmentFamily)).toBe('tee')
+    expect(r.garmentFamily).toBe('kids_tee')   // reaches the composer UNFOLDED — its audience rule keys on kids_tee
     expect(r.spec?.brandInCopy).toBe(false)
   })
 
@@ -252,18 +261,6 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
   })
 })
 
-describe('composerGarmentFamily — the 5-way DB enum folds to the composer vocabulary', () => {
-  it.each([
-    ['tee', 'tee'], ['long_sleeve_tee', 'tee'], ['kids_tee', 'tee'], ['sweatshirt', 'sweatshirt'], ['hoodie', 'hoodie'],
-  ] as const)('%s → %s', (gf, out) => {
-    expect(composerGarmentFamily(gf)).toBe(out)
-  })
-  it('unknown / absent → null (caller keeps its title-regex guess)', () => {
-    expect(composerGarmentFamily(undefined)).toBeNull()
-    expect(composerGarmentFamily(null)).toBeNull()
-  })
-})
-
 describe('resolveBlankRowForNet — the ONE async seam, per-child SKUs from listing_content', () => {
   const fakeDb = (rows: { sku: string; product_type?: string; title?: string }[]) => ({
     from: () => ({ select: () => ({ eq: () => ({ limit: () => Promise.resolve({ data: rows, error: null }) }) }) }),
@@ -277,7 +274,7 @@ describe('resolveBlankRowForNet — the ONE async seam, per-child SKUs from list
     expect(row).not.toBeNull()
     expect(row!.match.source).toBe(byCode('64000').match.source)
     expect(row!.styleCode).toBe('64000')
-    expect(row!.spec).toEqual({ brandInCopy: false, sleeve: 'Short Sleeve', neck: 'Crew Neck' })
+    expect(row!.spec).toEqual({ brandInCopy: false, sleeve: 'Short Sleeve', neck: 'Crew Neck', material: 'Ring-Spun Cotton', weightNote: 'lightweight' })
     expect(row!.garmentFamily).toBe('tee')
   })
 

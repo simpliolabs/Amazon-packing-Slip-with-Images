@@ -54,7 +54,7 @@ export interface BlankSpec {
 }
 
 /** blank_specs.garment_family (migration 058). Drives the garment-compatibility gate and the Item
- *  Highlights composer's vocabulary (see composerGarmentFamily). */
+ *  Highlights composer's truth stage (garment nouns + audience — kids_tee reaches it UNFOLDED). */
 export type GarmentFamily = 'tee' | 'long_sleeve_tee' | 'sweatshirt' | 'hoodie' | 'kids_tee'
 const GARMENT_FAMILIES: ReadonlySet<string> = new Set<GarmentFamily>(['tee', 'long_sleeve_tee', 'sweatshirt', 'hoodie', 'kids_tee'])
 
@@ -251,19 +251,45 @@ export function extractStyleCode(sku: string | null | undefined, codes: readonly
   return null
 }
 
-const INTERSECT_KEYS = ['brand', 'fit', 'sleeve', 'neck', 'weightNote', 'material', 'dye', 'stretch', 'fitToSize'] as const
+/** Exact-match facts: a cut/neck/sleeve that differs between children is never claimed. */
+const INTERSECT_EXACT_KEYS = ['brand', 'fit', 'sleeve', 'neck', 'dye', 'stretch', 'fitToSize'] as const
+
+/** Case-insensitive token set of a material string ("100% Airlume Combed Ring-Spun Cotton" →
+ *  {100%, airlume, combed, ring, spun, cotton}). */
+const materialTokens = (v: string): Set<string> => new Set(v.toLowerCase().split(/[\s\-\/]+/).filter(Boolean))
 
 /** The facts EVERY resolved blank agrees on (PO: "a fact that differs between children — sleeve,
  *  neck — is never claimed"). brandInCopy=false if ANY blank forbids its brand; unisex only when
- *  all claim it. A single spec is returned as-is. */
+ *  all claim it. A single spec is returned as-is.
+ *
+ *  SEMANTIC intersection for the two prose facts (PO 2026-08-21, B0GR1K3TXF 64000 + BC3001: the
+ *  exact-match drop of "Ring-Spun Cotton" vs "100% Airlume Combed Ring-Spun Cotton" left the
+ *  family no truthful filler and the Item Highlight under floor):
+ *   - material: kept when one value is a case-insensitive substring OR token-subset of every other
+ *     — the SHORTEST such value is the shared fact ("Ring-Spun Cotton" ⊂ the Airlume string).
+ *   - weightNote: kept as the shared CLASS WORD ("lightweight") only when trueWeightClass agrees
+ *     across every blank — the ounce figures differ and are never claimed.
+ *  fit / neck / sleeve / dye / stretch / fitToSize / brand stay exact-match. */
 export function intersectBlankSpecs(specs: readonly BlankSpec[]): BlankSpec | null {
   if (specs.length === 0) return null
   if (specs.length === 1) return specs[0]
   const out: BlankSpec = {}
   if (specs.some((s) => s.brandInCopy === false)) out.brandInCopy = false
-  for (const k of INTERSECT_KEYS) {
+  for (const k of INTERSECT_EXACT_KEYS) {
     const v = specs[0][k]
     if (v && specs.every((s) => s[k] === v)) out[k] = v
+  }
+  const materials = specs.map((s) => (s.material ?? '').trim())
+  if (materials.every(Boolean)) {
+    const shared = [...materials].sort((a, b) => a.length - b.length).find((cand) => {
+      const lc = cand.toLowerCase(); const toks = materialTokens(cand)
+      return materials.every((m) => m.toLowerCase().includes(lc) || [...toks].every((t) => materialTokens(m).has(t)))
+    })
+    if (shared) out.material = shared
+  }
+  const classes = specs.map((s) => trueWeightClass(s))
+  if (classes[0] && classes.every((c) => c === classes[0])) {
+    out.weightNote = specs.every((s) => s.weightNote === specs[0].weightNote) ? specs[0].weightNote : classes[0]
   }
   if (specs.every((s) => s.unisex === true)) out.unisex = true
   return out
@@ -294,13 +320,6 @@ function hayGarmentClass(hay: string): GarmentClass | null {
 /** Pre-058 rows (no garment_family) ARE tees — the whole historical catalog was. */
 function rowGarmentClass(row: BlankSpecRow): GarmentClass {
   return row.garmentFamily === 'sweatshirt' || row.garmentFamily === 'hoodie' ? 'sweat' : 'tee'
-}
-
-/** The DB enum → the Item Highlights composer's vocabulary ('tee' | 'sweatshirt' | 'hoodie'). */
-export function composerGarmentFamily(gf: GarmentFamily | null | undefined): 'tee' | 'sweatshirt' | 'hoodie' | null {
-  if (gf === 'sweatshirt' || gf === 'hoodie') return gf
-  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'kids_tee') return 'tee'
-  return null
 }
 
 /**
@@ -399,6 +418,11 @@ export function matchBlankSpec(rows: readonly BlankSpecRow[], ...sources: (strin
  * the Item Highlights MUST carry the brand as a fact. Runs on the SHIPPED bytes, after the last
  * LLM stage, on BOTH generator paths (LLM output + spec fallback) and the regen route — never a
  * prompt hint.
+ *
+ * 2026-08-21 (PO, B0FKFHSCS9): the COMPOSER now satisfies the waterfall INSIDE the line with one
+ * brand-bearing phrase, so on the generation path this net must see `ih-carries` and return the
+ * bytes UNTOUCHED — it never truncates or re-orders a line that already carries the brand (pinned
+ * T4.10). The insertion below remains for the stored-IH re-net sites (title partial, lock guard).
  *
  * Mechanics: PREPEND `authentic <brand> blank` — insertion order is the survival mechanism, because
  * `capItemHighlightRepeats` keeps earlier phrases and drops later ones at the ≤75-char / ≤2-per-word
@@ -593,6 +617,17 @@ export function capabilityBanTokens(customizable: boolean): string[] {
   if (customizable) return []
   return ['custom', 'customs', 'customize', 'customized', 'customizable', 'personalize', 'personalized', 'monogram', 'monogrammed', 'photo']
 }
+
+/**
+ * PERFORMANCE-FABRIC capability claims (PO 2026-08-21, B0DMXMH266 "Sun Protection" on a Gildan 64000):
+ * a phrase asserting a fabric capability NO blank in the catalog states. Kept as a sibling of
+ * `capabilityBanTokens` rather than merged into it: that list is the PERSONALIZATION ban keyed on
+ * `customizable` and consumed token-exact by the backend strip — folding fabric claims into it would
+ * silently change backend behaviour. BlankSpec carries no capability field today, so a consumer
+ * (the Item Highlights truth stage) rejects every match unconditionally; the day a blank states
+ * one, the exemption belongs HERE beside the spec, not in a prompt.
+ */
+export const PERFORMANCE_CLAIM_RE = /\b(?:sun[\s-]?protect(?:ion|ive)|upf|spf|moisture[\s-]?wicking|quick[\s-]?dry(?:ing)?|water[\s-]?proof|water[\s-]?resistant|water[\s-]?repellent|thermal|insulated|breathable\s+mesh|anti[\s-]?microbial|odou?r[\s-]?resistant|compression)\b/i
 
 /** Strip capability-claim tokens from a backend string BEFORE the budget fill re-pads it, so a
  *  non-customizable listing's backend never carries the claim and the fill replaces the freed
