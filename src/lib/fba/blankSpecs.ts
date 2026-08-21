@@ -465,20 +465,25 @@ export async function resolveFamilyBlankForNet(
   opts: { parentAsin?: string | null; childAsin?: string | null; titles: (string | null | undefined)[] },
 ): Promise<FamilyBlankResolution> {
   try {
-    let rows: { sku?: string; product_type?: string; title?: string }[] = []
+    let rows: { sku?: string; title?: string }[] = []
+    // 2026-08-21 LIVE FINDING: this read selected a `product_type` column that listing_content has
+    // NEVER had — PostgREST rejected the select, the error was discarded, and the resolver read ZERO
+    // child rows for every family since 2026-08-08 (only the passed-in titles ever matched; the SKU
+    // half of "spec truth" was dead from birth). Select only real columns and never hide the error.
     // limit 500, not 50: dominance needs EVERY child (B0GR1K3TXF is 85 + 41 children × FBA/FBM twins).
     if (opts.parentAsin) {
-      const { data } = await db.from('listing_content').select('sku, product_type, title').eq('parent_asin', opts.parentAsin).limit(500)
+      const { data, error } = await db.from('listing_content').select('sku, title').eq('parent_asin', opts.parentAsin).limit(500)
+      if (error) console.error(`[blankSpecs] BLANK_RESOLVE_READ_FAILED parent=${opts.parentAsin}: ${error.message}`)
       if (Array.isArray(data)) rows = data
     }
     if (rows.length === 0 && opts.childAsin) {
-      const { data } = await db.from('listing_content').select('sku, product_type, title').eq('asin', opts.childAsin).limit(500)
+      const { data, error } = await db.from('listing_content').select('sku, title').eq('asin', opts.childAsin).limit(500)
+      if (error) console.error(`[blankSpecs] BLANK_RESOLVE_READ_FAILED asin=${opts.childAsin}: ${error.message}`)
       if (Array.isArray(data)) rows = data
     }
     const liveTitle = rows.find((r) => (r.title ?? '').trim())?.title ?? ''
-    const productType = rows.find((r) => (r.product_type ?? '').trim())?.product_type ?? ''
     const skuHay = rows.map((r) => r.sku).filter(Boolean).join(' ')
-    const hay = [...opts.titles, liveTitle, productType, skuHay].filter(Boolean).join(' ')
+    const hay = [...opts.titles, liveTitle, skuHay].filter(Boolean).join(' ')
     const [catalog, override] = await Promise.all([loadBlankSpecRows(), loadBlankFamilyOverride(opts.parentAsin)])
     const res = resolveFamilyBlank(catalog, rows, override, hay)
     console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'net', parent: opts.parentAsin ?? null, source: res.source, styleCode: res.dominant?.styleCode ?? null, garmentFamily: res.garmentFamily, mixed: res.mixed, byStyle: res.byStyle, children: rows.length }))
