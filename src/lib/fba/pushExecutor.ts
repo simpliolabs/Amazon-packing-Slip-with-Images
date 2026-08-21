@@ -72,7 +72,7 @@ import {
 // each candidate sub-field only emits variants when the pushed value coerces into ITS
 // vocabulary — so an index cached under one value could point at a DIFFERENT form for another.
 const _detailFormCache = new Map<string, string>()
-import { getProductType, tryGetProductType } from '@/lib/amazon/productType'
+import { getProductType, tryGetProductType, tryGetFamilyProductType } from '@/lib/amazon/productType'
 
 // ── Cancellation (streaming pushes) ──────────────────────────────────────────
 // PO: "NO way to cancel when it starts." The client sends a cancel_token with the push
@@ -768,17 +768,24 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
   // "not valid for this product type (PRODUCT)" message blaming the recommendation.
   // The enum coercion/shape below stay best-effort (VALIDATION_PREVIEW backstops them).
   try {
-    const { data: skuRows } = await supabase
+    // Up to 8 candidate SKUs, not the first arbitrary row (2026-08-21, B0FKFHSCS9: one dead SKU in
+    // position 1 failed the whole family as a "transient hiccup"). Any error is logged, never hidden.
+    const { data: skuRows, error: skuErr } = await supabase
       .from('listing_content')
       .select('sku')
       .eq('parent_asin', parentAsin)
-      .limit(1)
-    const sku = (skuRows as { sku?: string }[] | null)?.[0]?.sku
-    if (sku) {
+      .order('sku', { ascending: true })
+      .limit(8)
+    if (skuErr) console.error(`[push-content] productType probe: listing_content read failed for ${parentAsin}: ${skuErr.message}`)
+    const candidateSkus = ((skuRows as { sku?: string }[] | null) ?? []).map((r) => r.sku ?? '').filter(Boolean)
+    if (candidateSkus.length) {
       hadSku = true
       const token = await getAccessToken()
       const sellerId = await getSellerId()
-      resolvedPt = await tryGetProductType(sellerId, token, sku)
+      const probe = await tryGetFamilyProductType(sellerId, token, candidateSkus)
+      resolvedPt = probe.productType
+      if (!resolvedPt) console.warn(`[push-content] productType probe: NO SKU answered for ${parentAsin} — tried ${probe.tried.join(', ')}`)
+      else if (probe.tried.length > 1) console.log(`[push-content] productType probe: ${probe.hit} answered for ${parentAsin} after ${probe.tried.length - 1} dead SKU(s)`)
       if (resolvedPt) {
         const productType = resolvedPt
         const ptOpts = { token, sellerId, marketplaceId: MARKETPLACE_ID, endpoint: ENDPOINT }
@@ -820,7 +827,7 @@ export async function loadDetailContext(parentAsin: string, detailField: string,
     console.warn('[push-content] detail context prep failed:', err)
   }
   if (hadSku && !resolvedPt) {
-    return { ctx: null, error: `Amazon didn't return this listing's product type just now (usually a transient hiccup right after a deploy). Nothing was pushed — try again in a minute.` }
+    return { ctx: null, error: `Amazon returned no product type for any of this family's first SKUs — they may have no live listing. Nothing was pushed. Verify the family's SKUs on Amazon (Listing Issues → Missing Offer) and try again.` }
   }
 
   return { ctx: { detailField, attribute, recommendedValue, acceptedValues, normalizedFrom, enumInvalid, valueShape, productType: resolvedPt }, error: null }
@@ -3544,9 +3551,9 @@ export async function executePush(params: PushParams, emit: PushEmit): Promise<v
           // STRICT type from the context (resolved once, never the 'PRODUCT' fallback) — the
           // schema check, the coerced value, the value shape, and these patches must all agree.
           let productType = ctx.productType ?? null
-          if (!productType) productType = await tryGetProductType(sellerId, token, diff[0].sku)
+          if (!productType) productType = (await tryGetFamilyProductType(sellerId, token, diff.slice(0, 8).map((d) => d.sku))).productType
           if (!productType) {
-            emit({ type: 'error', error: `Amazon didn't return this listing's product type just now (usually a transient hiccup right after a deploy). Nothing was pushed — try again in a minute.` })
+            emit({ type: 'error', error: `Amazon returned no product type for any of this family's first SKUs — they may have no live listing. Nothing was pushed. Verify the family's SKUs on Amazon (Listing Issues → Missing Offer) and try again.` })
             return
           }
           // GUARD (PO live bug): the attribute must EXIST in THIS product type's schema. Apparel attrs

@@ -49,3 +49,25 @@ export async function getProductType(sellerId: string, token: string, sku: strin
   // tryGetProductType there and refuse to push on null.
   return (await tryGetProductType(sellerId, token, sku)) ?? 'PRODUCT'
 }
+
+/**
+ * Family-wide productType probe (2026-08-21, B0FKFHSCS9): the details push used to ask Amazon for
+ * the productType of the FIRST listing_content SKU of the parent — an arbitrary row — and failed the
+ * WHOLE family when that one SKU had no live listing, blaming "a transient hiccup after a deploy".
+ * One dead row in position 1 made a family unpushable. Try the candidates in order until one answers;
+ * say exactly which SKUs answered nothing. Never the 'PRODUCT' fallback.
+ */
+export async function tryGetFamilyProductType(
+  sellerId: string,
+  token: string,
+  skus: readonly string[],
+): Promise<{ productType: string | null; tried: string[]; hit: string | null }> {
+  const tried: string[] = []
+  for (const sku of skus) {
+    if (!sku || /^amzn\./i.test(sku)) continue
+    tried.push(sku)
+    const pt = await tryGetProductType(sellerId, token, sku)
+    if (pt) return { productType: pt, tried, hit: sku }
+  }
+  return { productType: null, tried, hit: null }
+}
