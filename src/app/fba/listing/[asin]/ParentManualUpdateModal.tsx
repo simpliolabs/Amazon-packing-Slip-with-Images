@@ -21,12 +21,16 @@
  */
 
 import { useState } from 'react'
+import { parentVariationsUrl, inventorySearchUrl } from '@/lib/fba/sellerCentralUrls'
 
 interface Props {
   parentAsin: string
-  parentSku?: string
-  productType?: string
+  parentSku?: string | null
+  productType?: string | null
   containers: string[]
+  /** FALSE = we never loaded the parent's stored copy (no listing_content row for the hub). The
+   *  stored column then says so instead of rendering "(none)", which read as "Amazon has nothing". */
+  storedAvailable: boolean
   storedTitle: string
   storedBullets: string[]
   storedDescription: string
@@ -54,11 +58,19 @@ export function ParentManualUpdateModal(props: Props) {
   const [reVerifying, setReVerifying] = useState(false)
   // Deep-link to the Variations tab (not the generic edit page) — that's where the operator actually
   // completes the composite the popup exists for. PO verified 2026-07-21 that /abis/listing/edit
-  // opens a stub without the composite fields. Requires parentSku + productType; if either is absent,
-  // fall back to the generic edit page (Amazon will show the SKU picker).
-  const sellerCentralUrl = props.parentSku && props.productType
-    ? `https://sellercentral.amazon.com/abis/listing/edit/variations?sku=${encodeURIComponent(props.parentSku)}&asin=${props.parentAsin}&productType=${encodeURIComponent(props.productType)}&marketplaceID=ATVPDKIKX0DER&isVariationParent=true&ref_=myp_1x1#variations`
-    : `https://sellercentral.amazon.com/abis/listing/edit?asin=${props.parentAsin}&ref_=xx_addlisting_dnav_xx`
+  // opens a stub without the composite fields.
+  //
+  // 2026-08-21 (PO, live on B0DQ5YZH38: "the product LINK doesn't work"): the url is built by ONE
+  // shared module now (sellerCentralUrls.ts). The parent SKU arrives from the heal:composite payload
+  // when there is one and from /family-skus otherwise — the old code required BOTH props and every
+  // listing without an active heal task got the ASIN-only stub. If the SKU is genuinely unresolvable
+  // the builder hands over the inventory search, which always resolves; it NEVER emits the stub.
+  const sellerCentralUrl = parentVariationsUrl({
+    sku: props.parentSku,
+    asin: props.parentAsin,
+    productType: props.productType,
+  })
+  const isFallbackSearch = sellerCentralUrl === inventorySearchUrl(props.parentAsin)
   const primaryContainer = props.containers[0] ?? 'shirt_size'
   const bulletsAsText = (arr: string[]): string => arr.map((b, i) => `${i + 1}. ${b}`).join('\n')
 
@@ -98,15 +110,27 @@ export function ParentManualUpdateModal(props: Props) {
           </button>
         </div>
 
-        <a
-          href={sellerCentralUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
-        >
-          Open Parent in Seller Central
-          <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" /><path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" /></svg>
-        </a>
+        <div className="mt-4">
+          <a
+            href={sellerCentralUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
+          >
+            {isFallbackSearch ? 'Find Parent in Seller Central Inventory' : 'Open Parent in Seller Central'}
+            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" /><path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" /></svg>
+          </a>
+          {isFallbackSearch ? (
+            <p className="mt-2 text-xs text-amber-700">
+              We couldn&apos;t resolve this hub&apos;s seller SKU, so this opens your inventory filtered to{' '}
+              <span className="font-mono">{props.parentAsin}</span> — click the parent SKU there to reach its Variations tab.
+            </p>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500">
+              Opens the Variations tab for parent SKU <span className="font-mono">{props.parentSku}</span>.
+            </p>
+          )}
+        </div>
 
         <div className="mt-5 border-t border-slate-200 pt-4">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -129,7 +153,15 @@ export function ParentManualUpdateModal(props: Props) {
                 <div className="grid grid-cols-2 gap-3 text-xs">
                   <div>
                     <div className="mb-1 text-slate-500">Stored on Amazon</div>
-                    <div className="max-h-24 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 font-mono text-[11px] text-slate-500">{r.stored?.trim() || '(none)'}</div>
+                    {/* HONESTY (PO 2026-08-21): when we never loaded the hub's stored copy this used to
+                        render "(none)", which reads as "Amazon has nothing" — a claim we can't make.
+                        Say "not loaded" instead and keep "(none)" for a row we DID load and that is
+                        genuinely empty. */}
+                    <div className={`max-h-24 overflow-auto whitespace-pre-wrap rounded border p-2 font-mono text-[11px] ${props.storedAvailable ? 'border-slate-200 bg-white text-slate-500' : 'border-dashed border-slate-300 bg-slate-50 italic text-slate-400'}`}>
+                      {props.storedAvailable
+                        ? (r.stored?.trim() || '(none)')
+                        : 'not loaded — check the live value in Seller Central'}
+                    </div>
                   </div>
                   <div>
                     <div className="mb-1 text-emerald-700">Recommended (copy this)</div>

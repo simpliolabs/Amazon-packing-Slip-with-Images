@@ -18,6 +18,7 @@ import { ScoreSparkline, type SparklinePoint } from '@/components/fba/ScoreSpark
 import { presentOutcome, MEASURE_TARGET, type OutcomeChip } from '@/lib/fba/outcomePresentation'
 import type { VariantDeathReport } from '@/lib/fba/variantDeathAlarm' // ONE shared derivation — server attaches, this page only renders
 import { priorityDisplay, priorityTooltip } from '@/lib/fba/priorityDisplay'  // market-first Priority cell (PO 2026-08-08)
+import { parentVariationsUrl, skuEditUrl, resolveParentSellerCentralTarget } from '@/lib/fba/sellerCentralUrls' // ONE seam for every Seller Central link (PO 2026-08-21)
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -525,7 +526,9 @@ export default function ListingDetailPage() {
   // parentManualRequired:true AND the seller hasn't dismissed the most recent heal:manual flag.
   // Dismiss key = heal:manual row.id (server-provided, stable) → a NEW heal:manual row (different id)
   // re-fires the popup, but re-pushing while the SAME flag stands stays quiet after one dismiss.
-  const [showParentManual, setShowParentManual] = useState<{ containers: string[]; parentSku?: string; productType?: string } | null>(null)
+  // Only the container list is popup-local state now — the parent SKU/productType the deep link needs
+  // are DERIVED at render from live truth (heal payload → /family-skus), never frozen at popup-open.
+  const [showParentManual, setShowParentManual] = useState<{ containers: string[] } | null>(null)
   // ── "Verify on Amazon" — fresh getListingsItem per SKU after a push, so the seller can
   // tell whether Amazon APPLIED the patch (vs just ACCEPTED it). Submissions can sit in
   // Amazon's queue for 15min–6hr; "I pushed an hour ago and nothing changed" needs an answer.
@@ -589,7 +592,10 @@ export default function ListingDetailPage() {
   // it alone hid the FBM twins (the seller saw "3 children" but the push hit 6).
   // /family-skus discovers them live so the displayed list matches the push reality.
   interface FamilySkuRow { sku: string; asin: string; fulfillment: 'FBA' | 'FBM' | 'unknown'; base_name: string }
-  interface FamilySkus { parent: { sku: string; asin: string } | null; children: FamilySkuRow[]; count: number }
+  // `product_type`: the family's Amazon productType, probed by the route with the SAME
+  // tryGetFamilyProductType the push executor uses. Feeds the Seller Central deep links; null when
+  // Amazon answered nothing (the url builder then just omits the param).
+  interface FamilySkus { parent: { sku: string; asin: string } | null; product_type?: string | null; children: FamilySkuRow[]; count: number }
   const [familySkus, setFamilySkus] = useState<FamilySkus | null>(null)
   const [showPushModal, setShowPushModal] = useState(false)
   const [fetchedImage, setFetchedImage] = useState<string | null>(null)
@@ -1194,15 +1200,37 @@ export default function ListingDetailPage() {
     const dismissKey = `fba.parentManualPopup.dismissed.${asin}.${manualTask.id ?? 'no-id'}`
     if (typeof window !== 'undefined' && window.localStorage.getItem(dismissKey)) return
     if (showParentManual) return   // already open — don't re-mount
-    // heal:manual payload has empty parentSku/productType — pull them from the sibling heal:composite
-    // task (its payload has valid values). Falls back to modal generic-edit URL if neither is present.
-    const compTask = verifyQueue.tasks.find((t) => t.kind === 'heal' && t.field === 'heal:composite' && t.heal_payload?.parentSku)
-    setShowParentManual({
-      containers,
-      parentSku: compTask?.heal_payload?.parentSku,
-      productType: compTask?.heal_payload?.productType,
-    })
+    setShowParentManual({ containers })
   }, [asin, verifyQueue.tasks, pushResults?.parentManualRequired, pushResults?.parentManualContainers, showParentManual])
+
+  // ── Seller Central deep-link target for THIS parent (PO 2026-08-21, B0DQ5YZH38: "the product LINK
+  // to open in Amazon doesn't work"). DEAD WIRE CURED: the popup used to take parentSku/productType
+  // ONLY from a sibling heal:composite verify task — a listing with zero heal tasks (the normal case)
+  // handed the modal `undefined` for both, and it degraded to the ASIN-only `abis/listing/edit?asin=`
+  // stub that opens an editor without the composite fields. The parent SKU is fully resolvable from
+  // /family-skus (which the page already fetches), so we resolve here, ONCE, for every consumer:
+  // heal payload FIRST (Amazon named that SKU) → family-skus → no SKU (builder = inventory search).
+  const parentScTarget = useMemo(() => {
+    const compTask = verifyQueue.tasks.find((t) => t.kind === 'heal' && t.field === 'heal:composite' && t.heal_payload?.parentSku)
+    return resolveParentSellerCentralTarget({
+      parentAsin: asin,
+      healParentSku: compTask?.heal_payload?.parentSku,
+      healProductType: compTask?.heal_payload?.productType,
+      familyParentSku: familySkus?.parent?.sku,
+      familyProductType: familySkus?.product_type,
+    })
+  }, [asin, verifyQueue.tasks, familySkus])
+
+  // Header "Edit in Seller Central" — SAME module, same rule (it carried the identical ASIN-only stub).
+  // A variation family opens on the parent hub's Variations tab; a standalone opens its own SKU's
+  // editor. With no SKU resolvable the builder returns the inventory search, never the stub.
+  const listingScUrl = useMemo(() => {
+    if (parentScTarget.sku) return parentVariationsUrl(parentScTarget)
+    const ownSku = familySkus?.children.find((c) => c.asin === asin)?.sku
+      ?? score?.children.find((c) => c.asin === asin)?.sku
+      ?? null
+    return skuEditUrl({ sku: ownSku, asin, productType: familySkus?.product_type })
+  }, [parentScTarget, familySkus, score?.children, asin])
 
   const refreshKwData = useCallback(async (opts?: { triggerSync?: boolean }) => {
     if (!asin) return
@@ -2689,7 +2717,7 @@ export default function ListingDetailPage() {
 
         {/* Primary actions */}
         <div className="flex flex-wrap items-center gap-2 mt-5 pt-4 border-t border-slate-100">
-          <a href={`https://sellercentral.amazon.com/abis/listing/edit?asin=${asin}&ref_=xx_addlisting_dnav_xx`}
+          <a href={listingScUrl}
             target="_blank" rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg px-3 py-2 transition-colors cursor-pointer">
             <Icon.External className="w-3.5 h-3.5" /> Edit in Seller Central
@@ -6024,19 +6052,26 @@ export default function ListingDetailPage() {
           </div>
         </div>
       )}
-      {showParentManual && aiRecs && (
+      {showParentManual && aiRecs && (() => {
+        // Stored parent copy: listing_content carries a row keyed on the HUB's own asin when the hub
+        // was ever synced (the optimizer's child join is `parent_asin.eq.X,asin.eq.X`). Use it when
+        // it's there. When it isn't, we say "not loaded" — the old hardcoded "" rendered "(none)",
+        // which claimed Amazon holds nothing. We can't make that claim from a row we never read.
+        const hub = score?.children.find((c) => c.asin === asin) ?? null
+        const hubBullets = hub
+          ? [hub.bullet_1, hub.bullet_2, hub.bullet_3, hub.bullet_4, hub.bullet_5].filter((b): b is string => !!b && b.trim() !== '')
+          : []
+        return (
         <ParentManualUpdateModal
           parentAsin={asin}
-          parentSku={showParentManual.parentSku}
-          productType={showParentManual.productType}
+          parentSku={parentScTarget.sku}
+          productType={parentScTarget.productType}
           containers={showParentManual.containers}
-          // Stored parent values are surfaced from score.children when available (Karpathy simple: no
-          // extra probe just for a nice-to-have side-by-side). The RECOMMENDED side is the one that
-          // matters — that's what the operator copy-pastes into Seller Central.
-          storedTitle=""
-          storedBullets={[]}
-          storedDescription=""
-          storedKeywords=""
+          storedAvailable={!!hub}
+          storedTitle={hub?.title ?? ''}
+          storedBullets={hubBullets}
+          storedDescription={hub?.description ?? ''}
+          storedKeywords={hub?.backend_keywords ?? ''}
           recommendedTitle={aiRecs.recommended_title ?? ''}
           recommendedBullets={aiRecs.recommended_bullets ?? []}
           recommendedDescription={aiRecs.recommended_description ?? ''}
@@ -6059,7 +6094,8 @@ export default function ListingDetailPage() {
             } catch { /* silent — the queue poll will catch up */ }
           }}
         />
-      )}
+        )
+      })()}
     </div>
     </div>
   )

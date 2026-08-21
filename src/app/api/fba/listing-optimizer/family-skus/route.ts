@@ -15,6 +15,11 @@
  * The UI uses this so the "Titles to push" / "Bullets to push" / etc. cards show
  * the seller exactly what the push will hit — matching the modal's accepted-count.
  *
+ * It also carries `product_type` (2026-08-21): the listing page needs the parent SKU + productType
+ * to build a WORKING Seller Central variations deep link (src/lib/fba/sellerCentralUrls.ts). Those
+ * two used to come only from a heal-task payload, so any listing without an active heal task got an
+ * ASIN-only stub link. This route already resolves the parent SKU — the productType rides along.
+ *
  * Read-only. Used for display, not as the source of truth for the push (the push
  * still does its own discovery so we don't depend on a cache window).
  *
@@ -26,6 +31,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
+import { tryGetFamilyProductType } from '@/lib/amazon/productType'
 import { resolveFamilyRoster, isSystemSku, type FamilySkuRef } from '@/lib/fba/familyRoster'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -106,9 +112,25 @@ export async function GET(req: NextRequest) {
     // 3) Variation parent SKU (non-buyable hub).
     const parentSku = await findParentSku(sellerId, token, parentAsin)
 
+    // 4) productType for the family (2026-08-21). The listing page needs it to build the Seller
+    //    Central VARIATIONS deep link (sellerCentralUrls.ts) — without it the link used to degrade
+    //    to an ASIN-only stub that opens an editor with no composite fields. REUSED probe: the same
+    //    tryGetFamilyProductType the details push executor runs (tries candidates in order, never
+    //    returns the 'PRODUCT' fallback) — no second probe, so the link and the push can't disagree.
+    //    Parent hub SKU first (its own type is the one the variations editor loads), children after.
+    //    FAIL-OPEN: null when Amazon answers nothing — the url builder just omits the param.
+    //    CAPPED at 4 candidates: this route runs on every listing-page load and a family can hold
+    //    113 SKUs; an uncapped probe would walk all of them (2 attempts + a 400ms backoff each) on
+    //    every load of a family Amazon has nothing to say about. Failed probes are not cached, so
+    //    the cap is what bounds that cost. 4 is well past the "one dead row in position 1" case the
+    //    family probe exists for.
+    const ptCandidates = [...(parentSku ? [parentSku] : []), ...children.map((c) => c.sku)].slice(0, 4)
+    const { productType } = await tryGetFamilyProductType(sellerId, token, ptCandidates)
+
     return NextResponse.json({
       parent_asin: parentAsin,
       parent: parentSku ? { sku: parentSku, asin: parentAsin } : null,
+      product_type: productType,
       children,
       count: children.length + (parentSku ? 1 : 0),
     })
