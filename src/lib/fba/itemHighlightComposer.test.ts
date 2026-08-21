@@ -317,7 +317,7 @@ describe('ihTruthVerdict — capability claims (no BlankSpec states a capability
 describe('ihTruthVerdict — audience truth (derived from garmentFamily, never a title)', () => {
   it('B0DP5H8QBT (kids_tee 64000B): women / plus-size / men / ladies / adult phrases are rejected', () => {
     expect(ihAudienceOf('kids_tee')).toBe('kids')
-    for (const p of ['motivational shirts women', 't shirts for women', 'plus size tees', 'plus-size tops', 'mens graphic tee', 'ladies tops', 'adult humor shirt', 'shirts for woman']) {
+    for (const p of ['motivational shirts women', 't shirts for women', 'plus size tees', 'plus-size tops', 'mens graphic tee', 'ladies tops', 'adult humor shirt', 'shirts for woman', 'womans shirts', 'mans graphic tee', 'lady tops']) {
       expect(ihTruthVerdict(p, TRUTH_KIDS)).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
     }
     expect(ihTruthVerdict('kids dinosaur shirt', TRUTH_KIDS)).toEqual({ ok: true })
