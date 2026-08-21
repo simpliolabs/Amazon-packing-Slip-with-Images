@@ -561,6 +561,41 @@ export function applyBlankBrandNetToDetails(
   return { details: out, changed: true }
 }
 
+/**
+ * PER-DESIGN twin of applyBlankBrandNetToDetails (PO 2026-08-21): each design's stored Item
+ * Highlight is re-netted against the titles ITS SKUs ship (the design's per_child_titles rows, ASIN
+ * twins included) — never the family broadcast title, never another design's. Same insert-only,
+ * same caps, same floor-abort. Pure: returns the SAME array reference with changed:false on no-op.
+ * A held design ('' line) is untouched — the net never invents a line.
+ */
+export function applyBlankBrandNetPerDesign<T extends { sku: string; asin?: string | null; item_highlight: string }>(
+  entries: T[] | null | undefined,
+  perChildTitles: { sku: string; asin?: string | null; title: string }[] | null | undefined,
+  blank: BlankSpecRow | null,
+): { entries: T[]; changed: boolean } {
+  const arr = Array.isArray(entries) ? entries : []
+  if (arr.length === 0 || !blank) return { entries: arr, changed: false }
+  const titlesBySku = new Map<string, string>()
+  const titlesByAsin = new Map<string, string>()
+  for (const t of Array.isArray(perChildTitles) ? perChildTitles : []) {
+    if (t.sku && t.title) titlesBySku.set(t.sku, t.title)
+    if (t.asin && t.title && !titlesByAsin.has(t.asin)) titlesByAsin.set(t.asin, t.title)
+  }
+  let changed = false
+  const out = arr.map((e) => {
+    const current = (e.item_highlight || '').trim()
+    if (!current) return e
+    const title = titlesBySku.get(e.sku) ?? (e.asin ? titlesByAsin.get(e.asin) : undefined)
+    if (!title) return e   // no shipped title known for this SKU → nothing to net against
+    const netted = capItemHighlightRepeats(ensureBlankBrandInHighlights(current, [title], blank))
+    if (netted === current) return e
+    changed = true
+    console.log(JSON.stringify({ tag: 'BLANK_BRAND_NET', decision: 'per-design-rewrite', sku: e.sku, from: current, to: netted }))
+    return { ...e, item_highlight: netted }
+  })
+  return { entries: changed ? out : arr, changed }
+}
+
 // ─── FABRIC-TRUTH TERMINAL NET (task #41 / GAP 2, 2026-08-19) ────────────────────────────────────
 // The craft review caught "midweight" ×3 shipped for a Gildan 64000 (lightweight 4.5 oz) — the
 // LLM contradicting the system's own spec catalog. The title brief already carries a GARMENT TRUTH

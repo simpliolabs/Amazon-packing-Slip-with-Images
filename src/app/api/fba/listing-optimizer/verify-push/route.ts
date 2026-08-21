@@ -37,7 +37,7 @@ import { spApiReadBucket } from '@/lib/fba/spApiRateLimiter'
 // attributes) — details is a separate code path in push-content and here.
 type VerifyField = PushField | 'details'
 import {
-  resolveDetailAttribute, isPushableDetail, currentDetailValue, normalizeFieldName, detailValueToString,
+  resolveDetailAttribute, isPushableDetail, currentDetailValue, normalizeFieldName, detailValueToString, isItemHighlightsField,
 } from '@/lib/fba/productDetailAttrs'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
@@ -115,7 +115,9 @@ interface RecRow {
    *  resolves the SKU-specific value (else broadcast), so the expected value matches what the push sends. */
   per_child_bullets?: { sku: string; asin: string; bullets: string[] }[] | null
   per_child_descriptions?: { sku: string; asin: string; description: string }[] | null
-  product_details_improvements?: { field_name?: string; recommended_value?: string; sp_api_key?: string; pushable?: boolean }[] | null
+  /** Per-design Item Highlights (migration 060): the expected value for an IH SKU is ITS design's line. */
+  per_child_item_highlights?: { sku: string; asin: string; item_highlight: string }[] | null
+  product_details_improvements?: { field_name?: string; recommended_value?: string; sp_api_key?: string; pushable?: boolean; per_design?: boolean }[] | null
 }
 
 /** Compute the value WE tried to push for this SKU (mirrors push-content's resolution). */
@@ -127,6 +129,15 @@ function expectedFor(
     const entry = (rec.product_details_improvements ?? []).find(
       (d) => normalizeFieldName(d.field_name || '') === normalizeFieldName(detailFriendlyName || ''),
     )
+    // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): the SKU's own design line (ASIN twin fallback —
+    // the same resolution the push applies); a held design / the hub expects nothing.
+    if (entry && isItemHighlightsField(entry.field_name ?? '', entry.sp_api_key) && (entry.per_design === true || (rec.per_child_item_highlights ?? []).some((e) => (e.item_highlight || '').trim()))) {
+      if (isParent) return ''
+      const rows = rec.per_child_item_highlights ?? []
+      const twin = (x: string) => x.replace(/-(?:FBA|FBM)$/i, '')
+      const own = rows.find((e) => e.sku === sku) ?? rows.find((e) => twin(e.sku) === twin(sku))
+      return (own?.item_highlight ?? '').trim()
+    }
     // Historical rows can carry non-string values (LLM array/number) — normalize, never throw.
     return detailValueToString(entry?.recommended_value).trim()
   }
@@ -175,6 +186,15 @@ export async function GET(req: NextRequest) {
       .eq('parent_asin', parentAsin)
       .single()
     const rec = (recRow ?? {}) as RecRow
+    // per_child_item_highlights (migration 060) — separate best-effort read so a pre-060 DB never
+    // breaks verify for every other field (missing-column tolerance, same as the push seam).
+    if (field === 'details') {
+      try {
+        const { data: ihRow } = await supabase.from('listing_seo_recommendations').select('per_child_item_highlights').eq('parent_asin', parentAsin).maybeSingle()
+        const raw = (ihRow as { per_child_item_highlights?: unknown } | null)?.per_child_item_highlights
+        if (Array.isArray(raw)) rec.per_child_item_highlights = raw as RecRow['per_child_item_highlights']
+      } catch { /* column absent — broadcast expectation stands */ }
+    }
 
     // Resolve the SP-API attribute key for details (so extractLive knows where to look).
     // Prefer the key the regen stored on the recommendation (schema-resolved, works for ANY

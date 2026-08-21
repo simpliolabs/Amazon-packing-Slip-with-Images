@@ -44,7 +44,7 @@ import { maybeEnqueueContentReconcile, jsonChanged, perChildChanged, resolveTitl
 // Blank-brand waterfall re-net (adversarial MEDIUMs, 2026-08-08): a title-only partial regen and
 // the persist-time manual-lock guard both change the SHIPPED title after the stored/fresh IH was
 // netted — both sites re-run the ONE shared net against the title that actually ships.
-import { resolveBlankRowForNet, applyBlankBrandNetToDetails } from '@/lib/fba/blankSpecs'
+import { resolveBlankRowForNet, applyBlankBrandNetToDetails, applyBlankBrandNetPerDesign } from '@/lib/fba/blankSpecs'
 // STICKY DETAILS (PO 2026-08-08: "Collarless" churned over the accepted-pushed "Round Collar").
 // ONE pure gate on the full path (after enum coercion, before the live-score gap count) — an
 // accepted details:* push is a standing approval; only blank_specs provenance
@@ -52,6 +52,7 @@ import { resolveBlankRowForNet, applyBlankBrandNetToDetails } from '@/lib/fba/bl
 // re-propose over it. See stickyDetails.ts for the dual-write-path argument (the #79 partial
 // never rebuilds details).
 import { applyStickyDetails, collectAcceptedDetailPushes, type AcceptedPushRow } from '@/lib/fba/stickyDetails'
+import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 
 function getAdminSupabase() {
   return createClient(
@@ -219,6 +220,8 @@ export interface AiRecommendations {
   per_child_titles?: { sku: string; asin: string; title: string }[]
   per_child_bullets?: { sku: string; asin: string; bullets: string[] }[]
   per_child_descriptions?: { sku: string; asin: string; description: string }[]
+  /** Per-design Item Highlights (migration 060, PO 2026-08-21) — multi-design families only. */
+  per_child_item_highlights?: PerChildItemHighlight[]
   recommended_description: string
   variant_corrections: VariantCorrection[]
   cannibalization_warnings: CannibalizationWarning[]
@@ -1011,6 +1014,16 @@ export async function POST(req: NextRequest) {
                   upd.product_details_improvements = netted.details
                   console.log(`[ai-recommendations] title partial for ${parent_asin}: blank-brand net updated the stored Item Highlight to match the new title`)
                 }
+                // PER-DESIGN twin (PO 2026-08-21): re-net each design's stored line against the
+                // per-child titles that will now ship. Separate best-effort read (migration 060).
+                try {
+                  const { data: ihRow } = await supabase.from('listing_seo_recommendations').select('per_child_item_highlights').eq('parent_asin', parent_asin).maybeSingle()
+                  const storedPd = (ihRow as { per_child_item_highlights?: unknown } | null)?.per_child_item_highlights
+                  if (Array.isArray(storedPd) && storedPd.length) {
+                    const nettedPd = applyBlankBrandNetPerDesign(storedPd as PerChildItemHighlight[], (newPct ?? []) as { sku: string; asin?: string | null; title: string }[], blankRow)
+                    if (nettedPd.changed) upd.per_child_item_highlights = nettedPd.entries
+                  }
+                } catch { /* column absent — migration 060 */ }
               } catch (e) {
                 console.warn('[ai-recommendations] title-partial IH re-net failed (stored IH kept):', e instanceof Error ? e.message : e)
               }
@@ -1066,13 +1079,14 @@ export async function POST(req: NextRequest) {
               .from('listing_seo_recommendations')
               .update(upd as never)
               .eq('parent_asin', parent_asin)
-            if (updErr && ('per_child_bullets' in upd || 'per_child_descriptions' in upd)) {
-              // Missing-column degradation (review; mirrors the full path): a pre-migration-033 DB
+            if (updErr && ('per_child_bullets' in upd || 'per_child_descriptions' in upd || 'per_child_item_highlights' in upd)) {
+              // Missing-column degradation (review; mirrors the full path): a pre-migration-033/060 DB
               // must not lose the whole regenerated section over the per-design columns — retry
               // without them and log loudly (the broadcast section + keyword_plan still save).
               console.error(`[ai-recommendations] partial ${sec} save failed (${updErr.message}) — retrying without per-design columns`)
               delete (upd as Record<string, unknown>).per_child_bullets
               delete (upd as Record<string, unknown>).per_child_descriptions
+              delete (upd as Record<string, unknown>).per_child_item_highlights
               ;({ error: updErr } = await supabase
                 .from('listing_seo_recommendations')
                 .update(upd as never)
@@ -1585,6 +1599,7 @@ export async function POST(req: NextRequest) {
             per_child_titles: result.per_child_titles,
             per_child_bullets: result.per_child_bullets,
             per_child_descriptions: result.per_child_descriptions,
+            per_child_item_highlights: result.per_child_item_highlights,
             recommended_description: result.recommended_description,
             variant_corrections: result.variant_corrections,
             cannibalization_warnings: result.cannibalization_warnings,
@@ -1790,6 +1805,13 @@ export async function POST(req: NextRequest) {
               rec.product_details_improvements = netted.details as unknown as typeof rec.product_details_improvements
               console.log(`[ai-recommendations] persist-boundary IH re-net for ${parent_asin}: blank-brand net re-keyed the Item Highlight to the final shipping titles${stickyIhReverted ? ' (sticky-reverted IH)' : ''}`)
             }
+            // PER-DESIGN twin (PO 2026-08-21): each design's line against the titles ITS SKUs ship
+            // (the lock-preserve above may have restored the PRIOR per_child_titles over this run's).
+            const nettedPd = applyBlankBrandNetPerDesign(rec.per_child_item_highlights, rec.per_child_titles, blankRow)
+            if (nettedPd.changed) {
+              rec.per_child_item_highlights = nettedPd.entries
+              console.log(`[ai-recommendations] persist-boundary per-design IH re-net for ${parent_asin}`)
+            }
           } catch (e) {
             console.warn('[ai-recommendations] persist-boundary IH re-net failed (IH ships as generated/kept):', e instanceof Error ? e.message : e)
           }
@@ -1832,6 +1854,8 @@ export async function POST(req: NextRequest) {
             // Per-design bullets/description (migration 033) — JSONB, only present for multi-design POD families.
             per_child_bullets: rec.per_child_bullets ?? null,
             per_child_descriptions: rec.per_child_descriptions ?? null,
+            // Per-design Item Highlights (migration 060) — JSONB; null for single-design (broadcast row).
+            per_child_item_highlights: rec.per_child_item_highlights ?? null,
             keyword_plan: result.keywordPlan ?? null,   // #92/#93 — read by the scorer (sync-time parity)
           }
 
@@ -1897,6 +1921,12 @@ export async function POST(req: NextRequest) {
                 .update({ per_child_bullets: rec.per_child_bullets ?? null, per_child_descriptions: rec.per_child_descriptions ?? null })
                 .eq('parent_asin', rec.parent_asin)
             } catch { /* per_child_bullets/descriptions column absent — handled by migration 033 */ }
+            try {
+              const { error: ihErr } = await supabase.from('listing_seo_recommendations')
+                .update({ per_child_item_highlights: rec.per_child_item_highlights ?? null } as never)
+                .eq('parent_asin', rec.parent_asin)
+              if (ihErr) console.error(`[AI Recs] per_child_item_highlights persist failed for ${rec.parent_asin} (run migration 060): ${ihErr.message}`)
+            } catch { /* per_child_item_highlights column absent — handled by migration 060 */ }
           }
 
           // CONTENT-RECONCILE (PO 2026-08-08, SELLER_PROFILE §10): changed + previously-shipped +
@@ -2039,6 +2069,9 @@ export async function GET(req: NextRequest) {
     Array.isArray(data.per_child_bullets) ? data.per_child_bullets : []
   const per_child_descriptions: { sku: string; asin: string; description: string; designName?: string | null; designKey?: string | null }[] =
     Array.isArray(data.per_child_descriptions) ? data.per_child_descriptions : []
+  // per_child_item_highlights (migration 060) is JSONB. Tolerate missing column / null / non-arrays.
+  const per_child_item_highlights: PerChildItemHighlight[] =
+    Array.isArray((data as { per_child_item_highlights?: unknown }).per_child_item_highlights) ? ((data as { per_child_item_highlights: PerChildItemHighlight[] }).per_child_item_highlights) : []
 
   // product_details_improvements is a blind-persisted LLM parse: values can be arrays
   // (["Water Proof","Shock Proof"]) or numbers on rows written before the pipeline
@@ -2109,6 +2142,7 @@ export async function GET(req: NextRequest) {
   const per_child_titles_scrubbed = per_child_titles.map((c) => ({ ...c, title: scrubTrademarks(c.title || '') }))
   const per_child_bullets_scrubbed = per_child_bullets.map((c) => ({ ...c, bullets: scrubTrademarksArr(c.bullets || []) }))
   const per_child_descriptions_scrubbed = per_child_descriptions.map((c) => ({ ...c, description: scrubTrademarks(c.description || '') }))
+  const per_child_item_highlights_scrubbed = per_child_item_highlights.map((c) => ({ ...c, item_highlight: c.item_highlight ? capItemHighlightRepeats(scrubTrademarks(c.item_highlight)) : '' }))
 
   // SHIP-TRUTH DERIVATION (2026-07-09, approach A): the card verdict / current_status /
   // replacement_content are DERIVED from live truth on every serve — displayed content is the exact
@@ -2160,6 +2194,7 @@ export async function GET(req: NextRequest) {
       per_child_titles: per_child_titles_scrubbed,
       per_child_bullets: per_child_bullets_scrubbed,
       per_child_descriptions: per_child_descriptions_scrubbed,
+      per_child_item_highlights: per_child_item_highlights_scrubbed,
       // Deep-scrub the structured audit blobs too (PO-caught 2026-07-02: "france world cup tee" in an
       // action_plan copy block — the field-level scrubs above never reached these). Identifier keys
       // (sku/asin/element/...) are skipped inside scrubTrademarksDeep, so SKU codes like

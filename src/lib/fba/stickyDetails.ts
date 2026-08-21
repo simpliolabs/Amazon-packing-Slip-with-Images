@@ -102,6 +102,7 @@ type Row = Record<string, unknown> & {
   current_value?: unknown
   recommended_value?: unknown
   value_source?: string
+  per_design?: boolean
 }
 
 /** k:/f:-keyed lookup over a prior-row map — sp_api_key first, folded field name second
@@ -175,6 +176,15 @@ export function applyStickyDetails(opts: {
   const details = fresh.map((row) => {
     const fieldName = detailValueToString(row.field_name)
     const freshRec = detailValueToString(row.recommended_value).trim()
+    // PER-DESIGN ITEM HIGHLIGHT (PO 2026-08-21): on a multi-design family the IH row is a MARKER
+    // (recommended_value '' by construction; the lines live in per_child_item_highlights). An
+    // accepted push here is ONE design's line — the old broadcast lie, or the latest per-SKU write
+    // — and snapping it onto the marker would recreate exactly the design-specific broadcast the
+    // ruling forbids. The marker is never snapped, never carried a value.
+    if (row.per_design === true && isItemHighlightsField(fieldName, row.sp_api_key)) {
+      log({ tag: 'DETAIL_STICKY', decision: 'per-design-marker', field: fieldName })
+      return row
+    }
     const acc = lookupAccepted(row)
     if (acc) {
       const accepted = acc.value
