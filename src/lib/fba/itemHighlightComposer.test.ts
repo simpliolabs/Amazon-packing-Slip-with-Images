@@ -111,6 +111,23 @@ describe('composeItemHighlight — Architecture A under the 85% floor', () => {
   })
 })
 
+describe('brand at most once (PO 2026-08-21, B0GWFFK1W7 "repeating CC 2 times")', () => {
+  it('the allowed blank brand appears in at most ONE composed phrase', () => {
+    const pool = [
+      { keyword: 'comfort colors graphic tee', searchVolume: 900, themeFit: 3 },
+      { keyword: 'comfort colors shirts women', searchVolume: 800, themeFit: 3 },
+      { keyword: 'sarcastic club tshirt', searchVolume: 700, themeFit: 3 },
+      { keyword: 'funny sayings top', searchVolume: 600, themeFit: 3 },
+      { keyword: 'plus size graphic tees', searchVolume: 500, themeFit: 2 },
+      { keyword: 'novelty humor apparel', searchVolume: 400, themeFit: 2 },
+    ]
+    const out = composeItemHighlight(pool, ['THE CEO Do Not Care Tee Shirt | Shirt for Women'], OPTS)
+    expect(out).toBeTruthy()
+    const mentions = (out!.match(/comfort\s*colors/gi) ?? []).length
+    expect(mentions).toBeLessThanOrEqual(1)
+  })
+})
+
 describe('truth filters', () => {
   const DIRTY_POOL = [
     { keyword: 'rodeo outfit women', searchVolume: 400, themeFit: 3 },
