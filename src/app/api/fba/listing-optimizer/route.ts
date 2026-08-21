@@ -21,7 +21,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import { syncListingContent, ensureListingScored, syncSingleAsinContent, type SingleAsinSyncOutcome } from '@/lib/sync/syncListingContent'
 import { isClaimStale, type ClaimRow } from '@/lib/fba/claims'
 import { NEEDS_ATTENTION_VERDICTS, type OutcomeChip, type OutcomeVerdict } from '@/lib/fba/outcomePresentation'
-import { attachVariantDeath, loadOfferEvidence, type VariantDeathReport } from '@/lib/fba/variantDeathAlarm'
+import { attachVariantDeath, loadDeathEvidence, type VariantDeathReport } from '@/lib/fba/variantDeathAlarm'
 
 // ── Shared shapes ───────────────────────────────────────────────────────────────────────
 
@@ -125,11 +125,11 @@ async function assembleSurvivors(
     if (!lastPushedMap[row.parent_asin]) lastPushedMap[row.parent_asin] = row.pushed_at // first = latest (DESC)
   }
 
-  // Offer evidence for the offer_dead prong: ONE listing_health read over every child SKU in
-  // the batch (read-only; fail-open → [] keeps that prong silent, never breaks the page).
-  const offerEvidence = await loadOfferEvidence(
-    supabase, Object.values(childMap).flat().map((c) => c.sku),
-  )
+  // Evidence for the offer_dead prong: ONE listing_health read over every child SKU in the batch
+  // + ONE sku_offer_liveness read (the persisted push-gate verdicts AND the persisted family
+  // roster, keyed by parent_asin). Read-only; fail-open → [] keeps that prong silent / the roster
+  // at listing_content, never breaks the page.
+  const evidence = await loadDeathEvidence(supabase, Object.values(childMap).flat(), ids)
 
   // Ghost filter (>=1 live child = FOUNDATIONAL INVARIANT; child_count lies) + cross-batch dedup.
   // variant_death: the per-family dead-variant report (VARIANT-DEATH ALARM, read-side only) is
@@ -141,7 +141,7 @@ async function assembleSurvivors(
     const children = childMap[score.parent_asin] || []
     if (children.length === 0) continue
     seenPa.add(score.parent_asin)
-    out.push(attachVariantDeath({ ...score, children, last_pushed_at: lastPushedMap[score.parent_asin] || null }, offerEvidence))
+    out.push(attachVariantDeath({ ...score, children, last_pushed_at: lastPushedMap[score.parent_asin] || null }, evidence))
   }
   return out
 }
@@ -485,8 +485,8 @@ export async function GET(req: Request) {
                 .limit(1)
               const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
               // SAME variant_death seam as assembleSurvivors / ?ensure= (three assembly paths, ONE seam),
-              // SAME offer-evidence join (loadOfferEvidence over this family's SKUs).
-              const kidEvidence = await loadOfferEvidence(supabase, kids.map((k) => k.sku))
+              // SAME evidence join (loadDeathEvidence over this family's SKUs + parent).
+              const kidEvidence = await loadDeathEvidence(supabase, kids, [scoredParent])
               pageRows = [attachVariantDeath({ ...(sr as ScoreRow), children: kids, last_pushed_at: lastPushed }, kidEvidence)]
             }
           }
@@ -573,8 +573,8 @@ export async function GET(req: Request) {
             const lastPushed = ((epRows || []) as { pushed_at: string }[])[0]?.pushed_at || null
             // SAME variant_death seam as assembleSurvivors (dual-path parity — the [asin] page's
             // row usually arrives via THIS unshift, so an attach on the batch path alone is not done),
-            // SAME offer-evidence join (loadOfferEvidence over this family's SKUs).
-            const ensuredEvidence = await loadOfferEvidence(supabase, ensuredKids.map((k) => k.sku))
+            // SAME evidence join (loadDeathEvidence over this family's SKUs + parent).
+            const ensuredEvidence = await loadDeathEvidence(supabase, ensuredKids, [ensureAsin])
             pageRows.unshift(attachVariantDeath({ ...(sr as ScoreRow), children: ensuredKids, last_pushed_at: lastPushed }, ensuredEvidence))
           }
         }

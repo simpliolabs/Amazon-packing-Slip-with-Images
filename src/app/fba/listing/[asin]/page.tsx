@@ -2905,10 +2905,12 @@ export default function ListingDetailPage() {
       </div>
 
       {/* ══ VARIANT-DEATH ALARM — child SKUs that are dead by stored evidence ══
-          Two prongs, each SKU says WHY: 'offer_dead' = the stored offer evidence (listing_health,
-          the same status='Active' predicate the content scanner trusts) says no live offer;
+          Two prongs, each SKU says WHY: 'offer_dead' = no live offer, by EITHER the persisted
+          push-gate verdict (sku_offer_liveness — the live Listings-Items check the push already
+          runs; authoritative, chip says "gate, since <date>") OR the stored listing_health report;
           'sync_lag' = the Later Gator XL/2XL Orchid signature — a dead offer stops being touched
           by scans, so its content_synced_at freezes while every sibling keeps advancing.
+          Rows = the SAME family roster /family-skus shows (familyRoster.ts, one resolver).
           Derivation lives in variantDeathAlarm.ts (ONE shared seam, attached server-side;
           VARIANT_DEATH_ALARM flag gates it there) — this card only renders the report.
           Read-only: no writes, no cron, no Amazon calls. */}
@@ -2919,23 +2921,34 @@ export default function ListingDetailPage() {
             <p className="text-sm font-semibold text-red-700">
               {vd.flagged.length} variant{vd.flagged.length === 1 ? '' : 's'} may be unbuyable
               {offerDeadCount > 0
-                ? ` — ${offerDeadCount === vd.flagged.length ? 'no live offer in the listings report' : `${offerDeadCount} with no live offer in the listings report`}`
+                ? ` — ${offerDeadCount === vd.flagged.length ? 'no live offer on Amazon' : `${offerDeadCount} with no live offer on Amazon`}`
                 : ' — sync froze while siblings advanced'}
             </p>
             <p className="text-xs text-slate-600 mt-0.5">
-              <b>No live offer</b> means Amazon&apos;s own listings report shows this SKU offerless — shoppers can&apos;t buy that
+              <b>No live offer</b> means Amazon reports this SKU offerless — either the push gate&apos;s own live check
+              (<b>gate</b>, recorded on every push/verify) or the listings report — so shoppers can&apos;t buy that
               size/color. <b>Sync froze</b> means the SKU stopped updating while the rest of the family kept syncing — the
               signature of a dead offer. Either way the money walks silently. Check each offer in Seller Central; once
-              it&apos;s buyable again, <b>Sync Now</b> clears this alarm.
+              it&apos;s buyable again, the next push/verify or <b>Sync Now</b> clears this alarm.
             </p>
             <ul className="mt-2 space-y-1">
               {vd.flagged.map((f) => (
                 <li key={f.sku} className="text-xs text-slate-700 flex items-center gap-2 flex-wrap">
                   <span className="font-mono font-semibold">{f.sku}</span>
                   <span className="font-mono text-slate-400">{f.asin}</span>
-                  {f.reasons.includes('offer_dead') && (
+                  {f.reasons.includes('offer_dead') && f.offer_dead_source === 'gate' && (
+                    <span className="inline-flex items-center rounded-full bg-red-50 border border-red-200 px-2 py-0.5 text-[11px] font-medium text-red-700">
+                      no live offer (gate, since {f.offer_missing_since ? new Date(f.offer_missing_since).toLocaleDateString() : f.offer_checked_at ? new Date(f.offer_checked_at).toLocaleDateString() : '—'})
+                    </span>
+                  )}
+                  {f.reasons.includes('offer_dead') && f.offer_dead_source !== 'gate' && (
                     <span className="inline-flex items-center rounded-full bg-red-50 border border-red-200 px-2 py-0.5 text-[11px] font-medium text-red-700">
                       no live offer{f.offer_status_message ? ` · ${f.offer_status_message}` : f.offer_status ? ` · ${f.offer_status}` : ''}{f.offer_evidence_at ? ` · report ${new Date(f.offer_evidence_at).toLocaleDateString()}` : ''}
+                    </span>
+                  )}
+                  {f.roster_only && (
+                    <span className="inline-flex items-center rounded-full bg-slate-50 border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                      twin known from push discovery only
                     </span>
                   )}
                   {f.reasons.includes('sync_lag') && (
@@ -2949,7 +2962,7 @@ export default function ListingDetailPage() {
               ))}
             </ul>
             <p className="text-[11px] text-slate-400 mt-2">
-              Family last synced {vd.family_max_synced_at ? new Date(vd.family_max_synced_at).toLocaleDateString() : '—'} · {vd.rows_considered} SKU{vd.rows_considered === 1 ? '' : 's'} checked · offer evidence for {vd.offer_evidence_rows} of {vd.rows_considered}{vd.shellRows > 0 ? ` · ${vd.shellRows} placeholder row${vd.shellRows === 1 ? '' : 's'} (offerless backfill) excluded` : ''}
+              Family last synced {vd.family_max_synced_at ? new Date(vd.family_max_synced_at).toLocaleDateString() : '—'} · {vd.rows_considered} SKU{vd.rows_considered === 1 ? '' : 's'} checked{(vd.roster_only_rows ?? 0) > 0 ? ` (${vd.roster_only_rows} twin${vd.roster_only_rows === 1 ? '' : 's'} from push discovery)` : ''} · gate verdicts for {vd.offer_liveness_rows ?? 0} of {vd.rows_considered} · report evidence for {vd.offer_evidence_rows} of {vd.rows_considered}{vd.shellRows > 0 ? ` · ${vd.shellRows} placeholder row${vd.shellRows === 1 ? '' : 's'} (offerless backfill) excluded` : ''}
             </p>
           </div>
         </div>

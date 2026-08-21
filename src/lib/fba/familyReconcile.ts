@@ -18,6 +18,7 @@
  * as a phantom incomplete ASIN by a later push (the 2026-06-16 B0GHH4MQ7N incident).
  */
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { recordOfferLiveness, type OfferLivenessObservation } from '@/lib/fba/offerLiveness'
 
 export interface FamilyReconcileResult {
   /** Live VARIATION children Amazon reports for this parent (0 = not a variation family / no data). */
@@ -89,6 +90,11 @@ export async function reconcileFamilyChildren(
       const newRows: any[] = []
       const cap = opts.backfillCap ?? 60
       result.capHit = missingAsins.length > cap
+      // PERSIST THE GATE'S OWN TRUTH (offerLiveness.ts): this loop reads each child SKU's live
+      // offers[] — the richest per-SKU liveness observation in the codebase — and the offer gate
+      // below decides live vs offerless from it. Record BOTH branches so the VARIANT-DEATH ALARM
+      // reads the same verdict. Zero extra calls; written once after the loop, fail-open.
+      const liveness: OfferLivenessObservation[] = []
       if (sellerId) {
         for (const childAsin of missingAsins.slice(0, cap)) { // cap: a runaway family can't stall the run
           // includedData=offers too — we backfill a child ONLY if it has a live offer (gate below).
@@ -98,12 +104,17 @@ export async function reconcileFamilyChildren(
           const ljson = await lresp.json() as { items?: { sku?: string; offers?: unknown[] }[] }
           for (const it of ljson.items ?? []) {
             if (!it.sku || /^amzn\./i.test(it.sku)) { result.amznSkuSkipped = (result.amznSkuSkipped ?? 0) + 1; continue } // skip Amazon-managed system SKUs
+            const hasOffer = Array.isArray(it.offers) && it.offers.length > 0
+            liveness.push({
+              sku: it.sku, asin: childAsin, parent_asin: parentAsin, offer_live: hasOffer, source: 'family_reconcile',
+              detail: hasOffer ? `Listings-Items offers[] has ${it.offers!.length} offer(s)` : 'Listings-Items offers[] empty (reconcile skipped as offerless)',
+            })
             // OFFER GATE: only backfill children that have a LIVE offer. An offerless SKU ("Missing
             // offer") would, when later PATCHed by a push, make Amazon CREATE a phantom incomplete
             // ASIN. Skip — never seed an offerless/unpushable row. Scoped to the offerless case: a
             // zero-sales / no-inventory child that DOES carry an offer still backfills (the reconcile's
             // legitimate purpose). The push update-only gate is the backstop if a bad row slips in.
-            if (!Array.isArray(it.offers) || it.offers.length === 0) { result.offerlessSkipped = (result.offerlessSkipped ?? 0) + 1; continue }
+            if (!hasOffer) { result.offerlessSkipped = (result.offerlessSkipped ?? 0) + 1; continue }
             newRows.push({
               sku: it.sku, asin: childAsin, parent_asin: parentAsin, title: placeholderTitle,
               bullet_1: '', bullet_2: '', bullet_3: '', bullet_4: '', bullet_5: '',
@@ -113,6 +124,7 @@ export async function reconcileFamilyChildren(
           }
         }
       }
+      await recordOfferLiveness(supabase, liveness)
       if (newRows.length > 0) {
         const { error: insErr } = await supabase.from('listing_content').upsert(newRows, { onConflict: 'sku' } as never)
         if (insErr) console.warn('[familyReconcile] backfill upsert failed:', insErr.message)

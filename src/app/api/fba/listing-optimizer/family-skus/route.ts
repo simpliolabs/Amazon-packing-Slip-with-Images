@@ -17,10 +17,16 @@
  *
  * Read-only. Used for display, not as the source of truth for the push (the push
  * still does its own discovery so we don't depend on a cache window).
+ *
+ * INVARIANT 2 — ONE RESOLVER: the merge rule (DB seed + twin-name-guarded discovered twins +
+ * sort) lives in src/lib/fba/familyRoster.ts and is SHARED with the VARIANT-DEATH ALARM, which
+ * feeds it the PERSISTED discovery (sku_offer_liveness) instead of a live call. This route only
+ * supplies the live discovery and appends the parent hub.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getAccessToken } from '@/lib/amazon/auth'
+import { resolveFamilyRoster, isSystemSku, type FamilySkuRef } from '@/lib/fba/familyRoster'
 
 const ENDPOINT       = process.env.AMAZON_ENDPOINT       || 'https://sellingpartnerapi-na.amazon.com'
 const MARKETPLACE_ID = process.env.AMAZON_MARKETPLACE_ID || 'ATVPDKIKX0DER'
@@ -35,32 +41,9 @@ async function getSellerId(): Promise<string> {
   throw new Error('amazon_seller_id not configured.')
 }
 
-/** Same filter the push route uses — Amazon-managed system SKUs (amzn.gr.* graded /
- *  returnless inventory, etc.) are not real seller listings and must NOT show up. */
-function isSystemSku(sku: string): boolean { return /^amzn\./i.test(sku) }
-
-/** Strip the trailing fulfillment suffix so an FBA SKU and its FBM twin compare equal:
- *  "DAFEI-482-32G-FBA" → "DAFEI-482-32G", "DAFEI-482-32G" → "DAFEI-482-32G". */
-function stripFulfillmentSuffix(sku: string): string {
-  return sku.replace(/[-_](?:FBA|FBM|AFN|MFN|FN)$/i, '')
-}
-
-/** Best-effort fulfillment tag from the SKU naming convention. UI badge only —
- *  the actual fulfillment can also be read from /summaries[].fulfillmentChannels,
- *  but the SKU suffix matches sellers' mental model here. */
-function fulfillmentOf(sku: string): 'FBA' | 'FBM' | 'unknown' {
-  if (/[-_]FBA$/i.test(sku)) return 'FBA'
-  if (/[-_]FBM$/i.test(sku) || /[-_]MFN$/i.test(sku)) return 'FBM'
-  // No suffix: most sellers use the bare SKU for FBM and -FBA for FBA, but it's a
-  // convention not a rule. Tag as FBM as the more-likely sibling of an -FBA twin.
-  return /[-_]/.test(sku) ? 'FBM' : 'unknown'
-}
-
-interface FamilySku { sku: string; asin: string; fulfillment: 'FBA' | 'FBM' | 'unknown'; base_name: string }
-
 async function discoverSkusForAsin(
   sellerId: string, token: string, asin: string,
-): Promise<{ sku: string; asin: string }[]> {
+): Promise<FamilySkuRef[]> {
   try {
     const url =
       `${ENDPOINT}/listings/2021-08-01/items/${encodeURIComponent(sellerId)}` +
@@ -71,7 +54,7 @@ async function discoverSkusForAsin(
     const json = (await resp.json()) as { items?: { sku?: string }[] }
     return (json.items ?? [])
       .map((it) => (it.sku ? { sku: it.sku, asin } : null))
-      .filter((x): x is { sku: string; asin: string } => x !== null && !isSystemSku(x.sku))
+      .filter((x): x is FamilySkuRef => x !== null && !isSystemSku(x.sku))
   } catch { return [] }
 }
 
@@ -109,47 +92,19 @@ export async function GET(req: NextRequest) {
     const token = await getAccessToken()
     const sellerId = await getSellerId()
 
-    // 1) Seed with what the DB knows.
-    const bySku = new Map<string, FamilySku>()
-    for (const r of cached) {
-      if (isSystemSku(r.sku)) continue
-      bySku.set(r.sku, {
-        sku: r.sku, asin: r.asin,
-        fulfillment: fulfillmentOf(r.sku),
-        base_name: stripFulfillmentSuffix(r.sku),
-      })
-    }
-
-    // 2) For each unique ASIN, ask Amazon what other SKUs the seller has on it
+    // 1) LIVE discovery: for each unique ASIN, ask Amazon what other SKUs the seller has on it
     //    (typically the FBM twin of an -FBA SKU, or vice versa).
     const asins = [...new Set(cached.map((r) => r.asin).filter(Boolean))]
-    for (const asin of asins) {
-      const discovered = await discoverSkusForAsin(sellerId, token, asin)
-      for (const d of discovered) {
-        if (bySku.has(d.sku)) continue
-        // Twin-name guard: only include a discovered SKU when its base name matches one
-        // of the DB-known SKUs under the same ASIN. Avoids leaking unrelated SKUs that
-        // share an ASIN through a stale mapping (real bug seen during PR #63).
-        const dBase = stripFulfillmentSuffix(d.sku)
-        const matchesKnown = cached.some((c) => c.asin === asin && stripFulfillmentSuffix(c.sku) === dBase)
-        if (!matchesKnown) continue
-        bySku.set(d.sku, {
-          sku: d.sku, asin: d.asin,
-          fulfillment: fulfillmentOf(d.sku),
-          base_name: dBase,
-        })
-      }
-    }
+    const discovered: FamilySkuRef[] = []
+    for (const asin of asins) discovered.push(...await discoverSkusForAsin(sellerId, token, asin))
+
+    // 2) ONE RESOLVER (familyRoster.ts): DB seed + twin-name-guarded twins + sort. The alarm calls
+    //    the same function over the persisted discovery, so the two can never enumerate differently.
+    const children = resolveFamilyRoster(cached, discovered)
+      .map(({ sku, asin, fulfillment, base_name }) => ({ sku, asin, fulfillment, base_name }))
 
     // 3) Variation parent SKU (non-buyable hub).
     const parentSku = await findParentSku(sellerId, token, parentAsin)
-
-    const children = [...bySku.values()].sort((a, b) => {
-      // Group by base_name (capacity / variant identity), then FBA before FBM.
-      if (a.base_name !== b.base_name) return a.base_name.localeCompare(b.base_name)
-      const order = { FBA: 0, FBM: 1, unknown: 2 } as const
-      return order[a.fulfillment] - order[b.fulfillment]
-    })
 
     return NextResponse.json({
       parent_asin: parentAsin,
