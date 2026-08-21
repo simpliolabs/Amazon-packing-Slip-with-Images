@@ -20,6 +20,15 @@
  * but the brand NAME never appears in customer-facing text (the Gildan rule). `match_pattern` is a
  * case-insensitive regex over the listing hay (title/attribute/productType/SKUs — note \b64000
  * with no trailing boundary so SKU-glued style numbers like "640002XL" match).
+ *
+ * SKU-FIRST RESOLUTION (PO ruling 2026-08-21, SELLER_PROFILE.md "Blank identity is stated in the
+ * CHILD SKU"; migration 058): the blank is the STYLE CODE in each child SKU's leading token
+ * (`style_code` column), never a brand word inferred from the title. Order: per-child style codes →
+ * `blank_family_overrides` (PO-maintained, for families whose SKUs carry no code) → the legacy
+ * `match_pattern` regex over the hay. Mixed-blank families claim only the INTERSECTION of facts.
+ * `garment_family` replaces the old looksShirt gate: a tee family never inherits a sweatshirt row
+ * and vice-versa. `resolveFamilyBlank` is the ONE pure core; the pipeline and every out-of-pipeline
+ * net site (resolveBlankRowForNet) call it.
  */
 import { createClient } from '@supabase/supabase-js'
 // capItemHighlightRepeats: the ONE Amazon word-repeat + <=75-char IH net (productDetailAttrs.ts) —
@@ -44,13 +53,27 @@ export interface BlankSpec {
   unisex?: boolean
 }
 
-export interface BlankSpecRow { match: RegExp; spec: BlankSpec }
+/** blank_specs.garment_family (migration 058). Drives the garment-compatibility gate and the Item
+ *  Highlights composer's vocabulary (see composerGarmentFamily). */
+export type GarmentFamily = 'tee' | 'long_sleeve_tee' | 'sweatshirt' | 'hoodie' | 'kids_tee'
+const GARMENT_FAMILIES: ReadonlySet<string> = new Set<GarmentFamily>(['tee', 'long_sleeve_tee', 'sweatshirt', 'hoodie', 'kids_tee'])
+
+export interface BlankSpecRow {
+  match: RegExp
+  spec: BlankSpec
+  /** Manufacturer style code as stated in the child SKU leading token (058). Absent on pre-058 rows. */
+  styleCode?: string
+  /** Absent on pre-058 rows — treated as a tee by the compatibility gate (the historical catalog). */
+  garmentFamily?: GarmentFamily
+}
 
 /** The seed rows — byte-identical to the historical hardcoded table (and to migration 053's
- *  seeds). These are the fail-open floor, never an alternate behavior path. */
+ *  seeds; 058 stamps the same two rows with style_code/garment_family, mirrored here so the
+ *  fail-open floor still resolves 1717/64000 SKUs). These are the fail-open floor, never an
+ *  alternate behavior path. */
 export const DEFAULT_BLANK_SPECS: BlankSpecRow[] = [
-  { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed', stretch: 'Low Stretch', fitToSize: 'Runs Slightly Small' } },
-  { match: /\bgildan\b|\b64000/i, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton' } },
+  { match: /\bcomfort\s*colors?\b/i, spec: { brand: 'Comfort Colors', fit: 'Relaxed', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'midweight 6.1 oz garment-dyed', material: '100% Ring-Spun Cotton', dye: 'Garment-Dyed', stretch: 'Low Stretch', fitToSize: 'Runs Slightly Small' }, styleCode: '1717', garmentFamily: 'tee' },
+  { match: /\bgildan\b|\b64000/i, spec: { brand: 'Gildan', brandInCopy: false, fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weightNote: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton' }, styleCode: '64000', garmentFamily: 'tee' },
 ]
 
 // Lazy Proxy (tests-into-CI pattern): defer client construction so env-free unit tests never touch it.
@@ -76,6 +99,8 @@ interface DbRow {
   fit_to_size?: string | null
   unisex?: boolean | null
   active?: boolean | null
+  style_code?: string | null
+  garment_family?: string | null
 }
 
 /** DB row → BlankSpecRow. Null columns become ABSENT fields (undefined) so every existing
@@ -108,7 +133,13 @@ export function rowToSpec(row: DbRow): BlankSpecRow | null {
   if (row.stretch) spec.stretch = row.stretch
   if (row.fit_to_size) spec.fitToSize = row.fit_to_size
   if (row.unisex === true) spec.unisex = true
-  return { match, spec }
+  const out: BlankSpecRow = { match, spec }
+  // 058 columns — fail-open: a pre-058 DB (or NULL) leaves both absent = legacy regex behaviour.
+  const code = (row.style_code ?? '').trim().toUpperCase()
+  if (code) out.styleCode = code
+  const gf = (row.garment_family ?? '').trim()
+  if (GARMENT_FAMILIES.has(gf)) out.garmentFamily = gf as GarmentFamily
+  return out
 }
 
 const CACHE_TTL_MS = 5 * 60 * 1000
@@ -118,6 +149,16 @@ const CACHE_TTL_MS = 5 * 60 * 1000
 const LOAD_TIMEOUT_MS = 4000
 let cache: { rows: BlankSpecRow[]; at: number } | null = null
 
+function withTimeout<T>(query: PromiseLike<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    query,
+    new Promise<never>((_, reject) => {
+      const t = setTimeout(() => reject(new Error(`${label} load timed out after ${timeoutMs}ms`)), timeoutMs)
+      ;(t as unknown as { unref?: () => void }).unref?.()
+    }),
+  ])
+}
+
 /** Load the catalog (5-min cache; ONE cheap read per window). Fail-open to the seeds. */
 export async function loadBlankSpecRows(timeoutMs: number = LOAD_TIMEOUT_MS): Promise<BlankSpecRow[]> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.rows
@@ -125,13 +166,7 @@ export async function loadBlankSpecRows(timeoutMs: number = LOAD_TIMEOUT_MS): Pr
     // .order('id') is LOAD-BEARING: matchBlankSpec is first-match-wins, and Postgres row order is
     // unspecified without it — a PO-added row must never nondeterministically shadow a seed.
     const query = supabase.from('blank_specs').select('*').eq('active', true).order('id', { ascending: true })
-    const { data, error } = await Promise.race([
-      query,
-      new Promise<never>((_, reject) => {
-        const t = setTimeout(() => reject(new Error(`blank_specs load timed out after ${timeoutMs}ms`)), timeoutMs)
-        ;(t as unknown as { unref?: () => void }).unref?.()
-      }),
-    ])
+    const { data, error } = await withTimeout(query, timeoutMs, 'blank_specs')
     if (error) throw new Error(error.message)
     const rows = (Array.isArray(data) ? (data as DbRow[]) : []).map(rowToSpec).filter((r): r is BlankSpecRow => !!r)
     if (rows.length === 0) throw new Error('blank_specs empty — using seeds')
@@ -144,10 +179,205 @@ export async function loadBlankSpecRows(timeoutMs: number = LOAD_TIMEOUT_MS): Pr
   }
 }
 
+let overrideCache: { map: Map<string, string>; at: number } | null = null
+
+/** blank_family_overrides (058): parent ASIN → style_code, PO-maintained for families whose child
+ *  SKUs carry no style code. Tiny table, ONE read per 5-min window. Fail-open to "no override". */
+export async function loadBlankFamilyOverrides(timeoutMs: number = LOAD_TIMEOUT_MS): Promise<Map<string, string>> {
+  if (overrideCache && Date.now() - overrideCache.at < CACHE_TTL_MS) return overrideCache.map
+  try {
+    const query = supabase.from('blank_family_overrides').select('parent_asin, style_code').limit(1000)
+    const { data, error } = await withTimeout(query, timeoutMs, 'blank_family_overrides')
+    if (error) throw new Error(error.message)
+    const map = new Map<string, string>()
+    for (const r of (Array.isArray(data) ? data : []) as { parent_asin?: string | null; style_code?: string | null }[]) {
+      const asin = (r.parent_asin ?? '').trim().toUpperCase()
+      const code = (r.style_code ?? '').trim().toUpperCase()
+      if (asin && code) map.set(asin, code)
+    }
+    overrideCache = { map, at: Date.now() }
+    return map
+  } catch (e) {
+    console.warn('[blankSpecs] blank_family_overrides load failed (fail-open: no override):', e instanceof Error ? e.message : e)
+    overrideCache = { map: new Map(), at: Date.now() }
+    return overrideCache.map
+  }
+}
+
+/** The override style code for ONE family, or null. */
+export async function loadBlankFamilyOverride(parentAsin: string | null | undefined): Promise<string | null> {
+  const asin = (parentAsin ?? '').trim().toUpperCase()
+  if (!asin) return null
+  return (await loadBlankFamilyOverrides()).get(asin) ?? null
+}
+
+// ─── SKU-FIRST FAMILY RESOLUTION (PO ruling 2026-08-21) — the pure core ─────────────────────────
+
+/** What may follow a digit-ending style code inside the SKU leading token: nothing, a letter run
+ *  (size or colour: 64000S, 64000BLK) or a glued numeric size (640002XL). A further DIGIT is not a
+ *  size and means the token is some other number (17170 is not a 1717). */
+const AFTER_DIGIT_CODE_RE = /^(?:$|[A-Z]|[2-6]X)/
+/** What may follow a LETTER-ending code (64000B) or an elided trailing zero (1800 for 18000): only
+ *  a recognised size token (adult or Y-prefixed youth), or nothing. The letter glue is ambiguous
+ *  ("64000BLK" is the adult code + a colour, not youth + "LK"), so only a size disambiguates. */
+const SIZE_TOKEN_RE = /^(?:$|(?:Y?(?:XXS|XS|S|M|L|XL|XXL|XXXL)|[2-6]XL?)(?![A-Z0-9]))/
+
+/**
+ * The style code stated by ONE child SKU, or null. Pure, data-driven: `codes` are the catalog's
+ * style_code values (any order; matched LONGEST-FIRST so 64000B beats 64000 and 18500 is never
+ * read as 1800). Scans the SKU's LEADING token only (before the first -/_/space), strips a letter
+ * prefix (ADWF64000, G644002XL, BCSG18002X, BC3001XL) and tolerates a glued size. A full-code match
+ * always beats the trailing-zero elision (EDG1800L / BCSG18002X → 18000, the PO's "1800x").
+ */
+export function extractStyleCode(sku: string | null | undefined, codes: readonly string[]): string | null {
+  const token = (sku ?? '').trim().toUpperCase().split(/[-_\s]/)[0] ?? ''
+  const body = token.replace(/^[A-Z]+/, '')
+  if (!body) return null
+  // A code is compared by its own letter-stripped body too, so a PO who types the SELLER_PROFILE
+  // spelling ('G64400', 'BC3001') still matches; the RETURNED value is the catalog's code verbatim.
+  const ordered = [...new Map(codes.map((c) => c.trim().toUpperCase()).filter(Boolean).map((c) => [c, c.replace(/^[A-Z]+/, '')] as const)).entries()]
+    .filter(([, cb]) => cb.length > 0)
+    .sort((a, b) => b[1].length - a[1].length)
+  for (const [code, cb] of ordered) {
+    if (!body.startsWith(cb)) continue
+    const rest = body.slice(cb.length)
+    if (/[A-Z]$/.test(cb) ? SIZE_TOKEN_RE.test(rest) : AFTER_DIGIT_CODE_RE.test(rest)) return code
+  }
+  for (const [code, cb] of ordered) {
+    if (!cb.endsWith('0')) continue
+    const elided = cb.slice(0, -1)
+    if (body.startsWith(elided) && SIZE_TOKEN_RE.test(body.slice(elided.length))) return code
+  }
+  return null
+}
+
+const INTERSECT_KEYS = ['brand', 'fit', 'sleeve', 'neck', 'weightNote', 'material', 'dye', 'stretch', 'fitToSize'] as const
+
+/** The facts EVERY resolved blank agrees on (PO: "a fact that differs between children — sleeve,
+ *  neck — is never claimed"). brandInCopy=false if ANY blank forbids its brand; unisex only when
+ *  all claim it. A single spec is returned as-is. */
+export function intersectBlankSpecs(specs: readonly BlankSpec[]): BlankSpec | null {
+  if (specs.length === 0) return null
+  if (specs.length === 1) return specs[0]
+  const out: BlankSpec = {}
+  if (specs.some((s) => s.brandInCopy === false)) out.brandInCopy = false
+  for (const k of INTERSECT_KEYS) {
+    const v = specs[0][k]
+    if (v && specs.every((s) => s[k] === v)) out[k] = v
+  }
+  if (specs.every((s) => s.unisex === true)) out.unisex = true
+  return out
+}
+
+export type BlankSource = 'sku' | 'override' | 'legacy'
+export interface FamilyBlankResolution {
+  /** Most-common resolved blank (ties → catalog id order). null = unresolved. */
+  dominant: BlankSpecRow | null
+  /** Child count per extracted style code (SKU path only; {} on override/legacy). */
+  byStyle: Record<string, number>
+  /** More than one distinct blank among the children. */
+  mixed: boolean
+  /** The INTERSECTED spec — what copy may claim for the whole family. */
+  spec: BlankSpec | null
+  garmentFamily: GarmentFamily | null
+  source: BlankSource | null
+}
+const EMPTY_RESOLUTION: FamilyBlankResolution = { dominant: null, byStyle: {}, mixed: false, spec: null, garmentFamily: null, source: null }
+
+type GarmentClass = 'tee' | 'sweat'
+/** The garment class the listing HAY names (same regexes as the historical looksShirt gate). */
+function hayGarmentClass(hay: string): GarmentClass | null {
+  if (/sweat|hoodie|fleece|pullover/i.test(hay)) return 'sweat'
+  if (/\bt?[\s-]?shirts?\b|\btees?\b/i.test(hay)) return 'tee'
+  return null
+}
+/** Pre-058 rows (no garment_family) ARE tees — the whole historical catalog was. */
+function rowGarmentClass(row: BlankSpecRow): GarmentClass {
+  return row.garmentFamily === 'sweatshirt' || row.garmentFamily === 'hoodie' ? 'sweat' : 'tee'
+}
+
+/** The DB enum → the Item Highlights composer's vocabulary ('tee' | 'sweatshirt' | 'hoodie'). */
+export function composerGarmentFamily(gf: GarmentFamily | null | undefined): 'tee' | 'sweatshirt' | 'hoodie' | null {
+  if (gf === 'sweatshirt' || gf === 'hoodie') return gf
+  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'kids_tee') return 'tee'
+  return null
+}
+
+/**
+ * THE resolver (pure). Order: per-child style codes → `override` (blank_family_overrides) → the
+ * legacy match_pattern regex over `hay` (only when the hay names a garment class — the historical
+ * gate, preserved) → unresolved. Then the GARMENT-COMPATIBILITY gate: when the hay names a class
+ * and EVERY resolved row is of the other class (a "Sweatshirt" family resolving tee rows, or a
+ * "Shirt" family resolving a hoodie), the family is unresolved with a BLANK_GARMENT_CONFLICT warn
+ * — a wrong blank is worse than no blank. A partial conflict is warned and kept: the intersection
+ * already drops every fact the conflicting rows disagree on.
+ */
+export function resolveFamilyBlank(
+  rows: readonly BlankSpecRow[],
+  children: readonly { sku?: string | null }[],
+  override: string | null | undefined,
+  hay: string,
+): FamilyBlankResolution {
+  const codes = rows.map((r) => r.styleCode).filter((c): c is string => !!c)
+  const rowFor = (code: string): BlankSpecRow | null => rows.find((r) => r.styleCode === code.trim().toUpperCase()) ?? null
+  const byStyle: Record<string, number> = {}
+  for (const c of children) {
+    const code = extractStyleCode(c.sku, codes)
+    if (code) byStyle[code] = (byStyle[code] ?? 0) + 1
+  }
+  let resolved: BlankSpecRow[] = []
+  let source: BlankSource | null = null
+  // Count DESC, then catalog (id) order on ties — deterministic dominance.
+  const ranked = Object.entries(byStyle).sort((a, b) => (b[1] - a[1]) || (rows.findIndex((r) => r.styleCode === a[0]) - rows.findIndex((r) => r.styleCode === b[0])))
+  for (const [code] of ranked) {
+    const r = rowFor(code)
+    if (r && !resolved.includes(r)) resolved.push(r)
+  }
+  if (resolved.length > 0) source = 'sku'
+  if (resolved.length === 0 && override) {
+    const r = rowFor(override)
+    if (r) { resolved = [r]; source = 'override' }
+  }
+  const hayClass = hayGarmentClass(hay)
+  if (resolved.length === 0 && hayClass) {
+    const r = matchBlankSpecRow(rows, hay)
+    if (r) { resolved = [r]; source = 'legacy' }
+  }
+  if (resolved.length === 0) return { ...EMPTY_RESOLUTION, byStyle }
+  if (hayClass) {
+    const conflicting = resolved.filter((r) => rowGarmentClass(r) !== hayClass)
+    if (conflicting.length > 0) {
+      const nulled = conflicting.length === resolved.length
+      console.warn(JSON.stringify({ tag: 'BLANK_GARMENT_CONFLICT', hayClass, source, conflicting: conflicting.map((r) => r.styleCode ?? r.spec.brand ?? '?'), nulled }))
+      if (nulled) return { ...EMPTY_RESOLUTION, byStyle }
+    }
+  }
+  const dominant = resolved[0]
+  return {
+    dominant,
+    byStyle,
+    mixed: resolved.length > 1,
+    spec: intersectBlankSpecs(resolved.map((r) => r.spec)),
+    garmentFamily: dominant.garmentFamily ?? null,
+    source,
+  }
+}
+
+/** The resolution as the BlankSpecRow shape every existing consumer reads: the dominant row's
+ *  match regex, with `spec` = the family INTERSECTION (a mixed-brand family therefore carries no
+ *  brand, so the brand-insertion net can never claim one). */
+export function familyBlankRow(res: FamilyBlankResolution): BlankSpecRow | null {
+  if (!res.dominant) return null
+  const out: BlankSpecRow = { match: res.dominant.match, spec: res.spec ?? res.dominant.spec }
+  if (res.dominant.styleCode) out.styleCode = res.dominant.styleCode
+  if (res.garmentFamily) out.garmentFamily = res.garmentFamily
+  return out
+}
+
 /** Row-returning lookup (first matching row wins, over the joined hay of every non-empty source).
  *  Callers that need the match REGEX as well as the spec (the blank-brand IH net below) use this;
  *  `matchBlankSpec` stays the spec-only convenience every existing consumer already calls. */
-export function matchBlankSpecRow(rows: BlankSpecRow[], ...sources: (string | null | undefined)[]): BlankSpecRow | null {
+export function matchBlankSpecRow(rows: readonly BlankSpecRow[], ...sources: (string | null | undefined)[]): BlankSpecRow | null {
   const hay = sources.filter(Boolean).join(' ')
   for (const b of rows) if (b.match.test(hay)) return b
   return null
@@ -155,7 +385,7 @@ export function matchBlankSpecRow(rows: BlankSpecRow[], ...sources: (string | nu
 
 /** The lookup — identical semantics to the historical lookupBlankSpec (first matching row wins,
  *  over the joined hay of every non-empty source). */
-export function matchBlankSpec(rows: BlankSpecRow[], ...sources: (string | null | undefined)[]): BlankSpec | null {
+export function matchBlankSpec(rows: readonly BlankSpecRow[], ...sources: (string | null | undefined)[]): BlankSpec | null {
   return matchBlankSpecRow(rows, ...sources)?.spec ?? null
 }
 
@@ -222,36 +452,49 @@ export function ensureBlankBrandInHighlights(
  * claim. This is the ONE resolver for every out-of-pipeline net site (regenerate-item-highlight,
  * the ai-recommendations title partial, the persist-time lock guard) — one seam, no drift.
  * Best-effort: any failure returns null → the net no-ops.
+ *
+ * SKU-FIRST (PO 2026-08-21): reads every child SKU of the family (listing_content by parent_asin)
+ * and hands them to resolveFamilyBlank — per-child style codes → family override → legacy regex.
+ * `resolveFamilyBlankForNet` is the rich result; this wrapper keeps the historical row shape with
+ * `spec` = the family intersection.
  */
-export async function resolveBlankRowForNet(
+export async function resolveFamilyBlankForNet(
   // Any supabase-js client (routes construct their own); the minimal surface we call.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
   opts: { parentAsin?: string | null; childAsin?: string | null; titles: (string | null | undefined)[] },
-): Promise<BlankSpecRow | null> {
+): Promise<FamilyBlankResolution> {
   try {
     let rows: { sku?: string; product_type?: string; title?: string }[] = []
+    // limit 500, not 50: dominance needs EVERY child (B0GR1K3TXF is 85 + 41 children × FBA/FBM twins).
     if (opts.parentAsin) {
-      const { data } = await db.from('listing_content').select('sku, product_type, title').eq('parent_asin', opts.parentAsin).limit(50)
+      const { data } = await db.from('listing_content').select('sku, product_type, title').eq('parent_asin', opts.parentAsin).limit(500)
       if (Array.isArray(data)) rows = data
     }
     if (rows.length === 0 && opts.childAsin) {
-      const { data } = await db.from('listing_content').select('sku, product_type, title').eq('asin', opts.childAsin).limit(50)
+      const { data } = await db.from('listing_content').select('sku, product_type, title').eq('asin', opts.childAsin).limit(500)
       if (Array.isArray(data)) rows = data
     }
     const liveTitle = rows.find((r) => (r.title ?? '').trim())?.title ?? ''
     const productType = rows.find((r) => (r.product_type ?? '').trim())?.product_type ?? ''
     const skuHay = rows.map((r) => r.sku).filter(Boolean).join(' ')
-    // Same looksShirt gate as the pipeline (listingPipeline garmentHay rule): hoodies/sweatshirts
-    // never inherit a shirt blank's brand.
-    const garmentHay = [...opts.titles, liveTitle, productType].filter(Boolean).join(' ')
-    const looksShirt = /\bt?[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover/i.test(garmentHay)
-    if (!looksShirt) return null
-    return matchBlankSpecRow(await loadBlankSpecRows(), ...opts.titles, liveTitle, productType, skuHay)
+    const hay = [...opts.titles, liveTitle, productType, skuHay].filter(Boolean).join(' ')
+    const [catalog, override] = await Promise.all([loadBlankSpecRows(), loadBlankFamilyOverride(opts.parentAsin)])
+    const res = resolveFamilyBlank(catalog, rows, override, hay)
+    console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'net', parent: opts.parentAsin ?? null, source: res.source, styleCode: res.dominant?.styleCode ?? null, garmentFamily: res.garmentFamily, mixed: res.mixed, byStyle: res.byStyle, children: rows.length }))
+    return res
   } catch (e) {
     console.warn('[blankSpecs] blank-row net resolution failed (net no-ops):', e instanceof Error ? e.message : e)
-    return null
+    return EMPTY_RESOLUTION
   }
+}
+
+export async function resolveBlankRowForNet(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  opts: { parentAsin?: string | null; childAsin?: string | null; titles: (string | null | undefined)[] },
+): Promise<BlankSpecRow | null> {
+  return familyBlankRow(await resolveFamilyBlankForNet(db, opts))
 }
 
 /**

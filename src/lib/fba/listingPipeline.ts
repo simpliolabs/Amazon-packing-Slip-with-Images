@@ -56,7 +56,7 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
-import { loadBlankSpecRows, matchBlankSpecRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
+import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, composerGarmentFamily, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { composeItemHighlight, humanizeSpecToken, titleCasePhrase } from '@/lib/fba/itemHighlightComposer'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
@@ -177,9 +177,10 @@ export interface PipelineInput {
   customizable?: boolean
   analysis: AnalyzedKeyword[]
   children: PipelineChild[]
-  /** Parent ASIN of the family this run generates for. DIAGNOSTICS ONLY — every generator is
-   *  child-scoped and nothing branches on it. Threaded (2026-08-09) so the MONEY_TAIL_NO_MARKET_DATA
-   *  refusal is attributable to a listing without a child→parent grep. Absent ⇒ null in the log. */
+  /** Parent ASIN of the family this run generates for. Threaded (2026-08-09) so the
+   *  MONEY_TAIL_NO_MARKET_DATA refusal is attributable to a listing without a child→parent grep.
+   *  Since 2026-08-21 it also keys the blank_family_overrides lookup (PO-maintained blank identity
+   *  for families whose SKUs carry no style code) — absent ⇒ no override, null in the log. */
   parentAsin?: string | null
   /** keyword_cache.fetched_at for the analysed ASIN — WHEN this keyword pool was researched.
    *  DIAGNOSTICS ONLY (no gate reads it): a refusal log that says "0 of 88 rows carry market data,
@@ -2391,7 +2392,10 @@ export async function buildItemHighlights(
         spec: blankBrand?.spec ?? null,
         // NON-APPAREL families (PO 2026-08-21: B0GCF11RKL is Electronics) compose NO garment vocab —
         // 'none' inverts the wrong-garment filter to drop every garment-noun candidate.
-        garmentFamily: !apparelProduct ? 'none' : /sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee',
+        // GARMENT FROM THE BLANK (PO 2026-08-21, SKU rule): the resolved row's garment_family
+        // (long_sleeve_tee/kids_tee fold to 'tee') beats the title guess; the title regex remains
+        // the fallback for an unresolved blank. Both callers pass the row, so no signature churn.
+        garmentFamily: !apparelProduct ? 'none' : (composerGarmentFamily(blankBrand?.garmentFamily) ?? (/sweatshirt/i.test(finalTitle) ? 'sweatshirt' : /hoodie/i.test(finalTitle) ? 'hoodie' : /\bhat|\bcap\b/i.test(finalTitle) ? 'hat' : 'tee')),
         // brand_in_copy=false (Gildan) ⇒ NO brand is composable for this family.
         allowedBrand: blankBrand?.spec.brandInCopy === false ? null : (blankBrand?.spec.brand ?? null),
       },
@@ -8817,19 +8821,24 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // available here. Comfort Colors sweatshirts fall back to the guess rather than getting
   // "Short Sleeve" force-pushed on (no regression on non-tees).
   const garmentHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType].filter(Boolean).join(' ')
-  /* looksShirt (2026-08-07, the Later-Gator unisex miss): the old `looksTee` gate demanded a
-   * tee/tshirt token AND rejected any "long sleeve" — so a LONG SLEEVE SHIRT family (CC 6014,
-   * title says just "Shirt") got blankSpec=NULL and lost EVERY spec fact (brand casing, fit,
-   * unisex…). A long-sleeve shirt is still a shirt; the gate's real job is only to keep true
-   * non-shirt classes (sweatshirt/hoodie/fleece/pullover) from inheriting shirt-blank facts. */
   const isLongSleeve = /long[\s-]?sleeve/i.test(garmentHay)
-  const looksShirt = /\bt?[\s-]?shirts?\b|\btees?\b/i.test(garmentHay) && !/sweat|hoodie|fleece|pullover/i.test(garmentHay)
   // SKUs join the hay (2026-07-31): print-on-demand copy often never names the blank ("Gildan"
   // appears nowhere on the We Still Do listing) but the SKUs embed the style number ("640002XL-…").
   const skuHay = (input.children ?? []).map((c) => c.sku).filter(Boolean).join(' ')
+  /* SKU-FIRST BLANK (PO ruling 2026-08-21, SELLER_PROFILE "Blank identity is stated in the CHILD
+   * SKU"; migration 058): resolveFamilyBlank reads the STYLE CODE from every child SKU (1717/6014/
+   * 64000/64000B/64400/18000/18500/3001), then the PO family override, then — only as the legacy
+   * fallback — the match_pattern regex over this hay. The old `looksShirt` gate (which nulled EVERY
+   * sweatshirt/hoodie family because no sweatshirt blank existed) is replaced by the resolver's
+   * garment-compatibility gate on blank_specs.garment_family. A mixed-blank family's `spec` is the
+   * INTERSECTION of its blanks' facts (sleeve/neck/brand dropped when children differ). */
+  const blankCatalog = apparelProduct ? await loadBlankSpecRows() : []
+  const blankOverride = apparelProduct ? await loadBlankFamilyOverride(input.parentAsin) : null
   // ROW kept (2026-08-08): the blank-brand IH waterfall net needs the match REGEX too; the spec is
   // derived from it so every downstream `blankSpec.*` consumer is byte-identical.
-  const blankSpecRowMatched = apparelProduct && looksShirt ? matchBlankSpecRow(await loadBlankSpecRows(), attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay) : null
+  const blankFamilyFacts = apparelProduct ? resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, [attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')) : null
+  if (apparelProduct) console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'pipeline', parent: input.parentAsin ?? null, source: blankFamilyFacts?.source ?? null, styleCode: blankFamilyFacts?.dominant?.styleCode ?? null, garmentFamily: blankFamilyFacts?.garmentFamily ?? null, mixed: blankFamilyFacts?.mixed ?? false, byStyle: blankFamilyFacts?.byStyle ?? {}, override: blankOverride }))
+  const blankSpecRowMatched = blankFamilyFacts ? familyBlankRow(blankFamilyFacts) : null
   const blankSpecMatched = blankSpecRowMatched?.spec ?? null
   // A long-sleeve family must not inherit a short-sleeve blank row's sleeve fact (the CC row is
   // the 1717/short-sleeve spec until the PO adds a 6014 row) — drop the contradicted fact, keep the rest.
@@ -10976,8 +10985,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // selection over a pin-bearing hay would let the net stamp a FALSE "authentic Comfort Colors
     // blank" claim on a Gildan garment. blankSpecRowMatched (pin included) still drives the FACT
     // decorations — pre-net that hay only ever leaked spec facts, never an affirmative brand claim.
-    const blankBrandNetRow = apparelProduct && looksShirt
-      ? matchBlankSpecRow(await loadBlankSpecRows(), input.canonicalTitle, repTitle, input.productType, skuHay)
+    // SKU-first (PO 2026-08-21): same children + override as the FACT resolution above; only the
+    // legacy-fallback hay differs (no pin), so SKU-resolved families are byte-identical at both sites.
+    const blankBrandNetRow = apparelProduct
+      ? familyBlankRow(resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, [input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')))
       : null
     // Per-child titles join the net set (adversarial LOW, multi-design): the IH is ONE broadcast
     // value pushed to every SKU, while per_child_titles ship per SKU — the waterfall is satisfied
