@@ -30,6 +30,7 @@
 import { createAdminClient } from '@/lib/supabase/server'
 import { spApiWriteBucket, spApiReadBucket } from '@/lib/fba/spApiRateLimiter'
 import { reconcileFamilyChildren } from '@/lib/fba/familyReconcile'
+import { recordOfferLiveness, observationsFromGate } from '@/lib/fba/offerLiveness'
 import { getAccessToken } from '@/lib/amazon/auth'
 import {
   FIELD_CONFIG, isPushField, type PushField, PUSH_FIELDS,
@@ -587,6 +588,13 @@ export async function loadDiff(parentAsin: string, field: PushField, titleOverri
     for (const d of baseDiff) d.notLive = false
   }
 
+  // ── PERSIST THE GATE'S OWN TRUTH (offerLiveness.ts, migration 059) ──
+  // The verdicts just computed — POST-valve, so a distrusted verdict is never persisted — are the
+  // evidence the VARIANT-DEATH ALARM reads (the proxies it had, sync lag + listing_health, both
+  // read "healthy" for the Later Gator family's dead Orchid offers while THIS gate skipped them).
+  // Same Listings-Items answer, zero extra calls. Fail-open bookkeeping: never blocks a push.
+  await recordOfferLiveness(supabase, observationsFromGate(baseDiff, discoveredByAsin, { parentAsin, source: 'push_gate' }))
+
   // ── PARENT SKU row for BROADCAST field pushes ────────────────────────────────
   // The variation parent (e.g. Memory-Card-P) is non-buyable but DOES carry its own
   // item_name / bullet_point / product_description. Amazon's PDP and search results
@@ -941,6 +949,9 @@ export async function expandDetailSkuSet(
   if (wouldSkip > 0 && wouldSkip >= Math.ceil(withNotLive.length / 2)) {
     for (const r of withNotLive) r.notLive = false
   }
+  // PERSIST THE GATE'S OWN TRUTH (offerLiveness.ts) — post-valve verdicts, details-path parity with
+  // loadDiff's content gate. The parent hub row is notLive:false and never in discovery ⇒ no row.
+  await recordOfferLiveness(supabase, observationsFromGate(withNotLive, discoveredByAsin, { parentAsin, source: 'details_gate' }))
   return withNotLive
 }
 
@@ -1212,13 +1223,20 @@ export async function probeItemHighlightsWritable(): Promise<'supported' | 'bloc
 
     // Pick ONE confirmed-live child SKU (marketplace-wide flag → any live SKU answers the question).
     const { data: rows } = await db
-      .from('listing_content').select('sku, asin').limit(200)
-    const candidates = dedupByAsin((rows ?? []) as { sku: string; asin: string }[])
+      .from('listing_content').select('sku, asin, parent_asin').limit(200)
+    const candidates = dedupByAsin((rows ?? []) as { sku: string; asin: string; parent_asin: string | null }[])
     let liveSku: string | null = null
+    const seen: Parameters<typeof recordOfferLiveness>[1] = []
     for (const c of candidates) {
       const skus = await discoverSkusForAsin(sellerId, token, c.asin)   // null=failed, []=offerless, [..]=live
+      // Same interpretation as the push gate ⇒ same persisted truth (offerLiveness.ts).
+      seen.push(...observationsFromGate(
+        [{ sku: c.sku, asin: c.asin, notLive: Array.isArray(skus) && skus.length === 0 }],
+        new Map([[c.asin, skus]]), { parentAsin: c.parent_asin ?? null, source: 'ih_probe' },
+      ))
       if (skus && skus.length > 0) { liveSku = skus[0].sku; break }
     }
+    await recordOfferLiveness(db, seen)                   // fail-open bookkeeping
     if (!liveSku) return 'unknown'                       // no confirmed-live SKU → inconclusive
 
     const productType = await tryGetProductType(sellerId, token, liveSku)
