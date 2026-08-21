@@ -155,6 +155,10 @@ export interface AnalyzedKeyword {
   themeFit?: 0 | 1 | 2 | 3 | null;
   themeAbout?: string | null;
   themeRunId?: string | null;
+  /** PER-DESIGN theme fit (migration 061, PO 2026-08-21): {designKey: {fit, about}} rated against
+   *  EACH design's card on a multi-design family. Read by the shared Item Highlight composer
+   *  (min over designs). Same read gating as themeFit; null/absent = never rated per design. */
+  themeFitByDesign?: Record<string, { fit: 0 | 1 | 2 | 3; about?: string | null }> | null;
   /** THE membership predicate's backing column. NOT NULL = ranking target. Read via
    *  `isRankingTarget(row)`, never by comparing to a literal — see selection-core.ts. */
   selectionRank?: number | null;

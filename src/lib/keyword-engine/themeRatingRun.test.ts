@@ -14,15 +14,20 @@ import { rateThemeFit, type ThemeRating } from './themeRater'
 import {
   rateWithRetry,
   rerateFromCache,
+  rerateFromCachePerDesign,
   themeRatingAccepted,
   themeRunEpoch,
   rerateGuardKey,
+  rerateDesignGuardKey,
   THEME_RATE_MIN_SHARE,
   THEME_RATE_MAX_ATTEMPTS,
   THEME_RERATE_COOLDOWN_MS,
   type Rater,
   type ThemeRateVerdict,
+  type PerDesignRerateDeps,
 } from './themeRatingRun'
+import type { FamilyDesignGroups } from '@/lib/fba/familyDesignGroups'
+import type { DesignGroupIdentity, DesignGroupLike } from '@/lib/fba/designGroupIdentity'
 
 const FLAG = 'KEYWORD_TARGET_SET'
 let savedFlag: string | undefined
@@ -321,5 +326,165 @@ describe('rerateFromCache — credit-free, guard armed BEFORE the rater, writes 
     const db = fakeSupabase((c) => (c.table === 'app_settings' && c.op === 'upsert' ? { error: { message: 'rls' } } : baseHandler()(c)), calls)
     await expect(rerateFromCache('B0DQ5YZH38', { supabase: db, rateFamily, now: () => NOW })).rejects.toThrow(/guard could not be armed/)
     expect(rateFamily).not.toHaveBeenCalled()
+  })
+})
+
+/* ── rerateFromCachePerDesign — ONE card per DESIGN, theme_fit_by_design merged for rated rows only ── */
+
+type RpcCall = { fn: string; args: Record<string, unknown> }
+/** The recording fake + an `rpc` seam (migration 061's merge function). */
+function fakeSupabaseRpc(handle: Handler, calls: Call[], rpcs: RpcCall[], rpcResult: { data?: unknown; error?: { message: string } | null } = { data: 2 }) {
+  const base = fakeSupabase(handle, calls)
+  return { ...base, rpc: async (fn: string, args: Record<string, unknown>) => { rpcs.push({ fn, args }); return { data: null, error: null, ...rpcResult } } }
+}
+
+const DESIGN_POOL: { keyword: string; theme_run_by_design: Record<string, string> | null }[] = [
+  { keyword: 'motivational shirts women', theme_run_by_design: null },
+  { keyword: 'Graphic Tees For Men', theme_run_by_design: null },
+  { keyword: 'real king crown tee', theme_run_by_design: null },
+]
+const FAMILY: FamilyDesignGroups = {
+  isMultiDesign: true,
+  audienceLean: 'male',
+  productTitle: 'THE CEO Motivational Shirts',
+  groups: [
+    { key: 'BM', skus: [{ sku: 'BM64000L-BK', asin: 'B0BM000001' }], sellerName: 'Beast Mode', resolvedName: 'Beast Mode', titles: ['THE CEO Beast Mode Shirt'] },
+    { key: 'RK', skus: [{ sku: 'RK64000L-BK', asin: 'B0RK000001' }], sellerName: null, resolvedName: 'Real King', titles: ['THE CEO Real King Graffiti Shirt'] },
+    { key: 'DQ', skus: [{ sku: 'DQ64000L-BK', asin: 'B0DQ000001' }], sellerName: null, resolvedName: "Don't Quit", titles: [] },
+  ],
+}
+const identityFor = (withIdentity: string[]) => async (g: DesignGroupLike): Promise<DesignGroupIdentity> =>
+  withIdentity.includes(g.key)
+    ? { key: g.key, repAsin: g.skus[0].asin, imageUrl: null, identity: { designTheme: `${g.key} theme`, visualElements: [], seedKeywords: [] } as unknown as DesignGroupIdentity['identity'] }
+    : { key: g.key, repAsin: null, imageUrl: null, identity: null }
+
+const designHandler = (opts: { rows?: typeof DESIGN_POOL; guard?: Record<string, string> } = {}): Handler => (c) => {
+  if (c.table === 'listing_content' && c.op === 'select') {
+    const byAsin = c.filters.find((f) => f[0] === 'eq' && f[1] === 'asin')
+    if (byAsin) return { data: { asin: 'B0DQ5YZH38', parent_asin: 'B0DQ5YZH38' } }
+    return { data: [] }
+  }
+  if (c.table === 'keyword_analysis' && c.op === 'select') return { data: opts.rows ?? DESIGN_POOL }
+  if (c.table === 'app_settings' && c.op === 'select') {
+    const key = c.filters.find((f) => f[0] === 'eq' && f[1] === 'key')?.[2] as string
+    const v = opts.guard?.[key]
+    return { data: v ? { value: v } : null }
+  }
+  return { data: null }
+}
+
+type CardCtx = Parameters<NonNullable<PerDesignRerateDeps['buildCard']>>[0]
+
+describe('rerateFromCachePerDesign — per-design cards, per-(pool, design) guard, rated rows only, no-card skipped', () => {
+  it('rates each identity-bearing design against ITS OWN card, merges only the rated rows, skips the no-identity design as no-card', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []; const cards: CardCtx[] = []
+    const db = fakeSupabaseRpc(designHandler(), calls, rpcs)
+    const rate: Rater = async (keywords, card) => {
+      // BM's card rates everything 3 except the RK-named phrase; RK's card rates the women phrase 1.
+      const m = new Map<string, ThemeRating>()
+      for (const k of keywords) {
+        const key = themeRatingKey(k)
+        if (card?.startsWith('BM')) { if (key !== 'real king crown tee') m.set(key, rating(3, 'gym')) }
+        else m.set(key, rating(key === 'motivational shirts women' ? 1 : 3, 'kings'))
+      }
+      return m
+    }
+    const res = await rerateFromCachePerDesign('b0dq5yzh38', {
+      supabase: db, now: () => NOW, loadGroups: async () => FAMILY, readIdentity: identityFor(['BM', 'RK']),
+      buildCard: async (ctx) => { cards.push(ctx); return `${ctx.asin?.split(':')[1]} card` }, rate,
+    })
+    expect(res.status).toBe('rated')
+    expect(res.groups.map((g) => [g.designKey, g.status])).toEqual([['BM', 'rated'], ['RK', 'rated'], ['DQ', 'no-card']])
+    // Cards: one per rated design, from the design's OWN signals, NEVER persisted to the family row.
+    expect(cards).toHaveLength(2)
+    expect(cards[0]).toMatchObject({ asin: 'B0DQ5YZH38:BM', parentAsin: null, designNameOverride: 'Beast Mode', visionDesignTheme: 'BM theme', supabase: null, audienceLean: 'male' })
+    expect(cards[1]).toMatchObject({ asin: 'B0DQ5YZH38:RK', designNameOverride: null, resolvedDesignName: 'Real King', visionDesignTheme: 'RK theme', supabase: null })
+    // Merges: ONE rpc per rated design, exact stored spellings, ONLY the rated rows.
+    expect(rpcs).toHaveLength(2)
+    expect(rpcs[0].fn).toBe('merge_theme_fit_by_design')
+    expect(rpcs[0].args).toMatchObject({ p_asin: 'B0DQ5YZH38', p_design_key: 'BM' })
+    expect(rpcs[0].args.p_ratings).toEqual({ 'motivational shirts women': { fit: 3, about: 'gym' }, 'Graphic Tees For Men': { fit: 3, about: 'gym' } })
+    expect(rpcs[1].args.p_design_key).toBe('RK')
+    expect((rpcs[1].args.p_ratings as Record<string, { fit: number }>)['motivational shirts women'].fit).toBe(1)
+    expect(String(rpcs[0].args.p_run_id)).toMatch(/^kt_\d+_[a-z0-9]+$/)
+    expect(rpcs[0].args.p_run_id).not.toBe(rpcs[1].args.p_run_id)
+    // The family-level theme_fit is NEVER written (no keyword_analysis UPDATE at all).
+    expect(calls.filter((c) => c.table === 'keyword_analysis' && c.op === 'update')).toHaveLength(0)
+    // Guards: armed + completion-stamped per (pool, design); the no-card design is never armed.
+    const arms = calls.filter((c) => c.table === 'app_settings' && c.op === 'upsert').map((c) => (c.payload as { key: string }).key)
+    expect(arms).toEqual([rerateDesignGuardKey('B0DQ5YZH38', 'BM'), rerateDesignGuardKey('B0DQ5YZH38', 'BM'), rerateDesignGuardKey('B0DQ5YZH38', 'RK'), rerateDesignGuardKey('B0DQ5YZH38', 'RK')])
+    expect(arms).not.toContain(rerateGuardKey('B0DQ5YZH38'))   // the FAMILY guard is untouched
+    expect(res.groups[0]).toMatchObject({ asked: 3, rated: 2, written: 2 })
+    expect(res.groups[2]).toMatchObject({ status: 'no-card', reason: 'no-card', rated: 0, runId: null })
+    // Credit safety: nothing but these tables + the merge function.
+    expect(new Set(calls.map((c) => c.table))).toEqual(new Set(['listing_content', 'keyword_analysis', 'app_settings']))
+    const lines = logSpy.mock.calls.map((c: unknown[]) => String(c[0])).filter((s: string) => s.includes('THEME_RERATE_DESIGN'))
+    expect(JSON.parse(lines[0])).toMatchObject({ tag: 'THEME_RERATE_DESIGN', parent: 'B0DQ5YZH38', designKey: 'BM', asked: 3, rated: 2 })
+  })
+
+  it('the guard is per (pool, design): a design rated 5 min ago is refused while its siblings still rate', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []
+    const rows = DESIGN_POOL.map((r, i) => (i === 0 ? { ...r, theme_run_by_design: { BM: `kt_${NOW - 5 * 60_000}_zz9` } } : r))
+    const db = fakeSupabaseRpc(designHandler({ rows }), calls, rpcs)
+    const rate = vi.fn(ratesFirst(3))
+    const res = await rerateFromCachePerDesign('B0DQ5YZH38', {
+      supabase: db, now: () => NOW, loadGroups: async () => FAMILY, readIdentity: identityFor(['BM', 'RK']), buildCard: async () => 'card', rate,
+    })
+    expect(res.groups.map((g) => [g.designKey, g.status])).toEqual([['BM', 'cooldown'], ['RK', 'rated'], ['DQ', 'no-card']])
+    expect(res.groups[0].retryAfterMs).toBe(THEME_RERATE_COOLDOWN_MS - 5 * 60_000)
+    expect(rate).toHaveBeenCalledTimes(1)
+    expect(rpcs.map((r) => r.args.p_design_key)).toEqual(['RK'])
+  })
+
+  it('the ARMED stamp of one design blocks only that design', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []
+    const db = fakeSupabaseRpc(designHandler({ guard: { [rerateDesignGuardKey('B0DQ5YZH38', 'RK')]: new Date(NOW - 60_000).toISOString() } }), calls, rpcs)
+    const res = await rerateFromCachePerDesign('B0DQ5YZH38', {
+      supabase: db, now: () => NOW, loadGroups: async () => FAMILY, readIdentity: identityFor(['BM', 'RK']), buildCard: async () => 'card', rate: ratesFirst(3),
+    })
+    expect(res.groups.map((g) => [g.designKey, g.status])).toEqual([['BM', 'rated'], ['RK', 'cooldown'], ['DQ', 'no-card']])
+  })
+
+  it('a design whose raters judge < 30% FAILS: armed, nothing merged, siblings unaffected', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []
+    const db = fakeSupabaseRpc(designHandler(), calls, rpcs)
+    const rate: Rater = async (keywords, card) => (card === 'RK card' ? new Map() : new Map(keywords.map((k) => [themeRatingKey(k), rating(2)])))
+    const res = await rerateFromCachePerDesign('B0DQ5YZH38', {
+      supabase: db, now: () => NOW, loadGroups: async () => FAMILY, readIdentity: identityFor(['BM', 'RK']), buildCard: async (ctx) => `${ctx.asin?.split(':')[1]} card`, rate,
+    })
+    expect(res.status).toBe('rated')
+    expect(res.groups.map((g) => [g.designKey, g.status])).toEqual([['BM', 'rated'], ['RK', 'failed'], ['DQ', 'no-card']])
+    expect(res.groups[1].reason).toBe('below-threshold')
+    expect(rpcs.map((r) => r.args.p_design_key)).toEqual(['BM'])
+  })
+
+  it('NO design has an identity ⇒ none-rated, zero cards, zero rater calls, nothing armed', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []
+    const buildCard = vi.fn(async () => 'card'); const rate = vi.fn(ratesFirst(3))
+    const res = await rerateFromCachePerDesign('B0DQ5YZH38', {
+      supabase: fakeSupabaseRpc(designHandler(), calls, rpcs), now: () => NOW, loadGroups: async () => FAMILY, readIdentity: identityFor([]), buildCard, rate,
+    })
+    expect(res.status).toBe('none-rated')
+    expect(res.groups.every((g) => g.status === 'no-card')).toBe(true)
+    expect(buildCard).not.toHaveBeenCalled(); expect(rate).not.toHaveBeenCalled()
+    expect(calls.some((c) => c.op === 'upsert')).toBe(false); expect(rpcs).toHaveLength(0)
+  })
+
+  it('not a multi-design family ⇒ not-multi-design, nothing rated', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []
+    const rate = vi.fn(ratesFirst(3))
+    const res = await rerateFromCachePerDesign('B0DQ5YZH38', {
+      supabase: fakeSupabaseRpc(designHandler(), calls, rpcs), now: () => NOW, loadGroups: async () => ({ ...FAMILY, isMultiDesign: false }), readIdentity: identityFor(['BM']), rate,
+    })
+    expect(res).toMatchObject({ status: 'not-multi-design', groups: [] })
+    expect(rate).not.toHaveBeenCalled()
+  })
+
+  it('a merge failure (migration 061 missing) throws and names the migration', async () => {
+    const calls: Call[] = []; const rpcs: RpcCall[] = []
+    const db = fakeSupabaseRpc(designHandler(), calls, rpcs, { error: { message: 'function merge_theme_fit_by_design does not exist' } })
+    await expect(rerateFromCachePerDesign('B0DQ5YZH38', {
+      supabase: db, now: () => NOW, loadGroups: async () => FAMILY, readIdentity: identityFor(['BM']), buildCard: async () => 'card', rate: ratesFirst(3),
+    })).rejects.toThrow(/migration 061/)
   })
 })

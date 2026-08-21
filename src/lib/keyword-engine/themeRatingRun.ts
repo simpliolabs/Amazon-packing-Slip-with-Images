@@ -22,6 +22,9 @@
  * Two callers, one function (`rateFamilyThemeFit`): the sync's relevance gate and the credit-free
  * `rerateFromCache` path. Neither builds a card of its own — card logic stays in themeRater.ts and
  * the design signals come from loadSelectionContextWithSources, exactly as the sync always did.
+ * A third path, `rerateFromCachePerDesign` (PO 2026-08-21), rates the SAME pool once PER DESIGN of a
+ * multi-design family into theme_fit_by_design (migration 061) — same rateWithRetry contract, same
+ * guard shape keyed per (pool, design), family theme_fit untouched.
  *
  * CREDIT SAFETY. Nothing in this file imports or calls researchKeywords, the Jungle Scout client,
  * or keyword_cache. The only network calls are the existing OpenAI card + rater calls.
@@ -34,10 +37,13 @@ import {
   themeRatingKey,
   type RaterContext,
   type ThemeRating,
+  type ThemeCardContext,
 } from './themeRater'
 import { loadSelectionContextWithSources, type DesignSeasonSources } from './selectionContext'
 import type { SelectionContext } from './selection-core'
 import { resolveKeywordPoolKey, type PoolKey } from './poolKey'
+import { readDesignGroupIdentity, type DesignGroupIdentity, type DesignGroupLike } from '@/lib/fba/designGroupIdentity'
+import type { FamilyDesignGroups } from '@/lib/fba/familyDesignGroups'
 
 /* ── CONSTANTS (one home each) ───────────────────────────────────────────────────────────────── */
 
@@ -54,6 +60,8 @@ export const THEME_RERATE_COOLDOWN_MS = 10 * 60 * 1000
 
 /** app_settings key carrying the rerate guard stamp for a pool (value = ISO time it was ARMED). */
 export const rerateGuardKey = (poolKey: string): string => `theme_rerate_guard:${poolKey}`
+/** The per-(pool, design) guard — one design's rating never blocks or releases another's. */
+export const rerateDesignGuardKey = (poolKey: string, designKey: string): string => `theme_rerate_guard:${poolKey}:${designKey}`
 
 /* ── TYPES ───────────────────────────────────────────────────────────────────────────────────── */
 
@@ -335,4 +343,174 @@ export async function rerateFromCache(parentAsin: string, deps: RerateDeps): Pro
   await db.from('app_settings').upsert({ key: guardKey, value: new Date(now()).toISOString(), updated_at: new Date(now()).toISOString() }, { onConflict: 'key' })
   console.log(JSON.stringify({ tag: 'THEME_RERATE', parent: poolKey, asked: verdict.asked, rated: verdict.rated, written, runId: verdict.themeRunId, attempts: verdict.attempts }))
   return { poolKey, status: 'rated', asked: verdict.asked, rated: verdict.rated, runId: verdict.themeRunId }
+}
+
+/* ── PER-DESIGN RE-RATE (PO 2026-08-21: ONE shared line, true for EVERY design) ──────────────── */
+
+export type DesignRerateStatus = 'rated' | 'failed' | 'cooldown' | 'no-card'
+export interface DesignRerateResult {
+  designKey: string
+  designName: string | null
+  /** The child whose cached vision identity built the card (null ⇒ no-card). */
+  repAsin: string | null
+  status: DesignRerateStatus
+  asked: number
+  rated: number
+  /** Rows the merge function reported updated (rated only). */
+  written: number
+  runId: string | null
+  /** failed / no-card only. */
+  reason?: ThemeRateFailure
+  /** cooldown only. */
+  retryAfterMs?: number
+}
+export interface PerDesignRerateResult {
+  poolKey: PoolKey
+  /** 'rated' ⇒ at least one design rated; 'none-rated' ⇒ groups ran but none produced a run. */
+  status: 'rated' | 'none-rated' | 'empty' | 'not-multi-design'
+  groups: DesignRerateResult[]
+}
+
+export interface PerDesignRerateDeps {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any
+  openai?: OpenAI
+  /** Test seams — production wires the defaults (familyDesignGroups / designGroupIdentity /
+   *  themeRater). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  loadGroups?: (poolKey: string, db: any) => Promise<FamilyDesignGroups>
+  readIdentity?: (group: DesignGroupLike) => Promise<DesignGroupIdentity>
+  buildCard?: (ctx: ThemeCardContext) => Promise<string | null>
+  rate?: Rater
+  now?: () => number
+}
+
+/**
+ * Rate a multi-design family's EXISTING keyword_analysis rows against EACH design's OWN card and
+ * merge theme_fit_by_design[designKey] / theme_run_by_design[designKey] for the rows each design
+ * rated — nothing else (migration 061). The family-level theme_fit is never read or written here.
+ *
+ * PER DESIGN: groups = detectDesignGroups over the child SKUs (the per_child_* keys); the card is
+ * built from the design's PER-DESIGN vision identity (designGroupIdentity, READ ONLY — never a
+ * scan) plus its seller / resolved name. A group with NO cached identity is reported `no-card` and
+ * SKIPPED — never guessed from a sibling, never rated against the family card. Per-design cards are
+ * not persisted (listing_seo_scores.theme_card is the FAMILY card and must not be clobbered), so
+ * each run costs one gpt-4.1-mini card call + the raters per design — all OpenAI, zero credits.
+ *
+ * GUARD: the SAME 10-minute cooldown as rerateFromCache, keyed per (pool, designKey): armed BEFORE
+ * the design's first OpenAI call, completion evidence = the epoch inside theme_run_by_design[key].
+ * Designs run SEQUENTIALLY (each is already 3 parallel raters per chunk).
+ *
+ * NEVER: researchKeywords, Jungle Scout, keyword_cache, kw_ref_fingerprint, selection recompute.
+ */
+export async function rerateFromCachePerDesign(parentAsin: string, deps: PerDesignRerateDeps): Promise<PerDesignRerateResult> {
+  const db = deps.supabase
+  const now = deps.now ?? Date.now
+  const poolKey = await resolveKeywordPoolKey(parentAsin, db)
+
+  // 1. The stored pool — keyword + the per-design run map (the completion evidence).
+  const { data: rowsRaw, error: rowsErr } = await db
+    .from('keyword_analysis')
+    .select('keyword, theme_run_by_design')
+    .eq('asin', poolKey)
+  if (rowsErr) {
+    const missing = rowsErr.code === '42703' || rowsErr.code === 'PGRST204' || /theme_run_by_design|theme_fit_by_design/i.test(rowsErr.message ?? '')
+    throw new Error(missing
+      ? `keyword_analysis.theme_run_by_design is missing for ${poolKey} — apply migration 061 (theme_fit_by_design) first: ${rowsErr.message}`
+      : `keyword_analysis read failed for ${poolKey}: ${rowsErr.message}`)
+  }
+  const rows = ((rowsRaw ?? []) as { keyword: string; theme_run_by_design: Record<string, string> | null }[])
+    .filter((r) => typeof r.keyword === 'string' && r.keyword.trim().length > 0)
+  if (rows.length === 0) return { poolKey, status: 'empty', groups: [] }
+
+  // 2. The design groups (ONE grouping) + their name signals.
+  const loadGroups = deps.loadGroups ?? (await import('@/lib/fba/familyDesignGroups')).loadFamilyDesignGroups
+  const fam = await loadGroups(poolKey, db)
+  if (!fam.isMultiDesign || fam.groups.length < 2) {
+    console.warn(JSON.stringify({ tag: 'THEME_RERATE_DESIGN', parent: poolKey, status: 'not-multi-design', groups: fam.groups.map((g) => g.key) }))
+    return { poolKey, status: 'not-multi-design', groups: [] }
+  }
+  const readIdentity = deps.readIdentity ?? readDesignGroupIdentity
+  const buildCard = deps.buildCard ?? buildThemeCard
+  const keywords = rows.map((r) => r.keyword)
+  const stamp = async (key: string) => {
+    const { error } = await db
+      .from('app_settings')
+      .upsert({ key, value: new Date(now()).toISOString(), updated_at: new Date(now()).toISOString() }, { onConflict: 'key' })
+    return error as { message: string } | null
+  }
+
+  const out: DesignRerateResult[] = []
+  for (const g of fam.groups) {
+    const designName = g.sellerName || g.resolvedName || null
+    const base = { designKey: g.key, designName, asked: rows.length, written: 0 }
+
+    // 3. Guard per (pool, design) — BEFORE anything billable. Newest of: the armed stamp, the
+    //    newest run id this design ever wrote into the rows.
+    const guardKey = rerateDesignGuardKey(poolKey, g.key)
+    const { data: guardRow } = await db.from('app_settings').select('value').eq('key', guardKey).maybeSingle()
+    const armedAt = Date.parse((guardRow as { value?: string | null } | null)?.value || '') || 0
+    const lastRun = rows.reduce((mx, r) => Math.max(mx, themeRunEpoch(r.theme_run_by_design?.[g.key])), 0)
+    const lastRatedAt = Math.max(armedAt, lastRun)
+    const age = now() - lastRatedAt
+    if (lastRatedAt > 0 && age < THEME_RERATE_COOLDOWN_MS) {
+      console.warn(`[THEME_RERATE_DESIGN] parent=${poolKey} design=${g.key} refused — a rating was armed/completed ${Math.round(age / 1000)}s ago (cooldown ${THEME_RERATE_COOLDOWN_MS / 1000}s)`)
+      out.push({ ...base, repAsin: null, status: 'cooldown', rated: 0, runId: null, retryAfterMs: THEME_RERATE_COOLDOWN_MS - age })
+      continue
+    }
+
+    // 4. The design's OWN identity (READ ONLY). None ⇒ no-card, zero OpenAI calls, nothing armed.
+    const gi = await readIdentity(g).catch(() => null)
+    if (!gi?.identity) {
+      console.warn(JSON.stringify({ tag: 'THEME_RERATE_DESIGN', parent: poolKey, designKey: g.key, status: 'no-card', reason: 'no-identity', asked: rows.length, rated: 0 }))
+      out.push({ ...base, repAsin: gi?.repAsin ?? null, status: 'no-card', rated: 0, runId: null, reason: 'no-card' })
+      continue
+    }
+
+    // 5. ARM, then the card (one mini call) and the raters (with the shared retry contract).
+    const armErr = await stamp(guardKey)
+    if (armErr) throw new Error(`rerate guard could not be armed for ${poolKey}:${g.key}: ${armErr.message}`)
+    const tag = `${poolKey}:${g.key}`
+    const card = await buildCard({
+      asin: tag,
+      parentAsin: null,
+      designNameOverride: g.sellerName,
+      designNameOverrides: null,
+      resolvedDesignName: g.resolvedName,
+      visionDesignTheme: gi.identity.designTheme ?? null,
+      audienceLean: fam.audienceLean,
+      supabase: null,             // NEVER the family card row — per-design cards are not persisted
+      openai: deps.openai,
+    })
+    const verdict = await rateWithRetry(
+      keywords,
+      card,
+      { asin: tag, currentTitle: g.titles[0] || fam.productTitle || null, audienceLean: fam.audienceLean, openai: deps.openai },
+      deps.rate,
+    )
+    if (!verdict.ratings || !verdict.themeRunId) {
+      const status: DesignRerateStatus = verdict.reason === 'no-card' ? 'no-card' : 'failed'
+      console.warn(JSON.stringify({ tag: 'THEME_RERATE_DESIGN', parent: poolKey, designKey: g.key, status, reason: verdict.reason, asked: verdict.asked, rated: verdict.rated }))
+      out.push({ ...base, repAsin: gi.repAsin, status, rated: verdict.rated, runId: null, reason: verdict.reason ?? 'below-threshold' })
+      continue
+    }
+
+    // 6. Merge ONLY the rated rows, by exact stored keyword, through the ONE merge function.
+    const patch: Record<string, { fit: number; about: string }> = {}
+    for (const r of rows) {
+      const rating = verdict.ratings.get(themeRatingKey(r.keyword))
+      if (rating) patch[r.keyword] = { fit: rating.band, about: rating.about }
+    }
+    const { data: written, error: mergeErr } = await db.rpc('merge_theme_fit_by_design', {
+      p_asin: poolKey, p_design_key: g.key, p_run_id: verdict.themeRunId, p_ratings: patch,
+    })
+    if (mergeErr) throw new Error(`theme_fit_by_design merge failed for ${poolKey}:${g.key} (migration 061 applied?): ${mergeErr.message}`)
+
+    // 7. Completion stamp + the line.
+    await stamp(guardKey)
+    const n = typeof written === 'number' ? written : Object.keys(patch).length
+    console.log(JSON.stringify({ tag: 'THEME_RERATE_DESIGN', parent: poolKey, designKey: g.key, asked: verdict.asked, rated: verdict.rated, written: n, runId: verdict.themeRunId, attempts: verdict.attempts }))
+    out.push({ ...base, repAsin: gi.repAsin, status: 'rated', rated: verdict.rated, written: n, runId: verdict.themeRunId })
+  }
+  return { poolKey, status: out.some((r) => r.status === 'rated') ? 'rated' : 'none-rated', groups: out }
 }

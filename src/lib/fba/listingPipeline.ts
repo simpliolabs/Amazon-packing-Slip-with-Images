@@ -41,6 +41,7 @@ import { SEASONAL_TERMS, seasonsIn, isOffSeasonKeyword } from '@/lib/keyword-eng
 // selector, deliberately reused: the selector classifying a keyword CORE and the generators refusing
 // to place it is precisely the drift this migration exists to close.
 import { selectionMode, isRankingTarget, selectionSha, type SelectionContext } from '@/lib/keyword-engine/selection-core'
+import { unratedDesignKeys, minFitOverDesigns, ratedShareForDesign } from '@/lib/keyword-engine/themeFitByDesign'
 // deriveSeasonsFrom — THE one design→occasion derivation, shared with the seven keyword-side callers
 // that cannot build a PipelineInput. selectionContext.ts imports seasonalTerms/selection-core/
 // loadListingContent only, so importing it here creates no cycle.
@@ -2180,12 +2181,15 @@ function ihFloorDoor(line: string): string {
 }
 
 /** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action. */
-export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec'
+export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated'
 export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
   'unrated-pool': 'Held: pool is unrated — run research/theme rating first',
   'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
   'under-floor': `Held: truthful phrases + blank facts cannot reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor — harvest more keywords for this family`,
   'no-spec': 'Held: no blank spec resolved for this family — set its blank (child SKU style code or a family override)',
+  // Multi-design only (PO 2026-08-21): the shared line is a judgment under EVERY design, so it never
+  // composes from a partial one. The PO action: POST keyword-pool/rerate { parent_asin, per_design: true }.
+  'designs-unrated': 'Held: the pool is not rated against every design — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
 }
 
 export interface ItemHighlightsInput {
@@ -2245,14 +2249,15 @@ export function buildItemHighlights(input: ItemHighlightsInput): { value: string
   return { value: '', hold }
 }
 
-// ─── Item Highlights PER DESIGN (PO 2026-08-21, multi-design families) ─────────────────────────
+// ─── Item Highlights for MULTI-DESIGN families: ONE shared line (PO 2026-08-21) ────────────────
 
 export interface ItemHighlightDesignGroup {
   key: string
   designName: string
   skus: { sku: string; asin: string }[]
-  /** The title(s) THIS design ships (its per-child title) — the coverage exclusion and the brand
-   *  waterfall must see the titles the line will sit beside, never the family broadcast. */
+  /** The title(s) THIS design ships (its per-child title). The shared line's coverage exclusion and
+   *  brand waterfall see the UNION of every design's titles — a phrase any design's title already
+   *  covers is not novel beside that design, so it never composes. */
   titles: string[]
   /** The design's vision identity phrases (designTheme + seedKeywords). Extends the design's own
    *  vocabulary for the cross-design partition; [] when no identity is cached. */
@@ -2261,7 +2266,8 @@ export interface ItemHighlightDesignGroup {
 
 export interface PerDesignItemHighlightsInput {
   groups: ItemHighlightDesignGroup[]
-  /** The family's ranking targets (BACKEND-slot terms already excluded by the caller). */
+  /** The family's ranking targets (BACKEND-slot terms already excluded by the caller), carrying
+   *  `themeFitByDesign` (migration 061) — the per-design judgment the shared line is built from. */
   pool: AnalyzedKeyword[]
   apparelProduct: boolean
   blankBrand: BlankSpecRow | null
@@ -2273,44 +2279,83 @@ export interface PerDesignItemHighlight {
   designKey: string
   designName: string
   skus: { sku: string; asin: string }[]
+  /** The SHARED line (identical on every design by construction) or '' when held. */
   value: string
   hold: IhHoldReason | null
-  /** How many pool phrases the cross-design partition removed for this design (observability). */
+  /** How many pool phrases the cross-design partition removed (observability). */
+  foreignDropped: number
+  /** hold === 'designs-unrated' only: the design keys whose rating the pool lacks. */
+  missingDesigns?: string[]
+}
+
+export interface SharedItemHighlight {
+  value: string
+  hold: IhHoldReason | null
+  designKeys: string[]
+  missingDesigns: string[]
   foreignDropped: number
 }
 
 /**
- * THE per-design Item Highlights producer — shared by the pipeline's multi-design branch and the
+ * THE multi-design Item Highlights producer — shared by the pipeline's multi-design branch and the
  * regenerate-item-highlight route (Invariant 1: one function ships the field on every path).
- * Composes ONCE PER DESIGN GROUP through the SAME buildItemHighlights the single-design path ships
- * (same truth stage, same floor, same hold semantics), with two per-design inputs:
- *   1. titles = the group's own shipped title(s) (coverage exclusion + brand waterfall per group);
- *   2. pool = the family pool MINUS every phrase carrying a token foreign to this design — a token
- *      unique to ANOTHER design's name/identity (designScope.ts, the seam bullets/description
- *      already scope through). A BM line never carries "don't quit"; shared family phrases stay.
+ *
+ * PO RULING 2026-08-21 (refining the per-design ruling): a multi-design family's highlight is ONE
+ * SHARED LINE — design names stripped (each child's title already carries its design) — and every
+ * phrase must be TRUE FOR EVERY DESIGN. Composes ONCE through the SAME buildItemHighlights the
+ * single-design path ships (same truth stage, same floor, same hold semantics), with:
+ *   1. themeFit = the MIN over every design's rating (themeFitByDesign, migration 061) — a phrase
+ *      that is fit 3 on four designs and fit 1 on the fifth is excluded by the composer's fit gate;
+ *      a row missing ANY design's rating is null (never claimed true for a design it was not judged
+ *      under). If ANY design is unrated (< 30% of rows carry its fit) the family HOLDS with
+ *      `designs-unrated` naming the missing keys — a partial judgment never composes;
+ *   2. pool minus every phrase carrying ANY design's name/identity token (designScope STRICT
+ *      NAMES, unioned across designs) — the family pool is full of the harvested design;
+ *   3. titles = the UNION of every design's per-child titles (coverage exclusion + brand waterfall).
+ * The one line is written to every per_child_item_highlights entry — identical by construction —
+ * so the per-SKU push seam (#626) is unchanged: each SKU still ships "its" line, which is the
+ * shared one; a held family's SKUs are skipped `no-line-for-design`.
  * Single-design families never reach this function, so they are byte-identical to today.
  */
-export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput): { perDesign: PerDesignItemHighlight[]; perChild: PerChildItemHighlight[] } {
+export function buildItemHighlightsPerDesign(input: PerDesignItemHighlightsInput): { perDesign: PerDesignItemHighlight[]; perChild: PerChildItemHighlight[]; shared: SharedItemHighlight } {
   const { groups, pool, apparelProduct, blankBrand } = input
-  const foreignFor = buildForeignDesignTokens(
-    groups.map((g) => ({ key: g.key, name: g.designName, identity: g.identityPhrases ?? [] })),
-    // STRICT NAMES: the IH truth rule — another design's name never composes, however full of it the
-    // pool is (a pool harvested on the BM identity is full of "beast mode"; DQ still never says it).
-    { familyTitleText: input.familyTitleText, poolKeywords: pool.map((k) => k.keyword), strictNames: true },
-  )
-  const perDesign: PerDesignItemHighlight[] = groups.map((g) => {
-    const foreign = foreignFor(g.key)
-    const scoped = pool.filter((k) => !isForeignToDesign(k.keyword, foreign))
-    const titles = g.titles.filter((t) => !!t && !!t.trim())
+  const designKeys = groups.map((g) => g.key)
+  const missingDesigns = unratedDesignKeys(pool, designKeys)
+  let value = ''
+  let hold: IhHoldReason | null = null
+  let foreignDropped = 0
+  if (missingDesigns.length > 0) {
+    hold = 'designs-unrated'
+    console.warn(JSON.stringify({ tag: 'IH_SHARED_HOLD', reason: hold, designs: designKeys, missing: missingDesigns, pool: pool.length, ratedShare: Object.fromEntries(designKeys.map((k) => [k, Math.round(ratedShareForDesign(pool, k) * 100)])) }))
+  } else {
+    const foreignFor = buildForeignDesignTokens(
+      groups.map((g) => ({ key: g.key, name: g.designName, identity: g.identityPhrases ?? [] })),
+      // STRICT NAMES: another design's name never composes, however full of it the pool is. For the
+      // SHARED line every design is "another design" — the union of each design's foreign set is
+      // every design's distinguishing name/identity vocabulary.
+      { familyTitleText: input.familyTitleText, poolKeywords: pool.map((k) => k.keyword), strictNames: true },
+    )
+    const sharedForeign = new Set<string>(designKeys.flatMap((k) => [...foreignFor(k)]))
+    const scoped = pool
+      .filter((k) => !isForeignToDesign(k.keyword, sharedForeign))
+      // MIN OVER DESIGNS: the composer's fit gate (>= MIN_THEME_FIT) now reads the worst design.
+      .map((k) => ({ ...k, themeFit: minFitOverDesigns(k, designKeys) }))
+    foreignDropped = pool.length - scoped.length
+    const titles = [...new Set(groups.flatMap((g) => g.titles).map((t) => (t || '').trim()).filter(Boolean))]
     const r = buildItemHighlights({ finalTitle: titles[0] ?? '', pool: scoped, apparelProduct, blankBrand, netTitles: titles.length ? titles : null })
-    console.log(JSON.stringify({ tag: 'IH_PER_DESIGN', key: g.key, design: g.designName, pool: pool.length, scoped: scoped.length, len: r.value.length, hold: r.hold }))
-    return { designKey: g.key, designName: g.designName, skus: g.skus, value: r.value, hold: r.hold, foreignDropped: pool.length - scoped.length }
-  })
+    value = r.value
+    hold = r.hold
+    console.log(JSON.stringify({ tag: 'IH_SHARED', designs: designKeys, pool: pool.length, scoped: scoped.length, minFitRated: scoped.filter((k) => typeof k.themeFit === 'number').length, titles: titles.length, len: value.length, hold }))
+  }
+  const perDesign: PerDesignItemHighlight[] = groups.map((g) => ({
+    designKey: g.key, designName: g.designName, skus: g.skus, value, hold, foreignDropped,
+    ...(missingDesigns.length ? { missingDesigns } : {}),
+  }))
   const perChild: PerChildItemHighlight[] = []
   for (const d of perDesign) {
     for (const s of d.skus) perChild.push({ sku: s.sku, asin: s.asin, item_highlight: d.value, designName: d.designName, designKey: d.designKey, hold: d.hold })
   }
-  return { perDesign, perChild }
+  return { perDesign, perChild, shared: { value, hold, designKeys, missingDesigns, foreignDropped } }
 }
 
 // ─── Title validation (shared with the route's PR1 validator semantics) ────────
@@ -10842,7 +10887,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // scoped to the group's own titles + the family pool minus other designs' tokens. The
       // broadcast detail row becomes a per-design MARKER with NO line — a broadcast Ship can never
       // push one design's line to every SKU (the push seam resolves per SKU from the array).
-      onProgress(`Composing ${designGroupContexts.length} per-design Item Highlights...`)
+      onProgress(`Composing the shared Item Highlight across ${designGroupContexts.length} designs...`)
       const built = buildItemHighlightsPerDesign({
         groups: designGroupContexts.map((c) => ({
           key: c.key, designName: c.designName, skus: c.skus,
@@ -10860,8 +10905,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
           current_value: null,
           recommended_value: '',
           per_design: true,
-          reason: `${IH_REASON} MULTI-DESIGN family: one line per design (${composed}/${built.perDesign.length} composed) — each SKU ships its own design's line; designs that hold are skipped, never given another design's line.`,
+          reason: `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): ONE shared line, design names stripped, every phrase rated >= 2 under EVERY design (${built.shared.designKeys.length} designs) — carried per SKU through per_child_item_highlights.`,
         })
+      } else if (built.shared.hold) {
+        console.warn(JSON.stringify({ tag: 'IH_SHARED_HELD', parent: input.parentAsin ?? null, hold: built.shared.hold, missing: built.shared.missingDesigns }))
       }
     } else {
       const { value: hl } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })

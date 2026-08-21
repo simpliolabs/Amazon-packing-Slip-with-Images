@@ -7,9 +7,13 @@
  * PO 2026-08-21) — then persists the updated product_details_improvements row. Isolated: does NOT
  * run the full pipeline. Auth is enforced by the /api/fba middleware (task #49). Never blanks the
  * field: a HOLD answers 422 with the named reason and keeps the stored value.
- * MULTI-DESIGN (PO 2026-08-21): composes one line PER DESIGN (buildItemHighlightsPerDesign — the
- * same producer the pipeline ships) into per_child_item_highlights; the broadcast row becomes a
- * per-design marker with no line. READ-ONLY identity (no vision call) — see designGroupIdentity.ts.
+ * MULTI-DESIGN (PO 2026-08-21, refined the same day): composes ONE SHARED line — design names
+ * stripped, every phrase rated >= 2 under EVERY design (theme_fit_by_design, migration 061; min
+ * over designs) — through buildItemHighlightsPerDesign (the same producer the pipeline ships) into
+ * per_child_item_highlights (identical per SKU by construction); the broadcast row becomes a
+ * per-design marker with no line. Holds `designs-unrated` (422, missing keys named) until
+ * keyword-pool/rerate { per_design: true } has rated the pool under every design.
+ * READ-ONLY identity (no vision call) — see designGroupIdentity.ts.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -86,11 +90,15 @@ export async function POST(req: NextRequest) {
     // seam, correct regardless of which projection stripped the field.
     {
       const fitByKw = new Map(analysis.map((k) => [k.keyword.toLowerCase(), k.themeFit ?? null]))
-      hlAnalysis = hlAnalysis.map((k) => (
-        (k as { themeFit?: number | null }).themeFit == null
-          ? { ...k, themeFit: fitByKw.get(k.keyword.toLowerCase()) ?? null }
-          : k
-      ))
+      // PER-DESIGN fits (migration 061) re-hydrate by the same seam — the shared multi-design line
+      // is a min over these, so a projection that strips them would hold the family as unrated.
+      const fitByDesignByKw = new Map(analysis.map((k) => [k.keyword.toLowerCase(), k.themeFitByDesign ?? null]))
+      hlAnalysis = hlAnalysis.map((k) => {
+        const next = { ...k }
+        if ((k as { themeFit?: number | null }).themeFit == null) next.themeFit = fitByKw.get(k.keyword.toLowerCase()) ?? null
+        if (next.themeFitByDesign == null) next.themeFitByDesign = fitByDesignByKw.get(k.keyword.toLowerCase()) ?? null
+        return next
+      })
     }
 
     const apparel = /\b(shirt|tee|t-?shirts?|hoodie|sweatshirt|tank|apparel|garment)\b/i.test(title)
@@ -111,10 +119,11 @@ export async function POST(req: NextRequest) {
       titles: [title, ...storedPct.map((t) => String(t?.title ?? ''))],
     })
 
-    // ── MULTI-DESIGN (PO 2026-08-21): one line PER DESIGN through the SAME producer the pipeline
-    // ships. Groups = the stored per_child_titles' design keys (the ONE grouping — never a second
-    // resolver); identity per design = the READ-ONLY cached vision identity of the group's first
-    // scanned child (this route never spends a vision call — POST scan-identity {per_design:true}
+    // ── MULTI-DESIGN (PO 2026-08-21): ONE SHARED line through the SAME producer the pipeline
+    // ships (min-over-designs fit, all design names stripped, union of per-design titles). Groups =
+    // the stored per_child_titles' design keys (the ONE grouping — never a second resolver);
+    // identity per design = the READ-ONLY cached vision identity of the group's first scanned
+    // child (this route never spends a vision call — POST scan-identity {per_design:true}
     // populates it). The broadcast row becomes the per-design MARKER (no line).
     const pct = (Array.isArray(rec.per_child_titles) ? rec.per_child_titles : []) as { sku: string; asin: string; title: string; designName?: string | null; designKey?: string | null }[]
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -148,9 +157,11 @@ export async function POST(req: NextRequest) {
       const composed = built.perDesign.filter((d) => d.value)
       if (composed.length === 0) {
         const reasons = [...new Set(built.perDesign.map((d) => d.hold).filter((h): h is NonNullable<typeof h> => !!h))]
+        const missing = built.shared.missingDesigns
         return NextResponse.json({
-          error: `Every design HELD: ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')} — kept the existing values.`,
-          hold: reasons[0] ?? 'under-floor', per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
+          error: `Shared Item Highlight HELD: ${reasons.map((r) => IH_HOLD_MESSAGES[r]).join(' · ')}${missing.length ? ` (unrated designs: ${missing.join(', ')})` : ''} — kept the existing values.`,
+          hold: reasons[0] ?? 'under-floor', missing_designs: missing,
+          per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
         }, { status: 422 })
       }
       const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: '', per_design: true } : p))
@@ -167,6 +178,7 @@ export async function POST(req: NextRequest) {
         per_design: perDesignIhRows(built.perChild),
         per_child_item_highlights: built.perChild,
         product_details_improvements: updated,
+        shared: { item_highlight: built.shared.value, designs: built.shared.designKeys, foreignDropped: built.shared.foreignDropped },
         composed: composed.length, held: built.perDesign.length - composed.length,
       })
     }
