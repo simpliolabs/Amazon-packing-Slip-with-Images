@@ -46,8 +46,10 @@ const ACRONYM_CASE: Record<string, string> = {
   sd: 'SD', sdhc: 'SDHC', sdxc: 'SDXC', microsd: 'MicroSD', usb: 'USB', hdmi: 'HDMI',
   usa: 'USA', uk: 'UK', led: 'LED', hd: 'HD', tv: 'TV', gps: 'GPS', diy: 'DIY',
 }
-/** Title Case a pool phrase without disturbing its wording (the token sequence is what ranks). */
-const titleCasePhrase = (p: string): string =>
+/** Title Case a pool phrase without disturbing its wording (the token sequence is what ranks).
+ *  Exported as THE customer-facing IH caser — the spec fallback ships through it too, so both
+ *  producer paths case with one implementation (acronym caps included). Length-preserving. */
+export const titleCasePhrase = (p: string): string =>
   p.split(/\s+/).map((w) => {
     const lower = w.toLowerCase()
     if (ACRONYM_CASE[lower]) return ACRONYM_CASE[lower]
@@ -56,6 +58,18 @@ const titleCasePhrase = (p: string): string =>
     return IH_INSIGNIFICANT.has(lower) ? lower : w.charAt(0).toUpperCase() + w.slice(1)
   }).join(' ')
     .replace(/^./, (c) => c.toUpperCase())
+
+/** ONE humanizer for any spec/attribute-derived MACHINE TOKEN that reaches customer copy
+ *  (live B0GQ6PGR2N: Item Highlights shipped raw "short_sleeve"). Enum detail rows deliberately
+ *  STORE the Amazon API token — push needs it, and the editor prettifies at display only — so any
+ *  producer composing copy FROM spec rows must humanize at ITS seam: underscores → spaces, then
+ *  the shared Title Case above (acronym caps preserved). Values without underscores pass through
+ *  untouched — already-human labels ("Crew Neck") are not re-cased here. */
+export function humanizeSpecToken(value: string): string {
+  const v = (value ?? '').trim()
+  if (!v.includes('_')) return v
+  return titleCasePhrase(v.replace(/_+/g, ' ').replace(/\s{2,}/g, ' ').trim())
+}
 
 /** Gender/audience irregular plurals fold together (woman≡women, ladies≡lady, man≡men) — without
  *  this, "alligator shirt women" + "alligator shirts woman" both pass novelty and the line becomes
