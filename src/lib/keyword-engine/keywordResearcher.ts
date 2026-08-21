@@ -25,7 +25,11 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { resolveOpenAIKey } from '../openai/credentials';
 import { scrubTrademarks, hasTrademark } from '../fba/trademarkGuard';
-import { garmentNounFor, SHIRT_BASE, GARMENT_HEAD_WORDS, familyScanWords, type GarmentNoun } from '../fba/garmentNoun';
+import { garmentNounFor, resolveGarment, SHIRT_BASE, GARMENT_HEAD_WORDS, familyScanWords, type GarmentNoun, type GarmentResolution } from '../fba/garmentNoun';
+// BLANK-FIRST garment truth for seeding (PO 2026-08-21: "keyword universe follows the BLANK, not
+// Amazon's productType"). Consumed, never changed: the SKU-first resolver is blankSpecs' ONE core.
+// No cycle: blankSpecs → productDetailAttrs → contentContract (leaf); none import this module.
+import { resolveFamilyBlankForNet } from '../fba/blankSpecs';
 import { isWithinBudget } from './cacheService';
 // Seed-token audit primitives (task #144; the SEED_TOKEN_NET flag/reservation layer died at the
 // POOL_STRATA flip). No cycle: seedTokenNet imports only coverage-core (dependency-free leaf).
@@ -138,8 +142,10 @@ export async function researchKeywords(
      *  that narrow query — never the category winner whose keywords we need. Supplied by the
      *  caller for NON-apparel only (apparel niches are design-led; vision seeds them better). */
     categorySeed?: string;
-    /** SP-API productType (SHIRT/HAT/SWEATSHIRT/…) — drives the shared garment-noun resolver so a
-     *  HAT stops being seeded as a t-shirt. Flag-gated (GARMENT_NOUN); off → shirt-defaulted. */
+    /** SP-API productType (SHIRT/HAT/SWEATSHIRT/…) — the FALLBACK garment truth for the shared
+     *  garment-noun resolver (so a HAT stops being seeded as a t-shirt). The resolved BLANK's
+     *  garment_family wins when one resolves for the family (PO 2026-08-21: B0GQ6PGR2N is a 6014
+     *  long-sleeve tee listed as SWEATSHIRT). Flag-gated (GARMENT_NOUN); off → shirt-defaulted. */
     productType?: string;
     /** #174: the SELLABLE child to point ASIN-parameterized external queries at (JS keywords_by_asin
      *  ranks a sellable child, never a parent hub). STORAGE stays under the PoolKey `asin`; this is
@@ -148,13 +154,6 @@ export async function researchKeywords(
   } = {}
 ): Promise<KeywordResearchResult> {
   const { forceRefresh = false, listingTitle, manualSeed, categorySeed, productType, queryAsin } = options;
-  // Shared garment-noun resolver, flag-gated. Flag off/shadow → SHIRT_BASE (byte-identical to the
-  // legacy shirt defaults). Flag on → real per-family resolution. Shadow mode logs the delta.
-  const gReal = garmentNounFor(productType, listingTitle);
-  const g: GarmentNoun = GARMENT_NOUN_ON ? gReal : SHIRT_BASE;
-  if (GARMENT_NOUN_MODE === 'shadow' && gReal.family !== 'shirt') {
-    console.log(`[GARMENT_DIFF] ${asin} pt=${productType ?? '(none)'}: garment shirt→${gReal.family} | seedNoun ${SHIRT_BASE.seedNoun}→${gReal.seedNoun} | categoryHead "${SHIRT_BASE.categoryHead('women')}"→"${gReal.categoryHead('women')}"`);
-  }
 
   // Check cache first
   if (!forceRefresh) {
@@ -166,6 +165,17 @@ export async function researchKeywords(
       // still runs Phase 4b, which measures THIS listing's ranks fresh.
       return { ...cached, servedFromCache: true };
     }
+  }
+
+  // Garment truth for SEED DERIVATION — the resolved BLANK first, Amazon's productType as the
+  // fallback (PO 2026-08-21). Flag-gated exactly as before: off/shadow → SHIRT_BASE (byte-identical
+  // to the legacy shirt defaults), on → the real per-family resolution; shadow logs the delta.
+  const gReal = await resolveSeedGarment({ asin, parentAsin, listingTitle, productType });
+  const g: GarmentNoun = GARMENT_NOUN_ON ? gReal : SHIRT_BASE;
+  // Shadow fires on a family change OR a category-head change (a blank-sourced long-sleeve/kids tee
+  // stays in the shirt family but seeds a different 100-keyword head — that delta must be visible).
+  if (GARMENT_NOUN_MODE === 'shadow' && (gReal.family !== 'shirt' || gReal.categoryHead('women') !== SHIRT_BASE.categoryHead('women'))) {
+    console.log(`[GARMENT_DIFF] ${asin} pt=${productType ?? '(none)'}: garment shirt→${gReal.family} | seedNoun ${SHIRT_BASE.seedNoun}→${gReal.seedNoun} | categoryHead "${SHIRT_BASE.categoryHead('women')}"→"${gReal.categoryHead('women')}"`);
   }
 
   // ── Phase 1: Seed selection — Seed Agent (identity-validated) → rules failover ────────────
@@ -648,6 +658,48 @@ const SEED_GENERIC = new Set([
 // byte-identical until the PO flips this on after reviewing the shadow diff.
 const GARMENT_NOUN_MODE = (process.env.GARMENT_NOUN || 'off').toLowerCase()
 const GARMENT_NOUN_ON = GARMENT_NOUN_MODE === 'on'
+
+/**
+ * THE seed-derivation garment resolver (PO ruling 2026-08-21, SELLER_PROFILE.md "Keyword universe
+ * follows the BLANK, not Amazon's productType").
+ *
+ * B0GQ6PGR2N: a Comfort Colors 6014 long-sleeve TEE listed under Amazon productType SWEATSHIRT.
+ * `garmentNounFor(productType)` fixed the family from that productType, so every universe this
+ * module seeds — the broad category head, the niche head, the supply tail, the fallback — spoke
+ * sweatshirt, and 47 of the 52 harvested keywords were sweatshirt vocabulary on a tee. The blank
+ * resolved from the child SKUs (blank_specs.garment_family, SKU-first — the PO's own rule) is the
+ * product truth; Amazon's productType + title is the fallback when no blank resolves, byte-identical
+ * to the legacy path.
+ *
+ * Reads ONLY the DB (listing_content children + the cached blank catalog/overrides) via blankSpecs'
+ * ONE resolver — never Jungle Scout, never research. The hay handed to the blank resolver is the
+ * titles + child SKUs, deliberately NOT the productType: the garment-compatibility gate would let
+ * the very productType this ruling overrides veto the SKU. Fail-open: any failure → no blank →
+ * productType path. One GARMENT_RESOLVE line per call so prod logs show which truth seeded.
+ */
+export async function resolveSeedGarment(
+  opts: { asin: string; parentAsin?: string | null; listingTitle?: string | null; productType?: string | null },
+  // Any supabase-js client (tests inject); the minimal surface resolveFamilyBlankForNet calls.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any = supabase,
+): Promise<GarmentResolution> {
+  const blank = await resolveFamilyBlankForNet(db, {
+    parentAsin: opts.parentAsin || null,
+    childAsin: opts.asin,
+    titles: [opts.listingTitle],
+  });
+  const res = resolveGarment({ productType: opts.productType, title: opts.listingTitle, blankFamily: blank.garmentFamily });
+  if (blank.garmentFamily && res.source !== 'blank') {
+    console.warn(`[keywordResearcher] GARMENT_RESOLVE: blank garment_family "${blank.garmentFamily}" is not in the seeding table — fell back to productType (add it to BLANK_FAMILY_BASES).`);
+  }
+  console.log(JSON.stringify({
+    tag: 'GARMENT_RESOLVE', asin: opts.asin, source: res.source, family: res.family,
+    productType: opts.productType ?? null, styleCode: blank.dominant?.styleCode ?? null,
+    blankFamily: blank.garmentFamily, blankSource: blank.source, mixed: blank.mixed,
+    seedNoun: res.seedNoun, categoryHead: res.categoryHead('women'),
+  }));
+  return res;
+}
 // The historical shirt-only literal, now UNCONDITIONAL in every flag mode (#156, 2026-08-03).
 // The old ON-mode union of ALL alias tokens made modifier words (dad/graphic/crew/baseball/…)
 // "apparel words" for EVERY listing — "Best Dad Ever Shirt" seeded as "best ever dad" and
@@ -742,6 +794,21 @@ export function buildFallbackSeed(seed: string, listingTitle?: string | null, g:
 }
 
 /**
+ * The shirt family's "is this really a tee?" guard for the broad heads (U1.5 / U2). Legacy answer:
+ * the seed/title must SAY tee/t-shirt — a guard from when every listing was assumed a shirt, so a
+ * hat titled "Cap" could not receive "graphic tees for women". A BLANK-sourced shirt family
+ * (resolveGarment, PO 2026-08-21) is PROOF of the garment — a 6014 family titled "Long Sleeve
+ * Shirt" must receive its "long sleeve shirts for women" head whether or not the title says
+ * "tee". Non-shirt families pass as before (the family itself is the proof). No-blank shirts keep
+ * the legacy regex byte-for-byte.
+ */
+export function teeProven(g: GarmentNoun, src: string): boolean {
+  if (g.family !== 'shirt') return true
+  if (g.source === 'blank') return true
+  return /\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)
+}
+
+/**
  * BROAD-CATEGORY universe seed (PO 2026-06-17, hybrid model): the broad apparel category shoppers
  * browse — e.g. "graphic tees for women" (456k/mo) — which the design-niche seed never surfaces.
  * Tees only; audience inferred from the title ("for Women"/"for Men"), default women (the larger
@@ -751,7 +818,7 @@ function broadCategorySeed(seed: string, listingTitle?: string | null, g: Garmen
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
   // Flag OFF (g=SHIRT_BASE): tee-only gate + "graphic tees for {aud}" — byte-identical to legacy.
   // Flag ON: gate on apparel family (not just tee) so a hat/sweatshirt emits its own category head.
-  if (g.family === 'shirt' && !/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
+  if (!teeProven(g, src)) return null
   const aud = /\bwom[ae]n\b|\bladies\b/.test(src) ? 'women' : /\bmen\b/.test(src) ? 'men' : 'women'
   return g.categoryHead(aud)
 }
@@ -824,7 +891,7 @@ function broadNicheSeed(
   const src = `${seed} ${listingTitle ?? ''}`.toLowerCase()
   // Flag OFF (g=SHIRT_BASE): tee-only gate — byte-identical to legacy (shirts only get the head).
   // Flag ON: allow any apparel family (a hat/sweatshirt gets "cashflow cap"/"faith sweatshirt").
-  if (g.family === 'shirt' && !/\b(t-?shirts?|tees?|graphic tees?)\b/.test(src)) return null
+  if (!teeProven(g, src)) return null
   const tokenSources = [
     seed,
     visionIdentity?.designTheme || '',
@@ -1036,9 +1103,18 @@ export function validateSeeds(rawSeeds: string[], identity: Set<string>, product
     if (!s) continue
     // Hallucination guard: a seed the listing's own identity can't corroborate is dropped.
     if (identity.size > 0 && !keywordIsRelevant(s, identity)) continue
-    // Ensure a product word so JS returns product keywords, not abstract subject queries.
-    if (!s.split(/\s+/).some((w) => APPAREL_WORDS.has(w))) s = `${s} ${productWord}`
-    s = s.split(/\s+/).slice(0, 4).join(' ')
+    // Ensure a product word so JS returns product keywords, not abstract subject queries. The
+    // appended product word SURVIVES the 4-token cap whole (a multi-token word — "long sleeve
+    // shirt", "tank top" — must never be cut to a garment-less "sweet potato long sleeve"): the
+    // cap trims the SEED's tokens, never the product word, and always keeps the design's first two
+    // tokens (its identity is usually a pair: "sweet potato", "later gator", "world cup").
+    const toks = s.split(/\s+/)
+    if (!toks.some((w) => APPAREL_WORDS.has(w))) {
+      const pw = productWord.split(/\s+/).filter(Boolean)
+      s = [...toks.slice(0, Math.max(2, 4 - pw.length)), ...pw].join(' ')
+    } else {
+      s = toks.slice(0, 4).join(' ')
+    }
     const key = s.replace(/[^a-z0-9]/g, '')
     if (seen.has(key)) continue
     seen.add(key)
