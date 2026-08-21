@@ -113,8 +113,9 @@ export async function POST(req: NextRequest) {
 
     // ── BLANK-BRAND WATERFALL (PO 2026-08-08, all-paths invariant): this route bypasses the
     // pipeline, so it resolves its own blank row — via the ONE shared spec-truth resolver
-    // (resolveBlankRowForNet: stored/live title + productType + SKU style numbers, NEVER a search
-    // keyphrase; looksShirt-gated so hoodies/sweatshirts never inherit a shirt blank's brand).
+    // (resolveBlankRowForNet: SKU-first per PO 2026-08-21 — every child SKU's style code, then the
+    // family override, then the legacy title/productType regex, NEVER a search keyphrase; its
+    // garment-compatibility gate keeps a tee row off a sweatshirt family and vice-versa).
     // `title` here is rec.recommended_title, which IS the PO's locked title when
     // title_source='manual' (lock-title route stores it there) — exactly the title the net must
     // test. Best-effort: any read failure leaves blankRow null → net no-ops.
