@@ -63,6 +63,14 @@ export interface PhraseTruthCtx {
    *  word a lie. When present, the allowed garment classes are the UNION over these families.
    *  Absent/empty ⇒ exactly `garmentFamily` alone (the Item-Highlight contract, unchanged). */
   mixedFamilies?: readonly TruthGarmentFamily[]
+  /** THE FAMILY'S OWN DESIGN-NAME TOKENS (2026-08-21, coordinator amendment). A "Baby Shark" or
+   *  "Girl Dad" ADULT tee legitimately needs 'baby' / 'girl' vocabulary in its bullets and backend:
+   *  those words name the DESIGN, they do not claim the garment is for toddlers. Without this the
+   *  kids/adult rules blanket-strip the healthy majority's own design vocabulary to cure a defect
+   *  none of them have — the standing "don't over-generalize a specific failure" directive.
+   *  Absent/empty ⇒ every audience hit is foreign, i.e. EXACTLY the pre-amendment behavior (which is
+   *  what every Item-Highlight caller passes, so the IH pins hold byte-for-byte). */
+  designTokens?: readonly string[]
   /** Seller-declared lean. Only 'unisex' can trigger a rule, and only on the TITLE. */
   audienceLean?: TruthAudienceLean
   /** Which surface is asking. Field-agnostic for every rule except `audience-lean-lie`. */
@@ -124,8 +132,35 @@ const allowedGarmentClasses = (ctx: PhraseTruthCtx): ReadonlySet<string> | null 
 }
 
 // `womans`/`mans`/`lady` added 2026-08-21: "Womans Shirts" composed onto the kids family B0DP5H8QBT.
-const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\s-]?size)\b/i
-const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/i
+// GLOBAL since 2026-08-21 so the rule can ask WHICH audience words a phrase asserts, not merely
+// whether it asserts one — the design-token exemption below needs the individual hits. `matchAll`
+// does not mutate the source regex's lastIndex, so these stay safe to share.
+const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\s-]?size)\b/gi
+const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/gi
+
+/** The family's design words, plural-folded so a "Girl Dad" design also owns "girls". */
+const designWordSet = (tokens: readonly string[] | undefined): ReadonlySet<string> => {
+  const s = new Set<string>()
+  for (const t of tokens ?? []) {
+    for (const w of t.toLowerCase().match(/[a-z0-9]+/g) ?? []) { s.add(w); s.add(w.replace(/s$/, '')) }
+  }
+  return s
+}
+/** Is every word of this audience hit part of the family's OWN design name? */
+const isDesignOwnWord = (hit: string, design: ReadonlySet<string>): boolean => {
+  const parts = hit.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  return parts.length > 0 && parts.every((w) => design.has(w) || design.has(w.replace(/s$/, '')))
+}
+/**
+ * The audience words a phrase asserts that the DESIGN'S OWN NAME does not explain.
+ *
+ * THE RULE IS ABOUT THE CLAIM, NOT THE VOCABULARY. "baby shark shirt" on a "Baby Shark" ADULT tee
+ * asserts no audience — 'baby' is the design. "toddler tee" on the same family does, and still
+ * dies. "baby shark shirts for kids" does too: ONE foreign hit ('kids') is enough. An empty design
+ * set makes every hit foreign, which is the historical behavior exactly.
+ */
+const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<string>): string[] =>
+  [...phrase.matchAll(re)].map((m) => m[0]).filter((h) => !isDesignOwnWord(h, design))
 
 /** The two halves of the FORCED-GENDER rule. Adult gender words only — kids words are the
  *  kids/adult audience rule's business, and a phrase naming BOTH halves is INCLUSIVE, not forced. */
@@ -175,9 +210,17 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   }
   // (b) capability claims — BlankSpec states no capability today ⇒ every such claim is unverifiable.
   if (PERFORMANCE_CLAIM_RE.test(phrase)) return { ok: false, reason: 'capability-claim' }
-  // (c) audience truth — derived from the blank family, never a title.
-  if (ctx.audience === 'kids' && ADULT_AUDIENCE_RE.test(phrase)) return { ok: false, reason: 'audience-adult-on-kids' }
-  if (ctx.audience === 'adult' && KIDS_AUDIENCE_RE.test(phrase)) return { ok: false, reason: 'audience-kids-on-adult' }
+  // (c) audience truth — derived from the blank family, never a title. A phrase is rejected only
+  // when it asserts an audience this family is NOT, INDEPENDENTLY of the design's own name: the
+  // design-token exemption keeps a "Baby Shark" adult family's own vocabulary in its bullets and
+  // backend. It can NEVER license a garment lie — rule (a) runs first and never reads designTokens.
+  if (ctx.audience === 'kids' || ctx.audience === 'adult') {
+    const designWords = designWordSet(ctx.designTokens)
+    const re = ctx.audience === 'kids' ? ADULT_AUDIENCE_RE : KIDS_AUDIENCE_RE
+    if (foreignAudienceHits(phrase, re, designWords).length > 0) {
+      return { ok: false, reason: ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult' }
+    }
+  }
   // (c2) FORCED GENDER — TITLE ONLY (PO gold pattern "no forced gender", live B0DSCDZC6K: the title
   // said "for Women" while the family's stored audience_lean is 'unisex'). The title is a PRODUCT
   // CLAIM; bullets/description/backend carry MARKET vocabulary, where a gendered shopper phrase is
@@ -220,8 +263,11 @@ export const phraseIsTrue = (phrase: string, ctx: PhraseTruthCtx): boolean => ph
  *     BRAND WORD (keeping the rest of the phrase) with the family's own blank exempted by name.
  *     A whole-segment drop here would be strictly worse.
  *   • audience-adult-on-kids / audience-kids-on-adult — a DESIGN name legitimately carries these
- *     words ("Baby Shark", "Boys Trip"); on the title they are a false-positive factory. The
- *     candidate filter still rejects them from the FILL, which is where the pool leaks them in.
+ *     words ("Baby Shark", "Boys Trip"). `ctx.designTokens` exempts the family's OWN name, but only
+ *     when the name RESOLVED; on an unresolved-name family the title would still be a
+ *     false-positive factory, and the title is the one field where a wrong deletion is most
+ *     visible. The candidate filter still rejects a genuinely foreign audience claim from the FILL,
+ *     which is where the pool leaks them in.
  *   • capability-claim / weight-class-lie — `stripCapabilityClaims` and `enforceFabricTruth` are the
  *     existing owners of those two invariants; a second net would be the eighth rulebook.
  */

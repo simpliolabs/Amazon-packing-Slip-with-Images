@@ -115,6 +115,83 @@ describe('(c) audience-lean-lie — a unisex family forces no gender on its TITL
   })
 })
 
+/* ── THE DESIGN-TOKEN EXEMPTION: judge the CLAIM, not the vocabulary ───────────────────────────── */
+
+describe('design-token exemption — a family keeps its OWN design vocabulary', () => {
+  /** An ADULT tee whose design is literally called "Baby Shark". */
+  const BABY_SHARK: PhraseTruthCtx = { ...TEE, designTokens: ['Baby Shark'], field: 'backend' }
+  /** An ADULT tee whose design is "Girl Dad" — the plural fold must let "girls" through too. */
+  const GIRL_DAD: PhraseTruthCtx = { ...TEE, designTokens: ['Girl Dad'], field: 'bullets' }
+  /** A youth blank (64000B). Adult vocabulary is the lie here. */
+  const KIDS: PhraseTruthCtx = {
+    garmentFamily: 'kids_tee', spec: TEE.spec, allowedBrand: null,
+    audience: audienceOfGarmentFamily('kids_tee'), audienceLean: null, field: 'backend',
+  }
+
+  it('keeps "baby shark shirt" in BACKEND and BULLETS — the word names the DESIGN, not an audience', () => {
+    for (const field of ['backend', 'bullets', 'description', 'title'] as const)
+      expect(phraseTruthVerdict('baby shark shirt', { ...BABY_SHARK, field })).toEqual({ ok: true })
+  })
+  it('still rejects "toddler tee" on that same family — not a design token, so it IS an audience claim', () => {
+    expect(phraseTruthVerdict('toddler tee', BABY_SHARK)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+  it('ONE foreign hit is enough — "baby shark shirts for kids" still dies', () => {
+    expect(phraseTruthVerdict('baby shark shirts for kids', BABY_SHARK))
+      .toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+  it('plural-folds the design word: a "Girl Dad" design owns "girls"', () => {
+    expect(phraseTruthVerdict('girl dad shirt', GIRL_DAD)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('girls dad shirt', GIRL_DAD)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('youth girls tee', GIRL_DAD)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+  it('WITHOUT the design token the very same phrase is still rejected (the rule did not weaken)', () => {
+    expect(phraseTruthVerdict('baby shark shirt', { ...BABY_SHARK, designTokens: undefined }))
+      .toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+    expect(phraseTruthVerdict('baby shark shirt', { ...BABY_SHARK, designTokens: [] }))
+      .toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+  })
+  it('a kids_tee family still rejects "womens graphic tees" — the rule is symmetric', () => {
+    expect(phraseTruthVerdict('womens graphic tees', KIDS)).toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+    // …and the exemption is symmetric too: a kids design actually named "Ladies Night" keeps it.
+    expect(phraseTruthVerdict('ladies night tee', { ...KIDS, designTokens: ['Ladies Night'] })).toEqual({ ok: true })
+    expect(phraseTruthVerdict('womens graphic tees', { ...KIDS, designTokens: ['Ladies Night'] }))
+      .toEqual({ ok: false, reason: 'audience-adult-on-kids' })
+  })
+  it('a design token NEVER licenses a GARMENT lie — the garment rule never reads designTokens', () => {
+    // A sweatshirt family whose design is literally called "Sweatshirt Guy" still cannot say "shirts".
+    const SWEATSHIRT_GUY: PhraseTruthCtx = { ...SWEATS, designTokens: ['Sweatshirt Guy'], audienceLean: null }
+    expect(phraseTruthVerdict('funny work shirts', SWEATSHIRT_GUY)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(phraseTruthVerdict('sweatshirt guy tees', SWEATSHIRT_GUY)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(phraseTruthVerdict('sweatshirt guy crewneck', SWEATSHIRT_GUY)).toEqual({ ok: true })
+    // Nor any other rule: a design named after a competitor blank still cannot name it.
+    expect(phraseTruthVerdict('gildan guy tee', { ...TEE, designTokens: ['Gildan Guy'] }))
+      .toEqual({ ok: false, reason: 'competitor-brand' })
+  })
+  it('never licenses a forced gender on a unisex TITLE — the lean rule is untouched', () => {
+    const WOMEN_DESIGN: PhraseTruthCtx = { ...SWEATS, designTokens: ['Wonder Women'] }
+    expect(phraseTruthVerdict('womens sweatshirt', WOMEN_DESIGN)).toEqual({ ok: false, reason: 'audience-lean-lie' })
+  })
+  it('HIGHLIGHTS behavior is unchanged — the composer passes no design tokens', () => {
+    const ihCtx = { garmentFamily: 'tee' as const, spec: TEE.spec, allowedBrand: null, audience: 'adult' as const }
+    expect(ihTruthVerdict('baby shark shirt', ihCtx)).toEqual({ ok: false, reason: 'audience-kids-on-adult' })
+    expect(ihTruthVerdict('motivational shirts women', ihCtx)).toEqual({ ok: true })
+  })
+  it('the pipeline feeds the ctx from the EXISTING design-name sources, no new resolver (source pin)', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
+    const at = src.indexOf('const familyDesignNames: string[] = []')
+    expect(at, 'familyDesignNames not built').toBeGreaterThan(0)
+    const body = src.slice(at, at + 2200)
+    for (const source of ['pushDesignName(designName)', 'input.designNameOverride', 'designNameOverridesByKey', 'priorPerChildTitles'])
+      expect(body, `missing design-name source: ${source}`).toContain(source)
+    expect(body).toContain('designTokens: familyDesignNames')
+    // The per-design resolver registers each group's name at the ONE existing seam.
+    expect(src).toContain('pushDesignName(groupDesignName)')
+    expect(src).toContain('pushDesignName(coupleConcept)')
+    // No second design-name resolver was introduced for this.
+    expect((src.match(/extractDesignName\(/g) ?? []).length).toBe(3)   // definition + 2 existing callers
+  })
+})
+
 /* ── DEFECTS (b)+(c)+(d) on the SHIPPED bytes: the terminal title net ──────────────────────────── */
 
 describe('applyTitleTruthNet — the terminal net on the exact live B0DSCDZC6K title', () => {
@@ -233,7 +310,8 @@ describe('(a) a pool phrase that cannot fit WHOLE contributes NOTHING to the tit
   it('step 6b and both second passes call THE one harvester — no parallel word-splitter (source pin)', () => {
     const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
     // Three call sites: buildTitleFor pass 2, buildTitleFor step 6b, buildNicheParentTitle pass 2.
-    expect((src.match(/=\s*pooledNovelFragment\(\n/g) ?? []).length).toBe(3)
+    // Newline-agnostic on purpose: this checkout is CRLF on Windows and LF in CI.
+    expect((src.match(/=\s*pooledNovelFragment\(/g) ?? []).length).toBe(3)
     // The word-by-word append that shipped ", Mind" must be gone: 6b's old loop kept a `firstAdd`
     // flag and appended a single `capped` WORD. Both are the fingerprint of the deleted mechanism.
     expect(src).not.toContain('let firstAdd = true')

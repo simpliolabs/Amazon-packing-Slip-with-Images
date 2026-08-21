@@ -8957,6 +8957,30 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     .map((code) => blankCatalog.find((r) => r.styleCode === code)?.garmentFamily ?? null)
     .filter((g): g is NonNullable<typeof g> => !!g)
   const truthGarmentFamily: TruthGarmentFamily = !apparelProduct ? 'none' : (blankFamilyFacts?.garmentFamily ?? null)
+  /* DESIGN-TOKEN EXEMPTION (coordinator amendment 2026-08-21). The kids/adult audience rules must
+   * judge the CLAIM, not the vocabulary: a "Baby Shark" or "Girl Dad" ADULT tee legitimately needs
+   * 'baby'/'girl' in its bullets and backend, and stripping the healthy majority's own design words
+   * to cure a defect none of them have is the over-generalization the standing directive forbids.
+   *
+   * NO NEW RESOLVER. Every source here is one the paths already read: `extractDesignName`'s resolved
+   * `designName` (single-design), the seller's scalar `designNameOverride` and PER-DESIGN
+   * `designNameOverridesByKey` (multi-design = UNION), and `priorPerChildTitles[].designName` (what a
+   * section-regen rebuilds its per-design contexts from).
+   *
+   * ONE LIVE SET, DELIBERATELY BY REFERENCE: the per-design title loop resolves each group's name
+   * only later (`resolveGroupDesignName`), and pushes it here. Every ctx holds THIS array, so by the
+   * time the bullets / description / backend fills run — all downstream of the awaited title block —
+   * the family union is complete. The per-design TITLE calls additionally push their own group's
+   * name BEFORE building the title, so that path never depends on resolution order. */
+  const familyDesignNames: string[] = []
+  const pushDesignName = (n: string | null | undefined): void => {
+    const v = (n ?? '').trim()
+    if (v && !familyDesignNames.includes(v)) familyDesignNames.push(v)
+  }
+  pushDesignName(designName)
+  pushDesignName(input.designNameOverride)
+  for (const v of Object.values(input.designNameOverridesByKey ?? {})) pushDesignName(v)
+  for (const t of input.priorPerChildTitles ?? []) pushDesignName(t.designName)
   /** Build the spine ctx for ONE field. `null` when the family's blank is unresolved on an apparel
    *  listing: with no ground truth there is nothing to judge against, and a guessed rule is worse
    *  than none (the same fail-open `resolveFamilyBlank` itself takes on a garment conflict). */
@@ -8968,6 +8992,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       spec: blankSpec,
       allowedBrand: garmentBrandCanonical || null,
       audience: audienceOfGarmentFamily(truthGarmentFamily),
+      designTokens: familyDesignNames,
       audienceLean: normalizeAudienceLean(apparelProduct ? input.audienceLean : null),
       field,
     }
@@ -9678,6 +9703,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // through — per-design content must anchor on the design, never the shirt color.
       let groupDesignName = extracted.name
       if (!groupDesignName?.trim() || isGarmentColor(groupDesignName)) groupDesignName = keyLabel || groupDesignName || ''
+      // TRUTH SPINE, design-token exemption: register this design's name the moment the EXISTING
+      // resolver produces it — one seam covering both the couple path and the per-design loop, and
+      // always BEFORE this group's buildTitleFor call, so the title path never depends on the order
+      // the groups resolve in.
+      pushDesignName(groupDesignName)
       return { group, groupInput, groupDesignName, groupIdentityPhrases }
     }
     if (unifiedSet) {
@@ -9694,6 +9724,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // Fall back to the family designName, then a bare "Couple Matching" — never a leading space.
       const conceptBase = allDesignNames.length ? allDesignNames.join(' & ') : designName.trim()
       coupleConcept = (conceptBase ? `${conceptBase} ` : '') + 'Couple Matching'
+      pushDesignName(coupleConcept)   // the couple concept IS this family's design name (truth spine)
       // ONE shared title — buildTitleFor with coupleConcept AS the designName, so it leads the title
       // and the design-name backstop (guard 6) re-inserts it verbatim if the council drops it.
       const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName, season, titleTruthCtx)
