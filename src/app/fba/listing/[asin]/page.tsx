@@ -2904,36 +2904,52 @@ export default function ListingDetailPage() {
         </div>
       </div>
 
-      {/* ══ VARIANT-DEATH ALARM — child SKUs whose content sync FROZE while siblings advanced ══
-          The Later Gator XL/2XL Orchid signature: a dead (unbuyable) offer stops being touched by
-          scans, so its content_synced_at freezes while every sibling keeps advancing. Derivation
-          lives in variantDeathAlarm.ts (ONE shared seam, attached server-side; VARIANT_DEATH_ALARM
-          flag gates it there) — this card only renders the report. Read-only: no writes, no cron. */}
-      {score.variant_death && score.variant_death.lagging.length > 0 && (() => { const vd = score.variant_death!; return (
+      {/* ══ VARIANT-DEATH ALARM — child SKUs that are dead by stored evidence ══
+          Two prongs, each SKU says WHY: 'offer_dead' = the stored offer evidence (listing_health,
+          the same status='Active' predicate the content scanner trusts) says no live offer;
+          'sync_lag' = the Later Gator XL/2XL Orchid signature — a dead offer stops being touched
+          by scans, so its content_synced_at freezes while every sibling keeps advancing.
+          Derivation lives in variantDeathAlarm.ts (ONE shared seam, attached server-side;
+          VARIANT_DEATH_ALARM flag gates it there) — this card only renders the report.
+          Read-only: no writes, no cron, no Amazon calls. */}
+      {Array.isArray(score.variant_death?.flagged) && score.variant_death!.flagged.length > 0 && (() => { const vd = score.variant_death!; const offerDeadCount = vd.flagged.filter((f) => f.reasons.includes('offer_dead')).length; return (
         <div className="bg-white border border-slate-200 border-l-4 border-l-red-500 rounded-2xl shadow-sm p-4 flex items-start gap-3">
           <svg viewBox="0 0 24 24" className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
           <div className="min-w-0 flex-1">
             <p className="text-sm font-semibold text-red-700">
-              {vd.lagging.length} variant{vd.lagging.length === 1 ? '' : 's'} may be unbuyable — sync froze while siblings advanced
+              {vd.flagged.length} variant{vd.flagged.length === 1 ? '' : 's'} may be unbuyable
+              {offerDeadCount > 0
+                ? ` — ${offerDeadCount === vd.flagged.length ? 'no live offer in the listings report' : `${offerDeadCount} with no live offer in the listings report`}`
+                : ' — sync froze while siblings advanced'}
             </p>
             <p className="text-xs text-slate-600 mt-0.5">
-              These SKUs stopped updating while the rest of the family kept syncing — the signature of a
-              dead offer (no live offer = shoppers can&apos;t buy that size/color, and the money walks silently).
-              Check each offer in Seller Central; once it&apos;s buyable again, <b>Sync Now</b> clears this alarm.
+              <b>No live offer</b> means Amazon&apos;s own listings report shows this SKU offerless — shoppers can&apos;t buy that
+              size/color. <b>Sync froze</b> means the SKU stopped updating while the rest of the family kept syncing — the
+              signature of a dead offer. Either way the money walks silently. Check each offer in Seller Central; once
+              it&apos;s buyable again, <b>Sync Now</b> clears this alarm.
             </p>
             <ul className="mt-2 space-y-1">
-              {vd.lagging.map((l) => (
-                <li key={l.sku} className="text-xs text-slate-700 flex items-center gap-2 flex-wrap">
-                  <span className="font-mono font-semibold">{l.sku}</span>
-                  <span className="font-mono text-slate-400">{l.asin}</span>
-                  {l.lag_days === null
-                    ? <span className="text-red-700 font-medium">never synced</span>
-                    : <span>last synced {l.content_synced_at ? new Date(l.content_synced_at).toLocaleDateString() : '—'} <span className="text-red-700 font-medium">({l.lag_days}d behind the family)</span></span>}
+              {vd.flagged.map((f) => (
+                <li key={f.sku} className="text-xs text-slate-700 flex items-center gap-2 flex-wrap">
+                  <span className="font-mono font-semibold">{f.sku}</span>
+                  <span className="font-mono text-slate-400">{f.asin}</span>
+                  {f.reasons.includes('offer_dead') && (
+                    <span className="inline-flex items-center rounded-full bg-red-50 border border-red-200 px-2 py-0.5 text-[11px] font-medium text-red-700">
+                      no live offer{f.offer_status_message ? ` · ${f.offer_status_message}` : f.offer_status ? ` · ${f.offer_status}` : ''}{f.offer_evidence_at ? ` · report ${new Date(f.offer_evidence_at).toLocaleDateString()}` : ''}
+                    </span>
+                  )}
+                  {f.reasons.includes('sync_lag') && (
+                    <span className="inline-flex items-center rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                      {f.lag_days === null
+                        ? 'never synced'
+                        : `sync froze · last ${f.content_synced_at ? new Date(f.content_synced_at).toLocaleDateString() : '—'} (${f.lag_days}d behind the family)`}
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
             <p className="text-[11px] text-slate-400 mt-2">
-              Family last synced {vd.family_max_synced_at ? new Date(vd.family_max_synced_at).toLocaleDateString() : '—'} · {vd.rows_considered} SKU{vd.rows_considered === 1 ? '' : 's'} checked{vd.shellRows > 0 ? ` · ${vd.shellRows} placeholder row${vd.shellRows === 1 ? '' : 's'} (offerless backfill) excluded` : ''}
+              Family last synced {vd.family_max_synced_at ? new Date(vd.family_max_synced_at).toLocaleDateString() : '—'} · {vd.rows_considered} SKU{vd.rows_considered === 1 ? '' : 's'} checked · offer evidence for {vd.offer_evidence_rows} of {vd.rows_considered}{vd.shellRows > 0 ? ` · ${vd.shellRows} placeholder row${vd.shellRows === 1 ? '' : 's'} (offerless backfill) excluded` : ''}
             </p>
           </div>
         </div>
