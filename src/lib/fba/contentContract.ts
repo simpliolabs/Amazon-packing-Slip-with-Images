@@ -25,14 +25,6 @@ export const CONTENT_CONTRACT = {
     count: 5,               // exactly 5 bullets
     min: 150,               // BULLET_MIN_CHARS — generator floor, terminal-net enforced
     max: 200,               // BULLET_MAX_CHARS — capBulletLen ceiling
-    // The bullets band had a FLOOR and a CEILING but no TARGET, so "150-200" was the only number
-    // any prompt, scorer or net could reference — and an open range is exactly where the documented
-    // ~20-30% LLM char-count undershoot lands (arXiv 2508.13805, cited at listingPipeline ~:7680).
-    // Live B0DSCDZC6K measured 166/150/160/161/178 = 815 of a possible 1000 characters: legal on
-    // every gate, and 18.5% of an INDEXED field thrown away. `fillTarget` is the number the
-    // generator prompt asks for, the metric scores proximity to, and the terminal expander seeks —
-    // the same role `title.fillTarget` (73) and `keywords.fillTarget` (240) already play. (2026-08-21)
-    fillTarget: 195,        // bullets golden-band target — prompt + scorer + terminal expander
     scorerTooShort: 80,     // syncListingContent b.length<80 dock — DIVERGES from min (Step-4 reconcile)
   },
   description: {
