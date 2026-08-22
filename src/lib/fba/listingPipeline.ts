@@ -68,6 +68,8 @@ import {
   applyTitleTruthNet,
   audienceOfGarmentFamily,
   normalizeAudienceLean,
+  garmentNounConstraint,
+  TITLE_NET_REASONS,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
 } from '@/lib/fba/contentTruth'
@@ -1333,6 +1335,52 @@ function designPhraseCarriesGender(designPhrase: string): { female: boolean; mal
   }
   return { female, male }
 }
+/** Family display name for the garment-truth prompt line — 1:1 with blank_specs.garment_family
+ *  (contentTruth.ts's TruthGarmentFamily), never derived from the title. */
+const GARMENT_FAMILY_DISPLAY: Record<string, string> = {
+  tee: 'TEE / T-SHIRT',
+  long_sleeve_tee: 'LONG SLEEVE TEE',
+  sweatshirt: 'SWEATSHIRT',
+  hoodie: 'HOODIE',
+  kids_tee: 'KIDS TEE',
+  hat: 'HAT',
+}
+
+/**
+ * STATE CONSTRAINTS, NOT EXEMPLARS (editorial-audit-prompt-leak rule — memory
+ * editorial-audit-prompt-leaks.md: a prompt that shows a SAMPLE title gets the sample parroted).
+ * Tells the council writer/adversary/judge what the product IS and which garment nouns are
+ * forbidden for it — never a worked example. Blank-grounded from the SAME truth-spine ctx the
+ * #632 terminal net (`applyTitleTruthNet`) judges the SHIPPED title with (`garmentNounConstraint`,
+ * contentTruth.ts), so the council can never disagree with the door about what counts as a lie —
+ * it only gets the chance to avoid writing it in the first place, instead of burning a candidate
+ * slot on a title the net will have to amputate.
+ *
+ * Returns '' (no-op) when the blank is unresolved / non-apparel — exactly when the truth spine
+ * itself fails open (`truthCtxFor` returns null, or `garmentNounConstraint` reports no forbidden
+ * class), so every caller that doesn't thread `truth` renders byte-identically to before.
+ */
+function garmentTruthRule(truth: PhraseTruthCtx | null | undefined): string {
+  if (!truth) return ''
+  const fam = truth.garmentFamily
+  if (!fam || fam === 'none') return ''
+  const { allowed, forbidden } = garmentNounConstraint(truth)
+  if (forbidden.length === 0) return ''
+  const families = truth.mixedFamilies && truth.mixedFamilies.length ? truth.mixedFamilies : [fam]
+  const familyLabel = families.map((f) => GARMENT_FAMILY_DISPLAY[String(f)] ?? String(f).toUpperCase()).join(' + ')
+  const specBits = [
+    truth.allowedBrand || null,
+    truth.spec?.neck || null,
+    truth.spec?.sleeve || null,
+    truth.spec?.material || null,
+    truth.spec?.unisex ? 'unisex fit' : null,
+  ].filter(Boolean)
+  const specParen = specBits.length ? ` (${specBits.join(', ')})` : ''
+  const audienceBit = truth.audience === 'kids' ? ' This is a KIDS garment — never name an adult-only audience (women/men/ladies/plus-size).' : ''
+  const leanBit = truth.field === 'title' && truth.audienceLean === 'unisex' ? ' The family is UNISEX — never assert a single gender.' : ''
+  return `GARMENT TRUTH — this product IS a ${familyLabel}${specParen}, a PRODUCT FACT, not a style choice. It may be called: ${allowed.join(', ') || familyLabel.toLowerCase()}. NEVER call it: ${forbidden.join(', ')}.${audienceBit}${leanBit}`
+}
+
 /** PO gold examples (2026-07-22, provided verbatim). Used as FEW-SHOT in both title branches when
  *  TITLE_QUALITY_V2 is on. Rank order = PO's original list, deduped by exact string. Extend via a
  *  future auto-miner over listing_change_log title edits (memory: title-po-gold-pattern). */
@@ -1362,6 +1410,13 @@ export function buildApparelTitleBrief(ctx: {
   designPhrase?: string | null
   garmentNoun?: string | null
   lean?: AudienceLean
+  /** SHARED CONTENT TRUTH SPINE ctx (contentTruth.ts, #632) — blank-grounded, NEVER title-derived.
+   *  PO 2026-08-22 ("Council/Judges can read the garment field"): rendered as a HARD LIMIT bullet
+   *  (`garmentTruthRule` below) so every persona/adversary/judge in the council STOPS WRITING the
+   *  garment lie the #632 terminal net (`applyTitleTruthNet`) would otherwise have to delete after
+   *  the fact — STATE CONSTRAINTS, NOT EXEMPLARS (no sample title to parrot). null/undefined ⇒
+   *  unresolved blank or non-apparel — brief byte-identical to every pre-existing caller/test. */
+  truth?: PhraseTruthCtx | null
 }): { system: string; user: string } {
   const titles = ctx.poGolds?.titles?.length ? ctx.poGolds.titles : [...SEED_GOLD_TITLES]
   const shape = ctx.poGolds?.titles?.length && ctx.poGolds.shape ? ctx.poGolds.shape : measureGoldShape(titles)
@@ -1416,6 +1471,12 @@ export function buildApparelTitleBrief(ctx: {
     } catch { return '' }   // fail-open: an anchor that throws must never cost a title
   })()
   const system = `${ctx.roleLine} Below are the seller's own titles, a measurement of them, and titles this system generated that the seller rejected, with their words. Write a title they would not rewrite. Match their SHAPE, never copy their words. Output ONLY the final title string — no quotes, no markdown, no explanation.`
+  // GARMENT TRUTH (PO 2026-08-22) — merged AHEAD of any caller-supplied extraRules so it is never
+  // silently dropped when a caller passes its own (e.g. buildNicheParentTitle's "no design names").
+  // '' when the blank is unresolved/non-apparel, so `extraRules` is byte-identical to every existing
+  // caller/test that doesn't thread `truth`.
+  const garmentRule = garmentTruthRule(ctx.truth)
+  const allExtraRules = [...(garmentRule ? [garmentRule] : []), ...(ctx.extraRules ?? [])]
   const user = `${goldSpec}${anchorBlock}
 
 ${rejects}
@@ -1435,7 +1496,7 @@ IF NOTHING EARNS THE MONEY POSITION: stop after the identity. A shorter honest t
 - ${CONTENT_CONTRACT.title.hardCap} characters maximum, counted exactly. Amazon rejects a longer item_name (error 100476) and this pipeline refuses the push rather than trimming.
 - "${ctx.brandName}" at position 0.
 - Every word must be TRUE of this product. Search volume for a word does not make it true. Do not invent a motif, material, occasion or audience not given above.
-${(ctx.extraRules ?? []).map((r) => `- ${r}`).join('\n')}${ctx.extraRules?.length ? '\n' : ''}
+${allExtraRules.map((r) => `- ${r}`).join('\n')}${allExtraRules.length ? '\n' : ''}
 Write ONE title. Return only the title string.`
   return { system, user }
 }
@@ -1635,12 +1696,35 @@ export function titleQualityJudge(title: string, opts: {
    *  PipelineInput.audienceLean → runTitleAgent (single-design) / parent-lean via UNANIMITY (multi-design).
    *  Undefined/null = caller didn't classify → no audience dock (backward-compatible fail-open). */
   lean?: AudienceLean
+  /** SHARED CONTENT TRUTH SPINE ctx (PO 2026-08-22, "Council/Judges can read the garment field").
+   *  THE deterministic title measurement and the arbiter for both producer-side actors (the
+   *  council's fail-open winner-pick and the humanizer's adopt gate) — so this is where a
+   *  garment-lying candidate must be scored down DECISIVELY, using the SAME predicate
+   *  (`phraseTruthVerdict`) the #632 terminal net deletes shipped lies with. Undefined/null =
+   *  caller didn't thread it → no garment dock (backward-compatible fail-open; every existing
+   *  caller/test is unaffected). */
+  truth?: PhraseTruthCtx | null
 } = {} as never): { score: number; problems: string[] } {
   if (!title) return { score: 0, problems: ['empty'] }
   const problems: string[] = []
   let score = 100
   const t = title.trim()
   const len = t.length
+
+  // GARMENT TRUTH — decisive, not a normal dock. A candidate that names a garment this family is
+  // not (or, on the title only, asserts a single gender against a declared-unisex family) must
+  // never be able to OUTSCORE a truthful candidate, however well-shaped it otherwise reads: capped
+  // (not subtracted) so no combination of other bonuses can buy the lie back. `phraseTruthVerdict`
+  // is called on the WHOLE title (it scans internally via a global regex, same as the terminal net
+  // calling it on one segment at a time) — the judge only needs to know THAT a lie is present, not
+  // enumerate every one, to make the candidate unwinnable.
+  if (opts.truth) {
+    const verdict = phraseTruthVerdict(t, opts.truth)
+    if (!verdict.ok && TITLE_NET_REASONS.has(verdict.reason)) {
+      score = Math.min(score, 15)
+      problems.push(`garment truth violation: ${verdict.reason} — this product is not what the title claims (capped at 15)`)
+    }
+  }
 
   // LENGTH. Amazon's >75 cap is external and docks in EVERY mode. The lower pressure is the part
   // that was OURS: the hand-typed sub-70 docks scored the seller's own 69-char gold at 80 (PR-C
@@ -3348,7 +3432,7 @@ async function titleCouncilAsk(
  *      hardcode — TRADEMARK_RULES now says "world futbol cup");
  *  (5) fail-open uses titleQualityJudge score to pick the best draft, not `drafts[1] || drafts[0]` (the
  *      silent SEO-persona array-index bias). */
-async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null; shape?: GoldShape | null; apparel?: boolean }): Promise<string> {
+async function runTitleCouncilV3(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null; shape?: GoldShape | null; apparel?: boolean; truth?: PhraseTruthCtx | null }): Promise<string> {
   // Model env split — spec §4.3. Adversary MUST differ from judge (anti-echo). Default adversary =
   // gpt-4o-mini (different family from gpt-5) so an unconfigured deploy still respects the ≠ rule;
   // if operator overrides both to the same model, we log a warning but still run — the ≠ rule is
@@ -3452,6 +3536,7 @@ ${baseSystem}`,
   const maxLeftWords = opts?.maxLeftWords ?? null
   const shape = opts?.shape ?? null
   const apparel = opts?.apparel ?? false
+  const truth = opts?.truth ?? null
   /* P0 INSTRUMENTATION (2026-08-12) — KEEP THE DIAGNOSIS INSTEAD OF BINNING IT.
    *
    * `titleQualityJudge` returns `{ score, problems }` and every one of its five production call
@@ -3465,10 +3550,10 @@ ${baseSystem}`,
    * already being constructed — this only stops discarding half of it. It is the cheapest evidence
    * available for whether a referee is needed, and it is the input the P8 repair round will feed
    * back to the writers. handoff/TITLE_ARCHITECTURE.md §7 P0. */
-  let bestVerdict = titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel })
+  let bestVerdict = titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel, truth })
   let bestScore = bestVerdict.score
   for (const c of candidates.slice(1)) {
-    const v = titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel })
+    const v = titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel, truth })
     if (v.score > bestScore) { best = c; bestScore = v.score; bestVerdict = v }
   }
   console.log('[TITLE_JUDGE_DIAG]', JSON.stringify({
@@ -3480,7 +3565,7 @@ ${baseSystem}`,
     // expressed no preference and the winner is just `candidates[0]` — which is the measured state
     // for the seller's golds and their attack twins alike (separation margin -14, and 0 on the
     // anagram pair). Logged so that indifference is visible per regen, not only in a test.
-    spread: bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score)),
+    spread: bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel, truth }).score)),
   }))
   if (!judged) console.warn(`[title-council-v3] judge returned empty — deterministic fallback score=${bestScore}/100 "${best.slice(0, 90)}"`)
 
@@ -3521,7 +3606,7 @@ ${baseSystem}`,
        * the decision as it was made even though the line prints later. */
       const capturedBest = best
       const capturedScore = bestScore
-      const capturedSpread = bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel }).score))
+      const capturedSpread = bestScore - Math.min(...candidates.map((c) => titleQualityJudge(c, { brandName, lean, maxLeftWords, shape, apparel, truth }).score))
       const startedAt = Date.now()
       void (async () => {
       try {
@@ -3645,7 +3730,7 @@ ${baseSystem}`,
     }
   }
   if (stripped || appended) {
-    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel }).score}/100`)
+    console.log(`[COUNCIL_V3_TERMINAL_NET] lean=${lean ?? 'none'} mode=${mode} stripped=${stripped} appended=${appended} finalScore=${titleQualityJudge(best, { brandName, lean, maxLeftWords, shape, apparel, truth }).score}/100`)
   }
   // SHAPE OBSERVABILITY — UNCONDITIONAL, and it must stay that way.
   //
@@ -3675,7 +3760,7 @@ ${baseSystem}`,
  *  legacy council + [COUNCIL_V3_DIFF] shadow machinery are deleted — legacy was no longer a
  *  pre-Step-7 baseline anyway (V3.1a changed its brief un-flagged). Rollback is git-revert.
  *  Both title paths (single-design and multi-design) call this wrapper (INVARIANT 1 parity). */
-async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null; shape?: GoldShape | null; apparel?: boolean }): Promise<string> {
+async function runTitleCouncil(openai: OpenAI, baseSystem: string, baseUser: string, onProgress?: (m: string) => void, opts?: { brandName?: string; lean?: AudienceLean; maxLeftWords?: number | null; shape?: GoldShape | null; apparel?: boolean; truth?: PhraseTruthCtx | null }): Promise<string> {
   return runTitleCouncilV3(openai, baseSystem, baseUser, onProgress, opts)
 }
 
@@ -3790,6 +3875,14 @@ async function runTitleAgent(
    *  (historical). BOTH title producers reach validateTitle through here: single-design and
    *  per-design multi-design both call buildTitleFor → runTitleAgent (INVARIANT 1 parity). */
   season: SeasonPolicy = BLANKET_SEASON_POLICY,
+  /** SHARED CONTENT TRUTH SPINE ctx for the TITLE field (PO 2026-08-22, "Council/Judges can read
+   *  the garment field"). PATH PARITY with buildNicheParentTitle's `truth` param (INVARIANT 1): this
+   *  is the OTHER title producer, and a truth gate wired to only one producer is the #401 class of
+   *  wasted fix. Threaded into buildApparelTitleBrief (both brief builds below) and the council/
+   *  humanizer judge calls so the writer sees the constraint BEFORE generating, not only after (the
+   *  #632 terminal net still deletes any lie that slips through — unchanged, defense in depth).
+   *  null ⇒ fails open, byte-identical to the pre-2026-08-22 behavior. */
+  truth: PhraseTruthCtx | null = null,
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const { openai, brandName, category, repTitle, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
@@ -4060,6 +4153,7 @@ ${candidateList}`
       designPhrase: v2ExpandedDesign || designName || null,
       garmentNoun: input.productType ?? null,
       lean,
+      truth,
     })
     return [b.system, b.user]
   })() : [
@@ -4095,7 +4189,7 @@ Rules:
   // flows through the validate + deterministic backstops below, so the hard rules still hold.
   let title: string
   if (apparel) {
-    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean, maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null, shape: input.poGolds?.shape ?? null, apparel })
+    title = await runTitleCouncil(openai, system, user, input.onProgress, { brandName, lean, maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null, shape: input.poGolds?.shape ?? null, apparel, truth })
   } else {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
@@ -4302,6 +4396,7 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
         designPhrase: displayDesignName || designName || null,
         garmentNoun: ptWord || null,
         lean,
+        truth,
       })
       return [b.system, b.user]
     })()
@@ -4318,6 +4413,7 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
       maxLeftWords: input.poGolds?.shape.maxLeftWords ?? null,
       shape: input.poGolds?.shape ?? null,
       apparel: true,   // this call sits inside the apparel-gated single-design arm
+      truth,
     })
     if (extended && extended !== title) {
       title = extended
@@ -6799,7 +6895,7 @@ async function buildTitleFor(
    *  all three passes — the pool is where the lies come from ("funny work shirts" is a real tee
    *  search phrase; it is a LIE on a sweatshirt family). Fails open when the blank is unresolved. */
   const truthOk = (phrase: string): boolean => !truth || phraseTruthVerdict(phrase, truth).ok
-  const t = await runTitleAgent(input, candidates, searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, season)
+  const t = await runTitleAgent(input, candidates, searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, season, truth)
   const titleProblems = t.problems
   const retried = t.retried
   // 1. Vision-hallucination backstop + COMPETITOR BLANK STRIP (PO-caught defect (d), 2026-08-21:
@@ -7086,9 +7182,13 @@ async function humanizeTitleTo75(
     maxLeftWords?: number | null
     shape?: GoldShape | null
     apparel?: boolean
+    /** SHARED CONTENT TRUTH SPINE ctx — same INVARIANT-1 parity reason as maxLeftWords/shape above:
+     *  the humanizer's adopt gate reads the SAME `titleQualityJudge` as the council, so a rewrite
+     *  that reintroduces a garment lie must be capped the same way. Undefined/null = no dock. */
+    truth?: PhraseTruthCtx | null
   },
 ): Promise<string> {
-  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords, shape = null, apparel = false, v4Sink } = opts
+  const { baseSystem, baseUser, pool, brandName, postProcess, onProgress, trigger = 68, label = 'Title', lean, maxLeftWords, shape = null, apparel = false, truth = null, v4Sink } = opts
   // RETRY-CASING NORMALIZER: the LLM ships raw casing (live: "THE CEO fishing humor funny t-shirt…" —
   // correct content, lowercase niche). Title-Case only FULLY-LOWERCASE words; any word already carrying
   // an uppercase letter is preserved verbatim ("THE CEO", "T-shirt"); minor connectors stay lowercase
@@ -7156,8 +7256,8 @@ Return ONLY the extended title string.` },
         // count. Adopt a longer rewrite, OR a same-length/shorter one that scores strictly higher
         // on the deterministic titleQualityJudge — safety gates (trademark + brand-front) always
         // enforced.
-        const currentScore = titleQualityJudge(title, { brandName, lean, maxLeftWords, shape, apparel }).score
-        const retryScore = titleQualityJudge(retryTitle, { brandName, lean, maxLeftWords, shape, apparel }).score
+        const currentScore = titleQualityJudge(title, { brandName, lean, maxLeftWords, shape, apparel, truth }).score
+        const retryScore = titleQualityJudge(retryTitle, { brandName, lean, maxLeftWords, shape, apparel, truth }).score
         // SHAPE-AWARE ADOPT (TITLE_SHAPE_JUDGE=on). Extending toward the band is this function's whole
         // job, so a LONGER rewrite is still progress — but "longer" must not buy a title that scores
         // WORSE. The historical gate adopted ANY longer retry unconditionally, which made this a
@@ -7284,6 +7384,7 @@ async function buildNicheParentTitle(
     designPhrase: familyNiche || null,
     garmentNoun: productType || null,
     lean: parentLean,
+    truth,
   }).system
   // COMPETITOR SEO SNAPSHOT (fallback chain Part 1) — CONSTRAINTS-NOT-EXEMPLARS (prompt-leak
   // history #365/#367: instruction text the model can echo becomes product copy). The snapshot is
@@ -7320,10 +7421,11 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       designPhrase: familyNiche || null,
       garmentNoun: productType || null,
       lean: parentLean,
+      truth,
     })
     return b.user
   })()
-  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null, shape: poGolds?.shape ?? null, apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || '') })
+  const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null, shape: poGolds?.shape ?? null, apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || ''), truth })
   let title = (judged || '').trim()
   // COMPETITOR BLANK STRIP (PO-caught defect (d), 2026-08-21) — PATH PARITY with buildTitleFor's
   // guard 1: `stripCompetitorBlanks` ran on bullets and description but on NEITHER title producer.
@@ -7659,6 +7761,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     maxLeftWords: poGolds?.shape.maxLeftWords ?? null,
     shape: poGolds?.shape ?? null,
     apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || ''),
+    truth,
   })
   return title
 }
