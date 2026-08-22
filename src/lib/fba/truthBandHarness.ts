@@ -144,6 +144,36 @@ export const PRIOR: Record<string, string> = {
   MH:  'THE CEO Mother Hustler Hoodie | Funny Work Shirts for Women, Cozy Gifts',
 }
 
+/* ── THE SECOND LIVE GATE (parent-title-truth fix, PO 2026-08-22) ────────────────────────────────
+ *
+ * A LATER regen than `PRODUCED`/`PRODUCED_PARENT` above: a real `regenerate_section:'title'` POST
+ * on THIS SAME B0DSCDZC6K family, on live sha 42451a7, WITH BOTH #632 and #634 already deployed
+ * (the fix those pins cover). Despite the truth+band net and the brief/judge garment-truth wiring
+ * both being live, the parent still shipped a garment lie AND a forced gender, and FOUR per-design
+ * titles still carried a SIBLING's name. Root causes (see contentTruth.ts's `scrubMoneyPhrase` /
+ * `enforceSingleGarmentClass` / `scrubProtectedOverlap` docs, and listingPipeline.ts's
+ * `buildNicheParentTitle` ptWord + `bandTitle`'s `moneyCtx.truth`):
+ *
+ *   1. `applyTitleTruthNet`'s segment 0 (the "money phrase") was NEVER judged, only ever kept or
+ *      dropped whole — so a lie living IN segment 0 (parent: "…Entrepreneur Tee"; BCS/DQ: "…
+ *      Sweatshirt Business B*tch") survived every prior version of the net.
+ *   2. `buildNicheParentTitle`'s own "Product type: ${ptWord}" brief line came from Amazon's raw
+ *      productType, not the resolved blank — contradicting the garment-truth constraint one line
+ *      below it, and the money-tail candidate derivation never asked the truth spine at all, so
+ *      "mind your business tshirt for men" could win the pipe-right slot outright.
+ *   3. Nothing rejected TWO true-but-different garment classes in one title (BB: "…Shirt Sweatshirt
+ *      Long Sleeve Tee").
+ */
+export const LIVE_PARENT_TITLE = 'THE CEO Motivational Entrepreneur Tee | Mind Your Business Tshirt for Men'
+export const LIVE_TITLES: Record<string, string> = {
+  BB:  'THE CEO Business B*tch Funny Work Shirt Sweatshirt Long Sleeve Tee | Tshirt for Men',
+  BCS: 'THE CEO Billionare Coming Soon Sweatshirt Business B*tch | Pullover for Women',
+  DQ:  "THE CEO Don't Quit Sweatshirt Business B*tch | Long Sleeve Pullover for Men",
+  ED:  'THE CEO Entrepreneur Definition Sweatshirt | Business B*tch, Fall Crewneck for Men',
+  HD:  'THE CEO Hustle Definiton Sweatshirt | Long Sleeve Fall Hoodies Pullover',
+  MH:  'THE CEO Mother Hustler Sweatshirt | Business B*tch Fall Crewneck',
+}
+
 /* ── THE RUNNER ───────────────────────────────────────────────────────────────────────────────── */
 
 export interface HarnessRow {
@@ -182,6 +212,21 @@ export interface HarnessResult {
     longSleeveShirtOnFamily: boolean
   }
   rows: HarnessRow[]
+  /** THE SECOND LIVE GATE (see the `LIVE_PARENT_TITLE`/`LIVE_TITLES` doc above) — the parent +
+   *  per-design titles from the LATER, #632/#634-deployed regen, run through the REAL net
+   *  (`enforceTitleTruthBand`) exactly as `bandTitle`'s terminal net call does. */
+  liveRows: LiveGarmentTruthRow[]
+}
+
+export interface LiveGarmentTruthRow {
+  scope: string
+  design: string
+  produced: string
+  title: string
+  len: number
+  decision: TruthBandDecision
+  hold: boolean
+  reason: string
 }
 
 /** The family's design-name union — the truth spine's design-token exemption input. */
@@ -298,6 +343,39 @@ export function runTruthBandHarness(): HarnessResult {
     })
   }
 
+  /* ── THE SECOND LIVE GATE (parent-title-truth fix) — the REAL truth+band pipeline, on the REAL
+   * live strings. Runs `enforceTitleTruthBand` exactly as `bandTitle`'s terminal net call does (see
+   * listingPipeline.ts's `titleTruthDoor`/`titleScopeFor`): the parent passes NO scope
+   * (`scrubProtectedOverlap: true`, `protectHay` = every design name unioned — the family-wide
+   * protect hay `scrubMoneyPhrase`'s `scrubProtectedOverlap` guards against); each design passes
+   * its OWN resolved blank ctx, its OWN name as protect hay, and the SAME `foreignFor`/`reject`
+   * partition the loop above already built — so this also verifies truth+band SETTLE TOGETHER on
+   * these exact strings: a title the net shortens still reaches band from true material, or holds. */
+  const liveRows: LiveGarmentTruthRow[] = []
+  {
+    const produced = LIVE_PARENT_TITLE
+    const protect = designNames().join(' ')
+    const band = bandCtxFor(produced, familyCtx, familyUnion, familyRes.spec, familyBrand)
+    const r = enforceTitleTruthBand({ produced, prior: null, apparel: true, band, truth: familyCtx, protect, scrubProtectedOverlap: true })
+    liveRows.push({ scope: 'broadcast', design: '(family)', produced, title: r.title, len: r.len, decision: r.decision, hold: r.hold, reason: r.reason })
+  }
+  for (const d of DESIGNS) {
+    const groupChildren = children.filter((c) => c.designKey === d.key)
+    const groupSkuHay = groupChildren.map((c) => c.sku).join(' ')
+    const produced = LIVE_TITLES[d.key]
+    const groupHay = `${produced} ${PRODUCT_TYPE} ${groupSkuHay}`
+    const res = resolveFamilyBlank(CATALOG, groupChildren, null, groupHay, CHILD_ASSIGNMENTS)
+    const union = res.garmentFamily ? familyGarmentUnion(CATALOG, res, groupHay) : []
+    const brand = res.spec?.brandInCopy === false ? '' : (res.spec?.brand ?? '')
+    const ctx = res.garmentFamily ? mkCtx(res.garmentFamily, union, res.spec, brand || null) : familyCtx
+    const fams: readonly TruthGarmentFamily[] = union.length ? union : familyUnion
+    const foreign = foreignFor(d.key)
+    const reject = foreign.size ? (seg: string) => isForeignToDesign(seg, foreign) : undefined
+    const band = bandCtxFor(produced, ctx, fams, res.spec ?? familyRes.spec, brand)
+    const r = enforceTitleTruthBand({ produced, prior: PRIOR[d.key], apparel: true, band, truth: ctx, protect: d.name, reject, foreignTokens: foreign })
+    liveRows.push({ scope: d.key, design: d.name, produced, title: r.title, len: r.len, decision: r.decision, hold: r.hold, reason: r.reason })
+  }
+
   /* ── THE MISLABELED CHILD, RESOLVED AS ITS OWN SCOPE (PO 2026-08-22) ─────────────────────────
    * B0DSG4T5BR is the live proof that a FAMILY verdict is the wrong shape. Its own hay still says
    * "Sweatshirt" (that is what its stored Amazon title says), so every resolved row conflicts with
@@ -331,6 +409,7 @@ export function runTruthBandHarness(): HarnessResult {
       longSleeveShirtOnFamily: !!familyCtx && phraseTruthVerdict('Long Sleeve Shirt', familyCtx).ok,
     },
     rows,
+    liveRows,
   }
 }
 
@@ -358,6 +437,16 @@ function report(): void {
   console.log(bad.length === 0
     ? `ALL ${r.rows.length} TITLES IN BAND ${TITLE_BAND_LO}-${TITLE_BAND_HI}`
     : `${bad.length} TITLE(S) OUT OF BAND: ${bad.map((x) => `${x.scope}=${x.len}`).join(', ')}`)
+
+  console.log('\n═══ THE SECOND LIVE GATE — parent-title-truth fix (sha 42451a7, WITH #632+#634) ═══════════════')
+  for (const row of r.liveRows) {
+    const ok = row.len >= TITLE_BAND_LO && row.len <= TITLE_BAND_HI
+    console.log(`── ${row.scope} — ${row.design}`)
+    console.log(`   live regen        : ${row.produced}`)
+    console.log(`   fixed  (${String(row.len).padStart(2)})   : ${row.title}   ${ok ? 'IN BAND' : '*** OUT OF BAND ***'}`)
+    console.log(`   decision : ${row.decision}${row.hold ? '  [HOLD]' : ''} — ${row.reason}`)
+    console.log('')
+  }
 }
 
 // Node ESM: run the report only when this file is the entrypoint, never on import.

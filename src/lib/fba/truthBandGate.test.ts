@@ -210,3 +210,80 @@ describe('THE POOL IS GATED, NOT TRUSTED — a pad that adds untrue material is 
     expect(carriers.length, 'no title used a truthful pool phrase — the pad is facts-only again').toBeGreaterThan(0)
   })
 })
+
+/**
+ * THE SECOND LIVE GATE (parent-title-truth fix, PO 2026-08-22). A REAL `regenerate_section:'title'`
+ * POST on this SAME B0DSCDZC6K family, live sha 42451a7, WITH #632 AND #634 already deployed — the
+ * fix the pins above cover. Despite that, the PARENT still shipped a garment lie ("…Entrepreneur
+ * Tee") and a forced gender ("…for Men") on a unisex family, FOUR per-design titles still carried
+ * the "Business B*tch" sibling name, and one design named two garment classes at once ("…Shirt
+ * Sweatshirt Long Sleeve Tee"). Three producer-side/net-side root causes, one shared seam each:
+ *   1. `applyTitleTruthNet` never judged segment 0 (the money phrase), only kept-or-dropped it whole.
+ *   2. `buildNicheParentTitle`'s own "Product type" brief line came from Amazon's raw productType,
+ *      and the money-tail candidate derivation never asked the truth spine at all.
+ *   3. nothing rejected a truthful SECOND garment class, in the net OR in the band pad.
+ * See truthBandHarness.ts's `LIVE_PARENT_TITLE`/`LIVE_TITLES`/`liveRows` for the fixture + runner.
+ */
+describe('THE SECOND LIVE GATE — parent-title-truth fix (sha 42451a7, WITH #632+#634 deployed)', () => {
+  /** Independent of the implementation's own `dominantGarmentGroup` — a title should never trip
+   *  more than one of these three groups, however the code decides it. */
+  const garmentClassesIn = (title: string): Set<string> => {
+    const groups: Record<string, RegExp> = {
+      tee: /\b(?:t[-\s]?shirts?|tshirts?|tees?)\b/i,
+      sweatshirt: /\b(?:sweatshirts?|crewnecks?|pullovers?)\b/i,
+      hoodie: /\b(?:hoodies?|hoodys?|hooded)\b/i,
+    }
+    const out = new Set<string>()
+    for (const [cls, re] of Object.entries(groups)) if (re.test(title)) out.add(cls)
+    return out
+  }
+
+  it('the PARENT never contains tee/tshirt for this sweatshirt+hoodie family', () => {
+    const parent = RESULT.liveRows.find((r) => r.scope === 'broadcast')!
+    expect(norm(parent.title), parent.title).not.toMatch(/\b(?:tees?|tshirts?|t-?shirts?)\b/)
+  })
+
+  it('the PARENT asserts no "for Men"/"for Women" — the family lean is unisex', () => {
+    const parent = RESULT.liveRows.find((r) => r.scope === 'broadcast')!
+    expect(norm(parent.title), parent.title).not.toMatch(/\bfor (?:women|men)\b/)
+    expect(norm(parent.title), parent.title).not.toMatch(/\b(?:womens|mens|ladies)\b/)
+  })
+
+  it('no title carries a SIBLING design name (the live "Business B*tch" leak, x4)', () => {
+    for (const r of RESULT.liveRows) {
+      if (r.scope === 'broadcast') continue                 // the parent is answerable to every design
+      const own = DESIGNS.find((d) => d.key === r.scope)!
+      for (const sib of DESIGNS) {
+        if (sib.key === own.key) continue
+        expect(norm(r.title), `${r.scope} carries ${sib.name}: "${r.title}"`).not.toContain(norm(sib.name))
+      }
+    }
+  })
+
+  it('no title names two garment classes — even two both-true ones (sweatshirt + hoodie)', () => {
+    for (const r of RESULT.liveRows) {
+      const classes = garmentClassesIn(r.title)
+      expect(classes.size, `${r.scope} names ${[...classes].join('+')}: "${r.title}"`).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('the band + hold behavior still holds — every live title reaches 70-75 from true material', () => {
+    for (const r of RESULT.liveRows) {
+      expect(r.len, `${r.scope}: "${r.title}"`).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+      expect(r.len, `${r.scope}: "${r.title}"`).toBeLessThanOrEqual(TITLE_BAND_HI)
+      expect(r.decision, `${r.scope}: ${r.reason}`).toBe('refilled')
+      expect(r.hold, `${r.scope} raised a hold: ${r.reason}`).toBe(false)
+    }
+  })
+
+  it('pins the EXACT fixed strings — a future regression shows a byte diff here, not a re-derivation', () => {
+    const byScope = Object.fromEntries(RESULT.liveRows.map((r) => [r.scope, r.title]))
+    expect(byScope.broadcast).toBe('THE CEO Motivational Entrepreneur | Mind Your Business Long Sleeve Pullover')
+    expect(byScope.BB).toBe('THE CEO Business B*tch Funny Work Sweatshirt Long Sleeve | Fall Crewneck')
+    expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Pullover Long Sleeve Crewneck')
+    expect(byScope.DQ).toBe("THE CEO Don't Quit Sweatshirt | Long Sleeve Pullover Mind Your Business")
+    expect(byScope.ED).toBe('THE CEO Entrepreneur Definition Sweatshirt | Fall Crewneck Long Sleeve')
+    expect(byScope.HD).toBe('THE CEO Hustle Definiton Sweatshirt | Long Sleeve Fall Crewneck Pullover')
+    expect(byScope.MH).toBe('THE CEO Mother Hustler Sweatshirt | Long Sleeve Small Business Owner Gift')
+  })
+})

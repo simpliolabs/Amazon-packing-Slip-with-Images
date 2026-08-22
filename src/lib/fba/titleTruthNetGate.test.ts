@@ -302,9 +302,16 @@ describe('FAILURE 3 — the pad must restore the band from the family\'s OWN fac
     const v = enforceTitleBand(netted, bandCtx({ garmentSecond: 'Shirt' }))
     expect(v.title).not.toMatch(/\bshirts?\b/i)
     expect(phraseTruthVerdict(v.title, SWEATS)).toEqual({ ok: true })
-    // Without the gate the pad would have taken it (proving the gate, not the bank, is the lever).
-    const ungated = enforceTitleBand(netted, bandCtx({ garmentSecond: 'Shirt', truthOk: undefined, factSegments: [] }))
-    expect(ungated.title).toMatch(/\bShirt\b/)
+    // TWO INDEPENDENT GATES now hold this line (2026-08-22, defect 3's `dominantGarmentGroup` check
+    // in `candidateSegments`): the title already committed to "Sweatshirt", so disabling ONLY
+    // `truthOk` is no longer enough to weld "Shirt" back — the unconditional single-class gate
+    // (keyed on the title's own text, not on `truthOk`) still refuses it.
+    const truthGateOffOnly = enforceTitleBand(netted, bandCtx({ garmentSecond: 'Shirt', truthOk: undefined, factSegments: [] }))
+    expect(truthGateOffOnly.title).not.toMatch(/\bShirt\b/)
+    // Strip the money-phrase noun too, so NEITHER gate has anything to key off — THIS proves both
+    // gates were carrying real weight (not merely that "Shirt" was never really a candidate).
+    const bothGatesOff = enforceTitleBand("THE CEO Don't Quit", bandCtx({ garmentSecond: 'Shirt', truthOk: undefined, factSegments: [] }))
+    expect(bothGatesOff.title).toMatch(/\bShirt\b/)
   })
 
   it('a pair is always <attribute> <garment noun> — never a spec stack in the money position', () => {

@@ -4370,8 +4370,13 @@ Rules:
   if (apparel && title.length < 68) {
     const aud = preferredAudience || 'Men and Women'
     // Flag ON → title-aware family display (HAT + "Snapback Cap" title → "Snapback Cap"); OFF → exact legacy.
+    // BLANK-FIRST (defect 1 twin, PATH PARITY with buildNicheParentTitle): the SAME contradiction —
+    // telling the council "Product type: Tee Shirt" one line above a garment-truth constraint that
+    // forbids it — reaches this producer too on a blank-resolved family; `truth?.garmentFamily` is
+    // this design's own resolved dominant class (single-design ctx or the per-design group's own,
+    // per buildGroupTruthCtx), never the raw SP-API productType alone.
     const ptWord = GARMENT_NOUN_ON
-      ? garmentNounFor(productType, title).display
+      ? resolveGarment({ productType, title, blankFamily: truth?.garmentFamily ?? null }).display
       : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'Tee Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt'))
     const nichePool = [...new Set([...(input.nicheSeeds || []), ...upgradeKws].map((s) => (s || '').trim()).filter(Boolean))]
     // V2 gold-pattern brief (2026-07-22; TITLE_QUALITY_V2 flag retired 2026-08-03 — live env was
@@ -7352,9 +7357,13 @@ async function buildNicheParentTitle(
   /** Parent-path twin of buildTitleFor's gate — the SAME predicate, the same ctx shape. */
   const truthOk = (phrase: string): boolean => !truth || phraseTruthVerdict(phrase, truth).ok
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
-  // Flag ON → title-aware family display; OFF → exact legacy ('T-Shirt' for shirt else Titlecase(pt)).
+  /* BLANK-FIRST PRODUCT TYPE (defect 1, PO 2026-08-22, live B0DSCDZC6K: "…Tee | Mind Your Business
+   * Tshirt for Men" on a sweatshirt+hoodie family). This brief line is a DIRECT INSTRUCTION the
+   * council reads before writing a word — it used to be Amazon's raw productType (often generic
+   * "SHIRT"), contradicting the #632/#634 truth constraint one line below. The DOMINANT resolved
+   * class leads instead — `resolveGarment`, the SAME blank-first resolver the seeder uses. */
   const ptWord = GARMENT_NOUN_ON
-    ? garmentNounFor(productType, designNameList).display
+    ? resolveGarment({ productType, title: designNameList, blankFamily: truth?.garmentFamily ?? null }).display
     : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'T-Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt'))
   const aud = preferredAudience || 'Men and Women'
   const upgradeList = topUpgradeKws.slice(0, 8).join(', ') || '(none)'
@@ -9411,7 +9420,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     /* THE EXIT'S OWN BAND SCOPE. Undefined = the FAMILY's facts, truth gate and pool — correct for
      * the broadcast/parent title, which is answerable to every child. A per-child exit passes ITS
      * design's, so the pad that re-fills a title speaks for the same design the truth net judged. */
-    bandScope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[]; truth?: PhraseTruthCtx | null; reject?: (s: string) => boolean },
+    bandScope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[]; truth?: PhraseTruthCtx | null; reject?: (s: string) => boolean; foreignTokens?: ReadonlySet<string> },
   ): string => {
     if (!produced || !title) return title
     /* P0 INSTRUMENTATION (2026-08-12) — RECORD THE BYTES, NOT THEIR LENGTH.
@@ -9510,6 +9519,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         ...guaranteedIdentitySynonyms(effectiveDesignName || designName).map((s) => s.synonym),
       ].filter(Boolean).join(' ') || null,
       garmentBrand: garmentBrandCanonical || null,
+      // THE TRUTH SPINE (defect 1, PO 2026-08-22): `mtCandidates`'s own filters never asked this
+      // question, so a market keyword like "mind your business tshirt for men" could win the pipe-
+      // right slot on a sweatshirt/hoodie unisex family — a wrong garment noun AND a forced gender,
+      // both from ONE candidate the derivation's off-niche/season/lean filters wave through. Same
+      // per-exit ctx as the band pad and the terminal net (`bandScope?.truth ?? titleTruthCtx`).
+      truth: bandScope?.truth ?? titleTruthCtx,
     }
     /* TITLE WASTE VOCABULARY (PO ruling 2026-08-09, §3 gold rule 4 + §8) — "Unisex" and "Classic
      * Fit" are not title words. The PO's own rewrite is the specimen:
@@ -9719,6 +9734,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // protects exactly what the early one did.
       protect: protectDesign ?? '',
       reject: bandScope?.reject,
+      foreignTokens: bandScope?.foreignTokens,
+      // BROADCAST ONLY (no bandScope — see applyTitleTruthNet's doc on scrubProtectedOverlap).
+      scrubProtectedOverlap: !bandScope,
     })
     console.log(JSON.stringify({
       tag: 'TITLE_TRUTH_BAND', scope: holdScope, parent: input.parentAsin ?? null,
@@ -9835,6 +9853,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     /** THIS design's own garment truth (PO 2026-08-22). Absent ⇒ the family ctx, which is correct
      *  for the broadcast/parent title and wrong for every per-child one on a mixed family. */
     truth?: PhraseTruthCtx | null
+    /** The SAME sibling-name token set `reject` is built from (2026-08-22 defect 2 fix), so
+     *  `applyTitleTruthNet` can strike a foreign design name WORD BY WORD out of segment 0 too —
+     *  `reject` alone only answers "drop this whole phrase?", and segment 0 is never wholly dropped. */
+    foreignTokens?: ReadonlySet<string>
   }
   /** …plus the truth door BOUND to that scope, so every exit calls the same `(text, produced)`, and
    *  the BAND scope bound to the same design — one object, so a caller cannot pass the truth net one
@@ -9880,7 +9902,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // family ctx, where the DOMINANT-class union is the right authority.
     const ctx = scope?.truth ?? titleTruthCtx
     return ctx
-      ? applyTitleTruthNet(stripped, ctx, scope?.protect ?? protectHay, { rejectSegment: scope?.reject })
+      ? applyTitleTruthNet(stripped, ctx, scope?.protect ?? protectHay, {
+          rejectSegment: scope?.reject,
+          foreignTokens: scope?.foreignTokens,
+          // BROADCAST ONLY (no scope passed — see applyTitleTruthNet's doc): `protectHay` there is
+          // every sibling's name unioned, so a bare word collision ("business", inside the unrelated
+          // "mind your business tshirt") is never a genuine design mention. A per-child `scope`'s
+          // `protect` is THAT design's own name, where a match IS genuine and must stay verbatim.
+          scrubProtectedOverlap: !scope,
+        })
       : stripped
   }
   /* CROSS-DESIGN SCOPE FOR THE PER-CHILD EXIT (PO 2026-08-21, live B0DSCDZC6K). The "Business
@@ -9944,9 +9974,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // judges this per-child title against the SAME design as every stage before it.
       truth,
       reject,
+      foreignTokens: foreign,
     }
     // The property NAME shadows nothing: the body's `titleTruthDoor` is the shared door above.
-    return { protect, reject, truth, band, titleTruthDoor: (t: string, produced: boolean) => titleTruthDoor(t, produced, { protect, reject, truth }) }
+    return {
+      protect, reject, truth, band, foreignTokens: foreign,
+      titleTruthDoor: (t: string, produced: boolean) => titleTruthDoor(t, produced, { protect, reject, truth, foreignTokens: foreign }),
+    }
   }
   return censusLog({
     ...r,
