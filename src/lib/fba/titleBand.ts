@@ -26,6 +26,9 @@
  */
 
 import { CONTENT_CONTRACT } from './contentContract'
+// The shared content truth spine. No cycle: contentTruth imports only blankSpecs, which imports
+// productDetailAttrs + contentContract and never this module.
+import { applyTitleTruthNet, type PhraseTruthCtx } from './contentTruth'
 // Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
 // file stays cycle-free and unit-testable in isolation.
 import { BASIC_COLOR_WORDS } from './designName'
@@ -126,6 +129,44 @@ export interface TitleBandCtx {
   /** Amazon Custom enrollment (listing_content.is_customizable, migration 052) — TRUE makes
    *  "Personalized" a verified fact segment; false/absent keeps it banned (false claim otherwise). */
   customizable?: boolean
+  /** THE FAMILY'S OWN GARMENT VOCABULARY (2026-08-21, live B0DSCDZC6K). Product facts the caller
+   *  derives from the RESOLVED BLANKS — the garment surface forms of every garment_family in the
+   *  family's own union ("Sweatshirt", "Crewneck", "Pullover", "Hooded Sweatshirt"), Title-Cased.
+   *  NEVER a market/search phrase: these are what the blanks ARE. Ordered weakest-signal-last by
+   *  the caller; every entry still passes `truthOk` and `alreadyStates` below.
+   *
+   *  WHY THIS EXISTS: a MIXED-blank family agrees on almost nothing, so the spec facts intersect
+   *  away and `garmentBrand` is empty whenever the blank forbids its name in copy (every Gildan
+   *  row). That left exactly ONE pad candidate — a single garment form — and a title the terminal
+   *  truth net had shortened could not get back into the band with it. */
+  factSegments?: readonly string[]
+  /** The content truth spine's verdict for THIS family, so the pad can never re-mint the very lie
+   *  the terminal truth net just removed (a SHIRT productType on a sweatshirt family resolves
+   *  `garmentSecond` to "Shirt"). Absent ⇒ every candidate passes, i.e. today's behavior. */
+  truthOk?: (segment: string) => boolean
+  /**
+   * TRUTHFUL POOL PHRASES — the pad's THIRD and last fact bank (PO 2026-08-22, after PR #630/#631
+   * were reverted off production).
+   *
+   * WHY THIS EXISTS, and why the previous build was wrong to omit it. #631 gave the pad the
+   * family's own garment vocabulary and it was still not enough: on B0DSCDZC6K the terminal truth
+   * net correctly deleted "Funny Work Shirts" and "for Women", and the pad — restricted BY DOCTRINE
+   * to BLANK_SPECS facts — could only reach 29-49 chars against the 70-75 band. The titles were
+   * TRUE and unrankable, so a copy defect became a worse ranking defect and the whole spine came
+   * off production. THE LESSON, now standing: truth and band are ONE contract, and a subtractive
+   * net is only safe when paired with an additive producer that can restore the invariant.
+   *
+   * THE DOCTRINE WAS ALREADY INCOHERENT. "The pad is facts-only, never a search term" sat beside
+   * `enforceMoneyTail`, which installs a POOL KEYWORD in the title's money position on the very
+   * same door pass. The title has always carried pool vocabulary; only the PAD pretended otherwise.
+   * What actually matters is not WHERE a phrase came from but whether it is TRUE of this product —
+   * which is exactly the question `truthOk` asks, and it is asked of these segments too.
+   *
+   * ORDERED AFTER the spec facts and the garment vocabulary, so spec-grounding still beats coverage
+   * (SELLER_PROFILE §2) and a family with a real fact bank pads identically to today. The CALLER
+   * supplies phrases already filtered for truth, design scope and off-niche; every one is still
+   * re-gated here by `truthOk`, the waste vocabulary, `alreadyStates` and `wordsAreNew`. */
+  poolSegments?: readonly string[]
 }
 
 /** The audience tail the pipeline's own fillers recognise — kept byte-identical to the regexes at
@@ -138,6 +179,43 @@ function alreadyStates(title: string, phrase: string): boolean {
   const t = ` ${norm(title)} `
   const p = norm(phrase)
   return p.length > 0 && t.includes(` ${p} `)
+}
+
+const bandWords = (s: string): string[] => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean)
+
+/**
+ * CONCEPT-level distinctness — the SPACING twin of `collapseRepeatedWords`.
+ *
+ * THE DEFECT, caught by the full-title gate and invisible to every word-level check: a title
+ * already ending "…Fall Crewneck" was padded with the blank's `neck` fact "Crew Neck", shipping
+ * "| Long Sleeve Fall Crewneck Crew Neck". No word repeats — "crewneck" and "crew"+"neck" are
+ * different tokens — so `collapseRepeatedWords`, `alreadyStates` and `wordsAreNew` all pass it. But
+ * Amazon indexes the concept ONCE, so the second spelling spends 10 of 75 characters on nothing.
+ *
+ * The test is flattening: every 1-to-3-word window of the title, letters only, spaces removed. A
+ * candidate whose own flattened form is already in that set is the same concept re-spelled, in
+ * either direction ("Crew Neck" against "Crewneck", and "Crewneck" against "Crew Neck").
+ */
+function titleConcepts(title: string): Set<string> {
+  const w = bandWords(title).filter((x) => !TITLE_CONNECTORS.has(x))
+  const out = new Set<string>()
+  for (let i = 0; i < w.length; i++) {
+    for (let n = 1; n <= 3 && i + n <= w.length; n++) out.add(w.slice(i, i + n).join(''))
+  }
+  return out
+}
+function conceptIsNew(title: string, phrase: string): boolean {
+  const flat = bandWords(phrase).filter((x) => !TITLE_CONNECTORS.has(x)).join('')
+  return flat.length === 0 || !titleConcepts(title).has(flat)
+}
+
+/** Word-level distinctness: TRUE when no significant word of `phrase` already appears in `title`.
+ *  `alreadyStates` only catches the whole phrase; this is the same discipline
+ *  `pickDistinctGarmentForm` applies to a single garment form, generalised to multi-word facts. */
+function wordsAreNew(title: string, phrase: string): boolean {
+  const have = new Set(bandWords(title))
+  const w = bandWords(phrase)
+  return w.length > 0 && w.every((x) => TITLE_CONNECTORS.has(x) || !have.has(x))
 }
 
 /**
@@ -185,6 +263,15 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     // both a live oscillation and a broken idempotence claim. The fact itself is untouched
     // everywhere else: bullets, description and the Product Detail attributes still read the spec.
     if (!s || isTitleWasteVocabulary(s)) return
+    // TRUTH GATE (2026-08-21). The pad is the LAST writer in the door, downstream of the terminal
+    // truth net — so an untrue candidate here is a lie nothing else can catch. A sweatshirt family
+    // listed under an Amazon SHIRT productType resolves `garmentSecond` to "Shirt"; without this
+    // the pad would weld back exactly the "Shirts" the net had just dropped.
+    if (ctx.truthOk && !ctx.truthOk(s)) return
+    // CONCEPT GATE (2026-08-22): "Crew Neck" onto a title already saying "Crewneck" is the same
+    // concept re-spelled — indexed once, and 10 characters of the 75 spent on nothing. Applies to
+    // EVERY candidate, spec facts included, because the blank's `neck` fact is where it came from.
+    if (!conceptIsNew(title, s)) return
     if (!alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
   // Amazon Custom (2026-07-31, PO): "Personalized" leads the fact list — on an enrolled listing it
@@ -195,11 +282,59 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   push(ctx.spec?.fit)
   push(ctx.spec?.sleeve)
   push(ctx.spec?.neck)
+  const attributeCount = out.length          // everything above is a product ATTRIBUTE, not a noun
   push(ctx.garmentSecond)
+  /* THE FAMILY'S OWN GARMENT VOCABULARY (2026-08-21) — the resolved blanks' surface forms, e.g.
+   * Sweatshirt / Crewneck / Pullover / Hooded Sweatshirt / Hoodie on a mixed 18000+18500 family.
+   * Last among the singles because a spec attribute is a stronger product signal than a second noun
+   * for the same garment; but these are the facts that keep a MIXED-blank family — whose attributes
+   * intersect away to almost nothing — from having no pad bank at all.
+   *
+   * WORD-DISTINCT, like `garmentSecond` already is. `alreadyStates` only rejects the whole phrase,
+   * so a title ending "…Sweatshirt" would otherwise be padded "| Crewneck Sweatshirt" — a repeated
+   * word `collapseRepeatedWords` has already run past by the time the pad fires. */
+  for (const f of ctx.factSegments ?? []) if (wordsAreNew(title, f)) push(f)
+  const garmentFacts = out.slice(attributeCount)   // garmentSecond + the family's own vocabulary
+  const attributeFacts = out.slice(0, attributeCount)
   // Pairs, so a single thin fact can still carry the title into band without inventing anything.
+  // These two stay FIRST and unchanged: on a family that HAS a copy-legal brand they are today's
+  // chosen pads, and reordering them would rewrite healthy titles for no reason.
   if (ctx.garmentBrand && ctx.garmentSecond) push(`${ctx.garmentBrand.trim()} ${ctx.garmentSecond.trim()}`)
   if (ctx.spec?.fit && ctx.garmentSecond) push(`${ctx.spec.fit.trim()} ${ctx.garmentSecond.trim()}`)
+  /* GENERIC PAIRS (2026-08-21) — the reach a MIXED-blank family needs.
+   *
+   * The two pairs above are both keyed on `garmentBrand`/`spec.fit`, and B0DSCDZC6K has NEITHER:
+   * every Gildan row is `brand_in_copy=false` (so `garmentBrand` is '') and "Classic Fit" is title
+   * waste vocabulary. The bank was therefore ONE ~8-char garment form against a 16-char gap, so
+   * `enforceTitleBand` returned 'facts-exhausted' ~11 chars short — the live 54/61/64 titles.
+   *
+   * ALWAYS <attribute> <garment noun>, never attribute+attribute. That is the PO's gold shape
+   * ("… | Long Sleeve Comfort Colors Shirt") and it is also a REGRESSION GUARD: an unrestricted
+   * product would mint "Comfort Colors Relaxed Fit" — a pure spec stack in the money position, the
+   * exact tail class the seller has shipped zero times and the reason `dropSpecOnlyTail` exists. */
+  for (const a of attributeFacts) {
+    for (const g of garmentFacts) {
+      if (alreadyStates(a, g) || alreadyStates(g, a)) continue   // "Sweatshirt" + "Crewneck Sweatshirt"
+      push(`${a} ${g}`)
+    }
+  }
+  /* TRUTHFUL POOL PHRASES — LAST, and only what the product's own facts could not reach.
+   *
+   * Every entry passes the SAME four gates a spec fact does (`push` applies the waste check, the
+   * truth predicate and `alreadyStates`), plus `wordsAreNew` so a pool phrase can never re-state a
+   * word the title already spends. Being last means a family with a healthy fact bank pads exactly
+   * as it does today: `enforceTitleBand` returns on the FIRST candidate that lands in band, so
+   * these are only ever reached when the facts genuinely ran out — which is the starvation case
+   * that took the truth spine off production. */
+  for (const p of ctx.poolSegments ?? []) if (wordsAreNew(title, p)) push(p)
   return out
+}
+
+/** OBSERVABILITY ONLY — how many product-fact segments the pad has available for this title.
+ *  `TITLE_UNDER_BAND` reports it, so "the pad is mis-wired" and "the pad had nothing to say" are
+ *  distinguishable from one log line instead of from a code reading. Pure; mutates nothing. */
+export function candidateFactCount(title: string, ctx: TitleBandCtx): number {
+  return candidateSegments(title, ctx).length
 }
 
 /** Trivial connectors that may legitimately repeat. Everything else is a "significant word" and is
@@ -495,6 +630,43 @@ export function fixApostropheCase(title: string): string {
     if (pre.length > 1 && pre === pre.toUpperCase()) return m      // "CEO'S", "USA'S" — all-caps token
     return `${pre}${apo}${run.toLowerCase()}`
   })
+}
+
+/**
+ * THE CENSOR-STAR TWIN of `fixApostropheCase` (PO 2026-08-21, live B0DSCDZC6K: "Business B*Tch").
+ *
+ * A star is a NON-WORD character, so `\b` fires on both sides of it and the repo's Title-Case pass
+ * (`s.replace(/\b\w/g, c => c.toUpperCase())`) capitalises the letter that FOLLOWS it — turning the
+ * seller's own design name "Business B*tch" into "Business B*Tch" mid-word. The star is a censor,
+ * not a word break, and the design name must ship verbatim.
+ *
+ * PURE, TOTAL, IDEMPOTENT (an already-correct "B*tch" has a lowercase letter and is returned
+ * byte-identical) and LENGTH-NEUTRAL, so it may run beside `fixApostropheCase` in the ship door
+ * without a band guard.
+ *
+ * WHAT MUST NOT BREAK: a deliberately ALL-CAPS censored word ("F*CK", "SH*T", "WTF*", "B*TCH" typed
+ * that way by the seller) keeps every capital — the letters around the star are inspected as ONE
+ * token and an all-caps token is never touched.
+ */
+export function fixCensorStarCase(title: string): string {
+  const t = title || ''
+  if (!t.includes('*')) return title // fast path: the overwhelming majority of titles
+  return t.replace(/([A-Za-z]+)\*([A-Za-z])([A-Za-z]*)/g, (m, pre: string, first: string, rest: string) => {
+    if (first === first.toLowerCase()) return m                        // already correct — idempotence
+    const word = `${pre}${first}${rest}`
+    if (word === word.toUpperCase()) return m                          // "F*CK", "B*TCH" — deliberate
+    return `${pre}*${first.toLowerCase()}${rest}`
+  })
+}
+
+/**
+ * THE repo's ONE Title-Case pass for title text. Every producer used to inline
+ * `fixApostropheCase(s.replace(/\b\w/g, c => c.toUpperCase()))` — six copies, and the star artifact
+ * had to be fixed in all six or in none. Both artifacts of the `\b\w` caser (the apostrophe and the
+ * censor star) are repaired here, so a caser added tomorrow inherits both by using this function.
+ */
+export function titleCasePhrase(s: string): string {
+  return fixCensorStarCase(fixApostropheCase((s || '').replace(/\b\w/g, (c) => c.toUpperCase())))
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -885,6 +1057,314 @@ export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: str
     return { title: best, notes: [`band net: padded to ${best.length} chars — facts exhausted below ${TITLE_BAND_LO}`], decision: 'facts-exhausted' }
   }
   return { title: t0, notes: [`band net: ${t0.length} chars, NO product facts available to reach ${TITLE_BAND_LO}`], decision: 'no-facts' }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE ONE NET — TRUTH AND BAND ARE ONE CONTRACT (PO 2026-08-22).
+ *
+ * WHAT WENT WRONG THE FIRST TIME, measured live on B0DSCDZC6K and not theorised. PRs #630/#631
+ * shipped the shared truth spine and its live-gate fixes, and the truth rules WORKED: no "shirts"
+ * on a sweatshirt family, no forced gender on a unisex lean, no mid-phrase fragments. The titles
+ * came out at 29-49 characters against the 70-75 band (the parent at 37). Both commits were
+ * reverted off production, because a truthful title nobody can find is a worse defect than the
+ * untruthful one it replaced.
+ *
+ * THE CAUSE IS STRUCTURAL, NOT A TUNING MISS. The truth net only SUBTRACTS. The band pad, which is
+ * the only thing that can add, was restricted BY DOCTRINE to BLANK_SPECS facts — and a MIXED-blank
+ * family intersects its facts away to almost nothing. So the system had a subtractive net with no
+ * additive counterpart, and the arithmetic could only ever go one way.
+ *
+ * THE RULE THIS ENCODES: a net may only ship a title it has shortened if it can re-fill that title
+ * to the band FROM TRUE MATERIAL. Truth and band are not two nets that run in sequence and hope;
+ * they are ONE exit condition — `truthful AND in band` — and a title that cannot satisfy both is a
+ * REFUSAL, never a stub. The operator sees the refusal and the listing keeps what it already has,
+ * which is the same abort-and-preserve discipline the repo already applies to an empty AI response.
+ *
+ * PURE and SYNCHRONOUS: the caller owns every log line and every hold it raises, so this function
+ * can be pinned directly against real strings.
+ */
+/** Refill passes the additive producer may take before it gives up. Each pass adds at most one
+ *  product fact (`enforceTitleBand` appends one segment), so this bounds the widest gap the pad can
+ *  close: a title the truth net cut in half needs several ~10-char facts, never one. A pass that
+ *  adds nothing exits the loop immediately, so this ceiling is a guard, not the normal exit. */
+export const MAX_REFILL_PASSES = 4
+/** Candidate expansions the refill search may evaluate before giving up. Deterministic and cheap:
+ *  a title within one fact of the band exits on the first branch, and this only binds on a family
+ *  whose facts genuinely cannot span the gap — where the answer is a refusal either way. */
+export const REFILL_NODE_BUDGET = 600
+
+/** Append ONE segment the way `enforceTitleBand` does — inserting BEFORE the audience tail, and
+ *  extending the pipe-right rather than opening a second pipe once one exists. Extracted so the
+ *  band pad and the refill search compose segments identically; two copies of this would let the
+ *  greedy pad and the search disagree about what a title even looks like. */
+function appendBandSegment(title: string, seg: string): string {
+  const m = AUDIENCE_TAIL_RE.exec(title)
+  const head = (m ? title.slice(0, m.index) : title).trim()
+  const tail = m ? title.slice(m.index) : ''
+  const joiner = head.includes(' | ') ? ' ' : ' | '
+  return `${head}${joiner}${seg}${tail}`.replace(/\s{2,}/g, ' ').trim()
+}
+
+export type TruthBandDecision =
+  /** The run did not produce a title (a bullets/keywords regen passes the prior through). */
+  | 'not-produced'
+  /** Non-apparel titles are legitimately short — the band is an apparel invariant. */
+  | 'non-apparel'
+  /** Already OVER the 75 cap on arrival — `capTitle75` owns the ceiling and runs upstream, so this
+   *  should be unreachable; named rather than mislabelled 'in-band' if it ever is not. */
+  | 'over-cap'
+  /** Already 70-75 and truthful. The common, healthy case; returned byte-identical. */
+  | 'in-band'
+  /** Was short, and TRUE material carried it back into the band. The outcome that proves the
+   *  additive producer works — and the one thing #630/#631 could never reach. */
+  | 'refilled'
+  /** Could NOT reach the band from true material, so the PRIOR title is kept and a hold is raised.
+   *  Nothing ships; the operator decides. */
+  | 'refused-kept-prior'
+  /** Could not reach the band and there is NO prior to preserve (a listing with no live title).
+   *  The truthful short title ships — this is the ONLY path on which a sub-band title exits, and it
+   *  still raises a hold. */
+  | 'unreachable-no-prior'
+
+export interface TruthBandResult {
+  title: string
+  decision: TruthBandDecision
+  /** Length of the returned title. */
+  len: number
+  /** The product-fact and truthful-pool segments the pad had available — so a hold distinguishes
+   *  "the pad is mis-wired" from "the pad had nothing true left to say" from ONE log line. */
+  tried: string[]
+  reason: string
+  /** TRUE when the operator must see this — the caller raises the hold and logs
+   *  TITLE_BAND_UNREACHABLE. Never true on a healthy exit. */
+  hold: boolean
+}
+
+/**
+ * THE terminal truth+band exit. Runs LAST, on the bytes that ship, after every other net including
+ * the facts pad and the money-position gate.
+ *
+ * `prior` is the title that is live on Amazon today. It is what a refusal preserves — deliberately
+ * NOT re-judged for truth here: this net's job is to refuse to SHIP a short title, and swapping a
+ * live title for a shorter truthful one is the exact trade that was reverted. A prior that is
+ * itself untruthful surfaces as a hold with the operator, which is where that decision belongs.
+ */
+export function settleTruthBand(args: {
+  produced: string
+  prior?: string | null
+  apparel: boolean
+  band: TitleBandCtx
+}): TruthBandResult {
+  const produced = (args.produced || '').replace(/\s{2,}/g, ' ').trim()
+  const prior = (args.prior || '').replace(/\s{2,}/g, ' ').trim()
+  const done = (title: string, decision: TruthBandDecision, reason: string, tried: string[] = [], hold = false): TruthBandResult =>
+    ({ title, decision, len: title.length, tried, reason, hold })
+
+  if (!produced) return done(args.produced || '', 'not-produced', 'no title produced this run')
+  if (!args.apparel) return done(produced, 'non-apparel', 'band is an apparel invariant')
+  // OVER-CAP IS NOT "IN BAND". `capTitle75` owns the ceiling and runs upstream, so this should be
+  // unreachable — but a terminal net that blessed an 80-char title as in-band would hide exactly
+  // the Amazon 100476 rejection it exists to prevent. Named, not silently folded into 'in-band'.
+  if (produced.length > TITLE_BAND_HI) return done(produced, 'over-cap', `${produced.length} chars — capTitle75 owns the ceiling`)
+  if (produced.length >= TITLE_BAND_LO) return done(produced, 'in-band', `${produced.length} chars`)
+
+  /* THE ADDITIVE HALF, AND IT MUST ITERATE — this is the second half of why #630/#631 could not
+   * reach the band, and it is invisible from any single-leaf test.
+   *
+   * `enforceTitleBand` appends exactly ONE segment: it returns the first candidate that lands in
+   * band, and otherwise keeps the single longest improvement and stops. A title the truth net cut
+   * to 37 characters needs ~35 more, and NO single product fact is 35 characters long — so the pad
+   * would add one ~10-char fact, report 'facts-exhausted' at 47, and the band was structurally
+   * unreachable no matter how rich the fact bank was. Enlarging the bank alone (#631) could never
+   * have fixed it.
+   *
+   * So the refill runs to a FIXED POINT. Each pass re-derives its candidates against the CURRENT
+   * title, so `alreadyStates` / `wordsAreNew` exclude everything already spent and no fact can be
+   * added twice; `enforceTitleBand` is monotone (never shortens, never exceeds the cap), so the
+   * loop is strictly increasing and terminates. `MAX_REFILL_PASSES` bounds it regardless — a pass
+   * that adds nothing breaks out immediately, which is the normal exit. */
+  const tried = candidateSegments(produced, args.band)
+  const band = args.band
+
+  /* WHY THIS IS A SEARCH AND NOT A LOOP — the third and last reason the band was unreachable, and
+   * the one only a full-title gate could have found.
+   *
+   * `enforceTitleBand` is GREEDY: it returns the first candidate that lands in band, and otherwise
+   * keeps the LONGEST improvement. Greedy-longest walks into dead ends. Measured on this family's
+   * "Billionare Coming Soon" design: the head is 41 chars, no single fact spans the 29-char gap, so
+   * greedy took the longest available (a 25-char pool phrase) and landed on 69 — ONE character
+   * under the floor, with every remaining candidate now too long to fit under the 75 cap. Stuck at
+   * 69 forever, while `41 + "Mind Your Business" + "Long Sleeve"` = 74 was sitting right there.
+   *
+   * So the refill explores COMBINATIONS, depth-first in candidate order, and returns the first that
+   * lands inside the band. Bounded twice over — by depth and by a node budget — so it stays
+   * deterministic and cheap; a title within one fact of the band exits on the first branch.
+   *
+   * POOL PHRASES OUTRANK GARMENT NOUNS AFTER THE FIRST SEGMENT. Spec-grounding beats coverage for
+   * the segment that names the product (`candidateSegments` order, unchanged). Once the title has
+   * stated its garment, a SECOND garment noun buys nothing — Amazon indexes a token once — while a
+   * truthful pool phrase indexes a query a shopper actually types. Without this the pad produced
+   * "| Long Sleeve Pullover Hoodie Crewneck": four garment nouns, all true, all worthless. */
+  const poolSet = new Set(band.poolSegments ?? [])
+  let budget = REFILL_NODE_BUDGET
+  let best = produced
+  const search = (t: string, depth: number): string | null => {
+    if (t.length >= TITLE_BAND_LO && t.length <= TITLE_BAND_HI) return t
+    if (depth >= MAX_REFILL_PASSES || budget <= 0) return null
+    const cands = candidateSegments(t, band)
+    const ordered = depth === 0
+      ? cands
+      : [...cands.filter((c) => poolSet.has(c)), ...cands.filter((c) => !poolSet.has(c))]
+    for (const seg of ordered) {
+      if (budget-- <= 0) return null
+      const cand = appendBandSegment(t, seg)
+      if (cand.length > TITLE_BAND_HI || cand.length <= t.length) continue
+      if (cand.length > best.length) best = cand          // the honest partial, for the refusal note
+      const hit = search(cand, depth + 1)
+      if (hit) return hit
+    }
+    return null
+  }
+  const found = search(produced, 0)
+  if (found) {
+    return done(found, 'refilled', `re-filled ${produced.length} → ${found.length} from true material`, tried)
+  }
+
+  /* THE REFUSAL. Every true segment has been tried and the floor is still out of reach. Shipping
+   * the stub is precisely what got the first build reverted, so it does not happen: the live title
+   * stays, and the operator is told.
+   *
+   * THE PRIOR MUST ITSELF BE SHIPPABLE. A refusal returns the prior as this run's recommendation —
+   * so an over-cap prior would hand the door a string it is the door's whole job to prevent (>75 is
+   * the Amazon 100476 rejection class, and `capTitle75` already ran on the PRODUCED title, never on
+   * this one). An over-cap or empty prior is therefore not a preservable value: the hold still
+   * fires, and the truthful text is what exits, which is the only honest remaining option. */
+  if (prior && prior.length <= TITLE_BAND_HI) {
+    return done(prior, 'refused-kept-prior',
+      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material — prior title kept, nothing shipped`,
+      tried, true)
+  }
+  if (prior) {
+    return done(best, 'unreachable-no-prior',
+      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and the prior title is ${prior.length} chars — over the ${TITLE_BAND_HI} cap, so it cannot be preserved`,
+      tried, true)
+  }
+  return done(best, 'unreachable-no-prior',
+    `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and there is no prior title to preserve`,
+    tried, true)
+}
+
+/**
+ * DROP ORPHAN POOL FRAGMENTS — the "Mind" class, enforced TERMINALLY on the bytes that ship.
+ *
+ * THE LIVE DEFECT: `…Fall Crewneck, Mind` — a title fill appended the pool phrase "mind your
+ * business" WORD BY WORD until it ran out of characters, leaving a dangling ", Mind". #630 cured
+ * the PRODUCER (`pooledNovelFragment` harvests contiguous runs with provenance, so a phrase that
+ * cannot fit WHOLE is skipped whole) and that cure stands. But a producer-side cure cannot reach a
+ * title that arrived from somewhere else — a PO-locked prior, a stored title from before the fix,
+ * or a council draft — and this repo's own doctrine is that a measurable invariant gets a
+ * deterministic net on the SHIPPED bytes, not a promise from whoever wrote them.
+ *
+ * THE TEST IS PROVENANCE, NOT A WORD LIST. A segment is an orphan when it is a strict PREFIX of a
+ * pool phrase and is not a whole pool phrase itself: "Mind" out of "mind your business" is an
+ * orphan; "Fall Crewneck" is the whole phrase and is not. That is exactly the harvester's own rule,
+ * applied in the opposite direction, so the two cannot disagree.
+ *
+ * SAFETY RAILS, the same three the truth net uses: segment 0 is never dropped (it carries brand +
+ * design + noun), a segment carrying a design word that survives nowhere else is never dropped, and
+ * a segment of 3+ words is never dropped (a long segment is a phrase in its own right, whatever it
+ * is a prefix of). Pure, idempotent, and it only ever SHORTENS — the band pad downstream re-fills.
+ */
+export function dropOrphanPoolFragments(title: string, pool: readonly string[], protectHay = ''): string {
+  const t = (title || '').replace(/\s{2,}/g, ' ').trim()
+  if (!t || pool.length === 0) return title
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  const words = (s: string): string[] => norm(s).split(' ').filter(Boolean)
+  const poolNorm = pool.map(norm).filter(Boolean)
+  const protectedWords = new Set(words(protectHay).filter((w) => w.length > 2))
+
+  const isOrphan = (seg: string): boolean => {
+    const n = norm(seg)
+    if (!n) return false
+    const w = words(seg)
+    if (w.length === 0 || w.length > 2) return false          // a 3+ word segment stands on its own
+    if (poolNorm.includes(n)) return false                     // it IS a whole pool phrase — keep
+    return poolNorm.some((p) => p.startsWith(`${n} `))         // a strict prefix of one — orphan
+  }
+
+  const parts = t.split(/\s*([|,])\s*/)
+  if (parts.length <= 1) return title
+  const kept: string[] = [parts[0]]
+  let carried: string | null = null
+  for (let i = 1; i + 1 < parts.length; i += 2) {
+    const sep = parts[i]
+    const seg = parts[i + 1]
+    if (sep === undefined || seg === undefined || !seg.trim()) continue
+    if (isOrphan(seg)) {
+      const rest = [parts[0], ...kept.slice(1), ...parts.slice(i + 2)].join(' ')
+      const restWords = new Set(words(rest))
+      const solelyCarriesDesign = words(seg).some((w) => protectedWords.has(w) && !restWords.has(w))
+      if (!solelyCarriesDesign) {
+        carried = carried === '|' || sep === '|' ? '|' : (carried ?? sep)
+        continue
+      }
+    }
+    const useSep = carried === '|' || sep === '|' ? '|' : sep
+    carried = null
+    kept.push(useSep === '|' ? ` | ${seg}` : `, ${seg}`)
+  }
+  return kept.join('').replace(/\s{2,}/g, ' ').replace(/[\s,|]+$/g, '').trim()
+}
+
+/**
+ * THE ONE TERMINAL NET FOR THE TITLE — truth and band enforced together, on the final bytes.
+ *
+ * THE HOLE THIS CLOSES, and it is not hypothetical. The ship door runs the truth net EARLY (before
+ * the waste, money-tail, colour and inclusive-audience nets) because removing a lie frees characters
+ * the pad can then spend. But three of those later stages ADD text, and one of them —
+ * `enforceMoneyTail` — installs a POOL KEYWORD into the money position. Its candidates are filtered
+ * for off-niche and nothing else, so on a sweatshirt family a keyword like "funny work shirts" could
+ * be welded into the title AFTER the only stage that would have judged it. The truth net ran, and
+ * then the title changed underneath it.
+ *
+ * So the contract is enforced TERMINALLY, on the bytes that ship:
+ *   1. the truth net once more (idempotent by construction — a second pass finds nothing left to
+ *      drop — so this is free on a title no later stage touched, and a cure when one did);
+ *   2. the additive producer, re-filling from TRUE material only;
+ *   3. `settleTruthBand`, which refuses to ship anything that is not truthful AND in band.
+ *
+ * Truth and band are ONE contract with ONE exit condition; this is the function that owns it.
+ * PURE — the caller logs the decision and raises the hold.
+ */
+export function enforceTitleTruthBand(args: {
+  produced: string
+  prior?: string | null
+  apparel: boolean
+  band: TitleBandCtx
+  /** The design's (or family's) blank-grounded truth context. null ⇒ no ground truth to judge
+   *  against, and a guessed rule is worse than none — the net half is skipped, the band half is not. */
+  truth: PhraseTruthCtx | null
+  protect?: string
+  reject?: (segment: string) => boolean
+  /** The pool the ORPHAN-FRAGMENT guard tests provenance against (see `dropOrphanPoolFragments`).
+   *  Defaults to the band's own truthful pool segments, which is the same material any fill could
+   *  have harvested a fragment from. */
+  orphanPool?: readonly string[]
+}): TruthBandResult & { netted: string } {
+  const truthed = args.truth
+    ? applyTitleTruthNet(args.produced, args.truth, args.protect ?? '', { rejectSegment: args.reject })
+    : args.produced
+  // Orphan guard BEFORE the band, so the characters a dangling fragment was wasting are available
+  // to the pad — the same reason the truth net runs before the pad and not after it.
+  const netted = dropOrphanPoolFragments(truthed, args.orphanPool ?? args.band.poolSegments ?? [], args.protect ?? '')
+  const settled = settleTruthBand({ produced: netted, prior: args.prior, apparel: args.apparel, band: args.band })
+  /* THE CASING FIXES, TERMINALLY. Both are LENGTH-NEUTRAL and IDEMPOTENT, so they can run after the
+   * band without moving a title across it — which is exactly why they belong here as well as at the
+   * top of the door. The seller's design name "Business B*tch" must ship verbatim, and the door is
+   * no longer the last writer: the refill above appends segments AFTER the door's opening casing
+   * pass, and a prior title preserved by a refusal never went through that pass at all. A guarantee
+   * about shipped bytes has to be made by whatever writes them last. */
+  return { ...settled, netted, title: fixCensorStarCase(fixApostropheCase(settled.title)) }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────
