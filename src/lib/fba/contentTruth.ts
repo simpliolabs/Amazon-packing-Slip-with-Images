@@ -53,8 +53,11 @@ export type TruthAudienceLean = 'unisex' | 'women' | 'men' | null
 export interface PhraseTruthCtx {
   garmentFamily: TruthGarmentFamily | undefined
   /** BlankSpec has no capability field today, so the capability rule is unconditional; weightNote
-   *  backs the weight-class rule. */
-  spec: Pick<BlankSpec, 'weightNote'> | null | undefined
+   *  backs the weight-class rule. fit/sleeve/neck/material/unisex are NOT read by the predicate
+   *  below — they are widened here (2026-08-22) purely so a PROMPT built from this ctx (the council
+   *  brief's garment-truth line) can state the product's real facts without a second resolver call;
+   *  every caller already assigns the FULL resolved BlankSpec here, so this costs nothing. */
+  spec: Pick<BlankSpec, 'weightNote' | 'fit' | 'sleeve' | 'neck' | 'material' | 'unisex'> | null | undefined
   allowedBrand: string | null | undefined
   audience: 'kids' | 'adult' | null
   /** EVERY garment family present in a MIXED variation family (B0DSCDZC6K ships Gildan 18000
@@ -129,6 +132,39 @@ const allowedGarmentClasses = (ctx: PhraseTruthCtx): ReadonlySet<string> | null 
   const union = new Set<string>()
   for (const s of sets) for (const c of s as ReadonlySet<string>) union.add(c)
   return union.size ? union : null
+}
+
+/** Human-readable display nouns per garment CLASS (prompt copy only — the predicate itself keys
+ *  off `garmentNounClass`/`GARMENT_NOUN_RE` above and is untouched by this table). */
+const CLASS_DISPLAY_NOUNS: Record<string, string[]> = {
+  tee: ['shirt', 'tee', 't-shirt', 'top'],
+  sweatshirt: ['sweatshirt'],
+  crewneck: ['crewneck'],
+  hoodie: ['hoodie'],
+}
+const ALL_GARMENT_CLASSES = Object.keys(CLASS_DISPLAY_NOUNS)
+
+/**
+ * THE GARMENT NOUNS a family may truthfully use, and the ones it may NEVER use — derived from the
+ * SAME class table `phraseTruthVerdict`'s wrong-garment-noun rule gates with (`classesForFamily` /
+ * `allowedGarmentClasses`), so a prompt line built from this can never disagree with what the #632
+ * terminal net (`applyTitleTruthNet`) would delete. One source, two views: the predicate and the
+ * producer-facing constraint copy read the identical class union.
+ *
+ * PO 2026-08-22 ("Council/Judges can read the garment field"): councils were writing the garment
+ * lie and burning candidate slots on it because they never saw this constraint — only the terminal
+ * net, after the fact, ever asked the question. This lets a brief/judge ask it BEFORE generation.
+ *
+ * Empty `forbidden` ⇒ no rule (unresolved blank / non-apparel family) — caller must no-op exactly
+ * like `phraseTruthVerdict` fails open when `allowedGarmentClasses` returns null.
+ */
+export function garmentNounConstraint(ctx: PhraseTruthCtx): { allowed: string[]; forbidden: string[] } {
+  if (!ctx.garmentFamily || ctx.garmentFamily === 'none') return { allowed: [], forbidden: [] }
+  const allowedClasses = allowedGarmentClasses(ctx)
+  if (!allowedClasses) return { allowed: [], forbidden: [] }
+  const allowed = [...new Set([...allowedClasses].flatMap((c) => CLASS_DISPLAY_NOUNS[c] ?? [c]))]
+  const forbidden = [...new Set(ALL_GARMENT_CLASSES.filter((c) => !allowedClasses.has(c)).flatMap((c) => CLASS_DISPLAY_NOUNS[c] ?? [c]))]
+  return { allowed, forbidden }
 }
 
 // `womans`/`mans`/`lady` added 2026-08-21: "Womans Shirts" composed onto the kids family B0DP5H8QBT.
