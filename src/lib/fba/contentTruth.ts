@@ -297,23 +297,9 @@ const AUDIENCE_TAIL_RE = /\s*[,|]?\s+for\s+(?:men|women)(?:['’]s)?\s*$/i
  * a droppable segment — and losing the seller's design is strictly worse than keeping a lie beside
  * it. A phrase that merely RESTATES design words already present elsewhere is still droppable.
  *
- * `opts.rejectSegment` is the SECOND droppable predicate (2026-08-21, live B0DSCDZC6K): a phrase
- * that is perfectly TRUE of the product but belongs to ANOTHER DESIGN in the family. The caller
- * supplies it (the per-child exit passes designScope's STRICT-NAMES partition — the same seam the
- * Item Highlight uses; the broadcast/parent title passes none, because a family hub title is
- * answerable to every design in the family). It reuses this net's segment machinery rather than
- * adding a second net: same never-drop-segment-0 rule, same separator inheritance, same
- * design-protection rail — and on a per-child title `protectHay` is THAT design's own name only,
- * so a sibling design's name is droppable instead of protected.
- *
  * Idempotent (a second pass finds nothing left to drop) and a no-op when `ctx` names no blank.
  */
-export function applyTitleTruthNet(
-  title: string,
-  ctx: PhraseTruthCtx,
-  protectHay = '',
-  opts?: { rejectSegment?: (seg: string) => boolean },
-): string {
+export function applyTitleTruthNet(title: string, ctx: PhraseTruthCtx, protectHay = ''): string {
   if (!title || !title.trim()) return title
   let t = title.trim()
   const words = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) ?? []
@@ -347,8 +333,7 @@ export function applyTitleTruthNet(
     const seg = parts[i + 1]
     if (sep === undefined || seg === undefined || !seg.trim()) continue
     const verdict = phraseTruthVerdict(seg, ctx)
-    const untrue = !verdict.ok && TITLE_NET_REASONS.has(verdict.reason)
-    if (untrue || opts?.rejectSegment?.(seg) === true) {
+    if (!verdict.ok && TITLE_NET_REASONS.has(verdict.reason)) {
       // Everything that would remain if this segment went — segment 0 + the kept tail + the segments
       // still ahead. The design must survive the net; a redundant restatement need not.
       const rest = [parts[0], ...kept.slice(1), ...parts.slice(i + 2)].join(' ')
