@@ -437,6 +437,56 @@ export default function ListingDetailPage() {
   const [titleLockSaving, setTitleLockSaving] = useState(false)
   const [orphans, setOrphans] = useState<{ orphanCount: number; children: { sku: string; asin: string; liveParent: string | null; status: string }[] } | null>(null)
 
+  // ── GARMENT BLANK (handoff/BLANKS_IN_PORTAL_DESIGN.md §5.3) — the family's + each child's
+  // resolved blank, its source, and the active-blanks list for the assign dropdown. Read-only
+  // resolution comes from /api/fba/blank-assignment; writes go through the same route (scope
+  // 'family'|'child') and NEVER auto-queue a regenerate (PO decision C) — the "Regenerate to apply"
+  // note is the only feedback an assignment gives.
+  interface GarmentResolution { styleCode: string | null; source: string | null; blankId: number | null }
+  interface GarmentChildResolution extends GarmentResolution { sku: string | null; asin: string | null }
+  interface GarmentData { family: GarmentResolution; children: GarmentChildResolution[]; assignments: { family: string | null; child: Record<string, string> } }
+  interface ActiveBlank { id: number; style_code: string | null; brand: string | null; garment_family: string | null }
+  const SOURCE_LABEL: Record<string, string> = {
+    'child-assignment': 'assignment', 'sku-code': 'from SKU code', 'family-assignment': 'family default', 'legacy': 'guessed from title',
+  }
+  const [garmentData, setGarmentData] = useState<GarmentData | null>(null)
+  const [activeBlanks, setActiveBlanks] = useState<ActiveBlank[]>([])
+  const [garmentSaving, setGarmentSaving] = useState<string | null>(null)
+  const [garmentSavedKey, setGarmentSavedKey] = useState<string | null>(null)
+  const loadGarment = useCallback(async () => {
+    if (!asin) return
+    try {
+      const [gRes, bRes] = await Promise.all([
+        fetch(`/api/fba/blank-assignment?parentAsin=${asin}`),
+        fetch('/api/fba/blanks'),
+      ])
+      if (gRes.ok) setGarmentData(await gRes.json())
+      if (bRes.ok) {
+        const bd = await bRes.json()
+        setActiveBlanks(((bd.blanks ?? []) as (ActiveBlank & { active: boolean })[]).filter((b) => b.active))
+      }
+    } catch { /* best-effort — the card just stays empty */ }
+  }, [asin])
+  useEffect(() => { loadGarment() }, [loadGarment])
+  const assignBlank = useCallback(async (scope: 'family' | 'child', key: string, styleCode: string) => {
+    setGarmentSaving(key)
+    setGarmentSavedKey(null)
+    try {
+      const resp = await fetch('/api/fba/blank-assignment', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, key, style_code: styleCode }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.error || 'Assignment failed')
+      setGarmentSavedKey(key)
+      await loadGarment()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Assignment failed')
+    } finally {
+      setGarmentSaving(null)
+    }
+  }, [loadGarment])
+
   // ── Ship optimized content to Amazon — per section (title / bullets / description / keywords / details) ──
   // 'details' is a single-attribute push (one detail per click): Material, Brand, Fit Type, etc.
   // The seller picks WHICH detail in the UI; the route resolves the friendly name to an SP-API
@@ -2963,6 +3013,51 @@ export default function ListingDetailPage() {
         </div>
       </div>
 
+      {/* ══ GARMENT — the family's resolved blank, a source badge, and an assign dropdown
+          (handoff/BLANKS_IN_PORTAL_DESIGN.md §5.3). Assigning writes blank_assignments ONLY — it
+          never triggers a regenerate or push (PO decision C); "Regenerate to apply" says so. ══ */}
+      {garmentData && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm border-l-4 border-l-violet-500 p-4">
+          <div className="flex items-start gap-3">
+            <Icon.Tag className="w-5 h-5 text-violet-600 flex-shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-sm font-semibold text-slate-800">Garment Blank</p>
+                {garmentData.family.styleCode ? (
+                  <span className="font-mono text-xs font-semibold text-slate-700 bg-slate-100 rounded px-2 py-0.5">{garmentData.family.styleCode}</span>
+                ) : (
+                  <span className="text-xs text-slate-400">unresolved</span>
+                )}
+                {garmentData.family.source && (
+                  <span className="text-[10px] font-medium bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full">
+                    {SOURCE_LABEL[garmentData.family.source] ?? garmentData.family.source}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <select
+                  value={garmentData.assignments.family ?? ''}
+                  onChange={(e) => e.target.value && assignBlank('family', asin, e.target.value)}
+                  disabled={garmentSaving === asin}
+                  className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-violet-200 cursor-pointer disabled:opacity-50">
+                  <option value="">Assign a blank…</option>
+                  {activeBlanks.map((b) => (
+                    <option key={b.id} value={b.style_code ?? ''}>{b.style_code} — {b.brand || 'no brand'} ({b.garment_family})</option>
+                  ))}
+                </select>
+                {garmentSaving === asin && <span className="text-xs text-slate-400">Saving…</span>}
+                {garmentSavedKey === asin && (
+                  <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                    Assigned — stored copy unchanged. Regenerate to apply.
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1.5">Assigning this blank changes what the generator believes — it does not rewrite live copy and never pushes to Amazon.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ══ VARIANT-DEATH ALARM — child SKUs that are dead by stored evidence ══
           Two prongs, each SKU says WHY: 'offer_dead' = no live offer, by EITHER the persisted
           push-gate verdict (sku_offer_liveness — the live Listings-Items check the push already
@@ -4490,10 +4585,14 @@ export default function ListingDetailPage() {
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Bullets</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Keywords</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Images</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">Blank</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {dedupByAsin(score.children).map(child => (
+                {dedupByAsin(score.children).map(child => {
+                  const cRes = garmentData?.children.find((c) => c.sku === child.sku)
+                  const currentCode = garmentData?.assignments.child[child.sku] ?? cRes?.styleCode ?? ''
+                  return (
                   <tr key={child.sku} className="hover:bg-slate-50">
                     <td className="px-3 py-2">
                       <div className="font-mono text-slate-700">{child.sku}</div>
@@ -4513,8 +4612,35 @@ export default function ListingDetailPage() {
                       {child.backend_keywords ? `${child.backend_keywords.length}/250` : '0/250'}
                     </td>
                     <td className="px-3 py-2 text-slate-700">{child.image_count}/7</td>
+                    {/* Per-child blank assign (scope='child'), same control shape as the family-level
+                        Garment card, shown compactly — design doc §5.3 "per-child rows get the same
+                        control". The select carries the EXPLICIT assignment only (parity with the
+                        family control above); the resolved code + source (which may come from the
+                        SKU or a legacy guess with no explicit assignment at all) is the read-only
+                        chip beside it. */}
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="font-mono text-[10px] text-slate-500"
+                          title={cRes?.source ? `Resolved via ${SOURCE_LABEL[cRes.source] ?? cRes.source}` : 'Unresolved'}>
+                          {currentCode || '—'}
+                        </span>
+                        <select
+                          value={garmentData?.assignments.child[child.sku] ?? ''}
+                          onChange={(e) => e.target.value && assignBlank('child', child.sku, e.target.value)}
+                          disabled={garmentSaving === child.sku}
+                          className="text-[10px] border border-slate-200 rounded px-1 py-0.5 bg-white max-w-[90px] cursor-pointer disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-violet-200">
+                          <option value="">assign…</option>
+                          {activeBlanks.map((b) => (
+                            <option key={b.id} value={b.style_code ?? ''}>{b.style_code}</option>
+                          ))}
+                        </select>
+                        {garmentSavedKey === child.sku && <span className="text-[9px] text-amber-700" title="Regenerate to apply">↻</span>}
+                      </div>
+                    </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
