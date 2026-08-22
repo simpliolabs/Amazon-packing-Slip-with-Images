@@ -10340,6 +10340,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     brand: string,
   ): Promise<void> => {
     if (!(apparelMultiDesign && designGroupContexts.length)) return
+    // Cost-guard pass (2026-08-22, PO "$50 of OpenAI in 2 days, not sustainable"): mirrors the
+    // single-design final audit's own guard (`!input.onlySection`, ~:11631 below) — this gate used
+    // to run its full per-DESIGN-GROUP loop (up to MULTI_DESIGN_AUDIT_MAX_GROUPS sequential gpt-4.1
+    // calls) on EVERY regen path it's invoked from, including the bullets-only/description-only
+    // section regens, so a multi-design "Regenerate bullets" click paid up to 8x what the identical
+    // click pays on a single-design family (which only ever pays 1). FULL regens are unaffected
+    // (input.onlySection is unset there) — same audit + deterministic scrub as before.
+    console.log(JSON.stringify({
+      tag: 'LLM_FANOUT', op: 'multi_design_editorial_audit', designs: designGroupContexts.length,
+      calls: input.onlySection ? 0 : Math.min(MULTI_DESIGN_AUDIT_MAX_GROUPS, designGroupContexts.length),
+    }))
+    if (input.onlySection) return
     let auditBudget = MULTI_DESIGN_AUDIT_MAX_GROUPS
     for (const ctx of designGroupContexts) {
       const repSku = ctx.skus[0]?.sku
@@ -11628,6 +11640,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // off-theme bullets + awkward description, and drops backend junk (holidays/countries/competitor blanks/
   // colors/fragments) from EVERY child. Skipped when not enough context or on any error (keeps originals).
   if (apparelProduct && !designGroupInfo.isMultiDesign && !input.onlySection && bullets.length === 5) {
+    console.log(JSON.stringify({ tag: 'LLM_FANOUT', op: 'final_editorial_audit', designs: 1, calls: 1 }))
     const auditRes = await runFinalEditorialAudit(input.openai, finalTitle, bullets, description, perChild[0]?.keywords ?? '', {
       design: effectiveDesignName || designName || repTitle || '',
       designPhrases: secondaryPhrases,
