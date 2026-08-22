@@ -3011,52 +3011,46 @@ export default function ListingDetailPage() {
             {' — regenerate to apply'}
           </span>
         </div>
-      </div>
 
-      {/* ══ GARMENT — the family's resolved blank, a source badge, and an assign dropdown
-          (handoff/BLANKS_IN_PORTAL_DESIGN.md §5.3). Assigning writes blank_assignments ONLY — it
-          never triggers a regenerate or push (PO decision C); "Regenerate to apply" says so. ══ */}
-      {garmentData && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm border-l-4 border-l-violet-500 p-4">
-          <div className="flex items-start gap-3">
-            <Icon.Tag className="w-5 h-5 text-violet-600 flex-shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <p className="text-sm font-semibold text-slate-800">Garment Blank</p>
-                {garmentData.family.styleCode ? (
-                  <span className="font-mono text-xs font-semibold text-slate-700 bg-slate-100 rounded px-2 py-0.5">{garmentData.family.styleCode}</span>
-                ) : (
-                  <span className="text-xs text-slate-400">unresolved</span>
-                )}
-                {garmentData.family.source && (
-                  <span className="text-[10px] font-medium bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full">
-                    {SOURCE_LABEL[garmentData.family.source] ?? garmentData.family.source}
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2 mt-2 flex-wrap">
-                <select
-                  value={garmentData.assignments.family ?? ''}
-                  onChange={(e) => e.target.value && assignBlank('family', asin, e.target.value)}
-                  disabled={garmentSaving === asin}
-                  className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-violet-200 cursor-pointer disabled:opacity-50">
-                  <option value="">Assign a blank…</option>
-                  {activeBlanks.map((b) => (
-                    <option key={b.id} value={b.style_code ?? ''}>{b.style_code} — {b.brand || 'no brand'} ({b.garment_family})</option>
-                  ))}
-                </select>
-                {garmentSaving === asin && <span className="text-xs text-slate-400">Saving…</span>}
-                {garmentSavedKey === asin && (
-                  <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
-                    Assigned — stored copy unchanged. Regenerate to apply.
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1.5">Assigning this blank changes what the generator believes — it does not rewrite live copy and never pushes to Amazon.</p>
-            </div>
+        {/* GARMENT BLANK (handoff/BLANKS_IN_PORTAL_DESIGN.md §5.3) — moved into this settings block
+            per PO 2026-08-22 ("It needs to sit inside the main Block, Not under it"); placed directly
+            after Design Mode since both describe what the product IS. Style-code chip + source badge
+            are the "why" behind the resolution and must stay visible. Assigning writes
+            blank_assignments ONLY — it never triggers a regenerate or push (PO decision C); the
+            helper text and the post-save message (mirroring the Design Name row's saved-state swap)
+            say so. */}
+        {garmentData && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <label className="text-xs font-medium text-slate-500 whitespace-nowrap">Garment</label>
+            {garmentData.family.styleCode ? (
+              <span className="font-mono text-xs font-semibold text-slate-700 bg-slate-100 rounded px-2 py-0.5">{garmentData.family.styleCode}</span>
+            ) : (
+              <span className="text-xs text-slate-400">unresolved</span>
+            )}
+            {garmentData.family.source && (
+              <span className="text-[10px] font-medium bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full">
+                {SOURCE_LABEL[garmentData.family.source] ?? garmentData.family.source}
+              </span>
+            )}
+            <select
+              value={garmentData.assignments.family ?? ''}
+              onChange={(e) => e.target.value && assignBlank('family', asin, e.target.value)}
+              disabled={garmentSaving === asin}
+              className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-violet-200 cursor-pointer disabled:opacity-50">
+              <option value="">Assign a blank…</option>
+              {activeBlanks.map((b) => (
+                <option key={b.id} value={b.style_code ?? ''}>{b.style_code} — {b.brand || 'no brand'} ({b.garment_family})</option>
+              ))}
+            </select>
+            {garmentSaving === asin && <span className="text-xs text-slate-400">Saving…</span>}
+            <span className="text-[11px] text-slate-400">
+              {garmentSavedKey === asin
+                ? 'Assigned — stored copy unchanged. Regenerate to apply.'
+                : 'Changes what the generator believes — no live copy rewrite, no Amazon push.'}
+            </span>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* ══ VARIANT-DEATH ALARM — child SKUs that are dead by stored evidence ══
           Two prongs, each SKU says WHY: 'offer_dead' = no live offer, by EITHER the persisted
