@@ -21,10 +21,13 @@ const DB_ROWS = [
   { match_pattern: '\\bbc3001|\\b3001(?=\\D|$)', brand: 'Bella+Canvas', brand_in_copy: false, fit: 'Retail', sleeve: 'Short Sleeve', neck: 'Crew Neck', weight_note: 'lightweight 4.2 oz combed ring-spun', material: '100% Airlume Combed Ring-Spun Cotton', style_code: '3001', garment_family: 'tee' },
   { match_pattern: '\\b64000b', brand: 'Gildan', brand_in_copy: false, fit: 'Classic', sleeve: 'Short Sleeve', neck: 'Crew Neck', weight_note: 'lightweight 4.5 oz ring-spun', material: 'Ring-Spun Cotton', style_code: '64000B', garment_family: 'kids_tee' },
 ]
-const OVERRIDES = [
-  { parent_asin: 'B0FC8R484P', style_code: '64000' },
-  { parent_asin: 'B0FKFHSCS9', style_code: '1717' },
-  { parent_asin: 'B0DP5H8QBT', style_code: '64000B' },
+// `blank_assignments` as PostgREST returns it after migration 062 — BOTH scopes in one table
+// (the family rows backfilled from the deprecated blank_family_overrides, plus the one child row).
+const ASSIGNMENTS = [
+  { scope: 'family', key: 'B0FC8R484P', style_code: '64000' },
+  { scope: 'family', key: 'B0FKFHSCS9', style_code: '1717' },
+  { scope: 'family', key: 'B0DP5H8QBT', style_code: '64000B' },
+  { scope: 'child', key: 'BB64000XL-BK-FBA', style_code: '6014' },
 ]
 
 // The module's own (service-role) client serves the catalog + overrides; listing_content comes from
@@ -34,7 +37,7 @@ vi.mock('@supabase/supabase-js', () => ({
     from: (table: string) => ({
       select: () => ({
         eq: () => ({ order: () => Promise.resolve(table === 'blank_specs' ? { data: DB_ROWS, error: null } : { data: [], error: null }) }),
-        limit: () => Promise.resolve(table === 'blank_family_overrides' ? { data: OVERRIDES, error: null } : { data: [], error: null }),
+        limit: () => Promise.resolve(table === 'blank_assignments' ? { data: ASSIGNMENTS, error: null } : { data: [], error: null }),
       }),
     }),
   }),
@@ -154,7 +157,7 @@ describe('intersectBlankSpecs — a fact ships only when EVERY resolved blank ag
 describe('resolveFamilyBlank — per-child style codes → override → legacy regex → null', () => {
   it('85×64000 + 41×BC3001 → mixed; dominant 64000; intersection keeps Short Sleeve / Crew Neck + the shared Ring-Spun Cotton / lightweight facts', () => {
     const r = resolveFamilyBlank(ROWS, [...skus('64000', 85), ...skus('BC3001', 41)], null, 'THE CEO Funny Shirt SHIRT')
-    expect(r.source).toBe('sku')
+    expect(r.source).toBe('sku-code')
     expect(r.mixed).toBe(true)
     expect(r.byStyle).toEqual({ '64000': 85, '3001': 41 })
     expect(r.dominant?.styleCode).toBe('64000')
@@ -172,7 +175,7 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
 
   it('a sweatshirt family resolves 18000 even though no brand word appears anywhere and a tee row is first by id', () => {
     const r = resolveFamilyBlank(ROWS, [...skus('BCSG1800', 20, ['S', 'M', 'L', 'XL', '2X']), ...skus('HDG18500', 8)], null, 'THE CEO Christmas Sweatshirt SWEATSHIRT')
-    expect(r.source).toBe('sku')
+    expect(r.source).toBe('sku-code')
     expect(r.dominant?.styleCode).toBe('18000')
     expect(r.garmentFamily).toBe('sweatshirt')
     expect(r.mixed).toBe(true)
@@ -190,7 +193,7 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
 
   it('override path: MAHATS SKUs carry no code → the 64000 row; AJK → 1717', () => {
     const m = resolveFamilyBlank(ROWS, skus('MAHATS-', 8), '64000', 'THE CEO Mama Shirt')
-    expect(m.source).toBe('override')
+    expect(m.source).toBe('family-assignment')
     expect(m.dominant?.styleCode).toBe('64000')
     expect(m.mixed).toBe(false)
     expect(m.spec).toEqual(byCode('64000').spec)
@@ -201,7 +204,7 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
 
   it('override path (PO 2026-08-21): opaque-SKU kids family + 64000B override → kids_tee row, composer family "tee"', () => {
     const r = resolveFamilyBlank(ROWS, [{ sku: '1V-C6WM-US5T' }, { sku: '2W-D7XN-VT6U' }], '64000B', 'THE CEO Kids Dinosaur Shirt')
-    expect(r.source).toBe('override')
+    expect(r.source).toBe('family-assignment')
     expect(r.dominant?.styleCode).toBe('64000B')
     expect(r.garmentFamily).toBe('kids_tee')   // reaches the composer UNFOLDED — its audience rule keys on kids_tee
     expect(r.spec?.brandInCopy).toBe(false)
@@ -215,7 +218,7 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
 
   it('SKU codes beat the override when both exist (the SKU is the statement)', () => {
     const r = resolveFamilyBlank(ROWS, skus('17172', 4, ['XL']), '64000', 'THE CEO Shirt')
-    expect(r.source).toBe('sku')
+    expect(r.source).toBe('sku-code')
     expect(r.dominant?.styleCode).toBe('1717')
   })
 
@@ -255,9 +258,59 @@ describe('resolveFamilyBlank — per-child style codes → override → legacy r
     warn.mockRestore()
   })
 
+  /* ── MIGRATION 062: blank_assignments scope='child' — a SKU style code can be WRONG ─────────── */
+
+  it("a child assignment BEATS the SKU's own style code (B0DSG4T5BR: the 64000 in the SKU is a typo)", () => {
+    const children = [{ sku: 'BB64000XL-BK-FBA' }]
+    const assigned = new Map([['BB64000XL-BK-FBA', '6014']])
+    // Without it, the SKU token resolves the WRONG blank — a Gildan adult short-sleeve tee.
+    const without = resolveFamilyBlank(ROWS, children, null, 'Comfort Colors Long Sleeve', null)
+    expect(without.dominant?.styleCode).toBe('64000')
+    expect(without.source).toBe('sku-code')
+    // With it, the PO's statement wins and the source SAYS so (the portal renders this as a badge).
+    const withA = resolveFamilyBlank(ROWS, children, null, 'Comfort Colors Long Sleeve', assigned)
+    expect(withA.dominant?.styleCode).toBe('6014')
+    expect(withA.source).toBe('child-assignment')
+    expect(withA.garmentFamily).toBe('long_sleeve_tee')
+    expect(withA.childAssignmentHits).toBe(1)
+    expect(withA.bySource).toEqual({ 'child-assignment': 1 })
+  })
+
+  it("an assignment is a STATEMENT, not an inference — the conflict gate may not NULL it away", () => {
+    // The child's own stored Amazon title still says "Sweatshirt"; every resolved row therefore
+    // contradicts its own hay. Without the exemption the scope nulls out and the PO ruling is lost.
+    const children = [{ sku: 'BB64000XL-BK-FBA' }]
+    const hay = 'THE CEO Business Sweatshirt SHIRT BB64000XL-BK-FBA'
+    expect(resolveFamilyBlank(ROWS, children, null, hay, null).garmentFamily).toBeNull()   // nulled
+    const withA = resolveFamilyBlank(ROWS, children, null, hay, new Map([['BB64000XL-BK-FBA', '6014']]))
+    expect(withA.garmentFamily).toBe('long_sleeve_tee')                                     // stands
+  })
+
+  it('at FAMILY scope that same child is a MINORITY and loses its vote on the family facts', () => {
+    // 25 sweatshirts + 9 hoodies + the one long-sleeve child, hay says "Sweatshirt".
+    const children = [
+      ...skus('BCSG1800', 25).map((c) => c),
+      ...skus('HDG18500', 9).map((c) => c),
+      { sku: 'BB64000XL-BK-FBA' },
+    ]
+    const res = resolveFamilyBlank(ROWS, children, null, 'THE CEO Crewneck Sweatshirt', new Map([['BB64000XL-BK-FBA', '6014']]))
+    expect(res.garmentFamily).toBe('sweatshirt')
+    expect(res.byStyle).toEqual({ '18000': 25, '18500': 9, '6014': 1 })
+    expect(res.bySource).toEqual({ 'sku-code': 34, 'child-assignment': 1 })
+    // The long-sleeve row was conflict-dropped, so the family still claims the fleece facts.
+    expect(res.spec?.weightNote).toBe('heavyweight 8.0 oz fleece')
+  })
+
+  it('an assignment naming a style_code the catalog does not have resolves NOTHING (fail-open)', () => {
+    const res = resolveFamilyBlank(ROWS, [{ sku: 'BB64000XL-BK-FBA' }], null, 'Long Sleeve', new Map([['BB64000XL-BK-FBA', '99999']]))
+    expect(res.dominant?.styleCode).toBe('64000')      // falls through to the SKU's own code
+    expect(res.source).toBe('sku-code')
+  })
+
   it('no children, no override, no hay → null without throwing', () => {
     const r = resolveFamilyBlank(ROWS, [], undefined, '')
-    expect(r).toEqual({ dominant: null, byStyle: {}, mixed: false, spec: null, garmentFamily: null, source: null })
+    // `childOverrideHits` added 2026-08-22 (migration 062) — 0 when no child override applied.
+    expect(r).toEqual({ dominant: null, byStyle: {}, mixed: false, spec: null, garmentFamily: null, source: null, childAssignmentHits: 0, bySource: {} })
   })
 })
 
@@ -293,7 +346,7 @@ describe('resolveBlankRowForNet — the ONE async seam, per-child SKUs from list
       fakeDb(skus('MAHATS-', 4).map((s) => ({ ...s, product_type: 'SHIRT', title: 'THE CEO Mama Shirt' }))),
       { parentAsin: 'B0FC8R484P', titles: ['THE CEO Mama Shirt'] },
     )
-    expect(rich.source).toBe('override')
+    expect(rich.source).toBe('family-assignment')
     expect(rich.dominant?.styleCode).toBe('64000')
     expect(rich.byStyle).toEqual({})
   })

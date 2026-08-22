@@ -179,36 +179,70 @@ export async function loadBlankSpecRows(timeoutMs: number = LOAD_TIMEOUT_MS): Pr
   }
 }
 
-let overrideCache: { map: Map<string, string>; at: number } | null = null
+/* `blank_family_overrides` READER REMOVED 2026-08-22 (migration 062). The table still exists and is
+ * NOT dropped — a drop is irreversible — but its rows were BACKFILLED into `blank_assignments`
+ * scope='family', and this module now reads only the new table. Keeping the old loader alive beside
+ * the new one would leave TWO answers to "which blank did the PO state", which is the exact failure
+ * mode (seven definitions of "covered", four keyword-pool key resolvers) the one-table ruling exists
+ * to prevent. The deprecated table is dropped in a later migration once 062 has been through a full
+ * live regen. */
 
-/** blank_family_overrides (058): parent ASIN → style_code, PO-maintained for families whose child
- *  SKUs carry no style code. Tiny table, ONE read per 5-min window. Fail-open to "no override". */
-export async function loadBlankFamilyOverrides(timeoutMs: number = LOAD_TIMEOUT_MS): Promise<Map<string, string>> {
-  if (overrideCache && Date.now() - overrideCache.at < CACHE_TTL_MS) return overrideCache.map
+/** PO-stated blank identity, both scopes, as the resolver consumes them. */
+export interface BlankAssignments {
+  /** parent ASIN (upper-cased) → style_code. */
+  family: Map<string, string>
+  /** child SKU (upper-cased) → style_code. */
+  child: Map<string, string>
+}
+const EMPTY_ASSIGNMENTS = (): BlankAssignments => ({ family: new Map(), child: new Map() })
+
+let assignmentCache: { a: BlankAssignments; at: number } | null = null
+
+/**
+ * blank_assignments (062) — THE ONE loader for PO-stated blank identity, both scopes.
+ *
+ * WHY ONE LOADER. The child scope arrived because a SKU style code can be WRONG (PO 2026-08-22,
+ * B0DSG4T5BR / `BB64000XL-BK-FBA`: a Comfort Colors 6014 long sleeve whose SKU says 64000, and which
+ * cannot be renamed on Amazon without losing the offer). The obvious shape was a second table with
+ * a second loader beside `loadBlankFamilyOverrides` — and the PO vetoed it, because two loaders for
+ * one concept is precisely how this repo grew seven definitions of "covered". Scope is a COLUMN.
+ *
+ * ONE read per 5-min window, fail-open to "no assignments" — same doctrine as every other catalog
+ * read here: a DB blip degrades to SKU-first behavior, never to a throw. Keys are upper-cased so a
+ * PO who types a SKU or ASIN in a different case still matches.
+ *
+ * BACKFILL, NOT MIGRATION-IN-CODE: migration 062 copies the deprecated `blank_family_overrides`
+ * rows into scope='family', so this reader never has to consult the old table.
+ */
+export async function loadBlankAssignments(timeoutMs: number = LOAD_TIMEOUT_MS): Promise<BlankAssignments> {
+  if (assignmentCache && Date.now() - assignmentCache.at < CACHE_TTL_MS) return assignmentCache.a
   try {
-    const query = supabase.from('blank_family_overrides').select('parent_asin, style_code').limit(1000)
-    const { data, error } = await withTimeout(query, timeoutMs, 'blank_family_overrides')
+    const query = supabase.from('blank_assignments').select('scope, key, style_code').limit(2000)
+    const { data, error } = await withTimeout(query, timeoutMs, 'blank_assignments')
     if (error) throw new Error(error.message)
-    const map = new Map<string, string>()
-    for (const r of (Array.isArray(data) ? data : []) as { parent_asin?: string | null; style_code?: string | null }[]) {
-      const asin = (r.parent_asin ?? '').trim().toUpperCase()
+    const a = EMPTY_ASSIGNMENTS()
+    for (const r of (Array.isArray(data) ? data : []) as { scope?: string | null; key?: string | null; style_code?: string | null }[]) {
+      const scope = (r.scope ?? '').trim().toLowerCase()
+      const key = (r.key ?? '').trim().toUpperCase()
       const code = (r.style_code ?? '').trim().toUpperCase()
-      if (asin && code) map.set(asin, code)
+      if (!key || !code) continue
+      if (scope === 'family') a.family.set(key, code)
+      else if (scope === 'child') a.child.set(key, code)
     }
-    overrideCache = { map, at: Date.now() }
-    return map
+    assignmentCache = { a, at: Date.now() }
+    return a
   } catch (e) {
-    console.warn('[blankSpecs] blank_family_overrides load failed (fail-open: no override):', e instanceof Error ? e.message : e)
-    overrideCache = { map: new Map(), at: Date.now() }
-    return overrideCache.map
+    console.warn('[blankSpecs] blank_assignments load failed (fail-open: no assignments):', e instanceof Error ? e.message : e)
+    assignmentCache = { a: EMPTY_ASSIGNMENTS(), at: Date.now() }
+    return assignmentCache.a
   }
 }
 
-/** The override style code for ONE family, or null. */
-export async function loadBlankFamilyOverride(parentAsin: string | null | undefined): Promise<string | null> {
+/** The family-scope assignment for ONE parent, or null. Replaces `loadBlankFamilyOverride`. */
+export async function loadBlankFamilyAssignment(parentAsin: string | null | undefined): Promise<string | null> {
   const asin = (parentAsin ?? '').trim().toUpperCase()
   if (!asin) return null
-  return (await loadBlankFamilyOverrides()).get(asin) ?? null
+  return (await loadBlankAssignments()).family.get(asin) ?? null
 }
 
 // ─── SKU-FIRST FAMILY RESOLUTION (PO ruling 2026-08-21) — the pure core ─────────────────────────
@@ -249,6 +283,49 @@ export function extractStyleCode(sku: string | null | undefined, codes: readonly
     if (body.startsWith(elided) && SIZE_TOKEN_RE.test(body.slice(elided.length))) return code
   }
   return null
+}
+
+/**
+ * The style code a PO CHILD OVERRIDE states for one SKU, or null (062). Separate from
+ * `resolveChildStyleCode` so callers can ask "did the PO state this?" without re-deriving it — the
+ * conflict gate's `poStated` set and the BLANK_RESOLVE per-child source both need that answer.
+ *
+ * The override must name a code the CATALOG knows: a code with no `blank_specs` row resolves
+ * nothing, so a typo in the override degrades to the SKU's own code rather than to no blank at all.
+ */
+export function childAssignmentCodeFor(
+  sku: string | null | undefined,
+  codes: readonly string[],
+  childAssignments?: ReadonlyMap<string, string> | null,
+): string | null {
+  const key = (sku ?? '').trim().toUpperCase()
+  if (!key || !childAssignments) return null
+  const code = (childAssignments.get(key) ?? '').trim().toUpperCase()
+  if (!code) return null
+  return codes.some((c) => c.trim().toUpperCase() === code) ? code : null
+}
+
+/**
+ * THE per-child style code — the ONE place the PO's precedence is expressed (PO 2026-08-22):
+ *
+ *     blank_child_overrides (SKU)  →  the SKU's own style code
+ *
+ * The remaining two levels (blank_family_overrides, legacy match_pattern) are FAMILY-scoped and are
+ * applied by `resolveFamilyBlank` only when NO child resolved a code, which is why they are not
+ * here: a per-child function cannot answer a family-scoped question.
+ *
+ * Exported so the per-design fan-out resolves each group's children through exactly this seam
+ * instead of calling `extractStyleCode` directly and silently skipping the override level.
+ */
+export function resolveChildStyleCode(
+  sku: string | null | undefined,
+  codes: readonly string[],
+  childAssignments?: ReadonlyMap<string, string> | null,
+): { code: string | null; source: Extract<BlankSource, 'child-assignment' | 'sku-code'> | null } {
+  const assigned = childAssignmentCodeFor(sku, codes, childAssignments)
+  if (assigned) return { code: assigned, source: 'child-assignment' }
+  const code = extractStyleCode(sku, codes)
+  return { code, source: code ? 'sku-code' : null }
 }
 
 /** Exact-match facts: a cut/neck/sleeve that differs between children is never claimed. */
@@ -295,11 +372,26 @@ export function intersectBlankSpecs(specs: readonly BlankSpec[]): BlankSpec | nu
   return out
 }
 
-export type BlankSource = 'sku' | 'override' | 'legacy'
+/**
+ * HOW a blank was decided — API SURFACE (PO 2026-08-22). The portal renders this string as a badge
+ * beside the resolved blank, so these four values are a contract, not an internal label:
+ *
+ *   child-assignment   blank_assignments scope='child'  — the PO named the blank for THIS SKU, and
+ *                      it beats the SKU's own code (which may be a typo: `BB64000XL-BK-FBA`)
+ *   sku-code           the style code in the child SKU's leading token — the normal path
+ *   family-assignment  blank_assignments scope='family' — the PO named the blank for the parent,
+ *                      consulted only when no child SKU carries a code at all
+ *   legacy             the match_pattern regex over the listing hay — the last resort
+ *
+ * Renamed from 'sku' | 'override' | 'legacy' when the child scope arrived: "override" no longer
+ * identified WHICH override, and a badge that cannot distinguish a family statement from a child
+ * one is worse than no badge.
+ */
+export type BlankSource = 'child-assignment' | 'sku-code' | 'family-assignment' | 'legacy'
 export interface FamilyBlankResolution {
   /** Most-common resolved blank (ties → catalog id order). null = unresolved. */
   dominant: BlankSpecRow | null
-  /** Child count per extracted style code (SKU path only; {} on override/legacy). */
+  /** Child count per resolved style code (per-child paths only; {} on family-assignment/legacy). */
   byStyle: Record<string, number>
   /** More than one distinct blank among the children. */
   mixed: boolean
@@ -307,8 +399,15 @@ export interface FamilyBlankResolution {
   spec: BlankSpec | null
   garmentFamily: GarmentFamily | null
   source: BlankSource | null
+  /** How many children resolved via a scope='child' assignment (062). Observability: a family whose
+   *  BLANK_RESOLVE reports 0 here when the PO believes an assignment is live has a DATA problem
+   *  (wrong SKU spelling, or a style_code with no blank_specs row), not a code problem. */
+  childAssignmentHits?: number
+  /** Winning source per child, counted — the per-child half of the badge. `{'child-assignment':1,
+   *  'sku-code':34}` says at a glance which children the PO has spoken for. */
+  bySource?: Partial<Record<BlankSource, number>>
 }
-const EMPTY_RESOLUTION: FamilyBlankResolution = { dominant: null, byStyle: {}, mixed: false, spec: null, garmentFamily: null, source: null }
+const EMPTY_RESOLUTION: FamilyBlankResolution = { dominant: null, byStyle: {}, mixed: false, spec: null, garmentFamily: null, source: null, childAssignmentHits: 0, bySource: {} }
 
 type GarmentClass = 'tee' | 'sweat'
 /** The garment class the listing HAY names (same regexes as the historical looksShirt gate). */
@@ -323,26 +422,59 @@ function rowGarmentClass(row: BlankSpecRow): GarmentClass {
 }
 
 /**
+ * THE conflict predicate — the family's OWN BLANK_GARMENT_CONFLICT decision, exported so every
+ * consumer asks the SAME question instead of inventing a second one (PO 2026-08-21, B0DSCDZC6K).
+ *
+ * TRUE when this blank row belongs to the OTHER garment class from the one the listing hay names —
+ * i.e. exactly the rows `resolveFamilyBlank` warns about below. A hay that names no garment class
+ * can contradict nothing, so every row passes.
+ */
+export function blankRowConflictsWithHay(row: BlankSpecRow, hay: string): boolean {
+  const hc = hayGarmentClass(hay)
+  return hc !== null && rowGarmentClass(row) !== hc
+}
+
+/**
  * THE resolver (pure). Order: per-child style codes → `override` (blank_family_overrides) → the
  * legacy match_pattern regex over `hay` (only when the hay names a garment class — the historical
  * gate, preserved) → unresolved. Then the GARMENT-COMPATIBILITY gate: when the hay names a class
  * and EVERY resolved row is of the other class (a "Sweatshirt" family resolving tee rows, or a
  * "Shirt" family resolving a hoodie), the family is unresolved with a BLANK_GARMENT_CONFLICT warn
- * — a wrong blank is worse than no blank. A partial conflict is warned and kept: the intersection
- * already drops every fact the conflicting rows disagree on.
+ * — a wrong blank is worse than no blank.
+ *
+ * A PARTIAL CONFLICT NOW DROPS THE CONFLICTING ROWS (PO 2026-08-21, live B0DSCDZC6K). It used to
+ * warn and KEEP them, on the reasoning that "the intersection already drops every fact the
+ * conflicting rows disagree on" — and that reasoning was exactly backwards. ONE stray Gildan 64000
+ * adult TEE among 34 sweatshirt/hoodie SKUs disagreed with both real blanks on sleeve, neck and
+ * weight, so the intersection threw away "Long Sleeve" — a fact BOTH real blanks state — and left
+ * the family with no title fact at all (the shipped titles then landed at 54-64 against the 70-75
+ * band). A row this function has just declared incompatible with the family must not get a vote on
+ * the family's facts. `nulled` (every row conflicting) is unchanged.
  */
 export function resolveFamilyBlank(
   rows: readonly BlankSpecRow[],
   children: readonly { sku?: string | null }[],
   override: string | null | undefined,
   hay: string,
+  /** scope='child' assignments (062), keyed by SKU. The FAMILY-scope assignment arrives as
+   *  `override` — the caller resolves it with `loadBlankFamilyAssignment`. Both halves come from
+   *  the one `blank_assignments` table and the one loader. */
+  childAssignments?: ReadonlyMap<string, string> | null,
 ): FamilyBlankResolution {
   const codes = rows.map((r) => r.styleCode).filter((c): c is string => !!c)
   const rowFor = (code: string): BlankSpecRow | null => rows.find((r) => r.styleCode === code.trim().toUpperCase()) ?? null
   const byStyle: Record<string, number> = {}
+  /** The style codes the PO STATED for a specific child (062). Tracked because an assignment is not
+   *  an inference, and the garment-conflict gate below exists to catch inferences. */
+  const poStatedCodes = new Set<string>()
+  const bySource: Partial<Record<BlankSource, number>> = {}
+  let childAssignmentHits = 0
   for (const c of children) {
-    const code = extractStyleCode(c.sku, codes)
-    if (code) byStyle[code] = (byStyle[code] ?? 0) + 1
+    const { code, source: childSource } = resolveChildStyleCode(c.sku, codes, childAssignments)
+    if (!code || !childSource) continue
+    byStyle[code] = (byStyle[code] ?? 0) + 1
+    bySource[childSource] = (bySource[childSource] ?? 0) + 1
+    if (childSource === 'child-assignment') { poStatedCodes.add(code); childAssignmentHits++ }
   }
   let resolved: BlankSpecRow[] = []
   let source: BlankSource | null = null
@@ -352,23 +484,56 @@ export function resolveFamilyBlank(
     const r = rowFor(code)
     if (r && !resolved.includes(r)) resolved.push(r)
   }
-  if (resolved.length > 0) source = 'sku'
+  // The scope's own badge: a dominant row the PO named for a specific child reports that, because
+  // "the PO said so" and "the SKU said so" are different claims and the portal shows which.
+  if (resolved.length > 0) source = resolved[0].styleCode && poStatedCodes.has(resolved[0].styleCode) ? 'child-assignment' : 'sku-code'
   if (resolved.length === 0 && override) {
     const r = rowFor(override)
-    if (r) { resolved = [r]; source = 'override' }
+    if (r) { resolved = [r]; source = 'family-assignment' }
   }
   const hayClass = hayGarmentClass(hay)
   if (resolved.length === 0 && hayClass) {
     const r = matchBlankSpecRow(rows, hay)
     if (r) { resolved = [r]; source = 'legacy' }
   }
-  if (resolved.length === 0) return { ...EMPTY_RESOLUTION, byStyle }
+  if (resolved.length === 0) return { ...EMPTY_RESOLUTION, byStyle, childAssignmentHits, bySource }
   if (hayClass) {
-    const conflicting = resolved.filter((r) => rowGarmentClass(r) !== hayClass)
+    const conflicting = resolved.filter((r) => blankRowConflictsWithHay(r, hay))
     if (conflicting.length > 0) {
-      const nulled = conflicting.length === resolved.length
-      console.warn(JSON.stringify({ tag: 'BLANK_GARMENT_CONFLICT', hayClass, source, conflicting: conflicting.map((r) => r.styleCode ?? r.spec.brand ?? '?'), nulled }))
-      if (nulled) return { ...EMPTY_RESOLUTION, byStyle }
+      /* AN OVERRIDE IS A STATEMENT, NOT AN INFERENCE (PO 2026-08-22, 062). This gate exists to
+       * catch a blank GUESSED wrong — from a SKU token or the legacy regex — and a PO-typed child
+       * override IS that correction, so it can never be nulled away by a stale copy word. The
+       * specimen is B0DSG4T5BR: the PO states Comfort Colors 6014 (long sleeve), while the child's
+       * own stored Amazon title still says "Sweatshirt". Resolving THAT child's design group alone,
+       * every resolved row conflicts with its own hay — and without this the group would come back
+       * unresolved and inherit the family's sweatshirt verdict, discarding the PO's ruling.
+       *
+       * NARROW BY CONSTRUCTION, and deliberately so:
+       *   • NULLING is refused only when EVERY conflicting row was PO-stated. A mixed scope still
+       *     nulls on its inferred rows exactly as before.
+       *   • The PARTIAL drop below is UNCHANGED and still drops PO-stated rows. At FAMILY scope the
+       *     6014 is one child in 34 — a true minority, which must not vote on the family's facts or
+       *     speak for the parent title. Its authority is over its OWN child, not over the family.
+       * With no overrides present `inferred === conflicting` and every branch is byte-identical. */
+      const inferred = conflicting.filter((r) => !(r.styleCode && poStatedCodes.has(r.styleCode)))
+      const nulled = conflicting.length === resolved.length && inferred.length === conflicting.length
+      console.warn(JSON.stringify({ tag: 'BLANK_GARMENT_CONFLICT', hayClass, source, conflicting: conflicting.map((r) => r.styleCode ?? r.spec.brand ?? '?'), nulled, dropped: !nulled, poStated: [...poStatedCodes] }))
+      if (nulled) return { ...EMPTY_RESOLUTION, byStyle, childAssignmentHits, bySource }
+      // Every row conflicts but the PO stated them: the PO's statement stands, resolution unchanged.
+      if (conflicting.length === resolved.length) {
+        return {
+          dominant: resolved[0], byStyle, mixed: resolved.length > 1,
+          spec: intersectBlankSpecs(resolved.map((r) => r.spec)),
+          garmentFamily: resolved[0].garmentFamily ?? null, source, childAssignmentHits, bySource,
+        }
+      }
+      // Partial conflict: the incompatible rows lose their vote on the family's facts entirely —
+      // EXCEPT the dominant one. The SKU is the PO's stated authority on blank identity, so a hay
+      // word ("Shirt" in the copy of a family whose children are mostly 18000 sweatshirts) must
+      // never be able to demote the majority blank to a minority sibling. Dropping only the
+      // NON-dominant conflicting rows is a strict subset of today's behavior: a family whose
+      // dominant row is the conflicting one resolves byte-identically to before.
+      resolved = resolved.filter((r, i) => i === 0 || !conflicting.includes(r))
     }
   }
   const dominant = resolved[0]
@@ -379,7 +544,70 @@ export function resolveFamilyBlank(
     spec: intersectBlankSpecs(resolved.map((r) => r.spec)),
     garmentFamily: dominant.garmentFamily ?? null,
     source,
+    childAssignmentHits,
+    bySource,
   }
+}
+
+/**
+ * THE DOMINANCE RULE for the family's garment-class union — ONE named constant, so the threshold
+ * that decides whether a garment class may license its vocabulary for a whole family is a single
+ * auditable number rather than an inline literal.
+ *
+ * A class joins the union only when it holds a MEANINGFUL SHARE of the family: at least
+ * `minChildren` resolved children AND at least `minShare` of them. Live B0DSCDZC6K is the specimen —
+ * byStyle {18000:25, 18500:8, 64000:1}: one stray adult-tee child out of 34 put 'tee' into the
+ * union, which licensed "Funny Work Shirts" on a sweatshirt/hoodie family in four of six titles.
+ */
+export const GARMENT_UNION_DOMINANCE = { minChildren: 2, minShare: 0.10 } as const
+
+/**
+ * THE family's garment-class union — every garment_family whose blank is a real, non-conflicting,
+ * DOMINANT member of this variation family. This is the set the content truth spine judges garment
+ * nouns against (`PhraseTruthCtx.mixedFamilies`), so it must be derived from the resolver's OWN
+ * decisions and nothing else:
+ *   1. a style code `resolveFamilyBlank` marked CONFLICTING (BLANK_GARMENT_CONFLICT) contributes
+ *      nothing — the family already ruled that blank incompatible; and
+ *   2. a class must clear GARMENT_UNION_DOMINANCE against the resolved children.
+ * The dominant family is always present (it is the family, by definition). Override/legacy
+ * resolutions carry no per-child census (`byStyle` is {}), so they reduce to the dominant alone.
+ *
+ * Pure except for ONE audit line: `BLANK_GARMENT_UNION` records the union WITH its inputs, so a
+ * future "why did this family accept tee vocabulary" is answered from a log, not from inference.
+ */
+export function familyGarmentUnion(
+  rows: readonly BlankSpecRow[],
+  res: FamilyBlankResolution,
+  hay: string,
+): GarmentFamily[] {
+  if (!res.garmentFamily) return []
+  const rowFor = (code: string): BlankSpecRow | null => rows.find((r) => r.styleCode === code) ?? null
+  const census = Object.entries(res.byStyle)
+    .map(([code, n]) => ({ code, n, row: rowFor(code) }))
+    .filter((e): e is { code: string; n: number; row: BlankSpecRow } => !!e.row)
+  // Same asymmetry `resolveFamilyBlank` applies: a conflicting row loses its vote UNLESS it is the
+  // family's own dominant blank — which is always in the union below by definition.
+  const conflicting = census.filter((e) => e.row.garmentFamily !== res.garmentFamily && blankRowConflictsWithHay(e.row, hay))
+  const eligible = census.filter((e) => !conflicting.includes(e))
+  const resolvedChildren = eligible.reduce((a, e) => a + e.n, 0)
+  const union = new Set<GarmentFamily>([res.garmentFamily])
+  for (const e of eligible) {
+    if (!e.row.garmentFamily) continue
+    if (e.n < GARMENT_UNION_DOMINANCE.minChildren) continue
+    if (resolvedChildren > 0 && e.n / resolvedChildren < GARMENT_UNION_DOMINANCE.minShare) continue
+    union.add(e.row.garmentFamily)
+  }
+  const out = [...union]
+  console.log(JSON.stringify({
+    tag: 'BLANK_GARMENT_UNION',
+    union: out,
+    dominant: res.garmentFamily,
+    byStyle: res.byStyle,
+    conflicting: conflicting.map((e) => e.code),
+    resolvedChildren,
+    dominance: GARMENT_UNION_DOMINANCE,
+  }))
+  return out
 }
 
 /** The resolution as the BlankSpecRow shape every existing consumer reads: the dominant row's
@@ -508,9 +736,10 @@ export async function resolveFamilyBlankForNet(
     const liveTitle = rows.find((r) => (r.title ?? '').trim())?.title ?? ''
     const skuHay = rows.map((r) => r.sku).filter(Boolean).join(' ')
     const hay = [...opts.titles, liveTitle, skuHay].filter(Boolean).join(' ')
-    const [catalog, override] = await Promise.all([loadBlankSpecRows(), loadBlankFamilyOverride(opts.parentAsin)])
-    const res = resolveFamilyBlank(catalog, rows, override, hay)
-    console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'net', parent: opts.parentAsin ?? null, source: res.source, styleCode: res.dominant?.styleCode ?? null, garmentFamily: res.garmentFamily, mixed: res.mixed, byStyle: res.byStyle, children: rows.length }))
+    const [catalog, assignments] = await Promise.all([loadBlankSpecRows(), loadBlankAssignments()])
+    const override = opts.parentAsin ? (assignments.family.get(opts.parentAsin.trim().toUpperCase()) ?? null) : null
+    const res = resolveFamilyBlank(catalog, rows, override, hay, assignments.child)
+    console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'net', parent: opts.parentAsin ?? null, source: res.source, styleCode: res.dominant?.styleCode ?? null, garmentFamily: res.garmentFamily, mixed: res.mixed, byStyle: res.byStyle, children: rows.length, childAssignments: res.childAssignmentHits ?? 0, bySource: res.bySource ?? {} }))
     return res
   } catch (e) {
     console.warn('[blankSpecs] blank-row net resolution failed (net no-ops):', e instanceof Error ? e.message : e)

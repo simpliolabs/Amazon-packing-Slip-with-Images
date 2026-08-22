@@ -21,7 +21,7 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
-import { garmentNounFor, SHIRT_BASE, foreignHeadNoun, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
+import { garmentNounFor, resolveGarment, SHIRT_BASE, foreignHeadNoun, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode, makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
 // PO RULING 2026-08-09 — the money tail may never be decided by raw volume. ONE shared pure rule
@@ -57,15 +57,27 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
-import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
+import { loadBlankSpecRows, loadBlankAssignments, resolveFamilyBlank, familyBlankRow, familyGarmentUnion, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighlightComposer'
+/* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
+ * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
+ * highlights. Blank-grounded (resolveFamilyBlank), never title-derived: a title cannot vouch for
+ * itself, which is precisely how "Funny Work Shirts" shipped on a SWEATSHIRT family (B0DSCDZC6K). */
+import {
+  phraseTruthVerdict,
+  applyTitleTruthNet,
+  audienceOfGarmentFamily,
+  normalizeAudienceLean,
+  type PhraseTruthCtx,
+  type TruthGarmentFamily,
+} from '@/lib/fba/contentTruth'
 import { buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign } from '@/lib/fba/designScope'
 import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
 import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
-import { audienceSpans, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { audienceSpans, candidateFactCount, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, fixCensorStarCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, enforceTitleTruthBand, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, titleCasePhrase, tryMoneyTail, TITLE_BAND_LO, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanDesignGroupIdentity, identityPhrases } from '@/lib/fba/designGroupIdentity'
@@ -337,7 +349,12 @@ export interface PipelineResult {
   /** `v4` carries the TITLE_V4 shadow measurement per bandTitle trip — shipped vs the title WITHOUT
    *  the padding, and whether removing it would drop under the seller's corpus floor. On the
    *  response, not only in a log line, so the refusal rate needs no shell access to read. */
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; v4?: Record<string, unknown>[] }
+  /** `titleHolds` carries every TRUTH+BAND REFUSAL from this run (PO 2026-08-22): a title that
+   *  could not be made truthful AND 70-75 from true material, so the LIVE title was kept and
+   *  nothing shipped. On the response, not only in a log line, because "never exit below the band
+   *  silently" is not satisfied by a line only a shell can read. `tried` lists the true segments
+   *  the pad had available, which is what separates "mis-wired" from "nothing true left to say". */
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; v4?: Record<string, unknown>[]; titleHolds?: { scope: string; parent: string | null; len: number; tried: string[]; reason: string; kept: string }[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
@@ -629,6 +646,12 @@ function fillBackendToBudget(
    *  first; facts fill only the residual gap on thin pools (the 197/220 class). [] = byte-identical
    *  to today. Every safety filter below (banTok / alreadyIndexed / caps) applies to them too. */
   factTokens: string[] = [],
+  /** SHARED CONTENT TRUTH SPINE (2026-08-21). `false` ⇒ the phrase (or the single token) is a lie
+   *  about THIS family's blank and may never claim a backend byte. Asked at BOTH granularities the
+   *  fill works at: the whole priority/candidate PHRASE, and each token it appends — a sweatshirt
+   *  family must never inherit "shirts" vocabulary from a pool full of tee searches, and the
+   *  token-by-token append is exactly how it used to. Default = today's behavior byte-for-byte. */
+  truthOk: (phrase: string) => boolean = () => true,
 ): string {
   let out = (keywords || '').trim()
   // Token-normalized novelty: the field is a token soup (Amazon matches tokens, not
@@ -665,10 +688,12 @@ function fillBackendToBudget(
     if (getByteLength(out) >= 250) break
     if (capacityFamily && CAPACITY_RE.test(phrase)) continue          // capacity guard (mirrors the loop)
     if (findThirdPartyBrands(phrase, ownBrands).length > 0) continue  // competitor-brand ban (mirrors the loop)
+    if (!truthOk(phrase)) continue                                    // TRUTH SPINE — phrase-level
     for (const raw of phrase.toLowerCase().split(/\s+/)) {
       const tok = normTok(raw)                                        // raw pool form ("tees") — the byte we write
       if (tok.length <= 1 || have.has(tok)) continue                 // byte-novelty
       if (banTok(tok)) continue                                      // own-brand / stopword / gender
+      if (!truthOk(raw)) continue                                    // TRUTH SPINE — token-level
       if (scorerHave.has(gfold(tok)) || alreadyIndexed?.has(tok)) continue  // fold-aware echo + sibling-color/title index
       if (getByteLength(`${out} ${tok}`) > 250) continue             // hard cap, never crossed
       out = `${out} ${tok}`
@@ -697,12 +722,14 @@ function fillBackendToBudget(
   for (const cand of candidates) {
     if (capacityFamily && CAPACITY_RE.test(cand)) continue
     if (findThirdPartyBrands(cand, ownBrands).length > 0) continue
+    if (!truthOk(cand)) continue                                      // TRUTH SPINE — phrase-level
     // Append token-by-token so a partial fit still lands ("country" must not be lost
     // just because "country western" as a whole missed the cap by a byte).
     for (const raw of cand.split(/\s+/)) {
       const tok = normTok(raw)
       if (tok.length <= 1 || have.has(tok) || alreadyIndexed?.has(tok)) continue
       if (banTok(tok)) continue
+      if (!truthOk(raw)) continue                                     // TRUTH SPINE — token-level
       // The FILL never adds product-type words (2026-07-09): the title always carries the product
       // type ("...Shirt for Women") so Amazon already indexes it, and the core places up to 2 on
       // purpose — the fill re-adding "shirts" was pure title-echo the singular/plural alreadyIndexed
@@ -2532,7 +2559,7 @@ export function validateBullets(
     .filter((x) => x.len < BULLET_MIN_CHARS)
   if (shortBullets.length > 0) {
     const names = shortBullets.map((x) => `bullet ${x.i + 1} (${x.len} chars)`).join(', ')
-    problems.push(`${shortBullets.length} bullet${shortBullets.length === 1 ? '' : 's'} under ${BULLET_MIN_CHARS} chars: ${names}. Expand each to ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} chars with a "so that" benefit, a compatible-device example, and a long-tail keyword.`)
+    problems.push(`${shortBullets.length} bullet${shortBullets.length === 1 ? '' : 's'} under ${BULLET_MIN_CHARS} chars: ${names}. Expand each to ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} chars (never below ${BULLET_MIN_CHARS}) with a "so that" benefit, a compatible-device example, and a long-tail keyword.`)
   }
 
   // CAPS-hook check (live-verified bug at B0G884ZJ27: bullets opened with sentence prose
@@ -3076,10 +3103,57 @@ function contiguousNovelRun(kw: string, covered: Set<string>, wordBlocked: (w: s
  *  patches before it (an open generative class can't be enumerated). Same normalization stack as
  *  the dedup sets (bulletTokens + fillNormTok) — that symmetry is load-bearing. */
 const fragPoolKey = (s: string): string => bulletTokens(s).map(fillNormTok).join(' ')
-function buildFragPool(sources: string[][]): Set<string> {
+export function buildFragPool(sources: string[][]): Set<string> {
   const set = new Set<string>()
   for (const arr of sources) for (const kw of arr) { const k = fragPoolKey(kw); if (k) set.add(k) }
   return set
+}
+
+/**
+ * THE title-fill fragment harvester — ONE implementation of the contiguous-run + provenance +
+ * progressive-end-trim discipline, extracted 2026-08-21 from `buildTitleFor`'s second pass so the
+ * multi-design parent fill AND step 6b's novel-keyword harvest run the IDENTICAL rules.
+ *
+ * WHY IT EXISTS. Step 6b used to append pool phrases WORD BY WORD (`for (const w of kw.split(/\s+/))`)
+ * with no completeness or provenance check whatsoever, twenty lines below the second pass that was
+ * built precisely to stop that ("Too Many" out of "too many books"). Live B0DSCDZC6K shipped
+ * `… Fall Crewneck, Mind` — the pool phrase "mind your business" contributed ONE orphan word. Two
+ * mechanisms for one job is how that survived: now there is one.
+ *
+ * CONTRACT: returns the LONGEST leading contiguous run of `kw` that is (a) all-novel against
+ * `headToks`, (b) not blocked word-by-word by `wordBlocked`, (c) itself a PHRASE SOMEONE SEARCHED
+ * (`fragPool` provenance — the allowlist that replaced four blocklist patches), (d) accepted by
+ * `fragBlocked`, and (e) fits per `fits`. Progressive end-trim: a too-long/unpooled run is retried
+ * one word shorter (connectors popped) until a real pooled phrase fits, else null. NEVER a bare
+ * orphan word: a run that is all junk / all bare-gender is rejected outright.
+ */
+export function pooledNovelFragment(
+  kw: string,
+  headToks: Set<string>,
+  fragPool: Set<string>,
+  wordBlocked: (w: string) => boolean,
+  fits: (frag: string) => boolean,
+  fragBlocked: (frag: string, toks: string[]) => boolean = () => false,
+): string | null {
+  let novel = contiguousNovelRun(kw, headToks, wordBlocked)
+  // A trim must also pop the connectors it orphans, or ", Gifts For" reaches the gate (review-caught).
+  const trim = (): void => {
+    novel = novel.slice(0, -1)
+    while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+  }
+  while (novel.length > 0) {
+    const frag = novel.join(' ')
+    if (isAllJunk(frag)) return null
+    if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) return null // ", Mens" is not content
+    const toks = bulletTokens(frag).map(fillNormTok)
+    if (fragBlocked(frag, toks)) { trim(); continue }
+    // PROVENANCE GATE (council Layer 1): a fragment ships only if it IS a pooled phrase — a narrower
+    // trim that is itself a real pooled phrase may still pass on the next iteration.
+    if (!fragPool.has(fragPoolKey(frag))) { trim(); continue }
+    if (fits(frag)) return frag
+    trim()
+  }
+  return null
 }
 
 /** BULLET-VARIANT DEDUPE (Layer 1 of the bullet coherence fix, council 2026-07-03). The keyword pool
@@ -4488,7 +4562,7 @@ Rules per bullet:
 - 🚫 FIT IS NOT GENDERED: the blank (e.g. Comfort Colors, Bella Canvas, Gildan) is a UNISEX relaxed-fit garment. NEVER claim a "womens fit", "mens fit", "womens style", or "mens cut" — that fabricates a gender the garment doesn't have. Describe the FIT neutrally ("relaxed fit", "classic unisex fit", "easygoing cut"). You MAY still target the buyer audience ("for women", "great gift for her") — that's marketing, not a fit claim.` : ''}
 - NO PHRASE OVERUSE: do NOT repeat any single brand or material name (e.g. "Comfort Colors", "ring-spun", "garment-dyed") more than TWICE across the 5 bullets — vary the wording. And NEVER include misspellings (e.g. "confort colors") in customer-facing bullets — spell every word correctly.
 - The hook is a benefit (e.g. RETRO STYLE VIBES), NOT a keyword phrase.
-- ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters each. Generic for ALL variants (no specific size/color).${capacityFamily ? `
+- LENGTH: aim ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} characters each; NEVER below ${BULLET_MIN_CHARS}. A ${BULLET_MIN_CHARS}-character bullet wastes a quarter of an indexed field — write to the ceiling with real substance, not filler. Generic for ALL variants (no specific size/color).${capacityFamily ? `
 - 🚫 CAPACITY: this family has MULTIPLE capacities (${familyCapList}) — each variant carries its own GB in its own TITLE. The bullets are SHARED across all variants. NEVER hardcode a specific capacity value (e.g. "128GB SD card", "128GB and 64GB capacities"). Use capacity-agnostic phrasing ("ample capacity", "available in multiple capacities", "high-capacity storage") instead. If a candidate keyword contains a specific GB number, paraphrase it without that number, or skip it.` : ''}
 - Bullets 1-3 carry the top keyphrases; bullets 4-5 may focus on ${apparel ? 'material/comfort/care/gifting' : 'features/quality/use/gifting'}.${compatibilityBrands.length > 0 ? `
 - 🟢 COMPATIBILITY (high-opportunity): the product genuinely works with these device brands shoppers search for. Devote ONE bullet to compatibility using "Compatible with [Brand]" framing (NEVER bare): ${compatibilityBrands.join(', ')}. Example hook: "WIDE COMPATIBILITY - Compatible with ${compatibilityBrands.slice(0, 2).join(' and ')} cameras and more...".` : ''}${giftAudiences.length > 0 ? `
@@ -4590,7 +4664,7 @@ Problems:
 - ${bProblems.join('\n- ')}
 
 Rules to honor on rewrite:
-- Each bullet ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} chars, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ". The hook is a real BENEFIT ("HIGH-SPEED PERFORMANCE", "DURABLE DESIGN") — never a pipeline label like "CRITICAL UPGRADE" or "KEYWORD".
+- Each bullet: aim ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} chars, never below ${BULLET_MIN_CHARS}, starting with a 2-3 word BENEFIT HOOK in ALL CAPS then " - ". The hook is a real BENEFIT ("HIGH-SPEED PERFORMANCE", "DURABLE DESIGN") — never a pipeline label like "CRITICAL UPGRADE" or "KEYWORD".
 - Any third-party brand name (Canon/Nikon/Sony/GoPro/SanDisk/Kingston/Lexar/Samsung/Apple/iPhone/DJI/Bose etc. — anything not "${brandName}") appears ONLY as 'for [Brand]', 'compatible with [Brand]', or 'works with [Brand]'.${capacityClause}
 - Weave in any missing opportunity keywords listed above where they fit naturally.
 Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
@@ -4679,7 +4753,7 @@ Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
           model: 'gpt-4.1-mini',
           messages: [
             { role: 'system', content: system },
-            { role: 'user', content: `Rewrite ALL 5 bullets. ${instructions} The product is "${finalTitle}" — describe ONLY that. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} chars. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
+            { role: 'user', content: `Rewrite ALL 5 bullets. ${instructions} The product is "${finalTitle}" — describe ONLY that. Keep the 2-3 word ALL-CAPS BENEFIT HOOK + " - " format. Each bullet: aim ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} chars, never below ${BULLET_MIN_CHARS}. Return ONLY {"bullets":["b1","b2","b3","b4","b5"]}.` },
           ],
           temperature: 0.3,
           max_tokens: 1200,
@@ -5638,7 +5712,19 @@ async function runDescriptionCouncil(openai: OpenAI, baseSystem: string, baseUse
   return judged || drafts[1] || drafts[0]
 }
 
-async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bullets: string[], attributes: string[], compatibilityBrands: string[] = [], topOpportunityKws: string[] = [], useCouncil = true): Promise<string> {
+async function runDescriptionAgent(
+  input: PipelineInput,
+  finalTitle: string,
+  bullets: string[],
+  attributes: string[],
+  compatibilityBrands: string[] = [],
+  topOpportunityKws: string[] = [],
+  useCouncil = true,
+  /** SHARED CONTENT TRUTH SPINE ctx for the DESCRIPTION field. The description's ONE pool-derived
+   *  insertion point is the HIGH-VALUE SEARCH PHRASES line below; a phrase that is a lie about this
+   *  family's blank must never be offered to the writer. null ⇒ fails open. */
+  truth: PhraseTruthCtx | null = null,
+): Promise<string> {
   const { openai, category, repTitle, children, productType } = input
   const apparel = looksApparel(category, repTitle, productType)
   // Capacity-family detection (mirrors bullets): shared description must NOT hardcode a
@@ -5653,8 +5739,12 @@ async function runDescriptionAgent(input: PipelineInput, finalTitle: string, bul
   // SEO: weave the top opportunity search phrases into the copy (PO 2026-06-17: the description was
   // design-pretty but had ZERO of the high-volume keywords like "graphic tees for women"). Top few
   // only, woven naturally — the 900-980 cap + "no stuffing" rule keep it readable, not a keyword list.
-  const kwLine = topOpportunityKws.length
-    ? `\n🟢 HIGH-VALUE SEARCH PHRASES — weave 3-5 of these in NATURALLY where they genuinely fit the copy (do NOT list them, do NOT stuff, skip any that would read awkwardly): ${topOpportunityKws.slice(0, 8).join(', ')}.`
+  // TRUTH SPINE: the pool is MARKET vocabulary, not product facts — a sweatshirt family's pool is
+  // full of tee searches. Filter BEFORE the writer sees them; an untrue phrase offered as a
+  // "high-value search phrase" is an invitation to write a lie.
+  const truthfulDescKws = truth ? topOpportunityKws.filter((k) => phraseTruthVerdict(k, truth).ok) : topOpportunityKws
+  const kwLine = truthfulDescKws.length
+    ? `\n🟢 HIGH-VALUE SEARCH PHRASES — weave 3-5 of these in NATURALLY where they genuinely fit the copy (do NOT list them, do NOT stuff, skip any that would read awkwardly): ${truthfulDescKws.slice(0, 8).join(', ')}.`
     : ''
   // Widow-format wearer-POV rule (parity with runBulletsAgent — B0FRYMM56C shipped "Celebrate your
   // golf-loving spirit" on a Golf Widow tee). No-op when not a widow-format title.
@@ -6154,7 +6244,7 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   // fixApostropheCase (PO 2026-08-09, §4): an apostrophe is a NON-word char, so `\b` fires between
   // "women'" and "s" and this pass would emit "Women'S". Post-net rather than a rewritten regex so
   // every other casing behavior here stays byte-identical.
-  const titleCase = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+  const titleCase = (s: string) => titleCasePhrase(s)
   // accept(): a design name must ACTUALLY appear in the title or image text (rejects LLM
   // hallucination/paraphrase), is not the seller's own brand, is 1-6 words, and is not entirely
   // generic. Generic edge words are trimmed first ("Later Gator Shirt" -> "Later Gator").
@@ -6432,10 +6522,18 @@ function bulletHasCoherenceDefect(b: string): boolean {
   return [...counts.values()].some((c) => c >= 3)
 }
 
-type BulletMetric = { total: number; di: number; co: number; st: number }
-/** Objective bullets quality: 0.5·design-identity + 0.3·coherence + 0.2·structure. EXCLUDES keyword
- *  coverage (Content-step-2: coverage lives in backend, not bullets) and the <100-char length dock
- *  (anti-Goodhart, scope B) BY CONSTRUCTION. Every sub-score is in [0,1]; higher = better. */
+type BulletMetric = { total: number; di: number; co: number; st: number; fl: number }
+/** Objective bullets quality: 0.40·design-identity + 0.25·coherence + 0.15·structure + 0.20·FILL.
+ *  EXCLUDES keyword coverage (Content-step-2: coverage lives in backend, not bullets) and the
+ *  <100-char length dock (anti-Goodhart, scope B) BY CONSTRUCTION. Every sub-score is in [0,1].
+ *
+ *  FILL added 2026-08-21 (PO-caught defect (e), B0DSCDZC6K 166/150/160/161/178). Before it, a
+ *  160-char bullet and a 200-char bullet scored IDENTICALLY, so a floor-hugging set reached
+ *  total=1.0 and `metricGatedBulletsLoop`'s `>= 0.90` short-circuit blessed it at zero model calls —
+ *  the loop that exists to raise quality was structurally blind to the only defect present. Fill is
+ *  the mean distance from `min` to `fillTarget`, clamped: an all-150 set scores 0 fill (total 0.80),
+ *  the PO's live set 0.29 (total 0.858), and 0.90 is unreachable below ~172 chars average. The
+ *  terminal expander remains the ENFORCER (INVARIANT 2); this only stops the gate from lying. */
 function scoreBulletsMetric(bs: string[], brandName: string, designName: string): BulletMetric {
   const n = Math.max(1, bs.length)
   // (1) DESIGN IDENTITY — design-name tokens ONLY (fed [designName], never the opportunity pool). Binary:
@@ -6451,7 +6549,11 @@ function scoreBulletsMetric(bs: string[], brandName: string, designName: string)
   // construction so the loop can never keyword-stuff bullet prose).
   const tooShort = bs.filter((b) => b.trim().length < 80).length
   const st = 1 - Math.min(1, (structProblems.length + tooShort) / n)
-  return { total: 0.5 * di + 0.3 * co + 0.2 * st, di, co, st }
+  // (4) FILL — proximity to CONTENT_CONTRACT.bullets.fillTarget, measured from the floor. ONE
+  //     constant, no magic numbers (INVARIANT 5).
+  const span = Math.max(1, BULLET_FILL_TARGET - BULLET_MIN_CHARS)
+  const fl = bs.reduce((acc, b) => acc + Math.max(0, Math.min(1, (b.trim().length - BULLET_MIN_CHARS) / span)), 0) / n
+  return { total: 0.40 * di + 0.25 * co + 0.15 * st + 0.20 * fl, di, co, st, fl }
 }
 
 /** One bullets-JSON model call, fail-open to []. MUST branch on isGpt5 exactly like the council's
@@ -6477,7 +6579,7 @@ async function callBulletsModel(openai: OpenAI, system: string, user: string, mo
 // messages lack the literal word "json" — this prompt lacked it since birth, so every metric-loop
 // resynthesis died silently (400 → catch → []) and the loop shipped unchanged. Found by the
 // LLM-gateway call census 2026-08-04.
-const bulletsResynthSys = (): string => `You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence of ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY valid JSON: {"bullets":[5 strings]}.`
+const bulletsResynthSys = (): string => `You are the JUDGE of an Amazon apparel bullets council. You are given 5 CURRENT bullets and a specific CRITIQUE of what is wrong. Rewrite the set to FIX ONLY the critique, keeping everything already good. Each bullet = an ALL-CAPS 2-3 word benefit hook, then " - ", then ONE complete sentence aiming for ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} characters (never below ${BULLET_MIN_CHARS}) ending in a period. Keep the design identity in at least one bullet. Add NO new brand names, invent NO claims, do NOT keyword-stuff. Return ONLY valid JSON: {"bullets":[5 strings]}.`
 function bulletsResynthUser(title: string, designName: string, bullets: string[], critique: string): string {
   return `PRODUCT TITLE: ${title}\nDESIGN IDENTITY (must appear in >=1 bullet): ${designName || '(none)'}\n\nCURRENT BULLETS:\n${bullets.map((b, i) => `${i + 1}. ${b}`).join('\n')}\n\nCRITIQUE TO FIX:\n${critique}\n\nReturn ONLY valid JSON: {"bullets":[5 strings]}.`
 }
@@ -6491,7 +6593,11 @@ function bulletsCritique(m: BulletMetric, bullets: string[], designName: string)
   // scoreBulletsMetric.tooShort (line ~4835) intentionally stays at <80 so the gpt-5 loop doesn't
   // cascade — the terminal expandShortBulletsTerminal (added below) is the real 150-floor enforcer.
   const tooShort = bullets.map((b, i) => (b.trim().length < BULLET_MIN_CHARS ? i + 1 : 0)).filter(Boolean)
-  if (tooShort.length) notes.push(`Bullet(s) ${tooShort.join(', ')} are too short (under ${BULLET_MIN_CHARS} characters) — expand each into a full ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} character benefit sentence with real product substance (never padded keywords).`)
+  if (tooShort.length) notes.push(`Bullet(s) ${tooShort.join(', ')} are too short (under ${BULLET_MIN_CHARS} characters) — expand each into a full ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} character benefit sentence with real product substance (never padded keywords).`)
+  // UNDER-TARGET (2026-08-21): legal but wasteful. Named separately from `tooShort` so the critique
+  // asks for the ceiling instead of re-stating the floor the bullet already clears.
+  const underTarget = bullets.map((b, i) => (b.trim().length >= BULLET_MIN_CHARS && b.trim().length < BULLET_FILL_TARGET ? i + 1 : 0)).filter(Boolean)
+  if (underTarget.length) notes.push(`Bullet(s) ${underTarget.join(', ')} clear the ${BULLET_MIN_CHARS}-character floor but stop well short of the ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} target — every unused character is indexed space thrown away. Extend each with ONE more concrete, truthful detail (fabric feel, fit, styling, care, gifting); do NOT pad with keywords.`)
   if (m.st < 1) notes.push('Fix weak structure: every bullet needs an ALL-CAPS 2-3 word benefit hook, then " - ", then one complete grammatical sentence.')
   return notes.length ? notes.join('\n') : 'Tighten wording and improve clarity while keeping every bullet accurate.'
 }
@@ -6532,7 +6638,7 @@ async function metricGatedBulletsLoop(
       const candScore = scoreBulletsMetric(shipView(cand), ctx.brandName, ctx.designName)
       if (bestScore.total < candScore.total) {                    // STRICT '<' keep-best
         const shipped = shipView(cand)
-        const note = `[bullets-metric-loop][${ctx.label}] iter ${i + 1} improved bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)})`
+        const note = `[bullets-metric-loop][${ctx.label}] iter ${i + 1} improved bullets: total ${bestScore.total.toFixed(3)}->${candScore.total.toFixed(3)} (di ${bestScore.di}->${candScore.di}, co ${bestScore.co.toFixed(2)}->${candScore.co.toFixed(2)}, st ${bestScore.st.toFixed(2)}->${candScore.st.toFixed(2)}, fl ${bestScore.fl.toFixed(2)}->${candScore.fl.toFixed(2)})`
         console.warn(note)
         ctx.onProgress?.(note)
         best = shipped                                            // ENFORCE: ship the improved set (was shadow-frozen)
@@ -6684,13 +6790,24 @@ async function buildTitleFor(
    *  re-derived) so the single-design branch and each per-design multi-design branch strip against
    *  the SAME occasions the bullets/description/backend pools were built with. */
   season: SeasonPolicy = BLANKET_SEASON_POLICY,
+  /** SHARED CONTENT TRUTH SPINE ctx for the TITLE field (blank-grounded). null = unresolved blank /
+   *  non-apparel ⇒ every truth gate below fails OPEN, byte-identical to the pre-spine behavior. */
+  truth: PhraseTruthCtx | null = null,
 ): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const motifTrust = `${input.canonicalTitle ?? ''} ${input.repTitle ?? ''} ${designName}`.toLowerCase()
+  /** THE title-fill truth gate. Every candidate phrase AND every harvested fragment passes it, on
+   *  all three passes — the pool is where the lies come from ("funny work shirts" is a real tee
+   *  search phrase; it is a LIE on a sweatshirt family). Fails open when the blank is unresolved. */
+  const truthOk = (phrase: string): boolean => !truth || phraseTruthVerdict(phrase, truth).ok
   const t = await runTitleAgent(input, candidates, searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, season)
   const titleProblems = t.problems
   const retried = t.retried
-  // 1. Vision-hallucination backstop.
-  let finalTitle = apparelProduct ? stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust) : t.title
+  // 1. Vision-hallucination backstop + COMPETITOR BLANK STRIP (PO-caught defect (d), 2026-08-21:
+  //    `stripCompetitorBlanks` ran on bullets and description but NEVER on the title, so a pool
+  //    "gildan softstyle" reached the one field every shopper reads. Own blank exempted by name.)
+  let finalTitle = apparelProduct
+    ? stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(t.title, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust), attributePinFinal ?? '')
+    : t.title
   // 2. HARD audience.
   if (apparelProduct && (lean === 'female' || lean === 'male')) {
     const aud = lean === 'female' ? 'Women' as const : 'Men' as const
@@ -6726,7 +6843,7 @@ async function buildTitleFor(
     const tailGender = /\bfor\s+men\s*$/i.test(tail) ? 'men' : /\bfor\s+women\s*$/i.test(tail) ? 'women' : null
     // fixApostropheCase (PO 2026-08-09, §4): this is the caser that produced the PO's "Women'S
     // T-Shirts" — the pool phrase "women's t shirts" is fine; `\b\w` capitalised the possessive.
-    const titleCaseKw = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+    const titleCaseKw = (s: string) => titleCasePhrase(s)
     const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
     const MASC_T = /\bm[ae]ns?\b/i
     const canonPhrases: string[] = []
@@ -6753,6 +6870,7 @@ async function buildTitleFor(
       if (tailGender === 'men' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
       const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust)
       if (safe !== kw) continue
+      if (!truthOk(safe)) continue        // TRUTH SPINE — blank-grounded, unlike the haystack above
       const next = `${head}, ${titleCaseKw(safe)}`
       if ((next + tail).length > 75) {
         // Fits only if we drop an OPTIONAL inclusive audience tail? Prefer the product-specific keyphrase.
@@ -6778,39 +6896,30 @@ async function buildTitleFor(
         if (lean === 'male' && FEM_T.test(kw) && !MASC_T.test(kw)) continue
         const safe = stripContradictedGarments(stripUngroundedMotifs(kw, motifTrust), `${motifTrust} ${input.productType ?? ''}`.toLowerCase(), motifTrust)
         if (safe !== kw) continue
-        // Contiguous novel run only (review): a fragment must be a verbatim sub-phrase — no
-        // recombining distant words into new claims, no bare attribute modifiers, no cross-gender
-        // words over a single-gender tail.
-        let novel = contiguousNovelRun(kw, headToks, (w) => {
-          if (FRAG_ATTR_WORDS.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))) return true
-          if (tailGender === 'women' && MASC_T.test(w) && !FEM_T.test(w)) return true
-          if (tailGender === 'men' && FEM_T.test(w) && !MASC_T.test(w)) return true
-          if (lean === 'female' && MASC_T.test(w) && !FEM_T.test(w)) return true
-          if (lean === 'male' && FEM_T.test(w) && !MASC_T.test(w)) return true
-          return false
-        })
-        // Progressive end-trim (sim-caught): with only ~7-10 chars left, the full novel fragment
-        // rarely fits — drop trailing words until it does (never below one non-junk word).
-        while (novel.length > 0) {
-          const frag = novel.join(' ')
-          if (isAllJunk(frag)) break
-          if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) break // ", Mens" is not content
-          // PROVENANCE GATE (council Layer 1): a fragment ships only if it IS a pooled phrase —
-          // "Too Many" (headless remainder of "too many books") dies here; a narrower trim that
-          // is itself a real pooled phrase may still pass on the next iteration.
-          if (!fragPool.has(fragPoolKey(frag))) {
-            novel = novel.slice(0, -1)
-            while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
-            continue
-          }
-          const next = `${head}, ${titleCaseKw(frag)}`
-          if ((next + tail).length <= 75) {
-            head = next
-            for (const tt of bulletTokens(frag).map(fillNormTok)) headToks.add(tt)
-            break
-          }
-          novel = novel.slice(0, -1)
-          while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+        if (!truthOk(safe)) continue        // TRUTH SPINE — reject the whole phrase before harvesting
+        // Contiguous novel run + provenance + progressive end-trim, via THE shared harvester
+        // (`pooledNovelFragment`): a fragment must be a verbatim sub-phrase AND a real pooled
+        // phrase — no recombining distant words into new claims, no bare attribute modifiers, no
+        // cross-gender words over a single-gender tail, and every surviving fragment re-judged by
+        // the truth spine (a trim can change what a phrase CLAIMS).
+        const frag = pooledNovelFragment(
+          safe,
+          headToks,
+          fragPool,
+          (w) => {
+            if (FRAG_ATTR_WORDS.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))) return true
+            if (tailGender === 'women' && MASC_T.test(w) && !FEM_T.test(w)) return true
+            if (tailGender === 'men' && FEM_T.test(w) && !MASC_T.test(w)) return true
+            if (lean === 'female' && MASC_T.test(w) && !FEM_T.test(w)) return true
+            if (lean === 'male' && FEM_T.test(w) && !MASC_T.test(w)) return true
+            return false
+          },
+          (f) => (`${head}, ${titleCaseKw(f)}` + tail).length <= 75,
+          (f) => !truthOk(f),
+        )
+        if (frag) {
+          head = `${head}, ${titleCaseKw(frag)}`
+          for (const tt of bulletTokens(frag).map(fillNormTok)) headToks.add(tt)
         }
         if ((head + tail).length >= 73) break
       }
@@ -6879,31 +6988,48 @@ async function buildTitleFor(
   //     TOKENS from the candidate pool: each a real pooled token (provenance), content-bearing (not a
   //     stopword / junk / attribute / gender / bare-number fragment), NOT already in the title, and NEVER
   //     repeated. Yields "…Champions T-Shirt, Football Champs Graphic" instead of repeating design words.
+  //     PROVENANCE, 2026-08-21 (PO-caught defect (a) on B0DSCDZC6K, live title
+  //     "…Fall Crewneck, Mind"): this harvest used to walk `kw.split(/\s+/)` and append single
+  //     WORDS — no phrase-completeness check, no provenance check — so the pool phrase "mind your
+  //     business" contributed the orphan ", Mind" and the idiom was destroyed. The SAFE mechanism
+  //     already existed twenty lines above in this same function (the second pass's
+  //     contiguousNovelRun + fragPool provenance gate, built to kill exactly this class: "Too Many"
+  //     out of "too many books"). There is now ONE harvester (`pooledNovelFragment`) and 6b calls
+  //     it: a fragment ships only if it IS a phrase someone searched, so an incomplete idiom is
+  //     skipped WHOLE rather than truncated. A bare orphan word can no longer be appended at all.
   if (apparelProduct && finalTitle.length < 70) {
     const tailMatch = finalTitle.match(/\s+for\s+(?:men(?:\s+and\s+women)?|women(?:\s+and\s+men)?)\s*$/i)
     const tail = tailMatch ? tailMatch[0] : ''
     let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
     const have = new Set(bulletTokens(head).map(fillNormTok))
     const FEM_H = /\bwom[ae]ns?\b|\bladies\b/i, MASC_H = /\bm[ae]ns?\b/i
-    let firstAdd = true
-    for (const kw of [...(input.nicheSeeds ?? []), ...candidates.map((c) => c.keyword), ...topUpgradeKws]) {
+    const titleCaseKw6b = (s: string) => titleCasePhrase(s)
+    const harvestSources = [...(input.nicheSeeds ?? []), ...candidates.map((c) => c.keyword), ...topUpgradeKws]
+    // PROVENANCE POOL: the same sources this loop iterates, so the gate authorizes nothing new.
+    const harvestPool = buildFragPool([harvestSources])
+    for (const kw of harvestSources) {
       if ((head + tail).length >= 73) break
       if (lean === 'female' && MASC_H.test(kw) && !FEM_H.test(kw)) continue     // respect the audience lean
       if (lean === 'male' && FEM_H.test(kw) && !MASC_H.test(kw)) continue
       if (findTrademarkPhrases(kw).length > 0) continue                          // never harvest a trademark token
-      for (const w of kw.split(/\s+/)) {
-        if ((head + tail).length >= 73) break
-        const clean = w.toLowerCase().replace(/[^a-z0-9]/g, '')
-        if (clean.length < 3 || /^\d+$/.test(clean)) continue                    // skip tiny words + bare numbers
-        const norm = fillNormTok(w)
-        if (have.has(norm)) continue                                            // already in the title → no repeat
-        if (JUNK_WORDS.has(clean) || MINOR_WORDS.has(clean) || FRAG_ATTR_WORDS.has(clean)) continue
-        if (BARE_GENDER_RE.test(w)) continue
-        const capped = clean.charAt(0).toUpperCase() + clean.slice(1)
-        const next = `${head}${firstAdd ? ',' : ''} ${capped}`
-        if ((next + tail).length > 75) continue
-        head = next; have.add(norm); firstAdd = false
-      }
+      if (!truthOk(kw)) continue                                                 // TRUTH SPINE — whole phrase
+      const frag = pooledNovelFragment(
+        kw,
+        have,
+        harvestPool,
+        (w) => {
+          const clean = w.toLowerCase().replace(/[^a-z0-9]/g, '')
+          if (clean.length < 3 || /^\d+$/.test(clean)) return true               // tiny words + bare numbers
+          if (JUNK_WORDS.has(clean) || MINOR_WORDS.has(clean) || FRAG_ATTR_WORDS.has(clean)) return true
+          if (BARE_GENDER_RE.test(w)) return true
+          return false
+        },
+        (f) => (`${head}, ${titleCaseKw6b(f)}` + tail).length <= 75,
+        (f) => !truthOk(f),
+      )
+      if (!frag) continue
+      head = `${head}, ${titleCaseKw6b(frag)}`
+      for (const tt of bulletTokens(frag).map(fillNormTok)) have.add(tt)
     }
     finalTitle = `${head}${tail}`
   }
@@ -7117,8 +7243,14 @@ async function buildNicheParentTitle(
   // missed fixes applied only to its twin (PR #401). An instrument wired to one producer reports
   // confidently about the other while measuring nothing.
   v4Sink?: Record<string, unknown>[],
+  /** SHARED CONTENT TRUTH SPINE ctx for the TITLE field — PATH PARITY with buildTitleFor (INVARIANT
+   *  1). The multi-design hub is the other producer, and a truth gate wired to one producer is the
+   *  #401 class of wasted fix. null ⇒ fails open, byte-identical to the pre-spine behavior. */
+  truth: PhraseTruthCtx | null = null,
 ): Promise<string> {
   const audienceMode = deriveAudienceMode(parentLean)
+  /** Parent-path twin of buildTitleFor's gate — the SAME predicate, the same ctx shape. */
+  const truthOk = (phrase: string): boolean => !truth || phraseTruthVerdict(phrase, truth).ok
   const designNameList = designNames.filter(Boolean).slice(0, 6).join(', ') || '(unnamed)'
   // Flag ON → title-aware family display; OFF → exact legacy ('T-Shirt' for shirt else Titlecase(pt)).
   const ptWord = GARMENT_NOUN_ON
@@ -7193,6 +7325,10 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
   })()
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null, shape: poGolds?.shape ?? null, apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || '') })
   let title = (judged || '').trim()
+  // COMPETITOR BLANK STRIP (PO-caught defect (d), 2026-08-21) — PATH PARITY with buildTitleFor's
+  // guard 1: `stripCompetitorBlanks` ran on bullets and description but on NEITHER title producer.
+  // Runs BEFORE the fill below so the freed budget is re-filled with truthful pool phrases.
+  if (title) title = stripCompetitorBlanks(title, blankBrand ?? '')
   // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
   // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
   // right after the brand, BEFORE capTitle75 + every dedup/cap guard below, so they all run on it.
@@ -7209,7 +7345,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       const head = brandMatch ? brandMatch[0].trim() : ''
       const rest = title.slice(head.length).replace(/^[\s,]+/, '').trim()
       // fixApostropheCase (PO 2026-08-09, §4) — see the note on titleCaseKw.
-      const anchorTC = fixApostropheCase(familyNicheClean.replace(/\b\w/g, (c) => c.toUpperCase()))
+      const anchorTC = titleCasePhrase(familyNicheClean)
       title = `${head ? `${head} ` : ''}${anchorTC}${rest ? `, ${rest}` : ''}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ').trim()
     }
   }
@@ -7336,7 +7472,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     const designTokSets = designNames.filter(Boolean).map((d) => new Set([...bulletTokens(d)].map(fillNormTok).filter((t) => !familyNicheToks.has(t))))
     // fixApostropheCase (PO 2026-08-09, §4): this is the caser that produced the PO's "Women'S
     // T-Shirts" — the pool phrase "women's t shirts" is fine; `\b\w` capitalised the possessive.
-    const titleCaseKw = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+    const titleCaseKw = (s: string) => titleCasePhrase(s)
     // Garment-truthfulness rail (review-caught BLOCKER): the child fill vets keywords against the
     // seller's own text; the parent fill had NO rail, so a stray "hoodie" keyword in the family
     // pool would ship a product-identity misclaim. Parent trust = product type + design names.
@@ -7355,6 +7491,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       if (tailGender === 'women' && PAR_MASC.test(kw) && !PAR_FEM.test(kw)) continue
       if (tailGender === 'men' && PAR_FEM.test(kw) && !PAR_MASC.test(kw)) continue
       if (stripContradictedGarments(kw, parentHay, parentHay) !== kw) continue
+      if (!truthOk(kw)) continue          // TRUTH SPINE — blank-grounded, unlike parentHay above
       if (designTokSets.some((ds) => toks.filter((tt) => ds.has(tt)).length >= 2)) continue
       const next = `${fillHead}, ${titleCaseKw(kw)}`
       if ((next + tail).length > 75) continue
@@ -7370,41 +7507,27 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       // PROVENANCE POOL (council Layer 1): topUpgradeKws is the parent's only authorized source.
       const fragPool = buildFragPool([topUpgradeKws])
       for (const kw of topUpgradeKws) {
-        // Contiguous novel run only (review): verbatim sub-phrases, no bare attribute modifiers,
-        // no ungrounded garment words, no cross-gender words over a single-gender tail.
-        let novel = contiguousNovelRun(kw, headToks, (w) => {
-          if (FRAG_ATTR_WORDS.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))) return true
-          if (tailGender === 'women' && PAR_MASC.test(w) && !PAR_FEM.test(w)) return true
-          if (tailGender === 'men' && PAR_FEM.test(w) && !PAR_MASC.test(w)) return true
-          return stripContradictedGarments(w, parentHay, parentHay) !== w
-        })
-        // Progressive end-trim (sim-caught): drop trailing words until the fragment fits the
-        // remaining budget (never below one non-junk word). Same design-motif rail per width.
-        while (novel.length > 0) {
-          const frag = novel.join(' ')
-          if (isAllJunk(frag)) break
-          if (novel.every((w) => BARE_GENDER_RE.test(w) || bulletTokens(w).length === 0)) break // ", Mens" is not content
-          const fragToks = bulletTokens(frag).map(fillNormTok)
-          if (designTokSets.some((ds) => fragToks.filter((tt) => ds.has(tt)).length >= 2)) {
-            novel = novel.slice(0, -1)
-            while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop() // review: an un-popped connector let ", Gifts For" reach the gate
-            continue
-          }
-          // PROVENANCE GATE (council Layer 1): fragments must BE pooled phrases — no headless
-          // remainders ("Too Many", ", Plus" — both live-caught).
-          if (!fragPool.has(fragPoolKey(frag))) {
-            novel = novel.slice(0, -1)
-            while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
-            continue
-          }
-          const next = `${fillHead}, ${titleCaseKw(frag)}`
-          if ((next + tail).length <= 75) {
-            fillHead = next
-            for (const tt of fragToks) headToks.add(tt)
-            break
-          }
-          novel = novel.slice(0, -1)
-          while (novel.length && bulletTokens(novel[novel.length - 1]).length === 0) novel.pop()
+        if (!truthOk(kw)) continue        // TRUTH SPINE — reject the whole phrase before harvesting
+        // Contiguous novel run + provenance + progressive end-trim, via THE shared harvester
+        // (`pooledNovelFragment` — the SAME code buildTitleFor's pass 2 and step 6b run): verbatim
+        // sub-phrases, no bare attribute modifiers, no ungrounded garment words, no cross-gender
+        // words over a single-gender tail, no design-specific motif, every survivor truth-judged.
+        const frag = pooledNovelFragment(
+          kw,
+          headToks,
+          fragPool,
+          (w) => {
+            if (FRAG_ATTR_WORDS.has(w.toLowerCase().replace(/[^a-z0-9]/g, ''))) return true
+            if (tailGender === 'women' && PAR_MASC.test(w) && !PAR_FEM.test(w)) return true
+            if (tailGender === 'men' && PAR_FEM.test(w) && !PAR_MASC.test(w)) return true
+            return stripContradictedGarments(w, parentHay, parentHay) !== w
+          },
+          (f) => (`${fillHead}, ${titleCaseKw(f)}` + tail).length <= 75,
+          (f, fragToks) => designTokSets.some((ds) => fragToks.filter((tt) => ds.has(tt)).length >= 2) || !truthOk(f),
+        )
+        if (frag) {
+          fillHead = `${fillHead}, ${titleCaseKw(frag)}`
+          for (const tt of bulletTokens(frag).map(fillNormTok)) headToks.add(tt)
         }
         if ((fillHead + tail).length >= 73) break
       }
@@ -7671,6 +7794,12 @@ function scrubFitClaims(s: string, fit: string): string {
 // SEO/conversion target: each bullet 150-200 chars. Values now live in contentContract.ts (spine Step 1).
 export const BULLET_MIN_CHARS = CONTENT_CONTRACT.bullets.min
 export const BULLET_MAX_CHARS = CONTENT_CONTRACT.bullets.max
+/** The bullets TARGET (2026-08-21). `min` is what Amazon-facing gates refuse to go below; this is
+ *  what every producer AIMS at. Live B0DSCDZC6K shipped 166/150/160/161/178 = 815 of 1000 possible
+ *  characters — legal on every gate, and 18.5% of an indexed field discarded, because "150-200" was
+ *  the only number the prompt, the scorer and the terminal net could reference. ONE constant
+ *  (INVARIANT 5): generator prompt + retry prompts + scoreBulletsMetric + the terminal expander. */
+export const BULLET_FILL_TARGET = CONTENT_CONTRACT.bullets.fillTarget
 // Description char-budget floor (mirrors existing 900-980 target). Value now lives in contentContract.ts
 // (spine Step 1). Exported so the terminal re-expand can re-check length after scrubDescriptionBody.
 export const DESC_MIN_CHARS = CONTENT_CONTRACT.description.floor
@@ -7691,30 +7820,53 @@ const APPAREL_PAD_POOL: readonly string[] = Object.freeze([
   'A thoughtful gift for birthdays, holidays, or just because.',
 ])
 
-/** Deterministic bullet pad — runs AFTER the LLM retry budget is spent. Zero tokens. Idempotent:
- *  base >= floor returns base unchanged. Picks the smallest suffix that lifts base into [floor, ceil]
- *  without overshooting, skipping any suffix already used in this push OR whose 4+-char words already
- *  appear ≥2 times in base (avoids echoing). Never regresses — no-suffix-fits returns base as-is. */
+/** Deterministic bullet pad — runs AFTER the LLM retry budget is spent. Zero tokens.
+ *
+ *  CEILING-SEEKING since 2026-08-21 (PO defect (e)). It used to stop the moment `base >= floor`, so
+ *  it could only ever rescue an ILLEGAL bullet and never fill a merely WASTEFUL one — the exact
+ *  reason a 150-160-char set survived every gate. It now aims at `target`
+ *  (CONTENT_CONTRACT.bullets.fillTarget) and picks the suffix landing CLOSEST to it, still inside
+ *  [floor, ceil], still one suffix per bullet, still unique across the push.
+ *
+ *  IDEMPOTENCY IS STRUCTURAL, not incidental: a bullet that already ENDS with a pool suffix is
+ *  returned untouched. Without that door, a second pass over an under-target-but-padded bullet
+ *  would stack a second suffix (the pool set is per-call), and `expandShortBulletsTerminal`'s
+ *  pinned "running the net twice adds nothing further" contract would silently break.
+ *
+ *  `truthOk` gates the suffix through the SHARED CONTENT TRUTH SPINE: the pad WRITES SHIPPED BYTES,
+ *  so its phrases answer to the same predicate as any pool phrase. Never regresses — no-suffix-fits
+ *  returns base as-is. */
 function padBulletDeterministic(
   base: string,
   bulletIndex: number,
   usedSuffixes: Set<string>,
   floor: number = BULLET_MIN_CHARS,
   ceil: number = BULLET_MAX_CHARS,
+  target: number = BULLET_FILL_TARGET,
+  truthOk: (phrase: string) => boolean = () => true,
 ): string {
   const trimmed = (base || '').trim()
-  if (trimmed.length >= floor) return trimmed
-  const baseLower = trimmed.toLowerCase()
   const pool = APPAREL_PAD_POOL
+  // IDEMPOTENCY DOOR, and it must run FIRST. A bullet already carrying a pool suffix is never padded
+  // again — AND it RESERVES that suffix. Both halves are load-bearing: without the reservation the
+  // second pass sees a freed pool and hands an earlier bullet's suffix to a bullet the first pass
+  // could not pad, so `f(f(x)) !== f(x)` and the pinned "running the net twice adds nothing further"
+  // contract breaks. With it, pass 2 faces the exact same reserved set pass 1 did, at every index.
+  const already = pool.find((s) => trimmed.endsWith(s))
+  if (already) { usedSuffixes.add(already); return trimmed }
+  if (trimmed.length >= target) return trimmed
+  const baseLower = trimmed.toLowerCase()
   const start = ((bulletIndex % pool.length) + pool.length) % pool.length
   // Two passes (2026-07-31, live B0GR22ZHBW): an all-5-short push consumed suffixes 0-3 on bullets 1-4
   // and bullet 5's two remaining candidates both hit the overlap-skip — the strict pass exhausted and a
   // 120-char bullet shipped (census BULLET_UNDER_MIN). The floor is the hard Amazon-facing invariant;
   // echo-avoidance is a preference — so retry relaxed (used + band still enforced) before giving up.
   for (const relaxed of [false, true]) {
+    let best: { suffix: string; text: string; dist: number } | null = null
     for (let k = 0; k < pool.length; k++) {
       const suffix = pool[(start + k) % pool.length] as string
       if (usedSuffixes.has(suffix)) continue
+      if (!truthOk(suffix)) continue                               // TRUTH SPINE on shipped bytes
       if (!relaxed) {
         const suffixWords = suffix.toLowerCase().match(/[a-z]{4,}/g) ?? []
         const overlaps = suffixWords.filter((w) => baseLower.includes(w)).length
@@ -7722,10 +7874,16 @@ function padBulletDeterministic(
       }
       const baseWithStop = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
       const candidate = `${baseWithStop} ${suffix}`.trim()
-      if (candidate.length >= floor && candidate.length <= ceil) {
-        usedSuffixes.add(suffix)
-        return candidate
+      if (candidate.length < floor || candidate.length > ceil) continue
+      const dist = Math.abs(target - candidate.length)
+      // Closest to target; ties go to the LONGER text (more indexed characters, same distance).
+      if (!best || dist < best.dist || (dist === best.dist && candidate.length > best.text.length)) {
+        best = { suffix, text: candidate, dist }
       }
+    }
+    if (best) {
+      usedSuffixes.add(best.suffix)
+      return best.text
     }
   }
   return trimmed
@@ -7742,10 +7900,25 @@ function padBulletDeterministic(
 export async function expandShortBulletsTerminal(
   openai: OpenAI,
   bullets: string[],
-  ctx: { title: string; designName?: string; fit?: string; garmentBrand?: string },
+  ctx: {
+    title: string
+    designName?: string
+    fit?: string
+    garmentBrand?: string
+    /** SHARED CONTENT TRUTH SPINE ctx for the BULLETS field. The expander WRITES SHIPPED BYTES —
+     *  an LLM rewrite and a deterministic pad suffix are both "phrases added to the listing", so
+     *  both answer to the same predicate every pool phrase does. Absent ⇒ fails open. */
+    truth?: PhraseTruthCtx | null
+  },
 ): Promise<string[]> {
   if (!Array.isArray(bullets) || bullets.length !== 5) return bullets
-  const needs = bullets.some((b) => (b?.trim().length ?? 0) < BULLET_MIN_CHARS)
+  const truthOk = (phrase: string): boolean => !ctx.truth || phraseTruthVerdict(phrase, ctx.truth).ok
+  // CEILING-SEEKING (2026-08-21, PO defect (e)): the trigger is the TARGET, not the floor. It used
+  // to be `< BULLET_MIN_CHARS`, which made this net an illegal-bullet rescue and nothing more — the
+  // PO's 166/150/160/161/178 set passed it untouched. The LLM half still fires only below the floor
+  // (cost: a model that undershoots char counts by 20-30% is the wrong tool for the last 35 chars);
+  // the DETERMINISTIC pad now carries every bullet toward `BULLET_FILL_TARGET`.
+  const needs = bullets.some((b) => (b?.trim().length ?? 0) < BULLET_FILL_TARGET)
   if (!needs) return bullets                                   // IDEMPOTENT no-op — bullets already pass
   const gate = (b: string): string => {
     // Leading-dash strip (2026-07-31, live B0GR22ZHBW): the model read the prompt's «keep the " - "
@@ -7759,13 +7932,31 @@ export async function expandShortBulletsTerminal(
   }
   const out = [...bullets]
   const usedSuffixes = new Set<string>()   // shared across the 5 bullets so the pad picks unique suffixes
-  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_MIN_CHARS}-${BULLET_MAX_CHARS} characters long. The bullet format is "ALL-CAPS 2-3 WORD HOOK - one sentence"; keep the exact hook and start your rewrite WITH the hook — never prepend a dash or bullet mark before it. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY JSON: {"bullet":"..."}.`
+  // RESERVE the pad suffixes this set ALREADY carries, before a single bullet is padded. Without
+  // this, a re-run frees the suffixes the first run spent on bullets that are now AT target (and so
+  // skipped below), and hands one of them to a bullet the first run could not pad — the net would
+  // keep growing on every call. Idempotency is a pinned contract, so it is enforced, not hoped for.
+  for (const b of out) {
+    const s = APPAREL_PAD_POOL.find((x) => (b ?? '').trim().endsWith(x))
+    if (s) usedSuffixes.add(s)
+  }
+  const sys = `You are an Amazon apparel copywriter. Rewrite ONE bullet to be ${BULLET_FILL_TARGET}-${BULLET_MAX_CHARS} characters long (never below ${BULLET_MIN_CHARS}). The bullet format is "ALL-CAPS 2-3 WORD HOOK - one sentence"; keep the exact hook and start your rewrite WITH the hook — never prepend a dash or bullet mark before it. Keep the same core benefit; ADD real substance (fabric feel, fit, styling, care, gifting) — do NOT invent facts or new brand names. Return ONLY JSON: {"bullet":"..."}.`
   for (let i = 0; i < out.length; i++) {
     const original = (out[i] ?? '').trim()
-    if (original.length >= BULLET_MIN_CHARS) continue
+    if (original.length >= BULLET_FILL_TARGET) continue
     let best = original
-    let bestDist = Math.abs(BULLET_MIN_CHARS - original.length)
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Distance to the LEGAL band (not to the target): an in-band-but-under-target bullet is not a
+    // MISS — the pad handles it — so it must not log BULLET_EXPAND_MISS.
+    let bestDist = original.length < BULLET_MIN_CHARS ? BULLET_MIN_CHARS - original.length
+      : original.length > BULLET_MAX_CHARS ? original.length - BULLET_MAX_CHARS
+        : 0
+    // THE LLM HALF fires only BELOW THE FLOOR. Two reasons, both measured: (1) an in-band bullet is
+    // already good copy — spending a model call to grow it 30 characters risks the rewrite being
+    // worse than the original at real cost across every regen; (2) char-count prompting undershoots
+    // 20-30% on all current LLMs (arXiv 2508.13805), so the model is the wrong instrument for the
+    // last stretch. The deterministic pad below runs for EVERY under-target bullet — it is the
+    // ceiling-seeker, and it costs nothing. (Pinned: a >=floor set still makes ZERO model calls.)
+    for (let attempt = 0; original.length < BULLET_MIN_CHARS && attempt < 2; attempt++) {
       try {
         const nudge = attempt === 0 ? '' : ` The previous rewrite was ${best.length} chars — expand further to reach at least ${BULLET_MIN_CHARS}.`
         const resp = await openai.chat.completions.create({
@@ -7779,6 +7970,9 @@ export async function expandShortBulletsTerminal(
         const raw = typeof parsed.bullet === 'string' ? parsed.bullet.trim() : ''
         const gated = raw ? gate(raw) : ''
         if (!gated) continue
+        // TRUTH SPINE on the rewrite: the model was handed the TITLE as context and will happily
+        // echo a garment noun out of it. A rewrite that lies is not a candidate at any length.
+        if (!truthOk(gated)) { console.warn(JSON.stringify({ tag: 'BULLET_EXPAND_MISS', reason: 'truth-reject', bullet: i + 1, attempt: attempt + 1 })); continue }
         const dist = gated.length < BULLET_MIN_CHARS ? BULLET_MIN_CHARS - gated.length
           : gated.length > BULLET_MAX_CHARS ? gated.length - BULLET_MAX_CHARS
             : 0
@@ -7798,7 +7992,7 @@ export async function expandShortBulletsTerminal(
     // TERMINAL 100% floor guarantee (2026-07-21, workflow wg9bftozi judge verdict). LLM char-count
     // undershoot is systemic (arXiv 2508.13805) — prompt-only control can't guarantee thresholds;
     // deterministic pad is the only reliable enforcer. Idempotent: base >= floor → no-op.
-    out[i] = padBulletDeterministic(best, i, usedSuffixes)
+    out[i] = padBulletDeterministic(best, i, usedSuffixes, BULLET_MIN_CHARS, BULLET_MAX_CHARS, BULLET_FILL_TARGET, truthOk)
     if ((out[i] ?? '').length < BULLET_MIN_CHARS) console.warn(JSON.stringify({ tag: 'BULLET_PAD_EXHAUSTED', bullet: i + 1, len: (out[i] ?? '').length }))
   }
   return out
@@ -7845,6 +8039,9 @@ export async function applyTerminalNets(
      *  stretch claims. Absent spec ⇒ weight adjectives are REMOVED (never claimed unconfirmed). */
     weightNote?: string
     stretch?: string
+    /** SHARED CONTENT TRUTH SPINE ctx for the BULLETS field — forwarded to the terminal expander so
+     *  the section-regen path gets the SAME truth discipline as the full path (INVARIANT 3). */
+    truth?: PhraseTruthCtx | null
   },
 ): Promise<string[] | string> {
   if (field === 'bullets') {
@@ -7855,6 +8052,7 @@ export async function applyTerminalNets(
       designName: ctx.designName,
       fit: ctx.fit,
       garmentBrand: ctx.garmentBrand,
+      truth: ctx.truth,
     })
     if (ctx.unisex) bullets = ensureUnisexFitClause(bullets)
     // FABRIC TRUTH last (INVARIANT 2): the expander above is an LLM and can re-introduce a false
@@ -8726,11 +8924,27 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * garment-compatibility gate on blank_specs.garment_family. A mixed-blank family's `spec` is the
    * INTERSECTION of its blanks' facts (sleeve/neck/brand dropped when children differ). */
   const blankCatalog = apparelProduct ? await loadBlankSpecRows() : []
-  const blankOverride = apparelProduct ? await loadBlankFamilyOverride(input.parentAsin) : null
+  /* PO-STATED BLANK IDENTITY, BOTH SCOPES, ONE TABLE (PO 2026-08-22, migration 062).
+   *
+   * The child scope is the precedence level that was missing: the SKU-first rule assumed a SKU's
+   * style code is always RIGHT, and B0DSG4T5BR (`BB64000XL-BK-FBA`) proves it is not — the code says
+   * Gildan 64000, the stored Amazon title says "Sweatshirt", and the PO says Comfort Colors 6014
+   * LONG SLEEVE. `blank_assignments` holds both scopes behind ONE loader (the PO vetoed a second
+   * table: two homes for one concept is how this repo grew seven definitions of "covered"). One
+   * cached read per 5-min window, fail-open to empty maps — a DB blip degrades to SKU-first. */
+  const blankAssignments = apparelProduct ? await loadBlankAssignments() : null
+  const blankOverride = (input.parentAsin && blankAssignments)
+    ? (blankAssignments.family.get(input.parentAsin.trim().toUpperCase()) ?? null)
+    : null
+  const blankChildAssignments = blankAssignments?.child ?? null
   // ROW kept (2026-08-08): the blank-brand IH waterfall net needs the match REGEX too; the spec is
   // derived from it so every downstream `blankSpec.*` consumer is byte-identical.
-  const blankFamilyFacts = apparelProduct ? resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, [attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')) : null
-  if (apparelProduct) console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'pipeline', parent: input.parentAsin ?? null, source: blankFamilyFacts?.source ?? null, styleCode: blankFamilyFacts?.dominant?.styleCode ?? null, garmentFamily: blankFamilyFacts?.garmentFamily ?? null, mixed: blankFamilyFacts?.mixed ?? false, byStyle: blankFamilyFacts?.byStyle ?? {}, override: blankOverride }))
+  // ONE hay, named: the resolver's garment-compatibility gate and the family's garment-class union
+  // must ask the SAME question of the SAME text, or the union can re-admit a blank the resolver
+  // just ruled incompatible (live B0DSCDZC6K).
+  const blankHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')
+  const blankFamilyFacts = apparelProduct ? resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, blankHay, blankChildAssignments) : null
+  if (apparelProduct) console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'pipeline', parent: input.parentAsin ?? null, source: blankFamilyFacts?.source ?? null, styleCode: blankFamilyFacts?.dominant?.styleCode ?? null, garmentFamily: blankFamilyFacts?.garmentFamily ?? null, mixed: blankFamilyFacts?.mixed ?? false, byStyle: blankFamilyFacts?.byStyle ?? {}, override: blankOverride, childAssignments: blankFamilyFacts?.childAssignmentHits ?? 0, bySource: blankFamilyFacts?.bySource ?? {} }))
   const blankSpecRowMatched = blankFamilyFacts ? familyBlankRow(blankFamilyFacts) : null
   const blankSpecMatched = blankSpecRowMatched?.spec ?? null
   // A long-sleeve family must not inherit a short-sleeve blank row's sleeve fact (the CC row is
@@ -8746,15 +8960,218 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // not a selling point (Gildan ≠ Comfort Colors) — an empty canonical brand keeps it out of every
   // copy surface while the competitor-blank drop for the token stays active (we don't index it either).
   const garmentBrandCanonical = blankSpec?.brandInCopy === false ? '' : (blankSpec?.brand ?? '')
+
+  /* ── SHARED CONTENT TRUTH SPINE ctx (2026-08-21) ───────────────────────────────────────────────
+   * ONE blank-grounded context, built ONCE here from the resolved blank, handed to every field's
+   * deterministic fill. This is the cure for the PO's four B0DSCDZC6K defects: the previous garment
+   * net (`stripContradictedGarments`) grounds in a haystack DERIVED FROM THE TITLE, so a title that
+   * carries the lie is its own witness. `resolveFamilyBlank` reads the STYLE CODE off every child
+   * SKU — it cannot be fooled by copy.
+   *
+   * MIXED FAMILIES: B0DSCDZC6K ships Gildan 18000 (sweatshirt) AND 18500 (hoodie) under one parent.
+   * `resolveFamilyBlank` reports one DOMINANT family, so judging a hoodie noun against the
+   * sweatshirt row alone would call a TRUE word a lie. The truth ctx therefore carries every family
+   * present and the allowed garment classes are their UNION. Both families reject tee nouns —
+   * which is exactly what "Funny Work Shirts" was.
+   *
+   * THE UNION IS THE RESOLVER'S, NOT A RAW SKU CENSUS (PO 2026-08-21, live B0DSCDZC6K). This used
+   * to map `byStyle`'s keys straight onto garment families, so ONE stray Gildan 64000 adult-TEE
+   * child among 34 SKUs put 'tee' into the union and licensed "shirts" vocabulary for the WHOLE
+   * family — in four of six per-design titles — even though the resolver had ALREADY logged that
+   * same 64000 as `BLANK_GARMENT_CONFLICT.conflicting`. `familyGarmentUnion` is the single
+   * authority: it drops the rows the family itself ruled incompatible and then applies
+   * GARMENT_UNION_DOMINANCE, so a class must be a real share of the family to speak for it.
+   */
+  const familyGarmentFamilies: TruthGarmentFamily[] = blankFamilyFacts
+    ? familyGarmentUnion(blankCatalog, blankFamilyFacts, blankHay)
+    : []
+  const truthGarmentFamily: TruthGarmentFamily = !apparelProduct ? 'none' : (blankFamilyFacts?.garmentFamily ?? null)
+  /* DESIGN-TOKEN EXEMPTION (coordinator amendment 2026-08-21). The kids/adult audience rules must
+   * judge the CLAIM, not the vocabulary: a "Baby Shark" or "Girl Dad" ADULT tee legitimately needs
+   * 'baby'/'girl' in its bullets and backend, and stripping the healthy majority's own design words
+   * to cure a defect none of them have is the over-generalization the standing directive forbids.
+   *
+   * NO NEW RESOLVER. Every source here is one the paths already read: `extractDesignName`'s resolved
+   * `designName` (single-design), the seller's scalar `designNameOverride` and PER-DESIGN
+   * `designNameOverridesByKey` (multi-design = UNION), and `priorPerChildTitles[].designName` (what a
+   * section-regen rebuilds its per-design contexts from).
+   *
+   * ONE LIVE SET, DELIBERATELY BY REFERENCE: the per-design title loop resolves each group's name
+   * only later (`resolveGroupDesignName`), and pushes it here. Every ctx holds THIS array, so by the
+   * time the bullets / description / backend fills run — all downstream of the awaited title block —
+   * the family union is complete. The per-design TITLE calls additionally push their own group's
+   * name BEFORE building the title, so that path never depends on resolution order. */
+  const familyDesignNames: string[] = []
+  const pushDesignName = (n: string | null | undefined): void => {
+    const v = (n ?? '').trim()
+    if (v && !familyDesignNames.includes(v)) familyDesignNames.push(v)
+  }
+  pushDesignName(designName)
+  pushDesignName(input.designNameOverride)
+  for (const v of Object.values(input.designNameOverridesByKey ?? {})) pushDesignName(v)
+  for (const t of input.priorPerChildTitles ?? []) pushDesignName(t.designName)
+  /** Build the spine ctx for ONE field. `null` when the family's blank is unresolved on an apparel
+   *  listing: with no ground truth there is nothing to judge against, and a guessed rule is worse
+   *  than none (the same fail-open `resolveFamilyBlank` itself takes on a garment conflict). */
+  const truthCtxFor = (field: 'title' | 'bullets' | 'description' | 'backend'): PhraseTruthCtx | null => {
+    if (apparelProduct && !blankFamilyFacts?.garmentFamily) return null
+    return {
+      garmentFamily: truthGarmentFamily,
+      mixedFamilies: familyGarmentFamilies.length > 1 ? familyGarmentFamilies : undefined,
+      spec: blankSpec,
+      allowedBrand: garmentBrandCanonical || null,
+      audience: audienceOfGarmentFamily(truthGarmentFamily),
+      designTokens: familyDesignNames,
+      audienceLean: normalizeAudienceLean(apparelProduct ? input.audienceLean : null),
+      field,
+    }
+  }
+  const titleTruthCtx = truthCtxFor('title')
+  /* ── PER-DESIGN GARMENT TRUTH (PO 2026-08-22) ─────────────────────────────────────────────────
+   *
+   * A SINGLE FAMILY-LEVEL GARMENT VERDICT IS THE WRONG SHAPE, and B0DSCDZC6K is the live proof:
+   * 37 sweatshirt/hoodie SKUs plus ONE child — B0DSG4T5BR, SKU `BB64000XL-BK-FBA` — whose SKU code
+   * says Gildan 64000, whose stored Amazon title says "Sweatshirt", and whose PO says it is a
+   * Comfort Colors 6014 LONG SLEEVE. Families demonstrably MIX garments and the three sources
+   * disagree, so "what may this family truthfully call itself" has no single answer.
+   *
+   * THE MODEL: each design group's copy is judged against THAT group's OWN resolved blank. The
+   * family UNION survives for exactly one thing — the broadcast/parent title, which is answerable
+   * to every child — and there it is not a permissive union but the DOMINANT class
+   * (`familyGarmentUnion` + GARMENT_UNION_DOMINANCE, reused verbatim from #631), so one stray child
+   * can never license its vocabulary for 34 SKUs.
+   *
+   * FAIL-OPEN AND LOUD: a group whose own blank does not resolve INHERITS the family dominant and
+   * says so in a log line, because silently inheriting is how the family-union bug looked from the
+   * outside for a whole live gate. */
+  const perDesignTruthCtx = new Map<string, { ctx: PhraseTruthCtx; families: TruthGarmentFamily[] }>()
+  const buildGroupTruthCtx = (
+    key: string,
+    groupChildren: readonly { sku?: string | null }[],
+    groupHay: string,
+  ): PhraseTruthCtx | null => {
+    if (!apparelProduct || groupChildren.length === 0) return titleTruthCtx
+    const res = resolveFamilyBlank(blankCatalog, groupChildren, blankOverride, groupHay, blankChildAssignments)
+    if (!res.garmentFamily) {
+      console.log(JSON.stringify({
+        tag: 'DESIGN_GARMENT_TRUTH', design: key, decision: 'inherit-family-dominant',
+        familyDominant: truthGarmentFamily, byStyle: res.byStyle, children: groupChildren.length,
+      }))
+      return titleTruthCtx
+    }
+    const union = familyGarmentUnion(blankCatalog, res, groupHay)
+    console.log(JSON.stringify({
+      tag: 'DESIGN_GARMENT_TRUTH', design: key, decision: 'own-blank',
+      garmentFamily: res.garmentFamily, union, byStyle: res.byStyle,
+      childAssignments: res.childAssignmentHits ?? 0, source: res.source, bySource: res.bySource ?? {}, children: groupChildren.length,
+    }))
+    const groupBrand = res.spec?.brandInCopy === false ? '' : (res.spec?.brand ?? '')
+    const ctx: PhraseTruthCtx = {
+      garmentFamily: res.garmentFamily,
+      mixedFamilies: union.length > 1 ? union : undefined,
+      spec: res.spec,
+      allowedBrand: groupBrand || null,
+      audience: audienceOfGarmentFamily(res.garmentFamily),
+      // The design-token exemption stays FAMILY-wide: it only ever makes the audience rules more
+      // permissive, and a sibling design's NAME is rejected by designScope's strict-names partition,
+      // which is the seam that owns cross-design contamination (#626, reused by #631).
+      designTokens: familyDesignNames,
+      audienceLean: normalizeAudienceLean(input.audienceLean),
+      field: 'title',
+    }
+    if (key) perDesignTruthCtx.set(key, { ctx, families: union.length ? union : [res.garmentFamily] })
+    return ctx
+  }
+  const backendTruthCtx = truthCtxFor('backend')
+  const bulletsTruthCtx = truthCtxFor('bullets')
+  const descTruthCtx = truthCtxFor('description')
+  /** THE backend fill's truth gate — phrase AND token level (see fillBackendToBudget). */
+  const backendTruthOk = (phrase: string): boolean => !backendTruthCtx || phraseTruthVerdict(phrase, backendTruthCtx).ok
   /* SHIP_BAND_NET (#147) — the FACTS the title band net may pad with. Product attributes only:
    * BLANK_SPECS values and a distinct garment surface form. NEVER a search-pool term, because a
    * title is a product claim (spec-grounding beats coverage). A missing fact contributes NO segment,
    * so a short-sleeve blank can never be padded with "Long Sleeve". */
   const bandGarment = garmentFor(input.productType, repTitle)
-  const titleBandCtx = (title: string): TitleBandCtx => ({
+  /* THE FAMILY'S OWN GARMENT VOCABULARY — the pad's second fact bank (PO 2026-08-21, live
+   * B0DSCDZC6K per-design titles at 61/64 against the 70-75 band).
+   *
+   * ROOT CAUSE THIS CURES: a MIXED-blank family claims only the INTERSECTION of its blanks' facts,
+   * so 18000 (Crew Neck) + 18500 (Hooded) agree on almost nothing; `garmentBrand` is '' because
+   * every Gildan row is brand_in_copy=false; and "Classic Fit" is title WASTE vocabulary. The pad's
+   * whole bank was therefore ONE ~8-char garment form — it improved a shortened title by ~11 chars
+   * and stopped ('facts-exhausted'). Nothing was wrong with the pad's ORDER or its wiring: it ran,
+   * on the right bytes, with nothing to say.
+   *
+   * These segments are PRODUCT FACTS, not market phrases: `resolveGarment` maps each garment_family
+   * in the family's OWN union to the same alias list the seed builders use, so a sweatshirt+hoodie
+   * family may say Sweatshirt / Crewneck / Pullover / Hooded Sweatshirt / Hoodie — every one of
+   * them true of a blank this family actually ships. `candidateSegments` still applies the waste,
+   * truth and already-states gates to each. No pool term ever reaches here. */
+  const garmentFactSegments = (fams: readonly TruthGarmentFamily[]): string[] => {
+    if (!apparelProduct) return []
+    const out: string[] = []
+    for (const f of fams) {
+      for (const alias of resolveGarment({ productType: input.productType, title: repTitle, blankFamily: f }).aliases) {
+        const seg = titleCasePhrase(alias)
+        if (seg && !out.includes(seg)) out.push(seg)
+      }
+    }
+    return out
+  }
+  const bandFactSegments: string[] = garmentFactSegments(
+    familyGarmentFamilies.length ? familyGarmentFamilies : (truthGarmentFamily && truthGarmentFamily !== 'none' ? [truthGarmentFamily] : []),
+  )
+  /** The pad's truth gate — the SAME spine predicate the terminal net judges with, so the last
+   *  writer in the door can never weld back the lie the net just removed. */
+  const bandTruthOkFor = (ctx: PhraseTruthCtx | null) => (segment: string): boolean => !ctx || phraseTruthVerdict(segment, ctx).ok
+  const bandTruthOk = bandTruthOkFor(titleTruthCtx)
+  /* TRUTHFUL POOL PHRASES — the pad's third and last bank (PO 2026-08-22, the cure for the revert).
+   *
+   * #630/#631 restricted the pad to BLANK_SPECS facts and were reverted at 29-49 chars against the
+   * 70-75 band. The restriction was never coherent: `enforceMoneyTail` installs a POOL KEYWORD in
+   * the title's money position on the same door pass, so the title has always carried pool
+   * vocabulary — only the PAD pretended otherwise. What matters is whether a phrase is TRUE of this
+   * product, and that is exactly what `bandTruthOk` asks of every one of these.
+   *
+   * `candidates` is already the title pool AFTER the off-niche and colour-neutral gates (:8693), so
+   * these are the same phrases the title producer itself may compose — nothing new is admitted to
+   * the title that the producer could not already have written. Ordered by the pool's own ranking;
+   * `candidateSegments` re-gates each one for truth, waste vocabulary and word-distinctness, and
+   * they sit BEHIND every spec fact so a family with a real fact bank pads exactly as it does
+   * today (`enforceTitleBand` returns on the first candidate that lands in band). */
+  const poolSegmentsFor = (truthOk: (s: string) => boolean, reject?: (s: string) => boolean): string[] => {
+    if (!apparelProduct) return []
+    const out: string[] = []
+    for (const c of candidates) {
+      const kw = (c.keyword ?? '').trim()
+      // 3..38 chars: shorter than 3 is not a phrase, and a segment longer than the whole band gap
+      // can never land IN band — it would only ever overshoot the 75 cap and be skipped.
+      if (kw.length < 3 || kw.length > 38) continue
+      if (!truthOk(kw)) continue
+      // A per-child exit rejects every OTHER design's name here for the same reason the truth net
+      // does: a pad that welds a sibling's identity into this design's title is the #631 defect
+      // re-created by the very mechanism meant to cure the band.
+      if (reject && reject(kw)) continue
+      const seg = titleCasePhrase(kw)
+      if (seg && !out.includes(seg)) out.push(seg)
+      if (out.length >= 24) break
+    }
+    return out
+  }
+  const bandPoolSegments: string[] = poolSegmentsFor(bandTruthOk)
+  /** The band context for ONE exit. Defaults are the FAMILY's (the broadcast/parent title, which is
+   *  answerable to every child); a per-child exit passes ITS design's truth ctx, garment vocabulary
+   *  and design-scoped pool, so the pad speaks for the same design the truth net judges. */
+  const titleBandCtx = (
+    title: string,
+    scope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[] },
+  ): TitleBandCtx => ({
     apparel: apparelProduct,
     customizable: input.customizable === true,
     garmentBrand: garmentBrandCanonical || null,
+    factSegments: scope?.facts ?? bandFactSegments,
+    poolSegments: scope?.pool ?? bandPoolSegments,
+    truthOk: scope?.truthOk ?? bandTruthOk,
     spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
     // Delegated to the TESTED leaf. This was six inline lines here and shipped two invisible escaping
     // bugs: a word-boundary escape one backslash short inside a template literal (it compiled to the
@@ -8877,7 +9294,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * only place that knows which designs a given exit covers — the broadcast title is answerable to
    * EVERY design in the family, a per-child title to its own group's. Defaults to the family name so
    * an un-passed call is protected, never guard-off. */
-  const bandTitle = (title: string, produced: boolean, moneyKws: readonly string[] | null = null, protectDesign: string | null = null): string => {
+  /* OPERATOR-VISIBLE HOLDS from the terminal truth+band net. One entry per title that could not be
+   * shipped truthful AND in band; surfaced on `debug.titleHolds` and appended to `titleProblems`,
+   * so the refusal is readable from the regen response itself and never needs a log grep. */
+  const titleBandHolds: { scope: string; parent: string | null; len: number; tried: string[]; reason: string; kept: string }[] = []
+  const bandTitle = (
+    title: string,
+    produced: boolean,
+    moneyKws: readonly string[] | null = null,
+    protectDesign: string | null = null,
+    prior: string | null = null,
+    holdScope = 'broadcast',
+    /* THE EXIT'S OWN BAND SCOPE. Undefined = the FAMILY's facts, truth gate and pool — correct for
+     * the broadcast/parent title, which is answerable to every child. A per-child exit passes ITS
+     * design's, so the pad that re-fills a title speaks for the same design the truth net judged. */
+    bandScope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[]; truth?: PhraseTruthCtx | null; reject?: (s: string) => boolean },
+  ): string => {
     if (!produced || !title) return title
     /* P0 INSTRUMENTATION (2026-08-12) — RECORD THE BYTES, NOT THEIR LENGTH.
      *
@@ -8909,6 +9341,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     title = cased
     mark('APOSTROPHE_CASE', title)
+    /* THE CENSOR-STAR TWIN (PO 2026-08-21, live B0DSCDZC6K: "Business B*Tch"). A star is a non-word
+     * character, so the repo's `\b\w` Title-Case pass capitalises the letter AFTER it and mangles
+     * the seller's own design name mid-word. Same properties as the apostrophe fix — length-neutral,
+     * idempotent — so it runs beside it, terminally, catching a council/LLM title, a stored prior or
+     * a caser added tomorrow. The producers are fixed at source too (`titleCasePhrase`). */
+    const starred = fixCensorStarCase(title)
+    if (starred !== title) {
+      console.log(JSON.stringify({ tag: 'SHIP_CENSOR_STAR_CASE', field: 'title', from: title, to: starred }))
+    }
+    title = starred
+    mark('CENSOR_STAR_CASE', title)
     /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
      * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
      * "Heavyweight" into a midweight blank's title as if it were fact. Claims the blank spec does
@@ -8978,7 +9421,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
      * arm alone). Fail-open: any removal that satisfies neither arm returns byte-identical. */
     const waste = stripTitleWasteVocabulary(capped, {
       apparel: apparelProduct,
-      band: titleBandCtx(capped),
+      band: titleBandCtx(capped, bandScope),
       moneyKws: moneyTailMode === 'on' ? (moneyKws ?? null) : null,
       money: moneyCtx,
     })
@@ -9024,7 +9467,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const colorNet = stripVariantColorWords(moneyed, {
       apparel: apparelProduct,
       protect: protectDesign || effectiveDesignName || designName || null,
-      band: titleBandCtx(moneyed),
+      band: titleBandCtx(moneyed, bandScope),
     })
     console.log('[TITLE_GOLD]', JSON.stringify({
       tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision,
@@ -9040,7 +9483,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
      * own: never co-occur with a gendered noun (delete), never appear on a leaned listing (narrow to
      * the leaned gender). It re-pads from facts internally and refuses any removal it cannot land
      * back inside the band, so a skip is byte-identical. */
-    const inc = enforceInclusiveAudience(moneyed, { apparel: apparelProduct, lean, band: titleBandCtx(moneyed) })
+    const inc = enforceInclusiveAudience(moneyed, { apparel: apparelProduct, lean, band: titleBandCtx(moneyed, bandScope) })
     console.log('[TITLE_GOLD]', JSON.stringify({
       tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision,
       from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note,
@@ -9060,7 +9503,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const v4NoPad = v4Applies()
     const v = v4NoPad
       ? { title: moneyed, decision: 'v4-no-pad', notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
-      : enforceTitleBand(moneyed, titleBandCtx(moneyed))
+      : enforceTitleBand(moneyed, titleBandCtx(moneyed, bandScope))
     // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
     // logged only when it changed something, so on the first live run after deploy — a 75-char title
     // and no log line — "the net works", "the net never fired" and "the net fired and did nothing"
@@ -9127,11 +9570,91 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // readable from the regen response itself, by anyone, without shell access.
       v4Diffs.push(entry)
     }
+    /* ── THE NAMED REFUSAL (PO 2026-08-21) ────────────────────────────────────────────────────
+     * "If a title genuinely cannot reach 70 with true facts, it must still be truthful — log a
+     * named reason rather than padding with a lie." The pad above only ever adds PRODUCT FACTS and
+     * refuses to invent; when the family's own facts cannot span the gap the honest outcome is a
+     * short title AND a line that says which fact bank ran dry. Without this the only evidence was
+     * a `SHIP_BAND_DECISION` buried among nine other stages, so "the pad is mis-wired" and "the pad
+     * had nothing to say" were indistinguishable — which is exactly how this defect survived the
+     * spine's first live gate. `reason` is the pad's own decision, so it names the cure:
+     *   no-facts        — the blank contributes NOTHING (add the blank / its facts to blank_specs)
+     *   facts-exhausted — the facts ran out mid-gap (this family's blanks agree on too little)
+     *   v4-no-pad       — TITLE_V4=on: the pad is deleted by policy; short IS the refusal
+     *   post-pad-short  — the pad reached the band and a later terminal gate shortened it again */
+    if (apparelProduct && drop.title.length < TITLE_BAND_LO) {
+      console.warn(JSON.stringify({
+        tag: 'TITLE_UNDER_BAND',
+        parent: input.parentAsin ?? null,
+        len: drop.title.length,
+        reason: v.decision === 'padded' || v.decision === 'in-band' ? 'post-pad-short' : v.decision,
+        band: TITLE_BAND_LO,
+        facts: candidateFactCount(moneyed, titleBandCtx(moneyed, bandScope)),
+        note: v.notes[0] ?? '',
+      }))
+    }
+    /* ── THE ONE NET: TRUTH AND BAND SETTLE TOGETHER (PO 2026-08-22) ──────────────────────────
+     *
+     * TERMINAL, on the exact bytes that ship, after every other net including the facts pad and the
+     * money-position gate. Everything above this line may SHORTEN a title; this is the single place
+     * that decides whether a shortened title is allowed to leave the door at all.
+     *
+     * PRs #630/#631 had the truth half and no additive counterpart, so they shipped true 29-49 char
+     * titles against a 70-75 band and were reverted off production. The exit condition is now the
+     * WHOLE contract — truthful AND in band — and it is satisfied by re-filling from TRUE material
+     * (spec facts, the family's own garment vocabulary, and truthful pool phrases) or not at all.
+     * A title that cannot satisfy both is a REFUSAL that preserves the live title and raises an
+     * operator hold; it is never a stub, and it is never silent. */
+    const settled = enforceTitleTruthBand({
+      produced: drop.title,
+      prior,
+      apparel: apparelProduct,
+      band: titleBandCtx(drop.title, bandScope),
+      truth: bandScope?.truth ?? titleTruthCtx,
+      // Both call sites already pass the exit's design protect hay as `protectDesign` (the family
+      // union for the broadcast title, THIS design's name for a per-child one), so the terminal net
+      // protects exactly what the early one did.
+      protect: protectDesign ?? '',
+      reject: bandScope?.reject,
+    })
+    console.log(JSON.stringify({
+      tag: 'TITLE_TRUTH_BAND', scope: holdScope, parent: input.parentAsin ?? null,
+      decision: settled.decision, from: drop.title.length, netted: settled.netted.length, to: settled.len,
+      changed: settled.title !== drop.title, reason: settled.reason,
+    }))
+    // The terminal truth pass caught a lie a LATER stage installed — almost always the money tail,
+    // whose candidates are off-niche-filtered but never truth-filtered. Rare and always worth a line.
+    if (settled.netted !== drop.title) {
+      console.warn(JSON.stringify({ tag: 'TITLE_TERMINAL_TRUTH_CATCH', scope: holdScope, parent: input.parentAsin ?? null, from: drop.title, to: settled.netted }))
+    }
+    if (settled.hold) {
+      /* THE NAMED REFUSAL. `tried` is the full list of true segments the pad had available, so
+       * "the pad is mis-wired" (tried is empty when facts obviously exist) and "the pad had nothing
+       * true left to say" (tried is full and none fit) are one log line apart — the distinction
+       * that let this defect survive the spine's first live gate. */
+      console.warn(JSON.stringify({
+        tag: 'TITLE_BAND_UNREACHABLE',
+        parent: input.parentAsin ?? null,
+        scope: holdScope,
+        len: settled.len,
+        band: TITLE_BAND_LO,
+        tried: settled.tried,
+        reason: settled.reason,
+        decision: settled.decision,
+        produced: drop.title,
+        kept: settled.title,
+      }))
+      titleBandHolds.push({
+        scope: holdScope, parent: input.parentAsin ?? null, len: settled.len,
+        tried: settled.tried, reason: settled.reason, kept: settled.title,
+      })
+    }
+    if (settled.title !== drop.title) mark('TRUTH_BAND_SETTLE', settled.title)
     // ONE line per trip. `stages` is the ordered list of every stage that actually rewrote the
     // string — i.e. the authorship record. An empty `stages` means the door shipped the producer's
     // bytes untouched, which is the state the architecture is aiming for.
-    console.log('[TITLE_DOOR_TRACE]', JSON.stringify({ id: traceId, in: inTitle, out: drop.title, stages: trace }))
-    return drop.title
+    console.log('[TITLE_DOOR_TRACE]', JSON.stringify({ id: traceId, in: inTitle, out: settled.title, stages: trace }))
+    return settled.title
   }
   /* SHIP CENSUS (Phase 2 of the foundation plan) — MEASURE-ONLY, on the object this function
    * RETURNS, i.e. the exact bytes that persist. It exists because of a same-day live specimen: the
@@ -9201,8 +9724,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // bytes from the stored/approved ones. Run the SAME phrase-aware terminal scrub the push runs
   // (scrubCelebrityNames) right beside scrubTrademarks on every published surface, so stored ≡
   // pushed. Idempotent; runs before bandTitle so the band pad can re-fill any freed chars.
+  /** What ONE title exit may keep and what it must drop: the design names it is answerable to, and
+   *  the sibling-design rejector (per-child exits only). */
+  interface TitleDropScope {
+    protect: string
+    reject?: (segment: string) => boolean
+    /** THIS design's own garment truth (PO 2026-08-22). Absent ⇒ the family ctx, which is correct
+     *  for the broadcast/parent title and wrong for every per-child one on a mixed family. */
+    truth?: PhraseTruthCtx | null
+  }
+  /** …plus the truth door BOUND to that scope, so every exit calls the same `(text, produced)`, and
+   *  the BAND scope bound to the same design — one object, so a caller cannot pass the truth net one
+   *  design's verdict and the pad another's. */
+  interface TitleExitScope extends TitleDropScope {
+    titleTruthDoor: (t: string, produced: boolean) => string
+    band: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[]; truth?: PhraseTruthCtx | null; reject?: (s: string) => boolean }
+  }
   const scrubPub = (s: string, fieldCtx: string): string => scrubCelebrityNames(scrubTrademarks(s), `pipeline:${fieldCtx}`)
   const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => {
+  // Holds belong to THIS exit. `scrubPublished` can run more than once in a process (a partial and
+  // a full result), and a hold carried over from an earlier call would report a refusal against a
+  // title this exit shipped cleanly — a false alarm is as corrosive to a hold surface as a miss.
+  titleBandHolds.length = 0
   /* DESIGN VOCABULARY THE COLOR NET MUST NOT STRIP (DEFECT B). Resolved HERE because this is the one
    * place that sees the whole result: on a multi-design family `effectiveDesignName` is deliberately
    * '' (:7750) and each design's name lives on its own per_child_titles row, so the FAMILY protect
@@ -9213,10 +9756,102 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     effectiveDesignName || designName,
     ...(r.per_child_titles ?? []).map((c) => c.designName ?? ''),
   ].filter(Boolean).join(' ')
+  /* TERMINAL TITLE TRUTH NET (2026-08-21) — installed HERE, at the single choke point every exit
+   * passes through (`partialResult` is defined as a scrubPublished wrapper), so it reaches the
+   * broadcast title, EVERY per-child title, and every section-regen partial by construction —
+   * INVARIANT 1 (both producers) + INVARIANT 3 (opt-OUT, never opt-in) in one place.
+   *
+   * ORDER IS LOAD-BEARING: strip competitor blanks (word-level, own blank exempt) → drop untrue
+   * PHRASES (segment-level, blank-grounded) → THEN band. Both edits only SHORTEN, and `bandTitle`
+   * re-pads from BLANK_SPECS facts — never from the search pool — so a truthful title that lost a
+   * lie is re-filled with product truth, not more market vocabulary. */
+  const titleTruthDoor = (t: string, produced: boolean, scope?: TitleDropScope): string => {
+    // `produced` mirrors bandTitle's own guard: a bullets/keywords-only regen passes the PRIOR
+    // (possibly PO-locked) title through, and a net that edits a field the run did not produce is a
+    // silent unrequested rewrite. `scope` is the per-child exit's design scope (see titleScopeFor).
+    if (!t || !produced || !apparelProduct) return t
+    const stripped = stripCompetitorBlanks(t, attributePinFinal ?? '')
+    // PER-DESIGN GARMENT TRUTH at the door too (PO 2026-08-22): a per-child title is judged against
+    // ITS OWN design's resolved blank, so the one long-sleeve child inside a sweatshirt family is
+    // not convicted of a garment lie for saying what it actually is. The broadcast title keeps the
+    // family ctx, where the DOMINANT-class union is the right authority.
+    const ctx = scope?.truth ?? titleTruthCtx
+    return ctx
+      ? applyTitleTruthNet(stripped, ctx, scope?.protect ?? protectHay, { rejectSegment: scope?.reject })
+      : stripped
+  }
+  /* CROSS-DESIGN SCOPE FOR THE PER-CHILD EXIT (PO 2026-08-21, live B0DSCDZC6K). The "Business
+   * B*tch" DESIGN NAME shipped inside THREE other designs' titles, and the truth net's own
+   * protection is what let it: `protectHay` above is the UNION of every design name in the family,
+   * so `carriesSoleDesignWord` treated a SIBLING's name as a design word worth protecting and kept
+   * the phrase carrying it.
+   *
+   * A per-child title is answerable to ONE design. So on that exit the protect hay is THAT design's
+   * name only, and every OTHER design's name is REJECTED OUTRIGHT — via designScope's STRICT-NAMES
+   * partition, the exact seam the per-design Item Highlight already uses (#626). No second scoper.
+   *
+   * DELIBERATELY NO familyTitle / pool EXEMPTIONS HERE, unlike the candidate-filter callers. Those
+   * exemptions answer "is this pool phrase the family's niche word?", where over-blocking starves a
+   * pool. At the SHIP DOOR the question is "does this title carry another design's name?", and an
+   * exemption sourced from the family TITLE would be circular — the title is the thing on trial.
+   * What survives is intrinsic to the names: a design's own tokens, and a token shared by >=50% of
+   * the family's names (the family's real niche word, e.g. "Fishing"). The BROADCAST/parent title
+   * takes no scope at all: a family hub title is answerable to every design in the family. */
+  /** THIS child's own live title (SKU first, then ASIN), or the family's prior title as the last
+   *  resort. A truth+band refusal preserves what is live on THAT child — handing it a sibling
+   *  design's title would be a worse defect than the short title the refusal is avoiding. */
+  const priorTitleForChild = (c: { sku?: string; asin?: string }): string | null => {
+    const rows = input.priorPerChildTitles ?? []
+    const bySku = c.sku ? rows.find((p) => p.sku === c.sku && (p.title ?? '').trim()) : undefined
+    const byAsin = !bySku && c.asin ? rows.find((p) => p.asin === c.asin && (p.title ?? '').trim()) : undefined
+    return (bySku ?? byAsin)?.title?.trim() || input.priorTitle?.trim() || null
+  }
+  const perChildDesignScope = buildForeignDesignTokens(
+    [...new Map((r.per_child_titles ?? [])
+      .map((c) => [c.designKey || c.sku || c.asin || '', (c.designName ?? '').trim()] as const)
+      .filter(([k, n]) => !!k && !!n)).entries()].map(([key, name]) => ({ key, name })),
+    { familyTitleText: '', poolKeywords: [], strictNames: true },
+  )
+  /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
+   *  door BOUND to them — so every exit calls the same `(text, produced)` shape and no caller can
+   *  forget to pass the scope. */
+  const titleScopeFor = (c: { designKey?: string; sku?: string; asin?: string; designName?: string }): TitleExitScope => {
+    const key = c.designKey || c.sku || c.asin || ''
+    const own = (c.designName ?? '').trim()
+    // Fail-open: an unresolved design name leaves the FAMILY protect hay in place rather than
+    // stripping protection off a title we cannot scope — under-protection corrupts a design name.
+    const foreign = key && own ? perChildDesignScope(key) : new Set<string>()
+    const protect = key && own ? own : protectHay
+    const reject = foreign.size ? (seg: string) => isForeignToDesign(seg, foreign) : undefined
+    /* THIS DESIGN'S OWN GARMENT TRUTH, resolved during the per-design title fan-out from the
+     * group's own children (`buildGroupTruthCtx`). Absent — a single-design family, a section regen
+     * that never ran the fan-out, or a group whose blank did not resolve — falls back to the family
+     * ctx, which is exactly the fail-open the rest of the spine takes. */
+    const perDesign = key ? perDesignTruthCtx.get(key) : undefined
+    const truth = perDesign?.ctx ?? titleTruthCtx
+    /* ONE OBJECT FOR BOTH HALVES. The truth net and the band pad must answer to the SAME design, or
+     * the pad re-fills a title with vocabulary the net would have deleted — which is precisely how
+     * a subtractive net and an additive producer drift apart. */
+    const bandTruth = perDesign ? bandTruthOkFor(perDesign.ctx) : bandTruthOk
+    const band = {
+      truthOk: bandTruth,
+      facts: perDesign ? garmentFactSegments(perDesign.families) : bandFactSegments,
+      pool: perDesign || reject ? poolSegmentsFor(bandTruth, reject) : bandPoolSegments,
+      // …and the terminal truth net's own two arguments, so the LAST pass over the shipped bytes
+      // judges this per-child title against the SAME design as every stage before it.
+      truth,
+      reject,
+    }
+    // The property NAME shadows nothing: the body's `titleTruthDoor` is the shared door above.
+    return { protect, reject, truth, band, titleTruthDoor: (t: string, produced: boolean) => titleTruthDoor(t, produced, { protect, reject, truth }) }
+  }
   return censusLog({
     ...r,
     // Third arg = the derived money-keyword candidates (TITLE_MONEY_TAIL) — BROADCAST title only in Phase 1.
-    recommended_title: bandTitle(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false, titleMoneyKws, protectHay),
+    // `input.priorTitle` is what is LIVE on Amazon today — the string a truth+band refusal
+    // preserves rather than replacing with a truthful stub (the exact trade that got #630/#631
+    // reverted). Passing it here is what makes the refusal a no-op instead of a regression.
+    recommended_title: bandTitle(titleTruthDoor(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false), opts?.titleProduced !== false, titleMoneyKws, protectHay, input.priorTitle ?? null, 'broadcast'),
     recommended_bullets: scrubCelebrityNamesArr(scrubTrademarksArr(r.recommended_bullets), 'pipeline:bullets'),
     recommended_description: scrubPub(r.recommended_description, 'description'),
     // RE-CAP AFTER THE SCRUB (2026-08-10) — the same discipline the title door already applies at
@@ -9233,7 +9868,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
-    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false, null, protectHay) })),
+    per_child_titles: r.per_child_titles?.map((c) => {
+      // The scope carries the door BOUND to it, so this exit reads exactly like the broadcast one
+      // — same `(text, produced)` call shape, and no caller can forget to pass the design scope.
+      const { titleTruthDoor, protect, band } = titleScopeFor(c)
+      // THIS CHILD'S OWN live title is its refusal fallback — never the family broadcast title and
+      // never a sibling design's, which would hand the seller another design's copy on a hold.
+      const priorForChild = priorTitleForChild(c)
+      return { ...c, title: bandTitle(titleTruthDoor(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false), opts?.titleProduced !== false, null, protect, priorForChild, c.designKey || c.sku || c.asin || 'per-child', band) }
+    }),
     // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
     // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
     // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
@@ -9249,6 +9892,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     action_plan: scrubTrademarksDeep(r.action_plan),
     keyword_reconciliation: scrubTrademarksDeep(r.keyword_reconciliation),
     product_details_improvements: scrubTrademarksDeep(r.product_details_improvements),
+    /* THE HOLD SURFACE — LAST IN THIS LITERAL, and that ordering is load-bearing: object properties
+     * evaluate in source order, so every title exit above has already run and pushed its holds by
+     * the time this line reads them. A refusal that only reached a log line would need shell access
+     * to see, and "never exit below the band SILENTLY" would be satisfied on a technicality. The
+     * holds also ride `titleProblems`, which the regen UI already renders. */
+    debug: {
+      ...r.debug,
+      titleProblems: [
+        ...(r.debug?.titleProblems ?? []),
+        ...titleBandHolds.map((h) => `[${h.scope}] TITLE HELD — ${h.reason} (kept: "${h.kept}")`),
+      ],
+      ...(titleBandHolds.length ? { titleHolds: titleBandHolds.map((h) => ({ ...h })) } : {}),
+    },
   })
   }
   const partialResult = (section: NonNullable<PipelineInput['onlySection']>, fields: Partial<PipelineResult>): PipelineResult => scrubPublished({
@@ -9368,7 +10024,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // BOTH the per-design title loop (multi-design, !unifiedSet) and the Phase-2 unified-set path so the
     // couple concept names the SAME design names the per-design path would have produced. (Extracted
     // verbatim from the Phase-1 loop body; buildTitleFor is the only part the unified path does NOT do.)
-    const resolveGroupDesignName = async (group: DesignGroup): Promise<{ group: DesignGroup; groupInput: PipelineInput; groupDesignName: string; groupIdentityPhrases: string[] }> => {
+    const resolveGroupDesignName = async (group: DesignGroup): Promise<{ group: DesignGroup; groupInput: PipelineInput; groupDesignName: string; groupIdentityPhrases: string[]; groupTruthCtx: PhraseTruthCtx | null }> => {
       const groupChildren = group.skus
         .map((s) => input.children.find((c) => c.sku === s.sku))
         .filter((c): c is NonNullable<typeof c> => Boolean(c))
@@ -9426,7 +10082,22 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // through — per-design content must anchor on the design, never the shirt color.
       let groupDesignName = extracted.name
       if (!groupDesignName?.trim() || isGarmentColor(groupDesignName)) groupDesignName = keyLabel || groupDesignName || ''
-      return { group, groupInput, groupDesignName, groupIdentityPhrases }
+      // TRUTH SPINE, design-token exemption: register this design's name the moment the EXISTING
+      // resolver produces it — one seam covering both the couple path and the per-design loop, and
+      // always BEFORE this group's buildTitleFor call, so the title path never depends on the order
+      // the groups resolve in.
+      pushDesignName(groupDesignName)
+      /* PER-DESIGN GARMENT TRUTH — resolved from THIS group's own children, against THIS group's
+       * own hay, through the same resolver + child-override precedence the family uses. Built here
+       * because this is the one seam every per-design title passes through, and always BEFORE the
+       * group's `buildTitleFor` call, so the title path never depends on group resolution order. */
+      const groupSkuHay = group.skus.map((s) => s.sku).filter(Boolean).join(' ')
+      const groupTruthCtx = buildGroupTruthCtx(
+        group.key,
+        groupChildren.length ? groupChildren : group.skus.map((s) => ({ sku: s.sku })),
+        [attributePinFinal, groupRepTitle, input.productType, groupSkuHay].filter(Boolean).join(' '),
+      )
+      return { group, groupInput, groupDesignName, groupIdentityPhrases, groupTruthCtx }
     }
     if (unifiedSet) {
       // UNIFIED-SET (couple / matching). The family is ONE concept split across halves — do NOT
@@ -9442,9 +10113,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // Fall back to the family designName, then a bare "Couple Matching" — never a leading space.
       const conceptBase = allDesignNames.length ? allDesignNames.join(' & ') : designName.trim()
       coupleConcept = (conceptBase ? `${conceptBase} ` : '') + 'Couple Matching'
+      pushDesignName(coupleConcept)   // the couple concept IS this family's design name (truth spine)
       // ONE shared title — buildTitleFor with coupleConcept AS the designName, so it leads the title
       // and the design-name backstop (guard 6) re-inserts it verbatim if the council drops it.
-      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName, season)
+      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName, season, titleTruthCtx)
       finalTitle = r.title
       titleProblems = r.problems
       retried = r.retried
@@ -9454,9 +10126,37 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     } else {
       onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
       perChildTitles = []
-      const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
-        const { groupInput, groupDesignName, groupIdentityPhrases } = await resolveGroupDesignName(group)
-        const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName, season)
+      /* NAMES FIRST, THEN TITLES (PO 2026-08-21, live B0DSCDZC6K). Every design's title used to be
+       * written from the UNSCOPED family pool — a pool harvested on ONE design's identity is full of
+       * that design — so "Business B*tch" was composed into three OTHER designs' titles. Bullets,
+       * description, backend and the Item Highlight all scope the pool per design; the TITLE was the
+       * one fan-out that never did, because the design names were only resolved INSIDE the same
+       * Promise.all that wrote the titles.
+       *
+       * So resolve every group's name (the expensive half — one vision scan per design) in one
+       * parallel pass, build designScope's STRICT-NAMES partition from the resolved names, and write
+       * the titles in a second parallel pass against the SCOPED pool. Same total work, same
+       * parallelism, and the terminal net at the ship door stays the backstop rather than the cure. */
+      const resolvedGroups = await Promise.all(designGroupInfo.groups.map((group) => resolveGroupDesignName(group)))
+      const titleForeignFor = buildForeignDesignTokens(
+        resolvedGroups.map((rg) => ({ key: rg.group.key, name: rg.groupDesignName, identity: rg.groupIdentityPhrases })),
+        // Candidate-FILTER semantics (unlike the ship door): the family's niche vocabulary must stay
+        // available to every design, so the family title + pool-frequency exemptions apply exactly as
+        // they do for the bullets/description partition. STRICT on NAMES — another design's name is
+        // foreign however full of it the shared pool is.
+        { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: candidates.map((c) => c.keyword), strictNames: true },
+      )
+      const groupResults = await Promise.all(resolvedGroups.map(async (rg) => {
+        const { group, groupInput, groupDesignName, groupIdentityPhrases, groupTruthCtx } = rg
+        const foreign = titleForeignFor(group.key)
+        const scoped = foreign.size ? candidates.filter((c) => !isForeignToDesign(c.keyword, foreign)) : candidates
+        if (scoped.length !== candidates.length) {
+          console.log(JSON.stringify({ tag: 'TITLE_DESIGN_SCOPE', design: group.key, name: groupDesignName, pool: candidates.length, scoped: scoped.length, foreign: [...foreign].slice(0, 12) }))
+        }
+        // THIS group's OWN garment truth, not the family's. A design group whose blank resolves to a
+        // long_sleeve_tee inside a sweatshirt family may truthfully say "Long Sleeve Shirt"; the
+        // sweatshirt groups still may not say "shirt" at all.
+        const r = await buildTitleFor(groupInput, scoped, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName, season, groupTruthCtx ?? titleTruthCtx)
         // groupInput is returned so the bullets/description stages can reuse the resolved per-group
         // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
         return { group, groupInput, groupDesignName, groupIdentityPhrases, ...r }
@@ -9555,11 +10255,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // a truly mixed-lean family should have audienceLean='unisex' set on the parent; a lean_female/lean_male
       // family value means the seller has already asserted family-level unanimity). Fallback null on non-apparel.
       const parentLean: AudienceLean = apparelProduct ? (input.audienceLean ?? null) : null
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.__v4Sink)
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.__v4Sink, titleTruthCtx)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
-    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName, season)
+    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName, season, titleTruthCtx)
     finalTitle = r.title
     titleProblems = r.problems
     retried = r.retried
@@ -9689,7 +10389,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // per-child bullet under BULLET_MIN_CHARS via gpt-4.1-mini, keeping the ALL-CAPS hook and
       // running the same deterministic post-scrub as existing bullets.
       if (gb.length === 5) gb = await expandShortBulletsTerminal(input.openai, gb, {
-        title: ctx.title, designName: ctx.designName, fit, garmentBrand: brand,
+        title: ctx.title, designName: ctx.designName, fit, garmentBrand: brand, truth: bulletsTruthCtx,
       })
       // 3) Broadcast the gated copy back to EVERY SKU in the group by ctx.skus membership (authoritative —
       //    the per-child designKey is optional and may be unset). They shared one set, so this is free.
@@ -10056,7 +10756,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // loop; the bullets-only path never did, so a section-regen could ship broadcast bullets < 150. Wire
     // the SAME terminal net here. apparel-gated to match the full-path guard.
     if (apparelProduct && Array.isArray(bullets) && bullets.length === 5) {
-      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true, weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch }
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true, weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch, truth: bulletsTruthCtx }
       bullets = await applyTerminalNets('bullets', bullets, spineCtx) as string[]
     }
     // Per-child multi-design bullets the push prefers now get the SAME gate (task #61) — closing the
@@ -10308,7 +11008,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // garment-noun candidate against the title (which stably indexes the product type), not against
         // bullets — bullets are transient prose and their "graphic"/"gift"/etc. would wrongly block
         // high-volume opportunity phrases from ever landing in backend where Content step 2 needs them.
-        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(groupBan, input.customizable === true), groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
+        rows = rows.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), ctx.groupInput.canonicalTitle, groupPool.map((k) => k.keyword), ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(groupBan, input.customizable === true), groupIndexed, topVolumeBackendPhrases(groupPool), ctx.title, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : []), backendTruthOk) }))
         return rows
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -10333,7 +11033,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // defaulting to the REP design's name would exempt design A's tokens on design B's children,
         // re-introducing the cross-design pollution the per-design fan-out (#12) removed.
         const restIndexed = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
-        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(banBackendTok, input.customizable === true), restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])) }))
+        rest = rest.map((p) => ({ ...p, keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(banBackendTok, input.customizable === true), restIndexed, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : []), backendTruthOk) }))
         rows.push(...rest)
       } catch (e) {
         if (throwOnGroupFailure) throw e
@@ -10354,7 +11054,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // useCouncil:false — runs once PER design group inside a Promise.all; N parallel GPT-5
         // councils would be cost/latency-prohibitive. Only the broadcast description gets the council.
         // descAttrs (real facts, no search phrases) + [] opportunity kws — same clean-prose rule as broadcast.
-        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, descAttrs, compatibilityBrands, [], false)
+        const raw = await runDescriptionAgent(ctx.groupInput, ctx.title, groupBullets, descAttrs, compatibilityBrands, [], false, descTruthCtx)
         const groupMotif = `${ctx.groupInput.canonicalTitle ?? ''} ${ctx.groupInput.repTitle ?? ''} ${ctx.designName}`.toLowerCase()
         // 3rd arg = sellerGarmentText (parity-audit #8: it was missing, so the heavy-garment-
         // stuffing guard never fired for per-design descriptions).
@@ -10401,7 +11101,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       const idx = mkAlreadyIndexed(finalTitle, bullets, broadcastDesignAnchor)
       out = out.map((p) => ({
         ...p,
-        keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(banBackendTok, input.customizable === true), idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
+        keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(banBackendTok, input.customizable === true), idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : []), backendTruthOk),
       }))
       return out
     }
@@ -10439,7 +11139,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     return partialResult('keywords', { per_child_keywords: perChildOnly })
   }
   if (only === 'description') {
-    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, descAttrs, compatibilityBrands, [])
+    let descriptionOnly = await runDescriptionAgent(input, finalTitle, bullets, descAttrs, compatibilityBrands, [], true, descTruthCtx)
     // broadcastMotifTrust (review-caught): the plain motifTrust stripped a unified-set's couple
     // design names on description-only partials, where the full regen deliberately preserves them.
     if (apparelProduct) descriptionOnly = stripCompetitorBlanks(stripContradictedGarments(stripUngroundedMotifs(descriptionOnly, broadcastMotifTrust), `${broadcastMotifTrust} ${input.productType ?? ''}`.toLowerCase(), broadcastMotifTrust), attributePinFinal ?? '')
@@ -10460,7 +11160,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // so a section-regen could ship brand-in-body / "screen-printed" / sub-900 broadcast copy. Wire the
     // SAME terminal net here, before the per-design fan-out and the existing capDescriptionVisible below.
     {
-      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true, weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch }
+      const spineCtx = { openai: input.openai, finalTitle, designName: effectiveDesignName || '', fit: truthFitEarly, brandName: brandName || 'THE CEO', garmentBrand: blankSpec?.brand, unisex: blankSpec?.unisex === true, weightNote: blankSpec?.weightNote, stretch: blankSpec?.stretch, truth: bulletsTruthCtx }
       if (descriptionOnly && brandName) {
         descriptionOnly = await applyTerminalNets('description', descriptionOnly, spineCtx) as string
       }
@@ -10493,7 +11193,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       if (pd) { usedPerDesignBackend = true; return pd }
       return await runBackendAgent(input, finalTitle, bullets, backendPool, broadcastDesignAnchor, banBackendTok)
     })(),
-    runDescriptionAgent(input, finalTitle, bullets, descAttrs, compatibilityBrands, []),
+    runDescriptionAgent(input, finalTitle, bullets, descAttrs, compatibilityBrands, [], true, descTruthCtx),
   ])
   // Fill each child toward the 250-byte budget (seller's canonical descriptors first —
   // "country western" — then leftover pool keywords), THEN the hard-lean gender strip
@@ -10515,7 +11215,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const ban = extraBan ? (w: string) => banBackendTok(w) || extraBan(w) : banBackendTok
     out = out.map((p) => ({
       ...p,
-      keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(ban, input.customizable === true), idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : [])),
+      keywords: fillBackendToBudget(stripCapabilityClaims(p.keywords, input.customizable === true), input.canonicalTitle, backendKeywordPool, ownB, capacityFamilyTokens.length >= 2, composeCapabilityBan(ban, input.customizable === true), idx, topVolumeBackendPhrases(backendPool), finalTitle, blankSpecFactTokens(blankSpec).concat(input.customizable ? ['personalized custom'] : []), backendTruthOk),
     }))
     return out
   }
@@ -10868,7 +11568,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // SKU-first (PO 2026-08-21): same children + override as the FACT resolution above; only the
     // legacy-fallback hay differs (no pin), so SKU-resolved families are byte-identical at both sites.
     const blankBrandNetRow = apparelProduct
-      ? familyBlankRow(resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, [input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')))
+      ? familyBlankRow(resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, [input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' '), blankChildAssignments))
       : null
     // Per-child titles join the net set (adversarial LOW, multi-design): the IH is ONE broadcast
     // value pushed to every SKU, while per_child_titles ship per SKU — the waterfall is satisfied
@@ -11025,6 +11725,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       designName: effectiveDesignName || '',
       fit: truthFit,
       garmentBrand: blankSpec?.brand,
+      truth: bulletsTruthCtx,
     })
   }
 

@@ -35,7 +35,15 @@ import { CONTENT_CONTRACT } from './contentContract'
 import { makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
 import { ihFoldWord, IH_INSIGNIFICANT, ihRepeatViolations } from './productDetailAttrs'
 import { scrubTrademarks } from './trademarkGuard'
-import { trueWeightClass, PERFORMANCE_CLAIM_RE, type BlankSpec, type GarmentFamily } from './blankSpecs'
+import { type BlankSpec } from './blankSpecs'
+import {
+  phraseTruthVerdict,
+  audienceOfGarmentFamily,
+  GARMENT_SURFACE_RE,
+  type PhraseTruthCtx,
+  type PhraseTruthReason,
+  type TruthGarmentFamily,
+} from './contentTruth'
 
 export interface ComposerPoolRow {
   keyword: string
@@ -43,116 +51,42 @@ export interface ComposerPoolRow {
   themeFit?: number | null
 }
 
-/** Competitor blank/apparel makers — never composable unless the family's own allowed brand.
- *  The trademark lexicon covers franchises/marks, not blanks (the Darlin' pool composed
- *  "Pro Club Shirts" straight through it).
- *  FISHING / OUTDOOR APPAREL (2026-08-21, seen in live pools: "huk shirts for men", "magellan
- *  fishing shirts"): a shopper typing a maker's name wants THAT maker — never this blank. Scoped to
- *  the composer's truth stage only: "columbia" / "magellan" double as place/design words elsewhere
- *  (listingPipeline.ts:968), and declining to COMPOSE a phrase is a hold, not a publish. */
-const APPAREL_BRAND_RE = /\b(?:pro\s?club|gild[ae]n|guildan|softstyle|heavy\s?cotton\s?brand|hanes|fruit\s+of\s+the\s+loom|next\s+level|bella\s?canvas|american\s+apparel|champion|carhartt|comfort\s+colors|huk|bassdash|columbia|under\s*armou?r|magellan|simms|aftco|pelagic)\b/i
 const MIN_CANDIDATES = 3
 /** Rated pools compose themeFit >= 2 ONLY (PO 2026-08-21, B0DQ5YZH38: fit-1 "Band Tees" led a line). */
 const MIN_THEME_FIT = 2
-const GARMENT_SURFACE_RE = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|apparel|tops?|clothing|hoodies?|sweatshirts?|garments?)\b/i
 
 /** The composer's garment vocabulary: the blank_specs enum UNFOLDED (kids_tee must reach the
- *  audience rule; long_sleeve_tee names its own spec phrase), plus the title-guess values. */
-export type ComposerGarmentFamily = GarmentFamily | 'hat' | 'none' | null
+ *  audience rule; long_sleeve_tee names its own spec phrase), plus the title-guess values.
+ *  ALIAS of the spine's type — the composer's historical name, kept for its callers. */
+export type ComposerGarmentFamily = TruthGarmentFamily
 
-/* ─── TRUTH STAGE ─────────────────────────────────────────────────────────────────────────────── */
+/* ─── TRUTH STAGE — now the SHARED spine (contentTruth.ts) ─────────────────────────────────────
+ *
+ * PROMOTED 2026-08-21. The predicate below used to live here and was wired to this composer ONLY,
+ * which is why the same pool that could not compose "hooded fishing shirts" into an Item Highlight
+ * shipped "Funny Work Shirts" in a SWEATSHIRT family's TITLE (PO-caught, B0DSCDZC6K). The rules,
+ * lexicons and reason codes moved VERBATIM into `contentTruth.ts`; `ihTruthVerdict` is now a thin
+ * wrapper that pins this composer's field ('highlights') and asserts no audience-lean rule applies
+ * here — so every pin in itemHighlightComposer.test.ts holds byte-for-byte. */
 
-export type IhTruthReason =
-  | 'wrong-garment-noun'            // names a garment the family is not (jersey/hooded on a tee…)
-  | 'garment-vocab-on-non-apparel'  // any garment word on a 'none' (Electronics) family
-  | 'capability-claim'              // sun protection / UPF / moisture-wicking… — no blank states it
-  | 'audience-adult-on-kids'        // women/men/ladies/plus-size on a kids_tee family
-  | 'audience-kids-on-adult'        // kids/toddler/youth/boys/girls/baby on an adult family
-  | 'competitor-brand'              // another blank maker (Pro Club, Gildan…) unless it is the family's own
-  | 'weight-class-lie'              // light/mid/heavyweight that the blank's weightNote does not back
+/** The Item-Highlight reason set: every spine reason EXCEPT the title-only forced-gender rule,
+ *  which `ihTruthVerdict` can never return (it pins field='highlights'). */
+export type IhTruthReason = Exclude<PhraseTruthReason, 'audience-lean-lie'>
 
-export interface IhTruthCtx {
-  garmentFamily: ComposerGarmentFamily | undefined
-  /** BlankSpec has no capability field today, so the capability rule is unconditional; weightNote
-   *  backs the weight-class rule. */
-  spec: Pick<BlankSpec, 'weightNote'> | null | undefined
-  allowedBrand: string | null | undefined
-  audience: 'kids' | 'adult' | null
-}
+/** The composer's slice of the spine ctx — no `field` (pinned) and no `audienceLean` (title-only). */
+export type IhTruthCtx = Omit<PhraseTruthCtx, 'field' | 'audienceLean'>
 
 /** Audience is a property of the BLANK FAMILY (64000B youth tee ⇒ kids), never inferred from a title. */
-export function ihAudienceOf(gf: ComposerGarmentFamily | undefined): 'kids' | 'adult' | null {
-  if (gf === 'kids_tee') return 'kids'
-  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'sweatshirt' || gf === 'hoodie' || gf === 'hat') return 'adult'
-  return null
-}
-
-/** Every garment noun the lexicon knows; longer multi-word forms FIRST so "hooded sweatshirt" /
- *  "tank top" match as one noun. `crewnecks?` is the one-word sweatshirt noun ("crew neck" two
- *  words is a neck style and not a noun). */
-const GARMENT_NOUN_RE = /\b(?:hooded[\s-]?sweatshirts?|tank[\s-]?tops?|t[\s-]?shirts?|tshirts?|tees?|shirts?|tops?|sweatshirts?|crewnecks?|pullovers?|hoodies?|hoodys?|hooded|jerseys?|tanks?|polos?|dress(?:es)?|sweaters?|jackets?|onesies?|bodysuits?|rompers?|leggings)\b/gi
-/** A matched noun → its garment class. `crewneck` is its own class: a crew neck contradicts a hood. */
-const garmentNounClass = (m: string): string => {
-  const k = m.toLowerCase().replace(/[\s-]+/g, '')
-  if (/^(?:t?shirts?|tees?|tops?)$/.test(k)) return 'tee'
-  if (/^(?:sweatshirts?|pullovers?)$/.test(k)) return 'sweatshirt'
-  if (/^crewnecks?$/.test(k)) return 'crewneck'
-  if (/^(?:hoodies?|hoodys?|hooded|hoodedsweatshirts?)$/.test(k)) return 'hoodie'
-  return k.replace(/s$/, '')
-}
-const TEE_CLASSES: ReadonlySet<string> = new Set(['tee'])
-const SWEATSHIRT_CLASSES: ReadonlySet<string> = new Set(['sweatshirt', 'crewneck'])
-const HOODIE_CLASSES: ReadonlySet<string> = new Set(['hoodie', 'sweatshirt'])
-/** The garment classes each family may name. A hoodie IS a hooded sweatshirt (coordinator ruling
- *  2026-08-21): hoodie families accept hoodie / hooded sweatshirt / sweatshirt / pullover — only
- *  tee nouns (and a crew neck) are foreign to them. null = no noun rule (unresolved blank / hat). */
-const allowedGarmentClasses = (gf: ComposerGarmentFamily | undefined): ReadonlySet<string> | null => {
-  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'kids_tee') return TEE_CLASSES
-  if (gf === 'sweatshirt') return SWEATSHIRT_CLASSES
-  if (gf === 'hoodie') return HOODIE_CLASSES
-  return null
-}
-
-// `womans`/`mans`/`lady` added 2026-08-21: "Womans Shirts" composed onto the kids family B0DP5H8QBT.
-const ADULT_AUDIENCE_RE = /\b(?:women|woman|womens|womans|ladies|lady|men|mens|mans|adults?|plus[\s-]?size)\b/i
-const KIDS_AUDIENCE_RE = /\b(?:kids?|toddlers?|youth|boys|girls|baby)\b/i
+export const ihAudienceOf = audienceOfGarmentFamily
 
 /**
  * ONE pure truth predicate for a candidate phrase against the family's blank facts. Exported so the
  * pins read as the PO's rulings; applied in the candidate filter beside the shape/legal filters.
+ * Thin wrapper over the shared spine — see contentTruth.ts for the rules themselves.
  */
 export function ihTruthVerdict(phrase: string, ctx: IhTruthCtx): { ok: true } | { ok: false; reason: IhTruthReason } {
-  const gf = ctx.garmentFamily
-  // (a) garment-noun truth — 'none' = NON-APPAREL (PO 2026-08-21: B0GCF11RKL is Electronics — the
-  // composer put "T Shirts for Women" on a memory card); otherwise a phrase naming a garment class
-  // the family is not (a tee is never a jersey/hoodie/sweatshirt; hooded ⇒ hoodie only).
-  if (gf === 'none') {
-    if (GARMENT_SURFACE_RE.test(phrase)) return { ok: false, reason: 'garment-vocab-on-non-apparel' }
-  } else {
-    const allowed = allowedGarmentClasses(gf)
-    if (allowed) {
-      for (const m of phrase.matchAll(GARMENT_NOUN_RE)) {
-        if (!allowed.has(garmentNounClass(m[0]))) return { ok: false, reason: 'wrong-garment-noun' }
-      }
-    }
-  }
-  // (b) capability claims — BlankSpec states no capability today ⇒ every such claim is unverifiable.
-  if (PERFORMANCE_CLAIM_RE.test(phrase)) return { ok: false, reason: 'capability-claim' }
-  // (c) audience truth — derived from the blank family, never a title.
-  if (ctx.audience === 'kids' && ADULT_AUDIENCE_RE.test(phrase)) return { ok: false, reason: 'audience-adult-on-kids' }
-  if (ctx.audience === 'adult' && KIDS_AUDIENCE_RE.test(phrase)) return { ok: false, reason: 'audience-kids-on-adult' }
-  // (d) competitor APPAREL brands — outside the trademark lexicon (it covers franchises, not blanks):
-  // a pool row naming another maker never composes. The family's own allowed blank brand
-  // (brand_in_copy, e.g. Comfort Colors) is exempted by name.
-  const bm = phrase.match(APPAREL_BRAND_RE)
-  if (bm && bm[0].toLowerCase() !== (ctx.allowedBrand ?? '').toLowerCase()) return { ok: false, reason: 'competitor-brand' }
-  // (e) fabric-class truth — a weight-class word must match the blank (unknown blank ⇒ none).
-  const wm = phrase.match(/\b(light|mid|middle|heavy)[\s-]?weight\b/i)
-  if (wm) {
-    const wt = trueWeightClass(ctx.spec)
-    if (!wt || !wt.startsWith(wm[1].toLowerCase().slice(0, 3))) return { ok: false, reason: 'weight-class-lie' }
-  }
-  return { ok: true }
+  return phraseTruthVerdict(phrase, { ...ctx, field: 'highlights', audienceLean: null }) as
+    { ok: true } | { ok: false; reason: IhTruthReason }
 }
 
 /** The deterministic brand phrase when no pool candidate carries the brand: "<Brand> <garment noun>". */
