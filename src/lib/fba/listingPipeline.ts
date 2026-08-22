@@ -21,7 +21,7 @@
 
 import OpenAI from 'openai'
 import type { AnalyzedKeyword, OutcomeSignal } from '@/lib/keyword-engine'
-import { garmentNounFor, SHIRT_BASE, foreignHeadNoun, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
+import { garmentNounFor, resolveGarment, SHIRT_BASE, foreignHeadNoun, type GarmentNoun, APPAREL_PRODUCT_TYPES as APPAREL_PRODUCT_TYPES_SHARED } from '@/lib/fba/garmentNoun'
 import { missingBulletKeywords, bulletTokens, foldPlural, foldGarment } from '@/lib/keyword-engine/bulletCoverage'
 import { coverageMode, makeCoverageChecker } from '@/lib/keyword-engine/coverage-core'
 // PO RULING 2026-08-09 — the money tail may never be decided by raw volume. ONE shared pure rule
@@ -57,7 +57,7 @@ import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalC
 import { isCelebrityToken, hasCelebrityName, scrubCelebrityNames, scrubCelebrityNamesArr } from '@/lib/fba/celebrityGuard'
 import { expandIdiomDesignName, isIdiomDesign } from '@/lib/fba/titleIdiomExpander'
 import { BACKEND_MIN_LEGACY } from '@/lib/fba/backendDegradeGate'
-import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
+import { loadBlankSpecRows, loadBlankFamilyOverride, resolveFamilyBlank, familyBlankRow, familyGarmentUnion, ensureBlankBrandInHighlights, enforceFabricTruth, capabilityBanTokens, stripCapabilityClaims, type BlankSpec, type BlankSpecRow } from '@/lib/fba/blankSpecs'
 import { composeItemHighlightDetailed, ihAudienceOf } from '@/lib/fba/itemHighlightComposer'
 /* THE SHARED CONTENT TRUTH SPINE (2026-08-21). ONE predicate every deterministic fill in this file
  * asks before it may place a pool-derived phrase — title, bullets, description, backend, item
@@ -77,7 +77,7 @@ import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
 import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
-import { audienceSpans, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, tryMoneyTail, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { audienceSpans, candidateFactCount, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, fixCensorStarCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, titleCasePhrase, tryMoneyTail, TITLE_BAND_LO, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanDesignGroupIdentity, identityPhrases } from '@/lib/fba/designGroupIdentity'
@@ -6239,7 +6239,7 @@ async function extractDesignName(input: PipelineInput): Promise<{ name: string; 
   // fixApostropheCase (PO 2026-08-09, §4): an apostrophe is a NON-word char, so `\b` fires between
   // "women'" and "s" and this pass would emit "Women'S". Post-net rather than a rewritten regex so
   // every other casing behavior here stays byte-identical.
-  const titleCase = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+  const titleCase = (s: string) => titleCasePhrase(s)
   // accept(): a design name must ACTUALLY appear in the title or image text (rejects LLM
   // hallucination/paraphrase), is not the seller's own brand, is 1-6 words, and is not entirely
   // generic. Generic edge words are trimmed first ("Later Gator Shirt" -> "Later Gator").
@@ -6838,7 +6838,7 @@ async function buildTitleFor(
     const tailGender = /\bfor\s+men\s*$/i.test(tail) ? 'men' : /\bfor\s+women\s*$/i.test(tail) ? 'women' : null
     // fixApostropheCase (PO 2026-08-09, §4): this is the caser that produced the PO's "Women'S
     // T-Shirts" — the pool phrase "women's t shirts" is fine; `\b\w` capitalised the possessive.
-    const titleCaseKw = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+    const titleCaseKw = (s: string) => titleCasePhrase(s)
     const FEM_T = /\bwom[ae]ns?\b|\bladies\b/i
     const MASC_T = /\bm[ae]ns?\b/i
     const canonPhrases: string[] = []
@@ -6998,7 +6998,7 @@ async function buildTitleFor(
     let head = tail ? finalTitle.slice(0, finalTitle.length - tail.length) : finalTitle
     const have = new Set(bulletTokens(head).map(fillNormTok))
     const FEM_H = /\bwom[ae]ns?\b|\bladies\b/i, MASC_H = /\bm[ae]ns?\b/i
-    const titleCaseKw6b = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+    const titleCaseKw6b = (s: string) => titleCasePhrase(s)
     const harvestSources = [...(input.nicheSeeds ?? []), ...candidates.map((c) => c.keyword), ...topUpgradeKws]
     // PROVENANCE POOL: the same sources this loop iterates, so the gate authorizes nothing new.
     const harvestPool = buildFragPool([harvestSources])
@@ -7340,7 +7340,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       const head = brandMatch ? brandMatch[0].trim() : ''
       const rest = title.slice(head.length).replace(/^[\s,]+/, '').trim()
       // fixApostropheCase (PO 2026-08-09, §4) — see the note on titleCaseKw.
-      const anchorTC = fixApostropheCase(familyNicheClean.replace(/\b\w/g, (c) => c.toUpperCase()))
+      const anchorTC = titleCasePhrase(familyNicheClean)
       title = `${head ? `${head} ` : ''}${anchorTC}${rest ? `, ${rest}` : ''}`.replace(/,\s*,/g, ',').replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ').trim()
     }
   }
@@ -7467,7 +7467,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     const designTokSets = designNames.filter(Boolean).map((d) => new Set([...bulletTokens(d)].map(fillNormTok).filter((t) => !familyNicheToks.has(t))))
     // fixApostropheCase (PO 2026-08-09, §4): this is the caser that produced the PO's "Women'S
     // T-Shirts" — the pool phrase "women's t shirts" is fine; `\b\w` capitalised the possessive.
-    const titleCaseKw = (s: string) => fixApostropheCase(s.replace(/\b\w/g, (c) => c.toUpperCase()))
+    const titleCaseKw = (s: string) => titleCasePhrase(s)
     // Garment-truthfulness rail (review-caught BLOCKER): the child fill vets keywords against the
     // seller's own text; the parent fill had NO rail, so a stray "hoodie" keyword in the family
     // pool would ship a product-identity misclaim. Parent trust = product type + design names.
@@ -8922,7 +8922,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const blankOverride = apparelProduct ? await loadBlankFamilyOverride(input.parentAsin) : null
   // ROW kept (2026-08-08): the blank-brand IH waterfall net needs the match REGEX too; the spec is
   // derived from it so every downstream `blankSpec.*` consumer is byte-identical.
-  const blankFamilyFacts = apparelProduct ? resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, [attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')) : null
+  // ONE hay, named: the resolver's garment-compatibility gate and the family's garment-class union
+  // must ask the SAME question of the SAME text, or the union can re-admit a blank the resolver
+  // just ruled incompatible (live B0DSCDZC6K).
+  const blankHay = [attributePinFinal, input.canonicalTitle, repTitle, input.productType, skuHay].filter(Boolean).join(' ')
+  const blankFamilyFacts = apparelProduct ? resolveFamilyBlank(blankCatalog, input.children ?? [], blankOverride, blankHay) : null
   if (apparelProduct) console.log(JSON.stringify({ tag: 'BLANK_RESOLVE', site: 'pipeline', parent: input.parentAsin ?? null, source: blankFamilyFacts?.source ?? null, styleCode: blankFamilyFacts?.dominant?.styleCode ?? null, garmentFamily: blankFamilyFacts?.garmentFamily ?? null, mixed: blankFamilyFacts?.mixed ?? false, byStyle: blankFamilyFacts?.byStyle ?? {}, override: blankOverride }))
   const blankSpecRowMatched = blankFamilyFacts ? familyBlankRow(blankFamilyFacts) : null
   const blankSpecMatched = blankSpecRowMatched?.spec ?? null
@@ -8950,12 +8954,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * MIXED FAMILIES: B0DSCDZC6K ships Gildan 18000 (sweatshirt) AND 18500 (hoodie) under one parent.
    * `resolveFamilyBlank` reports one DOMINANT family, so judging a hoodie noun against the
    * sweatshirt row alone would call a TRUE word a lie. The truth ctx therefore carries every family
-   * present (from `byStyle`, the per-child SKU census) and the allowed garment classes are their
-   * UNION. Both families reject tee nouns — which is exactly what "Funny Work Shirts" was.
+   * present and the allowed garment classes are their UNION. Both families reject tee nouns —
+   * which is exactly what "Funny Work Shirts" was.
+   *
+   * THE UNION IS THE RESOLVER'S, NOT A RAW SKU CENSUS (PO 2026-08-21, live B0DSCDZC6K). This used
+   * to map `byStyle`'s keys straight onto garment families, so ONE stray Gildan 64000 adult-TEE
+   * child among 34 SKUs put 'tee' into the union and licensed "shirts" vocabulary for the WHOLE
+   * family — in four of six per-design titles — even though the resolver had ALREADY logged that
+   * same 64000 as `BLANK_GARMENT_CONFLICT.conflicting`. `familyGarmentUnion` is the single
+   * authority: it drops the rows the family itself ruled incompatible and then applies
+   * GARMENT_UNION_DOMINANCE, so a class must be a real share of the family to speak for it.
    */
-  const familyGarmentFamilies: TruthGarmentFamily[] = Object.keys(blankFamilyFacts?.byStyle ?? {})
-    .map((code) => blankCatalog.find((r) => r.styleCode === code)?.garmentFamily ?? null)
-    .filter((g): g is NonNullable<typeof g> => !!g)
+  const familyGarmentFamilies: TruthGarmentFamily[] = blankFamilyFacts
+    ? familyGarmentUnion(blankCatalog, blankFamilyFacts, blankHay)
+    : []
   const truthGarmentFamily: TruthGarmentFamily = !apparelProduct ? 'none' : (blankFamilyFacts?.garmentFamily ?? null)
   /* DESIGN-TOKEN EXEMPTION (coordinator amendment 2026-08-21). The kids/adult audience rules must
    * judge the CLAIM, not the vocabulary: a "Baby Shark" or "Girl Dad" ADULT tee legitimately needs
@@ -9008,10 +9020,42 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * title is a product claim (spec-grounding beats coverage). A missing fact contributes NO segment,
    * so a short-sleeve blank can never be padded with "Long Sleeve". */
   const bandGarment = garmentFor(input.productType, repTitle)
+  /* THE FAMILY'S OWN GARMENT VOCABULARY — the pad's second fact bank (PO 2026-08-21, live
+   * B0DSCDZC6K per-design titles at 61/64 against the 70-75 band).
+   *
+   * ROOT CAUSE THIS CURES: a MIXED-blank family claims only the INTERSECTION of its blanks' facts,
+   * so 18000 (Crew Neck) + 18500 (Hooded) agree on almost nothing; `garmentBrand` is '' because
+   * every Gildan row is brand_in_copy=false; and "Classic Fit" is title WASTE vocabulary. The pad's
+   * whole bank was therefore ONE ~8-char garment form — it improved a shortened title by ~11 chars
+   * and stopped ('facts-exhausted'). Nothing was wrong with the pad's ORDER or its wiring: it ran,
+   * on the right bytes, with nothing to say.
+   *
+   * These segments are PRODUCT FACTS, not market phrases: `resolveGarment` maps each garment_family
+   * in the family's OWN union to the same alias list the seed builders use, so a sweatshirt+hoodie
+   * family may say Sweatshirt / Crewneck / Pullover / Hooded Sweatshirt / Hoodie — every one of
+   * them true of a blank this family actually ships. `candidateSegments` still applies the waste,
+   * truth and already-states gates to each. No pool term ever reaches here. */
+  const bandFactSegments: string[] = (() => {
+    if (!apparelProduct) return []
+    const fams = familyGarmentFamilies.length ? familyGarmentFamilies : (truthGarmentFamily && truthGarmentFamily !== 'none' ? [truthGarmentFamily] : [])
+    const out: string[] = []
+    for (const f of fams) {
+      for (const alias of resolveGarment({ productType: input.productType, title: repTitle, blankFamily: f }).aliases) {
+        const seg = titleCasePhrase(alias)
+        if (seg && !out.includes(seg)) out.push(seg)
+      }
+    }
+    return out
+  })()
+  /** The pad's truth gate — the SAME spine predicate the terminal net judges with, so the last
+   *  writer in the door can never weld back the lie the net just removed. */
+  const bandTruthOk = (segment: string): boolean => !titleTruthCtx || phraseTruthVerdict(segment, titleTruthCtx).ok
   const titleBandCtx = (title: string): TitleBandCtx => ({
     apparel: apparelProduct,
     customizable: input.customizable === true,
     garmentBrand: garmentBrandCanonical || null,
+    factSegments: bandFactSegments,
+    truthOk: bandTruthOk,
     spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
     // Delegated to the TESTED leaf. This was six inline lines here and shipped two invisible escaping
     // bugs: a word-boundary escape one backslash short inside a template literal (it compiled to the
@@ -9166,6 +9210,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     title = cased
     mark('APOSTROPHE_CASE', title)
+    /* THE CENSOR-STAR TWIN (PO 2026-08-21, live B0DSCDZC6K: "Business B*Tch"). A star is a non-word
+     * character, so the repo's `\b\w` Title-Case pass capitalises the letter AFTER it and mangles
+     * the seller's own design name mid-word. Same properties as the apostrophe fix — length-neutral,
+     * idempotent — so it runs beside it, terminally, catching a council/LLM title, a stored prior or
+     * a caser added tomorrow. The producers are fixed at source too (`titleCasePhrase`). */
+    const starred = fixCensorStarCase(title)
+    if (starred !== title) {
+      console.log(JSON.stringify({ tag: 'SHIP_CENSOR_STAR_CASE', field: 'title', from: title, to: starred }))
+    }
+    title = starred
+    mark('CENSOR_STAR_CASE', title)
     /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
      * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
      * "Heavyweight" into a midweight blank's title as if it were fact. Claims the blank spec does
@@ -9384,6 +9439,29 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // readable from the regen response itself, by anyone, without shell access.
       v4Diffs.push(entry)
     }
+    /* ── THE NAMED REFUSAL (PO 2026-08-21) ────────────────────────────────────────────────────
+     * "If a title genuinely cannot reach 70 with true facts, it must still be truthful — log a
+     * named reason rather than padding with a lie." The pad above only ever adds PRODUCT FACTS and
+     * refuses to invent; when the family's own facts cannot span the gap the honest outcome is a
+     * short title AND a line that says which fact bank ran dry. Without this the only evidence was
+     * a `SHIP_BAND_DECISION` buried among nine other stages, so "the pad is mis-wired" and "the pad
+     * had nothing to say" were indistinguishable — which is exactly how this defect survived the
+     * spine's first live gate. `reason` is the pad's own decision, so it names the cure:
+     *   no-facts        — the blank contributes NOTHING (add the blank / its facts to blank_specs)
+     *   facts-exhausted — the facts ran out mid-gap (this family's blanks agree on too little)
+     *   v4-no-pad       — TITLE_V4=on: the pad is deleted by policy; short IS the refusal
+     *   post-pad-short  — the pad reached the band and a later terminal gate shortened it again */
+    if (apparelProduct && drop.title.length < TITLE_BAND_LO) {
+      console.warn(JSON.stringify({
+        tag: 'TITLE_UNDER_BAND',
+        parent: input.parentAsin ?? null,
+        len: drop.title.length,
+        reason: v.decision === 'padded' || v.decision === 'in-band' ? 'post-pad-short' : v.decision,
+        band: TITLE_BAND_LO,
+        facts: candidateFactCount(moneyed, titleBandCtx(moneyed)),
+        note: v.notes[0] ?? '',
+      }))
+    }
     // ONE line per trip. `stages` is the ordered list of every stage that actually rewrote the
     // string — i.e. the authorship record. An empty `stages` means the door shipped the producer's
     // bytes untouched, which is the state the architecture is aiming for.
@@ -9458,6 +9536,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // bytes from the stored/approved ones. Run the SAME phrase-aware terminal scrub the push runs
   // (scrubCelebrityNames) right beside scrubTrademarks on every published surface, so stored ≡
   // pushed. Idempotent; runs before bandTitle so the band pad can re-fill any freed chars.
+  /** What ONE title exit may keep and what it must drop: the design names it is answerable to, and
+   *  the sibling-design rejector (per-child exits only). */
+  interface TitleDropScope {
+    protect: string
+    reject?: (segment: string) => boolean
+  }
+  /** …plus the truth door BOUND to that scope, so every exit calls the same `(text, produced)`. */
+  interface TitleExitScope extends TitleDropScope {
+    titleTruthDoor: (t: string, produced: boolean) => string
+  }
   const scrubPub = (s: string, fieldCtx: string): string => scrubCelebrityNames(scrubTrademarks(s), `pipeline:${fieldCtx}`)
   const scrubPublished = (r: PipelineResult, opts?: { titleProduced?: boolean }): PipelineResult => {
   /* DESIGN VOCABULARY THE COLOR NET MUST NOT STRIP (DEFECT B). Resolved HERE because this is the one
@@ -9479,16 +9567,52 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * PHRASES (segment-level, blank-grounded) → THEN band. Both edits only SHORTEN, and `bandTitle`
    * re-pads from BLANK_SPECS facts — never from the search pool — so a truthful title that lost a
    * lie is re-filled with product truth, not more market vocabulary. */
-  const titleTruthDoor = (t: string, produced: boolean): string => {
-    // `produced` mirrors bandTitle's own guard: on a bullets/keywords-only regen `recommended_title`
-    // is the PRIOR (possibly PO-locked) title being passed through, not a title this run authored.
-    // A net that edits a field the run did not produce is a silent unrequested rewrite.
+  const titleTruthDoor = (t: string, produced: boolean, scope?: TitleDropScope): string => {
+    // `produced` mirrors bandTitle's own guard: a bullets/keywords-only regen passes the PRIOR
+    // (possibly PO-locked) title through, and a net that edits a field the run did not produce is a
+    // silent unrequested rewrite. `scope` is the per-child exit's design scope (see titleScopeFor).
     if (!t || !produced || !apparelProduct) return t
     const stripped = stripCompetitorBlanks(t, attributePinFinal ?? '')
-    // `protectHay` = the family's design names — the SAME union the color net uses. A design token
-    // that survives nowhere else in the title keeps its phrase, so a comma inside a design name
-    // ("Later, Alligator Tee") can never cost the seller their design.
-    return titleTruthCtx ? applyTitleTruthNet(stripped, titleTruthCtx, protectHay) : stripped
+    return titleTruthCtx
+      ? applyTitleTruthNet(stripped, titleTruthCtx, scope?.protect ?? protectHay, { rejectSegment: scope?.reject })
+      : stripped
+  }
+  /* CROSS-DESIGN SCOPE FOR THE PER-CHILD EXIT (PO 2026-08-21, live B0DSCDZC6K). The "Business
+   * B*tch" DESIGN NAME shipped inside THREE other designs' titles, and the truth net's own
+   * protection is what let it: `protectHay` above is the UNION of every design name in the family,
+   * so `carriesSoleDesignWord` treated a SIBLING's name as a design word worth protecting and kept
+   * the phrase carrying it.
+   *
+   * A per-child title is answerable to ONE design. So on that exit the protect hay is THAT design's
+   * name only, and every OTHER design's name is REJECTED OUTRIGHT — via designScope's STRICT-NAMES
+   * partition, the exact seam the per-design Item Highlight already uses (#626). No second scoper.
+   *
+   * DELIBERATELY NO familyTitle / pool EXEMPTIONS HERE, unlike the candidate-filter callers. Those
+   * exemptions answer "is this pool phrase the family's niche word?", where over-blocking starves a
+   * pool. At the SHIP DOOR the question is "does this title carry another design's name?", and an
+   * exemption sourced from the family TITLE would be circular — the title is the thing on trial.
+   * What survives is intrinsic to the names: a design's own tokens, and a token shared by >=50% of
+   * the family's names (the family's real niche word, e.g. "Fishing"). The BROADCAST/parent title
+   * takes no scope at all: a family hub title is answerable to every design in the family. */
+  const perChildDesignScope = buildForeignDesignTokens(
+    [...new Map((r.per_child_titles ?? [])
+      .map((c) => [c.designKey || c.sku || c.asin || '', (c.designName ?? '').trim()] as const)
+      .filter(([k, n]) => !!k && !!n)).entries()].map(([key, name]) => ({ key, name })),
+    { familyTitleText: '', poolKeywords: [], strictNames: true },
+  )
+  /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
+   *  door BOUND to them — so every exit calls the same `(text, produced)` shape and no caller can
+   *  forget to pass the scope. */
+  const titleScopeFor = (c: { designKey?: string; sku?: string; asin?: string; designName?: string }): TitleExitScope => {
+    const key = c.designKey || c.sku || c.asin || ''
+    const own = (c.designName ?? '').trim()
+    // Fail-open: an unresolved design name leaves the FAMILY protect hay in place rather than
+    // stripping protection off a title we cannot scope — under-protection corrupts a design name.
+    const foreign = key && own ? perChildDesignScope(key) : new Set<string>()
+    const protect = key && own ? own : protectHay
+    const reject = foreign.size ? (seg: string) => isForeignToDesign(seg, foreign) : undefined
+    // The property NAME shadows nothing: the body's `titleTruthDoor` is the shared door above.
+    return { protect, reject, titleTruthDoor: (t: string, produced: boolean) => titleTruthDoor(t, produced, { protect, reject }) }
   }
   return censusLog({
     ...r,
@@ -9510,7 +9634,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     })),
     // Commit 2: per_child_titles ALSO ship to Amazon (multi-design POD + capacity families).
     // Adversarial review caught the gap — a trademark in a per-design title was unscrubbed.
-    per_child_titles: r.per_child_titles?.map((c) => ({ ...c, title: bandTitle(titleTruthDoor(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false), opts?.titleProduced !== false, null, protectHay) })),
+    per_child_titles: r.per_child_titles?.map((c) => {
+      // The scope carries the door BOUND to it, so this exit reads exactly like the broadcast one
+      // — same `(text, produced)` call shape, and no caller can forget to pass the design scope.
+      const { titleTruthDoor, protect } = titleScopeFor(c)
+      return { ...c, title: bandTitle(titleTruthDoor(scrubPub(c.title, 'per-child-title'), opts?.titleProduced !== false), opts?.titleProduced !== false, null, protect) }
+    }),
     // Per-design bullets/description are PERSISTED (scrubbed the same as their broadcast peers), but
     // the push does NOT consume them yet — pushExecutor/resolveProposed still send the broadcast
     // bullets/description to every SKU. Per-design PUSH + UI is the next commit (PR3). Until then
@@ -9737,9 +9866,34 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     } else {
       onProgress(`Writing ${designGroupInfo.groups.length} per-design titles + niche-aware parent...`)
       perChildTitles = []
-      const groupResults = await Promise.all(designGroupInfo.groups.map(async (group) => {
-        const { groupInput, groupDesignName, groupIdentityPhrases } = await resolveGroupDesignName(group)
-        const r = await buildTitleFor(groupInput, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName, season, titleTruthCtx)
+      /* NAMES FIRST, THEN TITLES (PO 2026-08-21, live B0DSCDZC6K). Every design's title used to be
+       * written from the UNSCOPED family pool — a pool harvested on ONE design's identity is full of
+       * that design — so "Business B*tch" was composed into three OTHER designs' titles. Bullets,
+       * description, backend and the Item Highlight all scope the pool per design; the TITLE was the
+       * one fan-out that never did, because the design names were only resolved INSIDE the same
+       * Promise.all that wrote the titles.
+       *
+       * So resolve every group's name (the expensive half — one vision scan per design) in one
+       * parallel pass, build designScope's STRICT-NAMES partition from the resolved names, and write
+       * the titles in a second parallel pass against the SCOPED pool. Same total work, same
+       * parallelism, and the terminal net at the ship door stays the backstop rather than the cure. */
+      const resolvedGroups = await Promise.all(designGroupInfo.groups.map((group) => resolveGroupDesignName(group)))
+      const titleForeignFor = buildForeignDesignTokens(
+        resolvedGroups.map((rg) => ({ key: rg.group.key, name: rg.groupDesignName, identity: rg.groupIdentityPhrases })),
+        // Candidate-FILTER semantics (unlike the ship door): the family's niche vocabulary must stay
+        // available to every design, so the family title + pool-frequency exemptions apply exactly as
+        // they do for the bullets/description partition. STRICT on NAMES — another design's name is
+        // foreign however full of it the shared pool is.
+        { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: candidates.map((c) => c.keyword), strictNames: true },
+      )
+      const groupResults = await Promise.all(resolvedGroups.map(async (rg) => {
+        const { group, groupInput, groupDesignName, groupIdentityPhrases } = rg
+        const foreign = titleForeignFor(group.key)
+        const scoped = foreign.size ? candidates.filter((c) => !isForeignToDesign(c.keyword, foreign)) : candidates
+        if (scoped.length !== candidates.length) {
+          console.log(JSON.stringify({ tag: 'TITLE_DESIGN_SCOPE', design: group.key, name: groupDesignName, pool: candidates.length, scoped: scoped.length, foreign: [...foreign].slice(0, 12) }))
+        }
+        const r = await buildTitleFor(groupInput, scoped, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, lean, apparelProduct, brandName, season, titleTruthCtx)
         // groupInput is returned so the bullets/description stages can reuse the resolved per-group
         // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
         return { group, groupInput, groupDesignName, groupIdentityPhrases, ...r }

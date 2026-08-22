@@ -323,13 +323,34 @@ function rowGarmentClass(row: BlankSpecRow): GarmentClass {
 }
 
 /**
+ * THE conflict predicate — the family's OWN BLANK_GARMENT_CONFLICT decision, exported so every
+ * consumer asks the SAME question instead of inventing a second one (PO 2026-08-21, B0DSCDZC6K).
+ *
+ * TRUE when this blank row belongs to the OTHER garment class from the one the listing hay names —
+ * i.e. exactly the rows `resolveFamilyBlank` warns about below. A hay that names no garment class
+ * can contradict nothing, so every row passes.
+ */
+export function blankRowConflictsWithHay(row: BlankSpecRow, hay: string): boolean {
+  const hc = hayGarmentClass(hay)
+  return hc !== null && rowGarmentClass(row) !== hc
+}
+
+/**
  * THE resolver (pure). Order: per-child style codes → `override` (blank_family_overrides) → the
  * legacy match_pattern regex over `hay` (only when the hay names a garment class — the historical
  * gate, preserved) → unresolved. Then the GARMENT-COMPATIBILITY gate: when the hay names a class
  * and EVERY resolved row is of the other class (a "Sweatshirt" family resolving tee rows, or a
  * "Shirt" family resolving a hoodie), the family is unresolved with a BLANK_GARMENT_CONFLICT warn
- * — a wrong blank is worse than no blank. A partial conflict is warned and kept: the intersection
- * already drops every fact the conflicting rows disagree on.
+ * — a wrong blank is worse than no blank.
+ *
+ * A PARTIAL CONFLICT NOW DROPS THE CONFLICTING ROWS (PO 2026-08-21, live B0DSCDZC6K). It used to
+ * warn and KEEP them, on the reasoning that "the intersection already drops every fact the
+ * conflicting rows disagree on" — and that reasoning was exactly backwards. ONE stray Gildan 64000
+ * adult TEE among 34 sweatshirt/hoodie SKUs disagreed with both real blanks on sleeve, neck and
+ * weight, so the intersection threw away "Long Sleeve" — a fact BOTH real blanks state — and left
+ * the family with no title fact at all (the shipped titles then landed at 54-64 against the 70-75
+ * band). A row this function has just declared incompatible with the family must not get a vote on
+ * the family's facts. `nulled` (every row conflicting) is unchanged.
  */
 export function resolveFamilyBlank(
   rows: readonly BlankSpecRow[],
@@ -364,11 +385,18 @@ export function resolveFamilyBlank(
   }
   if (resolved.length === 0) return { ...EMPTY_RESOLUTION, byStyle }
   if (hayClass) {
-    const conflicting = resolved.filter((r) => rowGarmentClass(r) !== hayClass)
+    const conflicting = resolved.filter((r) => blankRowConflictsWithHay(r, hay))
     if (conflicting.length > 0) {
       const nulled = conflicting.length === resolved.length
-      console.warn(JSON.stringify({ tag: 'BLANK_GARMENT_CONFLICT', hayClass, source, conflicting: conflicting.map((r) => r.styleCode ?? r.spec.brand ?? '?'), nulled }))
+      console.warn(JSON.stringify({ tag: 'BLANK_GARMENT_CONFLICT', hayClass, source, conflicting: conflicting.map((r) => r.styleCode ?? r.spec.brand ?? '?'), nulled, dropped: !nulled }))
       if (nulled) return { ...EMPTY_RESOLUTION, byStyle }
+      // Partial conflict: the incompatible rows lose their vote on the family's facts entirely —
+      // EXCEPT the dominant one. The SKU is the PO's stated authority on blank identity, so a hay
+      // word ("Shirt" in the copy of a family whose children are mostly 18000 sweatshirts) must
+      // never be able to demote the majority blank to a minority sibling. Dropping only the
+      // NON-dominant conflicting rows is a strict subset of today's behavior: a family whose
+      // dominant row is the conflicting one resolves byte-identically to before.
+      resolved = resolved.filter((r, i) => i === 0 || !conflicting.includes(r))
     }
   }
   const dominant = resolved[0]
@@ -380,6 +408,67 @@ export function resolveFamilyBlank(
     garmentFamily: dominant.garmentFamily ?? null,
     source,
   }
+}
+
+/**
+ * THE DOMINANCE RULE for the family's garment-class union — ONE named constant, so the threshold
+ * that decides whether a garment class may license its vocabulary for a whole family is a single
+ * auditable number rather than an inline literal.
+ *
+ * A class joins the union only when it holds a MEANINGFUL SHARE of the family: at least
+ * `minChildren` resolved children AND at least `minShare` of them. Live B0DSCDZC6K is the specimen —
+ * byStyle {18000:25, 18500:8, 64000:1}: one stray adult-tee child out of 34 put 'tee' into the
+ * union, which licensed "Funny Work Shirts" on a sweatshirt/hoodie family in four of six titles.
+ */
+export const GARMENT_UNION_DOMINANCE = { minChildren: 2, minShare: 0.10 } as const
+
+/**
+ * THE family's garment-class union — every garment_family whose blank is a real, non-conflicting,
+ * DOMINANT member of this variation family. This is the set the content truth spine judges garment
+ * nouns against (`PhraseTruthCtx.mixedFamilies`), so it must be derived from the resolver's OWN
+ * decisions and nothing else:
+ *   1. a style code `resolveFamilyBlank` marked CONFLICTING (BLANK_GARMENT_CONFLICT) contributes
+ *      nothing — the family already ruled that blank incompatible; and
+ *   2. a class must clear GARMENT_UNION_DOMINANCE against the resolved children.
+ * The dominant family is always present (it is the family, by definition). Override/legacy
+ * resolutions carry no per-child census (`byStyle` is {}), so they reduce to the dominant alone.
+ *
+ * Pure except for ONE audit line: `BLANK_GARMENT_UNION` records the union WITH its inputs, so a
+ * future "why did this family accept tee vocabulary" is answered from a log, not from inference.
+ */
+export function familyGarmentUnion(
+  rows: readonly BlankSpecRow[],
+  res: FamilyBlankResolution,
+  hay: string,
+): GarmentFamily[] {
+  if (!res.garmentFamily) return []
+  const rowFor = (code: string): BlankSpecRow | null => rows.find((r) => r.styleCode === code) ?? null
+  const census = Object.entries(res.byStyle)
+    .map(([code, n]) => ({ code, n, row: rowFor(code) }))
+    .filter((e): e is { code: string; n: number; row: BlankSpecRow } => !!e.row)
+  // Same asymmetry `resolveFamilyBlank` applies: a conflicting row loses its vote UNLESS it is the
+  // family's own dominant blank — which is always in the union below by definition.
+  const conflicting = census.filter((e) => e.row.garmentFamily !== res.garmentFamily && blankRowConflictsWithHay(e.row, hay))
+  const eligible = census.filter((e) => !conflicting.includes(e))
+  const resolvedChildren = eligible.reduce((a, e) => a + e.n, 0)
+  const union = new Set<GarmentFamily>([res.garmentFamily])
+  for (const e of eligible) {
+    if (!e.row.garmentFamily) continue
+    if (e.n < GARMENT_UNION_DOMINANCE.minChildren) continue
+    if (resolvedChildren > 0 && e.n / resolvedChildren < GARMENT_UNION_DOMINANCE.minShare) continue
+    union.add(e.row.garmentFamily)
+  }
+  const out = [...union]
+  console.log(JSON.stringify({
+    tag: 'BLANK_GARMENT_UNION',
+    union: out,
+    dominant: res.garmentFamily,
+    byStyle: res.byStyle,
+    conflicting: conflicting.map((e) => e.code),
+    resolvedChildren,
+    dominance: GARMENT_UNION_DOMINANCE,
+  }))
+  return out
 }
 
 /** The resolution as the BlankSpecRow shape every existing consumer reads: the dominant row's

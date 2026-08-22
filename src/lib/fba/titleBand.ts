@@ -126,6 +126,21 @@ export interface TitleBandCtx {
   /** Amazon Custom enrollment (listing_content.is_customizable, migration 052) — TRUE makes
    *  "Personalized" a verified fact segment; false/absent keeps it banned (false claim otherwise). */
   customizable?: boolean
+  /** THE FAMILY'S OWN GARMENT VOCABULARY (2026-08-21, live B0DSCDZC6K). Product facts the caller
+   *  derives from the RESOLVED BLANKS — the garment surface forms of every garment_family in the
+   *  family's own union ("Sweatshirt", "Crewneck", "Pullover", "Hooded Sweatshirt"), Title-Cased.
+   *  NEVER a market/search phrase: these are what the blanks ARE. Ordered weakest-signal-last by
+   *  the caller; every entry still passes `truthOk` and `alreadyStates` below.
+   *
+   *  WHY THIS EXISTS: a MIXED-blank family agrees on almost nothing, so the spec facts intersect
+   *  away and `garmentBrand` is empty whenever the blank forbids its name in copy (every Gildan
+   *  row). That left exactly ONE pad candidate — a single garment form — and a title the terminal
+   *  truth net had shortened could not get back into the band with it. */
+  factSegments?: readonly string[]
+  /** The content truth spine's verdict for THIS family, so the pad can never re-mint the very lie
+   *  the terminal truth net just removed (a SHIRT productType on a sweatshirt family resolves
+   *  `garmentSecond` to "Shirt"). Absent ⇒ every candidate passes, i.e. today's behavior. */
+  truthOk?: (segment: string) => boolean
 }
 
 /** The audience tail the pipeline's own fillers recognise — kept byte-identical to the regexes at
@@ -138,6 +153,16 @@ function alreadyStates(title: string, phrase: string): boolean {
   const t = ` ${norm(title)} `
   const p = norm(phrase)
   return p.length > 0 && t.includes(` ${p} `)
+}
+
+/** Word-level distinctness: TRUE when no significant word of `phrase` already appears in `title`.
+ *  `alreadyStates` only catches the whole phrase; this is the same discipline
+ *  `pickDistinctGarmentForm` applies to a single garment form, generalised to multi-word facts. */
+function wordsAreNew(title: string, phrase: string): boolean {
+  const words = (s: string): string[] => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean)
+  const have = new Set(words(title))
+  const w = words(phrase)
+  return w.length > 0 && w.every((x) => TITLE_CONNECTORS.has(x) || !have.has(x))
 }
 
 /**
@@ -185,6 +210,11 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     // both a live oscillation and a broken idempotence claim. The fact itself is untouched
     // everywhere else: bullets, description and the Product Detail attributes still read the spec.
     if (!s || isTitleWasteVocabulary(s)) return
+    // TRUTH GATE (2026-08-21). The pad is the LAST writer in the door, downstream of the terminal
+    // truth net — so an untrue candidate here is a lie nothing else can catch. A sweatshirt family
+    // listed under an Amazon SHIRT productType resolves `garmentSecond` to "Shirt"; without this
+    // the pad would weld back exactly the "Shirts" the net had just dropped.
+    if (ctx.truthOk && !ctx.truthOk(s)) return
     if (!alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
   // Amazon Custom (2026-07-31, PO): "Personalized" leads the fact list — on an enrolled listing it
@@ -195,11 +225,50 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   push(ctx.spec?.fit)
   push(ctx.spec?.sleeve)
   push(ctx.spec?.neck)
+  const attributeCount = out.length          // everything above is a product ATTRIBUTE, not a noun
   push(ctx.garmentSecond)
+  /* THE FAMILY'S OWN GARMENT VOCABULARY (2026-08-21) — the resolved blanks' surface forms, e.g.
+   * Sweatshirt / Crewneck / Pullover / Hooded Sweatshirt / Hoodie on a mixed 18000+18500 family.
+   * Last among the singles because a spec attribute is a stronger product signal than a second noun
+   * for the same garment; but these are the facts that keep a MIXED-blank family — whose attributes
+   * intersect away to almost nothing — from having no pad bank at all.
+   *
+   * WORD-DISTINCT, like `garmentSecond` already is. `alreadyStates` only rejects the whole phrase,
+   * so a title ending "…Sweatshirt" would otherwise be padded "| Crewneck Sweatshirt" — a repeated
+   * word `collapseRepeatedWords` has already run past by the time the pad fires. */
+  for (const f of ctx.factSegments ?? []) if (wordsAreNew(title, f)) push(f)
+  const garmentFacts = out.slice(attributeCount)   // garmentSecond + the family's own vocabulary
+  const attributeFacts = out.slice(0, attributeCount)
   // Pairs, so a single thin fact can still carry the title into band without inventing anything.
+  // These two stay FIRST and unchanged: on a family that HAS a copy-legal brand they are today's
+  // chosen pads, and reordering them would rewrite healthy titles for no reason.
   if (ctx.garmentBrand && ctx.garmentSecond) push(`${ctx.garmentBrand.trim()} ${ctx.garmentSecond.trim()}`)
   if (ctx.spec?.fit && ctx.garmentSecond) push(`${ctx.spec.fit.trim()} ${ctx.garmentSecond.trim()}`)
+  /* GENERIC PAIRS (2026-08-21) — the reach a MIXED-blank family needs.
+   *
+   * The two pairs above are both keyed on `garmentBrand`/`spec.fit`, and B0DSCDZC6K has NEITHER:
+   * every Gildan row is `brand_in_copy=false` (so `garmentBrand` is '') and "Classic Fit" is title
+   * waste vocabulary. The bank was therefore ONE ~8-char garment form against a 16-char gap, so
+   * `enforceTitleBand` returned 'facts-exhausted' ~11 chars short — the live 54/61/64 titles.
+   *
+   * ALWAYS <attribute> <garment noun>, never attribute+attribute. That is the PO's gold shape
+   * ("… | Long Sleeve Comfort Colors Shirt") and it is also a REGRESSION GUARD: an unrestricted
+   * product would mint "Comfort Colors Relaxed Fit" — a pure spec stack in the money position, the
+   * exact tail class the seller has shipped zero times and the reason `dropSpecOnlyTail` exists. */
+  for (const a of attributeFacts) {
+    for (const g of garmentFacts) {
+      if (alreadyStates(a, g) || alreadyStates(g, a)) continue   // "Sweatshirt" + "Crewneck Sweatshirt"
+      push(`${a} ${g}`)
+    }
+  }
   return out
+}
+
+/** OBSERVABILITY ONLY — how many product-fact segments the pad has available for this title.
+ *  `TITLE_UNDER_BAND` reports it, so "the pad is mis-wired" and "the pad had nothing to say" are
+ *  distinguishable from one log line instead of from a code reading. Pure; mutates nothing. */
+export function candidateFactCount(title: string, ctx: TitleBandCtx): number {
+  return candidateSegments(title, ctx).length
 }
 
 /** Trivial connectors that may legitimately repeat. Everything else is a "significant word" and is
@@ -495,6 +564,43 @@ export function fixApostropheCase(title: string): string {
     if (pre.length > 1 && pre === pre.toUpperCase()) return m      // "CEO'S", "USA'S" — all-caps token
     return `${pre}${apo}${run.toLowerCase()}`
   })
+}
+
+/**
+ * THE CENSOR-STAR TWIN of `fixApostropheCase` (PO 2026-08-21, live B0DSCDZC6K: "Business B*Tch").
+ *
+ * A star is a NON-WORD character, so `\b` fires on both sides of it and the repo's Title-Case pass
+ * (`s.replace(/\b\w/g, c => c.toUpperCase())`) capitalises the letter that FOLLOWS it — turning the
+ * seller's own design name "Business B*tch" into "Business B*Tch" mid-word. The star is a censor,
+ * not a word break, and the design name must ship verbatim.
+ *
+ * PURE, TOTAL, IDEMPOTENT (an already-correct "B*tch" has a lowercase letter and is returned
+ * byte-identical) and LENGTH-NEUTRAL, so it may run beside `fixApostropheCase` in the ship door
+ * without a band guard.
+ *
+ * WHAT MUST NOT BREAK: a deliberately ALL-CAPS censored word ("F*CK", "SH*T", "WTF*", "B*TCH" typed
+ * that way by the seller) keeps every capital — the letters around the star are inspected as ONE
+ * token and an all-caps token is never touched.
+ */
+export function fixCensorStarCase(title: string): string {
+  const t = title || ''
+  if (!t.includes('*')) return title // fast path: the overwhelming majority of titles
+  return t.replace(/([A-Za-z]+)\*([A-Za-z])([A-Za-z]*)/g, (m, pre: string, first: string, rest: string) => {
+    if (first === first.toLowerCase()) return m                        // already correct — idempotence
+    const word = `${pre}${first}${rest}`
+    if (word === word.toUpperCase()) return m                          // "F*CK", "B*TCH" — deliberate
+    return `${pre}*${first.toLowerCase()}${rest}`
+  })
+}
+
+/**
+ * THE repo's ONE Title-Case pass for title text. Every producer used to inline
+ * `fixApostropheCase(s.replace(/\b\w/g, c => c.toUpperCase()))` — six copies, and the star artifact
+ * had to be fixed in all six or in none. Both artifacts of the `\b\w` caser (the apostrophe and the
+ * censor star) are repaired here, so a caser added tomorrow inherits both by using this function.
+ */
+export function titleCasePhrase(s: string): string {
+  return fixCensorStarCase(fixApostropheCase((s || '').replace(/\b\w/g, (c) => c.toUpperCase())))
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────
