@@ -17,7 +17,6 @@
  * group. Returns one entry per design key; the regenerate-item-highlight route reads them.
  */
 import { NextRequest, NextResponse } from 'next/server'
-import OpenAI from 'openai'
 import { createClient } from '@supabase/supabase-js'
 import { scanProductImage, getProductImageUrl } from '@/lib/keyword-engine/visionScanner'
 import { detectDesignGroups } from '@/lib/fba/listingPipeline'
@@ -31,9 +30,12 @@ export async function POST(req: NextRequest) {
     const asin = (parent_asin ?? '').trim().toUpperCase()
     if (!asin) return NextResponse.json({ error: 'parent_asin is required' }, { status: 400 })
 
-    const { resolveOpenAIKey } = await import('@/lib/openai/credentials')
-    const { instrumentAiHealth } = await import('@/lib/openai/errorClass')
-    const openai = instrumentAiHealth(new OpenAI({ apiKey: await resolveOpenAIKey(), baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1' }))
+    // Cost-guard pass (2026-08-22): routed through the gateway (llmGateway.ts) instead of a
+    // hand-rolled `new OpenAI({...})`, which inherited the SDK's default maxRetries: 2 — an
+    // insufficient_quota (429) account silently retried this vision call up to 3x. Same
+    // resolveOpenAIKey() + baseURL + instrumentAiHealth as before.
+    const { getLlmClientForRequest } = await import('@/lib/fba/llmGateway')
+    const openai = await getLlmClientForRequest()
 
     // ── PER DESIGN (PO 2026-08-21): one identity per DESIGN GROUP — the SAME grouping the pipeline's
     // per_child_titles use (detectDesignGroups over the family's child SKUs, seller override

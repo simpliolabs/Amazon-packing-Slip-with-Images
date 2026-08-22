@@ -16,7 +16,6 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import OpenAI from 'openai'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { loadPoGoldTitles } from '@/lib/fba/poGoldCorpus'
 import { selectionMode } from '@/lib/keyword-engine/selection-core'
@@ -67,19 +66,21 @@ function getAdminSupabase() {
  * Settings UI; falls back to OPENAI_API_KEY env var so historical deploys keep
  * working. The DB key is resolved via the cached helper to avoid one DB read per
  * agent call.
+ *
+ * Cost-guard pass (2026-08-22): routed through the gateway's getLlmClientForRequest()
+ * instead of hand-rolling `new OpenAI({...})` — that inherited the SDK's default
+ * maxRetries: 2, so an insufficient_quota (429) account silently retried EVERY logical
+ * call in EVERY regen up to 3x. The gateway applies maxRetries: 0 (llmGateway.ts) while
+ * still resolving the seller's key the same way and applying the SAME instrumentAiHealth
+ * wrapper documented below.
+ * instrumentAiHealth (2026-07-08): records the first HARD error (quota/auth) on the client and
+ * rethrows — the pipeline's fail-open catches keep working, but the identity survives so the
+ * degradation gate + the stream catch can say "credit exhausted" instead of silently persisting
+ * empty content as success. Per-request client: the flag lives exactly one POST.
  */
 async function getOpenAI() {
-  const { resolveOpenAIKey } = await import('@/lib/openai/credentials')
-  const { instrumentAiHealth } = await import('@/lib/openai/errorClass')
-  const apiKey = await resolveOpenAIKey()
-  // instrumentAiHealth (2026-07-08): records the first HARD error (quota/auth) on the client and
-  // rethrows — the pipeline's fail-open catches keep working, but the identity survives so the
-  // degradation gate + the stream catch can say "credit exhausted" instead of silently persisting
-  // empty content as success. Per-request client: the flag lives exactly one POST.
-  return instrumentAiHealth(new OpenAI({
-    apiKey,
-    baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-  }))
+  const { getLlmClientForRequest } = await import('@/lib/fba/llmGateway')
+  return getLlmClientForRequest()
 }
 
 /** Best-effort site-wide AI-health record (migration 045, single row id=1). Written DOWN on a hard

@@ -12,7 +12,6 @@
  * resolver (identical to the intelligence route, no fork).
  */
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
 import { createAdminClient } from '@/lib/supabase/server';
 import { resolveToChildAsin } from '@/lib/fba/resolveAsin';
 import { getJungleScoutStatus } from '@/lib/sync/jungleScoutClient';
@@ -231,11 +230,11 @@ export async function POST(
 
     // OpenAI client — key from app_settings (Settings UI), env fallback. `new OpenAI()` with no key
     // silently fails in prod (the env key is unset), so resolve it explicitly. Mirrors getOpenAI().
-    const { resolveOpenAIKey } = await import('@/lib/openai/credentials');
-    const openai = new OpenAI({
-      apiKey: await resolveOpenAIKey(),
-      baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-    });
+    // Cost-guard pass (2026-08-22): routed through the gateway (llmGateway.ts) instead of a
+    // hand-rolled `new OpenAI({...})`, which inherited the SDK's default maxRetries: 2 — an
+    // insufficient_quota (429) account silently retried every council call up to 3x.
+    const { getLlmClientForRequest } = await import('@/lib/fba/llmGateway');
+    const openai = await getLlmClientForRequest();
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({

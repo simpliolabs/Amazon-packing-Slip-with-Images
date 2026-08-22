@@ -59,6 +59,8 @@ const BEHAVIOR_FLAGS = [
   'JUNGLE_SCOUT_ENABLED',
   'TITLE_COUNCIL_MODEL', // model PIN for council judges/adversaries (bullets + backend judges inherit it, default 'gpt-5') — #176 found the judges failing EVERY run with the failure swallowed; the pinned model must be readable in prod or a bad pin is invisible
   'BULLETS_COUNCIL_MODEL', // bullets-council override of the above (default: TITLE_COUNCIL_MODEL || gpt-5)
+  'BRAND_SAFETY_JUDGE_MODEL', // brand-safety judge model PIN (listingPipeline.ts:5994, default 'gpt-5') — cost-guard pass 2026-08-22: this and the two below were never echoed, so every judge silently defaulting to gpt-5 was invisible from outside the container
+  'TITLE_JUDGE_MODEL', // title-council judge model PIN (listingPipeline.ts:3358, default: TITLE_COUNCIL_MODEL || gpt-5) — separate from the adversary/proposer models by design (see refereeModelPin.test.ts's adversary != judge rationale)
   'VARIANT_DEATH_ALARM', // on (DEFAULT — read-only alarm card) | off — per-family dead-variant detector (variantDeathAlarm.ts): a child SKU whose content_synced_at froze >14d behind its siblings' max (sync_lag) OR whose stored listing_health offer evidence says no live offer (offer_dead; fail-open on a missing row) is surfaced as a revenue-leak card on the listing page, each SKU labelled with its reason (the Later Gator XL/2XL Orchid two-months-unbuyable incident). UNSET = ON, so it is echoed as the EFFECTIVE mode below — a raw null would read as 'off' to the flag census, the opposite of the truth.
 ] as const
 
@@ -96,6 +98,21 @@ export async function GET() {
           : 'shadow (default)',
         // Default ON (read-only alarm) — same effective-mode reasoning as the three above.
         VARIANT_DEATH_ALARM: describeVariantDeathAlarm(),
+        // COST-GUARD PASS (2026-08-22): the cost audit found every judge/referee model PIN
+        // defaulting to gpt-5 (the most expensive tier) with no way to see it from outside the
+        // container — a raw null here reads as "unset", not "which model is actually running".
+        // Echo the EFFECTIVE model, mirroring each pin's own resolution chain exactly (listingPipeline.ts:5994).
+        BRAND_SAFETY_JUDGE_MODEL: process.env.BRAND_SAFETY_JUDGE_MODEL || 'gpt-5 (default)',
+        // listingPipeline.ts:3358 — falls through TITLE_COUNCIL_MODEL before the gpt-5 floor.
+        TITLE_JUDGE_MODEL: process.env.TITLE_JUDGE_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5 (default)',
+        // TITLE_COUNCIL_MODEL / BULLETS_COUNCIL_MODEL are already listed above but were echoed RAW —
+        // a null told the census nothing about the model actually in use. Same effective-value fix,
+        // same chain the code itself resolves (listingPipeline.ts:4938 / :3728).
+        TITLE_COUNCIL_MODEL: process.env.TITLE_COUNCIL_MODEL || 'gpt-5 (default)',
+        BULLETS_COUNCIL_MODEL: process.env.BULLETS_COUNCIL_MODEL || process.env.TITLE_COUNCIL_MODEL || 'gpt-5 (default)',
+        // Effective count, not the raw string — code default is 8 (listingPipeline.ts's
+        // MULTI_DESIGN_AUDIT_MAX_GROUPS = Number(process.env.MULTI_DESIGN_AUDIT_MAX_GROUPS || 8)).
+        MULTI_DESIGN_AUDIT_MAX_GROUPS: Number(process.env.MULTI_DESIGN_AUDIT_MAX_GROUPS || 8),
       },
     },
     { headers: { 'Cache-Control': 'no-store, max-age=0' } },
