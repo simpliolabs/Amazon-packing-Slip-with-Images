@@ -17,6 +17,7 @@ import {
   Package,
   KeyRound,
   Zap,
+  Tag,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -62,6 +63,15 @@ export default function DashboardLayout({
       href: '/fba/keywords',
       label: 'Keyword Pool',
       icon: KeyRound,
+      roles: ['admin', 'packer'],
+    },
+    {
+      // Blanks catalog (PO decision B, 2026-08-22: lives UNDER Settings, not top-level — but
+      // decision D says any signed-in user may edit blanks, unlike the rest of /settings which
+      // stays admin-only for credentials — so this one entry is reachable by both roles).
+      href: '/settings/blanks',
+      label: 'Blanks',
+      icon: Tag,
       roles: ['admin', 'packer'],
     },
     {

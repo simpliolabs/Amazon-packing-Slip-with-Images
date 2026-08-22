@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { toast } from 'sonner'
 import {
   CheckCircle,
@@ -14,6 +15,8 @@ import {
   ShieldCheck,
   AlertTriangle,
   ExternalLink,
+  Tag,
+  ChevronRight,
 } from 'lucide-react'
 
 interface SettingsPanelProps {
@@ -457,6 +460,24 @@ export default function SettingsPanel({
           </p>
         </div>
       </div>
+
+      {/* Blanks catalog (PO 2026-08-22, decision B: lives under Settings). Any signed-in user may
+          edit blanks — NOT admin-only like the rest of this page — so it's its own route
+          (/settings/blanks) rather than an admin-gated section here; this card just points there. */}
+      <Link
+        href="/settings/blanks"
+        className="flex items-center justify-between bg-white rounded-xl border border-slate-200 p-5 mb-4 hover:border-violet-300 hover:shadow-sm transition-all group">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-violet-50 flex items-center justify-center flex-shrink-0">
+            <Tag size={16} className="text-violet-600" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">Blanks</h2>
+            <p className="text-xs text-slate-500">The garment blank catalog — add/correct blanks, no deploy required. Any signed-in user can edit.</p>
+          </div>
+        </div>
+        <ChevronRight size={16} className="text-slate-300 group-hover:text-violet-500 transition-colors flex-shrink-0" />
+      </Link>
 
       {/* FBA Intelligence Settings */}
       <FBASettingsSection />
