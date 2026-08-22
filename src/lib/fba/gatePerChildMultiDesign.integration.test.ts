@@ -8,9 +8,47 @@
  *
  * Drives the REAL runListingPipeline() with a stubbed OpenAI client (no network) so the guard is
  * exercised as production would hit it, not re-implemented as a second copy of the condition.
+ *
+ * CI TIMEOUT ROOT CAUSE (diagnosed 2026-08-22, PR #635 CI run 32589317216): the FULL-regen case
+ * timed out in CI at 30s but ran in ~80ms locally. NOT a hang in a retry/score loop (all of the
+ * description MAX_ITERS=4 / bullets metric-gated / title attempt<2 loops are bounded and resolve
+ * against this file's synchronous mock in well under a second even when every iteration is spent —
+ * reproduced locally with CI's own env and confirmed by timing). The actual cause: this repo's
+ * lazy-Proxy Supabase clients (blankSpecs.ts etc.) only fail FAST when NEXT_PUBLIC_SUPABASE_URL /
+ * SUPABASE_SERVICE_ROLE_KEY are completely UNSET (a synchronous "supabaseUrl is required" throw,
+ * zero network attempt) — which is this repo's local/dev state, but NOT CI's: build.yml's "Test
+ * (blocking)" step sets them to a syntactically-valid-but-fake `https://placeholder.supabase.co`,
+ * so every Supabase read in the pipeline actually attempts a real network request against a host
+ * that isn't a real project, and only gives up after its own timeout (blankSpecs.ts: 4000ms EACH
+ * for blank_specs + blank_assignments — confirmed by re-running this file locally with the exact
+ * env build.yml sets: the bullets-only case alone went from ~50ms to ~8s). The FULL-regen case
+ * touches strictly more of these (title generation resolves the design groups via a heavier path
+ * than the bullets-only cheap rebuild, and per-design color resolution probes SP-API/vision too),
+ * and at least one of those reads has no bounded timeout at all, so the cumulative wait exceeds the
+ * 30s test budget outright rather than merely running long. Neutralizing the two Supabase env vars
+ * for the duration of this file (matching this repo's OWN local-dev behavior, not CI's) restores
+ * the synchronous fail-open path everywhere in the pipeline, regardless of what the CI runner
+ * happens to export — the fix is making the test hermetic, not padding a real slow-path budget.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import { runListingPipeline, type PipelineInput, type PipelineChild } from './listingPipeline'
+
+const SUPABASE_ENV_KEYS = ['NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'NEXT_PUBLIC_SUPABASE_ANON_KEY'] as const
+const savedSupabaseEnv: Record<string, string | undefined> = {}
+
+beforeAll(() => {
+  // Force every lazy-Proxy Supabase client the pipeline might construct (blank specs/assignments,
+  // etc.) onto its synchronous "supabaseUrl is required" fail-open throw instead of a real network
+  // attempt against CI's placeholder host — see the root-cause note above. Saved/restored so this
+  // never leaks into other test files sharing the worker process.
+  for (const key of SUPABASE_ENV_KEYS) { savedSupabaseEnv[key] = process.env[key]; delete process.env[key] }
+})
+afterAll(() => {
+  for (const key of SUPABASE_ENV_KEYS) {
+    if (savedSupabaseEnv[key] === undefined) delete process.env[key]
+    else process.env[key] = savedSupabaseEnv[key]
+  }
+})
 
 /** A generic "kitchen sink" JSON payload — every field any JSON-mode caller in the bullets-only
  *  multi-design path might read, so ANY of them can parse a valid, non-empty result regardless of
