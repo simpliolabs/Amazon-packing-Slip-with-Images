@@ -26,9 +26,11 @@
  * assert a single gender; its bullets/description/backend carry MARKET vocabulary where a gendered
  * phrase is legitimate shopper language. That asymmetry is the ONLY thing `ctx.field` decides.
  *
- * Pure data + pure functions. No side effects, no imports beyond blankSpecs — safe to import anywhere.
+ * Pure data + pure functions. No side effects; imports only blankSpecs and designScope's pure token
+ * folder (no cycle: designScope imports neither of this module's exports) — safe to import anywhere.
  */
 import { trueWeightClass, PERFORMANCE_CLAIM_RE, type BlankSpec, type GarmentFamily } from './blankSpecs'
+import { designScopeTokens } from './designScope'
 
 /** The truth stage's garment vocabulary: the blank_specs enum UNFOLDED (kids_tee must reach the
  *  audience rule; long_sleeve_tee names its own spec phrase), plus the title-guess values. */
@@ -112,6 +114,14 @@ const garmentNounClass = (m: string): string => {
 const TEE_CLASSES: ReadonlySet<string> = new Set(['tee'])
 const SWEATSHIRT_CLASSES: ReadonlySet<string> = new Set(['sweatshirt', 'crewneck'])
 const HOODIE_CLASSES: ReadonlySet<string> = new Set(['hoodie', 'sweatshirt'])
+
+/** Which GARMENT (not which noun) a class names, for the "one class per title" rule (defect 3) —
+ *  narrower than `garmentNounClass`. `crewneck` is its own NOUN CLASS (a crew neck contradicts a
+ *  hood, so `phraseTruthVerdict` must keep telling them apart), but it is not a different GARMENT
+ *  from `sweatshirt` — "Sweatshirt … Fall Crewneck" is the SAME product named twice, the PO's own
+ *  gold pattern, and must never be read as "two garment classes in one title". Every other class
+ *  (tee / sweatshirt / hoodie / …) names a materially different garment and is its own group. */
+const garmentGroup = (cls: string): string => (cls === 'crewneck' ? 'sweatshirt' : cls)
 
 /** The garment classes ONE family may name. A hoodie IS a hooded sweatshirt (coordinator ruling
  *  2026-08-21): hoodie families accept hoodie / hooded sweatshirt / sweatshirt / pullover — only
@@ -317,15 +327,177 @@ export const TITLE_NET_REASONS: ReadonlySet<PhraseTruthReason> = new Set<PhraseT
 const AUDIENCE_TAIL_RE = /\s*[,|]?\s+for\s+(?:men|women)(?:['’]s)?\s*$/i
 
 /**
+ * WORD-LEVEL scrub for the title's MONEY PHRASE — segment 0 (brand + design + noun), and the whole
+ * string when a title carries no separator at all. Segment 0 is never DROPPED (see the net's own
+ * doctrine below), but that must not mean it is exempt from truth: PR #632/#634 wired garment-truth
+ * INTO the brief/judge, yet the live parent title on B0DSCDZC6K still shipped
+ * "THE CEO Motivational Entrepreneur Tee" and a per-child title shipped "Sweatshirt Business B*tch"
+ * — both lies the segment sweep below can only ever catch AFTER the first separator. This is that
+ * seam: it removes the OFFENDING TOKENS (a forbidden garment noun, a forced gender on a unisex
+ * title, another design's name) and leaves everything true — including the brand and this design's
+ * own name — exactly where it was. `primaryClass` is threaded out so `enforceSingleGarmentClass`
+ * below knows which class the money phrase already committed to, without re-scanning it.
+ */
+function scrubMoneyPhrase(
+  seg: string,
+  ctx: PhraseTruthCtx,
+  protectedWords: ReadonlySet<string>,
+  foreignTokens?: ReadonlySet<string>,
+): { text: string; primaryClass: string | null } {
+  if (!seg.trim()) return { text: seg, primaryClass: null }
+  let s = seg
+  let primaryClass: string | null = null
+  const words = (x: string): string[] => x.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  const isProtected = (m: string): boolean => words(m).some((w) => protectedWords.has(w))
+  // (a) wrong-garment-noun, noun by noun — the phrase-level rule (a) can only reject or accept the
+  // WHOLE segment; this rejects one noun at a time so "Funny Work Shirt Sweatshirt" loses only the
+  // tee-class word and keeps the truthful sweatshirt one. A protected (design-name) token is never
+  // touched, same fail-open the phrase-level rule already gives the segment sweep.
+  if (ctx.garmentFamily === 'none') {
+    s = s.replace(GARMENT_SURFACE_RE, (m) => (isProtected(m) ? m : ''))
+  } else if (ctx.garmentFamily) {
+    const allowed = allowedGarmentClasses(ctx)
+    if (allowed) {
+      s = s.replace(GARMENT_NOUN_RE, (m) => {
+        const cls = garmentNounClass(m)
+        if (!allowed.has(cls)) return isProtected(m) ? m : ''
+        // First ALLOWED class this money phrase names wins the slot; a title commits to ONE class
+        // (defect 3, PO 2026-08-22) even when the family union would truthfully permit both. Grouped
+        // ("crewneck" folds into "sweatshirt") so "Sweatshirt … Fall Crewneck" is not read as two.
+        const grp = garmentGroup(cls)
+        if (primaryClass === null) { primaryClass = grp; return m }
+        return grp === primaryClass || isProtected(m) ? m : ''
+      })
+    }
+  }
+  // (b) forced gender — TITLE + unisex only, and only when the phrase names ONE gender (never an
+  // inclusive "for Men and Women", which `LEAN_FEM_RE`/`LEAN_MASC_RE` both match and so cancel out).
+  if (ctx.field === 'title' && ctx.audienceLean === 'unisex') {
+    const fem = LEAN_FEM_RE.test(s)
+    const masc = LEAN_MASC_RE.test(s)
+    if (fem !== masc) {
+      const re = fem ? /\b(?:for\s+)?wom[ae]n['’]?s?\b/gi : /\b(?:for\s+)?m[ae]n['’]?s?\b/gi
+      s = s.replace(re, (m) => (isProtected(m) ? m : ''))
+    }
+  }
+  // (c) another design's name — a maximal per-WORD strike (not a whole-segment drop: this phrase is
+  // never dropped). `foreignTokens` is the SAME per-design set `isForeignToDesign` checks elsewhere
+  // (designScope.ts's STRICT-NAMES partition); tokenizing each chunk with `designScopeTokens` keeps
+  // the two in agreement (a "Business B*tch" foreign entry folds to the tokens that "Business" and
+  // "B*tch" each resolve to, so both chunks strike even though "b*tch" splits on the star).
+  if (foreignTokens && foreignTokens.size) {
+    s = s.split(/(\s+)/).map((chunk) => {
+      if (!chunk.trim()) return chunk
+      const toks = designScopeTokens(chunk)
+      if (toks.length === 0) return chunk
+      const foreign = toks.some((t) => foreignTokens.has(t))
+      const protectedTok = toks.some((t) => protectedWords.has(t))
+      return foreign && !protectedTok ? '' : chunk
+    }).join('')
+  }
+  return { text: s.replace(/\s{2,}/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').trim(), primaryClass }
+}
+
+/**
+ * The garment GROUP (see `garmentGroup`) a text names FIRST, reading left to right — no allowed-set
+ * filter, so this also answers "what has the title already committed to?" for a caller (the title
+ * BAND PAD, `titleBand.ts`'s `candidateSegments`) that only has plain strings, not a `PhraseTruthCtx`.
+ * Exported for exactly that seam: defect 3 (one garment class per title) must hold even when the
+ * SECOND class is proposed by the pad AFTER the net already settled on the first one — the pad is
+ * the LAST writer, so a gate that only ran inside `applyTitleTruthNet` could not reach it. Pure.
+ */
+export function dominantGarmentGroup(text: string): string | null {
+  for (const m of text.matchAll(GARMENT_NOUN_RE)) return garmentGroup(garmentNounClass(m[0]))
+  return null
+}
+
+/** Which allowed garment GROUP (see `garmentGroup`) a text names FIRST, reading left to right. Pure. */
+function firstGarmentClass(text: string, allowed: ReadonlySet<string>): string | null {
+  for (const m of text.matchAll(GARMENT_NOUN_RE)) {
+    const cls = garmentNounClass(m[0])
+    if (allowed.has(cls)) return garmentGroup(cls)
+  }
+  return null
+}
+
+/**
+ * ONE GARMENT CLASS PER TITLE (defect 3, PO 2026-08-22, live B0DSCDZC6K:
+ * "… Sweatshirt Long Sleeve Tee | …"). The family union may truthfully permit MORE than one class
+ * (sweatshirt + hoodie) — that is what `mixedFamilies` is for — but a single title still commits to
+ * ONE of them; naming two, even two both-true classes, is not a garment LIE `phraseTruthVerdict`
+ * catches (each noun is individually true of the family) and so survives the sweep above untouched.
+ * The class named FIRST wins (money-phrase priority, the same doctrine segment 0 itself follows);
+ * every later mention of a DIFFERENT allowed class is removed — word-level where it already scrubbed
+ * segment 0 (via `primaryClassHint`, so this never re-decides what that pass already committed to),
+ * whole-segment after it, reusing the exact safety rails the sweep above uses (a sole surviving
+ * design word is kept, a dropped separator is inherited).
+ */
+function enforceSingleGarmentClass(
+  title: string,
+  ctx: PhraseTruthCtx,
+  protectHay: string,
+  primaryClassHint: string | null,
+): string {
+  if (!title || !title.trim() || !ctx.garmentFamily || ctx.garmentFamily === 'none') return title
+  const allowed = allowedGarmentClasses(ctx)
+  if (!allowed || allowed.size <= 1) return title
+  const t = title.trim()
+  const primary = primaryClassHint ?? firstGarmentClass(t, allowed)
+  if (!primary) return t
+  const words = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  const protectedWords = new Set(words(protectHay).filter((w) => w.length > 2))
+  const otherClassPresent = (seg: string): boolean => {
+    for (const m of seg.matchAll(GARMENT_NOUN_RE)) {
+      const cls = garmentNounClass(m[0])
+      if (allowed.has(cls) && garmentGroup(cls) !== primary) return true
+    }
+    return false
+  }
+  const stripOtherClass = (seg: string): string => seg.replace(GARMENT_NOUN_RE, (m) => {
+    const cls = garmentNounClass(m)
+    return (!allowed.has(cls) || garmentGroup(cls) === primary || words(m).some((w) => protectedWords.has(w))) ? m : ''
+  }).replace(/\s{2,}/g, ' ').trim()
+
+  const parts = t.split(/\s*([|,])\s*/)
+  if (parts.length <= 1) return otherClassPresent(t) ? stripOtherClass(t) : t
+  const kept: string[] = [otherClassPresent(parts[0]) ? stripOtherClass(parts[0]) : parts[0]]
+  let carried: string | null = null
+  for (let i = 1; i + 1 < parts.length; i += 2) {
+    const sep = parts[i]
+    const seg = parts[i + 1]
+    if (sep === undefined || seg === undefined || !seg.trim()) continue
+    if (otherClassPresent(seg)) {
+      const rest = [parts[0], ...kept.slice(1), ...parts.slice(i + 2)].join(' ')
+      const restWords = new Set(words(rest))
+      const solelyDesign = words(seg).some((w) => protectedWords.has(w) && !restWords.has(w))
+      if (!solelyDesign) {
+        carried = carried === '|' || sep === '|' ? '|' : (carried ?? sep)
+        continue
+      }
+    }
+    const useSep = carried === '|' || sep === '|' ? '|' : sep
+    carried = null
+    kept.push(useSep === '|' ? ` | ${seg}` : `, ${seg}`)
+  }
+  return kept.join('').replace(/\s{2,}/g, ' ').replace(/[\s,|]+$/g, '').trim()
+}
+
+/**
  * TERMINAL title truth net — the ONE deterministic net that removes an UNTRUE phrase from a shipped
  * title, on every producer and every path (installed at `scrubPublished`, the single choke point
  * both `recommended_title` and `per_child_titles` pass through).
  *
  * WHY SEGMENTS ARE SAFE HERE AND NOT IN PROSE: an Amazon title is a phrase LIST — "BRAND Design
  * Noun | Keyphrase, Keyphrase, Keyphrase" — so dropping one segment leaves a grammatical title.
- * The FIRST segment is never dropped: it carries brand + design name + product noun (the money
- * phrase), and destroying it is strictly worse than the lie it might contain. Shortening is the
- * only edit this makes; the band net downstream re-pads from SPEC facts, never from the pool.
+ * The FIRST segment is never DROPPED WHOLESALE: it carries brand + design name + product noun (the
+ * money phrase), and destroying it is strictly worse than the lie it might contain. But "never
+ * dropped" is not "never judged" (live B0DSCDZC6K, 2026-08-22: the parent title's own segment 0 said
+ * "Tee" on a sweatshirt/hoodie family, and BCS/DQ's said "Sweatshirt Business B*tch" — a sibling's
+ * name — and both survived every prior version of this net because segment 0 was skipped entirely).
+ * `scrubMoneyPhrase` above judges it WORD BY WORD instead: a forbidden garment noun, a forced gender,
+ * or a foreign design-name token is removed; the brand, this design's own name, and every true word
+ * stay exactly where they were. Shortening is the only edit this makes; the band net downstream
+ * re-pads from SPEC facts, never from the pool.
  *
  * `protectHay` (the family's design names) is the second safety rail: a segment is KEPT whenever
  * dropping it would delete a design word that survives NOWHERE ELSE in the title. A design name may
@@ -340,7 +512,13 @@ const AUDIENCE_TAIL_RE = /\s*[,|]?\s+for\s+(?:men|women)(?:['’]s)?\s*$/i
  * answerable to every design in the family). It reuses this net's segment machinery rather than
  * adding a second net: same never-drop-segment-0 rule, same separator inheritance, same
  * design-protection rail — and on a per-child title `protectHay` is THAT design's own name only,
- * so a sibling design's name is droppable instead of protected.
+ * so a sibling design's name is droppable instead of protected. `opts.foreignTokens` is the SAME
+ * partition's token set (not just the phrase predicate), so `scrubMoneyPhrase` can strike a sibling's
+ * name WORD BY WORD out of segment 0 too — the phrase predicate alone cannot, since it answers
+ * "drop the whole phrase?" and segment 0 is never wholly dropped.
+ *
+ * LAST, `enforceSingleGarmentClass` folds in defect 3: even after every noun left standing is
+ * individually true, at most ONE garment class may appear in the finished title.
  *
  * Idempotent (a second pass finds nothing left to drop) and a no-op when `ctx` names no blank.
  */
@@ -348,7 +526,21 @@ export function applyTitleTruthNet(
   title: string,
   ctx: PhraseTruthCtx,
   protectHay = '',
-  opts?: { rejectSegment?: (seg: string) => boolean },
+  opts?: {
+    rejectSegment?: (seg: string) => boolean
+    foreignTokens?: ReadonlySet<string>
+    /** BROADCAST/parent titles only (PO 2026-08-22, live B0DSCDZC6K parent): `protectHay` there is
+     *  the UNION of every sibling's name, so a plain word that happens to ALSO be one sibling's
+     *  name token ("business", from "Business B*tch") can coincidentally "protect" an unrelated
+     *  market phrase ("mind your business tshirt") that is not about any design at all — and
+     *  `carriesSoleDesignWord` then keeps the whole lie rather than dropping the segment. When true,
+     *  a segment blocked from a whole-segment drop this way is word-scrubbed instead of kept
+     *  verbatim. DEFAULT FALSE — a per-child exit's `protectHay` is THAT design's own name, where a
+     *  match is a genuine design-identity hit ("See You Later, Alligator Tee" — the design survives
+     *  WITH its "Tee" attached, PO ruling: losing the design is worse than the lie beside it) and
+     *  must keep the existing verbatim-preservation behavior byte-for-byte. */
+    scrubProtectedOverlap?: boolean
+  },
 ): string {
   if (!title || !title.trim()) return title
   let t = title.trim()
@@ -372,15 +564,21 @@ export function applyTitleTruthNet(
 
   // 2. Segment sweep. Split KEEPING the separators so the survivors rejoin exactly as written.
   const parts = t.split(/\s*([|,])\s*/)
-  if (parts.length <= 1) return t
-  const kept: string[] = [parts[0]]                    // segment 0 = the money phrase, never dropped
+  if (parts.length <= 1) {
+    // No separator at all — this whole string IS the money phrase. Word-scrub it (2b below still
+    // runs on the result via enforceSingleGarmentClass at the bottom of this function).
+    return scrubMoneyPhrase(t, ctx, protectedWords, opts?.foreignTokens).text
+  }
+  // segment 0 = the money phrase: judged word-by-word above, never dropped as a whole.
+  const seg0 = scrubMoneyPhrase(parts[0], ctx, protectedWords, opts?.foreignTokens)
+  const kept: string[] = [seg0.text]
   // A dropped segment's separator is INHERITED by the next survivor. Dropping the phrase after the
   // pipe must not demote the title from the PO's gold "BRAND Design Noun | keyphrase" shape to a
   // comma list — the lie goes, the structure stays.
   let carried: string | null = null
   for (let i = 1; i + 1 < parts.length; i += 2) {
     const sep = parts[i]
-    const seg = parts[i + 1]
+    let seg = parts[i + 1]
     if (sep === undefined || seg === undefined || !seg.trim()) continue
     const verdict = phraseTruthVerdict(seg, ctx)
     const untrue = !verdict.ok && TITLE_NET_REASONS.has(verdict.reason)
@@ -392,11 +590,18 @@ export function applyTitleTruthNet(
         carried = carried === '|' || sep === '|' ? '|' : (carried ?? sep)
         continue                                                          // drop the untrue phrase
       }
+      // A protected design word survives NOWHERE ELSE, so the whole segment stays verbatim — UNLESS
+      // the caller has told us that protection is family-wide (the broadcast title), where a bare
+      // word collision is not a genuine design mention (see `scrubProtectedOverlap`'s doc above).
+      if (opts?.scrubProtectedOverlap) seg = scrubMoneyPhrase(seg, ctx, protectedWords, opts?.foreignTokens).text || seg
     }
     // Rejoin in the shape the producers write: " | " around a pipe, ", " after a comma.
     const useSep = carried === '|' || sep === '|' ? '|' : sep
     carried = null
     kept.push(useSep === '|' ? ` | ${seg}` : `, ${seg}`)
   }
-  return kept.join('').replace(/\s{2,}/g, ' ').replace(/[\s,|]+$/g, '').trim()
+  const swept = kept.join('').replace(/\s{2,}/g, ' ').replace(/[\s,|]+$/g, '').trim()
+  // 3. ONE garment class for the whole title (defect 3) — primed with the class segment 0 already
+  //    committed to, so this never re-litigates what `scrubMoneyPhrase` just decided.
+  return enforceSingleGarmentClass(swept, ctx, protectHay, seg0.primaryClass)
 }

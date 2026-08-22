@@ -28,7 +28,7 @@
 import { CONTENT_CONTRACT } from './contentContract'
 // The shared content truth spine. No cycle: contentTruth imports only blankSpecs, which imports
 // productDetailAttrs + contentContract and never this module.
-import { applyTitleTruthNet, type PhraseTruthCtx } from './contentTruth'
+import { applyTitleTruthNet, phraseTruthVerdict, dominantGarmentGroup, type PhraseTruthCtx } from './contentTruth'
 // Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
 // file stays cycle-free and unit-testable in isolation.
 import { BASIC_COLOR_WORDS } from './designName'
@@ -254,6 +254,13 @@ export function pickDistinctGarmentForm(title: string, aliases: readonly string[
  *  keyword and a genuine attribute of the blank). */
 function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   const out: string[] = []
+  // ONE GARMENT CLASS (defect 3, PO 2026-08-22, live B0DSCDZC6K: the pad itself re-introduced a
+  // SECOND class — "Hooded" onto a title that already committed to "Sweatshirt" — because every
+  // gate above judges TRUTH, and a mixed family's hoodie facts are perfectly true. The pad is the
+  // LAST writer, so `applyTitleTruthNet`'s own single-class rule (contentTruth.ts) cannot reach a
+  // class it introduces after the net already ran. Computed ONCE, from the title as this door
+  // received it — the SAME money-phrase-priority doctrine the net's `scrubMoneyPhrase` uses. */
+  const committedClass = dominantGarmentGroup(title)
   const push = (v?: string | null): void => {
     const s = (v ?? '').trim()
     // TITLE-ONLY WASTE VOCABULARY (PO ruling 2026-08-09, §3 gold rule 4). "Classic Fit" is a REAL
@@ -268,6 +275,13 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     // listed under an Amazon SHIRT productType resolves `garmentSecond` to "Shirt"; without this
     // the pad would weld back exactly the "Shirts" the net had just dropped.
     if (ctx.truthOk && !ctx.truthOk(s)) return
+    // ONE CLASS (defect 3) — a candidate naming a DIFFERENT garment class than the title already
+    // committed to is skipped, same as an untrue one. Both classes may be individually true
+    // (sweatshirt + hoodie); the title still may not name both.
+    if (committedClass) {
+      const segClass = dominantGarmentGroup(s)
+      if (segClass && segClass !== committedClass) return
+    }
     // CONCEPT GATE (2026-08-22): "Crew Neck" onto a title already saying "Crewneck" is the same
     // concept re-spelled — indexed once, and 10 characters of the 75 spent on nothing. Applies to
     // EVERY candidate, spec facts included, because the blank's `neck` fact is where it came from.
@@ -705,10 +719,16 @@ export function titleCasePhrase(s: string): string {
  *                     ended "for Women", i.e. had a replaceable tail).
  *   spec-conflict   — the market phrase would re-leak a spec claim the blank doesn't back
  *   no-fit          — the candidate cannot land inside [70,75] without truncating the keyword
+ *   truth-lie       — the market keyword itself fails the content truth spine (defect 1, PO
+ *                     2026-08-22, live B0DSCDZC6K parent: "mind your business tshirt for men" — a
+ *                     wrong garment noun AND a forced gender on a unisex family, both baked into ONE
+ *                     candidate keyword this derivation's filters never asked the truth spine about).
+ *                     `ctx.truth` absent ⇒ this never fires (fail-open, byte-identical to today).
  *   applied         — the gold-shape tail shipped  ← the only outcome that changes bytes */
 export type MoneyTailDecision =
   | 'empty' | 'no-kw' | 'non-apparel' | 'already-covered' | 'cross-gender'
   | 'word-repeat' | 'design-right' | 'brand-tail' | 'no-tail' | 'spec-conflict' | 'no-fit' | 'applied'
+  | 'truth-lie'
 
 /** The skips that are IDENTICAL for every candidate keyword, so trying the next one is pointless:
  *  they are properties of the TITLE (or of the slot already being satisfied), not of the keyword.
@@ -738,6 +758,14 @@ export interface MoneyTailCtx {
    *  pipe-right carrying ALL of its tokens is a protected BRAND tail (gold #2's shape) — the
    *  brand-tail guard skips rather than evict it. */
   garmentBrand?: string | null
+  /** THE CONTENT TRUTH SPINE (defect 1, PO 2026-08-22). This derivation's own filters check
+   *  off-niche, season, color-neutrality, word count and cross-gender vs. hard/soft LEANS — never
+   *  the family's blank-grounded truth, and never `audience-lean-lie` (which only fires on an
+   *  explicit `unisex`, a value the lean checks above never veto on). A candidate that fails it is
+   *  skipped per-keyword ('truth-lie'), same as every other per-candidate veto. null/undefined ⇒ no
+   *  ground truth to judge against ⇒ this never fires (fail-open, matches every other truth-ctx
+   *  consumer in the pipeline). */
+  truth?: PhraseTruthCtx | null
   /**
    * May the net APPEND a money tail where none existed? (PO ruling 2026-08-10.)
    *
@@ -837,6 +865,10 @@ export function enforceMoneyTail(
   const kw0 = (moneyKw || '').replace(/\s{2,}/g, ' ').trim().toLowerCase()
   if (!kw0) return { title: t0, decision: 'no-kw', note: '' }
   if (!ctx.apparel) return { title: t0, decision: 'non-apparel', note: '' }
+  // THE TRUTH SPINE (defect 1) — BEFORE every other veto, same discipline as the cross-gender check
+  // just below: a candidate that lies about the garment or forces a gender on a unisex family never
+  // gets a chance to win the slot, no matter how it scores on volume/opportunity upstream.
+  if (ctx.truth && !phraseTruthVerdict(kw0, ctx.truth).ok) return { title: t0, decision: 'truth-lie', note: `"${kw0}" fails the content truth spine` }
 
   const kwFem = MONEY_FEM_RE.test(kw0)
   const kwMasc = MONEY_MASC_RE.test(kw0)
@@ -1346,13 +1378,23 @@ export function enforceTitleTruthBand(args: {
   truth: PhraseTruthCtx | null
   protect?: string
   reject?: (segment: string) => boolean
+  /** Same partition `reject` is built from — lets `applyTitleTruthNet` strike a foreign design name
+   *  out of segment 0 word by word (2026-08-22 defect 2 fix; see its doc for why `reject` alone,
+   *  a whole-phrase predicate, cannot reach segment 0). */
+  foreignTokens?: ReadonlySet<string>
+  /** BROADCAST/parent titles only — see `applyTitleTruthNet`'s doc on the same option. */
+  scrubProtectedOverlap?: boolean
   /** The pool the ORPHAN-FRAGMENT guard tests provenance against (see `dropOrphanPoolFragments`).
    *  Defaults to the band's own truthful pool segments, which is the same material any fill could
    *  have harvested a fragment from. */
   orphanPool?: readonly string[]
 }): TruthBandResult & { netted: string } {
   const truthed = args.truth
-    ? applyTitleTruthNet(args.produced, args.truth, args.protect ?? '', { rejectSegment: args.reject })
+    ? applyTitleTruthNet(args.produced, args.truth, args.protect ?? '', {
+        rejectSegment: args.reject,
+        foreignTokens: args.foreignTokens,
+        scrubProtectedOverlap: args.scrubProtectedOverlap,
+      })
     : args.produced
   // Orphan guard BEFORE the band, so the characters a dangling fragment was wasting are available
   // to the pad — the same reason the truth net runs before the pad and not after it.
