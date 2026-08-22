@@ -100,9 +100,15 @@ An assignment changes **what the generator believes**. It does **not** rewrite a
 | Wrong blank ships wrong Amazon attributes | Same guard as copy — regen + review; `value_source='spec'` already routes through sticky-details review |
 | Anyone edits product truth | Admin-gated writes, `set_by` recorded |
 
-## 8. Open decisions for the PO
+## 8. Decisions — SETTLED (PO, 2026-08-22)
 
-1. **Unify the two override tables into one `blank_assignments`?** (recommended — `blank_child_overrides` is not applied yet, so it is free to fold now)
-2. **Where does the Blanks section live** — top-level nav, or under Settings?
-3. **Should assigning a blank auto-queue a regenerate** for that family (never a push), or stay a manual click?
-4. **Who may edit blanks** — admin only, or any signed-in user?
+1. **Unify the override tables** into one `blank_assignments` — **YES**. `blank_child_overrides` never ships; the family rows are backfilled into `scope='family'`.
+2. **Location** — **under Settings**, not top-level nav.
+3. **Assigning a blank** — **manual regenerate only**. The assignment changes what the generator believes; it never queues a regen and never pushes.
+4. **Who may edit** — **any signed-in user**, not admin-only. `set_by` is recorded on every assignment for accountability.
+
+## 9. Build split (Fable designs, Sonnet implements — PO standing directive 2026-08-22)
+
+- **Resolver + migration 062** (`blank_assignments`, both scopes, `source` reported on every resolution): owned by the truth+band rebuild already in flight, because it edits the same resolver.
+- **Portal surface** (Settings → Blanks, the API routes, the listing-page Garment card + per-child dropdown, blast-radius preview): implemented separately against that resolver.
+- `source` is now API surface: `'child-assignment' | 'sku-code' | 'family-assignment' | 'legacy'` renders directly as the UI badge, so no second derivation of "why this blank" can drift.
