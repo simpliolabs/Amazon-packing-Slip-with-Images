@@ -19,6 +19,7 @@ import { presentOutcome, MEASURE_TARGET, type OutcomeChip } from '@/lib/fba/outc
 import type { VariantDeathReport } from '@/lib/fba/variantDeathAlarm' // ONE shared derivation — server attaches, this page only renders
 import { priorityDisplay, priorityTooltip } from '@/lib/fba/priorityDisplay'  // market-first Priority cell (PO 2026-08-08)
 import { parentVariationsUrl, skuEditUrl, resolveParentSellerCentralTarget } from '@/lib/fba/sellerCentralUrls' // ONE seam for every Seller Central link (PO 2026-08-21)
+import type { LockedTitleViolation } from '@/lib/fba/lockedTitleTruth' // locked-title-vs-product-truth warning (PO 2026-08-22) — analysis only, server-computed
 // Using <img> instead of next/image to avoid domain config issues with Amazon CDN
 
 // ─── Types (mirrored from fba/page.tsx) ─────────────────────────────────────
@@ -117,6 +118,10 @@ interface AiRecommendations {
   /** Server-probed: Amazon's Listings API currently accepts title_differentiation writes.
    *  Undefined on legacy responses → client treats Item Highlights as still write-blocked. */
   item_highlights_writable?: boolean
+  /** Locked-title-vs-product-truth analysis (PO 2026-08-22). Server-computed, read-only: violations
+   *  the LOCKED title (title_source==='manual') carries against the resolved blank — empty unless the
+   *  title is actually locked and actually conflicts. Absent on legacy responses → no warning shown. */
+  locked_title_truth?: { violations: LockedTitleViolation[] }
 }
 
 /** Compact relative date for audit/ship timestamps ("2h ago", "3d ago", "Jun 11"). */
@@ -2971,6 +2976,39 @@ export default function ListingDetailPage() {
               : 'Locks your exact title so an AI Audit or Regenerate cannot replace it (no Amazon push).'}
           </span>
         </div>
+
+        {/* LOCKED-TITLE TRUTH WARNING (PO 2026-08-22, live case B0DSCDZC6K: a locked title called a
+            Gildan 18000 sweatshirt/18500 hoodie family "Tee Shirt" and "for Men" on a unisex lean, and
+            would have shipped that forever — a lock protects the seller's WORDING, not the product's
+            TRUTH). Server-computed in the same ai-recommendations GET the page already calls (no second
+            "is this true" derivation, no extra round trip) — see locked_title_truth on AiRecommendations.
+            INFORM ONLY: this never auto-unlocks, never auto-regenerates, never auto-pushes. It only
+            names what's wrong and offers the EXISTING Unlock control (saveTitleLock('unlock'), the same
+            route/button above) so a human can decide. Compact + inline, reusing the page's amber
+            warning idiom (border-l-4 border-amber-500 bg-amber-50, see the AI-degradation banner above). */}
+        {aiRecs?.title_source === 'manual' && (aiRecs?.locked_title_truth?.violations.length ?? 0) > 0 && (
+          <div className="mt-2 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-3">
+            <div className="flex items-start gap-2.5">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 mt-0.5 shrink-0 text-amber-600" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold text-amber-800">
+                  Locked title conflicts with the product{aiRecs.locked_title_truth!.violations.length > 1 ? ` (${aiRecs.locked_title_truth!.violations.length} issues)` : ''}
+                </p>
+                <ul className="mt-1 space-y-0.5">
+                  {aiRecs.locked_title_truth!.violations.map((v, i) => (
+                    <li key={`${v.reason}-${i}`} className="text-xs text-amber-700">{v.message}</li>
+                  ))}
+                </ul>
+                <button
+                  onClick={() => saveTitleLock('unlock')}
+                  disabled={titleLockSaving}
+                  className="mt-1.5 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg px-3 py-1 transition-colors cursor-pointer disabled:opacity-50">
+                  Unlock to let AI fix it
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* MULTI-DESIGN CLASSIFICATION OVERRIDE (migration 041) — lets the seller force single or
             multi-design when the auto-detection (SKU structure) gets it wrong (e.g. BC3001 Bella Canvas). */}
