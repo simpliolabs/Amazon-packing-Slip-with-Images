@@ -334,18 +334,24 @@ describe('FAILURE 3 — the pad must restore the band from the family\'s OWN fac
   })
 
   it('the ship door NAMES the refusal (source pin) — TITLE_UNDER_BAND {parent, len, reason}', () => {
-    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
+    // 2026-08-22 title-settle rewrite: the door's per-stage logging (including this line) moved from
+    // listingPipeline.ts's `bandTitle` closure into `settleTitle` (titleBand.ts) — the ONE function
+    // that closure now thinly adapts to. The invariant is unchanged (the door still names its
+    // refusal); only the file that carries it moved, which is exactly what makes the door testable
+    // offline (see truthBandHarness.ts / truthBandGate.test.ts).
+    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'titleBand.ts'), 'utf8')
     const at = src.indexOf("tag: 'TITLE_UNDER_BAND'")
     expect(at, 'the door does not name its refusal').toBeGreaterThan(0)
     const body = src.slice(at, at + 320)
-    expect(body).toContain('parent: input.parentAsin')
+    expect(body).toContain('parent: ctx.parentAsin')
     expect(body).toContain('len: drop.title.length')
     expect(body).toContain('reason:')
     // …and the pad is fed the family's facts + the spine's verdict, not just BLANK_SPECS scalars.
     // 2026-08-22: both are now per-EXIT (`scope?.facts` / `scope?.truthOk`) so a per-child title
     // pads from ITS design's garment vocabulary, with the family's as the default for the broadcast.
-    expect(src).toContain('factSegments: scope?.facts ?? bandFactSegments')
-    expect(src).toContain('truthOk: scope?.truthOk ?? bandTruthOk')
+    const pipelineSrc = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
+    expect(pipelineSrc).toContain('factSegments: scope?.facts ?? bandFactSegments')
+    expect(pipelineSrc).toContain('truthOk: scope?.truthOk ?? bandTruthOk')
   })
 })
 
@@ -375,10 +381,14 @@ describe('the censor star is not a word break', () => {
     expect(netForDesign(t, 'BUSINESSBTCH', 'Business B*tch')).toContain('Business B*tch')
   })
   it('the ship door runs it beside the apostrophe fix (source pin)', () => {
-    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
+    // 2026-08-22 title-settle rewrite: this pass now lives in `settleTitle` (titleBand.ts), the ONE
+    // function listingPipeline.ts's `bandTitle` adapter calls — see the note on the sibling pin above.
+    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'titleBand.ts'), 'utf8')
     expect(src).toContain('const starred = fixCensorStarCase(title)')
     expect(src).toContain("tag: 'SHIP_CENSOR_STAR_CASE'")
-    // No producer still inlines the raw caser — they all go through the one seam.
-    expect(src).not.toMatch(/fixApostropheCase\([a-zA-Z]+\.replace\(\/\\b\\w\/g/)
+    // No PRODUCER still inlines the raw caser — they all go through the one seam. (titleBand.ts
+    // itself is exempt from this check: its own doc comments quote the historical bug pattern.)
+    const pipelineSrc = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'listingPipeline.ts'), 'utf8')
+    expect(pipelineSrc).not.toMatch(/fixApostropheCase\([a-zA-Z]+\.replace\(\/\\b\\w\/g/)
   })
 })

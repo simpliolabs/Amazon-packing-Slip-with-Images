@@ -79,7 +79,7 @@ import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
 import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
-import { audienceSpans, candidateFactCount, collapseRepeatedWords, dropSpecOnlyTail, enforceInclusiveAudience, enforceTitleBand, fixApostropheCase, fixCensorStarCase, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, enforceTitleTruthBand, stripInclusiveAudience, stripTitleWasteVocabulary, stripVariantColorWords, titleCasePhrase, tryMoneyTail, TITLE_BAND_LO, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { audienceSpans, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, settleTitle, stripInclusiveAudience, titleCasePhrase, type MoneyTailCtx, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanDesignGroupIdentity, identityPhrases } from '@/lib/fba/designGroupIdentity'
@@ -8497,11 +8497,6 @@ BACKEND STRING: ${backendSample}`
   } catch { return unchanged }
 }
 
-/* P0 INSTRUMENTATION — one correlation id per trip through the ship door, so a per-stage trace can
- * be reassembled from the logs of a single regen. Process-local and monotonic; it never affects a
- * decision, only the label on a log line. */
-let DOOR_SEQ = 0
-
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
   /** Per-run collector for [TITLE_V4_DIFF] entries, surfaced on `debug.v4` so the refusal rate is
    *  readable from the regen response instead of only from a server-log grep. */
@@ -9422,84 +9417,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
      * design's, so the pad that re-fills a title speaks for the same design the truth net judged. */
     bandScope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[]; truth?: PhraseTruthCtx | null; reject?: (s: string) => boolean; foreignTokens?: ReadonlySet<string> },
   ): string => {
-    if (!produced || !title) return title
-    /* P0 INSTRUMENTATION (2026-08-12) — RECORD THE BYTES, NOT THEIR LENGTH.
+    /* THIN ADAPTER (title-settle rewrite, handoff/TITLE_SETTLE_REWRITE.md, PO approval 2026-08-22).
      *
-     * Nine stages below already log a decision, and all but two record only `from.length` /
-     * `to.length`. That is why this repo cannot answer "who wrote this word": the '| Shirt' the
-     * seller rejected is attributed to the council at :8511 and to the band pad at
-     * poGoldCorpus.ts:226, and BOTH comments cannot be right. A length delta cannot settle it; a
-     * before/after STRING can, and one regen then settles it forever.
-     *
-     * `mark` appends only when a stage actually CHANGED the string, so the trace is exactly the
-     * list of authors, in order, and a clean pass costs one short line. Zero behaviour change —
-     * nothing here is read by any decision. handoff/TITLE_ARCHITECTURE.md §7 P0. */
-    const traceId = `${input.parentAsin ?? 'na'}#${++DOOR_SEQ}`
-    const inTitle = title
-    const trace: Array<{ stage: string; text: string }> = []
-    const mark = (stage: string, text: string): void => {
-      const prev = trace.length > 0 ? trace[trace.length - 1].text : inTitle
-      if (text !== prev) trace.push({ stage, text })
-    }
-    /* DEFECT 2 (PO 2026-08-09, §4) — the Title-Case apostrophe artifact ("Women'S T-Shirts"). Runs
-     * FIRST because it is LENGTH-NEUTRAL (it can never move a title across the band) and every stage
-     * below reads cleaner bytes for it: the gendered-noun probe, the word dedupe and the census all
-     * see "Women's" rather than a mangled token. The four casers that MANUFACTURE the artifact are
-     * fixed at their source too (:5447 / :6012 / :6426 / :6542); this is the terminal half of the
-     * same rule, catching a council/LLM title, a stored prior, or a caser added tomorrow. */
-    const cased = fixApostropheCase(title)
-    if (cased !== title) {
-      console.log(JSON.stringify({ tag: 'SHIP_APOSTROPHE_CASE', field: 'title', from: title, to: cased }))
-    }
-    title = cased
-    mark('APOSTROPHE_CASE', title)
-    /* THE CENSOR-STAR TWIN (PO 2026-08-21, live B0DSCDZC6K: "Business B*Tch"). A star is a non-word
-     * character, so the repo's `\b\w` Title-Case pass capitalises the letter AFTER it and mangles
-     * the seller's own design name mid-word. Same properties as the apostrophe fix — length-neutral,
-     * idempotent — so it runs beside it, terminally, catching a council/LLM title, a stored prior or
-     * a caser added tomorrow. The producers are fixed at source too (`titleCasePhrase`). */
-    const starred = fixCensorStarCase(title)
-    if (starred !== title) {
-      console.log(JSON.stringify({ tag: 'SHIP_CENSOR_STAR_CASE', field: 'title', from: title, to: starred }))
-    }
-    title = starred
-    mark('CENSOR_STAR_CASE', title)
-    /* SPEC-TRUTH FIRST (2026-08-04, the POOL_STRATA-flip leak): the composed pool now carries the
-     * MARKET'S fabric vocabulary ("comfort colors heavyweight t shirt"), and the council echoed
-     * "Heavyweight" into a midweight blank's title as if it were fact. Claims the blank spec does
-     * not back are removed BEFORE dedupe/band, so the freed chars go to the facts-only pad below. */
-    const truth = scrubUnspecdGarmentClaims(title, blankSpec)
-    if (truth.removed.length > 0) {
-      console.log(JSON.stringify({ tag: 'SHIP_SPEC_TRUTH', field: 'title', removed: truth.removed, from: title.length, to: truth.title.length }))
-    }
-    title = truth.title
-    mark('SPEC_TRUTH', title)
-    // CAP FIRST, because this door now runs AFTER scrubTrademarks — whose substitutions LENGTHEN the
-    // string ("world cup" -> "world futbol cup", +7 chars) and which nothing else re-caps. Before the
-    // order was inverted, a title banded to 73 could leave here at 80 and push at 80 (pushFields caps
-    // at 200, not 75), which is the Amazon 100476 rejection class. Adversarial review, PR #450.
-    // DEDUPE FIRST (#148). The live defect was "… Comfort Colors Tshirt, Tshirt for Women" — a
-    // repeat of one word, which `deduplicatePhrases` (:1600) cannot see because it only compares
-    // ADJACENT windows. Amazon indexes a token once, so the repeat bought zero extra indexing while
-    // spending 8 of the 75 characters. Removing it BEFORE the band pass means those characters are
-    // available to the pad below rather than locked up in a duplicate.
-    const deduped = collapseRepeatedWords(capTitle75(title))
-    if (deduped.removed.length > 0) {
-      console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', removed: deduped.removed, from: title.length, to: deduped.title.length }))
-    }
-    // The dedupe refused because removing the repeat would have re-created a protected mark — the
-    // second half of the live "Futbol World Futbol Cup" oscillation (B0GVVY5TS9). Rare and always
-    // worth a line: it means an upstream producer wrote a mark-adjacent token.
-    if (deduped.refusedForTrademark) {
-      console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', decision: 'refused-trademark-resurrection', title }))
-    }
-    const capped = deduped.title
-    mark('CAP_AND_DEDUPE', capped)
-    /* The context BOTH the waste net's probe and the money-tail loop use. Composed ONCE so the
-     * probe ("would removing this waste free space for the keyword?") is answered against exactly
-     * the arguments the loop below is about to run with — a second, drifting copy would let the two
-     * nets disagree, and the waste net would strip on a promise the loop never keeps. */
-    const moneyCtx = {
+     * Every decision this closure used to make inline — casing, spec-truth, cap+dedupe, waste
+     * vocabulary, the money tail, color strip, inclusive audience, the facts pad, the money-position
+     * gate, and the terminal truth+band settle — now lives in ONE function, `settleTitle`
+     * (titleBand.ts), so the exact code the offline harness drives (`truthBandHarness.ts`) is the
+     * code this route ships; nothing here re-implements or duplicates any of it. Four consecutive
+     * live failures (#630/#632/#634/#637) each fixed one of nine independently-wired stages while a
+     * LATER stage stayed free to write back the lie the fixed one had just removed — `settleTitle`
+     * closes that hole by making filtering and filling the SAME decision, verified as a whole before
+     * any candidate may leave the door. This closure's only remaining job is to resolve the
+     * pipeline-local values `settleTitle` needs into its ctx, and forward the pipeline-local
+     * bookkeeping (`titleBandHolds`, `v4Diffs`) its result carries back. */
+    const moneyCtx: MoneyTailCtx = {
       // PO ruling 2026-08-10: the pipe-right is the MONEY position, so where the title has ROOM the
       // money tail APPENDS rather than abstaining and letting the band-pad weld a spec fact there.
       allowAppend: true,
@@ -9525,257 +9456,42 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // both from ONE candidate the derivation's off-niche/season/lean filters wave through. Same
       // per-exit ctx as the band pad and the terminal net (`bandScope?.truth ?? titleTruthCtx`).
       truth: bandScope?.truth ?? titleTruthCtx,
+      // Per-child sibling-name tokens, so the whole-string verify INSIDE `enforceMoneyTail` (2026-
+      // 08-22 rewrite) can refuse a market keyword that would carry another design's identity.
+      foreignTokens: bandScope?.foreignTokens,
     }
-    /* TITLE WASTE VOCABULARY (PO ruling 2026-08-09, §3 gold rule 4 + §8) — "Unisex" and "Classic
-     * Fit" are not title words. The PO's own rewrite is the specimen:
-     *   AI:  THE CEO 2026 World Soccer Cup USA Mexico Canada Unisex Tee | Classic Fit
-     *   PO:  THE CEO 2026 World Soccer Cup Tee Shirt | USA Mexico Canada Football Tee
-     * BEFORE the money tail, unlike the color and inclusive-audience nets below: those two compete
-     * for the tail region the keyword wants, so the keyword gets first refusal and they clean up
-     * afterwards. This one frees characters on the LEFT, and freed characters only help the keyword
-     * if they are free when it is measured against the band. `moneyKws` is passed ONLY at
-     * TITLE_MONEY_TAIL=on — at off/shadow the keyword never ships, so a removal justified by it
-     * would leave a short title with nothing to fill it (the net then falls back to the facts-pad
-     * arm alone). Fail-open: any removal that satisfies neither arm returns byte-identical. */
-    const waste = stripTitleWasteVocabulary(capped, {
+    const result = settleTitle(title, {
+      produced,
       apparel: apparelProduct,
-      band: titleBandCtx(capped, bandScope),
-      moneyKws: moneyTailMode === 'on' ? (moneyKws ?? null) : null,
-      money: moneyCtx,
-    })
-    console.log('[TITLE_GOLD]', JSON.stringify({
-      tag: 'SHIP_TITLE_WASTE', decision: waste.decision,
-      from: capped.length, to: waste.title.length, changed: waste.title !== capped, note: waste.note,
-    }))
-    let moneyed = waste.title
-    mark('WASTE_VOCABULARY', moneyed)
-    /* MONEY TAIL (#147) — wire order is spec-truth → cap → dedupe → waste → enforceMoneyTail →
-     * enforceTitleBand: when the gold tail lands the title is already in band and the facts-only
-     * pad below never fires (curing the "fact tail eats the money slot" leak); when it skips,
-     * every downstream byte is identical to today. Shadow ships unchanged + logs the diff.
-     * CANDIDATE LOOP (adversarial MEDIUM, 2026-08-09): per-keyword skips (cross-gender/word-repeat/
-     * spec-conflict/no-fit) try the next candidate instead of burning the slot; 'already-covered'
-     * STOPS the loop (the top candidate indexing from the title = slot satisfied — a lower-value
-     * keyword must not be installed past it); title-structural skips (no-tail/design-right/
-     * brand-tail/empty/non-apparel) stop too — they are identical for every candidate. The loop
-     * itself lives in the leaf (`tryMoneyTail`) so the waste net probes the SAME code path. */
-    const mtRun = tryMoneyTail(moneyed, moneyKws, moneyCtx)
-    for (const a of mtRun.attempts) {
-      console.log('[TITLE_GOLD]', JSON.stringify({
-        tag: 'SHIP_MONEY_TAIL', mode: moneyTailMode, decision: a.decision, kw: a.kw,
-        from: moneyed.length, to: a.title.length, note: a.note,
-      }))
-    }
-    if (mtRun.applied) {
-      const wonKw = mtRun.attempts[mtRun.attempts.length - 1]?.kw ?? ''
-      if (moneyTailMode === 'on') { moneyed = mtRun.title; mark('MONEY_TAIL', moneyed) }
-      else console.log('[MONEY_TAIL_DIFF]', JSON.stringify({ kw: wonKw, current: moneyed, would: mtRun.title }))
-    }
-    /* DEFECT B (PO §5, live B0GVVY5TS9 2026-08-09) — A COLOR WORD IN THE SHARED TITLE. §5: "shared
-     * title/bullets carry NO color word; colors rank per-child via each child's own backend tail".
-     * The rule lived ONLY as an upstream pool filter (colorNeutralFamily + BASIC_COLOR_RE), which a
-     * council-written / prior-carried / fill-composed color word walks straight past — so it is
-     * enforced HERE, on the bytes that ship, like every other §-rule in this door.
-     * DELIBERATELY AFTER the money-tail loop, for the same reason DEFECT 1 is: a color word lives in
-     * the tail region the money keyword wants, and `enforceMoneyTail` gets first refusal on that
-     * space (when it takes the tail the color leaves for free, and the net below then reports
-     * 'no-color'). BEFORE the inclusive-audience net because a mis-describing color is the harder
-     * violation of the two and should get the better-funded re-pad. It re-pads from facts internally
-     * and refuses any removal it cannot land back inside the band, so a skip is byte-identical. */
-    const colorNet = stripVariantColorWords(moneyed, {
-      apparel: apparelProduct,
-      protect: protectDesign || effectiveDesignName || designName || null,
-      band: titleBandCtx(moneyed, bandScope),
-    })
-    console.log('[TITLE_GOLD]', JSON.stringify({
-      tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision,
-      from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note,
-    }))
-    moneyed = colorNet.title
-    mark('COLOR_STRIP', moneyed)
-    /* DEFECT 1 (PO 2026-08-09, §4) — "for Men and Women" is CHARACTER WASTE. Deliberately AFTER the
-     * money-tail loop: §4 allows the inclusive tail on a universal design ONLY when nothing better
-     * fits that space, and `enforceMoneyTail` is what decides "better" — it already treats the
-     * inclusive tail as its replaceable region (AUDIENCE_TAIL_RE covers "men and women"). So the
-     * keyword gets first refusal, and this net then enforces the two rules the money tail does not
-     * own: never co-occur with a gendered noun (delete), never appear on a leaned listing (narrow to
-     * the leaned gender). It re-pads from facts internally and refuses any removal it cannot land
-     * back inside the band, so a skip is byte-identical. */
-    const inc = enforceInclusiveAudience(moneyed, { apparel: apparelProduct, lean, band: titleBandCtx(moneyed, bandScope) })
-    console.log('[TITLE_GOLD]', JSON.stringify({
-      tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision,
-      from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note,
-    }))
-    moneyed = inc.title
-    mark('INCLUSIVE_AUDIENCE', moneyed)
-    /* THE FACTS PAD — suppressed at TITLE_V4=on (2026-08-12).
-     *
-     * The repo's own attribution makes this the author of TWO of the five rejected titles: it minted
-     * "| Crew Neck" (titleBand.ts:702-706) and "| Short Sleeve" (:3186-3188) to reach a length band.
-     * It is also the LAUNDERING vector — appending two words converts a droppable spec-only tail into
-     * a protected brand tail (classifyTail: "Short Sleeve" = specOnly, "Short Sleeve Comfort Colors
-     * Tee" = brand).
-     *
-     * The seller abolished its reason on 2026-08-12: "never ship short — always ask me". A title that
-     * cannot reach the band is now a REFUSAL, surfaced, not a hole packed with facts. */
-    const v4NoPad = v4Applies()
-    const v = v4NoPad
-      ? { title: moneyed, decision: 'v4-no-pad', notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
-      : enforceTitleBand(moneyed, titleBandCtx(moneyed, bandScope))
-    // PHASE 0 OBSERVABILITY. Log EVERY pass, including no-ops, with the reason. Previously the door
-    // logged only when it changed something, so on the first live run after deploy — a 75-char title
-    // and no log line — "the net works", "the net never fired" and "the net fired and did nothing"
-    // were indistinguishable, and the only honest report was "unknown". The evidence gate for the
-    // whole ship-door plan is a live `decision:'padded'` with from<70 and to in [70,75]; that cannot
-    // be collected without this line. One line per title per exit; cheap next to the LLM calls.
-    console.log(JSON.stringify({
-      tag: 'SHIP_BAND_DECISION',
-      field: 'title',
-      // Flag retired 2026-08-03; constant field kept for log-schema stability (grep tooling).
-      mode: 'on',
-      decision: v.decision,
-      from: title.length,
-      to: v.title.length,
-      changed: v.title !== moneyed,
-      capped: capped.length !== title.length,
-      note: v.notes[0] ?? '',
-    }))
-    const banded = v.title === moneyed ? moneyed : v.title
-    mark('BAND_PAD', banded)
-    if (v.title !== moneyed) console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: title.length, to: v.title.length, note: v.notes[0] ?? '' }))
-    // ── TERMINAL ACCEPTANCE ON THE MONEY POSITION ─────────────────────────────────────────────
-    // LAST, after every net including the pad — so exactly ONE place owns the rule "the money
-    // position must be worth ranking for", instead of a guard inside each operation that can touch
-    // a separator. Three live rejections reached the seller through three DIFFERENT writers of the
-    // same defect: the pad minted "| Short Sleeve", the pad extended into "| Shirt Short Sleeve",
-    // and the council wrote "| Shirt" itself. A terminal gate does not care who wrote it.
-    // `enforceMoneyTail` has already had its chance above, so a real keyword always wins the slot
-    // first; this only fires when nothing better was available.
-    const drop = dropSpecOnlyTail(banded, { apparel: apparelProduct, specValues: blankSpecFactTokens(blankSpec) })
-    console.log('[TITLE_GOLD]', JSON.stringify({
-      tag: 'SHIP_MONEY_POSITION', decision: drop.decision,
-      from: banded.length, to: drop.title.length, note: drop.note,
-    }))
-    mark('MONEY_POSITION_GATE', drop.title)
-    /* ── TITLE_V4 SHADOW MEASUREMENT — the number the seller asked for BEFORE anything changes ────
-     *
-     * `moneyed` is the title as it stood BEFORE the facts pad; `drop.title` is what ships today. The
-     * difference is exactly what the pad manufactured, and whether removing it drops the title under
-     * the seller's own corpus floor (their shortest gold is 69 — the Rod Father).
-     *
-     * At shadow this logs and ships today's bytes unchanged. At `on` the pad never ran, so the two
-     * are the same string and `wouldRefuse` becomes a real refusal handled upstream. Logged on EVERY
-     * trip, including no-ops: a flag whose shadow arm is silent on its own target listing is a dark
-     * flag — the TITLE_MONEY_TAIL lesson this repo already paid for once. */
-    const v4Mode = titleV4Mode()
-    if (v4Mode !== 'off') {
-      const unpadded = moneyed
-      const CORPUS_FLOOR = 68        // the seller's shortest gold after their 2026-08-12 revision
-      const entry = {
-        mode: v4Mode,
-        shipped: drop.title,
-        shippedLen: drop.title.length,
-        withoutPad: unpadded,
-        withoutPadLen: unpadded.length,
-        padManufactured: drop.title !== unpadded,
-        wouldRefuse: unpadded.length < CORPUS_FLOOR,
-        floor: CORPUS_FLOOR,
-      }
-      console.log('[TITLE_V4_DIFF]', JSON.stringify(entry))
-      // ALSO RIDE OUT ON THE RESPONSE. The log line alone makes every reading of this measurement
-      // depend on someone opening the Coolify log viewer and grepping — a manual step in front of
-      // the one number this phase exists to produce. Surfacing it on `debug` makes the refusal rate
-      // readable from the regen response itself, by anyone, without shell access.
-      v4Diffs.push(entry)
-    }
-    /* ── THE NAMED REFUSAL (PO 2026-08-21) ────────────────────────────────────────────────────
-     * "If a title genuinely cannot reach 70 with true facts, it must still be truthful — log a
-     * named reason rather than padding with a lie." The pad above only ever adds PRODUCT FACTS and
-     * refuses to invent; when the family's own facts cannot span the gap the honest outcome is a
-     * short title AND a line that says which fact bank ran dry. Without this the only evidence was
-     * a `SHIP_BAND_DECISION` buried among nine other stages, so "the pad is mis-wired" and "the pad
-     * had nothing to say" were indistinguishable — which is exactly how this defect survived the
-     * spine's first live gate. `reason` is the pad's own decision, so it names the cure:
-     *   no-facts        — the blank contributes NOTHING (add the blank / its facts to blank_specs)
-     *   facts-exhausted — the facts ran out mid-gap (this family's blanks agree on too little)
-     *   v4-no-pad       — TITLE_V4=on: the pad is deleted by policy; short IS the refusal
-     *   post-pad-short  — the pad reached the band and a later terminal gate shortened it again */
-    if (apparelProduct && drop.title.length < TITLE_BAND_LO) {
-      console.warn(JSON.stringify({
-        tag: 'TITLE_UNDER_BAND',
-        parent: input.parentAsin ?? null,
-        len: drop.title.length,
-        reason: v.decision === 'padded' || v.decision === 'in-band' ? 'post-pad-short' : v.decision,
-        band: TITLE_BAND_LO,
-        facts: candidateFactCount(moneyed, titleBandCtx(moneyed, bandScope)),
-        note: v.notes[0] ?? '',
-      }))
-    }
-    /* ── THE ONE NET: TRUTH AND BAND SETTLE TOGETHER (PO 2026-08-22) ──────────────────────────
-     *
-     * TERMINAL, on the exact bytes that ship, after every other net including the facts pad and the
-     * money-position gate. Everything above this line may SHORTEN a title; this is the single place
-     * that decides whether a shortened title is allowed to leave the door at all.
-     *
-     * PRs #630/#631 had the truth half and no additive counterpart, so they shipped true 29-49 char
-     * titles against a 70-75 band and were reverted off production. The exit condition is now the
-     * WHOLE contract — truthful AND in band — and it is satisfied by re-filling from TRUE material
-     * (spec facts, the family's own garment vocabulary, and truthful pool phrases) or not at all.
-     * A title that cannot satisfy both is a REFUSAL that preserves the live title and raises an
-     * operator hold; it is never a stub, and it is never silent. */
-    const settled = enforceTitleTruthBand({
-      produced: drop.title,
-      prior,
-      apparel: apparelProduct,
-      band: titleBandCtx(drop.title, bandScope),
+      // `garmentSecond` depends on the CURRENT draft title, so this must be re-derived per stage —
+      // exactly the discipline the pre-rewrite door's inline `titleBandCtx(text, bandScope)` calls
+      // already followed; `settleTitle` calls this once per stage instead of the caller doing it.
+      bandCtxFor: (t: string) => titleBandCtx(t, bandScope),
+      moneyKws,
+      moneyTailMode,
+      moneyCtx,
+      spec: blankSpec,
+      capTitle75,
+      colorProtect: protectDesign || effectiveDesignName || designName || null,
+      lean,
+      v4NoPad: v4Applies(),
+      v4Mode: titleV4Mode(),
+      specFactTokens: blankSpecFactTokens(blankSpec),
       truth: bandScope?.truth ?? titleTruthCtx,
       // Both call sites already pass the exit's design protect hay as `protectDesign` (the family
-      // union for the broadcast title, THIS design's name for a per-child one), so the terminal net
-      // protects exactly what the early one did.
+      // union for the broadcast title, THIS design's name for a per-child one).
       protect: protectDesign ?? '',
       reject: bandScope?.reject,
       foreignTokens: bandScope?.foreignTokens,
       // BROADCAST ONLY (no bandScope — see applyTitleTruthNet's doc on scrubProtectedOverlap).
       scrubProtectedOverlap: !bandScope,
+      prior,
+      holdScope,
+      parentAsin: input.parentAsin ?? null,
     })
-    console.log(JSON.stringify({
-      tag: 'TITLE_TRUTH_BAND', scope: holdScope, parent: input.parentAsin ?? null,
-      decision: settled.decision, from: drop.title.length, netted: settled.netted.length, to: settled.len,
-      changed: settled.title !== drop.title, reason: settled.reason,
-    }))
-    // The terminal truth pass caught a lie a LATER stage installed — almost always the money tail,
-    // whose candidates are off-niche-filtered but never truth-filtered. Rare and always worth a line.
-    if (settled.netted !== drop.title) {
-      console.warn(JSON.stringify({ tag: 'TITLE_TERMINAL_TRUTH_CATCH', scope: holdScope, parent: input.parentAsin ?? null, from: drop.title, to: settled.netted }))
-    }
-    if (settled.hold) {
-      /* THE NAMED REFUSAL. `tried` is the full list of true segments the pad had available, so
-       * "the pad is mis-wired" (tried is empty when facts obviously exist) and "the pad had nothing
-       * true left to say" (tried is full and none fit) are one log line apart — the distinction
-       * that let this defect survive the spine's first live gate. */
-      console.warn(JSON.stringify({
-        tag: 'TITLE_BAND_UNREACHABLE',
-        parent: input.parentAsin ?? null,
-        scope: holdScope,
-        len: settled.len,
-        band: TITLE_BAND_LO,
-        tried: settled.tried,
-        reason: settled.reason,
-        decision: settled.decision,
-        produced: drop.title,
-        kept: settled.title,
-      }))
-      titleBandHolds.push({
-        scope: holdScope, parent: input.parentAsin ?? null, len: settled.len,
-        tried: settled.tried, reason: settled.reason, kept: settled.title,
-      })
-    }
-    if (settled.title !== drop.title) mark('TRUTH_BAND_SETTLE', settled.title)
-    // ONE line per trip. `stages` is the ordered list of every stage that actually rewrote the
-    // string — i.e. the authorship record. An empty `stages` means the door shipped the producer's
-    // bytes untouched, which is the state the architecture is aiming for.
-    console.log('[TITLE_DOOR_TRACE]', JSON.stringify({ id: traceId, in: inTitle, out: settled.title, stages: trace }))
-    return settled.title
+    if (result.holdEntry) titleBandHolds.push(result.holdEntry)
+    if (result.v4Diff) v4Diffs.push({ ...result.v4Diff })
+    return result.title
   }
   /* SHIP CENSUS (Phase 2 of the foundation plan) — MEASURE-ONLY, on the object this function
    * RETURNS, i.e. the exact bytes that persist. It exists because of a same-day live specimen: the

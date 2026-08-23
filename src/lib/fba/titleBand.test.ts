@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { collapseRepeatedWords, enforceTitleBand, pickDistinctGarmentForm, scrubUnspecdGarmentClaims, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx } from './titleBand'
+import {
+  collapseRepeatedWords, enforceMoneyTail, enforceTitleBand, pickDistinctGarmentForm,
+  scrubUnspecdGarmentClaims, settleTruthBand, titleHasDuplicateConcept, titleHasPunctuationDefect,
+  verdictForAssembledTitle, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx,
+} from './titleBand'
+import type { PhraseTruthCtx } from './contentTruth'
+import { isForeignToDesign } from './designScope'
 
 /* The LIVE failure this net exists to fix (B0GF49RLDL, 2026-07-29 21:03 regen). */
 const LIVE_66 = 'THE CEO Cupid Valentine Comfort Colors Relaxed Fit Shirt for Women'
@@ -406,5 +412,164 @@ describe('scrubUnspecdGarmentClaims', () => {
     const twice = scrubUnspecdGarmentClaims(once.title, CC_SPEC)
     expect(twice.removed).toEqual([])
     expect(twice.title).toBe(once.title)
+  })
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE WHOLE-STRING VERIFY (title-settle rewrite, handoff/TITLE_SETTLE_REWRITE.md, 2026-08-22).
+ * Direct, fine-grained unit coverage of `verdictForAssembledTitle` and the two ctx-free checks it
+ * composes, plus proof that the additive search (`settleTruthBand`) and the money-tail installer
+ * (`enforceMoneyTail`) both actually CALL it — the fix for the four consecutive live failures on
+ * B0DSCDZC6K (#630/#632/#634/#637), where a per-segment/per-candidate gate could not see a violation
+ * that only exists in the ASSEMBLED string. The end-to-end fixture lives in `truthBandHarness.ts` /
+ * `truthBandGate.test.ts`; this file pins the primitives in isolation.
+ */
+const MIXED_SWEAT_HOODIE_UNISEX: PhraseTruthCtx = {
+  garmentFamily: 'sweatshirt', mixedFamilies: ['sweatshirt', 'hoodie'], spec: null,
+  allowedBrand: null, audience: 'adult', designTokens: [], audienceLean: 'unisex', field: 'title',
+}
+
+describe('titleHasDuplicateConcept', () => {
+  it('flags the SAME concept restated in two spellings ("Crewneck" + "Crew Neck")', () => {
+    expect(titleHasDuplicateConcept('THE CEO Fall Crewneck | Long Sleeve Crew Neck')).toBe(true)
+  })
+
+  it('does NOT flag the golds\' noun ×2 pattern ("Tee Shirt | … TShirt")', () => {
+    expect(titleHasDuplicateConcept('THE CEO Alligator Tee Shirt | Comfort Colors TShirt for Women')).toBe(false)
+  })
+
+  it('does not flag ordinary non-repeating vocabulary', () => {
+    expect(titleHasDuplicateConcept('THE CEO Mother Hustler Sweatshirt | Long Sleeve Pullover')).toBe(false)
+  })
+})
+
+describe('titleHasPunctuationDefect', () => {
+  it('flags the live specimen "Entrepreneur, |"', () => {
+    expect(titleHasPunctuationDefect('THE CEO Motivational Entrepreneur, | Long Sleeve')).toBe(true)
+  })
+
+  it('flags a trailing separator', () => {
+    expect(titleHasPunctuationDefect('THE CEO Mother Hustler Sweatshirt |')).toBe(true)
+  })
+
+  it('a clean title has no defect', () => {
+    expect(titleHasPunctuationDefect('THE CEO Mother Hustler Sweatshirt | Long Sleeve Pullover')).toBe(false)
+  })
+})
+
+describe('verdictForAssembledTitle — the ONE predicate for an assembled title', () => {
+  it('ok on a clean, single-class, truthful title', () => {
+    expect(verdictForAssembledTitle('THE CEO Mother Hustler Sweatshirt | Long Sleeve Pullover', { truth: MIXED_SWEAT_HOODIE_UNISEX })).toEqual({ ok: true })
+  })
+
+  it('rejects two garment classes even when each noun is individually true of the family', () => {
+    const v = verdictForAssembledTitle('THE CEO Mother Hustler Sweatshirt | Hoodie Pullover', { truth: MIXED_SWEAT_HOODIE_UNISEX })
+    expect(v.ok).toBe(false)
+  })
+
+  it('rejects a forced gender on a unisex family', () => {
+    const v = verdictForAssembledTitle('THE CEO Mother Hustler Sweatshirt | Long Sleeve for Women', { truth: MIXED_SWEAT_HOODIE_UNISEX })
+    expect(v.ok).toBe(false)
+  })
+
+  it('rejects a sibling design name', () => {
+    // `foreignTokens` alone scrubs segment 0 word-by-word; a TAIL segment carrying a sibling's whole
+    // name is dropped only via `reject` (the same pairing every real caller supplies — see
+    // `applyTitleTruthNet`'s own doc on why the two are separate levers).
+    const foreignTokens = new Set(['billionare', 'coming', 'soon'])
+    const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
+    const v = verdictForAssembledTitle('THE CEO Mother Hustler | Billionare Coming Soon Gift', { truth: MIXED_SWEAT_HOODIE_UNISEX, foreignTokens, reject })
+    expect(v.ok).toBe(false)
+  })
+
+  it('rejects a duplicated concept', () => {
+    const v = verdictForAssembledTitle('THE CEO Fall Crewneck | Long Sleeve Crew Neck', { truth: MIXED_SWEAT_HOODIE_UNISEX })
+    expect(v.ok).toBe(false)
+  })
+
+  it('rejects a punctuation defect', () => {
+    const v = verdictForAssembledTitle('THE CEO Entrepreneur, | Long Sleeve', { truth: MIXED_SWEAT_HOODIE_UNISEX })
+    expect(v.ok).toBe(false)
+  })
+
+  it('with no truth ctx, the truth/foreign-name half is skipped (fail-open) but concept + punctuation still run', () => {
+    expect(verdictForAssembledTitle('THE CEO Fall Crewneck | Long Sleeve Crew Neck', { truth: null }).ok).toBe(false)
+    expect(verdictForAssembledTitle('THE CEO Mother Hustler Sweatshirt | Hoodie Pullover', { truth: null }).ok).toBe(true)
+  })
+})
+
+describe('enforceMoneyTail — consults the whole-string verify, not just the keyword\'s own truth (2026-08-22)', () => {
+  it('refuses a candidate that is individually true but introduces a SECOND garment class already committed by the title', () => {
+    const r = enforceMoneyTail(
+      'THE CEO Mother Hustler Sweatshirt',
+      'hoodie pullover long sleeve gift set',
+      { apparel: true, truth: MIXED_SWEAT_HOODIE_UNISEX, allowAppend: true },
+    )
+    // Both "hoodie" and "pullover" pass `phraseTruthVerdict` alone (the family's union permits both),
+    // but the ASSEMBLED title would name two garment classes at once — the exact defect class this
+    // rewrite exists to close. The candidate must not win the slot.
+    expect(r.decision).not.toBe('applied')
+  })
+
+  it('still applies a clean candidate that introduces no whole-string violation', () => {
+    const r = enforceMoneyTail(
+      'THE CEO Mother Hustler Sweatshirt',
+      'cozy fleece pullover gift for family',
+      { apparel: true, truth: MIXED_SWEAT_HOODIE_UNISEX, allowAppend: true },
+    )
+    expect(r.decision).toBe('applied')
+    expect(r.title.length).toBeGreaterThanOrEqual(TITLE_BAND_LO)
+    expect(r.title.length).toBeLessThanOrEqual(TITLE_BAND_HI)
+  })
+
+  it('refuses a candidate that would carry a sibling design\'s name', () => {
+    const r = enforceMoneyTail(
+      'THE CEO Mother Hustler Sweatshirt',
+      'billionare coming soon gift for family and friends',
+      {
+        apparel: true, truth: MIXED_SWEAT_HOODIE_UNISEX, allowAppend: true,
+        foreignTokens: new Set(['billionare', 'coming', 'soon']),
+      },
+    )
+    expect(r.decision).not.toBe('applied')
+  })
+})
+
+describe('settleTruthBand — the additive search re-verifies the WHOLE string, not just length (2026-08-22)', () => {
+  it('never appends a candidate that would carry a sibling design name, even when the band pool itself was not pre-filtered for it (defense in depth)', () => {
+    const foreignTokens = new Set(['billionare', 'coming', 'soon'])
+    const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
+    const band: TitleBandCtx = {
+      apparel: true,
+      factSegments: [],
+      // Deliberately UNFILTERED — simulates a caller that forgot to sibling-scope its band ctx. The
+      // whole-string verify, driven by `foreignTokens`/`reject` passed directly to `settleTruthBand`,
+      // must still refuse the phrase — it does not rely solely on the band ctx being correctly wired.
+      poolSegments: ['Billionare Coming Soon Gift For The Whole Family', 'Cozy Fleece Pullover For Everyone'],
+      truthOk: () => true,
+    }
+    const r = settleTruthBand({
+      produced: 'THE CEO Mother Hustler', prior: null, apparel: true, band,
+      truth: MIXED_SWEAT_HOODIE_UNISEX, foreignTokens, reject,
+    })
+    expect(r.title.toLowerCase()).not.toContain('billionare')
+  })
+
+  it('never appends a candidate that would introduce a second garment class', () => {
+    const band: TitleBandCtx = {
+      apparel: true,
+      factSegments: [],
+      poolSegments: ['Hoodie Pullover Long Sleeve For The Whole Family', 'Cozy Fleece Sweatshirt For Everyone'],
+      truthOk: () => true,
+    }
+    const r = settleTruthBand({
+      produced: 'THE CEO Mother Hustler Sweatshirt', prior: null, apparel: true, band,
+      truth: MIXED_SWEAT_HOODIE_UNISEX,
+    })
+    const groups = [...r.title.matchAll(/\b(?:sweatshirts?|pullovers?|crewnecks?|hood(?:ie|ed)s?)\b/gi)]
+    const hasHoodie = groups.some((m) => /hood/i.test(m[0]))
+    const hasSweatFamily = groups.some((m) => /sweatshirt|pullover|crewneck/i.test(m[0]))
+    // Never BOTH at once — that is exactly the two-garment-class defect.
+    expect(hasHoodie && hasSweatFamily).toBe(false)
   })
 })

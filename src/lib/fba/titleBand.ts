@@ -28,7 +28,7 @@
 import { CONTENT_CONTRACT } from './contentContract'
 // The shared content truth spine. No cycle: contentTruth imports only blankSpecs, which imports
 // productDetailAttrs + contentContract and never this module.
-import { applyTitleTruthNet, phraseTruthVerdict, dominantGarmentGroup, type PhraseTruthCtx } from './contentTruth'
+import { applyTitleTruthNet, phraseTruthVerdict, dominantGarmentGroup, garmentGroupsIn, type PhraseTruthCtx } from './contentTruth'
 // Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
 // file stays cycle-free and unit-testable in isolation.
 import { BASIC_COLOR_WORDS } from './designName'
@@ -766,6 +766,10 @@ export interface MoneyTailCtx {
    *  ground truth to judge against ⇒ this never fires (fail-open, matches every other truth-ctx
    *  consumer in the pipeline). */
   truth?: PhraseTruthCtx | null
+  /** Sibling design name tokens this candidate must never carry (per-child exits only) — the SAME
+   *  whole-string verify `settleTruthBand`'s search runs on every candidate it assembles, applied
+   *  here too so a market keyword cannot win the money slot by carrying another design's identity. */
+  foreignTokens?: ReadonlySet<string>
   /**
    * May the net APPEND a money tail where none existed? (PO ruling 2026-08-10.)
    *
@@ -1014,6 +1018,17 @@ export function enforceMoneyTail(
     return { title: t0, decision: 'no-fit', note: `candidate ${cand.length} chars outside [${TITLE_BAND_LO},${TITLE_BAND_HI}]` }
   }
 
+  // THE WHOLE-STRING VERIFY (2026-08-22 rewrite). A market keyword can be individually true
+  // (`ctx.truth` already checked `kw0` above) and STILL make the ASSEMBLED title lie: a second
+  // garment class this money position welds on ("… Sweatshirt | … Pullover Hoodie"), a concept
+  // already stated on the left in a different spelling, or — per-child scope — a sibling design's
+  // name the keyword derivation's own off-niche filters never modeled. Same predicate the additive
+  // search uses; a candidate that fails it never wins the slot, no matter how it scored upstream.
+  const verdict = verdictForAssembledTitle(cand, { truth: ctx.truth ?? null, protect: ctx.protect ?? '', foreignTokens: ctx.foreignTokens })
+  if (!verdict.ok) {
+    return { title: t0, decision: 'truth-lie', note: `assembled candidate fails whole-title verification (${verdict.reason})` }
+  }
+
   return { title: cand, decision: 'applied', note: `money tail "${moneyTitleCase(kwFinal)}" → ${cand.length} chars` }
 }
 
@@ -1137,6 +1152,110 @@ function appendBandSegment(title: string, seg: string): string {
   return `${head}${joiner}${seg}${tail}`.replace(/\s{2,}/g, ' ').trim()
 }
 
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE WHOLE-STRING VERIFY — the rewrite's central seam (handoff/TITLE_SETTLE_REWRITE.md §3.3).
+ *
+ * FOUR live defects shipped through four consecutive "fixes" (#630/#632/#634/#637) because every
+ * check up to this point judges a SEGMENT or a CANDIDATE PHRASE in isolation: `phraseTruthVerdict`
+ * asks "is this one phrase true?", `candidateSegments`'s gates ask "is this one candidate safe to
+ * offer?". None of them can see the ASSEMBLED STRING, so a title built from individually-true pieces
+ * can still be a false WHOLE — "Long Sleeve" + "Longsleeve Tee" is two true fragments and one lying
+ * title (`Long Sleeve Longsleeve Tee`), naming a garment class the family is not.
+ *
+ * `verdictForAssembledTitle` is the ONE function that judges the WHOLE title, and it is the predicate
+ * the additive search (`settleTruthBand`) and the money-tail installer (`enforceMoneyTail`) now both
+ * call before accepting ANY candidate — filtering and filling are the SAME decision, not "filter,
+ * then fill, then hope". It reuses `applyTitleTruthNet`'s own idempotence as the truth+foreign-name
+ * probe (a title that net would still edit is not yet clean — no second rulebook), and adds the two
+ * checks a per-segment predicate structurally cannot express: one garment class for the WHOLE title,
+ * and no concept restated in two spellings across the WHOLE title (`Crewneck` + `Crew Neck`).
+ */
+export interface AssembledTitleCtx {
+  /** The family's blank-grounded truth. Absent ⇒ no ground truth to judge against — the truth/foreign
+   *  name half is skipped (fail-open, matching every other truth-ctx consumer in this file); the two
+   *  ctx-free checks below (duplicate concept, punctuation) still run unconditionally. */
+  truth: PhraseTruthCtx | null
+  /** Design words that must survive verbatim — same meaning as `applyTitleTruthNet`'s `protectHay`. */
+  protect?: string
+  /** Sibling design name tokens this title may never carry (per-child exits only). */
+  foreignTokens?: ReadonlySet<string>
+  /** The whole-phrase sibling-name rejector (per-child exits only) — same partition `foreignTokens`
+   *  is built from, at the segment-drop granularity `applyTitleTruthNet.rejectSegment` takes. */
+  reject?: (seg: string) => boolean
+  /** BROADCAST/parent titles only — see `applyTitleTruthNet`'s doc on the same option. */
+  scrubProtectedOverlap?: boolean
+}
+
+export type AssembledTitleVerdict = { ok: true } | { ok: false; reason: string }
+
+/**
+ * Does a candidate SIBLING span dispute this title — 2 or 3 word window `w`, or a bare word already
+ * present — re-state a concept spelled a different way ("Crewneck" vs "Crew Neck")? Self-check twin
+ * of `conceptIsNew` (which tests a NEW candidate against an EXISTING title): this tests the ASSEMBLED
+ * string against itself, because a combination the additive search built one segment at a time can
+ * restate a concept the search never directly compared the two occurrences of. Windows built from a
+ * very short (<2 char) word are skipped — not enough signal to avoid a coincidental collision.
+ */
+export function titleHasDuplicateConcept(title: string): boolean {
+  const w = bandWords(title).filter((x) => !TITLE_CONNECTORS.has(x))
+  const singles = new Set(w.filter((x) => x.length >= 4))
+  const multiSeen = new Set<string>()
+  for (let i = 0; i < w.length; i++) {
+    for (let n = 2; n <= 3 && i + n <= w.length; n++) {
+      const chunk = w.slice(i, i + n)
+      if (chunk.some((x) => x.length < 2)) continue
+      const flat = chunk.join('')
+      // the SAME multi-word concept twice, or a multi-word window spelling out a bare word already
+      // present elsewhere ("crew" + "neck" against a standalone "crewneck") — either direction.
+      if (multiSeen.has(flat) || singles.has(flat)) return true
+      multiSeen.add(flat)
+    }
+  }
+  return false
+}
+
+/**
+ * Punctuation integrity on the WHOLE title — the live specimen is "Entrepreneur, |" (a comma directly
+ * against a pipe). Every one of these is residue a mid-string removal can leave behind when a repair
+ * chain misses a case; a per-segment check cannot see it because the defect straddles the separator.
+ */
+export function titleHasPunctuationDefect(title: string): boolean {
+  if (!title) return false
+  return /,\s*\|/.test(title)              // ", |" — the exact live specimen
+    || /\|\s*,/.test(title)                // "| ,"
+    || /,\s*,/.test(title)                 // ",,"
+    || /\|\s*\|/.test(title)               // "||"
+    || /[,|]\s*$/.test(title)              // trailing separator
+    || /^\s*[,|]/.test(title)              // leading separator
+    || /\s{2,}/.test(title)                // doubled space
+    || /,\s+(?:for|and)\b/i.test(title)    // dangling comma before a connector
+}
+
+/**
+ * THE ONE PREDICATE for an ASSEMBLED title. `ok:false` means this exact string may never ship,
+ * however it was built. Reused by the additive search (per candidate it is about to accept) and by
+ * `enforceMoneyTail` (on the candidate it is about to install) — the SAME question, asked the SAME
+ * way, everywhere a title could be chosen. Pure.
+ */
+export function verdictForAssembledTitle(title: string, ctx: AssembledTitleCtx): AssembledTitleVerdict {
+  const t = (title || '').trim()
+  if (!t) return { ok: true }
+  if (ctx.truth) {
+    // Idempotence IS the truth+foreign-name probe: a title `applyTitleTruthNet` would still edit is
+    // not yet clean — no second rulebook duplicating what that net already knows how to judge.
+    const netted = applyTitleTruthNet(t, ctx.truth, ctx.protect ?? '', {
+      rejectSegment: ctx.reject,
+      foreignTokens: ctx.foreignTokens,
+      scrubProtectedOverlap: ctx.scrubProtectedOverlap,
+    })
+    if (netted !== t) return { ok: false, reason: 'untrue-or-foreign-segment-present' }
+    if (garmentGroupsIn(t).size > 1) return { ok: false, reason: 'two-garment-classes' }
+  }
+  if (titleHasDuplicateConcept(t)) return { ok: false, reason: 'duplicate-concept' }
+  if (titleHasPunctuationDefect(t)) return { ok: false, reason: 'punctuation-defect' }
+  return { ok: true }
+}
+
 export type TruthBandDecision =
   /** The run did not produce a title (a bullets/keywords regen passes the prior through). */
   | 'not-produced'
@@ -1186,6 +1305,16 @@ export function settleTruthBand(args: {
   prior?: string | null
   apparel: boolean
   band: TitleBandCtx
+  /** THE WHOLE-STRING VERIFY CTX (2026-08-22 rewrite). Threaded through so the additive search can
+   *  re-judge every candidate it is about to accept — SEARCH and VERIFY are one step, not two.
+   *  Optional/undefined ⇒ the search falls back to a LENGTH-only accept (every caller in this repo
+   *  now supplies it via `enforceTitleTruthBand`; left optional only so a future direct caller with
+   *  no truth ctx fails open exactly like every other truth-ctx consumer here, never a hard error). */
+  truth?: PhraseTruthCtx | null
+  protect?: string
+  foreignTokens?: ReadonlySet<string>
+  reject?: (seg: string) => boolean
+  scrubProtectedOverlap?: boolean
 }): TruthBandResult {
   const produced = (args.produced || '').replace(/\s{2,}/g, ' ').trim()
   const prior = (args.prior || '').replace(/\s{2,}/g, ' ').trim()
@@ -1240,8 +1369,20 @@ export function settleTruthBand(args: {
   const poolSet = new Set(band.poolSegments ?? [])
   let budget = REFILL_NODE_BUDGET
   let best = produced
+  /** THE WHOLE-STRING VERIFY CTX, bound once. Every candidate this search accepts is judged as a
+   *  whole assembled title, not merely by length — the fix for the four live defects (see this
+   *  file's header on `verdictForAssembledTitle`). */
+  const verifyCtx: AssembledTitleCtx = {
+    truth: args.truth ?? null, protect: args.protect, foreignTokens: args.foreignTokens,
+    reject: args.reject, scrubProtectedOverlap: args.scrubProtectedOverlap,
+  }
   const search = (t: string, depth: number): string | null => {
-    if (t.length >= TITLE_BAND_LO && t.length <= TITLE_BAND_HI) return t
+    if (t.length >= TITLE_BAND_LO && t.length <= TITLE_BAND_HI) {
+      // Already in band — but "in band" is not "settled". A string that reached here with a whole-
+      // string defect (introduced upstream, before this search ever ran) has no additive fix: the
+      // search can only APPEND, never repair a lie already present. Dead end, not a win.
+      return verdictForAssembledTitle(t, verifyCtx).ok ? t : null
+    }
     if (depth >= MAX_REFILL_PASSES || budget <= 0) return null
     const cands = candidateSegments(t, band)
     const ordered = depth === 0
@@ -1251,6 +1392,13 @@ export function settleTruthBand(args: {
       if (budget-- <= 0) return null
       const cand = appendBandSegment(t, seg)
       if (cand.length > TITLE_BAND_HI || cand.length <= t.length) continue
+      // VERIFY THE WHOLE ASSEMBLED STRING before taking this branch. A candidate that individually
+      // passed `candidateSegments`'s per-phrase gates can still make the ASSEMBLED title untrue: a
+      // second garment class, a concept restated in two spellings, a sibling name reached only in
+      // combination. On failure: drop this segment (never take it) and try the next one — the search
+      // itself already backtracks via the surrounding loop and recursion, so "drop the last appended
+      // segment and continue" falls out of `continue` here rather than needing a separate undo step.
+      if (!verdictForAssembledTitle(cand, verifyCtx).ok) continue
       if (cand.length > best.length) best = cand          // the honest partial, for the refusal note
       const hit = search(cand, depth + 1)
       if (hit) return hit
@@ -1399,14 +1547,48 @@ export function enforceTitleTruthBand(args: {
   // Orphan guard BEFORE the band, so the characters a dangling fragment was wasting are available
   // to the pad — the same reason the truth net runs before the pad and not after it.
   const netted = dropOrphanPoolFragments(truthed, args.orphanPool ?? args.band.poolSegments ?? [], args.protect ?? '')
-  const settled = settleTruthBand({ produced: netted, prior: args.prior, apparel: args.apparel, band: args.band })
+  const settled = settleTruthBand({
+    produced: netted, prior: args.prior, apparel: args.apparel, band: args.band,
+    // THE WHOLE-STRING VERIFY, threaded through so the additive search inside `settleTruthBand`
+    // judges every candidate as an assembled title, not by length alone (2026-08-22 rewrite).
+    truth: args.truth, protect: args.protect, foreignTokens: args.foreignTokens, reject: args.reject,
+    scrubProtectedOverlap: args.scrubProtectedOverlap,
+  })
   /* THE CASING FIXES, TERMINALLY. Both are LENGTH-NEUTRAL and IDEMPOTENT, so they can run after the
    * band without moving a title across it — which is exactly why they belong here as well as at the
    * top of the door. The seller's design name "Business B*tch" must ship verbatim, and the door is
    * no longer the last writer: the refill above appends segments AFTER the door's opening casing
    * pass, and a prior title preserved by a refusal never went through that pass at all. A guarantee
    * about shipped bytes has to be made by whatever writes them last. */
-  return { ...settled, netted, title: fixCensorStarCase(fixApostropheCase(settled.title)) }
+  const finalTitle = fixCensorStarCase(fixApostropheCase(settled.title))
+  /* THE FINAL GATE — nothing may leave this function unverified, ever, however it got here.
+   *
+   * `settleTruthBand`'s own search already verifies every candidate it assembles (the primary fix),
+   * and this is DEFENSE IN DEPTH for the one case that search cannot see: a hold this function is
+   * ABOUT to raise still names the offending string as `settled.title`, which is fine (a hold ships
+   * the PRIOR, never `settled.title`) — but a NON-hold exit (`in-band` / `refilled`) must itself pass
+   * the identical whole-title predicate before it is trusted, because the casing pass just above runs
+   * after the search and — however provably case-only it is today — a future writer added here by
+   * mistake is exactly the bug class this rewrite exists to make structurally impossible. Four live
+   * defects shipped through nets that were each correct in isolation; this is the one place that
+   * refuses to ship ANYTHING it has not itself just re-judged as a whole.
+   */
+  if (!settled.hold) {
+    const verdict = verdictForAssembledTitle(finalTitle, {
+      truth: args.truth, protect: args.protect, foreignTokens: args.foreignTokens, reject: args.reject,
+      scrubProtectedOverlap: args.scrubProtectedOverlap,
+    })
+    if (!verdict.ok) {
+      const priorTrim = (args.prior || '').trim()
+      const keep = priorTrim && priorTrim.length <= TITLE_BAND_HI ? priorTrim : netted
+      return {
+        title: keep, decision: 'refused-kept-prior', len: keep.length, tried: settled.tried,
+        reason: `final whole-title verification failed (${verdict.reason}) on "${finalTitle}" — kept ${priorTrim ? 'the prior title' : 'the truthful net result'} rather than ship`,
+        hold: true, netted,
+      }
+    }
+  }
+  return { ...settled, netted, title: finalTitle }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -2041,4 +2223,273 @@ export function stripTitleWasteVocabulary(
     decision: 'stripped',
     note: `${what}; ${t0.length} → ${final.length} chars${final.length < TITLE_BAND_LO ? ' (under the preferred floor — an honest short title beats a banned word)' : ''}`,
   }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+ * settleTitle — THE ONE DOOR (handoff/TITLE_SETTLE_REWRITE.md, PO approval 2026-08-22).
+ *
+ * Everything above this point in this file is a LEAF: individually correct, individually testable —
+ * and, before this rewrite, individually WIRED, nine separate times, into `listingPipeline.ts`'s
+ * `bandTitle` closure. That was the structural cause of four consecutive live failures on B0DSCDZC6K
+ * (#630 → #632 → #634 → #637): every patch fixed the ONE stage it targeted, and a stage that ran
+ * AFTER it was free to write back the very lie the fixed stage had just removed. The band refill was
+ * always the last writer, and it appended from the raw pool after the truth verification had already
+ * run — filtering and filling were treated as two decisions instead of one.
+ *
+ * `settleTitle` is the fix: ONE function, called from the ONE door every title producer already
+ * passes through (`scrubPublished` in listingPipeline.ts), that owns the full pipeline end to end and
+ * ends on `enforceTitleTruthBand`'s terminal whole-string verify (`verdictForAssembledTitle`, defined
+ * above). Every append candidate — pool phrase, spec fact, garment word, money-tail keyword — is
+ * pre-filtered by `phraseTruthVerdict` AND re-judged as part of the WHOLE assembled string before it
+ * may win a slot (`settleTruthBand`'s search, `enforceMoneyTail`, both updated by this rewrite).
+ * Nothing runs after this function returns; nothing may write to the string it hands back.
+ *
+ * `listingPipeline.ts`'s own `bandTitle` is now a THIN ADAPTER: it resolves the pipeline-local values
+ * this function needs (the blank spec, the money keywords, the per-exit design scope) into
+ * `SettleTitleCtx` and returns exactly what this function returns, plus its own hold/v4-diff
+ * bookkeeping. That is what makes the door testable OFFLINE: `truthBandHarness.ts` calls THIS
+ * function, not a leaf three stages upstream of what the route actually ships.
+ */
+let SETTLE_SEQ = 0
+
+export interface SettleTitleCtx {
+  /** Mirrors the door's own guard: a bullets/keywords-only regen passes the PRIOR title through
+   *  unproduced, and a net that edits a field the run did not produce is a silent unrequested
+   *  rewrite. `false` short-circuits every stage below and returns the input byte-identical. */
+  produced: boolean
+  /** Non-apparel titles are legitimately short; every stage below is apparel-gated. */
+  apparel: boolean
+  /** Recompute the band context for the CURRENT draft title. Cannot be a static object: `garmentSecond`
+   *  (`pickDistinctGarmentForm`) depends on what the title already says, so this is called fresh
+   *  before every stage that pads or judges against product facts — the SAME discipline the original
+   *  door's `titleBandCtx(title, scope)` closure already followed. */
+  bandCtxFor: (title: string) => TitleBandCtx
+  /** TITLE_MONEY_TAIL candidate keywords, opportunity-ordered. Empty/null on a per-child exit
+   *  (group-scoped derivation is a later phase in listingPipeline.ts). */
+  moneyKws: readonly string[] | null
+  /** 'off' | 'shadow' | 'on' (TITLE_MONEY_TAIL). Shadow logs the would-be title and ships unchanged. */
+  moneyTailMode: string
+  /** The money-tail context — built once by the caller so the waste-vocabulary probe and the money-
+   *  tail loop itself agree on exactly what they are about to try. */
+  moneyCtx: MoneyTailCtx
+  /** Feeds `scrubUnspecdGarmentClaims` — a market phrase must not re-leak a weight/fit claim the
+   *  blank does not back. */
+  spec: { fit?: string | null; weightNote?: string | null } | null | undefined
+  /** Amazon's 75-char hard cap + adjacent-phrase dedupe. Lives in listingPipeline.ts (it needs nothing
+   *  from this module) and is passed in so this file stays a zero-import leaf. */
+  capTitle75: (title: string) => string
+  /** Design vocabulary the color-strip net must never remove (DEFECT B) — this exit's design name(s),
+   *  so "Black Cat" survives even though "Black" is a variant color word. */
+  colorProtect: string | null
+  /** Seller-declared audience lean, for the inclusive-audience net. */
+  lean?: MoneyTailCtx['lean']
+  /** TITLE_V4=on: the facts pad is deleted by policy ("never ship short — always ask me"). */
+  v4NoPad: boolean
+  /** 'off' | 'shadow' | 'on' (TITLE_V4) — drives the shadow-measurement log/diff only; the pad itself
+   *  is gated by `v4NoPad` above. */
+  v4Mode: string
+  /** The blank's own fact tokens, for the money-position gate (`dropSpecOnlyTail`). */
+  specFactTokens: readonly string[]
+  /** THIS exit's blank-grounded truth ctx — null when the family's blank is unresolved (no ground
+   *  truth to judge against). The SAME object the money-tail ctx and the band ctx must agree on. */
+  truth: PhraseTruthCtx | null
+  /** Design phrase(s) in scope for THIS title, space-joined — the broadcast title protects every
+   *  design in the family; a per-child title protects only its own. */
+  protect: string
+  /** Per-child sibling-name rejector (whole-segment) and its token set (word-level) — undefined on
+   *  the broadcast/parent title, which is answerable to every design in the family. */
+  reject?: (seg: string) => boolean
+  foreignTokens?: ReadonlySet<string>
+  /** BROADCAST ONLY — see `applyTitleTruthNet`'s doc on `scrubProtectedOverlap`. */
+  scrubProtectedOverlap: boolean
+  /** What is LIVE on Amazon today — what a truth+band refusal preserves. */
+  prior: string | null
+  /** Observability only: which exit this is ('broadcast' or a design key/SKU) and the parent ASIN,
+   *  threaded onto every log line and hold entry so a live grep can tell titles apart. */
+  holdScope: string
+  parentAsin: string | null
+}
+
+export interface SettleTitleHold {
+  scope: string
+  parent: string | null
+  len: number
+  tried: string[]
+  reason: string
+  kept: string
+}
+
+export interface SettleTitleV4Diff {
+  mode: string
+  shipped: string
+  shippedLen: number
+  withoutPad: string
+  withoutPadLen: number
+  padManufactured: boolean
+  wouldRefuse: boolean
+  floor: number
+}
+
+export interface SettleTitleResult {
+  /** THE VERIFIED STRING. Nothing may write to this after `settleTitle` returns it — pinned by
+   *  `truthBandGate.test.ts`'s assertion that the caller's returned title is byte-identical to it. */
+  title: string
+  decision: TruthBandDecision
+  hold: boolean
+  reason: string
+  tried: string[]
+  /** Present only when `hold` is true — what the caller pushes onto its operator-visible hold list
+   *  (`debug.titleHolds` in listingPipeline.ts). */
+  holdEntry?: SettleTitleHold
+  /** Present only when TITLE_V4 is shadow/on — what the caller pushes onto `debug.v4`. */
+  v4Diff?: SettleTitleV4Diff
+}
+
+/**
+ * THE ONE ENTRY. `raw` is the producer's title exactly as scrubbed for trademarks/celebrity names,
+ * competitor-blank brand words and the initial truth pass (the door's own pre-pass in
+ * listingPipeline.ts — `scrubPub` → `titleTruthDoor` — unchanged by this rewrite: those are cross-
+ * field concerns, not the truth+band contract this function owns). Everything from here to the
+ * returned string is this function's job, and nothing else may touch the title after it returns.
+ */
+export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult {
+  if (!ctx.produced || !raw) {
+    return { title: raw, decision: 'not-produced', hold: false, reason: 'no title produced this run', tried: [] }
+  }
+  const traceId = `${ctx.parentAsin ?? 'na'}#${++SETTLE_SEQ}`
+  let title = raw
+
+  // 1-2. CASING FIRST — both length-neutral and idempotent, so every stage below reads clean bytes.
+  const cased = fixApostropheCase(title)
+  if (cased !== title) console.log(JSON.stringify({ tag: 'SHIP_APOSTROPHE_CASE', field: 'title', from: title, to: cased }))
+  title = cased
+  const starred = fixCensorStarCase(title)
+  if (starred !== title) console.log(JSON.stringify({ tag: 'SHIP_CENSOR_STAR_CASE', field: 'title', from: title, to: starred }))
+  title = starred
+
+  // 3. SPEC TRUTH — remove fabric-weight/fit claims the blank does not back, before the band pass.
+  const truthClaims = scrubUnspecdGarmentClaims(title, ctx.spec)
+  if (truthClaims.removed.length > 0) {
+    console.log(JSON.stringify({ tag: 'SHIP_SPEC_TRUTH', field: 'title', removed: truthClaims.removed, from: title.length, to: truthClaims.title.length }))
+  }
+  title = truthClaims.title
+
+  // 4. CAP + DEDUPE — cap first (this door runs after trademark substitutions, which LENGTHEN);
+  //    dedupe adjacent AND non-adjacent repeats before the band pass so freed chars are available to it.
+  const deduped = collapseRepeatedWords(ctx.capTitle75(title))
+  if (deduped.removed.length > 0) {
+    console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', removed: deduped.removed, from: title.length, to: deduped.title.length }))
+  }
+  if (deduped.refusedForTrademark) {
+    console.log(JSON.stringify({ tag: 'SHIP_WORD_DEDUPE', field: 'title', decision: 'refused-trademark-resurrection', title }))
+  }
+  const capped = deduped.title
+
+  // 5. WASTE VOCABULARY — "Unisex"/"Classic Fit" are not title words (PO ruling). Before the money
+  //    tail: this frees characters on the LEFT, useful to the keyword only if free before it is
+  //    measured against the band.
+  const waste = stripTitleWasteVocabulary(capped, {
+    apparel: ctx.apparel,
+    band: ctx.bandCtxFor(capped),
+    moneyKws: ctx.moneyTailMode === 'on' ? (ctx.moneyKws ?? null) : null,
+    money: ctx.moneyCtx,
+  })
+  console.log(JSON.stringify({ tag: 'SHIP_TITLE_WASTE', decision: waste.decision, from: capped.length, to: waste.title.length, changed: waste.title !== capped, note: waste.note }))
+  let moneyed = waste.title
+
+  // 6. MONEY TAIL — the PO gold pipe-right. Wire order spec-truth → cap → dedupe → waste →
+  //    enforceMoneyTail → facts pad: when the gold tail lands the title is already in band and the
+  //    pad below never fires. Every candidate is truth+whole-string verified INSIDE `enforceMoneyTail`
+  //    itself (2026-08-22 rewrite) before it may win the slot.
+  const mtRun = tryMoneyTail(moneyed, ctx.moneyKws, ctx.moneyCtx)
+  for (const a of mtRun.attempts) {
+    console.log(JSON.stringify({ tag: 'SHIP_MONEY_TAIL', mode: ctx.moneyTailMode, decision: a.decision, kw: a.kw, from: moneyed.length, to: a.title.length, note: a.note }))
+  }
+  if (mtRun.applied) {
+    if (ctx.moneyTailMode === 'on') moneyed = mtRun.title
+    else console.log(JSON.stringify({ tag: 'MONEY_TAIL_DIFF', kw: mtRun.attempts[mtRun.attempts.length - 1]?.kw ?? '', current: moneyed, would: mtRun.title }))
+  }
+
+  // 7. COLOR STRIP — §5: shared copy carries no color word; colors rank per-child via the backend tail.
+  const colorNet = stripVariantColorWords(moneyed, { apparel: ctx.apparel, protect: ctx.colorProtect, band: ctx.bandCtxFor(moneyed) })
+  console.log(JSON.stringify({ tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision, from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note }))
+  moneyed = colorNet.title
+
+  // 8. INCLUSIVE AUDIENCE — "for Men and Women" is character waste (§4). After the money tail: it
+  //    already had first refusal on the same tail region.
+  const inc = enforceInclusiveAudience(moneyed, { apparel: ctx.apparel, lean: ctx.lean, band: ctx.bandCtxFor(moneyed) })
+  console.log(JSON.stringify({ tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision, from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note }))
+  moneyed = inc.title
+
+  // 9. FACTS PAD — suppressed at TITLE_V4=on ("never ship short — always ask me").
+  const v = ctx.v4NoPad
+    ? { title: moneyed, decision: 'v4-no-pad' as const, notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
+    : enforceTitleBand(moneyed, ctx.bandCtxFor(moneyed))
+  console.log(JSON.stringify({
+    tag: 'SHIP_BAND_DECISION', field: 'title', mode: 'on', decision: v.decision,
+    from: raw.length, to: v.title.length, changed: v.title !== moneyed, capped: capped.length !== raw.length, note: v.notes[0] ?? '',
+  }))
+  const banded = v.title === moneyed ? moneyed : v.title
+  if (v.title !== moneyed) console.log(JSON.stringify({ tag: 'SHIP_BAND_NET', field: 'title', from: raw.length, to: v.title.length, note: v.notes[0] ?? '' }))
+
+  // 10. MONEY-POSITION GATE — a pipe-right holding nothing a shopper would type is not a money
+  //     position; drop it and the separator with it. Runs AFTER the money tail, so a real keyword
+  //     always wins the slot first.
+  const drop = dropSpecOnlyTail(banded, { apparel: ctx.apparel, specValues: ctx.specFactTokens })
+  console.log(JSON.stringify({ tag: 'SHIP_MONEY_POSITION', decision: drop.decision, from: banded.length, to: drop.title.length, note: drop.note }))
+
+  // V4 SHADOW MEASUREMENT — the number the seller asked for before anything changes. `moneyed` is the
+  // title as it stood BEFORE the facts pad; `drop.title` is what would ship today.
+  let v4Diff: SettleTitleV4Diff | undefined
+  if (ctx.v4Mode !== 'off') {
+    const CORPUS_FLOOR = 68 // the seller's shortest gold after their 2026-08-12 revision
+    v4Diff = {
+      mode: ctx.v4Mode, shipped: drop.title, shippedLen: drop.title.length,
+      withoutPad: moneyed, withoutPadLen: moneyed.length,
+      padManufactured: drop.title !== moneyed,
+      wouldRefuse: moneyed.length < CORPUS_FLOOR, floor: CORPUS_FLOOR,
+    }
+    console.log(JSON.stringify({ tag: 'TITLE_V4_DIFF', ...v4Diff }))
+  }
+
+  // 11. THE NAMED REFUSAL PRE-CHECK — logs which fact bank ran dry, ahead of the terminal net's own
+  //     (possibly different) reason, so "the pad is mis-wired" and "the pad had nothing to say" stay
+  //     distinguishable from one line.
+  if (ctx.apparel && drop.title.length < TITLE_BAND_LO) {
+    console.warn(JSON.stringify({
+      tag: 'TITLE_UNDER_BAND', parent: ctx.parentAsin, len: drop.title.length,
+      reason: v.decision === 'padded' || v.decision === 'in-band' ? 'post-pad-short' : v.decision,
+      band: TITLE_BAND_LO, facts: candidateFactCount(moneyed, ctx.bandCtxFor(moneyed)), note: v.notes[0] ?? '',
+    }))
+  }
+
+  // 12. TRUTH AND BAND SETTLE TOGETHER — the ONE net. JUDGE (truth), SEARCH (bounded DFS, verified
+  //     candidate by candidate), VERIFY (the whole assembled string, again, terminally). Everything
+  //     above this line may only shorten or propose; this is the single place that decides whether a
+  //     shortened or lengthened title is allowed to leave the door at all.
+  const settled = enforceTitleTruthBand({
+    produced: drop.title, prior: ctx.prior, apparel: ctx.apparel, band: ctx.bandCtxFor(drop.title),
+    truth: ctx.truth, protect: ctx.protect, reject: ctx.reject, foreignTokens: ctx.foreignTokens,
+    scrubProtectedOverlap: ctx.scrubProtectedOverlap,
+  })
+  console.log(JSON.stringify({
+    tag: 'TITLE_TRUTH_BAND', scope: ctx.holdScope, parent: ctx.parentAsin, decision: settled.decision,
+    from: drop.title.length, netted: settled.netted.length, to: settled.len,
+    changed: settled.title !== drop.title, reason: settled.reason,
+  }))
+  if (settled.netted !== drop.title) {
+    console.warn(JSON.stringify({ tag: 'TITLE_TERMINAL_TRUTH_CATCH', scope: ctx.holdScope, parent: ctx.parentAsin, from: drop.title, to: settled.netted }))
+  }
+  let holdEntry: SettleTitleHold | undefined
+  if (settled.hold) {
+    console.warn(JSON.stringify({
+      tag: 'TITLE_BAND_UNREACHABLE', parent: ctx.parentAsin, scope: ctx.holdScope, len: settled.len,
+      band: TITLE_BAND_LO, tried: settled.tried, reason: settled.reason, decision: settled.decision,
+      produced: drop.title, kept: settled.title,
+    }))
+    holdEntry = { scope: ctx.holdScope, parent: ctx.parentAsin, len: settled.len, tried: settled.tried, reason: settled.reason, kept: settled.title }
+  }
+  console.log(JSON.stringify({ tag: 'TITLE_DOOR_TRACE', id: traceId, in: raw, out: settled.title }))
+
+  return { title: settled.title, decision: settled.decision, hold: settled.hold, reason: settled.reason, tried: settled.tried, holdEntry, v4Diff }
 }
