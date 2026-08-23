@@ -65,9 +65,29 @@ is only its input set:
 - broadcast exit → foreign = **every** per-design name (the union), because no individual design
   speaks for the family
 
-The family THEME (e.g. `Motivational Entrepreneur`) is not a per-design name and is unaffected —
-it reaches the ctx via `designTokens`/`protect` as today. Per-child exits are untouched: a genuine
-"Business B*tch" child must still say "Business B*tch".
+**PRECEDENCE — the ambiguity this spec must not leave open.** `designTokens` on the broadcast ctx is
+`familyDesignNames` (`listingPipeline.ts`), which is assembled from `designName`,
+`input.designNameOverride`, every value of `designNameOverridesByKey`, and every prior per-child
+`designName`. That is *the same set* as the proposed broadcast foreign set. Without a stated winner,
+a name would be simultaneously protected and rejected.
+
+Resolution, explicit:
+
+1. On the BROADCAST exit, `foreignTokens` WINS over `protect`. A per-design name is rejected even
+   though it appears in `designTokens`.
+2. The broadcast `protect`/`designTokens` is narrowed to the FAMILY-LEVEL theme only — the tokens
+   that are NOT attributable to any single design group. Concretely: `familyDesignNames` MINUS the
+   union of `designNameOverridesByKey` values and per-child `designName`s. On a multi-design family
+   `effectiveDesignName` is already `''`, so the theme is whatever survives that subtraction.
+3. If the subtraction leaves the broadcast with NO design vocabulary at all, that is the correct
+   outcome — the parent then carries brand + garment + category vocabulary, and the band is reached
+   from spec facts and pool phrases or it honestly holds. It must NOT fall back to permitting a
+   design name.
+
+An implementation that cannot cleanly separate "family theme" from "per-design name" must STOP and
+report that, rather than guessing — the separation is the whole of the PO's ruling.
+
+Per-child exits are untouched: a genuine "Business B*tch" child must still say "Business B*tch".
 
 ### 3.3 Unspec'd attribute claims become a verdict reason
 
