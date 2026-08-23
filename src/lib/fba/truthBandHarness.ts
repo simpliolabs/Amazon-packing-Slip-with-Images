@@ -260,6 +260,24 @@ function capTitle75Like(title: string): string {
 }
 
 /**
+ * ENV-DRIVEN FLAGS — mirrors `listingPipeline.ts`'s `titleV4Mode()`/`v4Applies()`/`moneyTailMode`
+ * byte-for-byte (PO ruling 2026-08-23: "run the harness under PRODUCTION flags"). Before this, the
+ * harness HARD-CODED `v4NoPad: false, v4Mode: 'off', moneyTailMode: 'off'` — so `TITLE_V4=on npx tsx
+ * truthBandHarness.ts` silently exercised nothing, which is the harness's OWN version of the "richer
+ * fixture" mistake: a flag the live route obeys that this file could never disagree with, because it
+ * never read it. Defaults match production exactly (`shadow` for TITLE_V4, `off` for
+ * TITLE_MONEY_TAIL), so a plain `npx vitest run` with no env set is byte-identical to before this
+ * change — only an explicit `TITLE_V4=on` (or `=off`) on the CLI invocation changes anything.
+ */
+function envTitleV4Mode(): 'off' | 'shadow' | 'on' {
+  const v = (process.env.TITLE_V4 || 'shadow').toLowerCase()
+  return v === 'on' ? 'on' : v === 'off' ? 'off' : 'shadow'
+}
+function envMoneyTailMode(): string {
+  return (process.env.TITLE_MONEY_TAIL || 'off').toLowerCase()
+}
+
+/**
  * Build the FULL `SettleTitleCtx` for one exit — everything `settleTitle` (THE DOOR) needs, resolved
  * exactly the way listingPipeline.ts's `bandTitle` adapter resolves it from its own pipeline-local
  * state. This is what makes the harness drive the door rather than a leaf: every stage `settleTitle`
@@ -307,14 +325,14 @@ function buildSettleCtx(params: {
     // broadcast title; the defects this fixture exercises all live in the truth+band+pad path). The
     // dedicated `enforceMoneyTail` whole-string-verify coverage lives in titleBand.test.ts.
     moneyKws: null,
-    moneyTailMode: 'off',
+    moneyTailMode: envMoneyTailMode(),
     moneyCtx,
     spec: params.spec,
     capTitle75: capTitle75Like,
     colorProtect: params.protect || null,
     lean: AUDIENCE_LEAN,
-    v4NoPad: false,
-    v4Mode: 'off',
+    v4NoPad: envTitleV4Mode() === 'on',
+    v4Mode: envTitleV4Mode(),
     specFactTokens: blankSpecFactTokensLike(params.spec),
     truth: params.truth,
     protect: params.protect,
@@ -441,6 +459,119 @@ export function runTruthBandHarness(): HarnessResult {
   }
 }
 
+/* ── LIVE FAILURE REPRO — "a hold must not keep a lie" (PO ruling 2026-08-23) ────────────────────
+ *
+ * The seven-row suite above is the right fixture for TRUTH-FILTERING (it deliberately pits 4 true
+ * pool phrases against 4 untrue ones from a rich, hand-authored `POOL`) but it is NOT a live-fidelity
+ * fixture, and that is exactly what let four consecutive live failures ship "clean": #630→#637's
+ * common cause was a harness whose candidate pool was RICHER than production's, so it refilled a gap
+ * live could never close and reported green while live shipped a lie.
+ *
+ * This scenario is the antidote. It reproduces the EXACT 2026-08-23 02:48Z live defect: TITLE_V4=on
+ * suppressed the facts pad, the truth net cut the produced title to 35 chars, the live keyword pool
+ * for this design offered only 5 candidates — every one a garment FACT (this is a mixed
+ * sweatshirt+hoodie family), not a single truthful search phrase — and the band (70-75) was
+ * genuinely unreachable from them. The OLD invariant then kept the PRIOR regardless of its own
+ * truth, and the prior carried a sibling design's name ("Business B*tch") and a forced gender ("for
+ * Men") on this unisex-lean family. The NEW invariant this PR installs must never do that: a hold may
+ * keep the prior ONLY IF the prior is true; here it is not, so the door must ship the truthful short
+ * title instead.
+ *
+ * Live log, verbatim (2026-08-23 02:48Z regen, B0DSCDZC6K):
+ *   {"tag":"SHIP_BAND_DECISION","field":"title","mode":"on","decision":"v4-no-pad","from":35,"to":35,
+ *    "note":"TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill"}
+ *   {"tag":"TITLE_BAND_UNREACHABLE","parent":"B0DSCDZC6K","scope":"HDG",
+ *    "tried":["Long Sleeve","Pullover","Pullover Hoodie","Long Sleeve Pullover","Long Sleeve Pullover Hoodie"],
+ *    "reason":"truthful title reached only 58/70 from true material — prior title kept, nothing shipped",
+ *    "produced":"THE CEO Hustle Definiton Sweatshirt",
+ *    "kept":"THE CEO Hustle Definiton Sweatshirt Business B*tch | Long Sleeve for Men"}
+ *
+ * THE POOL IS HARD-CODED TO THESE EXACT 5 CANDIDATES, no richer than the live log above — asserted
+ * in `truthBandGate.test.ts` (`LIVE_HDG_CANDIDATES.length` must never exceed the live count). If a
+ * future edit adds a 6th candidate here, it must be because live's own pool grew a 6th, not because
+ * the fixture needed help reaching band — that is precisely the mistake this scenario exists to
+ * prevent from recurring.
+ */
+export const LIVE_HDG_CANDIDATES: readonly string[] = [
+  'Long Sleeve', 'Pullover', 'Pullover Hoodie', 'Long Sleeve Pullover', 'Long Sleeve Pullover Hoodie',
+]
+
+/** The EXACT untrue prior the 2026-08-23 live regen kept: a sibling design's name ("Business B*tch"
+ *  belongs to design BB, not HD) plus a forced gender on a unisex-lean family. This is what the new
+ *  invariant must refuse to keep. */
+export const LIVE_LYING_PRIOR = 'THE CEO Hustle Definiton Sweatshirt Business B*tch | Long Sleeve for Men'
+
+/** What a producer wrote this run, before the door — same defect shapes as the kept prior, because
+ *  that is exactly what the live "produced" field (post-truth-net, 35 chars) descends from. */
+export const LIVE_RAW = 'THE CEO Hustle Definiton Sweatshirt Business B*tch | Long Sleeve for Men'
+
+export function runLiveFailureRepro(): HarnessRow {
+  const truth: PhraseTruthCtx = {
+    garmentFamily: 'sweatshirt',
+    mixedFamilies: ['sweatshirt', 'hoodie'],
+    spec: null,
+    allowedBrand: null,
+    audience: 'adult',
+    designTokens: designNames(),
+    audienceLean: 'unisex',
+    field: 'title',
+  }
+  const foreignFor = buildForeignDesignTokens(
+    DESIGNS.map((d) => ({ key: d.key, name: d.name })),
+    { familyTitleText: '', poolKeywords: [], strictNames: true },
+  )
+  const foreign = foreignFor('HD')
+  const reject = (seg: string): boolean => isForeignToDesign(seg, foreign)
+  const truthOk = (s: string): boolean => phraseTruthVerdict(s, truth).ok
+  const bandCtxFor = (title: string): TitleBandCtx => ({
+    apparel: true,
+    customizable: false,
+    garmentBrand: null,
+    // THE THIN POOL — exactly the live log's 5 candidates, no more. See the header comment above.
+    factSegments: LIVE_HDG_CANDIDATES,
+    poolSegments: [],                                      // live had NO truthful search phrase here
+    truthOk,
+    spec: null,
+    garmentSecond: pickDistinctGarmentForm(title, ['sweatshirt', 'hoodie']),
+  })
+  const moneyCtx: MoneyTailCtx = {
+    apparel: true, lean: AUDIENCE_LEAN, spec: null, protect: 'Hustle Definiton', garmentBrand: null,
+    truth, foreignTokens: foreign, allowAppend: true,
+  }
+  const ctx: SettleTitleCtx = {
+    produced: true,
+    apparel: true,
+    bandCtxFor,
+    moneyKws: null,                     // out of scope here — see the seven-row suite's own note
+    moneyTailMode: envMoneyTailMode(),
+    moneyCtx,
+    spec: null,
+    capTitle75: capTitle75Like,
+    colorProtect: 'Hustle Definiton',
+    lean: AUDIENCE_LEAN,
+    v4NoPad: true,                      // PRODUCTION: TITLE_V4=on — this is the live-diagnosed config
+    v4Mode: 'on',
+    specFactTokens: [],
+    truth,
+    protect: 'Hustle Definiton',
+    reject,
+    foreignTokens: foreign,
+    scrubProtectedOverlap: false,
+    prior: LIVE_LYING_PRIOR,            // THE LIE — what live actually had stored
+    holdScope: 'HDG',
+    parentAsin: PARENT_ASIN,
+  }
+  const r = settleTitle(LIVE_RAW, ctx)
+  const r2 = settleTitle(r.title, { ...ctx, produced: true })
+  return {
+    scope: 'HDG', design: 'Hustle Definiton (live failure repro)',
+    garmentFamily: 'sweatshirt', union: ['sweatshirt', 'hoodie'],
+    raw: LIVE_RAW, rawLen: LIVE_RAW.length,
+    title: r.title, len: r.title.length, decision: r.decision, hold: r.hold, reason: r.reason, tried: r.tried,
+    idempotent: r2.title === r.title,
+  }
+}
+
 /* ── DIRECT RUN: `npx tsx src/lib/fba/truthBandHarness.ts` ────────────────────────────────────── */
 function report(): void {
   const r = runTruthBandHarness()
@@ -465,6 +596,16 @@ function report(): void {
   console.log(bad.length === 0
     ? `ALL ${r.rows.length} TITLES IN BAND ${TITLE_BAND_LO}-${TITLE_BAND_HI}`
     : `${bad.length} TITLE(S) OUT OF BAND: ${bad.map((x) => `${x.scope}=${x.len}`).join(', ')}`)
+
+  console.log('\n═══ LIVE FAILURE REPRO — thin pool + lying prior (PO ruling 2026-08-23) ══════════════════════')
+  const lf = runLiveFailureRepro()
+  console.log(`   raw      (${String(lf.rawLen).padStart(2)}): ${lf.raw}`)
+  console.log(`   prior         : ${LIVE_LYING_PRIOR}`)
+  console.log(`   SHIPPED  (${String(lf.len).padStart(2)}): ${lf.title}`)
+  console.log(`   decision : ${lf.decision}${lf.hold ? '  [HOLD]' : ''} — ${lf.reason}`)
+  console.log(lf.title === LIVE_LYING_PRIOR
+    ? '   *** FAIL: shipped the exact lying prior — the invariant is NOT installed ***'
+    : '   PASS: did not keep the lying prior')
 }
 
 // Node ESM: run the report only when this file is the entrypoint, never on import.

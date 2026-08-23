@@ -36,8 +36,11 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { runTruthBandHarness, DESIGNS, POOL, type HarnessResult } from './truthBandHarness'
-import { TITLE_BAND_LO, TITLE_BAND_HI, titleHasDuplicateConcept, titleHasPunctuationDefect } from './titleBand'
+import {
+  runTruthBandHarness, DESIGNS, POOL, runLiveFailureRepro, LIVE_HDG_CANDIDATES, LIVE_LYING_PRIOR,
+  type HarnessResult,
+} from './truthBandHarness'
+import { TITLE_BAND_LO, TITLE_BAND_HI, titleHasDuplicateConcept, titleHasPunctuationDefect, verdictForAssembledTitle } from './titleBand'
 import { phraseTruthVerdict } from './contentTruth'
 
 const RESULT: HarnessResult = runTruthBandHarness()
@@ -309,5 +312,65 @@ describe('NOTHING WRITES AFTER THE VERIFY — settleTitle is the DOOR, and it is
     const between = src.slice(settledCallAt, returnAt)
     expect(between).not.toMatch(/\btitle\s*=\s*(?!settled\.title)/)
     expect(between).not.toMatch(/settled\.title\s*\.\s*(replace|trim|slice|toUpperCase|toLowerCase|concat|padStart|padEnd)\(/)
+  })
+})
+
+/**
+ * THE LIVE FAILURE REPRO — "a hold must not keep a lie" (PO ruling 2026-08-23).
+ *
+ * The seven-row suite above never reproduced the live 2026-08-23 defect, for the same reason
+ * #630-#637 didn't: its candidate `POOL` and its `PRIOR` dict are both richer/cleaner than what
+ * production actually had for a struggling design — a harness that always has enough true material
+ * to refill, or a clean prior to fall back to, cannot ever exercise "the band is genuinely
+ * unreachable AND the prior is a lie". `runLiveFailureRepro` (truthBandHarness.ts) is the antidote:
+ * a pool hard-coded to the EXACT 5 candidates the live log showed (no richer — see the assertion
+ * below) and a prior carrying the EXACT defects live actually kept. This block pins that the new
+ * invariant holds: a hold may keep the prior title ONLY IF the prior title is true.
+ */
+describe('THE LIVE FAILURE REPRO — a hold must not keep a lie (PO ruling 2026-08-23)', () => {
+  it('the fixture pool is PROVABLY no richer than live — exactly the 5 candidates the live log showed', () => {
+    // If this count ever grows, it must be because live's OWN pool grew a 6th candidate, never
+    // because the fixture needed help reaching band — re-enriching this fixture past live is the
+    // exact false-confidence mistake this scenario exists to catch, permanently.
+    expect(LIVE_HDG_CANDIDATES.length).toBe(5)
+    expect(LIVE_HDG_CANDIDATES).toEqual([
+      'Long Sleeve', 'Pullover', 'Pullover Hoodie', 'Long Sleeve Pullover', 'Long Sleeve Pullover Hoodie',
+    ])
+  })
+
+  it('the prior is a genuine LIE — carries a sibling design name and a forced gender on a unisex family', () => {
+    expect(LIVE_LYING_PRIOR).toContain('Business B*tch')   // BB's design name, not HD's
+    expect(LIVE_LYING_PRIOR).toMatch(/for Men\b/)           // forced gender on a unisex-lean family
+  })
+
+  it('BEFORE asserting the fix: the band really is unreachable from this thin pool, so a naive hold has no honest in-band option', () => {
+    const r = runLiveFailureRepro()
+    expect(r.len, `shipped ${r.len} chars: "${r.title}"`).toBeLessThan(TITLE_BAND_LO)
+  })
+
+  it('the door does NOT ship the lying prior — the invariant is installed', () => {
+    const r = runLiveFailureRepro()
+    expect(r.title, `shipped: "${r.title}"`).not.toBe(LIVE_LYING_PRIOR)
+  })
+
+  it('what ships instead is itself TRUE — verdictForAssembledTitle (the door\'s own predicate) passes it', () => {
+    const r = runLiveFailureRepro()
+    // Re-derived independently, so this cannot pass merely because settleTitle's own bookkeeping says so.
+    const truth = { garmentFamily: 'sweatshirt' as const, mixedFamilies: ['sweatshirt', 'hoodie'] as const,
+      spec: null, allowedBrand: null, audience: 'adult' as const, audienceLean: 'unisex' as const, field: 'title' as const }
+    expect(verdictForAssembledTitle(r.title, { truth, protect: 'Hustle Definiton' })).toEqual({ ok: true })
+    expect(r.title).not.toContain('Business B*tch')
+    expect(r.title.toLowerCase()).not.toMatch(/\bfor men\b/)
+  })
+
+  it('the hold still fires, under a DISTINCT decision value — the operator sees this, it never ships silently', () => {
+    const r = runLiveFailureRepro()
+    expect(r.hold).toBe(true)
+    expect(r.decision).toBe('shipped-truthful-under-band')
+  })
+
+  it('the shipped title is a fixed point — nothing writes after settleTitle returns it here either', () => {
+    const r = runLiveFailureRepro()
+    expect(r.idempotent).toBe(true)
   })
 })
