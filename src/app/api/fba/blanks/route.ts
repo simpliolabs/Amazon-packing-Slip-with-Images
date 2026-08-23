@@ -18,6 +18,7 @@ import {
   validateBlankSpecInput, findDuplicateActiveStyleCode, toCatalogRows, groupFamilies, computeUsageCounts,
   type BlankSpecInput, type DbBlankRow, type AssignmentRow,
 } from '@/lib/fba/blankAssignmentImpact'
+import { invalidateBlankCaches } from '@/lib/fba/blankSpecs'
 
 const WRITABLE_FIELDS = [
   'match_pattern', 'style_code', 'garment_family', 'brand', 'brand_in_copy',
@@ -115,6 +116,7 @@ export async function POST(req: NextRequest) {
     console.error('[blanks][POST] insert failed:', error.message)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  invalidateBlankCaches()
   return NextResponse.json({ blank: inserted })
 }
 
@@ -167,5 +169,6 @@ export async function PATCH(req: NextRequest) {
     console.error('[blanks][PATCH] update failed:', error.message)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  invalidateBlankCaches()
   return NextResponse.json({ blank: updated })
 }

@@ -199,6 +199,28 @@ const EMPTY_ASSIGNMENTS = (): BlankAssignments => ({ family: new Map(), child: n
 let assignmentCache: { a: BlankAssignments; at: number } | null = null
 
 /**
+ * Bust BOTH module-level caches (the blank_specs catalog and blank_assignments) so the very next
+ * read re-queries the DB instead of serving up to CACHE_TTL_MS (5 min) of stale data. Call this
+ * ONCE, AFTER a write to either table succeeds — never before, never on an error path. No
+ * parameters, no partial invalidation: the two caches are cheap single-table reads, so blowing
+ * away both is simpler and safer than tracking which one a given write actually touched.
+ *
+ * ⚠ PER-PROCESS ONLY. `cache` and `assignmentCache` are plain module-level variables, so this only
+ * clears the copy held by the Node process that handled the write. If the app ever runs as more
+ * than one instance (multiple Coolify replicas, multiple PM2 `instances`, etc.), the OTHER
+ * instances keep serving their own stale cache until their independent CACHE_TTL_MS elapses — this
+ * function cannot reach across processes. As of 2026-08-22 this repo's deploy config (nixpacks.toml
+ * + Coolify, no compose/replica manifest in-repo; the Hostinger PM2 guide's ecosystem.config.js
+ * pins `instances: 1`) shows no evidence of running more than one instance, so this bound is not
+ * believed to bite today — but it is a real limitation, not a hypothetical one, and nothing here
+ * verifies the live replica count at runtime.
+ */
+export function invalidateBlankCaches(): void {
+  cache = null
+  assignmentCache = null
+}
+
+/**
  * blank_assignments (062) — THE ONE loader for PO-stated blank identity, both scopes.
  *
  * WHY ONE LOADER. The child scope arrived because a SKU style code can be WRONG (PO 2026-08-22,

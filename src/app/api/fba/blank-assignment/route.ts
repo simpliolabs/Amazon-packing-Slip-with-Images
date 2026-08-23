@@ -18,6 +18,7 @@ import {
   toCatalogRows, groupFamilies, buildAssignmentMaps, resolveFamily, styleCodeExists,
   type AssignmentRow, type DbBlankRow,
 } from '@/lib/fba/blankAssignmentImpact'
+import { invalidateBlankCaches } from '@/lib/fba/blankSpecs'
 
 export async function GET(req: NextRequest) {
   const parentAsin = (new URL(req.url).searchParams.get('parentAsin') ?? '').trim().toUpperCase()
@@ -125,10 +126,10 @@ export async function PUT(req: NextRequest) {
     console.error('[blank-assignment][PUT] upsert failed:', error.message)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
-  // NOTE: blankSpecs.ts (owned by a concurrent agent) exports no cache-invalidation hook today — the
-  // pipeline's 5-minute TTL is the only staleness guard for the LIVE resolver until one exists. This
-  // route's own reads (GET above, /api/fba/blanks/impact) are always fresh regardless, since they
-  // query blank_assignments directly rather than through the cached reader.
+  // Bust the pipeline's blankSpecs.ts caches so the very next regen sees this assignment instead
+  // of serving up to 5 minutes of stale data (this route's own reads stay fresh regardless, since
+  // GET above queries blank_assignments directly rather than through the cached reader).
+  invalidateBlankCaches()
   return NextResponse.json({ success: true })
 }
 
@@ -158,5 +159,6 @@ export async function DELETE(req: NextRequest) {
     console.error('[blank-assignment][DELETE] delete failed:', error.message)
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  invalidateBlankCaches()
   return NextResponse.json({ success: true })
 }
