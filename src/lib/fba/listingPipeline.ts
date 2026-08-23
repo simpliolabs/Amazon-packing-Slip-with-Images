@@ -69,7 +69,8 @@ import {
   audienceOfGarmentFamily,
   normalizeAudienceLean,
   garmentNounConstraint,
-  TITLE_NET_REASONS,
+  titleNetActsOn,
+  buildPhraseTruthCtx,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
 } from '@/lib/fba/contentTruth'
@@ -1720,7 +1721,7 @@ export function titleQualityJudge(title: string, opts: {
   // enumerate every one, to make the candidate unwinnable.
   if (opts.truth) {
     const verdict = phraseTruthVerdict(t, opts.truth)
-    if (!verdict.ok && TITLE_NET_REASONS.has(verdict.reason)) {
+    if (!verdict.ok && titleNetActsOn(verdict.reason, opts.truth)) {
       score = Math.min(score, 15)
       problems.push(`garment truth violation: ${verdict.reason} — this product is not what the title claims (capped at 15)`)
     }
@@ -4166,7 +4167,7 @@ ${candidateList}
 ${attrLine}${audienceLine}
 Write ONE product title as NATURAL, readable language — NOT dash-separated sections.
 ${apparel
-  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier ONLY if it fits the 75-char cap. 🚫 GROUND THE SUBJECT — never fabricate artwork: the visual subject MUST be something that literally appears in the design name "${designName || '<design>'}" or the title. If this is a TEXT/SLOGAN design with NO concrete object (e.g. a Gen X saying, a funny quote), do NOT invent an object/prop/motif (cassette, guitar, skull, dog, etc.) — build the second phrase from the slogan's THEME or a TONE word instead (e.g. "Funny Gen X Tee", "Sarcastic Saying Shirt"). Then, if it fits, you MAY end with the audience — but it is OPTIONAL and lowest-priority; a higher-value product-specific keyphrase outranks it, so drop the audience rather than the keyphrase. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — every char counts against 75. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words; it is exactly 75 chars): "THE CEO Later Gator T-Shirt, Comfort Colors Alligator Tee for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (drop it first if over 75)` : ''}, design subject from the image, audience "${preferredAudience || 'Men and Women'}".`
+  ? `Write a clean, natural, DESIGN-LED title and TRUST your judgement. Start with the brand, then weld the design name DIRECTLY to the product type as ONE unbroken phrase — "${designName || 'Later Gator'} T-Shirt" — that exact phrase is the seller's #1 search keyword; never split it. AFTER it, write a SECOND keyword phrase built from the design's MAIN VISUAL SUBJECT + a product-type SYNONYM — e.g. "Alligator Shirt", "Cat Tee", "Skull Graphic Tee" — because "<subject> shirt/tee" is itself a high-volume search term; weave the garment brand in as a modifier ONLY if it fits the 75-char cap. 🚫 GROUND THE SUBJECT — never fabricate artwork: the visual subject MUST be something that literally appears in the design name "${designName || '<design>'}" or the title. If this is a TEXT/SLOGAN design with NO concrete object (e.g. a Gen X saying, a funny quote), do NOT invent an object/prop/motif (cassette, guitar, skull, dog, etc.) — build the second phrase from the slogan's THEME or a TONE word instead (e.g. "Funny Gen X Tee", "Sarcastic Saying Shirt"). Then, if it fits, you MAY end with the audience — but it is OPTIONAL and lowest-priority; a higher-value product-specific keyphrase outranks it, so drop the audience rather than the keyphrase. TWO HARD RULES: (1) do NOT repeat the exact product-type word "T-Shirt" — the welded phrase already has it, so the second phrase uses a SYNONYM (Shirt / Tee / Graphic Tee) carrying the design subject; (2) do NOT pad with vague filler like "with Gator Art", "cool design", "fun graphic" — every char counts against 75. EXACT target shape (a DIFFERENT design — copy the SHAPE, not the words; it is exactly 75 chars): "THE CEO Later Gator T-Shirt, Comfort Colors Alligator Tee for Men and Women". For THIS product use: design name "${designName || '<design>'}"${attributePin ? `, garment brand "${attributePin}" (drop it first if over 75)` : ''}, design subject from the image, audience "${truth?.audience === 'kids' ? '' : (preferredAudience || 'Men and Women')}".`
   : `Order: ${brandName}, then the MANDATORY #1 keyword, then ${attributePin ? `the MANDATORY #2 blank-brand "${attributePin}", then an optional supporting keyphrase` : 'multiple supporting keyphrases/specs from above (fill the title)'}, then the audience only if budget remains (optional, lowest-priority).`} It should read like a human-written phrase.
 
 Rules:
@@ -4368,7 +4369,11 @@ Rules:
   // on apparel + a short title; fail-open (a rejection is a no-op = no worse than before). Pool = the
   // design-niche seeds (now fed by the vision→universe wire) + the upgrade keywords.
   if (apparel && title.length < 68) {
-    const aud = preferredAudience || 'Men and Women'
+    // KIDS AUDIENCE TRUTH (2026-08-23, live B0DP5H8QBT): the 'Men and Women' fallback below is a
+    // STATE-CONSTRAINTS-NOT-EXEMPLARS default for every OTHER family — never for a KIDS one, where it
+    // would directly contradict this SAME brief's `garmentTruthRule` "never name an adult-only
+    // audience" line. `truth?.audience` is the shared spine's own verdict, never re-derived here.
+    const aud = truth?.audience === 'kids' ? '' : (preferredAudience || 'Men and Women')
     // Flag ON → title-aware family display (HAT + "Snapback Cap" title → "Snapback Cap"); OFF → exact legacy.
     // BLANK-FIRST (defect 1 twin, PATH PARITY with buildNicheParentTitle): the SAME contradiction —
     // telling the council "Product type: Tee Shirt" one line above a garment-truth constraint that
@@ -7365,7 +7370,10 @@ async function buildNicheParentTitle(
   const ptWord = GARMENT_NOUN_ON
     ? resolveGarment({ productType, title: designNameList, blankFamily: truth?.garmentFamily ?? null }).display
     : (/T_SHIRT|SHIRT|TEE/i.test(productType ?? '') ? 'T-Shirt' : (productType ? productType.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Shirt'))
-  const aud = preferredAudience || 'Men and Women'
+  // KIDS AUDIENCE TRUTH (2026-08-23, live B0DP5H8QBT, THIS producer — the broadcast/parent title —
+  // is the one that actually shipped the defect): never default a KIDS family into the universal
+  // adult fallback; it would contradict this SAME brief's `garmentTruthRule` constraint line.
+  const aud = truth?.audience === 'kids' ? '' : (preferredAudience || 'Men and Women')
   const upgradeList = topUpgradeKws.slice(0, 8).join(', ') || '(none)'
   const compatList = compatibilityBrands.length > 0 ? compatibilityBrands.slice(0, 3).join(', ') : ''
   // FAMILY-NICHE ANCHOR (H "Seam 2"). familyNiche is the POSITIVE niche the whole family shares
@@ -8758,7 +8766,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // because lean_male fell into the broad `lean ? 'Men and Women'` branch. When GARMENT_NOUN=on, a
   // SOFT lean also narrows the tail (lean_male → 'Men'); only explicit 'unisex' stays dual. Flag OFF
   // → the exact prior behavior (soft lean keeps 'Men and Women'). Hard male/female already narrowed.
-  const preferredAudience = !apparelProduct ? ''
+  // `let`, not `const` (2026-08-23, live B0DP5H8QBT): this resolves BEFORE the blank truth below —
+  // see the KIDS AUDIENCE TRUTH re-gate right after `truthGarmentFamily` is computed.
+  let preferredAudience = !apparelProduct ? ''
     : lean === 'male' ? 'Men'
     : lean === 'female' ? 'Women'
     : (GARMENT_NOUN_ON && lean === 'lean_male') ? 'Men'
@@ -9093,6 +9103,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     ? familyGarmentUnion(blankCatalog, blankFamilyFacts, blankHay)
     : []
   const truthGarmentFamily: TruthGarmentFamily = !apparelProduct ? 'none' : (blankFamilyFacts?.garmentFamily ?? null)
+  /* KIDS AUDIENCE TRUTH (PO 2026-08-23, live B0DP5H8QBT: 12 children, all blank 64000B — a Gildan
+   * KIDS tee — `audience_lean='unisex'`, shipped "... for Men & Women"). `preferredAudience` above
+   * resolves BEFORE this blank truth exists, so a unisex-lean KIDS family would carry the literal
+   * 'Men and Women' into every title producer's audience directive — directly contradicting
+   * `garmentTruthRule`'s own "never name an adult-only audience" line in the SAME prompt. Re-gate
+   * now that the blank has resolved; every non-kids family is byte-identical to before. */
+  if (audienceOfGarmentFamily(truthGarmentFamily) === 'kids') preferredAudience = ''
   /* DESIGN-TOKEN EXEMPTION (coordinator amendment 2026-08-21). The kids/adult audience rules must
    * judge the CLAIM, not the vocabulary: a "Baby Shark" or "Girl Dad" ADULT tee legitimately needs
    * 'baby'/'girl' in its bullets and backend, and stripping the healthy majority's own design words
@@ -9120,19 +9137,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   /** Build the spine ctx for ONE field. `null` when the family's blank is unresolved on an apparel
    *  listing: with no ground truth there is nothing to judge against, and a guessed rule is worse
    *  than none (the same fail-open `resolveFamilyBlank` itself takes on a garment conflict). */
-  const truthCtxFor = (field: 'title' | 'bullets' | 'description' | 'backend'): PhraseTruthCtx | null => {
-    if (apparelProduct && !blankFamilyFacts?.garmentFamily) return null
-    return {
+  const truthCtxFor = (field: 'title' | 'bullets' | 'description' | 'backend'): PhraseTruthCtx | null =>
+    buildPhraseTruthCtx({
       garmentFamily: truthGarmentFamily,
-      mixedFamilies: familyGarmentFamilies.length > 1 ? familyGarmentFamilies : undefined,
+      mixedFamilies: familyGarmentFamilies,
       spec: blankSpec,
       allowedBrand: garmentBrandCanonical || null,
-      audience: audienceOfGarmentFamily(truthGarmentFamily),
       designTokens: familyDesignNames,
-      audienceLean: normalizeAudienceLean(apparelProduct ? input.audienceLean : null),
-      field,
-    }
-  }
+      audienceLean: apparelProduct ? input.audienceLean : null,
+    }, field)
   const titleTruthCtx = truthCtxFor('title')
   /* ── PER-DESIGN GARMENT TRUTH (PO 2026-08-22) ─────────────────────────────────────────────────
    *
