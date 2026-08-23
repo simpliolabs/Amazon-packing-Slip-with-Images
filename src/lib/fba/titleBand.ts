@@ -1276,6 +1276,13 @@ export type TruthBandDecision =
    *  The truthful short title ships — this is the ONLY path on which a sub-band title exits, and it
    *  still raises a hold. */
   | 'unreachable-no-prior'
+  /** Could NOT reach the band from true material AND the prior itself fails `verdictForAssembledTitle`
+   *  (a sibling design's name, a forced gender on a unisex family, or any other whole-string lie).
+   *  PO ruling 2026-08-23: "a hold may keep the prior title ONLY IF the prior title is TRUE." A hold
+   *  is a fallback, not a licence to ship a known lie just because it happens to be in band — so this
+   *  is the SECOND path (with `unreachable-no-prior`) on which a sub-band title exits deliberately,
+   *  and it still raises a hold so the operator sees it. */
+  | 'shipped-truthful-under-band'
 
 export interface TruthBandResult {
   title: string
@@ -1295,10 +1302,14 @@ export interface TruthBandResult {
  * THE terminal truth+band exit. Runs LAST, on the bytes that ship, after every other net including
  * the facts pad and the money-position gate.
  *
- * `prior` is the title that is live on Amazon today. It is what a refusal preserves — deliberately
- * NOT re-judged for truth here: this net's job is to refuse to SHIP a short title, and swapping a
- * live title for a shorter truthful one is the exact trade that was reverted. A prior that is
- * itself untruthful surfaces as a hold with the operator, which is where that decision belongs.
+ * `prior` is the title that is live on Amazon today. It is what a refusal PREFERS to preserve — but
+ * (PO ruling 2026-08-23) only when the prior is itself TRUE: swapping a live title for a shorter
+ * truthful one is a real trade-off (the #630/#631 revert), but keeping an in-band LIE over a
+ * truthful short title is not a trade-off at all, it is the inverted priority this ruling exists to
+ * fix. So the prior IS re-judged here, by the same `verdictForAssembledTitle` predicate every
+ * candidate the search assembles is judged by — see the refusal branch below. A prior that fails
+ * truth still surfaces as a hold with the operator (nothing ships silently either way); it just does
+ * not get to be the thing that ships.
  */
 export function settleTruthBand(args: {
   produced: string
@@ -1420,8 +1431,25 @@ export function settleTruthBand(args: {
    * this one). An over-cap or empty prior is therefore not a preservable value: the hold still
    * fires, and the truthful text is what exits, which is the only honest remaining option. */
   if (prior && prior.length <= TITLE_BAND_HI) {
-    return done(prior, 'refused-kept-prior',
-      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material — prior title kept, nothing shipped`,
+    /* THE INVARIANT (PO ruling 2026-08-23): "a hold may keep the prior title ONLY IF the prior title
+     * is TRUE." Truth is a correctness constraint; the 70-75 band is a quality target — an in-band
+     * LIE must never outrank a truthful short title. Judge the prior with the SAME whole-string
+     * predicate (`verdictForAssembledTitle`) the search above just verified every candidate against —
+     * no second rulebook for "is this true", per this file's own doctrine. */
+    const priorVerdict = verdictForAssembledTitle(prior, verifyCtx)
+    if (priorVerdict.ok) {
+      return done(prior, 'refused-kept-prior',
+        `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material — prior title kept, nothing shipped`,
+        tried, true)
+    }
+    // THE PRIOR FAILS TRUTH — it carries a sibling design's name, a forced gender on a unisex family,
+    // a second garment class, or some other whole-string lie `verdictForAssembledTitle` just caught.
+    // Keeping it is not a safe fallback, it is shipping a KNOWN lie because it happens to be in band.
+    // Ship the truthful short title instead — `best`, the honest partial the search already built —
+    // under a DISTINCT decision value so this never silently reads as an ordinary band-unreachable
+    // hold. The hold still fires (`done(..., true)`) so the operator sees it.
+    return done(best, 'shipped-truthful-under-band',
+      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`,
       tried, true)
   }
   if (prior) {
@@ -2283,7 +2311,10 @@ export interface SettleTitleCtx {
   colorProtect: string | null
   /** Seller-declared audience lean, for the inclusive-audience net. */
   lean?: MoneyTailCtx['lean']
-  /** TITLE_V4=on: the facts pad is deleted by policy ("never ship short — always ask me"). */
+  /** TITLE_V4=on: the facts pad is deleted by policy ("never ship short — always ask me") — UNLESS
+   *  `prior` fails `verdictForAssembledTitle`, in which case the pad runs anyway (PO ruling
+   *  2026-08-23; see step 9 inside `settleTitle`). The refusal this flag asks for is only sound when
+   *  the fallback it refuses INTO is itself true. */
   v4NoPad: boolean
   /** 'off' | 'shadow' | 'on' (TITLE_V4) — drives the shadow-measurement log/diff only; the pad itself
    *  is gated by `v4NoPad` above. */
@@ -2421,8 +2452,27 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   console.log(JSON.stringify({ tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision, from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note }))
   moneyed = inc.title
 
-  // 9. FACTS PAD — suppressed at TITLE_V4=on ("never ship short — always ask me").
-  const v = ctx.v4NoPad
+  // 9. FACTS PAD — suppressed at TITLE_V4=on ("never ship short — always ask me"), UNLESS the prior
+  //    this run would otherwise fall back to is itself a LIE (PO ruling 2026-08-23: "a hold may keep
+  //    the prior title ONLY IF the prior title is TRUE"). V4's premise — "short is a refusal, not a
+  //    hole to fill" — only holds when the thing a refusal falls back to is clean; when the fallback
+  //    is a sibling design's name or a forced gender on a unisex family, refusing to pad does not
+  //    avoid manufacturing text, it just manufactures a WORSE outcome (a shipped lie) by omission.
+  //    Judged with the SAME predicate every candidate this door assembles is judged by — no second
+  //    "is this true" rulebook.
+  const priorForV4 = (ctx.prior || '').trim()
+  const priorFailsTruthForV4 = !!priorForV4 && !verdictForAssembledTitle(priorForV4, {
+    truth: ctx.truth, protect: ctx.protect, foreignTokens: ctx.foreignTokens, reject: ctx.reject,
+    scrubProtectedOverlap: ctx.scrubProtectedOverlap,
+  }).ok
+  const padSuppressed = ctx.v4NoPad && !priorFailsTruthForV4
+  if (ctx.v4NoPad && priorFailsTruthForV4) {
+    console.warn(JSON.stringify({
+      tag: 'TITLE_V4_PAD_OVERRIDE', field: 'title', parent: ctx.parentAsin, scope: ctx.holdScope,
+      prior: priorForV4, reason: 'TITLE_V4=on but the prior fails truth — facts pad allowed so a truthful title can reach the band instead of falling back to the lie',
+    }))
+  }
+  const v = padSuppressed
     ? { title: moneyed, decision: 'v4-no-pad' as const, notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
     : enforceTitleBand(moneyed, ctx.bandCtxFor(moneyed))
   console.log(JSON.stringify({
