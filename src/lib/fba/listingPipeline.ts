@@ -71,6 +71,7 @@ import {
   garmentNounConstraint,
   titleNetActsOn,
   buildPhraseTruthCtx,
+  youthMarkerFor,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
 } from '@/lib/fba/contentTruth'
@@ -9284,7 +9285,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    *  and design-scoped pool, so the pad speaks for the same design the truth net judges. */
   const titleBandCtx = (
     title: string,
-    scope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[] },
+    scope?: { truthOk?: (s: string) => boolean; facts?: readonly string[]; pool?: readonly string[]; truth?: PhraseTruthCtx | null },
   ): TitleBandCtx => ({
     apparel: apparelProduct,
     customizable: input.customizable === true,
@@ -9300,6 +9301,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // 15 green tests, and the net did NOTHING on the very 66-char case it was written for. An inline
     // regex in a 9,400-line file is unreviewable; the leaf is unit-tested against real alias lists.
     garmentSecond: pickDistinctGarmentForm(title, bandGarment.aliases),
+    // THE YOUTH MARKER (defect 1, PO 2026-08-23, live B0DP5H8QBT) — derived from THIS exit's own
+    // blank-grounded truth ctx (the per-design ctx when scoped, the family's otherwise; same fallback
+    // `moneyCtx.truth`/`settleTitle`'s own `truth` arg already use), never the title or the pool. null
+    // for every non-kids family, so an adult listing's band ctx is byte-identical to before.
+    youthMarker: youthMarkerFor(scope?.truth ?? titleTruthCtx),
   })
 
   // Description SUBSTANCE = REAL product facts (blank spec + extracted specs), NEVER search keyphrases.
