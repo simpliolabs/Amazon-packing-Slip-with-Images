@@ -411,6 +411,23 @@ export function dominantGarmentGroup(text: string): string | null {
   return null
 }
 
+/**
+ * EVERY garment GROUP (see `garmentGroup`) a text names, not just the first — the whole-string twin
+ * of `dominantGarmentGroup`. This is the ONE-GARMENT-CLASS-PER-TITLE check applied to an ASSEMBLED
+ * string as a whole (the title-settle rewrite, 2026-08-22): `enforceSingleGarmentClass` prevents a
+ * SECOND class from being ADDED once one is committed, but a caller that wants to VERIFY an already-
+ * assembled candidate (the additive search, a money-tail candidate) needs the plain fact "how many
+ * DISTINCT classes does this text name", independent of which one came first. A family union may
+ * truthfully permit more than one class (sweatshirt + hoodie); a single title still may not name two
+ * — "Sweatshirt … Fall Crewneck" is ONE group (crewneck folds into sweatshirt), "Shirt … Sweatshirt"
+ * is two. Pure.
+ */
+export function garmentGroupsIn(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const m of text.matchAll(GARMENT_NOUN_RE)) out.add(garmentGroup(garmentNounClass(m[0])))
+  return out
+}
+
 /** Which allowed garment GROUP (see `garmentGroup`) a text names FIRST, reading left to right. Pure. */
 function firstGarmentClass(text: string, allowed: ReadonlySet<string>): string | null {
   for (const m of text.matchAll(GARMENT_NOUN_RE)) {

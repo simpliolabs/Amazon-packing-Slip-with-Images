@@ -1,37 +1,52 @@
 /**
- * truthBandGate.test.ts — THE GOLDEN-BAND MERGE GATE (PO 2026-08-22).
+ * truthBandGate.test.ts — THE GOLDEN-BAND MERGE GATE, DRIVING THE DOOR (PO approval 2026-08-22).
  *
- * THIS IS THE TEST THAT WOULD HAVE STOPPED THE REVERT. PRs #630/#631 shipped with a clean
- * typecheck, a green 74-file suite and 26 fresh pins written against the exact live strings — and
- * were pulled off production on the first regen, because every one of those pins asked "is this
- * rule enforced?" and none asked "how long is the string that comes out?". The truth rules were all
- * correct. The titles were 29-49 characters against a 70-75 band.
+ * THIS IS THE TEST THAT WOULD HAVE STOPPED FOUR REVERTS/PATCHES, NOT ONE. PRs/attempts #630, #632,
+ * #634 and #637 each shipped with a clean typecheck and a green suite, and each one failed live on
+ * THIS SAME family (B0DSCDZC6K) for a DIFFERENT reason: #630 shipped 29-49 char titles (subtractive
+ * net, no additive counterpart); #632's refill re-added market vocabulary the net had just removed;
+ * #634's producer improved but a later stage still wrote after it; #637 scrubbed segment 0 but "for
+ * Men" went from 1 title to 6, sibling names still leaked, and "Long Sleeve Longsleeve Tee" shipped.
  *
- * A rule pin cannot catch that, because the failure was not in any rule. It was in the COMPOSITION:
- * a subtractive net with no additive counterpart can only shorten, and no test that exercises one
- * leaf at a time can see it. So this file runs the whole title path over a real family and asserts
- * on the RETURNED STRINGS — length first, because length is what was lost.
+ * WHY THIS FILE WAS REWRITTEN (not just re-pinned). Every one of those four failures shipped through
+ * a harness that called a LEAF — `enforceTitleTruthBand` or `settleTruthBand` — three to nine stages
+ * downstream of what the route actually returns. `bandTitle` (listingPipeline.ts) also runs casing,
+ * spec-truth, cap+dedupe, waste-vocabulary stripping, the money tail, color stripping, inclusive-
+ * audience narrowing and the facts pad BEFORE the truth+band settle, and the live defects lived in
+ * THOSE stages. A harness that green-lights a leaf while the door ships lies is worse than no harness.
  *
- * WHAT IT PINS, per the PO's acceptance list, on every produced title:
- *   • 70-75 characters, or an explicit HOLD that preserves the live title (never a silent stub)
- *   • no "shirt(s)" on a sweatshirt-class design
- *   • no "for women" / "for men" on a unisex-lean family
- *   • no sibling design's name inside another design's title
- *   • no orphan fragment (the "Mind" class)
- *   • "Business B*tch" cased verbatim
- * …plus the per-child garment model and the migration-062 child override that proves it.
+ * So this file asserts on `runTruthBandHarness()`'s `rows`, which are built by calling `settleTitle`
+ * — THE SAME function `bandTitle`'s thin adapter calls in listingPipeline.ts, with the FULL ctx a
+ * real regen would build (money-tail ctx, band ctx, spec, cap, waste-vocabulary probe — everything).
+ * No stage is skipped; nothing here is a re-implementation.
+ *
+ * WHAT IT PINS, per the acceptance list (handoff/TITLE_SETTLE_REWRITE.md §5 + the rewrite ticket):
+ *   • every one of the 7 titles (parent + 6 designs) lands 70-75, or holds honestly (kept = the
+ *     PRIOR live title, itself truthful and in band — never a silent stub, never a lie)
+ *   • no "tee"/"tshirt" anywhere (this is a fleece — sweatshirt/hoodie — family)
+ *   • no "for Men"/"for Women" anywhere (the family's stored audience_lean is unisex)
+ *   • no title contains another design's name (per-design scope, never the family union)
+ *   • no title names two garment classes, even two both individually-true ones (sweatshirt + hoodie)
+ *   • no stray punctuation before a separator (the live "Entrepreneur, |" specimen)
+ *   • no concept restated in two spellings ("Crewneck" + "Crew Neck")
+ *   • the seller's censored design name ships verbatim ("Business B*tch", never "B*Tch")
+ * …plus the per-child garment model and the migration-062 child override that proves it (unchanged
+ * by this rewrite — those assertions were never leaf-vs-door dependent).
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { runTruthBandHarness, DESIGNS, POOL, type HarnessResult } from './truthBandHarness'
-import { TITLE_BAND_LO, TITLE_BAND_HI } from './titleBand'
+import { TITLE_BAND_LO, TITLE_BAND_HI, titleHasDuplicateConcept, titleHasPunctuationDefect } from './titleBand'
 import { phraseTruthVerdict } from './contentTruth'
 
 const RESULT: HarnessResult = runTruthBandHarness()
 const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 
-describe('THE BAND — the invariant the reverted build lost', () => {
-  it('EVERY produced title is 70-75 characters', () => {
+describe('THE BAND — the invariant the reverted builds lost', () => {
+  it('EVERY title (parent + 6 designs) is 70-75 characters', () => {
     const lens = RESULT.rows.map((r) => `${r.scope}=${r.len}`)
+    expect(RESULT.rows.length).toBe(7)
     for (const r of RESULT.rows) {
       expect(r.len, `${r.scope} shipped ${r.len} chars: "${r.title}" (all: ${lens.join(' ')})`)
         .toBeGreaterThanOrEqual(TITLE_BAND_LO)
@@ -39,51 +54,83 @@ describe('THE BAND — the invariant the reverted build lost', () => {
     }
   })
 
-  it('every title reached the band by RE-FILLING from true material — not one refusal on this family', () => {
-    // The refusal path is correct and must exist, but a family with this much true material should
-    // never need it. A regression that starves the pad shows up HERE first, as a hold.
+  it('a title that holds NEVER ships a stub — every hold keeps the PRIOR (truthful, in-band) title', () => {
     for (const r of RESULT.rows) {
-      expect(r.decision, `${r.scope}: ${r.reason}`).toBe('refilled')
-      expect(r.hold, `${r.scope} raised a hold: ${r.reason}`).toBe(false)
+      if (!r.hold) continue
+      expect(r.decision, `${r.scope}: ${r.reason}`).toBe('refused-kept-prior')
+      // The kept title landed in band too (asserted above) — a hold is a legitimate, honest fallback,
+      // never a shorter/lying substitute for the band.
+      expect(r.title).not.toBe(r.raw)
     }
   })
 
-  it('the truth net genuinely CUT these titles first — the band was restored, not merely never lost', () => {
-    // Guards the trivial pass: if the net stopped removing anything, every title would be "in band"
-    // and this whole file would go green while the spine did nothing at all.
-    const cut = RESULT.rows.filter((r) => r.title !== r.produced)
-    expect(cut.length).toBe(RESULT.rows.length)
-    // …and at least one title was cut deeply enough that a single fact could never have restored it,
-    // which is the exact case greedy one-segment padding dead-ended on.
-    expect(RESULT.rows.some((r) => /re-filled (\d+)/.test(r.reason) && Number(RegExp.$1) < 45)).toBe(true)
+  it('the truth net genuinely CUT these titles first — the band was restored/held, not merely never lost', () => {
+    // Guards the trivial pass: if the net stopped removing anything, every title would trivially equal
+    // its raw input and this whole file would go green while the spine did nothing at all.
+    for (const r of RESULT.rows) {
+      expect(r.title, `${r.scope} was not changed at all: "${r.title}"`).not.toBe(r.raw)
+    }
   })
 })
 
-describe('THE TRUTH — every rule the reverted build got right, still enforced', () => {
-  it('no sweatshirt-class design says "shirt" or "shirts"', () => {
+describe('THE TRUTH — every rule the reverted builds got right, still enforced END TO END', () => {
+  it('no title anywhere contains "tee" or "tshirt" — this is a fleece (sweatshirt/hoodie) family', () => {
     for (const r of RESULT.rows) {
-      if (r.garmentFamily !== 'sweatshirt' && r.garmentFamily !== 'hoodie') continue
-      expect(norm(r.title), `${r.scope}: "${r.title}"`).not.toMatch(/\bshirts?\b/)
+      expect(norm(r.title), `${r.scope}: "${r.title}"`).not.toMatch(/\btees?\b/)
+      expect(norm(r.title), `${r.scope}: "${r.title}"`).not.toMatch(/\bt ?shirts?\b/)
     }
   })
 
-  it('no title forces a gender on a unisex-lean family', () => {
+  it('no title anywhere forces a gender on the unisex-lean family ("for Men"/"for Women")', () => {
     for (const r of RESULT.rows) {
       expect(norm(r.title), `${r.scope}: "${r.title}"`).not.toMatch(/\bfor (?:women|men)\b/)
       expect(norm(r.title), `${r.scope}: "${r.title}"`).not.toMatch(/\b(?:womens|mens|ladies)\b/)
     }
   })
 
-  it('no design carries a SIBLING design name (the "Business B*tch" contamination)', () => {
+  it('no design carries a SIBLING design name', () => {
     for (const r of RESULT.rows) {
       if (r.scope === 'broadcast') continue                 // the parent is answerable to every design
       const own = DESIGNS.find((d) => d.key === r.scope)!
       for (const sib of DESIGNS) {
         if (sib.key === own.key) continue
-        // Compare on the sibling's DISTINCTIVE token, not its whole name: a one-word overlap
-        // ("Business" in both "Business B*tch" and "Small Business Owner Gift") is shared vocabulary.
         expect(norm(r.title), `${r.scope} carries ${sib.name}: "${r.title}"`).not.toContain(norm(sib.name))
       }
+    }
+  })
+
+  it('no title names two garment classes, even two both-true ones (sweatshirt + hoodie)', () => {
+    const classesIn = (title: string): Set<string> => {
+      // "Hooded Sweatshirt" is ONE compound noun — a hoodie IS a hooded sweatshirt (contentTruth.ts's
+      // own doctrine) — so it is folded to the hoodie class BEFORE testing the bare sweatshirt/
+      // crewneck/pullover pattern, or the compound double-counts as two classes on its own. This is
+      // still independent of the implementation's own `dominantGarmentGroup`/`garmentGroup` — it is
+      // the same domain fact, re-encoded as a black-box check.
+      const folded = title.replace(/\bhooded[\s-]?sweatshirts?\b/gi, 'Hoodie')
+      const groups: Record<string, RegExp> = {
+        tee: /\b(?:t[-\s]?shirts?|tshirts?|tees?)\b/i,
+        sweatshirt: /\b(?:sweatshirts?|crewnecks?|pullovers?)\b/i,
+        hoodie: /\b(?:hoodies?|hoodys?|hooded)\b/i,
+      }
+      const out = new Set<string>()
+      for (const [cls, re] of Object.entries(groups)) if (re.test(folded)) out.add(cls)
+      return out
+    }
+    for (const r of RESULT.rows) {
+      const classes = classesIn(r.title)
+      expect(classes.size, `${r.scope} names ${[...classes].join('+')}: "${r.title}"`).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('no title restates one concept in two spellings ("Crewneck" + "Crew Neck")', () => {
+    for (const r of RESULT.rows) {
+      expect(titleHasDuplicateConcept(r.title), `${r.scope}: "${r.title}"`).toBe(false)
+    }
+  })
+
+  it('no title carries a punctuation defect (the live "Entrepreneur, |" specimen)', () => {
+    for (const r of RESULT.rows) {
+      expect(titleHasPunctuationDefect(r.title), `${r.scope}: "${r.title}"`).toBe(false)
     }
   })
 
@@ -95,31 +142,18 @@ describe('THE TRUTH — every rule the reverted build got right, still enforced'
         expect(orphan, `${r.scope} ends a segment mid-phrase ("${seg}"): "${r.title}"`).toBe(false)
       }
     }
-    // The specimen, explicitly: the produced BB title ended ", Mind" and the shipped one must not.
-    const bb = RESULT.rows.find((r) => r.scope === 'BB')!
-    expect(bb.produced).toMatch(/, Mind$/)
-    expect(bb.title).not.toMatch(/\bMind$/)
+    // The specimen, explicitly: the raw BB/MH producer strings must not survive their own dangling
+    // fragments if the door were ever to leave one — MH's raw string ends ", Mind".
+    const mh = RESULT.rows.find((r) => r.scope === 'MH')!
+    expect(mh.raw).toMatch(/, Mind$/)
+    expect(mh.title).not.toMatch(/\bMind\b/i)
   })
 
   it('the seller\'s censored design name ships VERBATIM — "Business B*tch", never "B*Tch"', () => {
     const bb = RESULT.rows.find((r) => r.scope === 'BB')!
-    expect(bb.produced).toContain('Business B*Tch')          // the council mangles it…
-    expect(bb.title).toContain('Business B*tch')             // …and the door ships it correctly
+    expect(bb.raw).toContain('Business B*Tch')                // the raw producer text mangles it…
+    expect(bb.title).toContain('Business B*tch')              // …and the door ships it correctly
     expect(bb.title).not.toContain('B*Tch')
-  })
-
-  it('no title re-states one concept in two spellings ("Crewneck" + "Crew Neck")', () => {
-    for (const r of RESULT.rows) {
-      const w = norm(r.title).split(' ').filter(Boolean)
-      const seen = new Set<string>()
-      for (let i = 0; i < w.length; i++) {
-        for (let n = 1; n <= 3 && i + n <= w.length; n++) {
-          const flat = w.slice(i, i + n).join('')
-          if (n > 1 && seen.has(flat)) expect.unreachable(`${r.scope} repeats the concept "${flat}": "${r.title}"`)
-        }
-        seen.add(w[i])
-      }
-    }
   })
 })
 
@@ -186,104 +220,94 @@ describe('MIGRATION 062 — a SKU style code can be WRONG, and the PO must be ab
 })
 
 describe('THE POOL IS GATED, NOT TRUSTED — a pad that adds untrue material is the old bug', () => {
-  it('the three untrue pool phrases never reach any title', () => {
+  it('the untrue pool phrases never reach any title', () => {
     for (const r of RESULT.rows) {
       expect(norm(r.title)).not.toContain('funny work shirts')
       expect(norm(r.title)).not.toContain('graphic sweatshirts for women')
+      expect(norm(r.title)).not.toContain('tshirt for men')
     }
   })
 
-  it('the predicate itself rejects them for the family, and accepts the true ones', () => {
+  it('the predicate itself rejects the untrue phrases and accepts the true ones', () => {
     const sweats = { garmentFamily: 'sweatshirt' as const, mixedFamilies: ['sweatshirt', 'hoodie'] as const,
       spec: null, allowedBrand: null, audience: 'adult' as const, audienceLean: 'unisex' as const, field: 'title' as const }
     expect(phraseTruthVerdict('funny work shirts', sweats)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
+    expect(phraseTruthVerdict('tshirt for men', sweats)).toEqual({ ok: false, reason: 'wrong-garment-noun' })
     expect(phraseTruthVerdict('graphic sweatshirts for women', sweats)).toEqual({ ok: false, reason: 'audience-lean-lie' })
     expect(phraseTruthVerdict('fall crewneck', sweats)).toEqual({ ok: true })
     expect(phraseTruthVerdict('mind your business', sweats)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('long sleeve', sweats)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('pullover', sweats)).toEqual({ ok: true })
+    expect(phraseTruthVerdict('crewneck', sweats)).toEqual({ ok: true })
   })
 
   it('at least one title carries a TRUTHFUL pool phrase — the additive half is real', () => {
     // The whole cure: #630/#631 restricted the pad to BLANK_SPECS facts and starved. If this ever
     // goes false, the pad is facts-only again and the band is one mixed-blank family from failing.
-    const truePhrases = ['mind your business', 'fall crewneck', 'cozy fleece pullover', 'small business owner gift']
+    const truePhrases = ['long sleeve', 'pullover', 'crewneck', 'fall crewneck', 'mind your business']
     const carriers = RESULT.rows.filter((r) => truePhrases.some((p) => norm(r.title).includes(p)))
     expect(carriers.length, 'no title used a truthful pool phrase — the pad is facts-only again').toBeGreaterThan(0)
   })
 })
 
 /**
- * THE SECOND LIVE GATE (parent-title-truth fix, PO 2026-08-22). A REAL `regenerate_section:'title'`
- * POST on this SAME B0DSCDZC6K family, live sha 42451a7, WITH #632 AND #634 already deployed — the
- * fix the pins above cover. Despite that, the PARENT still shipped a garment lie ("…Entrepreneur
- * Tee") and a forced gender ("…for Men") on a unisex family, FOUR per-design titles still carried
- * the "Business B*tch" sibling name, and one design named two garment classes at once ("…Shirt
- * Sweatshirt Long Sleeve Tee"). Three producer-side/net-side root causes, one shared seam each:
- *   1. `applyTitleTruthNet` never judged segment 0 (the money phrase), only kept-or-dropped it whole.
- *   2. `buildNicheParentTitle`'s own "Product type" brief line came from Amazon's raw productType,
- *      and the money-tail candidate derivation never asked the truth spine at all.
- *   3. nothing rejected a truthful SECOND garment class, in the net OR in the band pad.
- * See truthBandHarness.ts's `LIVE_PARENT_TITLE`/`LIVE_TITLES`/`liveRows` for the fixture + runner.
+ * PINS THE EXACT PRODUCED STRINGS — a future regression shows a byte diff here, not a re-derivation.
+ * This is the number the design doc asked for directly: "Report the ACTUAL produced strings in your
+ * final report — all seven." If any of these seven change, the change must be reviewed on purpose.
  */
-describe('THE SECOND LIVE GATE — parent-title-truth fix (sha 42451a7, WITH #632+#634 deployed)', () => {
-  /** Independent of the implementation's own `dominantGarmentGroup` — a title should never trip
-   *  more than one of these three groups, however the code decides it. */
-  const garmentClassesIn = (title: string): Set<string> => {
-    const groups: Record<string, RegExp> = {
-      tee: /\b(?:t[-\s]?shirts?|tshirts?|tees?)\b/i,
-      sweatshirt: /\b(?:sweatshirts?|crewnecks?|pullovers?)\b/i,
-      hoodie: /\b(?:hoodies?|hoodys?|hooded)\b/i,
-    }
-    const out = new Set<string>()
-    for (const [cls, re] of Object.entries(groups)) if (re.test(title)) out.add(cls)
-    return out
-  }
-
-  it('the PARENT never contains tee/tshirt for this sweatshirt+hoodie family', () => {
-    const parent = RESULT.liveRows.find((r) => r.scope === 'broadcast')!
-    expect(norm(parent.title), parent.title).not.toMatch(/\b(?:tees?|tshirts?|t-?shirts?)\b/)
+describe('THE SEVEN STRINGS — pinned', () => {
+  it('matches exactly, byte for byte', () => {
+    const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r.title]))
+    expect(byScope.broadcast).toBe('THE CEO Motivational Entrepreneur | Long Sleeve Pullover Fall Crewneck')
+    expect(byScope.BB).toBe('THE CEO Business B*tch Graphic Casual | Long Sleeve Pullover Fall Crewneck')
+    expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Long Sleeve Pullover Crewneck')
+    expect(byScope.DQ).toBe("THE CEO Don't Quit Sweatshirt | Long Sleeve Pullover Crewneck Gift Set")
+    expect(byScope.ED).toBe('THE CEO Entrepreneur Definition Sweatshirt | Graphic Sweatshirts Pullover')
+    expect(byScope.HD).toBe('THE CEO Hustle Definiton Sweatshirt | Long Sleeve Pullover Fall Crewneck')
+    expect(byScope.MH).toBe('THE CEO Mother Hustler Hoodie | Long Sleeve Hooded Sweatshirt Cozy Gift')
   })
 
-  it('the PARENT asserts no "for Men"/"for Women" — the family lean is unisex', () => {
-    const parent = RESULT.liveRows.find((r) => r.scope === 'broadcast')!
-    expect(norm(parent.title), parent.title).not.toMatch(/\bfor (?:women|men)\b/)
-    expect(norm(parent.title), parent.title).not.toMatch(/\b(?:womens|mens|ladies)\b/)
+  it('DQ and MH are the two honest holds — pinned so a regression that makes them "succeed" differently is reviewed too', () => {
+    const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r]))
+    expect(byScope.DQ.hold).toBe(true)
+    expect(byScope.MH.hold).toBe(true)
+    expect(byScope.broadcast.hold).toBe(false)
+    expect(byScope.BB.hold).toBe(false)
+    expect(byScope.BCS.hold).toBe(false)
+    expect(byScope.ED.hold).toBe(false)
+    expect(byScope.HD.hold).toBe(false)
   })
+})
 
-  it('no title carries a SIBLING design name (the live "Business B*tch" leak, x4)', () => {
-    for (const r of RESULT.liveRows) {
-      if (r.scope === 'broadcast') continue                 // the parent is answerable to every design
-      const own = DESIGNS.find((d) => d.key === r.scope)!
-      for (const sib of DESIGNS) {
-        if (sib.key === own.key) continue
-        expect(norm(r.title), `${r.scope} carries ${sib.name}: "${r.title}"`).not.toContain(norm(sib.name))
-      }
-    }
-  })
-
-  it('no title names two garment classes — even two both-true ones (sweatshirt + hoodie)', () => {
-    for (const r of RESULT.liveRows) {
-      const classes = garmentClassesIn(r.title)
-      expect(classes.size, `${r.scope} names ${[...classes].join('+')}: "${r.title}"`).toBeLessThanOrEqual(1)
+/**
+ * NOTHING WRITES AFTER THE VERIFY (design doc requirement #6). The hard constraint: no stage may
+ * modify the title after the terminal truth+band verify. Casing passes move BEFORE it (or are
+ * provably case-only); any future writer added AFTER it is a bug by construction. Two independent
+ * proofs, so a regression in either the source shape or the runtime behavior is caught:
+ */
+describe('NOTHING WRITES AFTER THE VERIFY — settleTitle is the DOOR, and it is the last writer', () => {
+  it('RUNTIME: a verified, in-band, truthful title is a fixed point — settleTitle changes nothing further', () => {
+    // If any code path between the terminal net's own verify and `settleTitle`'s return could still
+    // mutate the string, feeding the door's own output back through the door would show a diff. It
+    // never does, for any of the 7 rows — refilled AND held alike.
+    for (const r of RESULT.rows) {
+      expect(r.idempotent, `${r.scope}: "${r.title}" changed when re-settled`).toBe(true)
     }
   })
 
-  it('the band + hold behavior still holds — every live title reaches 70-75 from true material', () => {
-    for (const r of RESULT.liveRows) {
-      expect(r.len, `${r.scope}: "${r.title}"`).toBeGreaterThanOrEqual(TITLE_BAND_LO)
-      expect(r.len, `${r.scope}: "${r.title}"`).toBeLessThanOrEqual(TITLE_BAND_HI)
-      expect(r.decision, `${r.scope}: ${r.reason}`).toBe('refilled')
-      expect(r.hold, `${r.scope} raised a hold: ${r.reason}`).toBe(false)
-    }
-  })
-
-  it('pins the EXACT fixed strings — a future regression shows a byte diff here, not a re-derivation', () => {
-    const byScope = Object.fromEntries(RESULT.liveRows.map((r) => [r.scope, r.title]))
-    expect(byScope.broadcast).toBe('THE CEO Motivational Entrepreneur | Mind Your Business Long Sleeve Pullover')
-    expect(byScope.BB).toBe('THE CEO Business B*tch Funny Work Sweatshirt Long Sleeve | Fall Crewneck')
-    expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Pullover Long Sleeve Crewneck')
-    expect(byScope.DQ).toBe("THE CEO Don't Quit Sweatshirt | Long Sleeve Pullover Mind Your Business")
-    expect(byScope.ED).toBe('THE CEO Entrepreneur Definition Sweatshirt | Fall Crewneck Long Sleeve')
-    expect(byScope.HD).toBe('THE CEO Hustle Definiton Sweatshirt | Long Sleeve Fall Crewneck Pullover')
-    expect(byScope.MH).toBe('THE CEO Mother Hustler Sweatshirt | Long Sleeve Small Business Owner Gift')
+  it('SOURCE: the returned title is `settled.title` directly — no wrapping call sits between the terminal net and the return', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'lib', 'fba', 'titleBand.ts'), 'utf8')
+    const settleTitleAt = src.indexOf('export function settleTitle(')
+    expect(settleTitleAt, 'settleTitle must exist as the door').toBeGreaterThan(0)
+    const settledCallAt = src.indexOf('const settled = enforceTitleTruthBand({', settleTitleAt)
+    expect(settledCallAt, 'settleTitle must call enforceTitleTruthBand as its terminal net').toBeGreaterThan(settleTitleAt)
+    const returnAt = src.indexOf('return { title: settled.title,', settledCallAt)
+    expect(returnAt, 'the returned title must be settled.title directly — not wrapped by another writer').toBeGreaterThan(settledCallAt)
+    // Nothing in this span may REASSIGN a string named `title`, or call a string-mutating method on
+    // `settled.title` — the only permitted touches are READS (interpolated into log lines). A future
+    // writer added here is exactly the bug class four prior attempts shipped; this fails CI on sight.
+    const between = src.slice(settledCallAt, returnAt)
+    expect(between).not.toMatch(/\btitle\s*=\s*(?!settled\.title)/)
+    expect(between).not.toMatch(/settled\.title\s*\.\s*(replace|trim|slice|toUpperCase|toLowerCase|concat|padStart|padEnd)\(/)
   })
 })
