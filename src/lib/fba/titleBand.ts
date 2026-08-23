@@ -1224,16 +1224,27 @@ export function titleHasDuplicateConcept(title: string): boolean {
       multiSeen.add(flat)
     }
   }
-  // THE SAME GARMENT NAMED THREE WAYS IN ONE SEGMENT (defect 2, PO 2026-08-23, live B0DP5H8QBT:
-  // "T-Shirt Graphic Tee Shirt | Short Sleeve" — "T-Shirt", "Tee" and "Shirt" all name the SAME class
-  // and the window-flattening check above cannot see it: none of these three spellings concatenate to
-  // match another, because they are three GENUINELY DIFFERENT spellings, not one concept split across
-  // a word boundary. `hasRedundantGarmentMention` (contentTruth.ts) reuses the coverage-token-style
-  // garment grouping every other truth check in this file already shares — no second vocabulary — and
-  // is scoped PER SEGMENT so the PO's own sanctioned noun-x2 gold shape ("Tee Shirt | … TShirt", one
-  // compound mention before the pipe plus one bare mention after it) is untouched: that pattern has
-  // exactly ONE mention-group per segment, same as every clean title.
-  for (const seg of title.split(/\s*[|,]\s*/)) {
+  // THE SAME GARMENT NAMED THREE WAYS (defect 2, PO 2026-08-23, live B0DP5H8QBT). The original
+  // specimen — "T-Shirt Graphic Tee Shirt | Short Sleeve" — named the tee class three times before
+  // ANY separator; "T-Shirt", "Tee" and "Shirt" all name the SAME class and the window-flattening
+  // check above cannot see it: none of these three spellings concatenate to match another, because
+  // they are three GENUINELY DIFFERENT spellings, not one concept split across a word boundary.
+  // `hasRedundantGarmentMention` (contentTruth.ts) reuses the coverage-token-style garment grouping
+  // every other truth check in this file already shares — no second vocabulary.
+  //
+  // PIPE-DELIMITED, NOT COMMA-DELIMITED (2026-08-23 correction, live B0DP5H8QBT: "T-Shirt, Graphic
+  // Tees | Kids Toddler Tee" shipped with THREE tee-class mentions — this loop split on `,` as well
+  // as `|` and so checked "T-Shirt", "Graphic Tees" and "Kids Toddler Tee" as three SEPARATE
+  // segments, each with only one mention, and missed it). The PO's own sanctioned noun-×2 gold shape
+  // ("Tee Shirt | … TShirt", one compound mention before the pipe plus one bare mention after it) is
+  // a claim about the PIPE — "once per side of the pipe" — never about a comma clause; a comma inside
+  // one side is ordinary coordination ("T-Shirt, Graphic Tees" reads as two design descriptors), not
+  // a second side the noun is entitled to. Splitting on `|` alone makes the redundant-mention check
+  // whole-CLAUSE instead of comma-fragmented: "T-Shirt, Graphic Tees" is now ONE segment, so its two
+  // non-adjacent tee-class mentions are caught by `hasRedundantGarmentMention`'s existing ≥2-groups
+  // rule — no new threshold, no new vocabulary — while the gold shape (exactly one mention on each
+  // side of the ONE pipe) still resolves to one group per segment and stays untouched.
+  for (const seg of title.split(/\s*\|\s*/)) {
     if (hasRedundantGarmentMention(seg)) return true
   }
   return false

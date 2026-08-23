@@ -369,6 +369,17 @@ export function runTruthBandHarness(): HarnessResult {
   const familyCtx = familyRes.garmentFamily
     ? mkCtx(familyRes.garmentFamily, familyUnion, familyRes.spec, familyBrand || null)
     : null
+  /* BROADCAST-ONLY (defect 1, PO 2026-08-23, live B0DSCDZC6K): the DOMINANT class alone, mirroring
+   * `broadcastTruthCtx`/`broadcastGarmentFamilies` in listingPipeline.ts. `familyCtx`/`familyUnion`
+   * above are UNCHANGED and stay the family's full union — they still answer "what is true of the
+   * family" for `mislabeledChild.longSleeveShirtOnFamily` below and for the per-design fallback (a
+   * group whose own blank never resolves) — only the PARENT TITLE DOOR gets the narrower ctx, since
+   * that is the one exit answerable to every child AT ONCE and therefore may only commit to the
+   * class that actually speaks for the family. */
+  const broadcastUnion: GarmentFamily[] = familyRes.garmentFamily ? [familyRes.garmentFamily] : []
+  const broadcastCtx = familyRes.garmentFamily
+    ? mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null)
+    : null
 
   const rows: HarnessRow[] = []
 
@@ -376,7 +387,7 @@ export function runTruthBandHarness(): HarnessResult {
   // to every design, exactly as listingPipeline.ts calls `bandTitle` for `recommended_title`.
   {
     const ctx = buildSettleCtx({
-      truth: familyCtx, fams: familyUnion, spec: familyRes.spec, brand: familyBrand,
+      truth: broadcastCtx, fams: broadcastUnion, spec: familyRes.spec, brand: familyBrand,
       protect: designNames().join(' '), prior: PRIOR_PARENT, holdScope: 'broadcast',
     })
     const r = settleTitle(RAW_PARENT, ctx)

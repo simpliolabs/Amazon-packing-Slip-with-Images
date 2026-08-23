@@ -687,6 +687,87 @@ function enforceSingleGarmentClass(
 }
 
 /**
+ * COLLAPSE A REDUNDANT SAME-CLASS MENTION, ONE PIPE SIDE AT A TIME (defect 2, PO 2026-08-23, live
+ * B0DP5H8QBT: "T-Shirt, Graphic Tees | Kids Toddler Tee" names the tee class THREE times —
+ * "T-Shirt", "Tees" and "Tee" — and shipped that way because nothing upstream of the terminal gate
+ * ACTIVELY repairs this; `titleHasDuplicateConcept`/`hasRedundantGarmentMention` only ever DETECTED
+ * it, at the ship door, where a whole-string verify can only accept or refuse a candidate — never
+ * repair one already in hand). `enforceSingleGarmentClass` above cures a DIFFERENT garment class
+ * appearing a second time; this cures the SAME class appearing a THIRD (or more) time.
+ *
+ * THE PO'S OWN SANCTIONED NOUN-×2 SHAPE — one mention on EACH side of the ONE pipe ("Tee Shirt | …
+ * TShirt") — is a claim about the PIPE, never about a comma clause inside one side ("T-Shirt,
+ * Graphic Tees" is ordinary comma coordination, not a second side the noun is entitled to). So this
+ * walks PIPE sides independently and never touches a side that only ever names a class once — which
+ * is every clean title, and the gold shape itself: `hasRedundantGarmentMention` (the SAME predicate
+ * the gate uses, no second vocabulary) is the guard, so a side this function edits is, by
+ * construction, exactly the side the gate would have refused.
+ *
+ * WITHIN A REDUNDANT SIDE: the FIRST mention-group of a class wins (reading order —
+ * `collapseRepeatedWords`'s own "earliest position is most valuable" doctrine, applied here to a
+ * concept instead of a literal word) and the SECOND is removed together with its ENCLOSING
+ * comma-delimited clause, not just the bare noun — "do not blindly delete the last if that leaves a
+ * dangling fragment": stripping only "Tees" out of "Graphic Tees" would leave an orphan "Graphic"
+ * exactly like the "Mind" class `dropOrphanPoolFragments` exists to prevent, so the whole clause goes
+ * together, the same drop-a-clause-not-a-word granularity `applyTitleTruthNet`'s own segment sweep
+ * uses. A protected design word that survives NOWHERE else in the title is never collateral damage —
+ * the same rail `enforceSingleGarmentClass` applies, reused rather than re-derived.
+ *
+ * Shortens only (never adds words) — the band pad downstream re-fills from true material, exactly
+ * the doctrine every other net in this file follows. Pure, and a no-op on any side that never
+ * restates a class.
+ */
+function collapseRedundantGarmentMention(title: string, protectHay: string): string {
+  if (!title || !title.trim()) return title
+  const words = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  const protectedWords = new Set(words(protectHay).filter((w) => w.length > 2))
+  const collapseSide = (side: string): string => {
+    let s = side
+    // Bounded loop: each pass removes AT MOST one redundant clause. Re-scanning (rather than
+    // computing every redundant span up front) keeps the index math trivial — after a removal every
+    // later offset would otherwise need re-basing — and a title naming one class three-plus times is
+    // already an extreme outlier, so the bound is generous without being unbounded.
+    for (let guard = 0; guard < 4; guard++) {
+      if (!hasRedundantGarmentMention(s)) break
+      const seen = new Set<string>()
+      let lastClass: string | null = null
+      let lastEnd = -1
+      let redundant: { start: number; end: number } | null = null
+      for (const m of s.matchAll(GARMENT_NOUN_RE)) {
+        const cls = garmentNounClass(m[0])
+        const start = m.index ?? 0
+        const adjacent = cls === lastClass && start - lastEnd <= 1
+        if (!adjacent) {
+          if (seen.has(cls)) { redundant = { start, end: start + m[0].length }; break }
+          seen.add(cls)
+        }
+        lastClass = cls
+        lastEnd = start + m[0].length
+      }
+      if (!redundant) break
+      // Expand to the enclosing comma-delimited clause — never past a comma on either side, never
+      // past the side's own boundary (there is no pipe inside `side` by construction).
+      const before = s.slice(0, redundant.start)
+      const after = s.slice(redundant.end)
+      const clauseStart = before.lastIndexOf(',')
+      const commaAfterRel = after.indexOf(',')
+      const spanStart = clauseStart >= 0 ? clauseStart : 0
+      const spanEnd = commaAfterRel >= 0 ? redundant.end + commaAfterRel : s.length
+      const clause = s.slice(spanStart, spanEnd)
+      const withoutClause = (s.slice(0, spanStart) + s.slice(spanEnd)).trim()
+      // DESIGN-WORD SAFETY RAIL (same rail `enforceSingleGarmentClass` applies): never delete a
+      // protected word that would survive nowhere else in this side.
+      const restWords = new Set(words(withoutClause))
+      const solelyDesign = words(clause).some((w) => protectedWords.has(w) && !restWords.has(w))
+      if (solelyDesign) break
+      s = withoutClause
+    }
+    return s.replace(/\s{2,}/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').trim()
+  }
+  return title.split(/\s*\|\s*/).map(collapseSide).join(' | ')
+}
+
+/**
  * TERMINAL title truth net — the ONE deterministic net that removes an UNTRUE phrase from a shipped
  * title, on every producer and every path (installed at `scrubPublished`, the single choke point
  * both `recommended_title` and `per_child_titles` pass through).
@@ -722,7 +803,10 @@ function enforceSingleGarmentClass(
  * "drop the whole phrase?" and segment 0 is never wholly dropped.
  *
  * LAST, `enforceSingleGarmentClass` folds in defect 3: even after every noun left standing is
- * individually true, at most ONE garment class may appear in the finished title.
+ * individually true, at most ONE garment class may appear in the finished title. Then
+ * `collapseRedundantGarmentMention` folds in defect 2's cross-segment half (PO 2026-08-23): even
+ * within the one class the title committed to, it may not name that class a third time by restating
+ * it in a comma clause on the SAME side of the pipe.
  *
  * Idempotent (a second pass finds nothing left to drop) and a no-op when `ctx` names no blank.
  */
@@ -807,5 +891,5 @@ export function applyTitleTruthNet(
   const swept = kept.join('').replace(/\s{2,}/g, ' ').replace(/[\s,|]+$/g, '').trim()
   // 3. ONE garment class for the whole title (defect 3) — primed with the class segment 0 already
   //    committed to, so this never re-litigates what `scrubMoneyPhrase` just decided.
-  return enforceSingleGarmentClass(swept, ctx, protectHay, seg0.primaryClass)
+  return collapseRedundantGarmentMention(enforceSingleGarmentClass(swept, ctx, protectHay, seg0.primaryClass), protectHay)
 }

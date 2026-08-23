@@ -9148,6 +9148,32 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       audienceLean: apparelProduct ? input.audienceLean : null,
     }, field)
   const titleTruthCtx = truthCtxFor('title')
+  /* BROADCAST-ONLY GARMENT TRUTH (defect 1, PO 2026-08-23, live B0DSCDZC6K: 25 Gildan 18000
+   * sweatshirt + 9 Gildan 18500 hoodie children shipped "…Business Casual Hoodie" on the shared
+   * parent title). `titleTruthCtx.mixedFamilies` is the FAMILY UNION — correct for a PER-CHILD exit
+   * (a genuine hoodie child's own blank IS hoodie), but the doc block below already states the
+   * intended broadcast rule: "the family UNION survives for exactly one thing — the broadcast/
+   * parent title… and there it is not a permissive union but the DOMINANT class". The union leaked
+   * into the broadcast exit anyway because every broadcast call site read `titleTruthCtx` directly.
+   * This is the SAME ctx builder (`buildPhraseTruthCtx`), the SAME dominant class
+   * (`truthGarmentFamily`, `familyGarmentUnion`'s own first/always-present member) — just with
+   * `mixedFamilies` omitted so `allowedGarmentClasses` collapses to the dominant alone. `titleTruthCtx`
+   * itself is UNCHANGED, so every existing per-child/per-group FALLBACK that reads it (an unresolved
+   * design group, a single-design listing's ship-door default) keeps today's behavior byte-for-byte;
+   * only the call sites that are unambiguously the broadcast/parent exit are re-pointed at this. */
+  const broadcastTruthCtx: PhraseTruthCtx | null = buildPhraseTruthCtx({
+    garmentFamily: truthGarmentFamily,
+    mixedFamilies: undefined,
+    spec: blankSpec,
+    allowedBrand: garmentBrandCanonical || null,
+    designTokens: familyDesignNames,
+    audienceLean: apparelProduct ? input.audienceLean : null,
+  }, 'title')
+  /** The broadcast pad's own garment fact bank: the DOMINANT class alone (never the union) — the
+   *  twin restriction to `broadcastTruthCtx` above, applied to `bandFactSegments`/`bandTruthOk`
+   *  below so the pad can never weld a minority class back in after the truth net removed it. */
+  const broadcastGarmentFamilies: TruthGarmentFamily[] =
+    truthGarmentFamily && truthGarmentFamily !== 'none' ? [truthGarmentFamily] : []
   /* ── PER-DESIGN GARMENT TRUTH (PO 2026-08-22) ─────────────────────────────────────────────────
    *
    * A SINGLE FAMILY-LEVEL GARMENT VERDICT IS THE WRONG SHAPE, and B0DSCDZC6K is the live proof:
@@ -9239,13 +9265,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     }
     return out
   }
-  const bandFactSegments: string[] = garmentFactSegments(
-    familyGarmentFamilies.length ? familyGarmentFamilies : (truthGarmentFamily && truthGarmentFamily !== 'none' ? [truthGarmentFamily] : []),
-  )
+  /* BROADCAST ONLY (defect 1): the DOMINANT class alone (`broadcastGarmentFamilies`), never the
+   * family union — a per-child exit always passes its OWN `facts` explicitly (see `titleScopeFor`
+   * below), so this default is reached only by the broadcast/parent title's pad. Restricting it here
+   * too closes the gap the truth-ctx narrowing alone would leave open: without this the pad could
+   * still WELD a minority-class alias (e.g. "Hoodie") back into a sweatshirt-dominant parent title
+   * even after `verdictForAssembledTitle` stopped accepting it as a candidate. */
+  const bandFactSegments: string[] = garmentFactSegments(broadcastGarmentFamilies)
   /** The pad's truth gate — the SAME spine predicate the terminal net judges with, so the last
    *  writer in the door can never weld back the lie the net just removed. */
   const bandTruthOkFor = (ctx: PhraseTruthCtx | null) => (segment: string): boolean => !ctx || phraseTruthVerdict(segment, ctx).ok
-  const bandTruthOk = bandTruthOkFor(titleTruthCtx)
+  // BROADCAST ONLY — same reasoning as `bandFactSegments` immediately above.
+  const bandTruthOk = bandTruthOkFor(broadcastTruthCtx)
   /* TRUTHFUL POOL PHRASES — the pad's third and last bank (PO 2026-08-22, the cure for the revert).
    *
    * #630/#631 restricted the pad to BLANK_SPECS facts and were reverted at 29-49 chars against the
@@ -9302,10 +9333,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // regex in a 9,400-line file is unreviewable; the leaf is unit-tested against real alias lists.
     garmentSecond: pickDistinctGarmentForm(title, bandGarment.aliases),
     // THE YOUTH MARKER (defect 1, PO 2026-08-23, live B0DP5H8QBT) — derived from THIS exit's own
-    // blank-grounded truth ctx (the per-design ctx when scoped, the family's otherwise; same fallback
-    // `moneyCtx.truth`/`settleTitle`'s own `truth` arg already use), never the title or the pool. null
-    // for every non-kids family, so an adult listing's band ctx is byte-identical to before.
-    youthMarker: youthMarkerFor(scope?.truth ?? titleTruthCtx),
+    // blank-grounded truth ctx (the per-design ctx when scoped, the broadcast dominant-only ctx
+    // otherwise; same fallback `moneyCtx.truth`/`settleTitle`'s own `truth` arg already use), never
+    // the title or the pool. `audience` is identical on `titleTruthCtx`/`broadcastTruthCtx` (only
+    // `mixedFamilies` differs), so this is a no-op for every family — kept in lockstep on principle.
+    // null for every non-kids family, so an adult listing's band ctx is byte-identical to before.
+    youthMarker: youthMarkerFor(scope?.truth ?? broadcastTruthCtx),
   })
 
   // Description SUBSTANCE = REAL product facts (blank spec + extracted specs), NEVER search keyphrases.
@@ -9473,8 +9506,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // question, so a market keyword like "mind your business tshirt for men" could win the pipe-
       // right slot on a sweatshirt/hoodie unisex family — a wrong garment noun AND a forced gender,
       // both from ONE candidate the derivation's off-niche/season/lean filters wave through. Same
-      // per-exit ctx as the band pad and the terminal net (`bandScope?.truth ?? titleTruthCtx`).
-      truth: bandScope?.truth ?? titleTruthCtx,
+      // per-exit ctx as the band pad and the terminal net (`bandScope?.truth ?? broadcastTruthCtx`).
+      // BROADCAST-ONLY default (defect 1): `bandScope` is undefined only on the parent/broadcast
+      // call, so this reaches the DOMINANT-only ctx, never the family union; a per-child call always
+      // supplies its own `bandScope.truth` and never falls through to this default.
+      truth: bandScope?.truth ?? broadcastTruthCtx,
       // Per-child sibling-name tokens, so the whole-string verify INSIDE `enforceMoneyTail` (2026-
       // 08-22 rewrite) can refuse a market keyword that would carry another design's identity.
       foreignTokens: bandScope?.foreignTokens,
@@ -9496,7 +9532,8 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       v4NoPad: v4Applies(),
       v4Mode: titleV4Mode(),
       specFactTokens: blankSpecFactTokens(blankSpec),
-      truth: bandScope?.truth ?? titleTruthCtx,
+      // BROADCAST-ONLY default (defect 1) — same reasoning as `moneyCtx.truth` immediately above.
+      truth: bandScope?.truth ?? broadcastTruthCtx,
       // Both call sites already pass the exit's design protect hay as `protectDesign` (the family
       // union for the broadcast title, THIS design's name for a per-child one).
       protect: protectDesign ?? '',
@@ -9633,9 +9670,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     const stripped = stripCompetitorBlanks(t, attributePinFinal ?? '')
     // PER-DESIGN GARMENT TRUTH at the door too (PO 2026-08-22): a per-child title is judged against
     // ITS OWN design's resolved blank, so the one long-sleeve child inside a sweatshirt family is
-    // not convicted of a garment lie for saying what it actually is. The broadcast title keeps the
-    // family ctx, where the DOMINANT-class union is the right authority.
-    const ctx = scope?.truth ?? titleTruthCtx
+    // not convicted of a garment lie for saying what it actually is. The broadcast title falls back
+    // to `broadcastTruthCtx` (defect 1) — the family's DOMINANT class alone, never the permissive
+    // union, because a parent title is answerable to every child at once.
+    const ctx = scope?.truth ?? broadcastTruthCtx
     return ctx
       ? applyTitleTruthNet(stripped, ctx, scope?.protect ?? protectHay, {
           rejectSegment: scope?.reject,
@@ -9988,7 +10026,9 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       pushDesignName(coupleConcept)   // the couple concept IS this family's design name (truth spine)
       // ONE shared title — buildTitleFor with coupleConcept AS the designName, so it leads the title
       // and the design-name backstop (guard 6) re-inserts it verbatim if the council drops it.
-      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName, season, titleTruthCtx)
+      // BROADCAST (defect 1): no per-design fan-out on this path (`designGroupContexts` stays
+      // empty), so this ONE title is answerable to every child — `broadcastTruthCtx`, not the union.
+      const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, coupleConcept, lean, apparelProduct, brandName, season, broadcastTruthCtx)
       finalTitle = r.title
       titleProblems = r.problems
       retried = r.retried
@@ -10127,11 +10167,17 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // a truly mixed-lean family should have audienceLean='unisex' set on the parent; a lean_female/lean_male
       // family value means the seller has already asserted family-level unanimity). Fallback null on non-apparel.
       const parentLean: AudienceLean = apparelProduct ? (input.audienceLean ?? null) : null
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.__v4Sink, titleTruthCtx)
+      // BROADCAST (defect 1): the explicit multi-design parent title — `broadcastTruthCtx`, the
+      // family's dominant class alone, never the permissive union (see the header comment on
+      // `broadcastTruthCtx`'s definition).
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.__v4Sink, broadcastTruthCtx)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
-    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName, season, titleTruthCtx)
+    // BROADCAST (defect 1): the single-design branch — no per-design fan-out at all, so this ONE
+    // title (which ships as `recommended_title`, answerable to every child) gets the same
+    // dominant-only ctx as every other broadcast/parent producer.
+    const r = await buildTitleFor(input, candidates, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, designName, lean, apparelProduct, brandName, season, broadcastTruthCtx)
     finalTitle = r.title
     titleProblems = r.problems
     retried = r.retried
