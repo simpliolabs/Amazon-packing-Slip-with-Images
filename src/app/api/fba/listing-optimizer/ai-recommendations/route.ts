@@ -52,6 +52,12 @@ import { resolveBlankRowForNet, applyBlankBrandNetToDetails, applyBlankBrandNetP
 // never rebuilds details).
 import { applyStickyDetails, collectAcceptedDetailPushes, type AcceptedPushRow } from '@/lib/fba/stickyDetails'
 import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
+// LOCKED-TITLE TRUTH (PO 2026-08-22, live case B0DSCDZC6K): a lock must still block AI rewrites, but a
+// locked title that contradicts the resolved product must be VISIBLE, not silently ship forever. This
+// is READ-ONLY analysis — it never edits recommended_title, never touches Amazon. Served from THIS GET
+// (the same call the page already makes for title_source) so there is exactly one "is this true"
+// derivation and no second round trip.
+import { lockedTitleViolations, resolveLockedTitleTruthCtx, type LockedTitleViolation } from '@/lib/fba/lockedTitleTruth'
 
 function getAdminSupabase() {
   return createClient(
@@ -2171,6 +2177,27 @@ export async function GET(req: NextRequest) {
     { pushedAt: field_pushed_at, generatedAt: (data.generated_at as string | null) ?? null }) as unknown as ActionPlanItem[]
   } catch (e) { console.warn('[ai-recommendations GET] derive failed — serving stored plan:', e instanceof Error ? e.message : e) }
 
+  // LOCKED-TITLE TRUTH ANALYSIS (2026-08-22) — only when the title is actually LOCKED
+  // (title_source==='manual'); an AI-owned title is never analyzed here (the terminal title-truth net
+  // already keeps it honest on every regen). Blank-grounded from listing_content, never from the
+  // locked title itself (contentTruth.ts's own doctrine: "a title cannot vouch for itself"). Best-
+  // effort/fail-open: any failure serves an empty violation list, never blocks the page.
+  let locked_title_truth: { violations: LockedTitleViolation[] } = { violations: [] }
+  if (data.title_source === 'manual' && typeof recommended_title_scrubbed === 'string' && recommended_title_scrubbed.trim()) {
+    try {
+      const { data: scoreRow } = await supabase
+        .from('listing_seo_scores')
+        .select('audience_lean')
+        .eq('parent_asin', parent_asin)
+        .maybeSingle()
+      const { ctx, blankLabel } = await resolveLockedTitleTruthCtx(supabase, {
+        parentAsin: parent_asin,
+        audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
+      })
+      locked_title_truth = { violations: lockedTitleViolations(recommended_title_scrubbed, data.title_source, ctx, blankLabel) }
+    } catch (e) { console.warn('[ai-recommendations GET] locked-title-truth analysis failed (non-fatal):', e instanceof Error ? e.message : e) }
+  }
+
   // Item Highlights write-gate: compute the single client-facing boolean server-side so the client
   // needs ZERO date logic. `writable == "not blocked for the IH field"` — the gate folds in the probe
   // flag AND the July-27 fallback (null flag → date). undefined on legacy responses → client treats
@@ -2216,6 +2243,7 @@ export async function GET(req: NextRequest) {
       action_plan: action_plan_out,
       product_details_improvements: scrubTrademarksDeep(product_details_improvements),
       field_pushed_at,
+      locked_title_truth,          // {violations:[]} unless title_source==='manual' AND the title conflicts with the resolved blank
       item_highlights_writable,    // server-probed marketplace flag (undefined on legacy → client treats as blocked)
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords_scrubbed.length > 0
