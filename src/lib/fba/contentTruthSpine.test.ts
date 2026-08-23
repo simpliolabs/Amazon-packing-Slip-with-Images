@@ -335,10 +335,21 @@ describe('single-design and multi-design producers run the IDENTICAL new rules',
       expect(body, `${producer} does not build the shared gate`).toContain('phraseTruthVerdict(phrase, truth).ok')
     }
   })
-  it('every title producer call site passes the family truth ctx', () => {
+  it('every title producer call site passes a shared family-level truth ctx (never an ad-hoc one)', () => {
+    // `broadcastTruthCtx` (defect 1, PO 2026-08-23, live B0DSCDZC6K: a sweatshirt-dominant/hoodie-
+    // minority family shipped "…Hoodie" on the shared parent title) is the SAME `truthCtxFor`-built,
+    // family-level ctx `titleTruthCtx` is — just with `mixedFamilies` omitted so a broadcast/parent
+    // exit (answerable to every child at once) commits to the family's DOMINANT class alone, never
+    // the permissive union. It is defined once, right beside `titleTruthCtx`, and reused at every
+    // call site that is unambiguously the broadcast/parent exit (couple/unified-set, the explicit
+    // multi-design parent, and the single-design branch — none of which fan out per-child titles);
+    // the one PER-DESIGN fallback call site (`groupTruthCtx ?? titleTruthCtx`) still reads
+    // `titleTruthCtx` because an unresolved design group's fallback is a per-child concern, not a
+    // broadcast one, and is deliberately unchanged by defect 1's fix. PATH PARITY still holds: every
+    // call site reads ONE of these two named, shared variables — never a one-off ctx built inline.
     const calls = src.match(/await build(?:TitleFor|NicheParentTitle)\([^\n]*\)/g) ?? []
     expect(calls.length).toBe(4)          // 3× buildTitleFor (couple / per-design / single) + 1× parent
-    for (const c of calls) expect(c, c).toContain('titleTruthCtx')
+    for (const c of calls) expect(c, c).toMatch(/\b(?:titleTruthCtx|broadcastTruthCtx)\b/)
   })
   it('both producers strip competitor blanks from the title (defect (d) parity)', () => {
     for (const producer of ['buildTitleFor', 'buildNicheParentTitle']) {
