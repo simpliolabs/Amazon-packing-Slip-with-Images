@@ -26,7 +26,7 @@
  */
 import {
   phraseTruthVerdict, garmentNounConstraint,
-  audienceOfGarmentFamily, normalizeAudienceLean,
+  normalizeAudienceLean, buildPhraseTruthCtx,
   type PhraseTruthCtx, type PhraseTruthReason,
 } from './contentTruth'
 import {
@@ -197,16 +197,19 @@ export async function resolveLockedTitleTruthCtx(
     if (!res.garmentFamily) return { ctx: null, blankLabel: null }   // unresolved blank — fail open
 
     const union = familyGarmentUnion(catalog, res, hay)
-    const ctx: PhraseTruthCtx = {
+    const ctx = buildPhraseTruthCtx({
       garmentFamily: res.garmentFamily,
-      mixedFamilies: union.length > 1 ? union : undefined,
+      mixedFamilies: union,
       spec: res.spec,
       allowedBrand: res.spec?.brandInCopy === false ? '' : (res.spec?.brand ?? null),
-      audience: audienceOfGarmentFamily(res.garmentFamily),
+      // No design-name source on this DB-light read path (listing_content carries sku/title only,
+      // no design-name column) — [] is the pre-existing behavior, now flowing through the SAME
+      // builder generation uses instead of a silently duplicated literal. Wiring a real source is a
+      // separate change (would need a new resolver, which this fix deliberately does not add).
       designTokens: [],
-      audienceLean: normalizeAudienceLean(opts.audienceLean as Parameters<typeof normalizeAudienceLean>[0]),
-      field: 'title',
-    }
+      audienceLean: opts.audienceLean as Parameters<typeof normalizeAudienceLean>[0],
+    }, 'title')
+    if (!ctx) return { ctx: null, blankLabel: null }   // defensive; res.garmentFamily was checked above
     const blankLabel = res.dominant ? [res.dominant.spec.brand, res.dominant.styleCode].filter(Boolean).join(' ').trim() || null : null
     return { ctx, blankLabel }
   } catch (e) {

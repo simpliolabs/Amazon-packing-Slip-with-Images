@@ -232,6 +232,54 @@ export function normalizeAudienceLean(
   return null
 }
 
+/* ─── ONE CTX BUILDER (PO 2026-08-23, live B0DP5H8QBT) ──────────────────────────────────────────── */
+
+/**
+ * The blank-grounded FACTS `buildPhraseTruthCtx` needs to assemble a `PhraseTruthCtx` — what a
+ * caller already has once it has resolved a family's blank, not yet shaped into the ctx object
+ * every field-specific fill reads.
+ */
+export interface PhraseTruthFacts {
+  garmentFamily: TruthGarmentFamily | undefined
+  /** The FULL set of garment families present (a mixed-blank family) — pass the raw union, never
+   *  pre-collapsed; a length ≤1 array collapses to `undefined` inside, same as every existing caller
+   *  already did by hand. */
+  mixedFamilies?: readonly TruthGarmentFamily[]
+  spec: PhraseTruthCtx['spec']
+  allowedBrand: string | null | undefined
+  designTokens?: readonly string[]
+  /** RAW seller-declared lean — this normalizes it, same as every existing caller already did inline. */
+  audienceLean?: Parameters<typeof normalizeAudienceLean>[0]
+}
+
+/**
+ * ONE ctx builder for the whole content-truth spine. Generation (`listingPipeline.ts`'s
+ * `truthCtxFor`) and the locked-title READ path (`lockedTitleTruth.ts`'s
+ * `resolveLockedTitleTruthCtx`) used to duplicate this assembly by hand — and had already drifted:
+ * the read path hardcoded `designTokens: []` while generation threaded the family's real design
+ * names, so a "Girl Dad"/"Baby Shark"-style family could get a TRUE verdict on one path and a FALSE
+ * one on the other for the exact same phrase. Every OTHER field (spec, allowedBrand, audience,
+ * audienceLean, mixedFamilies collapsing) is now structurally impossible to drift, because both
+ * callers build the SAME shape through the SAME function.
+ *
+ * Pure — no DB, no new resolver; both callers still do their own blank resolution and hand the
+ * result here. Fail-open, same doctrine as every blank-truth site in this repo: no resolved garment
+ * family ⇒ no ground truth ⇒ `null` (nothing to judge against).
+ */
+export function buildPhraseTruthCtx(facts: PhraseTruthFacts, field: ContentField): PhraseTruthCtx | null {
+  if (!facts.garmentFamily) return null
+  return {
+    garmentFamily: facts.garmentFamily,
+    mixedFamilies: facts.mixedFamilies && facts.mixedFamilies.length > 1 ? facts.mixedFamilies : undefined,
+    spec: facts.spec,
+    allowedBrand: facts.allowedBrand,
+    audience: audienceOfGarmentFamily(facts.garmentFamily),
+    designTokens: facts.designTokens ?? [],
+    audienceLean: normalizeAudienceLean(facts.audienceLean),
+    field,
+  }
+}
+
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -323,6 +371,26 @@ export const TITLE_NET_REASONS: ReadonlySet<PhraseTruthReason> = new Set<PhraseT
   'audience-lean-lie',
 ])
 
+/**
+ * Makes the allowlist's own precondition executable (PO 2026-08-23, live B0DP5H8QBT: 12 kids-tee
+ * children, `audience-adult-on-kids` convicted on the READ path via `phraseTruthVerdict` directly
+ * but stayed silent on the TITLE terminal net because `TITLE_NET_REASONS` excludes it unconditionally
+ * — the doc above states WHY (an unresolved design name is a false-positive factory) but nothing
+ * ever tested for that precondition). `ctx.designTokens` non-empty is exactly "the name resolved" —
+ * the same signal `familyDesignNames`/`pushDesignName` already populate before any title ctx is
+ * built. TITLE_NET_REASONS itself is untouched (tests reference it by name); this is the ONE gate
+ * every act-point in the net now shares — the tail match, the segment sweep, AND `scrubMoneyPhrase`'s
+ * segment-0 word-level scrub (its own kids/adult branch below) — so a design name that never
+ * resolved cannot become a false-positive factory at ANY granularity, not just the whole-segment one.
+ */
+export function titleNetActsOn(reason: PhraseTruthReason, ctx: PhraseTruthCtx): boolean {
+  if (TITLE_NET_REASONS.has(reason)) return true
+  if (reason === 'audience-adult-on-kids' || reason === 'audience-kids-on-adult') {
+    return (ctx.designTokens?.length ?? 0) > 0
+  }
+  return false
+}
+
 /** The trailing audience clause every title producer can emit. */
 const AUDIENCE_TAIL_RE = /\s*[,|]?\s+for\s+(?:men|women)(?:['’]s)?\s*$/i
 
@@ -378,6 +446,32 @@ function scrubMoneyPhrase(
     if (fem !== masc) {
       const re = fem ? /\b(?:for\s+)?wom[ae]n['’]?s?\b/gi : /\b(?:for\s+)?m[ae]n['’]?s?\b/gi
       s = s.replace(re, (m) => (isProtected(m) ? m : ''))
+    }
+  }
+  // (b2) kids/adult AUDIENCE — segment 0's twin of rule (c) in `phraseTruthVerdict` (live
+  // B0DP5H8QBT: "THE CEO Don't Quit Motivational T-Shirt for Men & Women | Short Sleeve" on a KIDS
+  // family — the audience lie sits BEFORE the first separator, where the tail/segment sweep below
+  // never looks). The predicate can only reject the WHOLE money phrase; this strips just the
+  // offending CLAUSE — one or more adjacent audience words plus their connectors ("for"/"&"/"and"/
+  // ","), so "for Men & Women" goes as ONE unit and never leaves a dangling "for" or "&" behind.
+  // Reuses the EXACT helpers the predicate gates on (`designWordSet`, `foreignAudienceHits`, the
+  // SAME ADULT/KIDS regexes) so this can never structurally disagree with rule (c) — a design's own
+  // audience word ("Baby Shark", "Girl Dad") still survives, same exemption; `isProtected` is the
+  // second safety rail, same as every other branch here. Gated by `titleNetActsOn` — the SAME
+  // precondition (the design name RESOLVED) the tail/segment-sweep act-points already require, so a
+  // "Baby Shark" family with no resolved name is not turned into a false-positive factory at the
+  // WORD level either (the exact regression an early version of this branch caused — pinned by
+  // contentTruthSpine.test.ts's "DELIBERATELY leaves kids/adult words alone" case).
+  if (ctx.audience === 'kids' || ctx.audience === 'adult') {
+    const reason: PhraseTruthReason = ctx.audience === 'kids' ? 'audience-adult-on-kids' : 'audience-kids-on-adult'
+    if (titleNetActsOn(reason, ctx)) {
+      const designWords = designWordSet(ctx.designTokens)
+      const re = ctx.audience === 'kids' ? ADULT_AUDIENCE_RE : KIDS_AUDIENCE_RE
+      const clauseRe = new RegExp(`(?:\\bfor\\s+)?${re.source}(?:\\s*(?:,|&|\\band\\b)\\s*${re.source})*`, 'gi')
+      s = s.replace(clauseRe, (m) => {
+        if (foreignAudienceHits(m, re, designWords).length === 0) return m
+        return isProtected(m) ? m : ''
+      })
     }
   }
   // (c) another design's name — a maximal per-WORD strike (not a whole-segment drop: this phrase is
@@ -574,7 +668,7 @@ export function applyTitleTruthNet(
   const tailMatch = t.match(AUDIENCE_TAIL_RE)
   if (tailMatch) {
     const verdict = phraseTruthVerdict(tailMatch[0], ctx)
-    if (!verdict.ok && TITLE_NET_REASONS.has(verdict.reason)) {
+    if (!verdict.ok && titleNetActsOn(verdict.reason, ctx)) {
       t = t.slice(0, t.length - tailMatch[0].length).replace(/[\s,|]+$/g, '').trim()
     }
   }
@@ -598,7 +692,7 @@ export function applyTitleTruthNet(
     let seg = parts[i + 1]
     if (sep === undefined || seg === undefined || !seg.trim()) continue
     const verdict = phraseTruthVerdict(seg, ctx)
-    const untrue = !verdict.ok && TITLE_NET_REASONS.has(verdict.reason)
+    const untrue = !verdict.ok && titleNetActsOn(verdict.reason, ctx)
     if (untrue || opts?.rejectSegment?.(seg) === true) {
       // Everything that would remain if this segment went — segment 0 + the kept tail + the segments
       // still ahead. The design must survive the net; a redundant restatement need not.

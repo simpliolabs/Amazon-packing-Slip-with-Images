@@ -343,7 +343,9 @@ describe('single-design and multi-design producers run the IDENTICAL new rules',
   it('both producers strip competitor blanks from the title (defect (d) parity)', () => {
     for (const producer of ['buildTitleFor', 'buildNicheParentTitle']) {
       const at = src.indexOf(`async function ${producer}(`)
-      const body = src.slice(at, at + 9000)
+      // Window widened 2026-08-23 (kids-audience-truth fix): a few comment lines landed ahead of
+      // `stripCompetitorBlanks(` inside buildNicheParentTitle and pushed it just past the old 9000.
+      const body = src.slice(at, at + 10000)
       expect(body, `${producer} never strips competitor blanks`).toContain('stripCompetitorBlanks(')
     }
   })
