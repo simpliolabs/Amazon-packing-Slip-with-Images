@@ -87,9 +87,20 @@ describe('live specimen — B0DP5H8QBT (12 kids-tee children, unisex lean)', () 
     expect(out).not.toMatch(/\s{2,}/)          // no double space left behind
   })
 
-  it('what remains is TRUE by verdictForAssembledTitle (idempotent, nothing left to net)', () => {
+  it('what remains no longer carries a LIE, but is still INCOMPLETE — no youth marker asserted (fix/kids-identity-asserted, PO 2026-08-23)', () => {
+    // #642 (this file, pre-existing) cured the SUBTRACTIVE half: the adult clause is gone, so the net
+    // is idempotent on it (nothing left for `applyTitleTruthNet` to touch — no lie survives). But
+    // "removed the lie" is not "stated the truth": this string never says Kids/Youth/Boys/Girls, so a
+    // shopper reading it reasonably assumes an adult garment. `verdictForAssembledTitle` now requires
+    // a kids family's title to POSITIVELY assert its audience, closing that gap.
     const out = applyTitleTruthNet(LIVE, KIDS_CTX)
-    expect(verdictForAssembledTitle(out, { truth: KIDS_CTX })).toEqual({ ok: true })
+    expect(applyTitleTruthNet(out, KIDS_CTX)).toBe(out)   // still idempotent — nothing left to NET
+    expect(verdictForAssembledTitle(out, { truth: KIDS_CTX })).toEqual({ ok: false, reason: 'missing-youth-marker' })
+  })
+
+  it('once the marker is present, the SAME string is fully true', () => {
+    const out = applyTitleTruthNet(LIVE, KIDS_CTX)
+    expect(verdictForAssembledTitle(`${out} Kids`, { truth: KIDS_CTX })).toEqual({ ok: true })
   })
 
   it('the segment-0 phrase itself now fails the plain predicate, matching the READ path finding', () => {

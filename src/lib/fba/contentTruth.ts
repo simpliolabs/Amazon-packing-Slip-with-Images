@@ -232,6 +232,37 @@ export function normalizeAudienceLean(
   return null
 }
 
+/* ─── THE YOUTH MARKER (PO 2026-08-23, live B0DP5H8QBT) ─────────────────────────────────────────────
+ * PR #642 cured the SUBTRACTIVE half of the kids-audience defect (an adult clause like "for Men &
+ * Women" no longer survives on a kids_tee family) but left the ADDITIVE half undone: the title never
+ * POSITIVELY says it is a children's garment, so a shopper searching "kids <design> shirt" cannot
+ * find it and a shopper reading the title reasonably assumes it is adult. "Removed the lie" is not
+ * "stated the truth" — the exact "subtractive net without an additive producer" class this repo keeps
+ * re-learning (see `settleTruthBand`'s own header on the #630/#631 revert). */
+
+/** Does TITLE assert ANY youth/kids audience marker? Reuses `KIDS_AUDIENCE_RE` — the SAME regex the
+ *  audience-truth rule (c) above matches against — so this can never disagree with what that rule
+ *  considers a "kids" word. `matchAll`, not `.test`, so the shared GLOBAL regex's `lastIndex` is never
+ *  mutated between calls (the same gotcha `foreignAudienceHits` above already avoids). */
+export function titleAssertsYouthAudience(title: string): boolean {
+  return [...(title ?? '').matchAll(KIDS_AUDIENCE_RE)].length > 0
+}
+
+/**
+ * The youth marker a KIDS family's title should assert, derived ONLY from the BLANK-GROUNDED ctx —
+ * never from the title text or the keyword pool (the PO's own ruling: "the garment should touch
+ * everything from title to Product Detail values"). A seller-declared gender lean picks the matching
+ * word; the default — unisex, or no lean declared — is the NEUTRAL 'Kids', never a guessed Boys/Girls
+ * (this repo's standing "don't over-generalize a specific failure" directive). `null` for a non-kids
+ * family (nothing to assert) or an unresolved ctx (no ground truth to derive from). Pure.
+ */
+export function youthMarkerFor(ctx: PhraseTruthCtx | null | undefined): string | null {
+  if (!ctx || ctx.audience !== 'kids') return null
+  if (ctx.audienceLean === 'women') return 'Girls'
+  if (ctx.audienceLean === 'men') return 'Boys'
+  return 'Kids'
+}
+
 /* ─── ONE CTX BUILDER (PO 2026-08-23, live B0DP5H8QBT) ──────────────────────────────────────────── */
 
 /**
@@ -426,15 +457,38 @@ function scrubMoneyPhrase(
   } else if (ctx.garmentFamily) {
     const allowed = allowedGarmentClasses(ctx)
     if (allowed) {
-      s = s.replace(GARMENT_NOUN_RE, (m) => {
+      // Tracks every NOUN CLASS already kept, and the end offset of its last kept mention, so a
+      // SECOND, non-adjacent mention of the SAME class ("T-Shirt … Tee Shirt", both class 'tee') can
+      // be told apart from a compound noun's own second word ("Tee" immediately followed by "Shirt"
+      // — one mention) AND from the PO's sanctioned noun-x2 VARIETY across DIFFERENT classes in the
+      // same allowed group ("Sweatshirt … Fall Crewneck" — 'sweatshirt' and 'crewneck' are different
+      // classes that fold to the same group below, never a repeat). The money-phrase half of defect 2
+      // (PO 2026-08-23, live B0DP5H8QBT: "T-Shirt Graphic Tee Shirt" names the tee class three times
+      // in one segment). `offset` is the callback's own match-position argument (no capture groups in
+      // `GARMENT_NOUN_RE`, so the signature is exactly `(match, offset, string)`).
+      const seenClasses = new Set<string>()
+      let lastClass: string | null = null
+      let lastEnd = -1
+      s = s.replace(GARMENT_NOUN_RE, (m: string, offset: number) => {
         const cls = garmentNounClass(m)
         if (!allowed.has(cls)) return isProtected(m) ? m : ''
         // First ALLOWED class this money phrase names wins the slot; a title commits to ONE class
         // (defect 3, PO 2026-08-22) even when the family union would truthfully permit both. Grouped
         // ("crewneck" folds into "sweatshirt") so "Sweatshirt … Fall Crewneck" is not read as two.
         const grp = garmentGroup(cls)
-        if (primaryClass === null) { primaryClass = grp; return m }
-        return grp === primaryClass || isProtected(m) ? m : ''
+        if (primaryClass === null) primaryClass = grp
+        else if (grp !== primaryClass) return isProtected(m) ? m : ''
+        // SAME group as the committed slot — now the finer, per-CLASS redundancy check: keep a repeat
+        // of the SAME class only when it is ADJACENT to its own last mention (a compound noun's second
+        // word); a non-adjacent repeat of a class already seen restates the same concept a second time
+        // and is redundant. A DIFFERENT class in the same group (Crewneck after Sweatshirt) is not a
+        // repeat at all and always survives — that pairing is the sanctioned variety, not a defect.
+        const adjacent = cls === lastClass && offset - lastEnd <= 1
+        if (!adjacent && seenClasses.has(cls)) return isProtected(m) ? m : ''
+        seenClasses.add(cls)
+        lastClass = cls
+        lastEnd = offset + m.length
+        return m
       })
     }
   }
@@ -520,6 +574,45 @@ export function garmentGroupsIn(text: string): Set<string> {
   const out = new Set<string>()
   for (const m of text.matchAll(GARMENT_NOUN_RE)) out.add(garmentGroup(garmentNounClass(m[0])))
   return out
+}
+
+/**
+ * Does TEXT restate the SAME garment NOUN CLASS via more than one, non-adjacent mention (live
+ * B0DP5H8QBT, 2026-08-23: "T-Shirt Graphic Tee Shirt" names the tee class three times in one
+ * segment)? Adjacent matches of the SAME class — "Tee" immediately followed by "Shirt" — are ONE
+ * mention, the compound noun `garmentNoun.ts`'s `SHIRT_BASE.display` already treats as a single
+ * garment name ("Tee Shirt"); a SEPARATE, non-adjacent match of that same class elsewhere in the
+ * text is a second, redundant one.
+ *
+ * DELIBERATELY `garmentNounClass`, NOT the coarser `garmentGroup` — "Pullover" and "Crewneck" fold to
+ * the SAME group (`garmentGroup('crewneck') === 'sweatshirt'`) for the UNRELATED one-class-per-title
+ * rule, but they are the PO's own sanctioned noun-x2 VARIETY, not a repeat ("Long Sleeve Pullover Fall
+ * Crewneck" is a pinned gold pattern — see `truthBandGate.test.ts`'s seven strings). `garmentNounClass`
+ * keeps them apart (`'sweatshirt'` vs `'crewneck'`) while still collapsing every true respelling of the
+ * SAME word ("T-Shirt"/"TShirt"/"Tee"/"Shirt"/"Top" all → `'tee'`).
+ *
+ * SAME VOCABULARY, NO SECOND TABLE: this reuses `GARMENT_NOUN_RE`/`garmentNounClass` — the exact
+ * per-noun classification `phraseTruthVerdict`'s wrong-garment-noun rule (a) already keys off — so
+ * every spelling folds here exactly as it does everywhere else in this file. Pure.
+ */
+export function hasRedundantGarmentMention(text: string): boolean {
+  const matches = [...(text ?? '').matchAll(GARMENT_NOUN_RE)]
+  if (matches.length < 2) return false
+  const seenClasses = new Set<string>()
+  let lastClass: string | null = null
+  let lastEnd = -1
+  for (const m of matches) {
+    const cls = garmentNounClass(m[0])
+    const start = m.index ?? 0
+    const adjacent = cls === lastClass && start - lastEnd <= 1
+    if (!adjacent) {
+      if (seenClasses.has(cls)) return true
+      seenClasses.add(cls)
+    }
+    lastClass = cls
+    lastEnd = start + m[0].length
+  }
+  return false
 }
 
 /** Which allowed garment GROUP (see `garmentGroup`) a text names FIRST, reading left to right. Pure. */

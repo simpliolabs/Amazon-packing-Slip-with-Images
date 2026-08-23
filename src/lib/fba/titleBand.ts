@@ -28,7 +28,10 @@
 import { CONTENT_CONTRACT } from './contentContract'
 // The shared content truth spine. No cycle: contentTruth imports only blankSpecs, which imports
 // productDetailAttrs + contentContract and never this module.
-import { applyTitleTruthNet, phraseTruthVerdict, dominantGarmentGroup, garmentGroupsIn, type PhraseTruthCtx } from './contentTruth'
+import {
+  applyTitleTruthNet, phraseTruthVerdict, dominantGarmentGroup, garmentGroupsIn, hasRedundantGarmentMention,
+  titleAssertsYouthAudience, type PhraseTruthCtx,
+} from './contentTruth'
 // Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
 // file stays cycle-free and unit-testable in isolation.
 import { BASIC_COLOR_WORDS } from './designName'
@@ -167,6 +170,13 @@ export interface TitleBandCtx {
    * supplies phrases already filtered for truth, design scope and off-niche; every one is still
    * re-gated here by `truthOk`, the waste vocabulary, `alreadyStates` and `wordsAreNew`. */
   poolSegments?: readonly string[]
+  /** THE YOUTH MARKER (defect 1, PO 2026-08-23, live B0DP5H8QBT) — 'Kids'/'Youth'/'Boys'/'Girls',
+   *  derived by the CALLER from the resolved blank's garment_family + the seller's audience lean
+   *  (`youthMarkerFor` in contentTruth.ts), NEVER guessed here. null/absent for a non-kids family —
+   *  the pad adds nothing and every adult title is byte-unchanged. Pushed FIRST (ahead of every other
+   *  fact): asserting the audience the family truthfully claims is a correctness requirement, not an
+   *  opportunistic pad, so it gets first refusal on the search's limited depth/budget. */
+  youthMarker?: string | null
 }
 
 /** The audience tail the pipeline's own fillers recognise — kept byte-identical to the regexes at
@@ -288,6 +298,9 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     if (!conceptIsNew(title, s)) return
     if (!alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
+  // THE YOUTH MARKER (defect 1) leads even "Personalized" — a kids family's title asserting its own
+  // audience is a truth requirement `verdictForAssembledTitle` now enforces, not a nice-to-have pad.
+  if (ctx.youthMarker) push(ctx.youthMarker)
   // Amazon Custom (2026-07-31, PO): "Personalized" leads the fact list — on an enrolled listing it
   // is both a verified product fact AND the highest-intent search modifier available. Never pushed
   // when the listing is not enrolled (the flag defaults false; a false claim is worse than a short title).
@@ -1211,6 +1224,18 @@ export function titleHasDuplicateConcept(title: string): boolean {
       multiSeen.add(flat)
     }
   }
+  // THE SAME GARMENT NAMED THREE WAYS IN ONE SEGMENT (defect 2, PO 2026-08-23, live B0DP5H8QBT:
+  // "T-Shirt Graphic Tee Shirt | Short Sleeve" — "T-Shirt", "Tee" and "Shirt" all name the SAME class
+  // and the window-flattening check above cannot see it: none of these three spellings concatenate to
+  // match another, because they are three GENUINELY DIFFERENT spellings, not one concept split across
+  // a word boundary. `hasRedundantGarmentMention` (contentTruth.ts) reuses the coverage-token-style
+  // garment grouping every other truth check in this file already shares — no second vocabulary — and
+  // is scoped PER SEGMENT so the PO's own sanctioned noun-x2 gold shape ("Tee Shirt | … TShirt", one
+  // compound mention before the pipe plus one bare mention after it) is untouched: that pattern has
+  // exactly ONE mention-group per segment, same as every clean title.
+  for (const seg of title.split(/\s*[|,]\s*/)) {
+    if (hasRedundantGarmentMention(seg)) return true
+  }
   return false
 }
 
@@ -1250,6 +1275,15 @@ export function verdictForAssembledTitle(title: string, ctx: AssembledTitleCtx):
     })
     if (netted !== t) return { ok: false, reason: 'untrue-or-foreign-segment-present' }
     if (garmentGroupsIn(t).size > 1) return { ok: false, reason: 'two-garment-classes' }
+    // THE KIDS IDENTITY MUST BE ASSERTED, NOT MERELY NOT-DENIED (defect 1, PO 2026-08-23, live
+    // B0DP5H8QBT). Removing an adult claim (#642) is necessary but not sufficient: a kids_tee family's
+    // title that never says Kids/Youth/Boys/Girls reads as adult by default. `youthMarkerFor` derives
+    // the expected word from the BLANK-grounded ctx alone (never the title or the pool); this checks
+    // only for PRESENCE of any youth marker, so a design that already carries one under a different
+    // word (or the family's own gendered lean) is never double-counted or contradicted.
+    if (ctx.truth.audience === 'kids' && !titleAssertsYouthAudience(t)) {
+      return { ok: false, reason: 'missing-youth-marker' }
+    }
   }
   if (titleHasDuplicateConcept(t)) return { ok: false, reason: 'duplicate-concept' }
   if (titleHasPunctuationDefect(t)) return { ok: false, reason: 'punctuation-defect' }
@@ -1338,7 +1372,20 @@ export function settleTruthBand(args: {
   // unreachable — but a terminal net that blessed an 80-char title as in-band would hide exactly
   // the Amazon 100476 rejection it exists to prevent. Named, not silently folded into 'in-band'.
   if (produced.length > TITLE_BAND_HI) return done(produced, 'over-cap', `${produced.length} chars — capTitle75 owns the ceiling`)
-  if (produced.length >= TITLE_BAND_LO) return done(produced, 'in-band', `${produced.length} chars`)
+
+  /** THE WHOLE-STRING VERIFY CTX, bound once — moved ahead of the in-band fast path (PO 2026-08-23,
+   *  live B0DP5H8QBT). Before this move only the additive search below ever consulted it, so a title
+   *  that arrived from the producer ALREADY 70-75 chars shipped on length alone — the exact gap that
+   *  let "T-Shirt Graphic Tee Shirt | Short Sleeve" (a duplicate-concept AND missing-youth-marker
+   *  title, both whole-string properties `verdictForAssembledTitle` exists to catch) through
+   *  untouched. Every exit from here on is judged the SAME way, in-band arrival or not. */
+  const verifyCtx: AssembledTitleCtx = {
+    truth: args.truth ?? null, protect: args.protect, foreignTokens: args.foreignTokens,
+    reject: args.reject, scrubProtectedOverlap: args.scrubProtectedOverlap,
+  }
+  if (produced.length >= TITLE_BAND_LO && verdictForAssembledTitle(produced, verifyCtx).ok) {
+    return done(produced, 'in-band', `${produced.length} chars`)
+  }
 
   /* THE ADDITIVE HALF, AND IT MUST ITERATE — this is the second half of why #630/#631 could not
    * reach the band, and it is invisible from any single-leaf test.
@@ -1380,19 +1427,23 @@ export function settleTruthBand(args: {
   const poolSet = new Set(band.poolSegments ?? [])
   let budget = REFILL_NODE_BUDGET
   let best = produced
-  /** THE WHOLE-STRING VERIFY CTX, bound once. Every candidate this search accepts is judged as a
-   *  whole assembled title, not merely by length — the fix for the four live defects (see this
-   *  file's header on `verdictForAssembledTitle`). */
-  const verifyCtx: AssembledTitleCtx = {
-    truth: args.truth ?? null, protect: args.protect, foreignTokens: args.foreignTokens,
-    reject: args.reject, scrubProtectedOverlap: args.scrubProtectedOverlap,
-  }
   const search = (t: string, depth: number): string | null => {
     if (t.length >= TITLE_BAND_LO && t.length <= TITLE_BAND_HI) {
-      // Already in band — but "in band" is not "settled". A string that reached here with a whole-
-      // string defect (introduced upstream, before this search ever ran) has no additive fix: the
-      // search can only APPEND, never repair a lie already present. Dead end, not a win.
-      return verdictForAssembledTitle(t, verifyCtx).ok ? t : null
+      const v = verdictForAssembledTitle(t, verifyCtx)
+      if (v.ok) return t
+      // Already in band — but "in band" is not "settled". Every whole-string defect EXCEPT
+      // missing-youth-marker is a dead end here exactly as before 2026-08-23: the search can only
+      // APPEND, never repair a lie already present (a duplicate concept, a foreign name, a second
+      // garment class, stray punctuation). Scoping the one exception this narrowly — by REASON, not
+      // merely "verdict failed" — keeps the search's DFS traversal byte-identical for every family
+      // that never lacks a youth marker (i.e. every non-kids family, and a kids family that already
+      // asserts one): widening this to "keep trying on ANY failure" was tried first and changed which
+      // combination a healthy sweatshirt/hoodie fixture landed on (truthBandGate.test.ts's pinned
+      // broadcast string), even though the new string was itself truthful — an unrelated behavior
+      // change this fix must not cause.
+      if (v.reason !== 'missing-youth-marker') return null
+      // fall through: a missing marker IS additively fixable, so keep trying to append it even though
+      // `t` is already 70+ chars.
     }
     if (depth >= MAX_REFILL_PASSES || budget <= 0) return null
     const cands = candidateSegments(t, band)
