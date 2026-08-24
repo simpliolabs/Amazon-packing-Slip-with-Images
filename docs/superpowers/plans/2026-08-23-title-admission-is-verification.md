@@ -351,7 +351,99 @@ Report the ACTUAL result. Do not claim green without the output.
 
 ---
 
-### Task 4: Report for the live gate
+### Task 4: Retire the pad's duplicate gates (prove-then-delete)
+
+**Files:**
+- Modify: `src/lib/fba/titleBand.ts` — the `push()` closure inside `candidateSegments` (~:274-299)
+- Test: Reuse `src/lib/fba/padAdmissionIsVerification.test.ts` (Task 3) — add cases there
+
+**Interfaces:**
+- Consumes: `verdictForAssembledTitle` with the Task 2 extension.
+- Produces: nothing. This task only REMOVES code.
+
+**Why this task exists.** Approach A's whole value is collapsing two rulebooks into one. Tasks 1-3 make the verifier authoritative; this task removes what it now duplicates. Leaving both means the eleventh rule gets added to one and not the other — the exact drift that produced nine PRs on 2026-08-23.
+
+**The guard (spec §6, mandatory).** Each gate may be deleted ONLY after you demonstrate the verifier already rejects what it rejected. For each candidate gate below, write a test asserting `verdictForAssembledTitle` returns `ok: false` for a title the gate would have blocked. If the verifier does NOT reject it, the gate STAYS and you report that — a silent behaviour loss here is worse than a duplicated rule.
+
+Gates in scope, and their expected owners:
+
+| Pad gate (`candidateSegments`) | Expected owner in the verifier |
+|---|---|
+| `committedClass` / `dominantGarmentGroup` one-class skip | `garmentGroupsIn(t).size > 1` → `two-garment-classes` |
+| `conceptIsNew` | `titleHasDuplicateConcept` → `duplicate-concept` |
+
+Gates that STAY, and must not be touched (they are preference, not correctness — skipping them only costs a wasted verify):
+- `alreadyStates` — dedup
+- `isTitleWasteVocabulary` — the PO's title-vocabulary ruling
+- `ctx.truthOk` — cheap per-phrase pre-filter ahead of the expensive whole-string verify
+
+- [ ] **Step 1: Write the proof tests**
+
+Add to `src/lib/fba/padAdmissionIsVerification.test.ts`:
+
+```ts
+describe('the verifier already owns what the pad gates duplicate', () => {
+  it('rejects a second garment class (the one-class pad gate)', () => {
+    const truth = buildPhraseTruthCtx(sweatFacts, 'title')
+    const v = verdictForAssembledTitle(
+      'THE CEO Motivational Entrepreneur Sweatshirt | Long Sleeve Hoodie Tee',
+      { truth, protect: 'Motivational Entrepreneur' },
+    )
+    expect(v.ok).toBe(false)
+    expect(v.reason).toBe('two-garment-classes')
+  })
+
+  it('rejects a concept restated in two spellings (the conceptIsNew pad gate)', () => {
+    const truth = buildPhraseTruthCtx(sweatFacts, 'title')
+    const v = verdictForAssembledTitle(
+      'THE CEO Motivational Entrepreneur Crewneck | Long Sleeve Crew Neck Pullover',
+      { truth, protect: 'Motivational Entrepreneur' },
+    )
+    expect(v.ok).toBe(false)
+    expect(v.reason).toBe('duplicate-concept')
+  })
+})
+```
+
+- [ ] **Step 2: Run the proof tests**
+
+Run: `npx vitest run --no-cache src/lib/fba/padAdmissionIsVerification.test.ts`
+Expected: BOTH PASS **before** you delete anything. If either fails, that gate is NOT duplicated — STOP, keep the gate, and report which one and why.
+
+- [ ] **Step 3: Delete only the proven-redundant gates**
+
+Remove from `push()` in `candidateSegments`:
+
+```ts
+    if (committedClass) {
+      const segClass = dominantGarmentGroup(s)
+      if (segClass && segClass !== committedClass) return
+    }
+    if (!conceptIsNew(title, s)) return
+```
+
+Remove the now-unused `committedClass` binding and any import made unused BY YOUR CHANGE only. Do not remove pre-existing dead code.
+
+- [ ] **Step 4: Full suite**
+
+Run: `npx vitest run --no-cache`
+Expected: zero regressions against the 1662 baseline. If a title fixture changes, the verifier's rejection differs from the gate's in some case — investigate rather than update the fixture.
+
+- [ ] **Step 5: Re-run the harness and compare to Task 3 step 6**
+
+Run: `TITLE_V4=on GARMENT_NOUN=on TITLE_MONEY_TAIL=on TITLE_SHAPE_JUDGE=on npx tsx src/lib/fba/truthBandHarness.ts`
+Expected: the seven decisions should be IDENTICAL to Task 3 step 6. If any differ, the gates were not equivalent — report the diff.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/lib/fba/titleBand.ts src/lib/fba/padAdmissionIsVerification.test.ts
+git commit -m "refactor(title): retire pad gates the verifier now owns"
+```
+
+---
+
+### Task 5: Report for the live gate
 
 **Files:** none — reporting only.
 
