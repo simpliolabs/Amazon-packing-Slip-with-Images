@@ -8543,6 +8543,40 @@ export function computeBroadcastDesignScope(
   return { foreignTokens, themeNames, protectHay: themeNames.join(' ') }
 }
 
+/**
+ * THE BROADCAST SHIP-DOOR SCOPE (extracted 2026-08-24 for direct unit testability; behavior
+ * unchanged by the extraction itself — see `scrubPublished`'s call site, which used to inline this).
+ * `familyDesignVocab` is `r.per_child_titles`, this run's REAL resolved per-design names (the correct
+ * LATE source — see `computeBroadcastDesignScope`'s doc for why the EARLY inputs are inert on a full
+ * regen). Returns the token set the word/segment-level truth net may reject (`foreignTokens`) and the
+ * space-joined vocabulary the broadcast title may still protect (`protectHay`).
+ *
+ * WHOLE-NAME SUBTRACTION, NOT TOKEN (PO ruling 2026-08-24, defect A of the reverted PR #646). A name
+ * in `familyDesignNames` is excluded from `protectHay` only when it IS (case-insensitive, whole
+ * string) one of the family's own per-design names — never merely because it SHARES A TOKEN with one.
+ * The live collapse this cures: family theme "Motivational Entrepreneur" shares the token
+ * "entrepreneur" with sibling design "Entrepreneur Definition"; the previous token-level filter
+ * (`familyDesignNames.filter(n => !isForeignToDesign(n, foreignTokens))`) convicted the WHOLE theme
+ * name of that one shared word and dropped it entirely, leaving "THE CEO Motivational" — orphaned
+ * comma, 29 chars, live and reverted the same day. `foreignTokens` itself is UNCHANGED (still
+ * token-level, still `buildForeignDesignTokens`/`isForeignToDesign`) — it is correct at that
+ * granularity for judging POOL PHRASES/segments word-by-word; only the NAME-level protect-hay
+ * decision needed whole-string granularity, and `familyDesignVocab`'s own name list (the exact set
+ * `foreignTokens` was built from) is the reused, no-new-predicate source of truth for "is this name
+ * actually one of the siblings".
+ */
+export function computeBroadcastShipDoorScope(
+  familyDesignNames: readonly string[],
+  familyDesignVocab: readonly { key: string; name: string }[],
+  familyTitleText: string,
+): { foreignTokens: Set<string>; protectHay: string } {
+  const scope = buildForeignDesignTokens(familyDesignVocab, { familyTitleText, poolKeywords: [], strictNames: true })
+  const foreignTokens = scope('__broadcast__')
+  const siblingNamesLower = new Set(familyDesignVocab.map((d) => d.name.toLowerCase()))
+  const protectHay = familyDesignNames.filter((n) => !siblingNamesLower.has(n.toLowerCase())).join(' ')
+  return { foreignTokens, protectHay }
+}
+
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
   /** Per-run collector for [TITLE_V4_DIFF] entries, surfaced on `debug.v4` so the refusal rate is
    *  readable from the regen response instead of only from a server-log grep. */
@@ -9848,40 +9882,32 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     { familyTitleText: '', poolKeywords: [], strictNames: true },
   )
   /* BROADCAST SHIP-DOOR SCOPE (CRITICAL 1+2 fix, final whole-branch review 2026-08-24, replacing
-   * `computeBroadcastDesignScope`). The OLD ship-door scope was built EARLY in the pipeline (before
-   * this function existed to call) from `input.designNameOverridesByKey` + `input.priorPerChildTitles`
-   * — INERT on the full "Generate recommendations" path, because `route.ts` only sets
-   * `priorPerChildTitles` when `onlySection` is truthy and `designNameOverridesByKey` is a documented
-   * dead wire (the `design_name_overrides` column never reaches here otherwise). Measured: a full run
-   * produced `foreignTokens: []` (rejects nothing) where a section regen on the SAME family produced
-   * the correct set. It also hand-rolled the foreign-token split instead of calling
+   * `computeBroadcastDesignScope`; WHOLE-NAME fix, PO ruling 2026-08-24, replacing the token-level
+   * `familyDesignNames.filter(n => !isForeignToDesign(n, foreignTokens))` this branch shipped and
+   * reverted with). The OLD ship-door scope was built EARLY in the pipeline (before this function
+   * existed to call) from `input.designNameOverridesByKey` + `input.priorPerChildTitles` — INERT on
+   * the full "Generate recommendations" path, because `route.ts` only sets `priorPerChildTitles` when
+   * `onlySection` is truthy and `designNameOverridesByKey` is a documented dead wire (the
+   * `design_name_overrides` column never reaches here otherwise). Measured: a full run produced
+   * `foreignTokens: []` (rejects nothing) where a section regen on the SAME family produced the
+   * correct set. It also hand-rolled the foreign-token split instead of calling
    * `buildForeignDesignTokens` (`designScope.ts` — "the ONE cross-design pool partition… every
-   * fan-out calls it"), so it had NO `>=50%` name-share niche exemption (stripping the family's own
-   * niche word) and NO family-title exemption (a design name containing a garment noun, e.g. "Beast
-   * Mode Shirt", poisoned "shirt" for the whole parent — directly against spec §4's "parent speaks
-   * with the DOMINANT garment").
+   * fan-out calls it"), so it had NO `>=50%` name-share niche exemption and NO family-title exemption.
    *
-   * THE CURE: build it HERE, from `familyDesignVocab` — the SAME correct source `perChildDesignScope`
-   * above uses — via the SAME seam, no second partition. Queried with a key no design ever owns,
-   * `buildForeignDesignTokens`'s documented UNKNOWN-KEY path returns exactly "the union of every
-   * design's name tokens minus the niche exemptions" (spec §3.2's broadcast rule verbatim: no
-   * individual design speaks for the family). `familyTitleText` (canonical + prior title — the SAME
-   * expression `titleForeignFor`/`foreignToksFor` already use elsewhere in this file for
-   * candidate-filter semantics) restores the garment-noun exemption: a garment word already present in
-   * the family's own title text is niche, never foreign, however many design names also happen to
-   * contain it. `strictNames: true` matches the per-child door and the Item Highlight: another
-   * design's NAME is foreign however frequent it is in some pool (there is no pool argument here to
-   * matter, but the intent — a name is a name — should agree with every other STRICT caller). */
-  const broadcastDesignScope = buildForeignDesignTokens(
-    familyDesignVocab,
-    { familyTitleText: `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`, poolKeywords: [], strictNames: true },
+   * THE TOKEN-LEVEL BUG (live B0DSCDZC6K, 2026-08-24, 29-char collapse): the FIRST cure built
+   * `protectHay` by filtering `familyDesignNames` with `isForeignToDesign` — a TOKEN-level test — so
+   * the family's own broadcast theme ("Motivational Entrepreneur") was convicted and dropped WHOLE
+   * merely for sharing the word "entrepreneur" with sibling design "Entrepreneur Definition". See
+   * `computeBroadcastShipDoorScope`'s own doc (above `runListingPipeline`) for the whole-name fix;
+   * `broadcastShipDoorScope.test.ts` reproduces the collapse and pins the cure. `familyTitleText`
+   * (canonical + prior title) restores the garment-noun exemption on `foreignTokens` (a design name
+   * containing a garment noun, e.g. "Beast Mode Shirt", would otherwise poison "shirt" for the whole
+   * parent — directly against spec §4's "parent speaks with the DOMINANT garment"). */
+  const broadcastShipDoorScope = computeBroadcastShipDoorScope(
+    familyDesignNames, familyDesignVocab, `${input.canonicalTitle ?? ''} ${input.priorTitle ?? ''}`,
   )
-  broadcastForeignTokens = broadcastDesignScope('__broadcast__')
-  // FAMILY THEME (spec §3.2 resolution #2), now correctly sourced: `familyDesignNames` minus
-  // whatever `broadcastForeignTokens` (just computed, above) convicts — disjoint BY CONSTRUCTION, so
-  // `broadcastForeignTokens` and `broadcastProtectHay` can never both claim the same name (the same
-  // discipline Task 1 established for the early, generation-time `broadcastTruthCtx.designTokens`).
-  broadcastProtectHay = familyDesignNames.filter((n) => !isForeignToDesign(n, broadcastForeignTokens)).join(' ')
+  broadcastForeignTokens = broadcastShipDoorScope.foreignTokens
+  broadcastProtectHay = broadcastShipDoorScope.protectHay
   /** ONE per-child exit scope: the design name to protect, the sibling-design rejector, and the
    *  door BOUND to them — so every exit calls the same `(text, produced)` shape and no caller can
    *  forget to pass the scope. */

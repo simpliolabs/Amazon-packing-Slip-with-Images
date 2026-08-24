@@ -408,19 +408,33 @@ export function runTruthBandHarness(): HarnessResult {
   // `listingPipeline.ts` — a hand-rolled split with NO niche/name-share exemption and NO
   // family-title/garment-noun exemption — while the ACTUAL production ship door (`scrubPublished`,
   // CRITICAL 1+2 fix) no longer uses that function's `foreignTokens`/`protectHay` outputs at all; it
-  // calls `buildForeignDesignTokens` directly, from `r.per_child_titles`. Grep confirmed NOTHING
-  // read the pipeline's real broadcast values except comments — a harness that cannot see the real
-  // wiring is worse than no harness. THE CURE: call the SAME canonical seam
-  // (`buildForeignDesignTokens`, designScope.ts) the SAME way `scrubPublished` now does — no second
-  // partition, no reach into `listingPipeline.ts` internals at all.
+  // calls `computeBroadcastShipDoorScope` directly, from `r.per_child_titles`. THE CURE: call the
+  // SAME canonical seam (`buildForeignDesignTokens`, designScope.ts) the SAME way that function does
+  // — no second partition. NOT a direct import of `computeBroadcastShipDoorScope` itself: this file
+  // is deliberately a "zero-database leaf" (see the header doc) so `npx tsx truthBandHarness.ts` runs
+  // standalone with no Supabase env at all; `listingPipeline.ts` is a 9,400-line module with its own
+  // module-scope lazy DB clients, and importing it here would reintroduce exactly the CI trap this
+  // file's own header warns about. The two lines below are therefore inlined, byte-for-byte the same
+  // expression `computeBroadcastShipDoorScope` runs — see that function's doc (listingPipeline.ts)
+  // and `broadcastShipDoorScope.test.ts` for the whole-name fix and its reproduction.
+  //
+  // WHOLE-NAME SUBTRACTION, NOT TOKEN (PO ruling 2026-08-24, defect A of the reverted PR #646): a
+  // name is excluded from `broadcastProtectHay` only when it IS (case-insensitive, whole string) one
+  // of the family's own per-design names — never merely because it SHARES A TOKEN with one. The live
+  // collapse this cures: a family theme sharing one word with a sibling design name used to be
+  // convicted and dropped WHOLESALE by the token-level `isForeignToDesign(name, foreignTokens)` this
+  // harness (and production) used before.
   //
   // Every design in this fixture family IS its own per-child scope (mirrors production's
   // `r.per_child_titles`), so the theme/foreign split subtracts all six design names from the
   // family set — on THIS fixture that leaves `broadcastThemeNames` empty and `broadcastProtectHay:
   // ''`, which is the CORRECT outcome per §3.2 of handoff/TITLE_ADMISSION_IS_VERIFICATION.md: a
   // parent with no family-level vocabulary left after the subtraction must never fall back to
-  // permitting a design name. Computed BEFORE `broadcastCtx` so `broadcastCtx.designTokens` can use
-  // `broadcastThemeNames` instead of `mkCtx`'s default full `designNames()`.
+  // permitting a design name (this fixture has no distinct family-theme name separate from its six
+  // per-design names, so the whole-name fix changes nothing HERE — see
+  // `broadcastShipDoorScope.test.ts` for the scenario it does change). Computed BEFORE `broadcastCtx`
+  // so `broadcastCtx.designTokens` can use `broadcastThemeNames` instead of `mkCtx`'s default full
+  // `designNames()`.
   const familyDesignVocab = DESIGNS.map((d) => ({ key: d.key, name: d.name }))
   const broadcastDesignScope = buildForeignDesignTokens(familyDesignVocab, {
     // `PRIOR_PARENT` — the closest fixture analog to production's `${canonicalTitle} ${priorTitle}`
@@ -434,7 +448,8 @@ export function runTruthBandHarness(): HarnessResult {
   // `buildForeignDesignTokens`'s documented unknown-key path is "the union of every design's name
   // tokens minus the niche exemptions" — spec §3.2's broadcast rule verbatim.
   const broadcastForeignTokens = broadcastDesignScope('__broadcast__')
-  const broadcastThemeNames = designNames().filter((n) => !isForeignToDesign(n, broadcastForeignTokens))
+  const broadcastSiblingNamesLower = new Set(familyDesignVocab.map((d) => d.name.toLowerCase()))
+  const broadcastThemeNames = designNames().filter((n) => !broadcastSiblingNamesLower.has(n.toLowerCase()))
   const broadcastProtectHay = broadcastThemeNames.join(' ')
   // SAME whole-phrase rejector the per-child partition below binds per-key (`isForeignToDesign`),
   // applied against the broadcast partition's UNION set instead of one design's own foreign set —
