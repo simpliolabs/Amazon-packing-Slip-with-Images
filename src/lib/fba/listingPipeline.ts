@@ -9161,12 +9161,47 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * itself is UNCHANGED, so every existing per-child/per-group FALLBACK that reads it (an unresolved
    * design group, a single-design listing's ship-door default) keeps today's behavior byte-for-byte;
    * only the call sites that are unambiguously the broadcast/parent exit are re-pointed at this. */
+  /* BROADCAST FOREIGN NAMES (PO 2026-08-23, live B0DSCDZC6K: "Business B*tch" refilled into the
+   * PARENT title). A parent speaks for EVERY child, so no individual design's name may lead it —
+   * PO ruling: family theme only. `foreignTokens` WINS over `protect` here; see
+   * handoff/TITLE_ADMISSION_IS_VERIFICATION.md §3.2. */
+  const perDesignNames: string[] = [
+    ...Object.values(input.designNameOverridesByKey ?? {}),
+    ...(input.priorPerChildTitles ?? []).map((t) => t.designName ?? ''),
+  ].map((v) => (v ?? '').trim()).filter(Boolean)
+  // Concrete `Set<string>` (not the `ReadonlySet<string>` every ctx field below declares) so this
+  // can ALSO be passed directly to `isForeignToDesign` (`designScope.ts`), whose own parameter type
+  // is `Set<string>` — a `Set` satisfies every `ReadonlySet`-typed slot it feeds without narrowing.
+  const broadcastForeignTokens: Set<string> = new Set(
+    perDesignNames.flatMap((n) => designScopeTokens(n)),
+  )
+  /** `foreignTokens` alone only reaches `applyTitleTruthNet`'s segment-0 (money-phrase) WORD-level
+   *  scrub — `scrubMoneyPhrase`'s own doc: "the phrase predicate alone cannot [strike inside a later
+   *  segment], since it answers 'drop the whole phrase?' and segment 0 is never wholly dropped."
+   *  The live regression string is `THE CEO Motivational Entrepreneur | Business B*tch Sweatshirt
+   *  for Men` — the foreign name sits in the segment AFTER the pipe, not segment 0 — so `foreignTokens`
+   *  alone cannot convict it; the net's SEGMENT-level droppable predicate (`rejectSegment`) must also
+   *  fire. Reuses `isForeignToDesign` verbatim — the SAME whole-phrase rejector `designScope.ts`
+   *  already exports, and the per-child exit already binds to its own foreign set below via
+   *  `perChildDesignScope` / `titleScopeFor`'s own `reject`. No new predicate, just the broadcast
+   *  exit's own foreign set bound to it instead of undefined. */
+  const broadcastReject = (seg: string): boolean => isForeignToDesign(seg, broadcastForeignTokens)
+  /** The FAMILY THEME: what survives after every per-design name is subtracted. MAY BE EMPTY — a
+   *  parent with no design vocabulary is the correct outcome, never a fallback to permitting one. */
+  const broadcastThemeNames: string[] = familyDesignNames.filter(
+    (n) => !perDesignNames.some((d) => d.toLowerCase() === n.toLowerCase()),
+  )
+  const broadcastProtectHay = broadcastThemeNames.join(' ')
   const broadcastTruthCtx: PhraseTruthCtx | null = buildPhraseTruthCtx({
     garmentFamily: truthGarmentFamily,
     mixedFamilies: undefined,
     spec: blankSpec,
     allowedBrand: garmentBrandCanonical || null,
-    designTokens: familyDesignNames,
+    // FAMILY THEME ONLY (PO 2026-08-23) — narrowed from `familyDesignNames` (every design's name) to
+    // `broadcastThemeNames` (that set minus every per-design name), so a per-design name is never
+    // simultaneously `designTokens`-protected and `broadcastForeignTokens`-rejected on this exit. See
+    // the precedence note beside `broadcastForeignTokens` above.
+    designTokens: broadcastThemeNames,
     audienceLean: apparelProduct ? input.audienceLean : null,
   }, 'title')
   /** The broadcast pad's own garment fact bank: the DOMINANT class alone (never the union) — the
@@ -9513,7 +9548,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       truth: bandScope?.truth ?? broadcastTruthCtx,
       // Per-child sibling-name tokens, so the whole-string verify INSIDE `enforceMoneyTail` (2026-
       // 08-22 rewrite) can refuse a market keyword that would carry another design's identity.
-      foreignTokens: bandScope?.foreignTokens,
+      // BROADCAST-ONLY default (PO 2026-08-23): `bandScope` is undefined only on the parent call, so
+      // this reaches `broadcastForeignTokens` — every per-design name in the family, union'd — never
+      // undefined; a per-child call always supplies its own (possibly empty) `bandScope.foreignTokens`
+      // Set and never falls through.
+      foreignTokens: bandScope?.foreignTokens ?? broadcastForeignTokens,
     }
     const result = settleTitle(title, {
       produced,
@@ -9534,11 +9573,21 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       specFactTokens: blankSpecFactTokens(blankSpec),
       // BROADCAST-ONLY default (defect 1) — same reasoning as `moneyCtx.truth` immediately above.
       truth: bandScope?.truth ?? broadcastTruthCtx,
-      // Both call sites already pass the exit's design protect hay as `protectDesign` (the family
-      // union for the broadcast title, THIS design's name for a per-child one).
+      // Both call sites already pass the exit's design protect hay as `protectDesign` (the FAMILY
+      // THEME — `broadcastProtectHay` — for the broadcast title, THIS design's name for a per-child
+      // one; see `broadcastProtectHay`'s doc for why the broadcast side excludes per-design names).
       protect: protectDesign ?? '',
-      reject: bandScope?.reject,
-      foreignTokens: bandScope?.foreignTokens,
+      // BROADCAST-ONLY default: keyed on `bandScope` PRESENCE, not `bandScope?.reject` — a per-child
+      // `bandScope` legitimately carries `reject: undefined` when that design has no siblings
+      // (`titleScopeFor`'s `foreign.size` guard), and `?? broadcastReject` would wrongly hand THAT
+      // child the broadcast's family-wide rejector. Only the broadcast call — the one that passes no
+      // `bandScope` argument at all — reaches `broadcastReject`, the SAME `isForeignToDesign`
+      // whole-phrase rejector a per-child exit binds to its own foreign set (see its doc above).
+      reject: bandScope ? bandScope.reject : broadcastReject,
+      // BROADCAST-ONLY default — same reasoning as `moneyCtx.foreignTokens` immediately above.
+      // Safe as `??`: `foreignTokens` is ALWAYS a defined (possibly empty) Set on a per-child
+      // `bandScope`, unlike `reject` above, so there is no scope-vs-field ambiguity to key off.
+      foreignTokens: bandScope?.foreignTokens ?? broadcastForeignTokens,
       // BROADCAST ONLY (no bandScope — see applyTitleTruthNet's doc on scrubProtectedOverlap).
       scrubProtectedOverlap: !bandScope,
       prior,
@@ -9645,10 +9694,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   titleBandHolds.length = 0
   /* DESIGN VOCABULARY THE COLOR NET MUST NOT STRIP (DEFECT B). Resolved HERE because this is the one
    * place that sees the whole result: on a multi-design family `effectiveDesignName` is deliberately
-   * '' (:7750) and each design's name lives on its own per_child_titles row, so the FAMILY protect
-   * set is the union — a broadcast title is answerable to every design in the family. The same union
-   * is handed to the per-child exit: over-protecting a sibling design's color word costs at most one
-   * un-stripped color (fail-open), while under-protecting corrupts a design name. */
+   * '' (:7750) and each design's name lives on its own per_child_titles row, so this union is the
+   * FAIL-OPEN fallback for a per-child exit whose own design name did not resolve (`titleScopeFor`
+   * below) — over-protecting a sibling design's color word there costs at most one un-stripped color,
+   * while under-protecting corrupts a design name. NOT used by the broadcast/parent title (PO
+   * 2026-08-23): that exit is answerable to every design at once, so it must reject each individual
+   * design's name rather than protect their union — see `broadcastProtectHay` above. */
   const protectHay = [
     effectiveDesignName || designName,
     ...(r.per_child_titles ?? []).map((c) => c.designName ?? ''),
@@ -9675,13 +9726,28 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // union, because a parent title is answerable to every child at once.
     const ctx = scope?.truth ?? broadcastTruthCtx
     return ctx
-      ? applyTitleTruthNet(stripped, ctx, scope?.protect ?? protectHay, {
-          rejectSegment: scope?.reject,
-          foreignTokens: scope?.foreignTokens,
-          // BROADCAST ONLY (no scope passed — see applyTitleTruthNet's doc): `protectHay` there is
-          // every sibling's name unioned, so a bare word collision ("business", inside the unrelated
-          // "mind your business tshirt") is never a genuine design mention. A per-child `scope`'s
-          // `protect` is THAT design's own name, where a match IS genuine and must stay verbatim.
+      ? applyTitleTruthNet(stripped, ctx, scope?.protect ?? broadcastProtectHay, {
+          // BROADCAST-ONLY default: keyed on `scope` PRESENCE, not `scope?.reject` — a per-child
+          // `scope` legitimately carries `reject: undefined` when that design has no siblings
+          // (`titleScopeFor`'s `foreign.size` guard), and `?? broadcastReject` would wrongly hand
+          // THAT child the broadcast's family-wide rejector (which would reject its OWN name, since
+          // that name is itself one of the per-design names `broadcastForeignTokens` unions). Only the
+          // broadcast call — the one that passes no `scope` argument at all — reaches `broadcastReject`.
+          rejectSegment: scope ? scope.reject : broadcastReject,
+          // Same reasoning as `rejectSegment` immediately above (PO 2026-08-23, live B0DSCDZC6K:
+          // "Business B*tch" refilled into the PARENT title): `foreignTokens` is ALWAYS defined on a
+          // per-child `scope` (a possibly-empty Set, never undefined — see `titleScopeFor`), so `??`
+          // is safe here without the same trap. `foreignTokens` WINS over `protect` at the word level
+          // (`scrubMoneyPhrase`'s own precedence): a per-design name is rejected here even though it
+          // used to appear in `protectHay`, because `broadcastProtectHay` is now the FAMILY THEME
+          // ONLY (`familyDesignNames` minus every per-design name) — the two sets are disjoint by
+          // construction, so there is no name a broadcast title both protects and rejects.
+          foreignTokens: scope?.foreignTokens ?? broadcastForeignTokens,
+          // BROADCAST ONLY (no scope passed — see applyTitleTruthNet's doc): `broadcastProtectHay`
+          // there is the family THEME only (never a sibling's name), so a bare word collision
+          // ("business", inside the unrelated "mind your business tshirt") is never a genuine design
+          // mention. A per-child `scope`'s `protect` is THAT design's own name, where a match IS
+          // genuine and must stay verbatim.
           scrubProtectedOverlap: !scope,
         })
       : stripped
@@ -9761,7 +9827,11 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // `input.priorTitle` is what is LIVE on Amazon today — the string a truth+band refusal
     // preserves rather than replacing with a truthful stub (the exact trade that got #630/#631
     // reverted). Passing it here is what makes the refusal a no-op instead of a regression.
-    recommended_title: bandTitle(titleTruthDoor(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false), opts?.titleProduced !== false, titleMoneyKws, protectHay, input.priorTitle ?? null, 'broadcast'),
+    // Fourth arg (`protectDesign`) is `broadcastProtectHay` — the FAMILY THEME only (PO 2026-08-23),
+    // not `protectHay`'s full sibling-name union — so a per-design name is never protected on the
+    // one exit that must reject it (`broadcastForeignTokens`, threaded above into `bandTitle`'s own
+    // defaults). Per-child titles are unaffected: they never reach this call.
+    recommended_title: bandTitle(titleTruthDoor(scrubPub(r.recommended_title, 'title'), opts?.titleProduced !== false), opts?.titleProduced !== false, titleMoneyKws, broadcastProtectHay, input.priorTitle ?? null, 'broadcast'),
     recommended_bullets: scrubCelebrityNamesArr(scrubTrademarksArr(r.recommended_bullets), 'pipeline:bullets'),
     recommended_description: scrubPub(r.recommended_description, 'description'),
     // RE-CAP AFTER THE SCRUB (2026-08-10) — the same discipline the title door already applies at
