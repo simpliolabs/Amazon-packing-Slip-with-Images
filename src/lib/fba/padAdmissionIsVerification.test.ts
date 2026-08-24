@@ -30,7 +30,10 @@
  * 1, 2026-08-23 — MINOR finding).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { enforceTitleBand, settleTruthBand, enforceTitleTruthBand, settleTitle, type SettleTitleCtx } from './titleBand'
+import {
+  enforceTitleBand, settleTruthBand, enforceTitleTruthBand, settleTitle, verdictForAssembledTitle,
+  candidateFactCount, type SettleTitleCtx,
+} from './titleBand'
 import { buildPhraseTruthCtx } from './contentTruth'
 import { designScopeTokens, isForeignToDesign } from './designScope'
 
@@ -158,20 +161,32 @@ describe('settleTruthBand never ships its own unverified seed', () => {
 })
 
 /**
- * `enforceTitleTruthBand`'s empty-title ratchet guard (review round 2, 2026-08-23 — NEW BREAKAGE 1,
- * introduced by the CRITICAL-2 fix above). `settleTruthBand`'s `''` seed is CORRECT in isolation (the
- * test above pins it) — but nothing downstream used to stop that `''` from becoming what the DOOR
- * itself ships on a hold. That is not merely a blank UI: `recommended_title` persists with no empty
- * check, and the NEXT run reads `priorTitle` from that same stored value, so an unguarded `''` is a
- * ONE-WAY RATCHET — once stored, the family can never recover a prior again.
+ * `enforceTitleTruthBand`'s empty-title ratchet guard (review round 2, 2026-08-23 — NEW BREAKAGE 1;
+ * corrected in review round 3 — CRITICAL-A / IMPORTANT-B). `settleTruthBand`'s `''` seed is CORRECT
+ * in isolation (the test above pins it) — but nothing downstream used to stop that `''` from
+ * becoming what the DOOR itself ships on a hold. That is not merely a blank UI: `recommended_title`
+ * persists with no empty check, and the NEXT run reads `priorTitle` from that same stored value, so
+ * an unguarded `''` is a ONE-WAY RATCHET — once stored, the family can never recover a prior again.
  *
- * Reproduced on a KIDS-TEE ctx (B0DP5H8QBT's family class, one of the plan's two acceptance ASINs):
- * a 73-char, already-in-band `produced` that fails ONLY on `missing-youth-marker`, with an empty
- * fact/pool bank so no append can supply one. `search()` hits the top-of-function in-band check,
- * fails the verdict, and — since 'missing-youth-marker' IS the one reason the search still tries to
- * fix additively — finds nothing to append either, so `found` is null and the refusal path is the
- * only exit. Both of the reviewer's exact sub-cases are asserted: no prior, and a prior that ALSO
- * fails truth (the `shipped-truthful-under-band` decision this whole plan added on 2026-08-23).
+ * ROUND 2's OWN FIX WAS WRONG (CRITICAL-A): it fell back to a caller-supplied `emptyHoldFallback`
+ * that the only real caller filled with `raw` — `settleTitle`'s UN-netted, pre-every-stage input.
+ * That undoes every subtractive correction the door already made (waste vocabulary, color strip,
+ * inclusive audience, `applyTitleTruthNet` itself) and can re-ship exactly the untrue segment those
+ * stages just removed — the SAME defect class round 1's seed fix closed, reopened one door over. It
+ * was also opt-in (IMPORTANT-B): omit the argument and the guard silently did nothing.
+ *
+ * ROUND 3 replaces it with `netted` — computed INSIDE this function (no caller can omit it), and
+ * `drop.title` (post `settleTitle` steps 1-11) run through `applyTitleTruthNet` +
+ * `dropOrphanPoolFragments`, i.e. every subtractive stage already applied. `prior` remains a second,
+ * structurally-unreachable-in-practice backstop (see `titleBand.ts`'s own proof: an empty `netted`
+ * routes to `settleTruthBand`'s `not-produced` exit, `hold: false`, before a hold can ever be
+ * raised — so `settled.hold === true` is itself a proof `netted` is non-empty here). No test below
+ * exercises the `prior`-branch specifically for that reason; it is documented, not demonstrated.
+ *
+ * Fixture: a KIDS-TEE ctx (B0DP5H8QBT's family class, one of the plan's two acceptance ASINs), a
+ * 73-char already-in-band `produced` that fails ONLY on `missing-youth-marker`, empty fact/pool
+ * banks so nothing is appendable — plus a SEPARATE fixture carrying a sibling design's name, which
+ * is the reviewer's own second repro and the one that actually distinguishes `netted` from `raw`.
  */
 describe('enforceTitleTruthBand never ships an empty title on a hold', () => {
   const truth = buildPhraseTruthCtx(
@@ -181,40 +196,104 @@ describe('enforceTitleTruthBand never ships an empty title on a hold', () => {
   const produced = 'THE CEO Cute Dino Graphic Tee Shirt | Short Sleeve Crew Neck Cotton Blend'
   const band = { apparel: true, spec: null, factSegments: [], poolSegments: [], truthOk: () => true }
 
-  it('is the exact live shape: in-band, missing-youth-marker, nothing appendable', () => {
+  it('is the exact live shape: in-band, missing-youth-marker (asserted, not assumed), and genuinely nothing appendable', () => {
     expect(produced.length).toBeGreaterThanOrEqual(70)
     expect(produced.length).toBeLessThanOrEqual(75)
+    expect(verdictForAssembledTitle(produced, { truth, protect: 'Cute Dino' })).toEqual({ ok: false, reason: 'missing-youth-marker' })
+    // "Nothing appendable" is not assumed from an empty poolSegments/factSegments array — it is the
+    // REASON candidateFactCount, and therefore the search's own append loop, has zero candidates to
+    // try, which is WHY `best` cannot recover past the seed at all.
+    expect(candidateFactCount(produced, band)).toBe(0)
   })
 
-  it('no prior + no fallback supplied (pre-fix / absent-guard shape): ships "" — proves the guard is opt-in, byte-identical when absent', () => {
+  it('CHARACTERIZATION PIN — no prior: ships this run\'s own already-netted material, never "", under an honest hold', () => {
     const r = enforceTitleTruthBand({ produced, prior: null, apparel: true, band, truth, protect: 'Cute Dino' })
     expect(r.decision).toBe('unreachable-no-prior')
     expect(r.hold).toBe(true)
-    expect(r.title).toBe('')
+    expect(r.title).not.toBe('')
+    // The fallback IS `netted`, structurally — not a value this test or any caller supplied.
+    expect(r.title).toBe(r.netted)
   })
 
-  it('no prior, WITH emptyHoldFallback: keeps this run\'s own producer output rather than ship ""', () => {
-    const r = enforceTitleTruthBand({
-      produced, prior: null, apparel: true, band, truth, protect: 'Cute Dino',
-      emptyHoldFallback: 'RAW PRODUCER OUTPUT',
-    })
-    expect(r.decision).toBe('unreachable-no-prior')
-    expect(r.hold).toBe(true)
-    expect(r.title).toBe('RAW PRODUCER OUTPUT')
-  })
-
-  it('prior set but ALSO fails truth: keeps the prior anyway (usable = non-empty + in-cap, not truth-clean) rather than ship ""', () => {
+  it('CHARACTERIZATION PIN — prior set but ALSO fails truth: `netted` outranks it (round 2 shipped the prior here; round 3 does not)', () => {
     const priorAlsoUntrue = 'THE CEO Cute Dino Graphic Tee Shirt | Cotton Blend' // also missing the youth marker
-    const r = enforceTitleTruthBand({
-      produced, prior: priorAlsoUntrue, apparel: true, band, truth, protect: 'Cute Dino',
-      emptyHoldFallback: 'RAW PRODUCER OUTPUT',
-    })
+    const r = enforceTitleTruthBand({ produced, prior: priorAlsoUntrue, apparel: true, band, truth, protect: 'Cute Dino' })
     expect(r.decision).toBe('shipped-truthful-under-band')
     expect(r.hold).toBe(true)
-    // The prior wins over the fallback here — it is "usable" (non-empty, in-cap) even though it is
-    // not truth-clean; requiring truth-cleanliness would recreate the exact dead end that produced
-    // an empty `best` to begin with (see the guard's own doc in titleBand.ts).
-    expect(r.title).toBe(priorAlsoUntrue)
+    expect(r.title).toBe(r.netted)
+    // Round 2's PO ruling ("a usable-but-untrue prior may be KEPT") covered PRESERVING existing
+    // stored copy against being overwritten by nothing. It did not authorise preferring a
+    // known-untrue prior over this run's own already-scrubbed material once one exists.
+    expect(r.title).not.toBe(priorAlsoUntrue)
+  })
+
+  /**
+   * CRITICAL-A, reproduced directly and pinned. `args.produced` here is deliberately the UN-netted
+   * string — parallel to what `settleTitle` calls `raw` — carrying a sibling design's name
+   * (`Business B*tch`) that `applyTitleTruthNet` removes on the way to `netted`. Round 2's fallback
+   * bypassed `netted` entirely and would have shipped this fixture's sibling name verbatim (the
+   * reviewer's own live reproduction: `{"decision":"unreachable-no-prior","hold":true,"title":
+   * "THE CEO Cute Dino Business B*tch Graphic Tee Shirt | Short Sleeve Cotton"}`); this test would
+   * have caught that regression at the moment it was written.
+   */
+  it('CRITICAL-A regression: the fallback ships already-netted material — a sibling design name stays gone, never restored', () => {
+    const foreignTokens = new Set(designScopeTokens('Business B*tch'))
+    const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
+    const producedWithSibling = 'THE CEO Cute Dino Graphic Tee Shirt | Business B*tch Cotton Blend'
+    const r = enforceTitleTruthBand({
+      produced: producedWithSibling, prior: null, apparel: true, band, truth, protect: 'Cute Dino',
+      foreignTokens, reject,
+    })
+    expect(r.hold).toBe(true)
+    expect(r.title).not.toBe('')
+    expect(r.title).not.toMatch(/business/i) // NOT restored — round 2's fallback would have shipped it
+    expect(r.title).toBe(r.netted)
+    expect(r.title).toBe('THE CEO Cute Dino Graphic Tee Shirt') // pinned exactly, not just a negative
+  })
+
+  /**
+   * CRITICAL-A, reproduced end-to-end through `settleTitle` itself — not just `enforceTitleTruthBand`
+   * in isolation — because the reviewer's own live specimen was exactly this shape: step 7
+   * (`stripVariantColorWords`) SUCCEEDS at removing a color word (70 → 64 chars), the title still
+   * cannot reach the band (a kids family missing its youth marker, nothing appendable), and the door
+   * holds. Round 2's fallback shipped `raw` — the color word came BACK, because `raw` predates step
+   * 7 entirely. This test fails against round 2's code (`raw` still has "Black") and passes here.
+   */
+  it('CRITICAL-A, end-to-end through settleTitle: a color word step 7 already removed does not come back', () => {
+    // A SEPARATE kids-tee truth ctx, matching THIS test's own design name ("Cool Cat", not the
+    // describe block's "Cute Dino") — the guard's mechanism does not depend on which design it is,
+    // but the fixture should be internally consistent with what it claims to model.
+    const coolCatTruth = buildPhraseTruthCtx(
+      { garmentFamily: 'kids_tee', mixedFamilies: ['kids_tee'], spec: null, allowedBrand: null, designTokens: ['Cool Cat'], audienceLean: null },
+      'title',
+    )
+    const kidsCtx: SettleTitleCtx = {
+      produced: true,
+      apparel: true,
+      bandCtxFor: () => ({ apparel: true, spec: null, factSegments: [], poolSegments: [], truthOk: () => true }),
+      moneyKws: null,
+      moneyTailMode: 'off',
+      moneyCtx: { apparel: true, lean: null, spec: null, protect: 'Cool Cat', garmentBrand: null, truth: coolCatTruth, allowAppend: true },
+      spec: null,
+      capTitle75: (t) => (t.length > 75 ? t.slice(0, 75) : t),
+      colorProtect: 'Cool Cat',
+      lean: null,
+      v4NoPad: false,
+      v4Mode: 'off',
+      specFactTokens: [],
+      truth: coolCatTruth,
+      protect: 'Cool Cat',
+      scrubProtectedOverlap: false,
+      prior: null,
+      holdScope: 'test',
+      parentAsin: null,
+    }
+    const rawInput = 'THE CEO Cool Cat Black Graphic Design Tee Shirt For The Holiday Season'
+    const r = settleTitle(rawInput, kidsCtx)
+    expect(r.hold).toBe(true)
+    expect(r.title).not.toBe('')
+    expect(r.title).not.toMatch(/\bBlack\b/) // step 7's strip stays stripped
+    expect(r.title).toBe('THE CEO Cool Cat Graphic Design Tee Shirt For The Holiday Season')
   })
 })
 
@@ -235,10 +314,21 @@ describe('enforceTitleTruthBand never ships an empty title on a hold', () => {
  * ZERO hold signal, and the ONLY trace is the new `TITLE_STAGE_REFUSED_VISIBLE` warn.
  */
 describe('settleTitle makes a stage-refusal band-guard VISIBLE, even when it raises no hold', () => {
+  // EXPLICIT restore, not `process.env.X = prev` (review round 3, 2026-08-23 — TEST QUALITY): when
+  // `prev` is `undefined` (the common case — this var is unset outside this test), assigning it
+  // back COERCES to the literal string `"undefined"`, which is truthy and would silently change
+  // `rulingOverFloor()`'s behaviour for any test that runs after this one without its own
+  // `afterEach`. The `afterEach` below happens to `delete` the var regardless and masks it today —
+  // this makes the restore correct on its own terms, not dependent on that second line.
   const withFlag = <T>(mode: string, fn: () => T): T => {
     const prev = process.env.TITLE_RULING_OVER_FLOOR
     process.env.TITLE_RULING_OVER_FLOOR = mode
-    try { return fn() } finally { process.env.TITLE_RULING_OVER_FLOOR = prev }
+    try {
+      return fn()
+    } finally {
+      if (prev === undefined) delete process.env.TITLE_RULING_OVER_FLOOR
+      else process.env.TITLE_RULING_OVER_FLOOR = prev
+    }
   }
   afterEach(() => { delete process.env.TITLE_RULING_OVER_FLOOR })
 
@@ -268,7 +358,12 @@ describe('settleTitle makes a stage-refusal band-guard VISIBLE, even when it rai
   // and the title ships in-band, unchanged, color word intact.
   const title = 'THE CEO Cool Cat Black Graphic Design Tee Shirt For The Holiday Season'
 
-  it('reproduces the worst case: in-band, no hold, the color word ships anyway', () => {
+  it('CHARACTERIZATION PIN — reproduces the worst case: in-band, no hold, the color word ships anyway', () => {
+    // Documents the STILL-ACCEPTED trade-off, deliberately, not a claim that this is ideal: a
+    // `band-guard` refusal is correct behaviour (an honest §5 violation beats an out-of-band title),
+    // and this task does not change WHETHER it can happen — only whether it is visible when it does
+    // (the WARN test below). If a future change makes this scenario raise a hold instead, that is
+    // an intentional supersession of this pin, not a regression, and this test should be updated.
     const r = withFlag('off', () => settleTitle(title, ctx))
     expect(r.decision).toBe('in-band')
     expect(r.hold).toBe(false)

@@ -1679,18 +1679,6 @@ export function enforceTitleTruthBand(args: {
    *  Defaults to the band's own truthful pool segments, which is the same material any fill could
    *  have harvested a fragment from. */
   orphanPool?: readonly string[]
-  /** THE EMPTY-TITLE RATCHET GUARD's last resort (review round 2, 2026-08-23 — NEW BREAKAGE 1).
-   *  `settleTruthBand`'s refusal branches (`shipped-truthful-under-band`, `unreachable-no-prior`)
-   *  can legitimately compute an empty `best` — the correct consequence of the seed only ever being
-   *  a VERIFIED `produced` (round-1 fix) — but a hold must never actually SHIP '': persisted
-   *  `recommended_title` has no empty check downstream, and the next run reads `priorTitle` from
-   *  that same stored value, so an unguarded '' is a one-way ratchet, not a one-run blip. Preferred
-   *  fallback is always `args.prior` when it is USABLE (non-empty, fits the 75-char cap — the SAME
-   *  bar `settleTruthBand`'s own refusal branches already use for a preservable prior, deliberately
-   *  not "passes the full truth predicate": that would recreate the exact dead end that produced an
-   *  empty `best`). This is the fallback of LAST resort, for when the prior is itself unusable —
-   *  the caller should pass its own run's producer output (already cap-safe), never a fresh guess. */
-  emptyHoldFallback?: string
 }): TruthBandResult & { netted: string } {
   const truthed = args.truth
     ? applyTitleTruthNet(args.produced, args.truth, args.protect ?? '', {
@@ -1743,18 +1731,46 @@ export function enforceTitleTruthBand(args: {
       }
     }
   }
-  /* THE EMPTY-TITLE RATCHET GUARD, applied. See `emptyHoldFallback`'s doc above for why. Scoped to
-   * `settled.hold` only — a NON-hold exit (`in-band`/`refilled`) never reaches here empty, because
-   * `finalTitle` is a casing-only transform of a `settleTruthBand` result that already verified
-   * non-empty content to get there. */
+  /* THE EMPTY-TITLE RATCHET GUARD (review round 2 — NEW BREAKAGE 1; corrected in review round 3 —
+   * CRITICAL-A/IMPORTANT-B, 2026-08-23). Scoped to `settled.hold` only — a NON-hold exit
+   * (`in-band`/`refilled`) never reaches here empty, because `finalTitle` is a casing-only
+   * transform of a `settleTruthBand` result that already verified non-empty content to get there.
+   *
+   * WHY `netted` AND NOT A CALLER-SUPPLIED FALLBACK (round 2's `emptyHoldFallback`, now deleted).
+   * Round 2's version defaulted to the caller's raw, PRE-net input — which undoes every subtractive
+   * stage this function and `settleTitle`'s steps 1-11 already ran (waste vocabulary, money tail,
+   * color strip, inclusive audience, the facts pad, spec-tail/orphan drop, `applyTitleTruthNet`
+   * itself) and can re-ship exactly the untrue segment those stages just removed — reintroducing,
+   * through a second door, the precise defect class round 1's seed fix closed on the first one. It
+   * was also opt-in: a caller that forgot the argument silently reinstated the empty-ratchet with
+   * the suite green — "a hold never emits empty IF the caller remembers to pass a string" is not a
+   * structural guarantee.
+   *
+   * `netted` fixes both. It is computed IN THIS FUNCTION (no caller can omit it), it is `drop.title`
+   * (post `settleTitle` steps 1-11) run through `applyTitleTruthNet` + `dropOrphanPoolFragments` —
+   * i.e. every subtractive correction this door makes, already applied — and it is PROVABLY
+   * non-empty on every path that reaches this line: `settleTruthBand`'s own top guard
+   * (`if (!produced) return done(..., 'not-produced', ...)`, `hold: false` by construction) routes
+   * an empty `netted` to `not-produced` before a hold can ever be raised, so `settled.hold === true`
+   * here is itself a proof `netted` is non-empty. `prior` is kept as a second, defence-in-depth
+   * backstop that should be structurally unreachable, not the primary fallback.
+   *
+   * ORDER, DELIBERATE: `netted` first, then `prior` — not the reverse. The PO ruling that a
+   * not-fully-truth-clean prior may be KEPT (round 2) was scoped to PRESERVING existing stored
+   * copy against being overwritten by nothing; it did not authorise MANUFACTURING and shipping this
+   * run's own un-netted output over a prior when one exists, and by the time this guard runs, prior
+   * (when non-empty) is already known unusable for this run — `shipped-truthful-under-band` only
+   * reaches here after `prior` failed truth, and `unreachable-no-prior`'s prior is absent or
+   * over-cap — so `netted` (this run's own already-scrubbed material) dominates it either way. */
   if (settled.hold && !finalTitle.trim()) {
+    const nettedTrim = netted.trim()
     const priorTrim = (args.prior || '').trim()
     const priorUsable = priorTrim.length > 0 && priorTrim.length <= TITLE_BAND_HI
-    const fallback = (priorUsable ? priorTrim : (args.emptyHoldFallback || '').trim())
+    const fallback = nettedTrim || (priorUsable ? priorTrim : '')
     if (fallback) {
       return {
         ...settled, netted, title: fallback, len: fallback.length,
-        reason: `${settled.reason} — EMPTY-TITLE GUARD: the door would otherwise have shipped '' (a stored-recommendation ratchet); kept ${priorUsable ? 'the prior title' : "this run's own producer output"} instead`,
+        reason: `${settled.reason} — EMPTY-TITLE GUARD: the door would otherwise have shipped '' (a stored-recommendation ratchet); kept ${nettedTrim ? "this run's own already-netted material" : 'the prior title'} instead`,
       }
     }
   }
@@ -2711,13 +2727,9 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
     produced: drop.title, prior: ctx.prior, apparel: ctx.apparel, band: ctx.bandCtxFor(drop.title),
     truth: ctx.truth, protect: ctx.protect, reject: ctx.reject, foreignTokens: ctx.foreignTokens,
     scrubProtectedOverlap: ctx.scrubProtectedOverlap,
-    // EMPTY-TITLE RATCHET GUARD (review round 2, 2026-08-23 — NEW BREAKAGE 1). See
-    // `enforceTitleTruthBand`'s own doc on `emptyHoldFallback` for the full account: a hold must
-    // never emit '' (persisted `recommended_title` has no empty check, and the NEXT run reads
-    // `priorTitle` from that same stored value, so an unguarded '' is a one-way ratchet). `raw` is
-    // this run's own producer output, guaranteed non-empty (`settleTitle` returned at its own top
-    // guard otherwise) — the last-resort fallback when `ctx.prior` is itself unusable.
-    emptyHoldFallback: ctx.capTitle75(raw),
+    // The empty-title ratchet guard (see `enforceTitleTruthBand`'s own doc) is now fully internal —
+    // it falls back to `netted`, which that function computes itself, never to anything this
+    // caller supplies. Nothing to wire here (review round 3, 2026-08-23).
   })
   console.log(JSON.stringify({
     tag: 'TITLE_TRUTH_BAND', scope: ctx.holdScope, parent: ctx.parentAsin, decision: settled.decision,
