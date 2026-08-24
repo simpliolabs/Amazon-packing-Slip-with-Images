@@ -1471,7 +1471,26 @@ export function settleTruthBand(args: {
    * "| Long Sleeve Pullover Hoodie Crewneck": four garment nouns, all true, all worthless. */
   const poolSet = new Set(band.poolSegments ?? [])
   let budget = REFILL_NODE_BUDGET
-  let best = produced
+  /* THE SHIP GATE FOR THE REFUSAL PATH (CRITICAL 2, review round 1, 2026-08-23). `best` is exactly
+   * what `shipped-truthful-under-band` / `unreachable-no-prior` SHIP when the search below finds
+   * nothing better — so it may never be seeded with a string nobody has verified. By the time
+   * execution reaches this line, `produced` has ALREADY either failed or skipped the in-band fast
+   * path above (`produced.length >= TITLE_BAND_LO && verdictForAssembledTitle(produced,
+   * verifyCtx).ok`): under band, its truth was never checked at all; in band, it was checked and
+   * FAILED. Seeding `best = produced` unconditionally (the pre-fix behaviour) let an admitted lie —
+   * one the pad upstream should never have admitted, but a second, structural line of defence must
+   * not depend on that — become the thing this function ships under a decision literally named
+   * "shipped-truthful-under-band" without ever itself being verified truthful.
+   *
+   * CHOSEN OVER the alternative (run the final gate in `enforceTitleTruthBand` on hold exits too):
+   * that gate's own fallback on a failed re-verify is `priorTrim` when the prior fits the cap — but
+   * the ONE branch that ships `best` under a hold *because* the prior fails truth
+   * (`shipped-truthful-under-band`, below) would then fall back to that same untrue prior, reviving
+   * the exact lie this decision exists to refuse. Fixing the seed here is one line, touches no
+   * decision logic, and is provably correct by construction: `best` is re-verified INDEPENDENTLY of
+   * length (`verdictForAssembledTitle` never inspects length), so a short-but-honest `produced` is
+   * still a legitimate baseline, and only a produced string carrying an actual lie is excluded. */
+  let best = verdictForAssembledTitle(produced, verifyCtx).ok ? produced : ''
   const search = (t: string, depth: number): string | null => {
     if (t.length >= TITLE_BAND_LO && t.length <= TITLE_BAND_HI) {
       const v = verdictForAssembledTitle(t, verifyCtx)
@@ -1763,6 +1782,14 @@ export interface InclusiveAudienceCtx {
    *  title: this net only ever deletes AUDIENCE words, never a garment noun, so `garmentSecond`
    *  (`pickDistinctGarmentForm`) resolves identically before and after. */
   band: TitleBandCtx
+  /** ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1). This stage's own re-fill (via
+   *  `enforceTitleBand`) is a pad like any other — the removal it performs frees characters, and
+   *  whatever it fills them back in with must pass the SAME whole-string predicate the door's
+   *  terminal exit judges by, or a candidate this stage admits can ship a lie the exit never gets a
+   *  chance to see (an in-band string short-circuits `enforceTitleBand`'s own top-of-function
+   *  'in-band' return before the verified candidate loop even runs). Optional, and absent ⇒
+   *  length-only re-fill, byte-identical to the pre-2026-08-23 behaviour. */
+  verify?: AssembledTitleCtx
 }
 
 /** Both genders, in either order, joined by "and"/"&"/","/nothing, with an optional leading "for" —
@@ -2002,7 +2029,9 @@ export function enforceInclusiveAudience(
   // Re-fill the freed characters from PRODUCT FACTS (never the pool — spec-vs-search grounding), then
   // judge the FINAL bytes. This is why the guard lives here and not in the caller: the removal and
   // the re-fill are one decision, and only their composition can be checked against the band.
-  const padded = enforceTitleBand(reduced, ctx.band).title
+  // ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1): this stage's own re-fill may not
+  // admit a candidate the door's terminal exit would reject — see `ctx.verify`'s doc.
+  const padded = enforceTitleBand(reduced, ctx.band, ctx.verify).title
   const verdict = removalPermitted(padded.length)
   if (!verdict.ok) {
     return {
@@ -2079,6 +2108,9 @@ export interface VariantColorCtx {
    *  title: this net only ever deletes COLOR words, never a garment noun, so `garmentSecond`
    *  (`pickDistinctGarmentForm`) resolves identically before and after. */
   band: TitleBandCtx
+  /** ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1) — see `InclusiveAudienceCtx.verify`'s
+   *  doc; the same gap applies to this stage's own re-fill. Optional, absent ⇒ byte-identical. */
+  verify?: AssembledTitleCtx
 }
 
 /** Built fresh per call — a shared /g/ regex carries `lastIndex` across calls, which is exactly how
@@ -2128,7 +2160,9 @@ export function stripVariantColorWords(
 
   // Re-fill the freed characters from PRODUCT FACTS, then judge the FINAL bytes — the removal and the
   // re-fill are ONE decision (same reasoning as enforceInclusiveAudience's guard).
-  const padded = enforceTitleBand(reduced, ctx.band).title
+  // ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1): this stage's own re-fill may not
+  // admit a candidate the door's terminal exit would reject — see `ctx.verify`'s doc.
+  const padded = enforceTitleBand(reduced, ctx.band, ctx.verify).title
   const verdict = removalPermitted(padded.length)
   if (!verdict.ok) {
     return {
@@ -2226,6 +2260,9 @@ export interface TitleWasteCtx {
    *  it. Absent ⇒ arm 1 is simply unavailable and arm 2 (the facts pad) decides alone. */
   moneyKws?: readonly string[] | null
   money?: MoneyTailCtx | null
+  /** ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1) — see `InclusiveAudienceCtx.verify`'s
+   *  doc; the same gap applies to this stage's own re-fill. Optional, absent ⇒ byte-identical. */
+  verify?: AssembledTitleCtx
 }
 
 /**
@@ -2340,7 +2377,9 @@ export function stripTitleWasteVocabulary(
   // An editorial ruling with zero corpus counter-examples is not a preference to be balanced against
   // length — it is a fact about their voice. A short clean title is the correct output; the length
   // cure belongs upstream (a real money keyword), never in keeping a word they banned.
-  const padded = enforceTitleBand(reduced, ctx.band).title
+  // ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1): this stage's own re-fill may not
+  // admit a candidate the door's terminal exit would reject — see `ctx.verify`'s doc.
+  const padded = enforceTitleBand(reduced, ctx.band, ctx.verify).title
   const final = padded.length <= TITLE_BAND_HI ? padded : reduced   // Amazon's cap is still absolute
   return {
     title: final,
@@ -2486,6 +2525,19 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   const traceId = `${ctx.parentAsin ?? 'na'}#${++SETTLE_SEQ}`
   let title = raw
 
+  // THE WHOLE-STRING VERIFY CTX, bound ONCE, up front (moved here 2026-08-23 review round 1 —
+  // CRITICAL 1: it used to bind only at step 9, so steps 5/7/8's own internal re-fills — which
+  // RETURN their padded string directly, not merely probe it — could admit an unspec'd attribute
+  // claim or any other whole-string lie `enforceTitleBand`'s own top-of-function 'in-band' fast
+  // path then shipped straight past step 9's gate untouched (an already-in-band string never
+  // enters the verified candidate loop at all). Same shape `settleTruthBand` binds for its own
+  // DFS, so every pad in this door — steps 5, 7, 8, 9 — and the prior-truth check judge candidates
+  // the SAME way, one ctx, no second rulebook.
+  const verifyCtx: AssembledTitleCtx = {
+    truth: ctx.truth, protect: ctx.protect, foreignTokens: ctx.foreignTokens, reject: ctx.reject,
+    scrubProtectedOverlap: ctx.scrubProtectedOverlap,
+  }
+
   // 1-2. CASING FIRST — both length-neutral and idempotent, so every stage below reads clean bytes.
   const cased = fixApostropheCase(title)
   if (cased !== title) console.log(JSON.stringify({ tag: 'SHIP_APOSTROPHE_CASE', field: 'title', from: title, to: cased }))
@@ -2520,6 +2572,7 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
     band: ctx.bandCtxFor(capped),
     moneyKws: ctx.moneyTailMode === 'on' ? (ctx.moneyKws ?? null) : null,
     money: ctx.moneyCtx,
+    verify: verifyCtx,
   })
   console.log(JSON.stringify({ tag: 'SHIP_TITLE_WASTE', decision: waste.decision, from: capped.length, to: waste.title.length, changed: waste.title !== capped, note: waste.note }))
   let moneyed = waste.title
@@ -2538,13 +2591,13 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   }
 
   // 7. COLOR STRIP — §5: shared copy carries no color word; colors rank per-child via the backend tail.
-  const colorNet = stripVariantColorWords(moneyed, { apparel: ctx.apparel, protect: ctx.colorProtect, band: ctx.bandCtxFor(moneyed) })
+  const colorNet = stripVariantColorWords(moneyed, { apparel: ctx.apparel, protect: ctx.colorProtect, band: ctx.bandCtxFor(moneyed), verify: verifyCtx })
   console.log(JSON.stringify({ tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision, from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note }))
   moneyed = colorNet.title
 
   // 8. INCLUSIVE AUDIENCE — "for Men and Women" is character waste (§4). After the money tail: it
   //    already had first refusal on the same tail region.
-  const inc = enforceInclusiveAudience(moneyed, { apparel: ctx.apparel, lean: ctx.lean, band: ctx.bandCtxFor(moneyed) })
+  const inc = enforceInclusiveAudience(moneyed, { apparel: ctx.apparel, lean: ctx.lean, band: ctx.bandCtxFor(moneyed), verify: verifyCtx })
   console.log(JSON.stringify({ tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision, from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note }))
   moneyed = inc.title
 
@@ -2555,13 +2608,7 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   //    is a sibling design's name or a forced gender on a unisex family, refusing to pad does not
   //    avoid manufacturing text, it just manufactures a WORSE outcome (a shipped lie) by omission.
   //    Judged with the SAME predicate every candidate this door assembles is judged by — no second
-  //    "is this true" rulebook.
-  // THE WHOLE-STRING VERIFY CTX, bound once — same shape `settleTruthBand` binds for its own DFS,
-  // reused here so the facts pad (below) and the prior-truth check judge candidates the SAME way.
-  const verifyCtx: AssembledTitleCtx = {
-    truth: ctx.truth, protect: ctx.protect, foreignTokens: ctx.foreignTokens, reject: ctx.reject,
-    scrubProtectedOverlap: ctx.scrubProtectedOverlap,
-  }
+  //    "is this true" rulebook. `verifyCtx` is bound once, above, at the top of this function.
   const priorForV4 = (ctx.prior || '').trim()
   const priorFailsTruthForV4 = !!priorForV4 && !verdictForAssembledTitle(priorForV4, verifyCtx).ok
   const padSuppressed = ctx.v4NoPad && !priorFailsTruthForV4

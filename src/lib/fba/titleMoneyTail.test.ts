@@ -344,7 +344,13 @@ describe('MoneyTailCtx.reject — the whole-segment twin foreignTokens alone can
   const title = 'THE CEO Motivational Entrepreneur Sweatshirt'
   const kw = 'business hustle for men' // carries the sibling's own "business" token, no garment noun
 
-  it('WITHOUT reject: a sibling-name-bearing keyword ships — foreignTokens alone is dead weight here', () => {
+  // COMPATIBILITY PIN, not an endorsement (review round 1, 2026-08-23 — MINOR finding): this is the
+  // pre-existing fail-open shape for a caller that supplies `foreignTokens` but no `reject` — it
+  // documents that `reject` is additive/optional, not that shipping a sibling name here is correct.
+  // If a future cure makes `foreignTokens` alone sufficient (e.g. `applyTitleTruthNet` learns to
+  // word-scrub a non-segment-0 span without a paired `rejectSegment`), THIS test should be updated
+  // to expect a refusal — that would be an intentional supersession of this pin, not a regression.
+  it('WITHOUT reject (compat pin): a sibling-name-bearing keyword ships — foreignTokens alone is dead weight here', () => {
     const v = enforceMoneyTail(title, kw, { apparel: true, lean: null, spec: null, protect: 'Motivational Entrepreneur', garmentBrand: null, allowAppend: true, truth, foreignTokens })
     expect(v.decision).toBe('applied')
     expect(v.title).toMatch(/business/i)
