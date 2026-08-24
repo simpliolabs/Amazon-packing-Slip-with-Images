@@ -8506,6 +8506,33 @@ BACKEND STRING: ${backendSample}`
   } catch { return unchanged }
 }
 
+/**
+ * PURE theme/foreign-name split for the BROADCAST/parent title exit (PO 2026-08-23, live
+ * B0DSCDZC6K: "Business B*tch" refilled into the PARENT title). §3.2 of
+ * handoff/TITLE_ADMISSION_IS_VERIFICATION.md, resolved: `familyDesignNames` (every design's name,
+ * including the family-level one) and the set of PER-design names (`designNameOverridesByKey`
+ * values + `priorPerChildTitles[].designName`) overlap, so without an explicit split a name would
+ * be simultaneously `protect`ed and `foreignTokens`-rejected on the one exit that must reject every
+ * individual design's name. `themeNames` MAY BE EMPTY — a parent with no family-level vocabulary
+ * left after the subtraction is the correct outcome, never a fallback to permitting a design name.
+ * Extracted as its own pure function (no restructuring of the caller) so the subtraction itself is
+ * unit-testable without exercising the ~11k-line pipeline body — see
+ * `broadcastForeignNames.test.ts`'s `computeBroadcastDesignScope` cases.
+ */
+export function computeBroadcastDesignScope(
+  familyDesignNames: readonly string[],
+  designNameOverridesByKey: Record<string, string> | null | undefined,
+  priorPerChildTitles: readonly { designName?: string | null }[] | null | undefined,
+): { foreignTokens: Set<string>; themeNames: string[]; protectHay: string } {
+  const perDesignNames: string[] = [
+    ...Object.values(designNameOverridesByKey ?? {}),
+    ...(priorPerChildTitles ?? []).map((t) => t.designName ?? ''),
+  ].map((v) => (v ?? '').trim()).filter(Boolean)
+  const foreignTokens = new Set(perDesignNames.flatMap((n) => designScopeTokens(n)))
+  const themeNames = familyDesignNames.filter((n) => !perDesignNames.some((d) => d.toLowerCase() === n.toLowerCase()))
+  return { foreignTokens, themeNames, protectHay: themeNames.join(' ') }
+}
+
 export async function runListingPipeline(input: PipelineInput): Promise<PipelineResult> {
   /** Per-run collector for [TITLE_V4_DIFF] entries, surfaced on `debug.v4` so the refusal rate is
    *  readable from the regen response instead of only from a server-log grep. */
@@ -9163,35 +9190,18 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * only the call sites that are unambiguously the broadcast/parent exit are re-pointed at this. */
   /* BROADCAST FOREIGN NAMES (PO 2026-08-23, live B0DSCDZC6K: "Business B*tch" refilled into the
    * PARENT title). A parent speaks for EVERY child, so no individual design's name may lead it —
-   * PO ruling: family theme only. `foreignTokens` WINS over `protect` here; see
-   * handoff/TITLE_ADMISSION_IS_VERIFICATION.md §3.2. */
-  const perDesignNames: string[] = [
-    ...Object.values(input.designNameOverridesByKey ?? {}),
-    ...(input.priorPerChildTitles ?? []).map((t) => t.designName ?? ''),
-  ].map((v) => (v ?? '').trim()).filter(Boolean)
-  // Concrete `Set<string>` (not the `ReadonlySet<string>` every ctx field below declares) so this
-  // can ALSO be passed directly to `isForeignToDesign` (`designScope.ts`), whose own parameter type
-  // is `Set<string>` — a `Set` satisfies every `ReadonlySet`-typed slot it feeds without narrowing.
-  const broadcastForeignTokens: Set<string> = new Set(
-    perDesignNames.flatMap((n) => designScopeTokens(n)),
-  )
-  /** `foreignTokens` alone only reaches `applyTitleTruthNet`'s segment-0 (money-phrase) WORD-level
-   *  scrub — `scrubMoneyPhrase`'s own doc: "the phrase predicate alone cannot [strike inside a later
-   *  segment], since it answers 'drop the whole phrase?' and segment 0 is never wholly dropped."
-   *  The live regression string is `THE CEO Motivational Entrepreneur | Business B*tch Sweatshirt
-   *  for Men` — the foreign name sits in the segment AFTER the pipe, not segment 0 — so `foreignTokens`
-   *  alone cannot convict it; the net's SEGMENT-level droppable predicate (`rejectSegment`) must also
-   *  fire. Reuses `isForeignToDesign` verbatim — the SAME whole-phrase rejector `designScope.ts`
-   *  already exports, and the per-child exit already binds to its own foreign set below via
-   *  `perChildDesignScope` / `titleScopeFor`'s own `reject`. No new predicate, just the broadcast
-   *  exit's own foreign set bound to it instead of undefined. */
+   * PO ruling: family theme only. `foreignTokens`/`reject` WIN over `protect` here; see
+   * handoff/TITLE_ADMISSION_IS_VERIFICATION.md §3.2 and `computeBroadcastDesignScope`'s own doc
+   * (module scope, above) for the pure split this destructures. `foreignTokens` alone only reaches
+   * `applyTitleTruthNet`'s segment-0 (money-phrase) word-level scrub — the live regression's foreign
+   * phrase sits in the segment AFTER the pipe, so convicting it also needs the net's SEGMENT-level
+   * droppable predicate, `broadcastReject` — confirmed by direct execution before wiring it, not
+   * assumed. Reuses `isForeignToDesign` verbatim, the SAME whole-phrase rejector the per-child exit
+   * already binds to its own foreign set below (`perChildDesignScope` / `titleScopeFor`'s `reject`).
+   * No new predicate. */
+  const { foreignTokens: broadcastForeignTokens, themeNames: broadcastThemeNames, protectHay: broadcastProtectHay } =
+    computeBroadcastDesignScope(familyDesignNames, input.designNameOverridesByKey, input.priorPerChildTitles)
   const broadcastReject = (seg: string): boolean => isForeignToDesign(seg, broadcastForeignTokens)
-  /** The FAMILY THEME: what survives after every per-design name is subtracted. MAY BE EMPTY — a
-   *  parent with no design vocabulary is the correct outcome, never a fallback to permitting one. */
-  const broadcastThemeNames: string[] = familyDesignNames.filter(
-    (n) => !perDesignNames.some((d) => d.toLowerCase() === n.toLowerCase()),
-  )
-  const broadcastProtectHay = broadcastThemeNames.join(' ')
   const broadcastTruthCtx: PhraseTruthCtx | null = buildPhraseTruthCtx({
     garmentFamily: truthGarmentFamily,
     mixedFamilies: undefined,

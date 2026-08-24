@@ -2,6 +2,50 @@ import { describe, it, expect } from 'vitest'
 import { verdictForAssembledTitle } from './titleBand'
 import { buildPhraseTruthCtx } from './contentTruth'
 import { designScopeTokens, isForeignToDesign } from './designScope'
+import { computeBroadcastDesignScope } from './listingPipeline'
+
+describe('computeBroadcastDesignScope — the pure theme/foreign-name split', () => {
+  it('subtracts every per-design name (override + prior per-child) from the family set, leaving the theme', () => {
+    const family = ['Motivational Entrepreneur', 'Business B*tch', 'Grind Never Stops']
+    const r = computeBroadcastDesignScope(
+      family,
+      { designA: 'Business B*tch' },
+      [{ designName: 'Grind Never Stops' }],
+    )
+    expect(r.themeNames).toEqual(['Motivational Entrepreneur'])
+    expect(r.protectHay).toBe('Motivational Entrepreneur')
+    // Both per-design names contribute their tokens to the foreign set — union'd, not just the last.
+    expect([...r.foreignTokens].sort()).toEqual([...new Set([
+      ...designScopeTokens('Business B*tch'),
+      ...designScopeTokens('Grind Never Stops'),
+    ])].sort())
+  })
+
+  it('MAY leave the theme EMPTY when every family name is a per-design name — never falls back to permitting one', () => {
+    const family = ['Business B*tch', 'Grind Never Stops']
+    const r = computeBroadcastDesignScope(
+      family,
+      { designA: 'Business B*tch', designB: 'Grind Never Stops' },
+      null,
+    )
+    expect(r.themeNames).toEqual([])
+    expect(r.protectHay).toBe('')
+  })
+
+  it('is a no-op (empty foreign set, theme = the full family) for a single-design family with no overrides or prior per-child rows', () => {
+    const family = ['Motivational Entrepreneur']
+    const r = computeBroadcastDesignScope(family, undefined, null)
+    expect(r.themeNames).toEqual(family)
+    expect(r.protectHay).toBe('Motivational Entrepreneur')
+    expect(r.foreignTokens.size).toBe(0)
+  })
+
+  it('name matching is case-insensitive so a differently-cased echo still subtracts', () => {
+    const family = ['Motivational Entrepreneur', 'business b*tch']
+    const r = computeBroadcastDesignScope(family, { designA: 'Business B*tch' }, null)
+    expect(r.themeNames).toEqual(['Motivational Entrepreneur'])
+  })
+})
 
 const sweatFacts = {
   apparelProduct: true,
