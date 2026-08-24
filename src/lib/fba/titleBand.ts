@@ -1286,6 +1286,13 @@ export function verdictForAssembledTitle(title: string, ctx: AssembledTitleCtx):
     })
     if (netted !== t) return { ok: false, reason: 'untrue-or-foreign-segment-present' }
     if (garmentGroupsIn(t).size > 1) return { ok: false, reason: 'two-garment-classes' }
+    /* UNSPEC'D ATTRIBUTE CLAIM (PO 2026-08-23). `scrubUnspecdGarmentClaims` owned this rule as a
+     * pipeline STAGE running BEFORE the pad, so the pad re-added from the pool exactly what the
+     * stage removed ("Oversized" on a Classic-fit Gildan 64000B, live 2026-08-23). Expressed HERE
+     * it is inadmissible, not merely deleted. Idempotence IS the probe, exactly as the truth net
+     * above: a title that scrub would still edit carries a claim the blank does not support. */
+    const scrubbed = scrubUnspecdGarmentClaims(t, ctx.truth.spec ?? null)
+    if (scrubbed.title !== t) return { ok: false, reason: 'unspecd-attribute-claim' }
     // THE KIDS IDENTITY MUST BE ASSERTED, NOT MERELY NOT-DENIED (defect 1, PO 2026-08-23, live
     // B0DP5H8QBT). Removing an adult claim (#642) is necessary but not sufficient: a kids_tee family's
     // title that never says Kids/Youth/Boys/Girls reads as adult by default. `youthMarkerFor` derives
