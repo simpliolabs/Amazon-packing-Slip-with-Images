@@ -703,15 +703,22 @@ function report(): void {
     ? `ALL ${r.rows.length} TITLES IN BAND ${TITLE_BAND_LO}-${TITLE_BAND_HI}`
     : `${bad.length} TITLE(S) OUT OF BAND: ${bad.map((x) => `${x.scope}=${x.len}`).join(', ')}`)
 
-  console.log('\n═══ LIVE FAILURE REPRO — thin pool + lying prior (PO ruling 2026-08-23) ══════════════════════')
+  console.log('\n═══ LIVE FAILURE REPRO — thin pool + lying prior, bounded by the 65-char floor (PO rulings 2026-08-23 + 2026-08-24) ══════════════════════')
   const lf = runLiveFailureRepro()
   console.log(`   raw      (${String(lf.rawLen).padStart(2)}): ${lf.raw}`)
   console.log(`   prior         : ${LIVE_LYING_PRIOR}`)
   console.log(`   SHIPPED  (${String(lf.len).padStart(2)}): ${lf.title}`)
   console.log(`   decision : ${lf.decision}${lf.hold ? '  [HOLD]' : ''} — ${lf.reason}`)
-  console.log(lf.title === LIVE_LYING_PRIOR
-    ? '   *** FAIL: shipped the exact lying prior — the invariant is NOT installed ***'
-    : '   PASS: did not keep the lying prior')
+  // PO ruling 2026-08-24 changed what "correct" means here: this scenario's truthful replacement is
+  // only 58 chars (under TITLE_TRUTHFUL_SHIP_FLOOR, 65) — below the floor, keeping the lying prior
+  // under `refused-kept-lying-prior` IS the correct, surfaced outcome, not a failure. Only flag it if
+  // the prior ships SILENTLY (any decision OTHER than the distinct floor decision) — that would mean
+  // the operator has no way to tell this hold kept a known lie.
+  console.log(lf.title === LIVE_LYING_PRIOR && lf.decision !== 'refused-kept-lying-prior'
+    ? '   *** FAIL: shipped the exact lying prior WITHOUT the distinct floor decision — surfacing is broken ***'
+    : lf.title === LIVE_LYING_PRIOR
+      ? '   PASS: kept the lying prior under the floor — surfaced via the distinct `refused-kept-lying-prior` decision, as expected'
+      : '   PASS: did not keep the lying prior')
 }
 
 // Node ESM: run the report only when this file is the entrypoint, never on import.

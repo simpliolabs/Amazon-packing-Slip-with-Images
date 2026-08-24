@@ -43,6 +43,17 @@ export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
 export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
 
 /**
+ * TITLE_TRUTHFUL_SHIP_FLOOR — PO ruling 2026-08-24: the shippable range for `settleTruthBand`'s
+ * `shipped-truthful-under-band` path is 65-75, not "as short as truth allows". Truth still outranks
+ * an in-band lie (the 2026-08-23 ruling stands — see `refused-kept-lying-prior`'s doc) — this
+ * constant only bounds how FAR that preference goes: below it, a truthful-but-too-short title is not
+ * a legitimate ship candidate either, and the door must hold and keep the prior instead, even when
+ * the prior itself fails truth (surfaced to the operator, never silent). Named beside
+ * `TITLE_BAND_LO`/`TITLE_BAND_HI` so a future band change updates all three from one place.
+ */
+export const TITLE_TRUTHFUL_SHIP_FLOOR = 65
+
+/**
  * TITLE_RULING_OVER_FLOOR — off | on. Default off ⇒ byte-identical to today.
  *
  * THE TWO BOUNDS ARE NOT THE SAME KIND OF THING, and treating them as one tier let an unrelated
@@ -1347,6 +1358,15 @@ export type TruthBandDecision =
    *  is the SECOND path (with `unreachable-no-prior`) on which a sub-band title exits deliberately,
    *  and it still raises a hold so the operator sees it. */
   | 'shipped-truthful-under-band'
+  /** PO ruling 2026-08-24: the prior fails truth (same condition as `shipped-truthful-under-band`
+   *  above) BUT the truthful replacement `best` reached is UNDER `TITLE_TRUTHFUL_SHIP_FLOOR` (65) —
+   *  too short to ship even though it is honest. "THE CEO Motivational" is true; so is "THE CEO". The
+   *  floor bounds how far the truth-over-band preference goes: below it, the door holds and keeps the
+   *  PRIOR anyway (even though the prior itself fails truth) rather than ship an even-shorter
+   *  truthful stub. This is the ONE decision in this file where the kept title is KNOWN to fail
+   *  `verdictForAssembledTitle` — callers MUST surface it to the operator, never let it ship silently
+   *  (see `SettleTitleHold.decision` and the ai-recommendations `locked_title_truth`-style warning). */
+  | 'refused-kept-lying-prior'
 
 export interface TruthBandResult {
   title: string
@@ -1548,8 +1568,21 @@ export function settleTruthBand(args: {
     // Ship the truthful short title instead — `best`, the honest partial the search already built —
     // under a DISTINCT decision value so this never silently reads as an ordinary band-unreachable
     // hold. The hold still fires (`done(..., true)`) so the operator sees it.
-    return done(best, 'shipped-truthful-under-band',
-      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`,
+    //
+    // THE FLOOR (PO ruling 2026-08-24): only when `best` itself clears `TITLE_TRUTHFUL_SHIP_FLOOR`
+    // (65). Truth outranks an in-band lie, but that preference does not extend to ANY length — "THE
+    // CEO Motivational" (21 chars) is true, and so is "THE CEO" (7). Below the floor, ship nothing
+    // new: hold and keep the prior anyway, under YET ANOTHER distinct decision value
+    // (`refused-kept-lying-prior`) so a caller can tell "kept a TRUE prior" from "kept a title we
+    // KNOW fails truth" and surface the second case to the operator (never silent — see
+    // `SettleTitleHold.decision`).
+    if (best.length >= TITLE_TRUTHFUL_SHIP_FLOOR) {
+      return done(best, 'shipped-truthful-under-band',
+        `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`,
+        tried, true)
+    }
+    return done(prior, 'refused-kept-lying-prior',
+      `truthful title reached only ${best.length}/${TITLE_TRUTHFUL_SHIP_FLOOR} (the shippable floor) from true material, and the prior title fails truth (${priorVerdict.reason}) — holding and keeping the prior anyway because ${best.length} chars is under the floor; the kept title is NOT truthful and must be surfaced to the operator`,
       tried, true)
   }
   if (prior) {
@@ -2511,6 +2544,12 @@ export interface SettleTitleHold {
   tried: string[]
   reason: string
   kept: string
+  /** PO ruling 2026-08-24: which `TruthBandDecision` raised this hold. Distinguishes "kept a TRUE
+   *  prior" (`refused-kept-prior`/`unreachable-no-prior`) from "kept a title we KNOW fails truth"
+   *  (`refused-kept-lying-prior`) — callers must surface the second case to the operator, never let
+   *  it read as an ordinary hold. Optional only so a hand-built `SettleTitleHold` elsewhere in tests
+   *  need not supply it; the real call site (below) always does. */
+  decision?: TruthBandDecision
 }
 
 export interface SettleTitleV4Diff {
@@ -2731,7 +2770,7 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
       band: TITLE_BAND_LO, tried: settled.tried, reason: settled.reason, decision: settled.decision,
       produced: drop.title, kept: settled.title,
     }))
-    holdEntry = { scope: ctx.holdScope, parent: ctx.parentAsin, len: settled.len, tried: settled.tried, reason: settled.reason, kept: settled.title }
+    holdEntry = { scope: ctx.holdScope, parent: ctx.parentAsin, len: settled.len, tried: settled.tried, reason: settled.reason, kept: settled.title, decision: settled.decision }
   }
   console.log(JSON.stringify({ tag: 'TITLE_DOOR_TRACE', id: traceId, in: raw, out: settled.title }))
 

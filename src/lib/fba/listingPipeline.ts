@@ -81,7 +81,7 @@ import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
 import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
-import { audienceSpans, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, settleTitle, stripInclusiveAudience, titleCasePhrase, type MoneyTailCtx, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { audienceSpans, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, settleTitle, stripInclusiveAudience, titleCasePhrase, type MoneyTailCtx, type SettleTitleHold, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanDesignGroupIdentity, identityPhrases } from '@/lib/fba/designGroupIdentity'
@@ -358,7 +358,7 @@ export interface PipelineResult {
    *  nothing shipped. On the response, not only in a log line, because "never exit below the band
    *  silently" is not satisfied by a line only a shell can read. `tried` lists the true segments
    *  the pad had available, which is what separates "mis-wired" from "nothing true left to say". */
-  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; v4?: Record<string, unknown>[]; titleHolds?: { scope: string; parent: string | null; len: number; tried: string[]; reason: string; kept: string }[] }
+  debug: { titleProblems: string[]; candidatesUsed: string[]; titleRetried: boolean; designName?: string; designSource?: string; multiDesign?: boolean; designGroups?: string[]; nicheSeeds?: string[]; v4?: Record<string, unknown>[]; titleHolds?: SettleTitleHold[] }
   /** #79 per-section regen: set when onlySection ran — ONLY that section's fields are
    *  meaningful; the route merges them into the STORED recommendation row. */
   regeneratedSection?: 'title' | 'bullets' | 'description' | 'keywords'
@@ -8570,7 +8570,7 @@ export function computeBroadcastShipDoorScope(
   familyDesignVocab: readonly { key: string; name: string }[],
   familyTitleText: string,
 ): { foreignTokens: Set<string>; protectHay: string } {
-  const scope = buildForeignDesignTokens(familyDesignVocab, { familyTitleText, poolKeywords: [], strictNames: true })
+  const scope = buildForeignDesignTokens([...familyDesignVocab], { familyTitleText, poolKeywords: [], strictNames: true })
   const foreignTokens = scope('__broadcast__')
   const siblingNamesLower = new Set(familyDesignVocab.map((d) => d.name.toLowerCase()))
   const protectHay = familyDesignNames.filter((n) => !siblingNamesLower.has(n.toLowerCase())).join(' ')
@@ -9567,7 +9567,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   /* OPERATOR-VISIBLE HOLDS from the terminal truth+band net. One entry per title that could not be
    * shipped truthful AND in band; surfaced on `debug.titleHolds` and appended to `titleProblems`,
    * so the refusal is readable from the regen response itself and never needs a log grep. */
-  const titleBandHolds: { scope: string; parent: string | null; len: number; tried: string[]; reason: string; kept: string }[] = []
+  const titleBandHolds: SettleTitleHold[] = []
   const bandTitle = (
     title: string,
     produced: boolean,
@@ -10005,7 +10005,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       ...r.debug,
       titleProblems: [
         ...(r.debug?.titleProblems ?? []),
-        ...titleBandHolds.map((h) => `[${h.scope}] TITLE HELD — ${h.reason} (kept: "${h.kept}")`),
+        // PO ruling 2026-08-24: a hold that keeps a title `verdictForAssembledTitle` KNOWS fails
+        // truth (`refused-kept-lying-prior` — the 65-char floor's own consequence) gets an explicit
+        // marker so it never reads as an ordinary band-unreachable hold in this human-readable list.
+        ...titleBandHolds.map((h) => `${h.decision === 'refused-kept-lying-prior' ? '[LYING PRIOR KEPT] ' : ''}[${h.scope}] TITLE HELD — ${h.reason} (kept: "${h.kept}")`),
       ],
       ...(titleBandHolds.length ? { titleHolds: titleBandHolds.map((h) => ({ ...h })) } : {}),
     },

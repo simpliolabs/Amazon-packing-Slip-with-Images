@@ -215,16 +215,26 @@ describe('enforceTitleTruthBand never ships an empty title on a hold', () => {
     expect(r.title).toBe(r.netted)
   })
 
-  it('CHARACTERIZATION PIN — prior set but ALSO fails truth: `netted` outranks it (round 2 shipped the prior here; round 3 does not)', () => {
+  it('CHARACTERIZATION PIN — prior set but ALSO fails truth, and `best` never clears the floor: PO ruling 2026-08-24 keeps the prior (round 2 shipped the prior; round 3 shipped netted instead; round 4 — this fix — keeps the prior again, but for a NEW reason and under a NEW, distinct decision)', () => {
     const priorAlsoUntrue = 'THE CEO Cute Dino Graphic Tee Shirt | Cotton Blend' // also missing the youth marker
     const r = enforceTitleTruthBand({ produced, prior: priorAlsoUntrue, apparel: true, band, truth, protect: 'Cute Dino' })
-    expect(r.decision).toBe('shipped-truthful-under-band')
+    // `produced` itself fails verdictForAssembledTitle (missing-youth-marker) and the band has
+    // nothing appendable (empty factSegments/poolSegments), so `settleTruthBand`'s search seeds
+    // `best` EMPTY (CRITICAL-2's own seed-from-verified-only rule) and never grows it — 0 chars,
+    // nowhere near TITLE_TRUTHFUL_SHIP_FLOOR (65). Round 3's "netted outranks the prior" reasoning
+    // assumed `best`/`netted` was a usable, if short, truthful candidate; here it is not even that.
+    // The 2026-08-24 floor therefore routes this to the NEW `refused-kept-lying-prior` decision, not
+    // `shipped-truthful-under-band` — a hold that knowingly keeps a title failing truth, which
+    // callers MUST surface (see SettleTitleHold.decision / ai-recommendations' title_truth_warning).
+    expect(r.decision).toBe('refused-kept-lying-prior')
     expect(r.hold).toBe(true)
-    expect(r.title).toBe(r.netted)
-    // Round 2's PO ruling ("a usable-but-untrue prior may be KEPT") covered PRESERVING existing
-    // stored copy against being overwritten by nothing. It did not authorise preferring a
-    // known-untrue prior over this run's own already-scrubbed material once one exists.
-    expect(r.title).not.toBe(priorAlsoUntrue)
+    expect(r.title).toBe(priorAlsoUntrue)
+    expect(r.title.length).toBe(priorAlsoUntrue.length)
+    expect(r.title.length).toBe(50)
+    // `netted` (this run's own already-scrubbed material) is still reported for diagnostics, even
+    // though it no longer wins — it is exactly `produced` here (nothing for the truth net to remove).
+    expect(r.netted).toBe(produced)
+    expect(r.netted.length).toBe(73)
   })
 
   /**
