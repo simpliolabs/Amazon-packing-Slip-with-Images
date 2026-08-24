@@ -261,7 +261,31 @@ describe('THE POOL IS GATED, NOT TRUSTED — a pad that adds untrue material is 
 describe('THE SEVEN STRINGS — pinned', () => {
   it('matches exactly, byte for byte', () => {
     const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r.title]))
-    expect(byScope.broadcast).toBe('THE CEO Motivational Entrepreneur | Long Sleeve Pullover Fall Crewneck')
+    // BROADCAST RE-PINNED (review round 1, 2026-08-23 — IMPORTANT finding; comment corrected in
+    // review round 2 — the mechanism below was misattributed). This harness's broadcast row used to
+    // pass `protect: designNames().join(' ')` with no `foreignTokens`/`reject` — the PRE-Task-1
+    // shape — so "Entrepreneur" (shared with the sibling design "Entrepreneur Definition") read as
+    // this exit's OWN protected vocabulary and the additive search could freely refill around it.
+    // NOT because `foreignTokens` "wins" over `protect` at the word level — it does not: `contentTruth.ts`'s
+    // word-level scrub keeps a chunk whenever it is BOTH foreign AND protected (`foreign &&
+    // !protectedTok ? '' : chunk` — protect wins the tie). The actual mechanism, wired this round via
+    // `computeBroadcastDesignScope`: on THIS fixture all six design names are per-child names, so the
+    // family/per-design theme subtraction leaves `broadcastThemeNames: []` and `broadcastProtectHay:
+    // ''` — §3.2 resolution #3, applied verbatim ("If the subtraction leaves the broadcast with NO
+    // design vocabulary at all, that is the correct outcome"). "Entrepreneur" was never IN
+    // `broadcastProtectHay` to begin with, so there is no tie for protect to win — it is simply
+    // foreign and unprotected, and gets scrubbed exactly as any other sibling-design word would be.
+    // (Final whole-branch review 2026-08-24, CRITICAL 3: the harness now computes this via
+    // `buildForeignDesignTokens` directly, matching production's `scrubPublished` — not via
+    // `computeBroadcastDesignScope`, whose foreignTokens/protectHay outputs neither the pipeline nor
+    // this harness consume anymore; same result on THIS fixture, correctly-sourced mechanism.) The
+    // head shrinks to "Motivational" alone, the additive search can no longer refill it into band
+    // from true material, and the door correctly FALLS BACK to the prior (`PRIOR_PARENT`, itself
+    // truthful and in band) under an honest hold — this is the PO-approved trade (truth outranks
+    // band), not a regression.
+    // The other six rows are BYTE-IDENTICAL: none of their `protect`/`foreignTokens`/`reject` wiring
+    // changed this round.
+    expect(byScope.broadcast).toBe('THE CEO Motivational Sweatshirt | Long Sleeve Pullover Crewneck Gift Set')
     expect(byScope.BB).toBe('THE CEO Business B*tch Graphic Casual | Long Sleeve Pullover Fall Crewneck')
     expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Long Sleeve Pullover Crewneck')
     expect(byScope.DQ).toBe("THE CEO Don't Quit Sweatshirt | Long Sleeve Pullover Crewneck Gift Set")
@@ -270,11 +294,12 @@ describe('THE SEVEN STRINGS — pinned', () => {
     expect(byScope.MH).toBe('THE CEO Mother Hustler Hoodie | Long Sleeve Hooded Sweatshirt Cozy Gift')
   })
 
-  it('DQ and MH are the two honest holds — pinned so a regression that makes them "succeed" differently is reviewed too', () => {
+  it('DQ, MH and (as of this round) broadcast are the three honest holds — pinned so a regression that makes them "succeed" differently is reviewed too', () => {
     const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r]))
     expect(byScope.DQ.hold).toBe(true)
     expect(byScope.MH.hold).toBe(true)
-    expect(byScope.broadcast.hold).toBe(false)
+    // Was `false` before this round's broadcast-partition fix — see the doc on the title pin above.
+    expect(byScope.broadcast.hold).toBe(true)
     expect(byScope.BB.hold).toBe(false)
     expect(byScope.BCS.hold).toBe(false)
     expect(byScope.ED.hold).toBe(false)
