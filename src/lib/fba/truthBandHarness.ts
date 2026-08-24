@@ -302,6 +302,15 @@ function buildSettleCtx(params: {
   reject?: (seg: string) => boolean
   foreignTokens?: ReadonlySet<string>
   holdScope: string
+  /** THE POOL'S OWN reject, DISTINCT from `reject` above (review round 2, 2026-08-23 — NEW
+   *  BREAKAGE 2). Production's broadcast band ctx builds its pool with NO rejector at all
+   *  (`bandPoolSegments = poolSegmentsFor(bandTruthOk)`, `listingPipeline.ts:9358`) — a family hub
+   *  is answerable to every design, so nothing is foreign to its OWN pool; only a per-child ctx
+   *  filters (`poolSegmentsFor(bandTruth, reject)`, `:9827`). `reject` above still governs the
+   *  TRUTH NET (`applyTitleTruthNet`'s `rejectSegment`) on every exit — that part is genuinely
+   *  the same on broadcast and per-child. Absent ⇒ unfiltered pool, matching the broadcast default;
+   *  the per-child call site below passes its own `reject` here too. */
+  poolReject?: (seg: string) => boolean
 }): SettleTitleCtx {
   const truthOk = (s: string): boolean => !params.truth || phraseTruthVerdict(s, params.truth).ok
   const bandCtxFor = (title: string): TitleBandCtx => ({
@@ -309,7 +318,7 @@ function buildSettleCtx(params: {
     customizable: false,
     garmentBrand: params.brand || null,
     factSegments: garmentFacts(params.fams, title),
-    poolSegments: poolFacts(truthOk, params.reject),
+    poolSegments: poolFacts(truthOk, params.poolReject),
     truthOk,
     spec: params.spec ? { fit: params.spec.fit ? `${params.spec.fit} Fit` : null, sleeve: params.spec.sleeve ?? null, neck: params.spec.neck ?? null } : null,
     garmentSecond: pickDistinctGarmentForm(title, resolveGarment({ productType: PRODUCT_TYPE, title, blankFamily: params.fams[0] ?? null }).aliases),
@@ -395,18 +404,15 @@ export function runTruthBandHarness(): HarnessResult {
    * that is the one exit answerable to every child AT ONCE and therefore may only commit to the
    * class that actually speaks for the family. */
   const broadcastUnion: GarmentFamily[] = familyRes.garmentFamily ? [familyRes.garmentFamily] : []
-  const broadcastCtx = familyRes.garmentFamily
-    ? mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null)
-    : null
-
-  const rows: HarnessRow[] = []
 
   // THE BROADCAST PARTITION (review round 1, 2026-08-23 — IMPORTANT finding). Every design in this
   // fixture family IS its own per-child scope (mirrors production's `priorPerChildTitles`), so the
   // theme/foreign split subtracts all six design names from the family set — on THIS fixture that
   // leaves `themeNames` empty and `protectHay: ''`, which is the CORRECT outcome per §3.2 of
   // handoff/TITLE_ADMISSION_IS_VERIFICATION.md: a parent with no family-level vocabulary left after
-  // the subtraction must never fall back to permitting a design name.
+  // the subtraction must never fall back to permitting a design name. Computed BEFORE `broadcastCtx`
+  // (moved up in review round 2 — MINOR 2) so `broadcastCtx.designTokens` can use `themeNames`
+  // instead of `mkCtx`'s default full `designNames()`.
   const broadcastScope = computeBroadcastDesignScope(
     designNames(), {}, DESIGNS.map((d) => ({ designName: d.name })),
   )
@@ -414,6 +420,20 @@ export function runTruthBandHarness(): HarnessResult {
   // applied against the broadcast partition's UNION set instead of one design's own foreign set —
   // exactly `broadcastReject` in listingPipeline.ts's `bandTitle` closure.
   const broadcastReject = (seg: string): boolean => isForeignToDesign(seg, broadcastScope.foreignTokens)
+
+  // NARROWED designTokens (review round 2, 2026-08-23 — MINOR 2): production narrows the broadcast
+  // truth ctx's own `designTokens` to `broadcastThemeNames` (`listingPipeline.ts:9214`, §3.2
+  // resolution #2) — this harness still passed the FULL `designNames()` via `mkCtx`'s default. Since
+  // `titleNetActsOn` gates the kids/adult act-points on `designTokens.length > 0`
+  // (`contentTruth.ts:420`), an un-narrowed broadcast ctx exercises a code path production would
+  // actually skip on this exit. No behavioural difference on this adult-only fixture (the gate in
+  // question never fires either way here), but this makes the row a faithful mirror, not merely an
+  // accidentally-equivalent one.
+  const broadcastCtx = familyRes.garmentFamily
+    ? { ...mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null), designTokens: broadcastScope.themeNames }
+    : null
+
+  const rows: HarnessRow[] = []
 
   // THE DOOR, on the PARENT/broadcast title — no per-design scope: a family hub title is answerable
   // to every design, exactly as listingPipeline.ts calls `bandTitle` for `recommended_title`.
@@ -459,6 +479,9 @@ export function runTruthBandHarness(): HarnessResult {
     const ctx = buildSettleCtx({
       truth: ctxTruth, fams, spec: res.spec ?? familyRes.spec, brand,
       protect: d.name, prior: PRIOR[d.key], reject, foreignTokens: foreign, holdScope: d.key,
+      // Per-child DOES filter its own pool (production `poolSegmentsFor(bandTruth, reject)`,
+      // listingPipeline.ts:9827) — only the broadcast row above is unfiltered.
+      poolReject: reject,
     })
     const r = settleTitle(raw, ctx)
     const r2 = settleTitle(r.title, { ...ctx, produced: true })

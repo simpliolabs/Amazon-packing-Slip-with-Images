@@ -1679,6 +1679,18 @@ export function enforceTitleTruthBand(args: {
    *  Defaults to the band's own truthful pool segments, which is the same material any fill could
    *  have harvested a fragment from. */
   orphanPool?: readonly string[]
+  /** THE EMPTY-TITLE RATCHET GUARD's last resort (review round 2, 2026-08-23 — NEW BREAKAGE 1).
+   *  `settleTruthBand`'s refusal branches (`shipped-truthful-under-band`, `unreachable-no-prior`)
+   *  can legitimately compute an empty `best` — the correct consequence of the seed only ever being
+   *  a VERIFIED `produced` (round-1 fix) — but a hold must never actually SHIP '': persisted
+   *  `recommended_title` has no empty check downstream, and the next run reads `priorTitle` from
+   *  that same stored value, so an unguarded '' is a one-way ratchet, not a one-run blip. Preferred
+   *  fallback is always `args.prior` when it is USABLE (non-empty, fits the 75-char cap — the SAME
+   *  bar `settleTruthBand`'s own refusal branches already use for a preservable prior, deliberately
+   *  not "passes the full truth predicate": that would recreate the exact dead end that produced an
+   *  empty `best`). This is the fallback of LAST resort, for when the prior is itself unusable —
+   *  the caller should pass its own run's producer output (already cap-safe), never a fresh guess. */
+  emptyHoldFallback?: string
 }): TruthBandResult & { netted: string } {
   const truthed = args.truth
     ? applyTitleTruthNet(args.produced, args.truth, args.protect ?? '', {
@@ -1728,6 +1740,21 @@ export function enforceTitleTruthBand(args: {
         title: keep, decision: 'refused-kept-prior', len: keep.length, tried: settled.tried,
         reason: `final whole-title verification failed (${verdict.reason}) on "${finalTitle}" — kept ${priorTrim ? 'the prior title' : 'the truthful net result'} rather than ship`,
         hold: true, netted,
+      }
+    }
+  }
+  /* THE EMPTY-TITLE RATCHET GUARD, applied. See `emptyHoldFallback`'s doc above for why. Scoped to
+   * `settled.hold` only — a NON-hold exit (`in-band`/`refilled`) never reaches here empty, because
+   * `finalTitle` is a casing-only transform of a `settleTruthBand` result that already verified
+   * non-empty content to get there. */
+  if (settled.hold && !finalTitle.trim()) {
+    const priorTrim = (args.prior || '').trim()
+    const priorUsable = priorTrim.length > 0 && priorTrim.length <= TITLE_BAND_HI
+    const fallback = (priorUsable ? priorTrim : (args.emptyHoldFallback || '').trim())
+    if (fallback) {
+      return {
+        ...settled, netted, title: fallback, len: fallback.length,
+        reason: `${settled.reason} — EMPTY-TITLE GUARD: the door would otherwise have shipped '' (a stored-recommendation ratchet); kept ${priorUsable ? 'the prior title' : "this run's own producer output"} instead`,
       }
     }
   }
@@ -2593,12 +2620,27 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   // 7. COLOR STRIP — §5: shared copy carries no color word; colors rank per-child via the backend tail.
   const colorNet = stripVariantColorWords(moneyed, { apparel: ctx.apparel, protect: ctx.colorProtect, band: ctx.bandCtxFor(moneyed), verify: verifyCtx })
   console.log(JSON.stringify({ tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision, from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note }))
+  /* MAKE THE REFUSAL VISIBLE (review round 2, 2026-08-23 — NEW BREAKAGE 3). Arming this stage's own
+   * pad with `verify` (this round's CRITICAL 1 fix) can make `padded` land SHORTER than it used to
+   * — a lying candidate that used to reach `removalPermitted`'s floor is now correctly refused, so
+   * the floor check that gated the removal can now fail where it didn't before. The removal net
+   * itself already returns 'band-guard' byte-identical (unchanged behaviour, still correct), but a
+   * §5 color-word violation silently persisting past a routine INFO line is exactly the failure
+   * mode this whole plan exists to end — so a NEW refusal of this specific shape gets its own WARN,
+   * grep-able independent of the routine per-stage trace above. */
+  if (colorNet.decision === 'band-guard') {
+    console.warn(JSON.stringify({ tag: 'TITLE_STAGE_REFUSED_VISIBLE', stage: 'color-strip', parent: ctx.parentAsin, scope: ctx.holdScope, title: colorNet.title, note: colorNet.note }))
+  }
   moneyed = colorNet.title
 
   // 8. INCLUSIVE AUDIENCE — "for Men and Women" is character waste (§4). After the money tail: it
   //    already had first refusal on the same tail region.
   const inc = enforceInclusiveAudience(moneyed, { apparel: ctx.apparel, lean: ctx.lean, band: ctx.bandCtxFor(moneyed), verify: verifyCtx })
   console.log(JSON.stringify({ tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision, from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note }))
+  // Same visibility fix as the color strip immediately above — see that comment.
+  if (inc.decision === 'band-guard') {
+    console.warn(JSON.stringify({ tag: 'TITLE_STAGE_REFUSED_VISIBLE', stage: 'inclusive-audience', parent: ctx.parentAsin, scope: ctx.holdScope, title: inc.title, note: inc.note }))
+  }
   moneyed = inc.title
 
   // 9. FACTS PAD — suppressed at TITLE_V4=on ("never ship short — always ask me"), UNLESS the prior
@@ -2669,6 +2711,13 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
     produced: drop.title, prior: ctx.prior, apparel: ctx.apparel, band: ctx.bandCtxFor(drop.title),
     truth: ctx.truth, protect: ctx.protect, reject: ctx.reject, foreignTokens: ctx.foreignTokens,
     scrubProtectedOverlap: ctx.scrubProtectedOverlap,
+    // EMPTY-TITLE RATCHET GUARD (review round 2, 2026-08-23 — NEW BREAKAGE 1). See
+    // `enforceTitleTruthBand`'s own doc on `emptyHoldFallback` for the full account: a hold must
+    // never emit '' (persisted `recommended_title` has no empty check, and the NEXT run reads
+    // `priorTitle` from that same stored value, so an unguarded '' is a one-way ratchet). `raw` is
+    // this run's own producer output, guaranteed non-empty (`settleTitle` returned at its own top
+    // guard otherwise) — the last-resort fallback when `ctx.prior` is itself unusable.
+    emptyHoldFallback: ctx.capTitle75(raw),
   })
   console.log(JSON.stringify({
     tag: 'TITLE_TRUTH_BAND', scope: ctx.holdScope, parent: ctx.parentAsin, decision: settled.decision,

@@ -261,18 +261,25 @@ describe('THE POOL IS GATED, NOT TRUSTED — a pad that adds untrue material is 
 describe('THE SEVEN STRINGS — pinned', () => {
   it('matches exactly, byte for byte', () => {
     const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r.title]))
-    // BROADCAST RE-PINNED (review round 1, 2026-08-23 — IMPORTANT finding). This harness's broadcast
-    // row used to pass `protect: designNames().join(' ')` with no `foreignTokens`/`reject` — the
-    // PRE-Task-1 shape — so "Entrepreneur" (shared with the sibling design "Entrepreneur Definition")
-    // read as this exit's OWN protected vocabulary and the additive search could freely refill
-    // around it. Wired to `computeBroadcastDesignScope` (this round), the SAME word is now correctly
-    // `foreignTokens`-flagged — per handoff/TITLE_ADMISSION_IS_VERIFICATION.md §3.2 resolution #1,
-    // "foreignTokens WINS over protect" — and gets scrubbed from the broadcast title exactly as it
-    // would for any other sibling-design word. The head shrinks to "Motivational" alone, the
-    // additive search can no longer refill it into band from true material, and the door correctly
-    // FALLS BACK to the prior (`PRIOR_PARENT`, itself truthful and in band) under an honest hold —
-    // this is the PO-approved trade (truth outranks band), not a regression. The other six rows are
-    // BYTE-IDENTICAL: none of their `protect`/`foreignTokens`/`reject` wiring changed this round.
+    // BROADCAST RE-PINNED (review round 1, 2026-08-23 — IMPORTANT finding; comment corrected in
+    // review round 2 — the mechanism below was misattributed). This harness's broadcast row used to
+    // pass `protect: designNames().join(' ')` with no `foreignTokens`/`reject` — the PRE-Task-1
+    // shape — so "Entrepreneur" (shared with the sibling design "Entrepreneur Definition") read as
+    // this exit's OWN protected vocabulary and the additive search could freely refill around it.
+    // NOT because `foreignTokens` "wins" over `protect` at the word level — it does not: `contentTruth.ts`'s
+    // word-level scrub keeps a chunk whenever it is BOTH foreign AND protected (`foreign &&
+    // !protectedTok ? '' : chunk` — protect wins the tie). The actual mechanism, wired this round via
+    // `computeBroadcastDesignScope`: on THIS fixture all six design names are per-child names, so the
+    // family/per-design theme subtraction leaves `themeNames: []` and `protectHay: ''` — §3.2
+    // resolution #3, applied verbatim ("If the subtraction leaves the broadcast with NO design
+    // vocabulary at all, that is the correct outcome"). "Entrepreneur" was never IN `protectHay` to
+    // begin with, so there is no tie for protect to win — it is simply foreign and unprotected, and
+    // gets scrubbed exactly as any other sibling-design word would be. The head shrinks to
+    // "Motivational" alone, the additive search can no longer refill it into band from true material,
+    // and the door correctly FALLS BACK to the prior (`PRIOR_PARENT`, itself truthful and in band)
+    // under an honest hold — this is the PO-approved trade (truth outranks band), not a regression.
+    // The other six rows are BYTE-IDENTICAL: none of their `protect`/`foreignTokens`/`reject` wiring
+    // changed this round.
     expect(byScope.broadcast).toBe('THE CEO Motivational Sweatshirt | Long Sleeve Pullover Crewneck Gift Set')
     expect(byScope.BB).toBe('THE CEO Business B*tch Graphic Casual | Long Sleeve Pullover Fall Crewneck')
     expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Long Sleeve Pullover Crewneck')
