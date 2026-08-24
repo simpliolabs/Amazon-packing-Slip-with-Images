@@ -43,13 +43,11 @@ import {
 } from './titleBand'
 import { resolveGarment } from './garmentNoun'
 import { buildForeignDesignTokens, isForeignToDesign } from './designScope'
-// THE BROADCAST PARTITION (review round 1, 2026-08-23 — IMPORTANT finding): this harness had ZERO
-// commits on the admission-is-verification branch, so its broadcast row still passed the PRE-Task-1
-// shape (`protect` = every design name, no `reject`, no `foreignTokens`) — a harness that cannot see
-// the change under test is worse than no harness. Imports Task 1's own pure, already-unit-tested
-// extraction (`broadcastForeignNames.test.ts`) rather than re-deriving the family/per-design split a
-// second time — no second predicate, per this plan's own corollary.
-import { computeBroadcastDesignScope } from './listingPipeline'
+// THE BROADCAST PARTITION (final whole-branch review 2026-08-24, CRITICAL 3): this harness now
+// calls `buildForeignDesignTokens` directly — the SAME canonical seam `scrubPublished` in
+// `listingPipeline.ts` uses for the real ship door — instead of importing a pipeline-internal
+// function (`computeBroadcastDesignScope`) whose outputs the pipeline itself no longer consumes for
+// this purpose. See the broadcast-scope block below for the full history.
 
 /* ── THE CATALOG, exactly as migrations 053 + 058 seed `blank_specs` ──────────────────────────── */
 
@@ -405,21 +403,43 @@ export function runTruthBandHarness(): HarnessResult {
    * class that actually speaks for the family. */
   const broadcastUnion: GarmentFamily[] = familyRes.garmentFamily ? [familyRes.garmentFamily] : []
 
-  // THE BROADCAST PARTITION (review round 1, 2026-08-23 — IMPORTANT finding). Every design in this
-  // fixture family IS its own per-child scope (mirrors production's `priorPerChildTitles`), so the
-  // theme/foreign split subtracts all six design names from the family set — on THIS fixture that
-  // leaves `themeNames` empty and `protectHay: ''`, which is the CORRECT outcome per §3.2 of
-  // handoff/TITLE_ADMISSION_IS_VERIFICATION.md: a parent with no family-level vocabulary left after
-  // the subtraction must never fall back to permitting a design name. Computed BEFORE `broadcastCtx`
-  // (moved up in review round 2 — MINOR 2) so `broadcastCtx.designTokens` can use `themeNames`
-  // instead of `mkCtx`'s default full `designNames()`.
-  const broadcastScope = computeBroadcastDesignScope(
-    designNames(), {}, DESIGNS.map((d) => ({ designName: d.name })),
-  )
+  // THE BROADCAST PARTITION (final whole-branch review 2026-08-24, CRITICAL 3 — this harness
+  // MIRRORED the wiring instead of CONSUMING it: it imported `computeBroadcastDesignScope` from
+  // `listingPipeline.ts` — a hand-rolled split with NO niche/name-share exemption and NO
+  // family-title/garment-noun exemption — while the ACTUAL production ship door (`scrubPublished`,
+  // CRITICAL 1+2 fix) no longer uses that function's `foreignTokens`/`protectHay` outputs at all; it
+  // calls `buildForeignDesignTokens` directly, from `r.per_child_titles`. Grep confirmed NOTHING
+  // read the pipeline's real broadcast values except comments — a harness that cannot see the real
+  // wiring is worse than no harness. THE CURE: call the SAME canonical seam
+  // (`buildForeignDesignTokens`, designScope.ts) the SAME way `scrubPublished` now does — no second
+  // partition, no reach into `listingPipeline.ts` internals at all.
+  //
+  // Every design in this fixture family IS its own per-child scope (mirrors production's
+  // `r.per_child_titles`), so the theme/foreign split subtracts all six design names from the
+  // family set — on THIS fixture that leaves `broadcastThemeNames` empty and `broadcastProtectHay:
+  // ''`, which is the CORRECT outcome per §3.2 of handoff/TITLE_ADMISSION_IS_VERIFICATION.md: a
+  // parent with no family-level vocabulary left after the subtraction must never fall back to
+  // permitting a design name. Computed BEFORE `broadcastCtx` so `broadcastCtx.designTokens` can use
+  // `broadcastThemeNames` instead of `mkCtx`'s default full `designNames()`.
+  const familyDesignVocab = DESIGNS.map((d) => ({ key: d.key, name: d.name }))
+  const broadcastDesignScope = buildForeignDesignTokens(familyDesignVocab, {
+    // `PRIOR_PARENT` — the closest fixture analog to production's `${canonicalTitle} ${priorTitle}`
+    // (this harness has no separate "canonical title" concept) — restores the garment-noun exemption
+    // exactly as `scrubPublished`'s own `familyTitleText` does.
+    familyTitleText: PRIOR_PARENT,
+    poolKeywords: [],
+    strictNames: true,
+  })
+  // Queried with a key no design owns, matching `scrubPublished`'s `'__broadcast__'` sentinel:
+  // `buildForeignDesignTokens`'s documented unknown-key path is "the union of every design's name
+  // tokens minus the niche exemptions" — spec §3.2's broadcast rule verbatim.
+  const broadcastForeignTokens = broadcastDesignScope('__broadcast__')
+  const broadcastThemeNames = designNames().filter((n) => !isForeignToDesign(n, broadcastForeignTokens))
+  const broadcastProtectHay = broadcastThemeNames.join(' ')
   // SAME whole-phrase rejector the per-child partition below binds per-key (`isForeignToDesign`),
   // applied against the broadcast partition's UNION set instead of one design's own foreign set —
-  // exactly `broadcastReject` in listingPipeline.ts's `bandTitle` closure.
-  const broadcastReject = (seg: string): boolean => isForeignToDesign(seg, broadcastScope.foreignTokens)
+  // exactly `broadcastReject` in listingPipeline.ts's `scrubPublished` closure.
+  const broadcastReject = (seg: string): boolean => isForeignToDesign(seg, broadcastForeignTokens)
 
   // NARROWED designTokens (review round 2, 2026-08-23 — MINOR 2): production narrows the broadcast
   // truth ctx's own `designTokens` to `broadcastThemeNames` (`listingPipeline.ts:9214`, §3.2
@@ -430,7 +450,7 @@ export function runTruthBandHarness(): HarnessResult {
   // question never fires either way here), but this makes the row a faithful mirror, not merely an
   // accidentally-equivalent one.
   const broadcastCtx = familyRes.garmentFamily
-    ? { ...mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null), designTokens: broadcastScope.themeNames }
+    ? { ...mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null), designTokens: broadcastThemeNames }
     : null
 
   const rows: HarnessRow[] = []
@@ -444,7 +464,7 @@ export function runTruthBandHarness(): HarnessResult {
       // "protect" from "foreignTokens" on this exit and so could never see a sibling name land on
       // the broadcast title even if the production fix regressed — a harness blind to the change
       // under test is worse than no harness.
-      protect: broadcastScope.protectHay, reject: broadcastReject, foreignTokens: broadcastScope.foreignTokens,
+      protect: broadcastProtectHay, reject: broadcastReject, foreignTokens: broadcastForeignTokens,
       prior: PRIOR_PARENT, holdScope: 'broadcast',
     })
     const r = settleTitle(RAW_PARENT, ctx)
