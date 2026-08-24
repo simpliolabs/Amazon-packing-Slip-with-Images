@@ -783,6 +783,15 @@ export interface MoneyTailCtx {
    *  whole-string verify `settleTruthBand`'s search runs on every candidate it assembles, applied
    *  here too so a market keyword cannot win the money slot by carrying another design's identity. */
   foreignTokens?: ReadonlySet<string>
+  /** THE WHOLE-SEGMENT twin of `foreignTokens` (PO 2026-08-23, admission-is-verification pass).
+   *  `applyTitleTruthNet` only drops or word-scrubs a NON-money-phrase segment when this fires (or
+   *  the segment is independently untrue) — `foreignTokens` alone never does, because the money
+   *  keyword always lands on the pipe-RIGHT, never segment 0, and segment 0 is the only span
+   *  `scrubMoneyPhrase` word-scrubs unconditionally. Without this, `ctx.foreignTokens` above was
+   *  dead weight for every money-tail candidate. Same `isForeignToDesign` rejector `settleTitle`'s
+   *  own ctx already binds (`bandScope.reject` / `broadcastReject`) — this only completes the pair
+   *  the caller was already computing, never a second rulebook. */
+  reject?: (seg: string) => boolean
   /**
    * May the net APPEND a money tail where none existed? (PO ruling 2026-08-10.)
    *
@@ -1037,7 +1046,7 @@ export function enforceMoneyTail(
   // already stated on the left in a different spelling, or — per-child scope — a sibling design's
   // name the keyword derivation's own off-niche filters never modeled. Same predicate the additive
   // search uses; a candidate that fails it never wins the slot, no matter how it scored upstream.
-  const verdict = verdictForAssembledTitle(cand, { truth: ctx.truth ?? null, protect: ctx.protect ?? '', foreignTokens: ctx.foreignTokens })
+  const verdict = verdictForAssembledTitle(cand, { truth: ctx.truth ?? null, protect: ctx.protect ?? '', foreignTokens: ctx.foreignTokens, reject: ctx.reject })
   if (!verdict.ok) {
     return { title: t0, decision: 'truth-lie', note: `assembled candidate fails whole-title verification (${verdict.reason})` }
   }
@@ -1085,7 +1094,19 @@ export function tryMoneyTail(
  *     both here would fight it
  *   - never emits a dangling separator
  */
-export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: string; notes: string[]; decision: TitleBandDecision } {
+export function enforceTitleBand(
+  title: string,
+  ctx: TitleBandCtx,
+  /** ADMISSION IS VERIFICATION (PO 2026-08-23). This pad is the last writer in the door that used
+   *  to accept a candidate on length alone — `settleTruthBand`'s DFS already re-judges every
+   *  candidate it assembles, so a candidate this pad would admit and the DFS would reject is not a
+   *  candidate at all, it is a lie waiting for the DFS's own `best`-seed to inherit it (live
+   *  2026-08-23: "Business B*tch Sweatshirt for Men", a sibling design's name, landed at 69 chars —
+   *  under band, so the length-only `best = cand` branch took it with no truth check at all).
+   *  OPTIONAL, and absent ⇒ length-only accept, byte-identical to the pre-2026-08-23 behaviour —
+   *  the same fail-open every other truth-ctx consumer in this file already takes. */
+  verify?: AssembledTitleCtx,
+): { title: string; notes: string[]; decision: TitleBandDecision } {
   const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
   if (!t0) return { title, notes: [], decision: 'empty' } // empty is the degrade gate's call, never the net's
   if (!ctx.apparel) return { title: t0, notes: [], decision: 'non-apparel' }
@@ -1105,6 +1126,12 @@ export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: str
   for (const seg of candidateSegments(t0, ctx)) {
     const cand = `${head}${joiner}${seg}${tail}`.replace(/\s{2,}/g, ' ').trim()
     if (cand.length > TITLE_BAND_HI) continue
+    // ADMISSION IS VERIFICATION (PO 2026-08-23): a candidate the exit predicate would reject is not
+    // a candidate — at EITHER accept point below, not just the in-band one. The 'facts-exhausted'
+    // branch is not a lesser guarantee than 'padded'; the live sibling-name defect shipped THROUGH
+    // this branch specifically, under band, where nothing downstream can re-verify the seed it hands
+    // to the DFS's own `best`.
+    if (verify && !verdictForAssembledTitle(cand, verify).ok) continue
     if (cand.length >= TITLE_BAND_LO) {
       // First candidate that lands IN band wins — ordered by product-signal strength, so this is
       // deterministic and explainable rather than "whichever happened to fit".
@@ -2529,11 +2556,14 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   //    avoid manufacturing text, it just manufactures a WORSE outcome (a shipped lie) by omission.
   //    Judged with the SAME predicate every candidate this door assembles is judged by — no second
   //    "is this true" rulebook.
-  const priorForV4 = (ctx.prior || '').trim()
-  const priorFailsTruthForV4 = !!priorForV4 && !verdictForAssembledTitle(priorForV4, {
+  // THE WHOLE-STRING VERIFY CTX, bound once — same shape `settleTruthBand` binds for its own DFS,
+  // reused here so the facts pad (below) and the prior-truth check judge candidates the SAME way.
+  const verifyCtx: AssembledTitleCtx = {
     truth: ctx.truth, protect: ctx.protect, foreignTokens: ctx.foreignTokens, reject: ctx.reject,
     scrubProtectedOverlap: ctx.scrubProtectedOverlap,
-  }).ok
+  }
+  const priorForV4 = (ctx.prior || '').trim()
+  const priorFailsTruthForV4 = !!priorForV4 && !verdictForAssembledTitle(priorForV4, verifyCtx).ok
   const padSuppressed = ctx.v4NoPad && !priorFailsTruthForV4
   if (ctx.v4NoPad && priorFailsTruthForV4) {
     console.warn(JSON.stringify({
@@ -2543,7 +2573,9 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   }
   const v = padSuppressed
     ? { title: moneyed, decision: 'v4-no-pad' as const, notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
-    : enforceTitleBand(moneyed, ctx.bandCtxFor(moneyed))
+    // ADMISSION IS VERIFICATION (PO 2026-08-23): the facts pad may not accept a candidate the door's
+    // own exit predicate would reject — see `enforceTitleBand`'s `verify` param doc.
+    : enforceTitleBand(moneyed, ctx.bandCtxFor(moneyed), verifyCtx)
   console.log(JSON.stringify({
     tag: 'SHIP_BAND_DECISION', field: 'title', mode: 'on', decision: v.decision,
     from: raw.length, to: v.title.length, changed: v.title !== moneyed, capped: capped.length !== raw.length, note: v.notes[0] ?? '',

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { enforceMoneyTail, TITLE_BAND_LO, TITLE_BAND_HI, type MoneyTailCtx } from './titleBand'
+import { buildPhraseTruthCtx } from './contentTruth'
+import { designScopeTokens, isForeignToDesign } from './designScope'
 
 /* ─────────────────────────────────────────────────────────────────────────────────────────────────
  * enforceMoneyTail (#147 title half, TITLE_MONEY_TAIL) — the deterministic gold-shape net.
@@ -315,5 +317,42 @@ describe('enforceMoneyTail — apply table', () => {
       expect(v.title.startsWith(`${left} | `)).toBe(true) // brand + design + noun untouched
       expect(v.title).not.toMatch(/\|\s*$/) // never a dangling separator
     }
+  })
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * `MoneyTailCtx.reject` (task 3, admission-is-verification, carried-item judgment).
+ *
+ * `ctx.foreignTokens` alone never protects the money slot: the keyword always assembles onto the
+ * pipe-RIGHT (never segment 0), and `applyTitleTruthNet` only word-scrubs or drops a non-segment-0
+ * span when `opts.rejectSegment` (or an independent truth failure) fires first — `foreignTokens`
+ * only backs a segment ALREADY marked droppable, at the word level. Without `reject`, a market
+ * keyword carrying a sibling design's own name tokens sails through `enforceMoneyTail`'s own
+ * whole-string verify untouched. Production wires `reject` from the SAME `isForeignToDesign`
+ * rejector `settleTitle`'s ctx already binds (`listingPipeline.ts`'s `moneyCtx`) — this pins that
+ * the field actually does something once wired, and that its absence is the pre-existing byte-
+ * identical (fail-open) behavior, never a silent regression for a caller that omits it.
+ */
+describe('MoneyTailCtx.reject — the whole-segment twin foreignTokens alone cannot provide', () => {
+  const truth = buildPhraseTruthCtx(
+    { garmentFamily: 'sweatshirt', mixedFamilies: ['sweatshirt'], spec: null, allowedBrand: null, designTokens: ['Motivational Entrepreneur'] },
+    'title',
+  )
+  // The SAME foreign-token/reject pairing production wires — never a hand-typed token list.
+  const foreignTokens = new Set(designScopeTokens('Business B*tch'))
+  const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
+  const title = 'THE CEO Motivational Entrepreneur Sweatshirt'
+  const kw = 'business hustle for men' // carries the sibling's own "business" token, no garment noun
+
+  it('WITHOUT reject: a sibling-name-bearing keyword ships — foreignTokens alone is dead weight here', () => {
+    const v = enforceMoneyTail(title, kw, { apparel: true, lean: null, spec: null, protect: 'Motivational Entrepreneur', garmentBrand: null, allowAppend: true, truth, foreignTokens })
+    expect(v.decision).toBe('applied')
+    expect(v.title).toMatch(/business/i)
+  })
+
+  it('WITH reject wired: the same candidate is refused — the money slot cannot carry a sibling design name', () => {
+    const v = enforceMoneyTail(title, kw, { apparel: true, lean: null, spec: null, protect: 'Motivational Entrepreneur', garmentBrand: null, allowAppend: true, truth, foreignTokens, reject })
+    expect(v.decision).toBe('truth-lie')
+    expect(v.title).toBe(title) // byte-identical refusal — nothing shipped
   })
 })

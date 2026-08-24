@@ -9563,6 +9563,12 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // undefined; a per-child call always supplies its own (possibly empty) `bandScope.foreignTokens`
       // Set and never falls through.
       foreignTokens: bandScope?.foreignTokens ?? broadcastForeignTokens,
+      // THE WHOLE-SEGMENT twin of `foreignTokens` above (admission-is-verification pass, task 3):
+      // `foreignTokens` alone never drops the money keyword's own segment (it is always the pipe-
+      // RIGHT, never segment 0 — see `MoneyTailCtx.reject`'s doc). Same broadcast/per-child default
+      // keying as `settleTitle`'s own `reject:` field a few lines below — keyed on `bandScope`
+      // PRESENCE, not `bandScope?.reject`, for the identical reason given there.
+      reject: bandScope ? bandScope.reject : broadcastReject,
     }
     const result = settleTitle(title, {
       produced,
