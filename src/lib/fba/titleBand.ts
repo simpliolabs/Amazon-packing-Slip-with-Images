@@ -193,32 +193,6 @@ function alreadyStates(title: string, phrase: string): boolean {
 
 const bandWords = (s: string): string[] => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean)
 
-/**
- * CONCEPT-level distinctness — the SPACING twin of `collapseRepeatedWords`.
- *
- * THE DEFECT, caught by the full-title gate and invisible to every word-level check: a title
- * already ending "…Fall Crewneck" was padded with the blank's `neck` fact "Crew Neck", shipping
- * "| Long Sleeve Fall Crewneck Crew Neck". No word repeats — "crewneck" and "crew"+"neck" are
- * different tokens — so `collapseRepeatedWords`, `alreadyStates` and `wordsAreNew` all pass it. But
- * Amazon indexes the concept ONCE, so the second spelling spends 10 of 75 characters on nothing.
- *
- * The test is flattening: every 1-to-3-word window of the title, letters only, spaces removed. A
- * candidate whose own flattened form is already in that set is the same concept re-spelled, in
- * either direction ("Crew Neck" against "Crewneck", and "Crewneck" against "Crew Neck").
- */
-function titleConcepts(title: string): Set<string> {
-  const w = bandWords(title).filter((x) => !TITLE_CONNECTORS.has(x))
-  const out = new Set<string>()
-  for (let i = 0; i < w.length; i++) {
-    for (let n = 1; n <= 3 && i + n <= w.length; n++) out.add(w.slice(i, i + n).join(''))
-  }
-  return out
-}
-function conceptIsNew(title: string, phrase: string): boolean {
-  const flat = bandWords(phrase).filter((x) => !TITLE_CONNECTORS.has(x)).join('')
-  return flat.length === 0 || !titleConcepts(title).has(flat)
-}
-
 /** Word-level distinctness: TRUE when no significant word of `phrase` already appears in `title`.
  *  `alreadyStates` only catches the whole phrase; this is the same discipline
  *  `pickDistinctGarmentForm` applies to a single garment form, generalised to multi-word facts. */
@@ -288,14 +262,19 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     // ONE CLASS (defect 3) — a candidate naming a DIFFERENT garment class than the title already
     // committed to is skipped, same as an untrue one. Both classes may be individually true
     // (sweatshirt + hoodie); the title still may not name both.
+    //
+    // KEPT DELIBERATELY (task #4 audit, 2026-08-23): `verdictForAssembledTitle`'s equivalent
+    // (`garmentGroupsIn(t).size > 1`) lives INSIDE `if (ctx.truth)` — pinned at
+    // titleBand.test.ts:497, `verdictForAssembledTitle('… Sweatshirt | Hoodie Pullover',
+    // { truth: null }).ok === true`. `committedClass` here is pure text (`dominantGarmentGroup`,
+    // no ctx), so it is the ONLY guard against a two-class title on the fail-open path — an
+    // apparel-heuristic-true (`looksApparel`), blank-UNRESOLVED listing (`truthGarmentFamily`
+    // null independent of `apparelProduct`), which is a real, documented state, not a
+    // hypothetical. Proven NOT redundant; do not delete without re-closing that gap first.
     if (committedClass) {
       const segClass = dominantGarmentGroup(s)
       if (segClass && segClass !== committedClass) return
     }
-    // CONCEPT GATE (2026-08-22): "Crew Neck" onto a title already saying "Crewneck" is the same
-    // concept re-spelled — indexed once, and 10 characters of the 75 spent on nothing. Applies to
-    // EVERY candidate, spec facts included, because the blank's `neck` fact is where it came from.
-    if (!conceptIsNew(title, s)) return
     if (!alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
   // THE YOUTH MARKER (defect 1) leads even "Personalized" — a kids family's title asserting its own
@@ -1217,10 +1196,13 @@ export interface AssembledTitleCtx {
   truth: PhraseTruthCtx | null
   /** Design words that must survive verbatim — same meaning as `applyTitleTruthNet`'s `protectHay`. */
   protect?: string
-  /** Sibling design name tokens this title may never carry (per-child exits only). */
+  /** Sibling design name tokens this title may never carry. Armed on both the per-child AND the
+   *  broadcast/parent exit (task #1, 2026-08-23) — a shared-parent title is answerable to every
+   *  child, so a sibling design's name is just as foreign to it as to any one child's own exit. */
   foreignTokens?: ReadonlySet<string>
-  /** The whole-phrase sibling-name rejector (per-child exits only) — same partition `foreignTokens`
-   *  is built from, at the segment-drop granularity `applyTitleTruthNet.rejectSegment` takes. */
+  /** The whole-phrase sibling-name rejector — same partition `foreignTokens` is built from, at the
+   *  segment-drop granularity `applyTitleTruthNet.rejectSegment` takes. Armed on both the per-child
+   *  AND the broadcast/parent exit, same as `foreignTokens` above. */
   reject?: (seg: string) => boolean
   /** BROADCAST/parent titles only — see `applyTitleTruthNet`'s doc on the same option. */
   scrubProtectedOverlap?: boolean
@@ -1230,11 +1212,14 @@ export type AssembledTitleVerdict = { ok: true } | { ok: false; reason: string }
 
 /**
  * Does a candidate SIBLING span dispute this title — 2 or 3 word window `w`, or a bare word already
- * present — re-state a concept spelled a different way ("Crewneck" vs "Crew Neck")? Self-check twin
- * of `conceptIsNew` (which tests a NEW candidate against an EXISTING title): this tests the ASSEMBLED
- * string against itself, because a combination the additive search built one segment at a time can
- * restate a concept the search never directly compared the two occurrences of. Windows built from a
- * very short (<2 char) word are skipped — not enough signal to avoid a coincidental collision.
+ * present — re-state a concept spelled a different way ("Crewneck" vs "Crew Neck")? Tests the
+ * ASSEMBLED string against itself, because a combination the additive search built one segment at a
+ * time can restate a concept the search never directly compared the two occurrences of. Windows
+ * built from a very short (<2 char) word are skipped — not enough signal to avoid a coincidental
+ * collision. Formerly had a pad-side twin (`titleBand.ts`'s own `conceptIsNew`, in `candidateSegments`'
+ * `push()`) that tested a NEW candidate against an EXISTING title one segment at a time; task #4
+ * (2026-08-23) deleted it as proven redundant — this whole-string check runs unconditionally, even
+ * with no truth ctx at all, so it already covers every case the pad-side twin did.
  */
 export function titleHasDuplicateConcept(title: string): boolean {
   const w = bandWords(title).filter((x) => !TITLE_CONNECTORS.has(x))

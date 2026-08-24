@@ -28,6 +28,10 @@ describe('unspecd attribute claims are inadmissible, not merely stage-deleted', 
       "THE CEO Don't Quit Kids Tee | Oversized Graphic Tees",
       { truth, protect: "Don't Quit" },
     )
-    expect(v.ok ? undefined : v.reason).not.toBe('unspecd-attribute-claim')
+    // Was `expect(v.ok ? undefined : v.reason).not.toBe('unspecd-attribute-claim')` — trivially true
+    // whenever `v.ok` is `true` (the `.reason` field does not exist on that arm), so it would still
+    // pass with the whole feature deleted. Tightened (task #4 audit, 2026-08-23) to assert the verdict
+    // itself, not merely that one string it never had a chance to produce.
+    expect(v.ok).toBe(true)
   })
 })

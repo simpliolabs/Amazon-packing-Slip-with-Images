@@ -390,3 +390,96 @@ describe('settleTitle makes a stage-refusal band-guard VISIBLE, even when it rai
     expect(visible.title).toMatch(/\bBlack\b/)
   })
 })
+
+/**
+ * Task 4, handoff/TITLE_ADMISSION_IS_VERIFICATION.md §6 — "prove, then delete". Two pad gates inside
+ * `candidateSegments`'s `push()` closure (titleBand.ts) were candidates for deletion because
+ * `verdictForAssembledTitle` was expected to already own the same rule. THE GUARD: each may be
+ * deleted ONLY after a passing proof that the verifier already rejects what the gate rejected: a
+ * FAILING proof means the gate is NOT duplicated and must stay.
+ *
+ * Both fixtures below reuse `sweatFacts` — a plain sweatshirt family, matching the pad's own
+ * `SWEATSHIRT_CLASSES = {sweatshirt, crewneck}` allow-set (contentTruth.ts), so "Crewneck"/"Fall
+ * Crewneck" segments are individually TRUE and only their CONCEPT overlap is under test.
+ */
+describe('the verifier already owns what the pad gates duplicate', () => {
+  const sweatFacts = {
+    garmentFamily: 'sweatshirt' as const,
+    mixedFamilies: ['sweatshirt'] as const,
+    spec: { fit: 'Classic', sleeve: 'Long Sleeve', neck: 'Crew Neck', weightNote: 'heavyweight fleece' },
+    allowedBrand: null,
+    designTokens: ['Motivational Entrepreneur'],
+    audienceLean: 'lean_male' as const,
+  }
+
+  /**
+   * THE CONCEPT GATE (`conceptIsNew`, formerly in `push()`) — PROVEN REDUNDANT, DELETED.
+   * `titleHasDuplicateConcept` runs UNCONDITIONALLY inside `verdictForAssembledTitle` (outside the
+   * `if (ctx.truth)` block — see titleBand.ts's own doc on that function), so it catches this class
+   * of defect even with NO ground truth at all. Both branches below prove it, matching the fail-open
+   * doctrine every other truth-ctx consumer in this file already takes.
+   */
+  it('rejects a concept restated in two spellings (the conceptIsNew pad gate) — WITH a truth ctx', () => {
+    const truth = buildPhraseTruthCtx(sweatFacts, 'title')
+    const v = verdictForAssembledTitle(
+      'THE CEO Motivational Entrepreneur Crewneck | Long Sleeve Crew Neck Pullover',
+      { truth, protect: 'Motivational Entrepreneur' },
+    )
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.reason).toBe('duplicate-concept')
+  })
+
+  it('rejects the SAME duplicate-concept title with NO truth ctx at all (fail-open parity — proves the pad gate added nothing the truth-independent check did not already cover)', () => {
+    const v = verdictForAssembledTitle(
+      'THE CEO Motivational Entrepreneur Crewneck | Long Sleeve Crew Neck Pullover',
+      { truth: null, protect: 'Motivational Entrepreneur' },
+    )
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.reason).toBe('duplicate-concept')
+  })
+
+  /**
+   * THE ONE-CLASS GATE (`committedClass` / `dominantGarmentGroup`, still in `push()`) — NOT PROVEN
+   * REDUNDANT, KEPT. `verdictForAssembledTitle`'s own equivalent (`garmentGroupsIn(t).size > 1` →
+   * `'two-garment-classes'`) lives INSIDE `if (ctx.truth)`. `committedClass` is pure text
+   * (`dominantGarmentGroup`, no ctx parameter at all), so it protects a real path the verifier
+   * structurally cannot on its own: an apparel-heuristic-true, blank-UNRESOLVED listing
+   * (`looksApparel` in listingPipeline.ts is independent of blank resolution; `truthGarmentFamily`
+   * is null whenever the blank does not resolve, regardless of `apparelProduct`) — the fail-open,
+   * "no ground truth to judge against" state this whole file's own doctrine names explicitly.
+   *
+   * The gap is not new to this task — it is ALREADY pinned at `titleBand.test.ts:497`
+   * (`verdictForAssembledTitle('… Sweatshirt | Hoodie Pullover', { truth: null }).ok === true`,
+   * inside "with no truth ctx, the truth/foreign-name half is skipped (fail-open) but concept +
+   * punctuation still run"). This describe block re-derives the same fact from the OTHER direction —
+   * as a reason to keep a pad gate, not just as a fact about the verifier — and pins it a second
+   * time so a future edit cannot silently delete `committedClass` on the strength of the WITH-truth
+   * test below alone.
+   */
+  it('WITH a resolved truth ctx: a second (but individually true) garment class is rejected by the verifier', () => {
+    const mixedTruth = buildPhraseTruthCtx(
+      { ...sweatFacts, mixedFamilies: ['sweatshirt', 'hoodie'] as const },
+      'title',
+    )
+    const v = verdictForAssembledTitle(
+      'THE CEO Motivational Entrepreneur Sweatshirt | Long Sleeve Hoodie',
+      { truth: mixedTruth, protect: 'Motivational Entrepreneur' },
+    )
+    // Not pinned to 'two-garment-classes': the truth net's own idempotence probe
+    // (`enforceSingleGarmentClass`, baked into `applyTitleTruthNet`) catches this BEFORE the
+    // explicit `garmentGroupsIn` check is ever reached, via `'untrue-or-foreign-segment-present'`.
+    // Either reason satisfies the guard — `ok: false` is what makes the candidate un-admittable.
+    expect(v.ok).toBe(false)
+  })
+
+  it('WITHOUT a truth ctx (unresolved blank): the verifier does NOT catch the second garment class — the gap `committedClass` alone still covers, and why it stays', () => {
+    const v = verdictForAssembledTitle(
+      'THE CEO Motivational Entrepreneur Sweatshirt | Long Sleeve Hoodie',
+      { truth: null, protect: 'Motivational Entrepreneur' },
+    )
+    // Deliberately `ok: true` — do NOT "fix" this by deleting `committedClass`; fix it (if ever
+    // wanted) by first closing this gap in `verdictForAssembledTitle` itself, then re-running this
+    // whole describe block's proof.
+    expect(v.ok).toBe(true)
+  })
+})
