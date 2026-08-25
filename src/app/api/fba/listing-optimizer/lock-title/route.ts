@@ -16,8 +16,9 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { getBearerUser, resolveUserName } from '@/lib/fba/claims'
+import { computeTitleTruthVerdict } from '@/lib/fba/titleLearningMiner'
 
 function admin() {
   return createClient(
@@ -25,6 +26,32 @@ function admin() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } },
   )
+}
+
+/**
+ * TITLE-LEARNING-LOOP INGESTION STAMP (feat/title-learning-loop, migration 065). Computed HERE, at
+ * lock time, so the mined gold corpus (titleLearningMiner.ts) never has to re-resolve a family's
+ * blank at read time — see that module's header. Best-effort: any failure (missing audience_lean row,
+ * unresolved blank, a network hiccup) yields `{ok:null,reason:null}`, which the insert below turns
+ * into an untouched NULL column — "not yet vetted", never a false positive or a blocked lock.
+ */
+async function lockTitleTruthStamp(
+  db: SupabaseClient, parentAsin: string, title: string,
+): Promise<{ title_truth_ok: boolean | null; title_truth_reason: string | null }> {
+  try {
+    const { data: scoreRow } = await db
+      .from('listing_seo_scores')
+      .select('audience_lean')
+      .eq('parent_asin', parentAsin)
+      .maybeSingle()
+    const verdict = await computeTitleTruthVerdict(
+      db, parentAsin, title, (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
+    )
+    return { title_truth_ok: verdict.ok, title_truth_reason: verdict.reason }
+  } catch (e) {
+    console.warn('[lock-title] truth-stamp computation failed (non-fatal):', e instanceof Error ? e.message : e)
+    return { title_truth_ok: null, title_truth_reason: null }
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -80,9 +107,11 @@ export async function POST(req: NextRequest) {
       // Best-effort audit log for the seed, then return.
       try {
         const myName = await resolveUserName(user.id, user.email)
+        const stamp = await lockTitleTruthStamp(db, parentAsin, title)
         await db.from('listing_change_log').insert({
           parent_asin: parentAsin, sku: null, field: 'title (locked)', action: 'edit',
           before_value: '', after_value: title, changed_by: user.id, changed_by_name: myName, source: 'manual_edit',
+          ...stamp,
         })
       } catch (e) { console.warn('[lock-title] seed change-log insert failed:', e instanceof Error ? e.message : e) }
       return NextResponse.json({ ok: true, title_source: 'manual', recommended_title: title, seeded: true })
@@ -111,13 +140,20 @@ export async function POST(req: NextRequest) {
   // Best-effort audit-log row (never blocks the response).
   try {
     const myName = await resolveUserName(user.id, user.email)
+    const afterValue = action === 'lock' && title ? title : before
+    // TRUTH STAMP only on an actual LOCK of a non-empty title — an unlock's after_value is just the
+    // prior value re-stated (no new title chosen), so there is nothing new to vet.
+    const stamp = action === 'lock' && title
+      ? await lockTitleTruthStamp(db, parentAsin, title)
+      : { title_truth_ok: null, title_truth_reason: null }
     // action MUST be one of the listing_change_log CHECK set (037: edit/ai_generate/ai_regenerate/push/
     // claim/release/takeover) — 'lock'/'unlock' would violate the constraint and be silently swallowed, so
     // we log it as 'edit' and encode lock vs unlock in the field label so the timeline still reads clearly.
     await db.from('listing_change_log').insert({
       parent_asin: parentAsin, sku: null, field: action === 'lock' ? 'title (locked)' : 'title (unlocked)', action: 'edit',
-      before_value: before, after_value: action === 'lock' && title ? title : before,
+      before_value: before, after_value: afterValue,
       changed_by: user.id, changed_by_name: myName, source: 'manual_edit',
+      ...stamp,
     })
   } catch (e) { console.warn('[lock-title] change-log insert failed:', e instanceof Error ? e.message : e) }
 

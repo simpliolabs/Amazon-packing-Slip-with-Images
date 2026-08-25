@@ -218,6 +218,10 @@ export interface PipelineInput {
    *  few-shots. PO 2026-08-10: "I gave you about 70 title recommendations ... that should be a
    *  strong signal for the council/judge how to put these together." */
   poGolds?: { titles: string[]; shape: GoldShape } | null
+  /** MINED REJECT PAIRS (feat/title-learning-loop, titleLearningMiner.loadMinedTitleRejectPairs) —
+   *  real before→after title corrections from `listing_change_log`, loaded by the ROUTE for the same
+   *  reason `poGolds` is. Absent/empty ⇒ the static SEED_REJECT_PAIRS floor (buildApparelTitleBrief). */
+  rejectPairs?: readonly { before: string; sellerSaid: string; after: string }[] | null
   /** Current title of the representative child — used for product-name token extraction */
   repTitle: string | null
   /** Canonical listing title (listing_seo_scores.product_title — the title the seller & dashboard
@@ -1406,6 +1410,11 @@ export function buildApparelTitleBrief(ctx: {
   roleLine: string
   inputBlock: string
   poGolds?: { titles: string[]; shape: GoldShape } | null
+  /** MINED REJECT PAIRS (feat/title-learning-loop) — real before→after corrections from
+   *  `listing_change_log` (titleLearningMiner.ts's `loadMinedTitleRejectPairs`), same shape as
+   *  `SEED_REJECT_PAIRS`. Absent/empty ⇒ falls back to the static seed, so a failed load can never
+   *  leave the council with no negative few-shots. */
+  rejectPairs?: readonly { before: string; sellerSaid: string; after: string }[] | null
   extraRules?: string[]
   /** The design being titled — enables NEAREST-GOLD ANCHORING (see below). Absent => no anchor, and
    *  the brief is byte-identical to the pre-2026-08-13 version. */
@@ -1423,7 +1432,7 @@ export function buildApparelTitleBrief(ctx: {
   const titles = ctx.poGolds?.titles?.length ? ctx.poGolds.titles : [...SEED_GOLD_TITLES]
   const shape = ctx.poGolds?.titles?.length && ctx.poGolds.shape ? ctx.poGolds.shape : measureGoldShape(titles)
   const goldSpec = goldSpecBlock(titles, shape)
-  const rejects = rejectPairBlock(SEED_REJECT_PAIRS)
+  const rejects = rejectPairBlock(ctx.rejectPairs?.length ? ctx.rejectPairs : SEED_REJECT_PAIRS)
 
   /* ── NEAREST-GOLD ANCHOR ───────────────────────────────────────────────────────────────────────
    *
@@ -4149,6 +4158,7 @@ ${candidateList}`
       roleLine: `You write Amazon apparel titles for ${brandName}.`,
       inputBlock,
       poGolds: input.poGolds,
+      rejectPairs: input.rejectPairs,
       // NEAREST-GOLD ANCHOR — the design decides WHICH gold is shown last, in the recency position.
       // v2ExpandedDesign is the idiom-expanded form when there is one, else the raw design name —
       // the same string this brief already teaches as the identity.
@@ -4404,6 +4414,7 @@ ${mustInclude ? `Mandatory keyword (KEEP verbatim — #1 search term): ${mustInc
         roleLine: `You write Amazon apparel titles for ${brandName}. This one is a SINGLE-DESIGN product title.`,
         inputBlock,
         poGolds: input.poGolds,
+        rejectPairs: input.rejectPairs,
         designPhrase: displayDesignName || designName || null,
         garmentNoun: ptWord || null,
         lean,
@@ -7349,6 +7360,10 @@ async function buildNicheParentTitle(
   // producer — a separate branch from runTitleAgent, and the branch that historically missed
   // fixes applied only to its twin (PR #401). Both now read the same corpus.
   poGolds?: { titles: string[]; shape: GoldShape } | null,
+  // MINED REJECT PAIRS (feat/title-learning-loop). Passed EXPLICITLY for the same PR #401 path-parity
+  // reason poGolds is — the multi-design producer must receive every council-brief input the
+  // single-design producer does, not just the ones some future fix happens to remember.
+  rejectPairs?: readonly { before: string; sellerSaid: string; after: string }[] | null,
   // TITLE_V4 diagnostics sink. Passed EXPLICITLY for the same reason poGolds is: this is the
   // multi-design producer, a separate branch from runTitleAgent, and the branch that historically
   // missed fixes applied only to its twin (PR #401). An instrument wired to one producer reports
@@ -7397,6 +7412,7 @@ async function buildNicheParentTitle(
     roleLine: `You write Amazon apparel titles for ${brandName}. This one is the BROADCAST PARENT TITLE for a variation family: it carries the FAMILY NICHE, never a specific child design.`,
     inputBlock: '(see user message)',
     poGolds,
+    rejectPairs,
     // PATH PARITY (PR #401): the parent producer is a separate branch and must receive the anchor
     // too. Its "design" is the FAMILY NICHE — the parent title never carries a child design name.
     designPhrase: familyNiche || null,
@@ -7435,6 +7451,7 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
       roleLine: `You write Amazon apparel titles for ${brandName}. This one is the BROADCAST PARENT TITLE for a variation family: it carries the FAMILY NICHE, never a specific child design.`,
       inputBlock,
       poGolds,
+      rejectPairs,
       extraRules: ['NO design names in the parent title — only the shared niche.'],
       designPhrase: familyNiche || null,
       garmentNoun: productType || null,
@@ -10170,7 +10187,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // BROADCAST (defect 1): the explicit multi-design parent title — `broadcastTruthCtx`, the
       // family's dominant class alone, never the permissive union (see the header comment on
       // `broadcastTruthCtx`'s definition).
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.__v4Sink, broadcastTruthCtx)
+      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.rejectPairs, input.__v4Sink, broadcastTruthCtx)
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
