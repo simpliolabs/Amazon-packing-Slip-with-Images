@@ -195,4 +195,51 @@ describe('loadPoGoldTitles — fail-open', () => {
     const r = await loadPoGoldTitles(ok)
     expect(r.titles.length).toBeLessThanOrEqual(GOLD_BRIEF_LIMIT + SEED_GOLD_TITLES.length)
   })
+
+  // feat/title-learning-loop: loadPoGoldTitles now UNIONS a second channel — mined, truth-vetted
+  // listing_change_log rows (titleLearningMiner.ts) — alongside the listing_seo_recommendations read
+  // above. This proves the union really fires (not just that it fails open harmlessly, which the
+  // earlier tests in this block already show via a single-table mock).
+  it('UNIONS mined listing_change_log golds with the listing_seo_recommendations read', async () => {
+    const recRows = [{ recommended_title: 'THE CEO Existing Locked Tee Shirt | Comfort Colors Graphic Tee for Women' }]
+    const changeLogRows = [{
+      parent_asin: 'B0MINED', sku: null, field: 'title (locked)', action: 'edit', source: 'manual_edit',
+      before_value: '', after_value: 'THE CEO Mined From Change Log Tee Shirt | Comfort Colors Graphic Tee for Women',
+      changed_at: '2026-08-20T00:00:00Z', title_truth_ok: true, title_truth_reason: null,
+    }]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dual: any = {
+      from: (table: string) => {
+        if (table === 'listing_change_log') {
+          return { select: () => ({ in: () => ({ eq: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: changeLogRows, error: null }) }) }) }) }) }) }
+        }
+        return { select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: recRows, error: null }) }) }) }) }
+      },
+    }
+    const r = await loadPoGoldTitles(dual)
+    expect(r.titles).toContain('THE CEO Existing Locked Tee Shirt | Comfort Colors Graphic Tee for Women')
+    expect(r.titles).toContain('THE CEO Mined From Change Log Tee Shirt | Comfort Colors Graphic Tee for Women')
+  })
+
+  it('a mined gold that is NOT yet truth-vetted (title_truth_ok=null) never enters the corpus via the union', async () => {
+    const recRows: { recommended_title: string }[] = []
+    const changeLogRows = [{
+      parent_asin: 'B0UNVET', sku: null, field: 'title (locked)', action: 'edit', source: 'manual_edit',
+      before_value: '', after_value: 'THE CEO Not Yet Vetted Tee Shirt | Comfort Colors Graphic Tee for Women',
+      changed_at: '2026-08-20T00:00:00Z', title_truth_ok: null, title_truth_reason: null,
+    }]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dual: any = {
+      from: (table: string) => {
+        if (table === 'listing_change_log') {
+          return { select: () => ({ in: () => ({ eq: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: changeLogRows, error: null }) }) }) }) }) }) }
+        }
+        return { select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: recRows, error: null }) }) }) }) }
+      },
+    }
+    const r = await loadPoGoldTitles(dual)
+    // No admissible titles from either channel ⇒ falls all the way back to the seed.
+    expect(r.source).toBe('seed')
+    expect(r.titles).not.toContain('THE CEO Not Yet Vetted Tee Shirt | Comfort Colors Graphic Tee for Women')
+  })
 })

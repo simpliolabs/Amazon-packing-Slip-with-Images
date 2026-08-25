@@ -27,6 +27,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { scrubTrademarks } from '@/lib/fba/trademarkGuard'
 import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
+import { loadMinedTitleGolds } from '@/lib/fba/titleLearningMiner'
 
 /**
  * SEED GOLDS — the floor, used when the DB read fails or returns nothing.
@@ -447,6 +448,52 @@ export async function loadPoGoldTitles(
 ): Promise<{ titles: string[]; shape: GoldShape; source: 'db' | 'seed' }> {
   const seed = () => ({ titles: [...SEED_GOLD_TITLES], shape: measureGoldShape(SEED_GOLD_TITLES), source: 'seed' as const })
   if (!supabase) return seed()
+
+  const seen = new Set<string>()
+  const titles: string[] = []
+  /**
+   * SHAPE/TRADEMARK ADMISSION — the ONE gate every candidate string passes through regardless of
+   * which source it came from (the `listing_seo_recommendations` read below, or the mined
+   * `listing_change_log` channel added by feat/title-learning-loop). Factored out so a second source
+   * cannot silently apply a looser check than the first.
+   *
+   * A gold must look like a shipped title: brand-front and inside the band. A truncated or
+   * placeholder row would teach the council a shape the seller never chose. Brand-front is required
+   * literally: every canonical gold opens with the brand, and a row that does not is either a
+   * fragment or another surface's copy — admitting it would let one bad row move the measured
+   * ceiling for the whole catalog with no deploy.
+   *
+   * A GOLD MUST SURVIVE THE SHIP DOOR UNCHANGED (2026-08-18). The two checks above test SHAPE —
+   * length, brand-front. Neither tests whether the row is a title we are actually allowed to
+   * publish. `lock-title/route.ts` writes whatever the seller types, unscrubbed, at every write site,
+   * and every one of those rows can reach this function (via either source). So a locked title
+   * carrying a trademark or a celebrity name would be eligible to become a GOLD — the reference
+   * corpus that teaches the council its measured shape, its vocabulary, and its ceiling.
+   *
+   * That is the worst possible place for an unguarded string: one bad row moves the measured shape
+   * for the entire catalog with no deploy, and it teaches the council to reproduce exactly the phrase
+   * the publish door will then rewrite — so the council is trained to fight the door.
+   *
+   * The test is deliberately IDENTITY, not repair: if scrubbing changes the string at all, the row is
+   * not a gold. We do not silently admit the scrubbed variant, because the seller never chose that
+   * string — they chose the one the door will not allow. Skipping is the honest outcome, and the
+   * corpus falls back to the seed when too few rows survive.
+   *
+   * Returns true iff `t` was newly admitted (false = rejected on shape/trademark grounds, or an
+   * already-seen duplicate — "one gold locked across many children is ONE example").
+   */
+  const admit = (raw: string): boolean => {
+    const t = (raw ?? '').trim()
+    if (t.length < 40 || t.length > 80) return false
+    if (!/^the ceo\b/i.test(t)) return false
+    if (scrubCelebrityNames(scrubTrademarks(t), 'gold:corpus') !== t) return false
+    const k = t.toLowerCase()
+    if (seen.has(k)) return false
+    seen.add(k)
+    titles.push(t)
+    return true
+  }
+
   try {
     const { data, error } = await supabase
       .from('listing_seo_recommendations')
@@ -454,50 +501,36 @@ export async function loadPoGoldTitles(
       .eq('title_source', 'manual')
       .order('generated_at', { ascending: false })
       .limit(400)
-    if (error || !data) return seed()
-
-    const seen = new Set<string>()
-    const titles: string[] = []
-    for (const r of data as { recommended_title: string | null }[]) {
-      const t = (r.recommended_title ?? '').trim()
-      // A gold must look like a shipped title: brand-front and inside the band. A truncated or
-      // placeholder row would teach the council a shape the seller never chose. Brand-front is
-      // required literally: every canonical gold opens with the brand, and a row that does not is
-      // either a fragment or another surface's copy — admitting it would let one bad row move the
-      // measured ceiling for the whole catalog with no deploy.
-      if (t.length < 40 || t.length > 80) continue
-      if (!/^the ceo\b/i.test(t)) continue
-      /* A GOLD MUST SURVIVE THE SHIP DOOR UNCHANGED (2026-08-18).
-       *
-       * The guards above test SHAPE — length, brand-front, uniqueness. None of them test whether the
-       * row is a title we are actually allowed to publish. `lock-title/route.ts` writes whatever the
-       * seller types, unscrubbed, at both of its write sites, and every one of those rows lands in
-       * THIS query (it selects on `title_source = 'manual'`). So a locked title carrying a trademark
-       * or a celebrity name was eligible to become a GOLD — the reference corpus that teaches the
-       * council its measured shape, its vocabulary, and its ceiling.
-       *
-       * That is the worst possible place for an unguarded string: one bad row moves the measured
-       * shape for the entire catalog with no deploy, and it teaches the council to reproduce exactly
-       * the phrase the publish door will then rewrite — so the council is trained to fight the door.
-       *
-       * The test is deliberately IDENTITY, not repair: if scrubbing changes the string at all, the
-       * row is not a gold. We do not silently admit the scrubbed variant, because the seller never
-       * chose that string — they chose the one the door will not allow. Skipping is the honest
-       * outcome, and the corpus falls back to the seed when too few rows survive. */
-      if (scrubCelebrityNames(scrubTrademarks(t), 'gold:corpus') !== t) continue
-      const k = t.toLowerCase()
-      if (seen.has(k)) continue          // one gold locked across many children is ONE example
-      seen.add(k)
-      titles.push(t)
-      if (titles.length >= limit) break
+    if (!error && data) {
+      for (const r of data as { recommended_title: string | null }[]) {
+        if (titles.length >= limit) break
+        admit(r.recommended_title ?? '')
+      }
     }
-    if (titles.length === 0) return seed()
-    // Union with the seed: the three highest-confidence examples always survive, even if the newest
-    // locks happen to be atypical. Dedupe keeps them from appearing twice.
-    for (const s of SEED_GOLD_TITLES) if (!seen.has(s.toLowerCase())) titles.push(s)
-    return { titles, shape: measureGoldShape(titles), source: 'db' }
-  } catch {
-    return seed()
+  } catch { /* fall through — the mined channel below and the seed union are still tried */ }
+
+  /* MINED CHANNEL (feat/title-learning-loop) — `listing_change_log` title-lock edits, truth-vetted at
+   * INGESTION (migration 065; see titleLearningMiner.ts's header). UNIONED with the read above, never
+   * a replacement for it: `lock-title/route.ts`'s change-log insert is best-effort (a failed insert
+   * only logs a console.warn, never blocks the lock), and this table did not exist before migration
+   * 037, so requiring every gold to have a matching change-log row would silently DROP real locked
+   * titles the moment this ships — before the one-time backfill has even run. Unioning means the
+   * corpus can only ever GROW/improve (more per-design-attributable, truth-checked examples over
+   * time), never regress below what `listing_seo_recommendations` alone already provided today. */
+  if (titles.length < limit) {
+    try {
+      const mined = await loadMinedTitleGolds(supabase, limit)
+      for (const g of mined) {
+        if (titles.length >= limit) break
+        admit(g.title)
+      }
+    } catch { /* fail-open — the seed union below still fires */ }
   }
+
+  if (titles.length === 0) return seed()
+  // Union with the seed: the highest-confidence examples always survive, even if the newest
+  // locks happen to be atypical. Dedupe keeps them from appearing twice.
+  for (const s of SEED_GOLD_TITLES) if (!seen.has(s.toLowerCase())) titles.push(s)
+  return { titles, shape: measureGoldShape(titles), source: 'db' }
 }
 

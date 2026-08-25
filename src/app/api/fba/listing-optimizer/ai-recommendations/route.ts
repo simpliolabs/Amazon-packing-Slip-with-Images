@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getStoredAnalysis, computeOutcomeSignals } from '@/lib/keyword-engine'
 import { loadPoGoldTitles } from '@/lib/fba/poGoldCorpus'
+import { loadMinedTitleRejectPairs, REJECT_PAIR_BRIEF_LIMIT } from '@/lib/fba/titleLearningMiner'
 import { selectionMode } from '@/lib/keyword-engine/selection-core'
 import { loadSelectionContext, readWindow } from '@/lib/keyword-engine/selectionContext'
 import { runListingPipeline, reconcilePlacedInBackendFirst } from '@/lib/fba/listingPipeline'
@@ -876,8 +877,15 @@ export async function POST(req: NextRequest) {
             source: poGolds.source, count: poGolds.shape.count, medianLeftWords: poGolds.shape.medianLeftWords,
             maxLeftWords: poGolds.shape.maxLeftWords, leftWordsFrom: poGolds.shape.leftWordsFrom,
             medianLen: poGolds.shape.medianLen, pipedShare: poGolds.shape.pipedShare }))
+          // MINED REJECT PAIRS (feat/title-learning-loop) — real before→after title corrections from
+          // listing_change_log, loaded the same way/for the same reason poGolds is above. Fail-open
+          // inside the loader: a failed read returns [], and buildApparelTitleBrief itself falls back
+          // to the static SEED_REJECT_PAIRS whenever this is empty, so the council can never be left
+          // with no negative few-shots either.
+          const rejectPairs = await loadMinedTitleRejectPairs(supabase, REJECT_PAIR_BRIEF_LIMIT)
           const result = await runListingPipeline({
             poGolds,
+            rejectPairs,
             openai,
             selectionCtx: pipelineSelCtx,
             brandName,
