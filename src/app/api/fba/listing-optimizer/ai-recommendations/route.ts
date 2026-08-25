@@ -2198,34 +2198,6 @@ export async function GET(req: NextRequest) {
     } catch (e) { console.warn('[ai-recommendations GET] locked-title-truth analysis failed (non-fatal):', e instanceof Error ? e.message : e) }
   }
 
-  // AI-OWNED TITLE TRUTH WARNING (PO ruling 2026-08-24) — the complementary case to
-  // `locked_title_truth` above. `TITLE_TRUTHFUL_SHIP_FLOOR` (titleBand.ts) can make `settleTruthBand`
-  // hold and keep a PRIOR it already knows fails truth (`refused-kept-lying-prior`) when the honest
-  // replacement would land under 65 chars — the ONE case where an AI-owned `recommended_title` can be
-  // untrue by design, not by bug. Same reused predicate (`lockedTitleViolations` → `phraseTruthVerdict`),
-  // same blank-grounded ctx builder (`resolveLockedTitleTruthCtx`), same response/render shape as
-  // `locked_title_truth` — just gated on the opposite `title_source` and opted into analysis via
-  // `forceAnalyze` (the lock-only gate stays the default; see that function's own doc). Read-time /
-  // heal-on-read: this recomputes from the CURRENTLY STORED title on every GET, so it stays accurate
-  // without threading a generation-time flag through the DB schema.
-  let title_truth_warning: { violations: LockedTitleViolation[] } = { violations: [] }
-  if (data.title_source !== 'manual' && typeof recommended_title_scrubbed === 'string' && recommended_title_scrubbed.trim()) {
-    try {
-      const { data: scoreRow } = await supabase
-        .from('listing_seo_scores')
-        .select('audience_lean')
-        .eq('parent_asin', parent_asin)
-        .maybeSingle()
-      const { ctx, blankLabel } = await resolveLockedTitleTruthCtx(supabase, {
-        parentAsin: parent_asin,
-        audienceLean: (scoreRow as { audience_lean?: string | null } | null)?.audience_lean ?? null,
-      })
-      title_truth_warning = {
-        violations: lockedTitleViolations(recommended_title_scrubbed, data.title_source, ctx, blankLabel, { forceAnalyze: true }),
-      }
-    } catch (e) { console.warn('[ai-recommendations GET] ai-title-truth-warning analysis failed (non-fatal):', e instanceof Error ? e.message : e) }
-  }
-
   // Item Highlights write-gate: compute the single client-facing boolean server-side so the client
   // needs ZERO date logic. `writable == "not blocked for the IH field"` — the gate folds in the probe
   // flag AND the July-27 fallback (null flag → date). undefined on legacy responses → client treats
@@ -2272,7 +2244,6 @@ export async function GET(req: NextRequest) {
       product_details_improvements: scrubTrademarksDeep(product_details_improvements),
       field_pushed_at,
       locked_title_truth,          // {violations:[]} unless title_source==='manual' AND the title conflicts with the resolved blank
-      title_truth_warning,         // {violations:[]} unless title_source!=='manual' AND the title conflicts (PO 2026-08-24: refused-kept-lying-prior)
       item_highlights_writable,    // server-probed marketplace flag (undefined on legacy → client treats as blocked)
       // Keep recommended_keywords as the first child's keywords for backward compat
       recommended_keywords: per_child_keywords_scrubbed.length > 0

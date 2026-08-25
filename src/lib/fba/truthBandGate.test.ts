@@ -40,7 +40,7 @@ import {
   runTruthBandHarness, DESIGNS, POOL, runLiveFailureRepro, LIVE_HDG_CANDIDATES, LIVE_LYING_PRIOR,
   type HarnessResult,
 } from './truthBandHarness'
-import { TITLE_BAND_LO, TITLE_BAND_HI, TITLE_TRUTHFUL_SHIP_FLOOR, titleHasDuplicateConcept, titleHasPunctuationDefect, verdictForAssembledTitle } from './titleBand'
+import { TITLE_BAND_LO, TITLE_BAND_HI, titleHasDuplicateConcept, titleHasPunctuationDefect, verdictForAssembledTitle } from './titleBand'
 import { phraseTruthVerdict } from './contentTruth'
 
 const RESULT: HarnessResult = runTruthBandHarness()
@@ -261,31 +261,7 @@ describe('THE POOL IS GATED, NOT TRUSTED — a pad that adds untrue material is 
 describe('THE SEVEN STRINGS — pinned', () => {
   it('matches exactly, byte for byte', () => {
     const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r.title]))
-    // BROADCAST RE-PINNED (review round 1, 2026-08-23 — IMPORTANT finding; comment corrected in
-    // review round 2 — the mechanism below was misattributed). This harness's broadcast row used to
-    // pass `protect: designNames().join(' ')` with no `foreignTokens`/`reject` — the PRE-Task-1
-    // shape — so "Entrepreneur" (shared with the sibling design "Entrepreneur Definition") read as
-    // this exit's OWN protected vocabulary and the additive search could freely refill around it.
-    // NOT because `foreignTokens` "wins" over `protect` at the word level — it does not: `contentTruth.ts`'s
-    // word-level scrub keeps a chunk whenever it is BOTH foreign AND protected (`foreign &&
-    // !protectedTok ? '' : chunk` — protect wins the tie). The actual mechanism, wired this round via
-    // `computeBroadcastDesignScope`: on THIS fixture all six design names are per-child names, so the
-    // family/per-design theme subtraction leaves `broadcastThemeNames: []` and `broadcastProtectHay:
-    // ''` — §3.2 resolution #3, applied verbatim ("If the subtraction leaves the broadcast with NO
-    // design vocabulary at all, that is the correct outcome"). "Entrepreneur" was never IN
-    // `broadcastProtectHay` to begin with, so there is no tie for protect to win — it is simply
-    // foreign and unprotected, and gets scrubbed exactly as any other sibling-design word would be.
-    // (Final whole-branch review 2026-08-24, CRITICAL 3: the harness now computes this via
-    // `buildForeignDesignTokens` directly, matching production's `scrubPublished` — not via
-    // `computeBroadcastDesignScope`, whose foreignTokens/protectHay outputs neither the pipeline nor
-    // this harness consume anymore; same result on THIS fixture, correctly-sourced mechanism.) The
-    // head shrinks to "Motivational" alone, the additive search can no longer refill it into band
-    // from true material, and the door correctly FALLS BACK to the prior (`PRIOR_PARENT`, itself
-    // truthful and in band) under an honest hold — this is the PO-approved trade (truth outranks
-    // band), not a regression.
-    // The other six rows are BYTE-IDENTICAL: none of their `protect`/`foreignTokens`/`reject` wiring
-    // changed this round.
-    expect(byScope.broadcast).toBe('THE CEO Motivational Sweatshirt | Long Sleeve Pullover Crewneck Gift Set')
+    expect(byScope.broadcast).toBe('THE CEO Motivational Entrepreneur | Long Sleeve Pullover Fall Crewneck')
     expect(byScope.BB).toBe('THE CEO Business B*tch Graphic Casual | Long Sleeve Pullover Fall Crewneck')
     expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Long Sleeve Pullover Crewneck')
     expect(byScope.DQ).toBe("THE CEO Don't Quit Sweatshirt | Long Sleeve Pullover Crewneck Gift Set")
@@ -294,12 +270,11 @@ describe('THE SEVEN STRINGS — pinned', () => {
     expect(byScope.MH).toBe('THE CEO Mother Hustler Hoodie | Long Sleeve Hooded Sweatshirt Cozy Gift')
   })
 
-  it('DQ, MH and (as of this round) broadcast are the three honest holds — pinned so a regression that makes them "succeed" differently is reviewed too', () => {
+  it('DQ and MH are the two honest holds — pinned so a regression that makes them "succeed" differently is reviewed too', () => {
     const byScope = Object.fromEntries(RESULT.rows.map((r) => [r.scope, r]))
     expect(byScope.DQ.hold).toBe(true)
     expect(byScope.MH.hold).toBe(true)
-    // Was `false` before this round's broadcast-partition fix — see the doc on the title pin above.
-    expect(byScope.broadcast.hold).toBe(true)
+    expect(byScope.broadcast.hold).toBe(false)
     expect(byScope.BB.hold).toBe(false)
     expect(byScope.BCS.hold).toBe(false)
     expect(byScope.ED.hold).toBe(false)
@@ -341,8 +316,7 @@ describe('NOTHING WRITES AFTER THE VERIFY — settleTitle is the DOOR, and it is
 })
 
 /**
- * THE LIVE FAILURE REPRO — "a hold must not keep a lie" (PO ruling 2026-08-23), BOUNDED BY A FLOOR
- * (PO ruling 2026-08-24).
+ * THE LIVE FAILURE REPRO — "a hold must not keep a lie" (PO ruling 2026-08-23).
  *
  * The seven-row suite above never reproduced the live 2026-08-23 defect, for the same reason
  * #630-#637 didn't: its candidate `POOL` and its `PRIOR` dict are both richer/cleaner than what
@@ -350,23 +324,10 @@ describe('NOTHING WRITES AFTER THE VERIFY — settleTitle is the DOOR, and it is
  * to refill, or a clean prior to fall back to, cannot ever exercise "the band is genuinely
  * unreachable AND the prior is a lie". `runLiveFailureRepro` (truthBandHarness.ts) is the antidote:
  * a pool hard-coded to the EXACT 5 candidates the live log showed (no richer — see the assertion
- * below) and a prior carrying the EXACT defects live actually kept.
- *
- * THIS SCENARIO'S OWN `best` (the truthful replacement the additive search reaches) IS 58 CHARS —
- * under `TITLE_TRUTHFUL_SHIP_FLOOR` (65). It was PICKED because it is the live defect's exact
- * shape, not because it exercises the floor; the floor ruling then changed what this exact scenario
- * PROVES. Before 2026-08-24 the 2026-08-23 ruling alone ("truth outranks band") meant the door
- * shipped that 58-char truthful stub rather than keep the lying prior. PO ruling 2026-08-24 bounds
- * how far "truth outranks band" goes: below the 65-char floor, a truthful-but-too-short title is
- * ALSO not shippable, so the door now holds and keeps the prior anyway — even though the prior is
- * the exact lie the 2026-08-23 ruling was written to refuse — under the DISTINCT
- * `refused-kept-lying-prior` decision, which every caller MUST surface to the operator (never
- * silent). This is the approved trade (more holds — see the seven-row suite's own hold count is
- * unaffected since none of ITS `best` values are this short) — see `broadcastShipDoorScope.test.ts`
- * for the SEPARATE (unrelated) defect A this branch also fixes, and `titleTruthWarning`-adjacent
- * coverage in `lockedTitleTruth.test.ts` for how the operator sees this specific hold.
+ * below) and a prior carrying the EXACT defects live actually kept. This block pins that the new
+ * invariant holds: a hold may keep the prior title ONLY IF the prior title is true.
  */
-describe('THE LIVE FAILURE REPRO — a hold must not keep a lie, BOUNDED BY THE 65-CHAR FLOOR (PO rulings 2026-08-23 + 2026-08-24)', () => {
+describe('THE LIVE FAILURE REPRO — a hold must not keep a lie (PO ruling 2026-08-23)', () => {
   it('the fixture pool is PROVABLY no richer than live — exactly the 5 candidates the live log showed', () => {
     // If this count ever grows, it must be because live's OWN pool grew a 6th candidate, never
     // because the fixture needed help reaching band — re-enriching this fixture past live is the
@@ -382,46 +343,30 @@ describe('THE LIVE FAILURE REPRO — a hold must not keep a lie, BOUNDED BY THE 
     expect(LIVE_LYING_PRIOR).toMatch(/for Men\b/)           // forced gender on a unisex-lean family
   })
 
-  it('BEFORE asserting the fix: the truthful replacement the search reaches is itself UNDER the 65-char floor, so this scenario genuinely exercises it (not merely under the 70-75 band)', () => {
+  it('BEFORE asserting the fix: the band really is unreachable from this thin pool, so a naive hold has no honest in-band option', () => {
     const r = runLiveFailureRepro()
-    // `r.title` is now the KEPT PRIOR (see below), not the truthful replacement — the replacement's
-    // own length is reported in `r.reason` ("truthful title reached only 58/65…"), asserted here by
-    // parsing the SAME string the operator sees, so a future change to the search's own output would
-    // show up here too, not just in the reason text.
-    const m = r.reason.match(/reached only (\d+)\/65/)
-    expect(m, `reason did not carry the expected "N/65" shape: "${r.reason}"`).not.toBeNull()
-    const bestLen = Number(m![1])
-    expect(bestLen, `truthful replacement was ${bestLen} chars: "${r.reason}"`).toBeLessThan(TITLE_TRUTHFUL_SHIP_FLOOR)
-    expect(bestLen).toBe(58)
+    expect(r.len, `shipped ${r.len} chars: "${r.title}"`).toBeLessThan(TITLE_BAND_LO)
   })
 
-  it('PO ruling 2026-08-24: the door HOLDS and keeps the lying prior anyway, because the truthful replacement never clears the 65-char floor', () => {
+  it('the door does NOT ship the lying prior — the invariant is installed', () => {
     const r = runLiveFailureRepro()
-    // This is the DELIBERATE reversal from the 2026-08-23-only ruling: the floor outranks
-    // "truth beats an in-band lie" once the truthful side is this short. The kept title is the
-    // SAME lying prior — length-asserted, not merely content-asserted, since a truncated or
-    // otherwise-mangled echo of the prior would satisfy a bare `.toContain` check just as wrongly.
-    expect(r.title).toBe(LIVE_LYING_PRIOR)
-    expect(r.title.length).toBe(LIVE_LYING_PRIOR.length)
-    expect(r.title.length).toBe(72)
+    expect(r.title, `shipped: "${r.title}"`).not.toBe(LIVE_LYING_PRIOR)
   })
 
-  it('the kept title is NOT truthful — verdictForAssembledTitle (the door\'s own predicate) still fails it; this is EXPECTED and is exactly what must be surfaced', () => {
+  it('what ships instead is itself TRUE — verdictForAssembledTitle (the door\'s own predicate) passes it', () => {
     const r = runLiveFailureRepro()
     // Re-derived independently, so this cannot pass merely because settleTitle's own bookkeeping says so.
     const truth = { garmentFamily: 'sweatshirt' as const, mixedFamilies: ['sweatshirt', 'hoodie'] as const,
       spec: null, allowedBrand: null, audience: 'adult' as const, audienceLean: 'unisex' as const, field: 'title' as const }
-    expect(verdictForAssembledTitle(r.title, { truth, protect: 'Hustle Definiton' })).toEqual({ ok: false, reason: 'untrue-or-foreign-segment-present' })
-    expect(r.title).toContain('Business B*tch')
-    expect(r.title.toLowerCase()).toMatch(/\bfor men\b/)
+    expect(verdictForAssembledTitle(r.title, { truth, protect: 'Hustle Definiton' })).toEqual({ ok: true })
+    expect(r.title).not.toContain('Business B*tch')
+    expect(r.title.toLowerCase()).not.toMatch(/\bfor men\b/)
   })
 
-  it('the hold fires under a THIRD, DISTINCT decision value — never conflated with an ordinary (truthful) hold', () => {
+  it('the hold still fires, under a DISTINCT decision value — the operator sees this, it never ships silently', () => {
     const r = runLiveFailureRepro()
     expect(r.hold).toBe(true)
-    expect(r.decision).toBe('refused-kept-lying-prior')
-    expect(r.decision).not.toBe('shipped-truthful-under-band')
-    expect(r.decision).not.toBe('refused-kept-prior')
+    expect(r.decision).toBe('shipped-truthful-under-band')
   })
 
   it('the shipped title is a fixed point — nothing writes after settleTitle returns it here either', () => {

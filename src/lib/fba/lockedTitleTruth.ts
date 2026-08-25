@@ -121,13 +121,7 @@ function messageFor(reason: PhraseTruthReason, title: string, ctx: PhraseTruthCt
  * FAIL-OPEN AND LOCK-GATED, on purpose:
  *   - `titleSource !== 'manual'` → `[]` — an unlocked (AI-owned) title is never analyzed; the terminal
  *     title-truth net already keeps THAT title honest on every regen, so a second opinion here would
- *     be noise at best and a second source of truth at worst. UNLESS `opts.forceAnalyze` (PO ruling
- *     2026-08-24): the `TITLE_TRUTHFUL_SHIP_FLOOR` fix in titleBand.ts introduced exactly one AI-owned
- *     path where that assumption no longer holds — `settleTruthBand`'s `refused-kept-lying-prior`
- *     decision deliberately ships (keeps) a prior it KNOWS fails truth, when the honest replacement
- *     would be shorter than the 65-char floor. The caller (route.ts) sets `forceAnalyze: true` only
- *     for that complementary (non-manual) case, so this stays the SAME predicate/SAME ctx-building —
- *     never a second rulebook — just no longer gated to locked titles alone.
+ *     be noise at best and a second source of truth at worst.
  *   - `ctx === null` (the family's blank did not resolve) → `[]` — same fail-open doctrine as the rest
  *     of the truth spine (contentTruth.ts's `truthCtxFor`): no ground truth, nothing to judge against.
  *
@@ -137,22 +131,14 @@ function messageFor(reason: PhraseTruthReason, title: string, ctx: PhraseTruthCt
  * gender in the same breath) needs more than one call to surface both. Each call here uses the exact
  * same predicate and the exact same ctx, with only the ALREADY-FOUND reason's gate turned off (a data
  * change to `ctx`, never a rule rewrite) — see `withGateDisabled`.
- *
- * KNOWN LIMIT (unchanged by the `forceAnalyze` addition): this predicate is `phraseTruthVerdict`
- * (garment/audience/brand/capability/weight) only — it does not see a sibling-design-name defect,
- * which needs `foreignTokens`/`reject` (`verdictForAssembledTitle`'s richer ctx, not built here). A
- * title that fails ONLY on a sibling name will report no violations. Accepted for the same reason the
- * `withGateDisabled` peeling stops where it does: a second, hand-rolled foreign-name resolver at read
- * time is a second partition, which this module's whole doctrine forbids.
  */
 export function lockedTitleViolations(
   title: string,
   titleSource: string | null | undefined,
   ctx: PhraseTruthCtx | null,
   blankLabel?: string | null,
-  opts?: { forceAnalyze?: boolean },
 ): LockedTitleViolation[] {
-  if (titleSource !== 'manual' && !opts?.forceAnalyze) return []
+  if (titleSource !== 'manual') return []
   if (!ctx || !title || !title.trim()) return []
   const reasons: PhraseTruthReason[] = []
   let probeCtx: PhraseTruthCtx = ctx

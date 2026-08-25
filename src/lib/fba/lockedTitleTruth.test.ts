@@ -87,36 +87,3 @@ describe('lockedTitleViolations — other reason codes stay reachable, not just 
     expect(out.map((v) => v.reason)).toContain('competitor-brand')
   })
 })
-
-/**
- * `opts.forceAnalyze` (PO ruling 2026-08-24) — the complementary case to "an unlocked title is never
- * analyzed" above. `TITLE_TRUTHFUL_SHIP_FLOOR` (titleBand.ts) can make the door hold and keep an
- * AI-owned title it already knows fails truth (`refused-kept-lying-prior`) rather than ship an honest
- * replacement under 65 chars — the ai-recommendations GET route opts into analysis for exactly that
- * complementary (non-manual) case via `forceAnalyze: true`, reusing this SAME function/predicate.
- */
-describe('lockedTitleViolations — opts.forceAnalyze (PO ruling 2026-08-24)', () => {
-  const LIVE_TITLE = "THE CEO Motivational Entrepreneur Tee Shirt | Funny Business Tshirt for Men"
-
-  it('default behavior is UNCHANGED: an unlocked title is still never analyzed without forceAnalyze', () => {
-    expect(lockedTitleViolations(LIVE_TITLE, 'ai', SWEATS, BLANK_LABEL)).toEqual([])
-  })
-
-  it('forceAnalyze:true analyzes an unlocked (AI-owned) title, finding the SAME violations the locked case would', () => {
-    const out = lockedTitleViolations(LIVE_TITLE, 'ai', SWEATS, BLANK_LABEL, { forceAnalyze: true })
-    expect(out.map((v) => v.reason).sort()).toEqual(['audience-lean-lie', 'wrong-garment-noun'])
-  })
-
-  it('forceAnalyze:true still reports nothing for a TRUE ai-owned title — this is not a blanket warning', () => {
-    const out = lockedTitleViolations(
-      'THE CEO Motivational Entrepreneur Sweatshirt | Funny Business Fall Crewneck', 'ai', SWEATS, BLANK_LABEL,
-      { forceAnalyze: true },
-    )
-    expect(out).toEqual([])
-  })
-
-  it('forceAnalyze:true does NOT bypass the manual-title path — a locked title is still analyzed exactly as before', () => {
-    const out = lockedTitleViolations(LIVE_TITLE, 'manual', SWEATS, BLANK_LABEL, { forceAnalyze: true })
-    expect(out.map((v) => v.reason).sort()).toEqual(['audience-lean-lie', 'wrong-garment-noun'])
-  })
-})

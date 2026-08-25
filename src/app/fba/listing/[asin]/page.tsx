@@ -122,13 +122,6 @@ interface AiRecommendations {
    *  the LOCKED title (title_source==='manual') carries against the resolved blank — empty unless the
    *  title is actually locked and actually conflicts. Absent on legacy responses → no warning shown. */
   locked_title_truth?: { violations: LockedTitleViolation[] }
-  /** AI-owned title truth warning (PO ruling 2026-08-24). Server-computed, read-only, same shape and
-   *  same underlying predicate as `locked_title_truth` above, but for the COMPLEMENTARY case
-   *  (title_source !== 'manual'): `TITLE_TRUTHFUL_SHIP_FLOOR` in titleBand.ts can make the title door
-   *  hold and keep a PRIOR it already knows fails truth rather than ship an honest title under 65
-   *  chars — the one case where an AI-owned title can be untrue by design. Empty unless that actually
-   *  happened and the kept title still conflicts. Absent on legacy responses → no warning shown. */
-  title_truth_warning?: { violations: LockedTitleViolation[] }
 }
 
 /** Compact relative date for audit/ship timestamps ("2h ago", "3d ago", "Jun 11"). */
@@ -3011,38 +3004,6 @@ export default function ListingDetailPage() {
                   disabled={titleLockSaving}
                   className="mt-1.5 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg px-3 py-1 transition-colors cursor-pointer disabled:opacity-50">
                   Unlock to let AI fix it
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* AI-OWNED TITLE TRUTH WARNING (PO ruling 2026-08-24). Consequence of the
-            TITLE_TRUTHFUL_SHIP_FLOOR fix (titleBand.ts): a hold can now keep a PRIOR title the door
-            already knows fails truth (`refused-kept-lying-prior`) rather than ship an honest
-            replacement under 65 chars. That must never be silent — reuses the exact same
-            server-computed pattern and amber-warning idiom as the LOCKED-TITLE warning above
-            (title_truth_warning on AiRecommendations), just for the complementary (AI-owned,
-            title_source !== 'manual') case. INFORM ONLY: never auto-regenerates; offers the existing
-            "Regenerate title" action so a human can decide. */}
-        {!!aiRecs && aiRecs.title_source !== 'manual' && (aiRecs.title_truth_warning?.violations.length ?? 0) > 0 && (
-          <div className="mt-2 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-3">
-            <div className="flex items-start gap-2.5">
-              <svg viewBox="0 0 24 24" className="w-4 h-4 mt-0.5 shrink-0 text-amber-600" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-bold text-amber-800">
-                  Current title conflicts with the product{(aiRecs.title_truth_warning!.violations.length > 1) ? ` (${aiRecs.title_truth_warning!.violations.length} issues)` : ''} — a short truthful replacement was held back
-                </p>
-                <ul className="mt-1 space-y-0.5">
-                  {aiRecs.title_truth_warning!.violations.map((v, i) => (
-                    <li key={`${v.reason}-${i}`} className="text-xs text-amber-700">{v.message}</li>
-                  ))}
-                </ul>
-                <button
-                  onClick={() => generateAiRecs('title')}
-                  disabled={aiLoading}
-                  className="mt-1.5 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg px-3 py-1 transition-colors cursor-pointer disabled:opacity-50">
-                  Regenerate title
                 </button>
               </div>
             </div>

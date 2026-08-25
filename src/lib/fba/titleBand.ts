@@ -43,17 +43,6 @@ export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
 export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
 
 /**
- * TITLE_TRUTHFUL_SHIP_FLOOR — PO ruling 2026-08-24: the shippable range for `settleTruthBand`'s
- * `shipped-truthful-under-band` path is 65-75, not "as short as truth allows". Truth still outranks
- * an in-band lie (the 2026-08-23 ruling stands — see `refused-kept-lying-prior`'s doc) — this
- * constant only bounds how FAR that preference goes: below it, a truthful-but-too-short title is not
- * a legitimate ship candidate either, and the door must hold and keep the prior instead, even when
- * the prior itself fails truth (surfaced to the operator, never silent). Named beside
- * `TITLE_BAND_LO`/`TITLE_BAND_HI` so a future band change updates all three from one place.
- */
-export const TITLE_TRUTHFUL_SHIP_FLOOR = 65
-
-/**
  * TITLE_RULING_OVER_FLOOR — off | on. Default off ⇒ byte-identical to today.
  *
  * THE TWO BOUNDS ARE NOT THE SAME KIND OF THING, and treating them as one tier let an unrelated
@@ -204,6 +193,32 @@ function alreadyStates(title: string, phrase: string): boolean {
 
 const bandWords = (s: string): string[] => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean)
 
+/**
+ * CONCEPT-level distinctness — the SPACING twin of `collapseRepeatedWords`.
+ *
+ * THE DEFECT, caught by the full-title gate and invisible to every word-level check: a title
+ * already ending "…Fall Crewneck" was padded with the blank's `neck` fact "Crew Neck", shipping
+ * "| Long Sleeve Fall Crewneck Crew Neck". No word repeats — "crewneck" and "crew"+"neck" are
+ * different tokens — so `collapseRepeatedWords`, `alreadyStates` and `wordsAreNew` all pass it. But
+ * Amazon indexes the concept ONCE, so the second spelling spends 10 of 75 characters on nothing.
+ *
+ * The test is flattening: every 1-to-3-word window of the title, letters only, spaces removed. A
+ * candidate whose own flattened form is already in that set is the same concept re-spelled, in
+ * either direction ("Crew Neck" against "Crewneck", and "Crewneck" against "Crew Neck").
+ */
+function titleConcepts(title: string): Set<string> {
+  const w = bandWords(title).filter((x) => !TITLE_CONNECTORS.has(x))
+  const out = new Set<string>()
+  for (let i = 0; i < w.length; i++) {
+    for (let n = 1; n <= 3 && i + n <= w.length; n++) out.add(w.slice(i, i + n).join(''))
+  }
+  return out
+}
+function conceptIsNew(title: string, phrase: string): boolean {
+  const flat = bandWords(phrase).filter((x) => !TITLE_CONNECTORS.has(x)).join('')
+  return flat.length === 0 || !titleConcepts(title).has(flat)
+}
+
 /** Word-level distinctness: TRUE when no significant word of `phrase` already appears in `title`.
  *  `alreadyStates` only catches the whole phrase; this is the same discipline
  *  `pickDistinctGarmentForm` applies to a single garment form, generalised to multi-word facts. */
@@ -273,19 +288,14 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     // ONE CLASS (defect 3) — a candidate naming a DIFFERENT garment class than the title already
     // committed to is skipped, same as an untrue one. Both classes may be individually true
     // (sweatshirt + hoodie); the title still may not name both.
-    //
-    // KEPT DELIBERATELY (task #4 audit, 2026-08-23): `verdictForAssembledTitle`'s equivalent
-    // (`garmentGroupsIn(t).size > 1`) lives INSIDE `if (ctx.truth)` — pinned at
-    // titleBand.test.ts:497, `verdictForAssembledTitle('… Sweatshirt | Hoodie Pullover',
-    // { truth: null }).ok === true`. `committedClass` here is pure text (`dominantGarmentGroup`,
-    // no ctx), so it is the ONLY guard against a two-class title on the fail-open path — an
-    // apparel-heuristic-true (`looksApparel`), blank-UNRESOLVED listing (`truthGarmentFamily`
-    // null independent of `apparelProduct`), which is a real, documented state, not a
-    // hypothetical. Proven NOT redundant; do not delete without re-closing that gap first.
     if (committedClass) {
       const segClass = dominantGarmentGroup(s)
       if (segClass && segClass !== committedClass) return
     }
+    // CONCEPT GATE (2026-08-22): "Crew Neck" onto a title already saying "Crewneck" is the same
+    // concept re-spelled — indexed once, and 10 characters of the 75 spent on nothing. Applies to
+    // EVERY candidate, spec facts included, because the blank's `neck` fact is where it came from.
+    if (!conceptIsNew(title, s)) return
     if (!alreadyStates(title, s) && !out.includes(s)) out.push(s)
   }
   // THE YOUTH MARKER (defect 1) leads even "Personalized" — a kids family's title asserting its own
@@ -773,15 +783,6 @@ export interface MoneyTailCtx {
    *  whole-string verify `settleTruthBand`'s search runs on every candidate it assembles, applied
    *  here too so a market keyword cannot win the money slot by carrying another design's identity. */
   foreignTokens?: ReadonlySet<string>
-  /** THE WHOLE-SEGMENT twin of `foreignTokens` (PO 2026-08-23, admission-is-verification pass).
-   *  `applyTitleTruthNet` only drops or word-scrubs a NON-money-phrase segment when this fires (or
-   *  the segment is independently untrue) — `foreignTokens` alone never does, because the money
-   *  keyword always lands on the pipe-RIGHT, never segment 0, and segment 0 is the only span
-   *  `scrubMoneyPhrase` word-scrubs unconditionally. Without this, `ctx.foreignTokens` above was
-   *  dead weight for every money-tail candidate. Same `isForeignToDesign` rejector `settleTitle`'s
-   *  own ctx already binds (`bandScope.reject` / `broadcastReject`) — this only completes the pair
-   *  the caller was already computing, never a second rulebook. */
-  reject?: (seg: string) => boolean
   /**
    * May the net APPEND a money tail where none existed? (PO ruling 2026-08-10.)
    *
@@ -1036,7 +1037,7 @@ export function enforceMoneyTail(
   // already stated on the left in a different spelling, or — per-child scope — a sibling design's
   // name the keyword derivation's own off-niche filters never modeled. Same predicate the additive
   // search uses; a candidate that fails it never wins the slot, no matter how it scored upstream.
-  const verdict = verdictForAssembledTitle(cand, { truth: ctx.truth ?? null, protect: ctx.protect ?? '', foreignTokens: ctx.foreignTokens, reject: ctx.reject })
+  const verdict = verdictForAssembledTitle(cand, { truth: ctx.truth ?? null, protect: ctx.protect ?? '', foreignTokens: ctx.foreignTokens })
   if (!verdict.ok) {
     return { title: t0, decision: 'truth-lie', note: `assembled candidate fails whole-title verification (${verdict.reason})` }
   }
@@ -1084,19 +1085,7 @@ export function tryMoneyTail(
  *     both here would fight it
  *   - never emits a dangling separator
  */
-export function enforceTitleBand(
-  title: string,
-  ctx: TitleBandCtx,
-  /** ADMISSION IS VERIFICATION (PO 2026-08-23). This pad is the last writer in the door that used
-   *  to accept a candidate on length alone — `settleTruthBand`'s DFS already re-judges every
-   *  candidate it assembles, so a candidate this pad would admit and the DFS would reject is not a
-   *  candidate at all, it is a lie waiting for the DFS's own `best`-seed to inherit it (live
-   *  2026-08-23: "Business B*tch Sweatshirt for Men", a sibling design's name, landed at 69 chars —
-   *  under band, so the length-only `best = cand` branch took it with no truth check at all).
-   *  OPTIONAL, and absent ⇒ length-only accept, byte-identical to the pre-2026-08-23 behaviour —
-   *  the same fail-open every other truth-ctx consumer in this file already takes. */
-  verify?: AssembledTitleCtx,
-): { title: string; notes: string[]; decision: TitleBandDecision } {
+export function enforceTitleBand(title: string, ctx: TitleBandCtx): { title: string; notes: string[]; decision: TitleBandDecision } {
   const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
   if (!t0) return { title, notes: [], decision: 'empty' } // empty is the degrade gate's call, never the net's
   if (!ctx.apparel) return { title: t0, notes: [], decision: 'non-apparel' }
@@ -1116,12 +1105,6 @@ export function enforceTitleBand(
   for (const seg of candidateSegments(t0, ctx)) {
     const cand = `${head}${joiner}${seg}${tail}`.replace(/\s{2,}/g, ' ').trim()
     if (cand.length > TITLE_BAND_HI) continue
-    // ADMISSION IS VERIFICATION (PO 2026-08-23): a candidate the exit predicate would reject is not
-    // a candidate — at EITHER accept point below, not just the in-band one. The 'facts-exhausted'
-    // branch is not a lesser guarantee than 'padded'; the live sibling-name defect shipped THROUGH
-    // this branch specifically, under band, where nothing downstream can re-verify the seed it hands
-    // to the DFS's own `best`.
-    if (verify && !verdictForAssembledTitle(cand, verify).ok) continue
     if (cand.length >= TITLE_BAND_LO) {
       // First candidate that lands IN band wins — ordered by product-signal strength, so this is
       // deterministic and explainable rather than "whichever happened to fit".
@@ -1207,13 +1190,10 @@ export interface AssembledTitleCtx {
   truth: PhraseTruthCtx | null
   /** Design words that must survive verbatim — same meaning as `applyTitleTruthNet`'s `protectHay`. */
   protect?: string
-  /** Sibling design name tokens this title may never carry. Armed on both the per-child AND the
-   *  broadcast/parent exit (task #1, 2026-08-23) — a shared-parent title is answerable to every
-   *  child, so a sibling design's name is just as foreign to it as to any one child's own exit. */
+  /** Sibling design name tokens this title may never carry (per-child exits only). */
   foreignTokens?: ReadonlySet<string>
-  /** The whole-phrase sibling-name rejector — same partition `foreignTokens` is built from, at the
-   *  segment-drop granularity `applyTitleTruthNet.rejectSegment` takes. Armed on both the per-child
-   *  AND the broadcast/parent exit, same as `foreignTokens` above. */
+  /** The whole-phrase sibling-name rejector (per-child exits only) — same partition `foreignTokens`
+   *  is built from, at the segment-drop granularity `applyTitleTruthNet.rejectSegment` takes. */
   reject?: (seg: string) => boolean
   /** BROADCAST/parent titles only — see `applyTitleTruthNet`'s doc on the same option. */
   scrubProtectedOverlap?: boolean
@@ -1223,14 +1203,11 @@ export type AssembledTitleVerdict = { ok: true } | { ok: false; reason: string }
 
 /**
  * Does a candidate SIBLING span dispute this title — 2 or 3 word window `w`, or a bare word already
- * present — re-state a concept spelled a different way ("Crewneck" vs "Crew Neck")? Tests the
- * ASSEMBLED string against itself, because a combination the additive search built one segment at a
- * time can restate a concept the search never directly compared the two occurrences of. Windows
- * built from a very short (<2 char) word are skipped — not enough signal to avoid a coincidental
- * collision. Formerly had a pad-side twin (`titleBand.ts`'s own `conceptIsNew`, in `candidateSegments`'
- * `push()`) that tested a NEW candidate against an EXISTING title one segment at a time; task #4
- * (2026-08-23) deleted it as proven redundant — this whole-string check runs unconditionally, even
- * with no truth ctx at all, so it already covers every case the pad-side twin did.
+ * present — re-state a concept spelled a different way ("Crewneck" vs "Crew Neck")? Self-check twin
+ * of `conceptIsNew` (which tests a NEW candidate against an EXISTING title): this tests the ASSEMBLED
+ * string against itself, because a combination the additive search built one segment at a time can
+ * restate a concept the search never directly compared the two occurrences of. Windows built from a
+ * very short (<2 char) word are skipped — not enough signal to avoid a coincidental collision.
  */
 export function titleHasDuplicateConcept(title: string): boolean {
   const w = bandWords(title).filter((x) => !TITLE_CONNECTORS.has(x))
@@ -1309,13 +1286,6 @@ export function verdictForAssembledTitle(title: string, ctx: AssembledTitleCtx):
     })
     if (netted !== t) return { ok: false, reason: 'untrue-or-foreign-segment-present' }
     if (garmentGroupsIn(t).size > 1) return { ok: false, reason: 'two-garment-classes' }
-    /* UNSPEC'D ATTRIBUTE CLAIM (PO 2026-08-23). `scrubUnspecdGarmentClaims` owned this rule as a
-     * pipeline STAGE running BEFORE the pad, so the pad re-added from the pool exactly what the
-     * stage removed ("Oversized" on a Classic-fit Gildan 64000B, live 2026-08-23). Expressed HERE
-     * it is inadmissible, not merely deleted. Idempotence IS the probe, exactly as the truth net
-     * above: a title that scrub would still edit carries a claim the blank does not support. */
-    const scrubbed = scrubUnspecdGarmentClaims(t, ctx.truth.spec ?? null)
-    if (scrubbed.title !== t) return { ok: false, reason: 'unspecd-attribute-claim' }
     // THE KIDS IDENTITY MUST BE ASSERTED, NOT MERELY NOT-DENIED (defect 1, PO 2026-08-23, live
     // B0DP5H8QBT). Removing an adult claim (#642) is necessary but not sufficient: a kids_tee family's
     // title that never says Kids/Youth/Boys/Girls reads as adult by default. `youthMarkerFor` derives
@@ -1358,15 +1328,6 @@ export type TruthBandDecision =
    *  is the SECOND path (with `unreachable-no-prior`) on which a sub-band title exits deliberately,
    *  and it still raises a hold so the operator sees it. */
   | 'shipped-truthful-under-band'
-  /** PO ruling 2026-08-24: the prior fails truth (same condition as `shipped-truthful-under-band`
-   *  above) BUT the truthful replacement `best` reached is UNDER `TITLE_TRUTHFUL_SHIP_FLOOR` (65) —
-   *  too short to ship even though it is honest. "THE CEO Motivational" is true; so is "THE CEO". The
-   *  floor bounds how far the truth-over-band preference goes: below it, the door holds and keeps the
-   *  PRIOR anyway (even though the prior itself fails truth) rather than ship an even-shorter
-   *  truthful stub. This is the ONE decision in this file where the kept title is KNOWN to fail
-   *  `verdictForAssembledTitle` — callers MUST surface it to the operator, never let it ship silently
-   *  (see `SettleTitleHold.decision` and the ai-recommendations `locked_title_truth`-style warning). */
-  | 'refused-kept-lying-prior'
 
 export interface TruthBandResult {
   title: string
@@ -1476,26 +1437,7 @@ export function settleTruthBand(args: {
    * "| Long Sleeve Pullover Hoodie Crewneck": four garment nouns, all true, all worthless. */
   const poolSet = new Set(band.poolSegments ?? [])
   let budget = REFILL_NODE_BUDGET
-  /* THE SHIP GATE FOR THE REFUSAL PATH (CRITICAL 2, review round 1, 2026-08-23). `best` is exactly
-   * what `shipped-truthful-under-band` / `unreachable-no-prior` SHIP when the search below finds
-   * nothing better — so it may never be seeded with a string nobody has verified. By the time
-   * execution reaches this line, `produced` has ALREADY either failed or skipped the in-band fast
-   * path above (`produced.length >= TITLE_BAND_LO && verdictForAssembledTitle(produced,
-   * verifyCtx).ok`): under band, its truth was never checked at all; in band, it was checked and
-   * FAILED. Seeding `best = produced` unconditionally (the pre-fix behaviour) let an admitted lie —
-   * one the pad upstream should never have admitted, but a second, structural line of defence must
-   * not depend on that — become the thing this function ships under a decision literally named
-   * "shipped-truthful-under-band" without ever itself being verified truthful.
-   *
-   * CHOSEN OVER the alternative (run the final gate in `enforceTitleTruthBand` on hold exits too):
-   * that gate's own fallback on a failed re-verify is `priorTrim` when the prior fits the cap — but
-   * the ONE branch that ships `best` under a hold *because* the prior fails truth
-   * (`shipped-truthful-under-band`, below) would then fall back to that same untrue prior, reviving
-   * the exact lie this decision exists to refuse. Fixing the seed here is one line, touches no
-   * decision logic, and is provably correct by construction: `best` is re-verified INDEPENDENTLY of
-   * length (`verdictForAssembledTitle` never inspects length), so a short-but-honest `produced` is
-   * still a legitimate baseline, and only a produced string carrying an actual lie is excluded. */
-  let best = verdictForAssembledTitle(produced, verifyCtx).ok ? produced : ''
+  let best = produced
   const search = (t: string, depth: number): string | null => {
     if (t.length >= TITLE_BAND_LO && t.length <= TITLE_BAND_HI) {
       const v = verdictForAssembledTitle(t, verifyCtx)
@@ -1568,21 +1510,8 @@ export function settleTruthBand(args: {
     // Ship the truthful short title instead — `best`, the honest partial the search already built —
     // under a DISTINCT decision value so this never silently reads as an ordinary band-unreachable
     // hold. The hold still fires (`done(..., true)`) so the operator sees it.
-    //
-    // THE FLOOR (PO ruling 2026-08-24): only when `best` itself clears `TITLE_TRUTHFUL_SHIP_FLOOR`
-    // (65). Truth outranks an in-band lie, but that preference does not extend to ANY length — "THE
-    // CEO Motivational" (21 chars) is true, and so is "THE CEO" (7). Below the floor, ship nothing
-    // new: hold and keep the prior anyway, under YET ANOTHER distinct decision value
-    // (`refused-kept-lying-prior`) so a caller can tell "kept a TRUE prior" from "kept a title we
-    // KNOW fails truth" and surface the second case to the operator (never silent — see
-    // `SettleTitleHold.decision`).
-    if (best.length >= TITLE_TRUTHFUL_SHIP_FLOOR) {
-      return done(best, 'shipped-truthful-under-band',
-        `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`,
-        tried, true)
-    }
-    return done(prior, 'refused-kept-lying-prior',
-      `truthful title reached only ${best.length}/${TITLE_TRUTHFUL_SHIP_FLOOR} (the shippable floor) from true material, and the prior title fails truth (${priorVerdict.reason}) — holding and keeping the prior anyway because ${best.length} chars is under the floor; the kept title is NOT truthful and must be surfaced to the operator`,
+    return done(best, 'shipped-truthful-under-band',
+      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`,
       tried, true)
   }
   if (prior) {
@@ -1749,49 +1678,6 @@ export function enforceTitleTruthBand(args: {
       }
     }
   }
-  /* THE EMPTY-TITLE RATCHET GUARD (review round 2 — NEW BREAKAGE 1; corrected in review round 3 —
-   * CRITICAL-A/IMPORTANT-B, 2026-08-23). Scoped to `settled.hold` only — a NON-hold exit
-   * (`in-band`/`refilled`) never reaches here empty, because `finalTitle` is a casing-only
-   * transform of a `settleTruthBand` result that already verified non-empty content to get there.
-   *
-   * WHY `netted` AND NOT A CALLER-SUPPLIED FALLBACK (round 2's `emptyHoldFallback`, now deleted).
-   * Round 2's version defaulted to the caller's raw, PRE-net input — which undoes every subtractive
-   * stage this function and `settleTitle`'s steps 1-11 already ran (waste vocabulary, money tail,
-   * color strip, inclusive audience, the facts pad, spec-tail/orphan drop, `applyTitleTruthNet`
-   * itself) and can re-ship exactly the untrue segment those stages just removed — reintroducing,
-   * through a second door, the precise defect class round 1's seed fix closed on the first one. It
-   * was also opt-in: a caller that forgot the argument silently reinstated the empty-ratchet with
-   * the suite green — "a hold never emits empty IF the caller remembers to pass a string" is not a
-   * structural guarantee.
-   *
-   * `netted` fixes both. It is computed IN THIS FUNCTION (no caller can omit it), it is `drop.title`
-   * (post `settleTitle` steps 1-11) run through `applyTitleTruthNet` + `dropOrphanPoolFragments` —
-   * i.e. every subtractive correction this door makes, already applied — and it is PROVABLY
-   * non-empty on every path that reaches this line: `settleTruthBand`'s own top guard
-   * (`if (!produced) return done(..., 'not-produced', ...)`, `hold: false` by construction) routes
-   * an empty `netted` to `not-produced` before a hold can ever be raised, so `settled.hold === true`
-   * here is itself a proof `netted` is non-empty. `prior` is kept as a second, defence-in-depth
-   * backstop that should be structurally unreachable, not the primary fallback.
-   *
-   * ORDER, DELIBERATE: `netted` first, then `prior` — not the reverse. The PO ruling that a
-   * not-fully-truth-clean prior may be KEPT (round 2) was scoped to PRESERVING existing stored
-   * copy against being overwritten by nothing; it did not authorise MANUFACTURING and shipping this
-   * run's own un-netted output over a prior when one exists, and by the time this guard runs, prior
-   * (when non-empty) is already known unusable for this run — `shipped-truthful-under-band` only
-   * reaches here after `prior` failed truth, and `unreachable-no-prior`'s prior is absent or
-   * over-cap — so `netted` (this run's own already-scrubbed material) dominates it either way. */
-  if (settled.hold && !finalTitle.trim()) {
-    const nettedTrim = netted.trim()
-    const priorTrim = (args.prior || '').trim()
-    const priorUsable = priorTrim.length > 0 && priorTrim.length <= TITLE_BAND_HI
-    const fallback = nettedTrim || (priorUsable ? priorTrim : '')
-    if (fallback) {
-      return {
-        ...settled, netted, title: fallback, len: fallback.length,
-        reason: `${settled.reason} — EMPTY-TITLE GUARD: the door would otherwise have shipped '' (a stored-recommendation ratchet); kept ${nettedTrim ? "this run's own already-netted material" : 'the prior title'} instead`,
-      }
-    }
-  }
   return { ...settled, netted, title: finalTitle }
 }
 
@@ -1843,14 +1729,6 @@ export interface InclusiveAudienceCtx {
    *  title: this net only ever deletes AUDIENCE words, never a garment noun, so `garmentSecond`
    *  (`pickDistinctGarmentForm`) resolves identically before and after. */
   band: TitleBandCtx
-  /** ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1). This stage's own re-fill (via
-   *  `enforceTitleBand`) is a pad like any other — the removal it performs frees characters, and
-   *  whatever it fills them back in with must pass the SAME whole-string predicate the door's
-   *  terminal exit judges by, or a candidate this stage admits can ship a lie the exit never gets a
-   *  chance to see (an in-band string short-circuits `enforceTitleBand`'s own top-of-function
-   *  'in-band' return before the verified candidate loop even runs). Optional, and absent ⇒
-   *  length-only re-fill, byte-identical to the pre-2026-08-23 behaviour. */
-  verify?: AssembledTitleCtx
 }
 
 /** Both genders, in either order, joined by "and"/"&"/","/nothing, with an optional leading "for" —
@@ -2090,9 +1968,7 @@ export function enforceInclusiveAudience(
   // Re-fill the freed characters from PRODUCT FACTS (never the pool — spec-vs-search grounding), then
   // judge the FINAL bytes. This is why the guard lives here and not in the caller: the removal and
   // the re-fill are one decision, and only their composition can be checked against the band.
-  // ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1): this stage's own re-fill may not
-  // admit a candidate the door's terminal exit would reject — see `ctx.verify`'s doc.
-  const padded = enforceTitleBand(reduced, ctx.band, ctx.verify).title
+  const padded = enforceTitleBand(reduced, ctx.band).title
   const verdict = removalPermitted(padded.length)
   if (!verdict.ok) {
     return {
@@ -2169,9 +2045,6 @@ export interface VariantColorCtx {
    *  title: this net only ever deletes COLOR words, never a garment noun, so `garmentSecond`
    *  (`pickDistinctGarmentForm`) resolves identically before and after. */
   band: TitleBandCtx
-  /** ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1) — see `InclusiveAudienceCtx.verify`'s
-   *  doc; the same gap applies to this stage's own re-fill. Optional, absent ⇒ byte-identical. */
-  verify?: AssembledTitleCtx
 }
 
 /** Built fresh per call — a shared /g/ regex carries `lastIndex` across calls, which is exactly how
@@ -2221,9 +2094,7 @@ export function stripVariantColorWords(
 
   // Re-fill the freed characters from PRODUCT FACTS, then judge the FINAL bytes — the removal and the
   // re-fill are ONE decision (same reasoning as enforceInclusiveAudience's guard).
-  // ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1): this stage's own re-fill may not
-  // admit a candidate the door's terminal exit would reject — see `ctx.verify`'s doc.
-  const padded = enforceTitleBand(reduced, ctx.band, ctx.verify).title
+  const padded = enforceTitleBand(reduced, ctx.band).title
   const verdict = removalPermitted(padded.length)
   if (!verdict.ok) {
     return {
@@ -2321,9 +2192,6 @@ export interface TitleWasteCtx {
    *  it. Absent ⇒ arm 1 is simply unavailable and arm 2 (the facts pad) decides alone. */
   moneyKws?: readonly string[] | null
   money?: MoneyTailCtx | null
-  /** ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1) — see `InclusiveAudienceCtx.verify`'s
-   *  doc; the same gap applies to this stage's own re-fill. Optional, absent ⇒ byte-identical. */
-  verify?: AssembledTitleCtx
 }
 
 /**
@@ -2438,9 +2306,7 @@ export function stripTitleWasteVocabulary(
   // An editorial ruling with zero corpus counter-examples is not a preference to be balanced against
   // length — it is a fact about their voice. A short clean title is the correct output; the length
   // cure belongs upstream (a real money keyword), never in keeping a word they banned.
-  // ADMISSION IS VERIFICATION (PO 2026-08-23, review round 1): this stage's own re-fill may not
-  // admit a candidate the door's terminal exit would reject — see `ctx.verify`'s doc.
-  const padded = enforceTitleBand(reduced, ctx.band, ctx.verify).title
+  const padded = enforceTitleBand(reduced, ctx.band).title
   const final = padded.length <= TITLE_BAND_HI ? padded : reduced   // Amazon's cap is still absolute
   return {
     title: final,
@@ -2544,12 +2410,6 @@ export interface SettleTitleHold {
   tried: string[]
   reason: string
   kept: string
-  /** PO ruling 2026-08-24: which `TruthBandDecision` raised this hold. Distinguishes "kept a TRUE
-   *  prior" (`refused-kept-prior`/`unreachable-no-prior`) from "kept a title we KNOW fails truth"
-   *  (`refused-kept-lying-prior`) — callers must surface the second case to the operator, never let
-   *  it read as an ordinary hold. Optional only so a hand-built `SettleTitleHold` elsewhere in tests
-   *  need not supply it; the real call site (below) always does. */
-  decision?: TruthBandDecision
 }
 
 export interface SettleTitleV4Diff {
@@ -2592,19 +2452,6 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   const traceId = `${ctx.parentAsin ?? 'na'}#${++SETTLE_SEQ}`
   let title = raw
 
-  // THE WHOLE-STRING VERIFY CTX, bound ONCE, up front (moved here 2026-08-23 review round 1 —
-  // CRITICAL 1: it used to bind only at step 9, so steps 5/7/8's own internal re-fills — which
-  // RETURN their padded string directly, not merely probe it — could admit an unspec'd attribute
-  // claim or any other whole-string lie `enforceTitleBand`'s own top-of-function 'in-band' fast
-  // path then shipped straight past step 9's gate untouched (an already-in-band string never
-  // enters the verified candidate loop at all). Same shape `settleTruthBand` binds for its own
-  // DFS, so every pad in this door — steps 5, 7, 8, 9 — and the prior-truth check judge candidates
-  // the SAME way, one ctx, no second rulebook.
-  const verifyCtx: AssembledTitleCtx = {
-    truth: ctx.truth, protect: ctx.protect, foreignTokens: ctx.foreignTokens, reject: ctx.reject,
-    scrubProtectedOverlap: ctx.scrubProtectedOverlap,
-  }
-
   // 1-2. CASING FIRST — both length-neutral and idempotent, so every stage below reads clean bytes.
   const cased = fixApostropheCase(title)
   if (cased !== title) console.log(JSON.stringify({ tag: 'SHIP_APOSTROPHE_CASE', field: 'title', from: title, to: cased }))
@@ -2639,7 +2486,6 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
     band: ctx.bandCtxFor(capped),
     moneyKws: ctx.moneyTailMode === 'on' ? (ctx.moneyKws ?? null) : null,
     money: ctx.moneyCtx,
-    verify: verifyCtx,
   })
   console.log(JSON.stringify({ tag: 'SHIP_TITLE_WASTE', decision: waste.decision, from: capped.length, to: waste.title.length, changed: waste.title !== capped, note: waste.note }))
   let moneyed = waste.title
@@ -2658,29 +2504,14 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   }
 
   // 7. COLOR STRIP — §5: shared copy carries no color word; colors rank per-child via the backend tail.
-  const colorNet = stripVariantColorWords(moneyed, { apparel: ctx.apparel, protect: ctx.colorProtect, band: ctx.bandCtxFor(moneyed), verify: verifyCtx })
+  const colorNet = stripVariantColorWords(moneyed, { apparel: ctx.apparel, protect: ctx.colorProtect, band: ctx.bandCtxFor(moneyed) })
   console.log(JSON.stringify({ tag: 'SHIP_COLOR_STRIP', decision: colorNet.decision, from: moneyed.length, to: colorNet.title.length, changed: colorNet.title !== moneyed, note: colorNet.note }))
-  /* MAKE THE REFUSAL VISIBLE (review round 2, 2026-08-23 — NEW BREAKAGE 3). Arming this stage's own
-   * pad with `verify` (this round's CRITICAL 1 fix) can make `padded` land SHORTER than it used to
-   * — a lying candidate that used to reach `removalPermitted`'s floor is now correctly refused, so
-   * the floor check that gated the removal can now fail where it didn't before. The removal net
-   * itself already returns 'band-guard' byte-identical (unchanged behaviour, still correct), but a
-   * §5 color-word violation silently persisting past a routine INFO line is exactly the failure
-   * mode this whole plan exists to end — so a NEW refusal of this specific shape gets its own WARN,
-   * grep-able independent of the routine per-stage trace above. */
-  if (colorNet.decision === 'band-guard') {
-    console.warn(JSON.stringify({ tag: 'TITLE_STAGE_REFUSED_VISIBLE', stage: 'color-strip', parent: ctx.parentAsin, scope: ctx.holdScope, title: colorNet.title, note: colorNet.note }))
-  }
   moneyed = colorNet.title
 
   // 8. INCLUSIVE AUDIENCE — "for Men and Women" is character waste (§4). After the money tail: it
   //    already had first refusal on the same tail region.
-  const inc = enforceInclusiveAudience(moneyed, { apparel: ctx.apparel, lean: ctx.lean, band: ctx.bandCtxFor(moneyed), verify: verifyCtx })
+  const inc = enforceInclusiveAudience(moneyed, { apparel: ctx.apparel, lean: ctx.lean, band: ctx.bandCtxFor(moneyed) })
   console.log(JSON.stringify({ tag: 'SHIP_INCLUSIVE_AUDIENCE', decision: inc.decision, from: moneyed.length, to: inc.title.length, changed: inc.title !== moneyed, note: inc.note }))
-  // Same visibility fix as the color strip immediately above — see that comment.
-  if (inc.decision === 'band-guard') {
-    console.warn(JSON.stringify({ tag: 'TITLE_STAGE_REFUSED_VISIBLE', stage: 'inclusive-audience', parent: ctx.parentAsin, scope: ctx.holdScope, title: inc.title, note: inc.note }))
-  }
   moneyed = inc.title
 
   // 9. FACTS PAD — suppressed at TITLE_V4=on ("never ship short — always ask me"), UNLESS the prior
@@ -2690,9 +2521,12 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   //    is a sibling design's name or a forced gender on a unisex family, refusing to pad does not
   //    avoid manufacturing text, it just manufactures a WORSE outcome (a shipped lie) by omission.
   //    Judged with the SAME predicate every candidate this door assembles is judged by — no second
-  //    "is this true" rulebook. `verifyCtx` is bound once, above, at the top of this function.
+  //    "is this true" rulebook.
   const priorForV4 = (ctx.prior || '').trim()
-  const priorFailsTruthForV4 = !!priorForV4 && !verdictForAssembledTitle(priorForV4, verifyCtx).ok
+  const priorFailsTruthForV4 = !!priorForV4 && !verdictForAssembledTitle(priorForV4, {
+    truth: ctx.truth, protect: ctx.protect, foreignTokens: ctx.foreignTokens, reject: ctx.reject,
+    scrubProtectedOverlap: ctx.scrubProtectedOverlap,
+  }).ok
   const padSuppressed = ctx.v4NoPad && !priorFailsTruthForV4
   if (ctx.v4NoPad && priorFailsTruthForV4) {
     console.warn(JSON.stringify({
@@ -2702,9 +2536,7 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
   }
   const v = padSuppressed
     ? { title: moneyed, decision: 'v4-no-pad' as const, notes: ['TITLE_V4=on — the facts pad is deleted; short is a refusal, not a hole to fill'] as string[] }
-    // ADMISSION IS VERIFICATION (PO 2026-08-23): the facts pad may not accept a candidate the door's
-    // own exit predicate would reject — see `enforceTitleBand`'s `verify` param doc.
-    : enforceTitleBand(moneyed, ctx.bandCtxFor(moneyed), verifyCtx)
+    : enforceTitleBand(moneyed, ctx.bandCtxFor(moneyed))
   console.log(JSON.stringify({
     tag: 'SHIP_BAND_DECISION', field: 'title', mode: 'on', decision: v.decision,
     from: raw.length, to: v.title.length, changed: v.title !== moneyed, capped: capped.length !== raw.length, note: v.notes[0] ?? '',
@@ -2751,9 +2583,6 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
     produced: drop.title, prior: ctx.prior, apparel: ctx.apparel, band: ctx.bandCtxFor(drop.title),
     truth: ctx.truth, protect: ctx.protect, reject: ctx.reject, foreignTokens: ctx.foreignTokens,
     scrubProtectedOverlap: ctx.scrubProtectedOverlap,
-    // The empty-title ratchet guard (see `enforceTitleTruthBand`'s own doc) is now fully internal —
-    // it falls back to `netted`, which that function computes itself, never to anything this
-    // caller supplies. Nothing to wire here (review round 3, 2026-08-23).
   })
   console.log(JSON.stringify({
     tag: 'TITLE_TRUTH_BAND', scope: ctx.holdScope, parent: ctx.parentAsin, decision: settled.decision,
@@ -2770,7 +2599,7 @@ export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult
       band: TITLE_BAND_LO, tried: settled.tried, reason: settled.reason, decision: settled.decision,
       produced: drop.title, kept: settled.title,
     }))
-    holdEntry = { scope: ctx.holdScope, parent: ctx.parentAsin, len: settled.len, tried: settled.tried, reason: settled.reason, kept: settled.title, decision: settled.decision }
+    holdEntry = { scope: ctx.holdScope, parent: ctx.parentAsin, len: settled.len, tried: settled.tried, reason: settled.reason, kept: settled.title }
   }
   console.log(JSON.stringify({ tag: 'TITLE_DOOR_TRACE', id: traceId, in: raw, out: settled.title }))
 
