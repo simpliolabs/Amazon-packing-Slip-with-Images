@@ -33,7 +33,7 @@ import {
   type BlankSpec, type BlankSpecRow, type GarmentFamily,
 } from './blankSpecs'
 import {
-  audienceOfGarmentFamily, normalizeAudienceLean, phraseTruthVerdict,
+  audienceOfGarmentFamily, normalizeAudienceLean, phraseTruthVerdict, youthMarkerFor,
   type PhraseTruthCtx, type TruthGarmentFamily,
 } from './contentTruth'
 import {
@@ -43,6 +43,11 @@ import {
 } from './titleBand'
 import { resolveGarment } from './garmentNoun'
 import { buildForeignDesignTokens, isForeignToDesign } from './designScope'
+// THE BROADCAST PARTITION (final whole-branch review 2026-08-24, CRITICAL 3): this harness now
+// calls `buildForeignDesignTokens` directly — the SAME canonical seam `scrubPublished` in
+// `listingPipeline.ts` uses for the real ship door — instead of importing a pipeline-internal
+// function (`computeBroadcastDesignScope`) whose outputs the pipeline itself no longer consumes for
+// this purpose. See the broadcast-scope block below for the full history.
 
 /* ── THE CATALOG, exactly as migrations 053 + 058 seed `blank_specs` ──────────────────────────── */
 
@@ -295,6 +300,15 @@ function buildSettleCtx(params: {
   reject?: (seg: string) => boolean
   foreignTokens?: ReadonlySet<string>
   holdScope: string
+  /** THE POOL'S OWN reject, DISTINCT from `reject` above (review round 2, 2026-08-23 — NEW
+   *  BREAKAGE 2). Production's broadcast band ctx builds its pool with NO rejector at all
+   *  (`bandPoolSegments = poolSegmentsFor(bandTruthOk)`, `listingPipeline.ts:9358`) — a family hub
+   *  is answerable to every design, so nothing is foreign to its OWN pool; only a per-child ctx
+   *  filters (`poolSegmentsFor(bandTruth, reject)`, `:9827`). `reject` above still governs the
+   *  TRUTH NET (`applyTitleTruthNet`'s `rejectSegment`) on every exit — that part is genuinely
+   *  the same on broadcast and per-child. Absent ⇒ unfiltered pool, matching the broadcast default;
+   *  the per-child call site below passes its own `reject` here too. */
+  poolReject?: (seg: string) => boolean
 }): SettleTitleCtx {
   const truthOk = (s: string): boolean => !params.truth || phraseTruthVerdict(s, params.truth).ok
   const bandCtxFor = (title: string): TitleBandCtx => ({
@@ -302,10 +316,16 @@ function buildSettleCtx(params: {
     customizable: false,
     garmentBrand: params.brand || null,
     factSegments: garmentFacts(params.fams, title),
-    poolSegments: poolFacts(truthOk, params.reject),
+    poolSegments: poolFacts(truthOk, params.poolReject),
     truthOk,
     spec: params.spec ? { fit: params.spec.fit ? `${params.spec.fit} Fit` : null, sleeve: params.spec.sleeve ?? null, neck: params.spec.neck ?? null } : null,
     garmentSecond: pickDistinctGarmentForm(title, resolveGarment({ productType: PRODUCT_TYPE, title, blankFamily: params.fams[0] ?? null }).aliases),
+    // Task 2's kids-identity check (review round 1, 2026-08-23 — IMPORTANT finding): this harness
+    // never populated `youthMarker`, so a kids-family fixture could not exercise that check even in
+    // principle. Same derivation every real caller uses — `youthMarkerFor` reads only `params.truth`,
+    // never the title — so this is `null` (no-op) on this fixture's adult-only families, byte-
+    // identical, and becomes live the moment a kids-family fixture is added.
+    youthMarker: youthMarkerFor(params.truth),
   })
   const moneyCtx: MoneyTailCtx = {
     apparel: true,
@@ -315,6 +335,11 @@ function buildSettleCtx(params: {
     garmentBrand: params.brand || null,
     truth: params.truth,
     foreignTokens: params.foreignTokens,
+    // Parity with the production `moneyCtx.reject` wiring (this same review round's carried-item
+    // fix in listingPipeline.ts). Inert on this fixture today (`moneyKws: null` below — Phase 1
+    // money-tail is broadcast-only, and this harness models the truth+band+pad path, not the money
+    // tail), kept here only so `buildSettleCtx` stays a faithful mirror of the real ctx shape.
+    reject: params.reject,
     allowAppend: true,
   }
   return {
@@ -377,8 +402,70 @@ export function runTruthBandHarness(): HarnessResult {
    * that is the one exit answerable to every child AT ONCE and therefore may only commit to the
    * class that actually speaks for the family. */
   const broadcastUnion: GarmentFamily[] = familyRes.garmentFamily ? [familyRes.garmentFamily] : []
+
+  // THE BROADCAST PARTITION (final whole-branch review 2026-08-24, CRITICAL 3 — this harness
+  // MIRRORED the wiring instead of CONSUMING it: it imported `computeBroadcastDesignScope` from
+  // `listingPipeline.ts` — a hand-rolled split with NO niche/name-share exemption and NO
+  // family-title/garment-noun exemption — while the ACTUAL production ship door (`scrubPublished`,
+  // CRITICAL 1+2 fix) no longer uses that function's `foreignTokens`/`protectHay` outputs at all; it
+  // calls `computeBroadcastShipDoorScope` directly, from `r.per_child_titles`. THE CURE: call the
+  // SAME canonical seam (`buildForeignDesignTokens`, designScope.ts) the SAME way that function does
+  // — no second partition. NOT a direct import of `computeBroadcastShipDoorScope` itself: this file
+  // is deliberately a "zero-database leaf" (see the header doc) so `npx tsx truthBandHarness.ts` runs
+  // standalone with no Supabase env at all; `listingPipeline.ts` is a 9,400-line module with its own
+  // module-scope lazy DB clients, and importing it here would reintroduce exactly the CI trap this
+  // file's own header warns about. The two lines below are therefore inlined, byte-for-byte the same
+  // expression `computeBroadcastShipDoorScope` runs — see that function's doc (listingPipeline.ts)
+  // and `broadcastShipDoorScope.test.ts` for the whole-name fix and its reproduction.
+  //
+  // WHOLE-NAME SUBTRACTION, NOT TOKEN (PO ruling 2026-08-24, defect A of the reverted PR #646): a
+  // name is excluded from `broadcastProtectHay` only when it IS (case-insensitive, whole string) one
+  // of the family's own per-design names — never merely because it SHARES A TOKEN with one. The live
+  // collapse this cures: a family theme sharing one word with a sibling design name used to be
+  // convicted and dropped WHOLESALE by the token-level `isForeignToDesign(name, foreignTokens)` this
+  // harness (and production) used before.
+  //
+  // Every design in this fixture family IS its own per-child scope (mirrors production's
+  // `r.per_child_titles`), so the theme/foreign split subtracts all six design names from the
+  // family set — on THIS fixture that leaves `broadcastThemeNames` empty and `broadcastProtectHay:
+  // ''`, which is the CORRECT outcome per §3.2 of handoff/TITLE_ADMISSION_IS_VERIFICATION.md: a
+  // parent with no family-level vocabulary left after the subtraction must never fall back to
+  // permitting a design name (this fixture has no distinct family-theme name separate from its six
+  // per-design names, so the whole-name fix changes nothing HERE — see
+  // `broadcastShipDoorScope.test.ts` for the scenario it does change). Computed BEFORE `broadcastCtx`
+  // so `broadcastCtx.designTokens` can use `broadcastThemeNames` instead of `mkCtx`'s default full
+  // `designNames()`.
+  const familyDesignVocab = DESIGNS.map((d) => ({ key: d.key, name: d.name }))
+  const broadcastDesignScope = buildForeignDesignTokens(familyDesignVocab, {
+    // `PRIOR_PARENT` — the closest fixture analog to production's `${canonicalTitle} ${priorTitle}`
+    // (this harness has no separate "canonical title" concept) — restores the garment-noun exemption
+    // exactly as `scrubPublished`'s own `familyTitleText` does.
+    familyTitleText: PRIOR_PARENT,
+    poolKeywords: [],
+    strictNames: true,
+  })
+  // Queried with a key no design owns, matching `scrubPublished`'s `'__broadcast__'` sentinel:
+  // `buildForeignDesignTokens`'s documented unknown-key path is "the union of every design's name
+  // tokens minus the niche exemptions" — spec §3.2's broadcast rule verbatim.
+  const broadcastForeignTokens = broadcastDesignScope('__broadcast__')
+  const broadcastSiblingNamesLower = new Set(familyDesignVocab.map((d) => d.name.toLowerCase()))
+  const broadcastThemeNames = designNames().filter((n) => !broadcastSiblingNamesLower.has(n.toLowerCase()))
+  const broadcastProtectHay = broadcastThemeNames.join(' ')
+  // SAME whole-phrase rejector the per-child partition below binds per-key (`isForeignToDesign`),
+  // applied against the broadcast partition's UNION set instead of one design's own foreign set —
+  // exactly `broadcastReject` in listingPipeline.ts's `scrubPublished` closure.
+  const broadcastReject = (seg: string): boolean => isForeignToDesign(seg, broadcastForeignTokens)
+
+  // NARROWED designTokens (review round 2, 2026-08-23 — MINOR 2): production narrows the broadcast
+  // truth ctx's own `designTokens` to `broadcastThemeNames` (`listingPipeline.ts:9214`, §3.2
+  // resolution #2) — this harness still passed the FULL `designNames()` via `mkCtx`'s default. Since
+  // `titleNetActsOn` gates the kids/adult act-points on `designTokens.length > 0`
+  // (`contentTruth.ts:420`), an un-narrowed broadcast ctx exercises a code path production would
+  // actually skip on this exit. No behavioural difference on this adult-only fixture (the gate in
+  // question never fires either way here), but this makes the row a faithful mirror, not merely an
+  // accidentally-equivalent one.
   const broadcastCtx = familyRes.garmentFamily
-    ? mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null)
+    ? { ...mkCtx(familyRes.garmentFamily, broadcastUnion, familyRes.spec, familyBrand || null), designTokens: broadcastThemeNames }
     : null
 
   const rows: HarnessRow[] = []
@@ -388,7 +475,12 @@ export function runTruthBandHarness(): HarnessResult {
   {
     const ctx = buildSettleCtx({
       truth: broadcastCtx, fams: broadcastUnion, spec: familyRes.spec, brand: familyBrand,
-      protect: designNames().join(' '), prior: PRIOR_PARENT, holdScope: 'broadcast',
+      // TASK-1 SHAPE, not `designNames().join(' ')`: the pre-fix harness could not distinguish
+      // "protect" from "foreignTokens" on this exit and so could never see a sibling name land on
+      // the broadcast title even if the production fix regressed — a harness blind to the change
+      // under test is worse than no harness.
+      protect: broadcastProtectHay, reject: broadcastReject, foreignTokens: broadcastForeignTokens,
+      prior: PRIOR_PARENT, holdScope: 'broadcast',
     })
     const r = settleTitle(RAW_PARENT, ctx)
     const r2 = settleTitle(r.title, { ...ctx, produced: true })
@@ -422,6 +514,9 @@ export function runTruthBandHarness(): HarnessResult {
     const ctx = buildSettleCtx({
       truth: ctxTruth, fams, spec: res.spec ?? familyRes.spec, brand,
       protect: d.name, prior: PRIOR[d.key], reject, foreignTokens: foreign, holdScope: d.key,
+      // Per-child DOES filter its own pool (production `poolSegmentsFor(bandTruth, reject)`,
+      // listingPipeline.ts:9827) — only the broadcast row above is unfiltered.
+      poolReject: reject,
     })
     const r = settleTitle(raw, ctx)
     const r2 = settleTitle(r.title, { ...ctx, produced: true })
@@ -608,15 +703,22 @@ function report(): void {
     ? `ALL ${r.rows.length} TITLES IN BAND ${TITLE_BAND_LO}-${TITLE_BAND_HI}`
     : `${bad.length} TITLE(S) OUT OF BAND: ${bad.map((x) => `${x.scope}=${x.len}`).join(', ')}`)
 
-  console.log('\n═══ LIVE FAILURE REPRO — thin pool + lying prior (PO ruling 2026-08-23) ══════════════════════')
+  console.log('\n═══ LIVE FAILURE REPRO — thin pool + lying prior, bounded by the 65-char floor (PO rulings 2026-08-23 + 2026-08-24) ══════════════════════')
   const lf = runLiveFailureRepro()
   console.log(`   raw      (${String(lf.rawLen).padStart(2)}): ${lf.raw}`)
   console.log(`   prior         : ${LIVE_LYING_PRIOR}`)
   console.log(`   SHIPPED  (${String(lf.len).padStart(2)}): ${lf.title}`)
   console.log(`   decision : ${lf.decision}${lf.hold ? '  [HOLD]' : ''} — ${lf.reason}`)
-  console.log(lf.title === LIVE_LYING_PRIOR
-    ? '   *** FAIL: shipped the exact lying prior — the invariant is NOT installed ***'
-    : '   PASS: did not keep the lying prior')
+  // PO ruling 2026-08-24 changed what "correct" means here: this scenario's truthful replacement is
+  // only 58 chars (under TITLE_TRUTHFUL_SHIP_FLOOR, 65) — below the floor, keeping the lying prior
+  // under `refused-kept-lying-prior` IS the correct, surfaced outcome, not a failure. Only flag it if
+  // the prior ships SILENTLY (any decision OTHER than the distinct floor decision) — that would mean
+  // the operator has no way to tell this hold kept a known lie.
+  console.log(lf.title === LIVE_LYING_PRIOR && lf.decision !== 'refused-kept-lying-prior'
+    ? '   *** FAIL: shipped the exact lying prior WITHOUT the distinct floor decision — surfacing is broken ***'
+    : lf.title === LIVE_LYING_PRIOR
+      ? '   PASS: kept the lying prior under the floor — surfaced via the distinct `refused-kept-lying-prior` decision, as expected'
+      : '   PASS: did not keep the lying prior')
 }
 
 // Node ESM: run the report only when this file is the entrypoint, never on import.
