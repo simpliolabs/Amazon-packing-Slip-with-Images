@@ -707,3 +707,88 @@ describe('settleTitle — NEVER EMIT EMPTY, the PRIMARY site (title-floor-baseli
     expect(r.hold).toBe(true)
   })
 })
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE PAD'S CROSS-GENDER VETO (PR #649 follow-up). #649 gave `buildNicheParentTitle` the same
+ * validateTitle reject-and-retry loop `runTitleAgent` already had — it worked, live: 0 of 6 children
+ * shipped under 65 chars, vs 4 of 6 before. But two children shipped with the pad appending a POOL
+ * PHRASE carrying "For Women" onto a `lean_male` family:
+ *   "THE CEO Don't Quit Sweatshirt | Pullover Sweatshirts For Women for Men"   (self-contradictory)
+ *   "THE CEO Hustle Definiton Sweatshirt | Pullover Sweatshirts For Women"     (fights the lean)
+ * `enforceMoneyTail` already has this exact veto for the MONEY TAIL slot (kw vs `ctx.lean`, kw vs the
+ * title's own audience tail) — `candidateSegments` (the facts pad, titleBand.ts) never had it at all:
+ * no lean/gender check anywhere in its body. These tests reproduce the live collapse FIRST (RED
+ * against pre-fix code) before asserting the fix.
+ */
+describe('candidateSegments (the facts pad) — CROSS-GENDER VETO (PR #649 follow-up)', () => {
+  it('REPRODUCTION: a lean_male family with only a "For Women" pool phrase available pads WITHOUT it — the exact live B0.. collapse ("Pullover Sweatshirts For Women" on a lean_male family)', () => {
+    const title = 'THE CEO Hustle Definiton Sweatshirt'
+    expect(title.length).toBe(35) // pin the fixture
+    const ctx: TitleBandCtx = {
+      apparel: true,
+      lean: 'lean_male',
+      poolSegments: ['Pullover Sweatshirts For Women'],
+      truthOk: () => true,
+    }
+    const v = enforceTitleBand(title, ctx)
+    // The candidate must never be admitted: no "for women" anywhere in the result, and since it was
+    // the ONLY candidate in the bank, the pad has nothing left to say — same length as the input.
+    expect(v.title.toLowerCase()).not.toContain('for women')
+    expect(v.title).toBe(title)
+    expect(v.title.length).toBe(35)
+  })
+
+  it('REPRODUCTION: a lean_male family whose title ALREADY carries "for Men" must never pad into the self-contradictory "For Women for Men" — the second live shipped string', () => {
+    const title = 'THE CEO Dont Quit Sweatshirt for Men'
+    expect(title.length).toBe(36) // pin the fixture
+    const ctx: TitleBandCtx = {
+      apparel: true,
+      lean: 'lean_male',
+      poolSegments: ['Pullover Sweatshirts For Women'],
+      truthOk: () => true,
+    }
+    const v = enforceTitleBand(title, ctx)
+    expect(v.title).not.toContain('Pullover Sweatshirts For Women for Men')
+    expect(v.title.toLowerCase()).not.toContain('for women')
+    expect(v.title).toBe(title)
+    expect(v.title.length).toBe(36)
+  })
+
+  it('a lean_male family still accepts a pool phrase that agrees with the lean (fail-open direction unchanged)', () => {
+    const title = 'THE CEO Hustle Definiton Sweatshirt'
+    const ctx: TitleBandCtx = {
+      apparel: true,
+      lean: 'lean_male',
+      poolSegments: ['Pullover Sweatshirts For Men'],
+      truthOk: () => true,
+    }
+    const v = enforceTitleBand(title, ctx)
+    expect(v.title.toLowerCase()).toContain('for men')
+    expect(v.title.length).toBe(66)
+  })
+
+  it('a UNISEX family (no lean) still accepts a "For Women" pool phrase — the veto is lean-scoped, not a blanket ban', () => {
+    const title = 'THE CEO Hustle Definiton Sweatshirt'
+    const ctx: TitleBandCtx = {
+      apparel: true,
+      lean: 'unisex',
+      poolSegments: ['Pullover Sweatshirts For Women'],
+      truthOk: () => true,
+    }
+    const v = enforceTitleBand(title, ctx)
+    expect(v.title.toLowerCase()).toContain('for women')
+    expect(v.title.length).toBe(68)
+  })
+
+  it('with no `lean` on ctx at all (absent field), behavior is fail-open — byte-identical to a family with no veto information', () => {
+    const title = 'THE CEO Hustle Definiton Sweatshirt'
+    const ctx: TitleBandCtx = {
+      apparel: true,
+      poolSegments: ['Pullover Sweatshirts For Women'],
+      truthOk: () => true,
+    }
+    const v = enforceTitleBand(title, ctx)
+    expect(v.title.toLowerCase()).toContain('for women')
+    expect(v.title.length).toBe(68)
+  })
+})

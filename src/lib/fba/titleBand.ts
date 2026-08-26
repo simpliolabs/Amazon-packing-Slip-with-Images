@@ -187,6 +187,13 @@ export interface TitleBandCtx {
    *  fact): asserting the audience the family truthfully claims is a correctness requirement, not an
    *  opportunistic pad, so it gets first refusal on the search's limited depth/budget. */
   youthMarker?: string | null
+  /** Seller-declared audience lean — SAME field/type as `MoneyTailCtx['lean']`, so the facts pad can
+   *  apply the IDENTICAL cross-gender veto `enforceMoneyTail` already applies to the money tail
+   *  (`crossGenderLeanVeto`/`crossGenderTailVeto`, PR #649 follow-up: a pool phrase carrying "For
+   *  Women" was shipping on a `lean_male` family because this ctx never carried the lean at all).
+   *  Absent ⇒ every candidate passes, i.e. today's behavior (fail-open, matching every other
+   *  optional gate on this ctx). */
+  lean?: MoneyTailCtx['lean']
 }
 
 /** The audience tail the pipeline's own fillers recognise — kept byte-identical to the regexes at
@@ -281,6 +288,12 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   // class it introduces after the net already ran. Computed ONCE, from the title as this door
   // received it — the SAME money-phrase-priority doctrine the net's `scrubMoneyPhrase` uses. */
   const committedClass = dominantGarmentGroup(title)
+  // CROSS-GENDER (PR #649 follow-up, live defect: "Pullover Sweatshirts For Women" shipped as a pad
+  // segment on a lean_male family — `candidateSegments` had no gender check at all). Computed ONCE
+  // from the title as this door received it, same discipline as `committedClass` above and the exact
+  // tail `enforceMoneyTail` computes for its own twin veto.
+  const tailM = AUDIENCE_TAIL_RE.exec(title)
+  const tailStr = tailM ? title.slice(tailM.index) : ''
   const push = (v?: string | null): void => {
     const s = (v ?? '').trim()
     // TITLE-ONLY WASTE VOCABULARY (PO ruling 2026-08-09, §3 gold rule 4). "Classic Fit" is a REAL
@@ -295,6 +308,10 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
     // listed under an Amazon SHIRT productType resolves `garmentSecond` to "Shirt"; without this
     // the pad would weld back exactly the "Shirts" the net had just dropped.
     if (ctx.truthOk && !ctx.truthOk(s)) return
+    // CROSS-GENDER (PR #649 follow-up) — the SAME veto enforceMoneyTail already applies to the money
+    // tail, reused (not re-implemented) here: a candidate must fight neither the family's own lean
+    // nor the title's current audience tail.
+    if (crossGenderLeanVeto(s, ctx.lean) || crossGenderTailVeto(s, tailStr)) return
     // ONE CLASS (defect 3) — a candidate naming a DIFFERENT garment class than the title already
     // committed to is skipped, same as an untrue one. Both classes may be individually true
     // (sweatshirt + hoodie); the title still may not name both.
@@ -854,6 +871,35 @@ const MONEY_AUDIENCE_TOKS = new Set(['men', 'women', 'ladie'])
 const MONEY_FEM_RE = /\bwom[ae]ns?\b|\bladies\b/i
 const MONEY_MASC_RE = /\bm[ae]ns?\b/i
 
+/** THE cross-gender veto against the family's own seller-declared LEAN — extracted (PR #649
+ *  follow-up) from `enforceMoneyTail`'s own check below so `candidateSegments` (the facts pad) can
+ *  apply the IDENTICAL rule instead of growing a second gender rulebook — the class of duplication
+ *  that grew SEVEN "covered" definitions in this repo. Soft leans veto too (stricter here is
+ *  fail-open, a skip is a no-op). Returns the `lean=${lean}` note `enforceMoneyTail`'s
+ *  `decision: 'cross-gender'` already used, or null when the candidate is clean. */
+function crossGenderLeanVeto(candidate: string, lean: MoneyTailCtx['lean']): string | null {
+  const kwFem = MONEY_FEM_RE.test(candidate)
+  const kwMasc = MONEY_MASC_RE.test(candidate)
+  if ((lean === 'female' || lean === 'lean_female') && kwMasc && !kwFem) return `lean=${lean}`
+  if ((lean === 'male' || lean === 'lean_male') && kwFem && !kwMasc) return `lean=${lean}`
+  return null
+}
+
+/** THE cross-gender veto against the title's OWN audience tail — the other half of
+ *  `enforceMoneyTail`'s check below, extracted for the same reason as `crossGenderLeanVeto`. A
+ *  candidate must never fight the audience the title itself already claims (a "for Men" tail plus a
+ *  "For Women" candidate is self-contradictory, not merely off-lean — the live #649 defect:
+ *  "Pullover Sweatshirts For Women for Men" on a lean_male family). */
+function crossGenderTailVeto(candidate: string, tailStr: string): string | null {
+  const kwFem = MONEY_FEM_RE.test(candidate)
+  const kwMasc = MONEY_MASC_RE.test(candidate)
+  const tailFem = MONEY_FEM_RE.test(tailStr) || /\bher\b/i.test(tailStr)
+  const tailMasc = MONEY_MASC_RE.test(tailStr) || /\bhim\b/i.test(tailStr)
+  if (tailFem && !tailMasc && kwMasc && !kwFem) return 'tail=women'
+  if (tailMasc && !tailFem && kwFem && !kwMasc) return 'tail=men'
+  return null
+}
+
 /** Title Case for the money keyword ("christian shirts for women" → "Christian Shirts for Women");
  *  connectors stay lower unless leading, matching the gold's casing. */
 const moneyTitleCase = (s: string): string =>
@@ -897,9 +943,6 @@ export function enforceMoneyTail(
   // gets a chance to win the slot, no matter how it scores on volume/opportunity upstream.
   if (ctx.truth && !phraseTruthVerdict(kw0, ctx.truth).ok) return { title: t0, decision: 'truth-lie', note: `"${kw0}" fails the content truth spine` }
 
-  const kwFem = MONEY_FEM_RE.test(kw0)
-  const kwMasc = MONEY_MASC_RE.test(kw0)
-
   // Idempotence / no-op: every significant keyword token already indexes from the title.
   const titleToks = new Set(moneySigToks(t0))
   const kwSig = moneySigToks(kw0)
@@ -910,10 +953,10 @@ export function enforceMoneyTail(
   if (new Set(kwSig).size !== kwSig.length) return { title: t0, decision: 'word-repeat', note: 'intra-keyword repeat' }
 
   // Cross-gender veto — the seller lean half of listingPipeline.ts:6031-6034 (soft leans included:
-  // stricter here is fail-open, a skip is a no-op).
-  const lean = ctx.lean
-  if ((lean === 'female' || lean === 'lean_female') && kwMasc && !kwFem) return { title: t0, decision: 'cross-gender', note: `lean=${lean}` }
-  if ((lean === 'male' || lean === 'lean_male') && kwFem && !kwMasc) return { title: t0, decision: 'cross-gender', note: `lean=${lean}` }
+  // stricter here is fail-open, a skip is a no-op). Extracted into crossGenderLeanVeto (PR #649
+  // follow-up) so candidateSegments' facts pad enforces the identical rule.
+  const leanVeto = crossGenderLeanVeto(kw0, ctx.lean)
+  if (leanVeto) return { title: t0, decision: 'cross-gender', note: leanVeto }
 
   // Split: protect the left side verbatim. A piped title's right side is the replaceable fact
   // tail; an unpiped title's replaceable part is only its bare trailing audience tail.
@@ -947,10 +990,9 @@ export function enforceMoneyTail(
   }
 
   // The tailGender half of the :6031-6034 veto: never put a masc-only keyword on a "for Women" title.
-  const tailFem = MONEY_FEM_RE.test(tailStr) || /\bher\b/i.test(tailStr)
-  const tailMasc = MONEY_MASC_RE.test(tailStr) || /\bhim\b/i.test(tailStr)
-  if (tailFem && !tailMasc && kwMasc && !kwFem) return { title: t0, decision: 'cross-gender', note: 'tail=women' }
-  if (tailMasc && !tailFem && kwFem && !kwMasc) return { title: t0, decision: 'cross-gender', note: 'tail=men' }
+  // Extracted into crossGenderTailVeto (PR #649 follow-up) — same reuse as the lean half above.
+  const tailVeto = crossGenderTailVeto(kw0, tailStr)
+  if (tailVeto) return { title: t0, decision: 'cross-gender', note: tailVeto }
 
   if (pipeIdx >= 0) {
     const rightToks = new Set(moneySigToks(t0.slice(pipeIdx + 3)))
