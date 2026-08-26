@@ -9421,6 +9421,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // `mixedFamilies` differs), so this is a no-op for every family — kept in lockstep on principle.
     // null for every non-kids family, so an adult listing's band ctx is byte-identical to before.
     youthMarker: youthMarkerFor(scope?.truth ?? broadcastTruthCtx),
+    // CROSS-GENDER VETO (PR #649 follow-up) — the SAME `lean` already threaded into `moneyCtx.lean`
+    // and `SettleTitleCtx.lean` a few lines below, now also reaching the facts pad so it can never
+    // admit a candidate ("Pullover Sweatshirts For Women") that fights a lean_male/lean_female family.
+    lean,
   })
 
   // Description SUBSTANCE = REAL product facts (blank spec + extracted specs), NEVER search keyphrases.
