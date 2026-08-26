@@ -1,6 +1,42 @@
 # Re-land PR #649 + pad cross-gender veto — report
 
-## Status: DONE, pushed, PR open, CI pending/verify at link below
+## Status: code DONE and pushed, PR open and mergeable; GitHub Actions CI has NOT run (see below)
+
+## CI status (the real, verified result — not fabricated)
+
+PR: https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/pull/651
+
+`gh pr checks 651` → `no checks reported on the 'fix/parent-judge-plus-gender-veto' branch`, both
+immediately after opening the PR and again ~16 minutes later after a forced re-trigger (empty
+commit `56a9476`, pushed ~10 min after the PR was opened). Verified directly against the GitHub API,
+not just the `gh` CLI wrapper:
+- `GET .../actions/runs?branch=fix/parent-judge-plus-gender-veto` → empty array, both before and
+  after the re-trigger push.
+- `GET .../commits/<head_sha>/check-suites` → only a **Netlify** check-suite (`status: queued`,
+  unrelated preview-deploy integration), **zero** check-suite from the "Build" GitHub Actions
+  workflow, for both commits (`5351923` and `56a9476`).
+- The "Build" workflow (`.github/workflows/build.yml`, id 288798087) is `state: active`; repo Actions
+  permissions are `enabled: true, allowed_actions: all`; the last successful `pull_request`-triggered
+  Build run in this repo before mine was over an hour earlier (14:02 UTC, a different branch) — no
+  `pull_request` Build run has fired for ANY branch since, mine included, despite the workflow being
+  live and `push`-triggered runs on `main` still completing in the same window (one such run at
+  15:22 UTC finished with `conclusion: failure`, unrelated to this PR — it was already-merged `main`
+  content, not my branch).
+
+This reads as a transient GitHub-side (Actions-trigger or webhook) issue affecting `pull_request`
+events on this repo today, not a defect in the pushed commits — I could not diagnose further without
+repo-admin access to webhook deliveries, and did not attempt anything destructive (no force-push, no
+merge, no workflow-permission changes) to work around it. **I did not fabricate a CI result.**
+`gh pr checks 651` should be re-run later to get the real number; as of this report it has not run.
+
+As a substitute (not equivalent) local signal: `npx tsc --noEmit` and the full `npx vitest run
+--no-cache` suite (87 files / 1694 passed + 4 expected fail / 1698, zero failures) were run directly
+in the worktree and are reported above under Test numbers. A local `next build` attempt was also
+tried but is **not a valid signal** — it failed only because of a `node_modules` Windows Junction
+this session created (pointing at `/tmp/fba-portal/node_modules` to skip a slow reinstall), which
+Turbopack refuses to resolve through ("Symlink points out of the filesystem root"). This is an
+artifact of my local dependency-sharing shortcut, gitignored and never committed, and does not
+reflect the real CI's fresh `pnpm install --frozen-lockfile` + `next build`, which uses no symlink.
 
 ## What shipped
 
