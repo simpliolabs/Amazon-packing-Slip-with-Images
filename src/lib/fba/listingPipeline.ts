@@ -372,8 +372,10 @@ export interface PipelineResult {
    *  console.warn-and-persist that shipped an 86-char title-echo string over 245-byte approved
    *  keywords. 'description' added 2026-07-30 (Phase 3): the ship census found a 719-char
    *  description PERSISTING against the 900 floor — the same post-audit blind spot as the 118-byte
-   *  backend — so census floor violations now degrade-mark and route into this same preserve. */
-  degradedSections?: ('backend_keywords' | 'description')[]
+   *  backend — so census floor violations now degrade-mark and route into this same preserve.
+   *  'title' added (title-floor-baseline task): MEASURE-ONLY, unlike the two above — see the `mark`
+   *  call site's comment for why the route does NOT (yet) auto-preserve on it. */
+  degradedSections?: ('backend_keywords' | 'description' | 'title')[]
 }
 
 // ─── Constants / small helpers ────────────────────────────────────────────────
@@ -9611,7 +9613,7 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
        * branch already exists in the route and is unchanged. */
       {
         const degraded = new Set(out.degradedSections ?? [])
-        const mark = (code: string, section: 'backend_keywords' | 'description'): void => {
+        const mark = (code: string, section: 'backend_keywords' | 'description' | 'title'): void => {
           if (violations.some((x) => x.code === code) && !degraded.has(section)) {
             degraded.add(section)
             console.log(JSON.stringify({ tag: 'SHIP_ENFORCE', action: 'degrade-mark', section, code }))
@@ -9619,6 +9621,21 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         }
         mark('KEYWORDS_BELOW_FLOOR', 'backend_keywords')
         mark('DESC_UNDER_FLOOR', 'description')
+        /* TITLE_UNDER_BAND (title-floor-baseline task, item 3) — MEASURE-ONLY, deliberately NOT wired
+         * to an auto-preserve consumer the way the two calls above are. `TITLE_UNDER_BAND` fires on
+         * ANY apparel title under `goldenBandLo` (70), which now includes the INTENTIONAL 65-69
+         * "shipped-truthful-under-band"/"refused-kept-prior" outcomes `settleTruthBand` (titleBand.ts)
+         * ships on purpose when the truthful prior/best cannot reach 70 — see TITLE_SHIP_FLOOR and the
+         * `shipped-truthful-below-floor` decision. `shouldPreserveDescription`/`shouldPreserveKeywords`
+         * (backendDegradeGate.ts) are LENGTH-ONLY comparators ("prior wins if longer") — cloning that
+         * pattern here would silently overrule `settleTruthBand`'s truth-aware choice and reintroduce
+         * exactly the rejected "prefer the longer of {best, prior}" design (it ships a longer LIE over
+         * a shorter TRUTH; see titleBand.ts's TITLE_SHIP_FLOOR doc). A truth-aware preserve can only be
+         * judged where the truth ctx (`PhraseTruthCtx`) exists — inside the title door itself, which is
+         * exactly what `settleTruthBand`'s own floor logic already does. So this mark exists for
+         * OBSERVABILITY (the `SHIP_ENFORCE`/`degradedSections` record) and for a FUTURE truth-aware
+         * consumer to key on — not to trigger today's length-only route.ts preserve machinery. */
+        mark('TITLE_UNDER_BAND', 'title')
         if (degraded.size > (out.degradedSections?.length ?? 0)) out.degradedSections = [...degraded]
       }
     } catch (e) {

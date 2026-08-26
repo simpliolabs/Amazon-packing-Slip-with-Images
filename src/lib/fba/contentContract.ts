@@ -20,6 +20,15 @@ export const CONTENT_CONTRACT = {
     // the humanizer, so the contract disagreed with itself (task #147, found by seam mapping).
     humanizerTrigger: 70,   // humanizeTitleTo75 fires below this — == goldenBandLo by construction
     fillTarget: 73,         // deterministic fill-to target
+    // THE HARD SHIP FLOOR (PO ruling, title-floor-baseline task). NOT `floor` (50, above) — that is
+    // `validateTitle`'s unrelated, older under-length trigger. NOT `goldenBandLo` (70) — that is the
+    // QUALITY target `scoreTitleQuality` aims for. `shipFloor` is the CORRECTNESS minimum: the
+    // truth+band terminal net (`settleTruthBand`/`enforceTitleTruthBand`, titleBand.ts) may ship a
+    // title under the golden band (65-69, honest but short of target) but must never ship shorter
+    // than this — a title that short reads as broken/truncated to a shopper, the defect class that
+    // reverted PRs #646 (29 chars) and #647 (42 chars; that attempt's floor constant existed but sat
+    // on a code path the shipped title did not take — see titleBand.ts's TITLE_SHIP_FLOOR doc).
+    shipFloor: 65,
   },
   bullets: {
     count: 5,               // exactly 5 bullets

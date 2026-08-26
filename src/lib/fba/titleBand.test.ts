@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   collapseRepeatedWords, enforceMoneyTail, enforceTitleBand, pickDistinctGarmentForm,
-  scrubUnspecdGarmentClaims, settleTruthBand, titleHasDuplicateConcept, titleHasPunctuationDefect,
-  verdictForAssembledTitle, TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx,
+  scrubUnspecdGarmentClaims, settleTruthBand, settleTitle, titleHasDuplicateConcept, titleHasPunctuationDefect,
+  verdictForAssembledTitle, TITLE_BAND_LO, TITLE_BAND_HI, TITLE_SHIP_FLOOR, type TitleBandCtx, type SettleTitleCtx,
 } from './titleBand'
 import type { PhraseTruthCtx } from './contentTruth'
 import { isForeignToDesign } from './designScope'
@@ -571,5 +571,139 @@ describe('settleTruthBand — the additive search re-verifies the WHOLE string, 
     const hasSweatFamily = groups.some((m) => /sweatshirt|pullover|crewneck/i.test(m[0]))
     // Never BOTH at once — that is exactly the two-garment-class defect.
     expect(hasHoodie && hasSweatFamily).toBe(false)
+  })
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE FLOOR (title-floor-baseline task). Four live attempts, three production reverts: PR #646
+ * shipped a 29-char parent; PR #647 added `TITLE_TRUTHFUL_SHIP_FLOOR = 65` and shipped a 42-char
+ * parent anyway (the constant existed but sat on a code path the shipped title never took); a plain
+ * regen on the reverted baseline produced a 42-char parent again. THE DIAGNOSIS: `settleTruthBand`
+ * had no floor at all — `refused-kept-prior` / `shipped-truthful-under-band` / `unreachable-no-prior`
+ * could each ship ANY length down to zero. These tests reproduce the collapse FIRST (see the first
+ * `it` below — this must FAIL on the pre-fix baseline) before asserting the fix.
+ */
+describe('settleTruthBand — THE FLOOR (title-floor-baseline task, PO ruling "65-75 shippable, 70 is target")', () => {
+  it('REPRODUCTION: the truth net strips a sibling design name from a 65-char prior, leaving a 42-char produced title with a thin pool — the real collapse PR #646/#647 shipped live', () => {
+    const foreignTokens = new Set(['billionare', 'coming', 'soon'])
+    const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
+    // THE LYING PRIOR — carries a sibling design's name ("Billionare Coming Soon" belongs to a
+    // different design in the family), otherwise in band. Pinned so the fixture itself is legible.
+    const prior = 'THE CEO Mother Hustler Sweatshirt Billionare Coming Soon Crewneck'
+    expect(prior.length).toBe(65)
+    // What the truth net leaves AFTER stripping the sibling's name — the exact 42-char collapse.
+    const produced = 'THE CEO Mother Hustler Sweatshirt Crewneck'
+    expect(produced.length).toBe(42)
+    // A THIN pool: no truthful search phrase and no additional facts, so the additive search cannot
+    // refill the gap — this is the genuine "band is unreachable from true material" case, not a
+    // search-algorithm miss.
+    const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
+    const r = settleTruthBand({ produced, prior, apparel: true, band, truth: MIXED_SWEAT_HOODIE_UNISEX, foreignTokens, reject })
+    // THE FIX: never ship under the hard floor unlabeled. Truth still outranks the lying prior (the
+    // standing 2026-08-23 ruling), so the honest 42-char material still ships — but it must be
+    // FLAGGED, not silently indistinguishable from a healthy 65-69 ship.
+    expect(r.title).not.toBe(prior)                 // never the lying prior
+    expect(r.title.toLowerCase()).not.toContain('billionare')
+    expect(r.len).toBe(42)
+    expect(r.len).toBeLessThan(TITLE_SHIP_FLOOR)
+    expect(r.decision).toBe('shipped-truthful-below-floor')
+    expect(r.hold).toBe(true)                        // the operator must see this
+  })
+
+  it('the 65-69 zone (above floor, below golden band) still reports the ORIGINAL under-band label, not the new floor label', () => {
+    const foreignTokens = new Set(['billionare', 'coming', 'soon'])
+    const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
+    const prior = 'THE CEO Mother Hustler Sweatshirt Billionare Coming Soon Crewneck'
+    // 66 chars — true, in-cap, but below the 70 golden band and ABOVE the 65 floor.
+    const produced = 'THE CEO Mother Hustler Sweatshirt Crewneck Pullover Cozy Warm Gift'
+    expect(produced.length).toBe(66)
+    expect(produced.length).toBeGreaterThanOrEqual(TITLE_SHIP_FLOOR)
+    expect(produced.length).toBeLessThan(TITLE_BAND_LO)
+    const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
+    const r = settleTruthBand({ produced, prior, apparel: true, band, truth: MIXED_SWEAT_HOODIE_UNISEX, foreignTokens, reject })
+    expect(r.len).toBeGreaterThanOrEqual(TITLE_SHIP_FLOOR)
+    expect(r.len).toBeLessThan(TITLE_BAND_LO)
+    expect(r.decision).toBe('shipped-truthful-under-band')
+    expect(r.hold).toBe(true)
+  })
+
+  it('a TRUE prior below the floor still ships (nothing better to rank it against) but the reason names the floor', () => {
+    // The prior itself is true and short — e.g. a pre-band-standard legacy title.
+    const shortTruePrior = 'THE CEO Mother Hustler Sweatshirt'
+    expect(shortTruePrior.length).toBeLessThan(TITLE_SHIP_FLOOR)
+    const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
+    const r = settleTruthBand({ produced: 'THE CEO Mother Hustler', prior: shortTruePrior, apparel: true, band, truth: MIXED_SWEAT_HOODIE_UNISEX })
+    expect(r.title).toBe(shortTruePrior)
+    expect(r.decision).toBe('refused-kept-prior')     // truth still wins the label — it really is the kept prior
+    expect(r.reason).toMatch(/ship floor/)
+    expect(r.hold).toBe(true)
+  })
+
+  it('NEVER EMIT EMPTY: an empty `produced` with a non-empty prior ships the prior, not "" — the ratchet this fix closes', () => {
+    const prior = 'THE CEO Mother Hustler Sweatshirt | Long Sleeve Pullover Crewneck'
+    const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
+    const r = settleTruthBand({ produced: '', prior, apparel: true, band, truth: null })
+    expect(r.title).toBe(prior)
+    expect(r.title).not.toBe('')
+    expect(r.decision).toBe('not-produced')
+    expect(r.hold).toBe(true)
+  })
+
+  it('NEVER EMIT EMPTY: an empty `produced` with NO prior at all has nothing to fall back to — this is the one accepted residual gap, but it must be VISIBLE (hold=true), never silent', () => {
+    const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
+    const r = settleTruthBand({ produced: '', prior: null, apparel: true, band, truth: null })
+    expect(r.title).toBe('')
+    expect(r.hold).toBe(true)
+    expect(r.reason).toMatch(/no prior/)
+  })
+})
+
+describe('settleTitle — NEVER EMIT EMPTY, the PRIMARY site (title-floor-baseline task, item 2)', () => {
+  const minimalCtx = (overrides: Partial<SettleTitleCtx>): SettleTitleCtx => ({
+    produced: true,
+    apparel: true,
+    bandCtxFor: () => ({ apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }),
+    moneyKws: null,
+    moneyTailMode: 'off',
+    moneyCtx: { apparel: true, allowAppend: true },
+    spec: null,
+    capTitle75: (t: string) => t,
+    colorProtect: null,
+    lean: 'unisex',
+    v4NoPad: false,
+    v4Mode: 'off',
+    specFactTokens: [],
+    truth: null,
+    protect: '',
+    reject: undefined,
+    foreignTokens: undefined,
+    scrubProtectedOverlap: false,
+    prior: null,
+    holdScope: 'broadcast',
+    parentAsin: 'B0TEST0000',
+    ...overrides,
+  })
+
+  it('a produced=true run with an empty raw (AI quota outage / empty LLM response) falls back to a non-empty prior instead of shipping "" — the exact live 2026-08-26 ratchet', () => {
+    const prior = 'THE CEO Mother Hustler Sweatshirt | Long Sleeve Pullover Crewneck'
+    const r = settleTitle('', minimalCtx({ prior }))
+    expect(r.title).toBe(prior)
+    expect(r.title).not.toBe('')
+    expect(r.hold).toBe(true)
+    expect(r.holdEntry).toBeDefined()
+  })
+
+  it('the benign produced=false passthrough (bullets/keywords-only regen) is UNCHANGED — byte-identical, hold=false', () => {
+    const priorTitle = 'THE CEO Mother Hustler Sweatshirt | Long Sleeve Pullover Crewneck'
+    const r = settleTitle(priorTitle, minimalCtx({ produced: false, prior: priorTitle }))
+    expect(r.title).toBe(priorTitle)
+    expect(r.decision).toBe('not-produced')
+    expect(r.hold).toBe(false)
+  })
+
+  it('produced=true, empty raw, AND no prior at all: the one accepted residual gap — still empty, but hold=true now instead of silently false', () => {
+    const r = settleTitle('', minimalCtx({ prior: null }))
+    expect(r.title).toBe('')
+    expect(r.hold).toBe(true)
   })
 })

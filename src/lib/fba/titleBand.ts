@@ -41,6 +41,16 @@ import { hasTrademark } from './trademarkGuard'
 /** ONE source per bound — never a new magic number (generation-invariants INVARIANT 5). */
 export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
 export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
+/**
+ * THE HARD SHIP FLOOR — 65. A title under `TITLE_BAND_LO` (70) misses the QUALITY target; a title
+ * under `TITLE_SHIP_FLOOR` misses CORRECTNESS — it reads as broken/truncated to a shopper. Every ship
+ * point in `settleTruthBand`/`enforceTitleTruthBand` below is judged against this, not a re-derived
+ * literal (the prior attempt's constant, `TITLE_TRUTHFUL_SHIP_FLOOR = 65`, was correctly VALUED but
+ * sat on a code path the shipped title never took — four other `done(...)`/return sites shipped
+ * un-floored regardless of it. This constant has no power on its own; what matters is that every exit
+ * below actually consults it).
+ */
+export const TITLE_SHIP_FLOOR = CONTENT_CONTRACT.title.shipFloor // 65
 
 /**
  * TITLE_RULING_OVER_FLOOR — off | on. Default off ⇒ byte-identical to today.
@@ -1328,6 +1338,17 @@ export type TruthBandDecision =
    *  is the SECOND path (with `unreachable-no-prior`) on which a sub-band title exits deliberately,
    *  and it still raises a hold so the operator sees it. */
   | 'shipped-truthful-under-band'
+  /** THE FLOOR (title-floor-baseline task, PO ruling "65-75 is shippable, 70 is the target"). Every
+   *  one of `not-produced`/`refused-kept-prior`/`unreachable-no-prior`/`shipped-truthful-under-band`
+   *  could previously ship ANY length down to empty — there was no hard minimum at all. This decision
+   *  fires whenever the terminal net is about to ship fewer than `TITLE_SHIP_FLOOR` (65) characters.
+   *  It STILL SHIPS the honest material (truth outranks length — the standing PO ruling: "an in-band
+   *  LIE must never outrank a truthful SHORT title" already grants the truthful alternative may be
+   *  short; a floor rejects everything below 65, it does not get to rank two truthful options against
+   *  each other by re-preferring an untrue prior). What changes is VISIBILITY: this is a distinct,
+   *  greppable signal that a genuinely sub-floor title shipped, separate from the ordinary 65-69
+   *  `shipped-truthful-under-band` case — a hold always fires alongside it so the operator sees it. */
+  | 'shipped-truthful-below-floor'
 
 export interface TruthBandResult {
   title: string
@@ -1377,7 +1398,19 @@ export function settleTruthBand(args: {
   const done = (title: string, decision: TruthBandDecision, reason: string, tried: string[] = [], hold = false): TruthBandResult =>
     ({ title, decision, len: title.length, tried, reason, hold })
 
-  if (!produced) return done(args.produced || '', 'not-produced', 'no title produced this run')
+  // NEVER SHIP EMPTY (title-floor-baseline task, item 2). An empty `produced` used to ship verbatim —
+  // and an empty title RATCHETS: it persists, becomes the NEXT run's `prior`, and the family can never
+  // recover without manual SQL (live, 2026-08-26). This mirrors the repo's existing empty-only
+  // abort-and-preserve doctrine (backendDegradeGate/#352): the fallback is UNCONDITIONAL on `prior`
+  // being non-empty — no truth/floor gate here, because a producer that returned nothing this run said
+  // nothing about whether the EXISTING title is true; re-shipping it is a pure no-op, not a new claim.
+  if (!produced) {
+    if (prior) {
+      return done(prior, 'not-produced',
+        'no title produced this run — kept the prior title rather than ship empty (empty-only abort-and-preserve)', [], true)
+    }
+    return done(args.produced || '', 'not-produced', 'no title produced this run and no prior to fall back to', [], true)
+  }
   if (!args.apparel) return done(produced, 'non-apparel', 'band is an apparel invariant')
   // OVER-CAP IS NOT "IN BAND". `capTitle75` owns the ceiling and runs upstream, so this should be
   // unreachable — but a terminal net that blessed an 80-char title as in-band would hide exactly
@@ -1492,6 +1525,16 @@ export function settleTruthBand(args: {
    * the Amazon 100476 rejection class, and `capTitle75` already ran on the PRODUCED title, never on
    * this one). An over-cap or empty prior is therefore not a preservable value: the hold still
    * fires, and the truthful text is what exits, which is the only honest remaining option. */
+  /* THE FLOOR (title-floor-baseline task, PO ruling "65-75 is shippable, 70 is the target"). Every
+   * `done(best, ...)` below this point used to ship `best` at ANY length down to a handful of chars —
+   * measured live at 42 and 58. A floor REJECTS a candidate for being too short; it does not RANK two
+   * truthful options against each other (that was the rejected "prefer the longer of {best, prior}"
+   * design — it still let a longer LIE outrank a shorter TRUTH). So this stays binary and per-candidate:
+   * whichever candidate the existing truth-preference logic below already selected still ships — truth
+   * still outranks a known lie even below the floor, per the standing 2026-08-23 ruling two lines up —
+   * only the DECISION LABEL changes, to a distinct, greppable signal the operator (and the ship census)
+   * can act on. Nothing here ranks `best` against `prior`; each is judged only against the floor. */
+  const shipUnderFloor = (len: number): boolean => len < TITLE_SHIP_FLOOR
   if (prior && prior.length <= TITLE_BAND_HI) {
     /* THE INVARIANT (PO ruling 2026-08-23): "a hold may keep the prior title ONLY IF the prior title
      * is TRUE." Truth is a correctness constraint; the 70-75 band is a quality target — an in-band
@@ -1500,8 +1543,13 @@ export function settleTruthBand(args: {
      * no second rulebook for "is this true", per this file's own doctrine. */
     const priorVerdict = verdictForAssembledTitle(prior, verifyCtx)
     if (priorVerdict.ok) {
+      // The kept prior is what is ALREADY live — shipping it changes nothing, so it ships regardless
+      // of its own length (there is no better alternative to rank it against; see the floor note
+      // above). The floor still gets a mention in `reason` when it applies, so a short-but-true kept
+      // prior is not silently indistinguishable from a healthy 72-char one in the logs.
       return done(prior, 'refused-kept-prior',
-        `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material — prior title kept, nothing shipped`,
+        `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material — prior title kept, nothing shipped`
+        + (shipUnderFloor(prior.length) ? ` (note: the kept prior is itself only ${prior.length} chars — under the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
         tried, true)
     }
     // THE PRIOR FAILS TRUTH — it carries a sibling design's name, a forced gender on a unisex family,
@@ -1510,17 +1558,20 @@ export function settleTruthBand(args: {
     // Ship the truthful short title instead — `best`, the honest partial the search already built —
     // under a DISTINCT decision value so this never silently reads as an ordinary band-unreachable
     // hold. The hold still fires (`done(..., true)`) so the operator sees it.
-    return done(best, 'shipped-truthful-under-band',
-      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`,
+    return done(best, shipUnderFloor(best.length) ? 'shipped-truthful-below-floor' : 'shipped-truthful-under-band',
+      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`
+      + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor — truth still outranks a known lie, but this family needs real product facts)` : ''),
       tried, true)
   }
   if (prior) {
-    return done(best, 'unreachable-no-prior',
-      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and the prior title is ${prior.length} chars — over the ${TITLE_BAND_HI} cap, so it cannot be preserved`,
+    return done(best, shipUnderFloor(best.length) ? 'shipped-truthful-below-floor' : 'unreachable-no-prior',
+      `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and the prior title is ${prior.length} chars — over the ${TITLE_BAND_HI} cap, so it cannot be preserved`
+      + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
       tried, true)
   }
-  return done(best, 'unreachable-no-prior',
-    `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and there is no prior title to preserve`,
+  return done(best, shipUnderFloor(best.length) ? 'shipped-truthful-below-floor' : 'unreachable-no-prior',
+    `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and there is no prior title to preserve`
+    + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
     tried, true)
 }
 
@@ -1669,11 +1720,34 @@ export function enforceTitleTruthBand(args: {
       scrubProtectedOverlap: args.scrubProtectedOverlap,
     })
     if (!verdict.ok) {
+      /* THE FIFTH SHIP POINT (title-floor-baseline task). Two gaps existed here, both now closed
+       * with the SAME rules `settleTruthBand` applies at its own four exits — no second rulebook:
+       *   1. TRUTH — `priorTrim` used to win unconditionally, un-judged. A prior this defensive branch
+       *      falls back to could itself be a lie (the exact class `settleTruthBand`'s own refusal
+       *      logic already refuses to trust); judge it with the SAME `verdictForAssembledTitle`
+       *      predicate before preferring it over the truthful `netted` material.
+       *   2. FLOOR — neither `priorTrim` nor `netted` was checked against `TITLE_SHIP_FLOOR`. This
+       *      branch is rare defense-in-depth (the casing pass breaking an already-verified title), so
+       *      `netted` is never empty here — if it were, `settled.hold` would already be true from
+       *      `settleTruthBand`'s own never-empty guard and this branch would be unreachable. */
       const priorTrim = (args.prior || '').trim()
-      const keep = priorTrim && priorTrim.length <= TITLE_BAND_HI ? priorTrim : netted
+      const priorUsable = !!priorTrim && priorTrim.length <= TITLE_BAND_HI
+        && verdictForAssembledTitle(priorTrim, {
+          truth: args.truth, protect: args.protect, foreignTokens: args.foreignTokens, reject: args.reject,
+          scrubProtectedOverlap: args.scrubProtectedOverlap,
+        }).ok
+      const keep = priorUsable ? priorTrim : netted
+      // DISTINCT LABELS PER CANDIDATE (fixes the brief's own finding: this site used to emit
+      // 'refused-kept-prior' even when it shipped `netted`, not the prior — indistinguishable from
+      // the :1503 site in a log line). `priorUsable` ⇒ we really did keep the prior; otherwise we
+      // shipped the truthful netted material, floor-labelled the same way `settleTruthBand` labels it.
+      const decision: TruthBandDecision = priorUsable
+        ? 'refused-kept-prior'
+        : (keep.length < TITLE_SHIP_FLOOR ? 'shipped-truthful-below-floor' : 'shipped-truthful-under-band')
       return {
-        title: keep, decision: 'refused-kept-prior', len: keep.length, tried: settled.tried,
-        reason: `final whole-title verification failed (${verdict.reason}) on "${finalTitle}" — kept ${priorTrim ? 'the prior title' : 'the truthful net result'} rather than ship`,
+        title: keep, decision, len: keep.length, tried: settled.tried,
+        reason: `final whole-title verification failed (${verdict.reason}) on "${finalTitle}" — kept ${priorUsable ? 'the prior title' : 'the truthful net result'} rather than ship`
+          + (keep.length < TITLE_SHIP_FLOOR ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
         hold: true, netted,
       }
     }
@@ -2447,7 +2521,37 @@ export interface SettleTitleResult {
  */
 export function settleTitle(raw: string, ctx: SettleTitleCtx): SettleTitleResult {
   if (!ctx.produced || !raw) {
-    return { title: raw, decision: 'not-produced', hold: false, reason: 'no title produced this run', tried: [] }
+    /* NEVER SHIP EMPTY (title-floor-baseline task, item 2) — THE PRIMARY SITE. `ctx.produced=false`
+     * is the benign "bullets/keywords-only regen" case: `raw` is the prior title passed through
+     * unproduced, and is virtually never empty — that path is untouched below, byte-identical to
+     * before. `ctx.produced=true` with an empty `raw` is a REAL generation failure (AI quota outage,
+     * an LLM call that returned nothing) — this is the FIRST gate a produced-but-empty title reaches,
+     * upstream of `settleTruthBand`'s own defense-in-depth empty guard, and it is the more direct site
+     * of the live 2026-08-26 incident: an empty title RATCHETS (it persists, becomes the NEXT run's
+     * `prior`, and the family cannot recover without manual SQL). The fallback is unconditional on
+     * `ctx.prior` being non-empty — a producer that returned nothing said nothing about whether the
+     * EXISTING title is true, so re-shipping it is a pure no-op, not a new claim (empty-only
+     * abort-and-preserve, matching backendDegradeGate's own #352 doctrine for description/keywords). */
+    if (ctx.produced && !raw && (ctx.prior ?? '').trim()) {
+      const kept = (ctx.prior as string).trim()
+      console.warn(JSON.stringify({
+        tag: 'TITLE_BAND_UNREACHABLE', parent: ctx.parentAsin, scope: ctx.holdScope, len: kept.length,
+        band: TITLE_BAND_LO, tried: [], decision: 'not-produced',
+        reason: 'no title produced this run — kept the prior title rather than ship empty', produced: raw, kept,
+      }))
+      return {
+        title: kept, decision: 'not-produced', hold: true,
+        reason: 'no title produced this run — kept the prior title rather than ship empty (empty-only abort-and-preserve)',
+        tried: [],
+        holdEntry: { scope: ctx.holdScope, parent: ctx.parentAsin, len: kept.length, tried: [], reason: 'no title produced this run — kept the prior title rather than ship empty', kept },
+      }
+    }
+    // The one irreducible case: a produced-but-empty run with NO prior to fall back to (a brand-new
+    // listing whose first-ever generation failed outright) still has to return SOMETHING and there is
+    // nothing true to say — `raw` (possibly '') is the only value left, but `hold` now correctly
+    // reports the failure instead of the silent `false` this branch always returned before, so this
+    // does not vanish from the operator's view the way the benign passthrough correctly still does.
+    return { title: raw, decision: 'not-produced', hold: !!(ctx.produced && !raw), reason: 'no title produced this run', tried: [] }
   }
   const traceId = `${ctx.parentAsin ?? 'na'}#${++SETTLE_SEQ}`
   let title = raw
