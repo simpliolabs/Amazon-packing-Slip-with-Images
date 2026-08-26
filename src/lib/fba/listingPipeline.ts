@@ -7340,7 +7340,11 @@ Return ONLY the extended title string.` },
   return title
 }
 
-async function buildNicheParentTitle(
+/** Exported (2026-08-25) so the reject-and-retry loop below (mirrors runTitleAgent's, reusing
+ *  validateTitle — PR #401 path-parity) can be unit-tested directly with a mocked OpenAI client,
+ *  the same way runTitleAgent's OWN twin logic would need a full-pipeline mock to reach otherwise.
+ *  No other caller added; the orchestrator call site is unchanged in shape. */
+export async function buildNicheParentTitle(
   openai: OpenAI,
   brandName: string,
   designNames: string[],
@@ -7375,7 +7379,10 @@ async function buildNicheParentTitle(
    *  1). The multi-design hub is the other producer, and a truth gate wired to one producer is the
    *  #401 class of wasted fix. null ⇒ fails open, byte-identical to the pre-spine behavior. */
   truth: PhraseTruthCtx | null = null,
-): Promise<string> {
+  /** Family-level mandated keyword — the SAME `titleMustInclude` already threaded into every
+   *  buildTitleFor call and coherenceGateTitles's `__parent` item. Fed to validateTitle below. */
+  mustInclude?: string,
+): Promise<{ title: string; problems: string[]; retried: boolean }> {
   const audienceMode = deriveAudienceMode(parentLean)
   /** Parent-path twin of buildTitleFor's gate — the SAME predicate, the same ctx shape. */
   const truthOk = (phrase: string): boolean => !truth || phraseTruthVerdict(phrase, truth).ok
@@ -7464,10 +7471,57 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
   })()
   const judged = await runTitleCouncil(openai, baseSystem, baseUser, onProgress, { brandName, lean: parentLean, maxLeftWords: poGolds?.shape.maxLeftWords ?? null, shape: poGolds?.shape ?? null, apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || ''), truth })
   let title = (judged || '').trim()
+
   // COMPETITOR BLANK STRIP (PO-caught defect (d), 2026-08-21) — PATH PARITY with buildTitleFor's
   // guard 1: `stripCompetitorBlanks` ran on bullets and description but on NEITHER title producer.
   // Runs BEFORE the fill below so the freed budget is re-filled with truthful pool phrases.
   if (title) title = stripCompetitorBlanks(title, blankBrand ?? '')
+
+  // ── REJECT-AND-RETRY (2026-08-25, PO-approved fix). Stored research (2026-08-24) named the
+  // asymmetry: runTitleAgent (single-design) has a SECOND judge layered on top of the council —
+  // validateTitle, in a correct-and-recheck loop — that CAN reject and retry; this producer (the
+  // OTHER title branch, multi-design/broadcast PARENT — INVARIANT 1 path parity) called validateTitle
+  // ZERO times. Its only prior retry, humanizeTitleTo75 below, is a length maximizer, not a
+  // correctness gate. Mirrors runTitleAgent's OWN loop (:4214-4239): SAME validateTitle (reused,
+  // never re-implemented — a parent-specific validator is the class of duplication that grew SEVEN
+  // "covered" definitions in this repo), SAME 2-attempt bound, SAME strict-improvement adoption rule.
+  //
+  // CONTEXT MAPPING (validateTitle's own params, populated from this producer's own args — no new
+  // parameter invented for a check; "pass real context through EXISTING parameters"):
+  //   - designName ← familyNicheClean: the parent has no single design's slogan ("NO design names in
+  //     the parent title" is the brief's own rule) but DOES have one phrase that must lead the title
+  //     after the brand — exactly what validateTitle's designName check enforces, and exactly what the
+  //     deterministic FAMILY-NICHE ANCHOR backstop below already tries to guarantee mechanically.
+  //     Empty familyNicheClean ⇒ undefined ⇒ no-op, mirroring that backstop's own gate.
+  //   - attributePin ← blankBrand; upgradeKws ← topUpgradeKws: this producer's own names for the same
+  //     two concepts runTitleAgent already validates under.
+  //   - mustInclude: the family-level mandated keyword threaded in from the orchestrator (new trailing
+  //     param) — the SAME value already passed to coherenceGateTitles's `__parent` gate item.
+  //   - designSeasons: left at validateTitle's default ([], the blanket rule) — the parent broadcasts
+  //     to EVERY child, so a seasonal term is legitimate only if the WHOLE family shares it, which the
+  //     blanket reject-any-seasonal-term default is the conservative, correct read of.
+  let problems = title ? validateTitle(title, brandName, mustInclude, blankBrand, topUpgradeKws, familyNicheClean || undefined, []) : ['No title generated.']
+  let retried = false
+  for (let attempt = 0; attempt < 2 && title && problems.length > 0; attempt++) {
+    retried = true
+    const fix = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      messages: [
+        { role: 'system', content: 'You are an Amazon SEO title editor. This title is a BROADCAST PARENT title for a variation family — it must read true for every design in the family, never naming one specifically. Output ONLY the corrected title string.' },
+        { role: 'user', content: `Fix this title. Brand: ${brandName}\nTitle: ${title}\n\nProblems:\n- ${problems.join('\n- ')}\n\nWrite it as natural readable language: ${brandName} then ${familyNicheClean ? `the shared family-niche phrase "${familyNicheClean}"` : 'the shared niche'}${mustInclude ? ` and the mandatory keyword "${mustInclude}"` : ''}${blankBrand ? ` then the blank-brand "${blankBrand}" if it fits` : ''} then an optional supporting keyphrase if it fits${aud ? ` then optionally "for ${aud}" if budget remains (lowest-priority — a product-specific keyphrase outranks it)` : ''}. 50-75 chars — HARD CAP 75 (Amazon auto-rewrites longer titles after July 27, 2026; overflow keyphrases belong in backend keywords, not here). Product-type word ("shirt"/"tee") used AT MOST twice total. No seasonal terms. Never name a single design — this is the FAMILY-wide title. Return ONLY the corrected title.` },
+      ],
+      temperature: 0.2,
+      max_tokens: 120,
+    })
+    const corrected = (fix.choices[0]?.message?.content || '').trim().replace(/^["']+|["']+$/g, '')
+    if (corrected) {
+      const cp = validateTitle(corrected, brandName, mustInclude, blankBrand, topUpgradeKws, familyNicheClean || undefined, [])
+      // Require a STRICT improvement (fewer problems), same rule as runTitleAgent's loop — otherwise a
+      // same-count rewrite could silently discard a clean, debated council title.
+      if (cp.length < problems.length) { title = corrected; problems = cp }
+    }
+  }
+
   // FAMILY-NICHE ANCHOR — reverses the historical "NO design-name backstop" stance for MULTI-DESIGN
   // ONLY. When the council's title does not already carry the family-niche tokens, seat the niche noun
   // right after the brand, BEFORE capTitle75 + every dedup/cap guard below, so they all run on it.
@@ -7800,7 +7854,16 @@ Compatibility (for-Brand framing if relevant): ${compatList}` : ''}${compSnapsho
     apparel: /shirt|tee|hoodie|sweatshirt|tank|apparel/i.test(ptWord || ''),
     truth,
   })
-  return title
+
+  // FINAL VALIDATION — records what the reject-and-retry loop above (and everything the deterministic
+  // backstops between it and here mutated) leaves unresolved on the ACTUAL shipped bytes, mirroring
+  // how runTitleAgent keeps `problems` current after every one of ITS own backstops. No further LLM
+  // retry here (same as runTitleAgent past its initial loop) — this is the record the caller surfaces
+  // into `debug.titleProblems`/`debug.titleRetried`, the SAME channel the single-design path already
+  // uses, so a parent-title defect is now visible there exactly like a child's (previously this
+  // channel stayed empty/false for every multi-design regen — the asymmetry this fix closes).
+  problems = title ? validateTitle(title, brandName, mustInclude, blankBrand, topUpgradeKws, familyNicheClean || undefined, []) : ['No title generated.']
+  return { title, problems, retried }
 }
 
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
@@ -10204,7 +10267,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       // BROADCAST (defect 1): the explicit multi-design parent title — `broadcastTruthCtx`, the
       // family's dominant class alone, never the permissive union (see the header comment on
       // `broadcastTruthCtx`'s definition).
-      finalTitle = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.rejectPairs, input.__v4Sink, broadcastTruthCtx)
+      // REJECT-AND-RETRY path parity (2026-08-25): buildNicheParentTitle now returns the same
+      // {title, problems, retried} shape runTitleAgent does (via buildTitleFor at the `else if`
+      // branch below) — surfaced into the SAME titleProblems/retried the single-design path already
+      // populates, so a parent-title defect is visible in debug.titleProblems exactly like a child's.
+      // titleMustInclude is the SAME value already threaded into every buildTitleFor call and into
+      // coherenceGateTitles's `__parent` gate item a few hundred lines down — not a new concept.
+      const parentTitleResult = await buildNicheParentTitle(input.openai, brandName, allDesignNames, familyNiche, attributePinFinal, preferredAudience, input.productType ?? null, parentFillPool, compatibilityBrands, onProgress, compSeo, parentLean, input.poGolds, input.rejectPairs, input.__v4Sink, broadcastTruthCtx, titleMustInclude)
+      finalTitle = parentTitleResult.title
+      titleProblems = parentTitleResult.problems
+      retried = parentTitleResult.retried
     }
   } else if (!only || only === 'title') {
     onProgress('Writing title...')
