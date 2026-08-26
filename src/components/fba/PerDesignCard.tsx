@@ -68,6 +68,22 @@ interface PerDesignCardProps {
   /** Persist a per-design name override (migration 034). value='' clears it back to auto-detect.
    *  DB-only — relabels the card + seeds the NEXT regen; nothing pushes to Amazon. */
   onRenameDesign?: (designKey: string, value: string) => void
+  /** PER-DESIGN AUDIENCE (migration 070, PO 2026-08-26 — the garment per-design ruling applied to
+   *  audience). `assignedAudienceLean` is the RAW map entry for THIS design ('' = unassigned, so
+   *  the select shows "Inherit family default" rather than a resolved value the seller could not
+   *  tell apart from an explicit choice). `familyAudienceLean` is the family's own audience_lean
+   *  (029) — the value this design falls back to when unassigned; shown so the seller can see what
+   *  "inherit" currently means without leaving the card. Same idiom as the family Garment row: a
+   *  select + a source badge, no auto-regen (PO decision C — assigning changes what the generator
+   *  believes, never a live rewrite). */
+  assignedAudienceLean?: string
+  familyAudienceLean?: string | null
+  audienceSaving?: boolean
+  onAssignAudience?: (designKey: string, value: string) => void
+}
+
+const AUDIENCE_LABEL: Record<string, string> = {
+  unisex: 'Unisex', lean_female: 'Lean Female', lean_male: 'Lean Male', female: 'Female', male: 'Male',
 }
 
 // Small inline "Ship →" affordance shown next to each editable field's label.
@@ -88,6 +104,7 @@ export function PerDesignCard({
   group, fallbackBullets, fallbackDescription,
   expanded, onToggle, edit, dirty, busy, status,
   onEditTitle, onEditBullet, onEditDescription, onSave, onShipField, onVerify, onRenameDesign,
+  assignedAudienceLean, familyAudienceLean, audienceSaving, onAssignAudience,
 }: PerDesignCardProps) {
   // Resolved display values: live edit > group's own per-child content > broadcast fallback.
   const title = edit?.title ?? group.title
@@ -174,6 +191,35 @@ export function PerDesignCard({
       {/* ── Body (when expanded) — editable Title / Bullets / Description ── */}
       {expanded && (
         <div className="px-4 pb-4 pt-1 bg-slate-50/60 border-t border-slate-100 space-y-4">
+          {/* ── AUDIENCE (migration 070, PO 2026-08-26) — same select+badge idiom as the family
+              Garment row (page.tsx). Assigning writes audience_lean_by_design ONLY; it never
+              triggers a regenerate or push — the helper text says so, mirroring the Garment row's
+              "Regenerate to apply" copy. Unassigned = inherit the family's own audience_lean. ── */}
+          {onAssignAudience && (
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Audience</label>
+              <select
+                value={assignedAudienceLean ?? ''}
+                onChange={(e) => onAssignAudience(group.designKey, e.target.value)}
+                disabled={!!audienceSaving}
+                title="Who is THIS design for? Overrides the family's Audience selector for this design only — the cross-gender keyword filter and the title's audience wording judge this design against its own value."
+                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-violet-200 cursor-pointer disabled:opacity-50"
+              >
+                <option value="">Inherit family default{familyAudienceLean ? ` (${AUDIENCE_LABEL[familyAudienceLean] ?? familyAudienceLean})` : ' (Auto)'}</option>
+                <option value="unisex">Unisex</option>
+                <option value="lean_female">Lean Female</option>
+                <option value="lean_male">Lean Male</option>
+                <option value="female">Female</option>
+                <option value="male">Male</option>
+              </select>
+              <span className="text-[10px] font-medium bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full">
+                {assignedAudienceLean ? 'design assignment' : 'family default'}
+              </span>
+              {audienceSaving && <span className="text-[10px] text-slate-400">Saving…</span>}
+              <span className="text-[10px] text-slate-400">Changes what the generator believes — no live copy rewrite. Regenerate to apply.</span>
+            </div>
+          )}
+
           {/* Title */}
           <div>
             <div className="flex items-center justify-between mb-1">

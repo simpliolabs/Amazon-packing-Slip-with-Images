@@ -435,6 +435,12 @@ export default function ListingDetailPage() {
   const [isMultiDesignOverride, setIsMultiDesignOverride] = useState<boolean | null>(null)
   const [designOverrideSaving, setDesignOverrideSaving] = useState(false)
   const [designOverrideSavedAt, setDesignOverrideSavedAt] = useState<number | null>(null)
+  // Per-design seller audience overrides (migration 070, PO 2026-08-26 — the garment per-design
+  // ruling applied to audience). {designKey: lean}. Loaded on mount alongside design name
+  // overrides, fed into each PerDesignCard, and POSTed by onAssignDesignAudience. DB-only — an
+  // unassigned design's card shows/falls back to the family Audience selector unchanged.
+  const [audienceLeanByDesign, setAudienceLeanByDesign] = useState<Record<string, string>>({})
+  const [audienceAssignSaving, setAudienceAssignSaving] = useState<string | null>(null)
   // GOLD-TITLE LOCK (the discoverable "lock my title" control). Seeded from the current recommended_title
   // until the seller edits it; a Lock stores it verbatim + title_source='manual' (no Amazon push).
   const [titleLockInput, setTitleLockInput] = useState<string>('')
@@ -1451,6 +1457,54 @@ export default function ListingDetailPage() {
       setDesignOverrideSavedAt(Date.now())
     } catch { /* ignore */ }
     setDesignOverrideSaving(false)
+  }
+
+  // Fetch seller-set per-design audience overrides (migration 070). Best-effort: a missing column
+  // on a pre-migration env returns {} → every card falls back to the family Audience selector.
+  useEffect(() => {
+    if (!asin) return
+    ;(async () => {
+      try {
+        const resp = await fetch(`/api/fba/audience-lean?parentAsin=${asin}`)
+        if (resp.ok) {
+          const data = await resp.json() as { audienceLeanByDesign?: Record<string, string> | null }
+          if (data.audienceLeanByDesign) setAudienceLeanByDesign(data.audienceLeanByDesign)
+        }
+      } catch { /* ignore */ }
+    })()
+  }, [asin])
+
+  // Persist ONE design's audience assignment (migration 070, PO 2026-08-26). value='' deletes the
+  // key (reverts to inheriting the family's audience_lean). Optimistic, rolled back on failure —
+  // same pattern as the family Audience selector and assignBlank above. DB-only: never triggers a
+  // regenerate or push (PO decision C, mirrored from the Garment row).
+  const onAssignDesignAudience = async (designKey: string, value: string) => {
+    setAudienceAssignSaving(designKey)
+    const prev = audienceLeanByDesign[designKey]
+    setAudienceLeanByDesign((m) => {
+      const next = { ...m }
+      if (value) next[designKey] = value
+      else delete next[designKey]
+      return next
+    })
+    try {
+      const resp = await fetch('/api/fba/audience-lean', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent_asin: asin, audience_lean: value || null, designKey }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.error || 'Assignment failed')
+    } catch (e) {
+      setAudienceLeanByDesign((m) => {
+        const next = { ...m }
+        if (prev) next[designKey] = prev
+        else delete next[designKey]
+        return next
+      })
+      alert(e instanceof Error ? e.message : 'Assignment failed')
+    } finally {
+      setAudienceAssignSaving(null)
+    }
   }
 
   // Seed the lock input from the current recommended title until the seller edits it.
@@ -3621,6 +3675,10 @@ export default function ListingDetailPage() {
                       onShipField={(field) => onShipDesignField(g, field)}
                       onVerify={() => onVerifyDesign(g)}
                       onRenameDesign={onRenameDesign}
+                      assignedAudienceLean={audienceLeanByDesign[g.designKey] ?? ''}
+                      familyAudienceLean={score?.audience_lean ?? null}
+                      audienceSaving={audienceAssignSaving === g.designKey}
+                      onAssignAudience={onAssignDesignAudience}
                     />
                   ))}
                 </div>
