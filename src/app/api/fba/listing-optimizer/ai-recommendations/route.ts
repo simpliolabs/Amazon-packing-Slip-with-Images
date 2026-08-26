@@ -939,7 +939,7 @@ export async function POST(req: NextRequest) {
             // listing-page selector; re-weights gendered keywords + sets the title tail.
             audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')
               ? pipelineScoreRow?.audience_lean : null) as 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null,
-            // PER-DESIGN seller-declared audience lean (migration 066, PO 2026-08-26 — the garment
+            // PER-DESIGN seller-declared audience lean (migration 070, PO 2026-08-26 — the garment
             // per-design ruling applied to audience). Rides the existing '*' select, exact same
             // pattern as designNameOverridesByKey two lines up. resolveDesignAudienceLean validates
             // each entry itself, so an unvalidated/legacy value here just falls through to the

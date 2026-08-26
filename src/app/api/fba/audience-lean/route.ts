@@ -5,7 +5,7 @@
  * POST { parent_asin, audience_lean, designKey? }
  *   - designKey ABSENT (legacy/default): writes the FAMILY scalar (PR #195, byte-identical to the
  *     pre-2026-08-26 behavior — every existing caller keeps working with no changes).
- *   - designKey PRESENT: writes ONE entry of the PER-DESIGN map (migration 066, PO 2026-08-26 —
+ *   - designKey PRESENT: writes ONE entry of the PER-DESIGN map (migration 070, PO 2026-08-26 —
  *     the garment per-design ruling — blank_assignments/062 — applied to audience). Mirrors
  *     design-name-override/route.ts's designKey branch exactly: a null/empty audience_lean DELETES
  *     that key (resets the design to inherit the family value) rather than storing an explicit null.
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
   if (!parentAsin) return NextResponse.json({ error: 'parentAsin required' }, { status: 400 })
   try {
     const supabase = await createAdminClient()
-    // select('*'), not a column list — audience_lean_by_design (066) may not exist yet on an
+    // select('*'), not a column list — audience_lean_by_design (070) may not exist yet on an
     // unmigrated env, and a missing column in an explicit select errors the WHOLE query (the same
     // trap design-name-override/route.ts and blankSpecs.ts both document).
     const { data, error } = await supabase
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
 
   const supabase = await createAdminClient()
 
-  // ── Per-design write (migration 066) — keyed by designKey on the JSONB map column, same
+  // ── Per-design write (migration 070) — keyed by designKey on the JSONB map column, same
   // read-modify-write shape as design-name-override/route.ts's designKey branch. ──
   if (typeof designKey === 'string' && designKey.trim()) {
     const key = designKey.trim()
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
       .single()
     if (readErr) {
       const friendly = /audience_lean_by_design|schema cache/i.test(readErr.message)
-        ? 'audience_lean_by_design column not found — run supabase/migrations/066_audience_lean_by_design.sql in the Supabase SQL editor, then retry.'
+        ? 'audience_lean_by_design column not found — run supabase/migrations/070_audience_lean_by_design.sql in the Supabase SQL editor, then retry.'
         : readErr.message
       return NextResponse.json({ error: friendly }, { status: 500 })
     }

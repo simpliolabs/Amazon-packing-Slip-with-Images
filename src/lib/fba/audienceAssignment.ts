@@ -23,12 +23,12 @@
  * for exactly that shape, live twice over: `listing_seo_scores.design_name_overrides` (migration
  * 034, {designKey: name}) and `keyword_analysis.theme_fit_by_design` (migration 061, {designKey:
  * {...}}) — a JSONB map keyed by the SAME `designKey` `detectDesignGroups` derives from the child
- * SKUs. `audience_lean_by_design` (migration 066) reuses that idiom rather than blank_assignments'
+ * SKUs. `audience_lean_by_design` (migration 070) reuses that idiom rather than blank_assignments'
  * heavier one (separate table, RLS, PostgREST reload, catalog cross-reference) — "reuse, don't
  * reinvent" pointed at the CLOSER-fitting precedent, not the more recent one.
  *
  * PRECEDENCE (the ONE place it is expressed — every caller asks this, never re-derives it):
- *   1. audience_lean_by_design[designKey]  (migration 066) -> source 'design-assignment'
+ *   1. audience_lean_by_design[designKey]  (migration 070) -> source 'design-assignment'
  *   2. the family's audience_lean          (migration 029) -> source 'family-default'
  * An unassigned design inherits today's family value — nothing changes until the PO assigns one.
  */

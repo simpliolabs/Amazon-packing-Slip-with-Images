@@ -265,7 +265,7 @@ export interface PipelineInput {
    *  pool; unisex forces the neutral tail. Null = legacy keyword-derived audience. */
   audienceLean?: 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null
   /** PER-DESIGN seller-declared audience lean for multi-design families
-   *  (listing_seo_scores.audience_lean_by_design, migration 066 — the garment per-design ruling
+   *  (listing_seo_scores.audience_lean_by_design, migration 070 — the garment per-design ruling
    *  applied to audience). {designKey: lean}. Resolved by audienceAssignment.ts's
    *  resolveDesignAudienceLean: an assigned design's own value wins over the family audienceLean
    *  above; an unassigned design inherits it unchanged. Mirrors designNameOverridesByKey exactly
@@ -8860,16 +8860,23 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // → the exact prior behavior (soft lean keeps 'Men and Women'). Hard male/female already narrowed.
   // `let`, not `const` (2026-08-23, live B0DP5H8QBT): this resolves BEFORE the blank truth below —
   // see the KIDS AUDIENCE TRUTH re-gate right after `truthGarmentFamily` is computed.
-  let preferredAudience = !apparelProduct ? ''
-    : lean === 'male' ? 'Men'
-    : lean === 'female' ? 'Women'
-    : (GARMENT_NOUN_ON && lean === 'lean_male') ? 'Men'
-    : (GARMENT_NOUN_ON && lean === 'lean_female') ? 'Women'
-    : lean ? 'Men and Women'
+  /** LIFTED to a function of `l` (review finding, 2026-08-26): this used to close over the family-
+   *  scope `lean` only, so every writer-stage caller — including a per-design fan-out that HAS its
+   *  own resolved lean via `groupInput.audienceLean` — got the same family-wide string back, no
+   *  matter which design's brief it was building. The text-sniffing fallback (unisex/mentionsWomen/
+   *  mentionsMen off `audienceText`) is UNCHANGED and still only reachable when `l` is null, exactly
+   *  as it was when `lean` was null. */
+  const preferredAudienceFor = (l: AudienceLean): string => !apparelProduct ? ''
+    : l === 'male' ? 'Men'
+    : l === 'female' ? 'Women'
+    : (GARMENT_NOUN_ON && l === 'lean_male') ? 'Men'
+    : (GARMENT_NOUN_ON && l === 'lean_female') ? 'Women'
+    : l ? 'Men and Women'
     : /\bunisex\b/.test(audienceText) || (mentionsWomen && mentionsMen) ? 'Men and Women'
     : mentionsWomen ? 'Women'
     : mentionsMen ? 'Men'
     : ''
+  let preferredAudience = preferredAudienceFor(lean)
 
   // SECOND pin: the blank/garment brand (e.g. "comfort colors") — a strategic attribute the
   // seller ranks for. Now that the #1 money keyword is guaranteed, this can be re-elevated
@@ -9290,6 +9297,16 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    *  drifting apart. NOT gated on the group's own blank resolving — unlike garment, audience is not
    *  derived FROM the blank, so a design the PO has assigned an audience to gets it even before its
    *  own blank resolves. */
+  /** PARALLEL to perDesignTruthCtx, deliberately NOT merged into it (review finding, 2026-08-26):
+   *  perDesignTruthCtx.set only runs when the group's OWN blank resolves (`own-blank`) — it sits
+   *  BELOW the two `return titleTruthCtx` early exits below (no apparelProduct/no children; blank
+   *  doesn't resolve), because that map also carries `ctx`/`families`, which drive band.facts/
+   *  band.pool — the garment VOCABULARY admissible in the title. Widening perDesignTruthCtx itself
+   *  to survive those exits would let an unresolved-blank design's copy draw on garment facts it was
+   *  never proven to own, which is exactly the vocabulary-admissibility class that got reverted three
+   *  times live. Audience lean carries no such risk — it is not derived FROM the blank — so it gets
+   *  its OWN map, written before either early exit, read independently at titleScopeFor. */
+  const perDesignLean = new Map<string, AudienceLean>()
   const groupAudienceFor = (key: string): { lean: AudienceLean; source: 'design-assignment' | 'family-default' } =>
     resolveDesignAudienceLean(key, input.audienceLeanByDesign, apparelProduct ? (input.audienceLean ?? null) : null)
   const buildGroupTruthCtx = (
@@ -9303,6 +9320,10 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // whole live gate before it was logged.
     if (key) {
       console.log(JSON.stringify({ tag: 'DESIGN_AUDIENCE_TRUTH', design: key, decision: groupAudience.source, lean: groupAudience.lean ?? null, familyLean: input.audienceLean ?? null }))
+      // Written HERE, above both early exits below, so a design whose blank never resolves still
+      // ships its OWN resolved lean instead of silently falling back to the family value at
+      // titleScopeFor (review finding, 2026-08-26) — see perDesignLean's declaration comment above.
+      perDesignLean.set(key, groupAudience.lean)
     }
     if (!apparelProduct || groupChildren.length === 0) return titleTruthCtx
     const res = resolveFamilyBlank(blankCatalog, groupChildren, blankOverride, groupHay, blankChildAssignments)
@@ -9653,7 +9674,13 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       spec: blankSpec,
       capTitle75,
       colorProtect: protectDesign || effectiveDesignName || designName || null,
-      lean,
+      // PER-DESIGN (PO 2026-08-26, review finding): the missed third sibling of moneyCtx.lean (above)
+      // and titleBandCtx's scope.lean (:9474) — this is the `lean` enforceInclusiveAudience reads
+      // (titleBand.ts:2659) to collapse an inclusive "for Men Women" tail to a single gender. Left
+      // bare, it fed the FAMILY lean on a per-child exit, so a design the PO assigned a different
+      // gender than its family could still get its inclusive tail collapsed toward the family's
+      // gender (the #649 class). Same fallback direction as moneyCtx.lean two lines up.
+      lean: bandScope?.lean ?? lean,
       v4NoPad: v4Applies(),
       v4Mode: titleV4Mode(),
       specFactTokens: blankSpecFactTokens(blankSpec),
@@ -9888,10 +9915,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       truth,
       reject,
       foreignTokens: foreign,
-      // THIS DESIGN'S OWN AUDIENCE (PO 2026-08-26), same fail-open direction as `truth` two lines up:
-      // absent perDesign (single-design, a group whose blank never resolved, a stale section regen)
-      // falls back to the family `lean` — the pre-existing behavior, byte-identical.
-      lean: perDesign?.lean ?? lean,
+      // THIS DESIGN'S OWN AUDIENCE (PO 2026-08-26), same fail-open direction as `truth` two lines up.
+      // Reads perDesignLean FIRST (review finding, 2026-08-26) — written for every group whose
+      // audience resolves regardless of whether its blank does, unlike `perDesign` above, which is
+      // absent whenever the group's own blank never resolved. Only when perDesignLean has no entry
+      // for this key (single-design, a stale section regen that never ran the fan-out) does this
+      // fall through to perDesign?.lean, then the family `lean` — the pre-existing behavior,
+      // byte-identical for an unassigned design.
+      lean: (key ? perDesignLean.get(key) : undefined) ?? perDesign?.lean ?? lean,
+    }
+    // DESIGN_BAND_LEAN (review finding, 2026-08-26): the live gate previously had to INFER whether a
+    // design's own lean reached the band from DESIGN_AUDIENCE_TRUTH plus silence — this reports what
+    // the band actually received, per design, at the one seam `enforceInclusiveAudience` reads from.
+    if (key) {
+      console.log(JSON.stringify({ tag: 'DESIGN_BAND_LEAN', design: key, lean: band.lean ?? null }))
     }
     // The property NAME shadows nothing: the body's `titleTruthDoor` is the shared door above.
     return {
@@ -10222,7 +10259,15 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
         // set in resolveGroupDesignName (an assignment, or the family value when unassigned). Read
         // from groupInput rather than the outer `lean` so this positional arg can never drift from
         // what runTitleAgent itself sees (it reads groupInput.audienceLean internally).
-        const r = await buildTitleFor(groupInput, scoped, attrs.searchKeyphrases, titleMustInclude, preferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, groupInput.audienceLean ?? null, apparelProduct, brandName, season, groupTruthCtx ?? titleTruthCtx)
+        const gLean = groupInput.audienceLean ?? null
+        // THIS group's OWN preferred-audience STRING (review finding, 2026-08-26): the 5th positional
+        // arg below used to be the bare family `preferredAudience`, self-contradicting the corrected
+        // per-design `gLean` a few args later — the writer's brief read "AUDIENCE MODE: REQUIRED" next
+        // to "Audience: <family value>" on an assigned design. An unassigned sibling has
+        // `gLean === lean` (groupAudienceFor falls back to the family value), so `preferredAudienceFor`
+        // returns the SAME string `preferredAudience` already holds — no behavior change there.
+        const groupPreferredAudience = gLean ? preferredAudienceFor(gLean) : preferredAudience
+        const r = await buildTitleFor(groupInput, scoped, attrs.searchKeyphrases, titleMustInclude, groupPreferredAudience, attributePinFinal, topUpgradeKws, compatibilityBrands, groupDesignName, gLean, apparelProduct, brandName, season, groupTruthCtx ?? titleTruthCtx)
         // groupInput is returned so the bullets/description stages can reuse the resolved per-group
         // design name + vision (designNameOverride/visionDesign/canonicalTitle) without recomputing.
         return { group, groupInput, groupDesignName, groupIdentityPhrases, ...r }

@@ -435,7 +435,7 @@ export default function ListingDetailPage() {
   const [isMultiDesignOverride, setIsMultiDesignOverride] = useState<boolean | null>(null)
   const [designOverrideSaving, setDesignOverrideSaving] = useState(false)
   const [designOverrideSavedAt, setDesignOverrideSavedAt] = useState<number | null>(null)
-  // Per-design seller audience overrides (migration 066, PO 2026-08-26 — the garment per-design
+  // Per-design seller audience overrides (migration 070, PO 2026-08-26 — the garment per-design
   // ruling applied to audience). {designKey: lean}. Loaded on mount alongside design name
   // overrides, fed into each PerDesignCard, and POSTed by onAssignDesignAudience. DB-only — an
   // unassigned design's card shows/falls back to the family Audience selector unchanged.
@@ -1459,7 +1459,7 @@ export default function ListingDetailPage() {
     setDesignOverrideSaving(false)
   }
 
-  // Fetch seller-set per-design audience overrides (migration 066). Best-effort: a missing column
+  // Fetch seller-set per-design audience overrides (migration 070). Best-effort: a missing column
   // on a pre-migration env returns {} → every card falls back to the family Audience selector.
   useEffect(() => {
     if (!asin) return
@@ -1474,7 +1474,7 @@ export default function ListingDetailPage() {
     })()
   }, [asin])
 
-  // Persist ONE design's audience assignment (migration 066, PO 2026-08-26). value='' deletes the
+  // Persist ONE design's audience assignment (migration 070, PO 2026-08-26). value='' deletes the
   // key (reverts to inheriting the family's audience_lean). Optimistic, rolled back on failure —
   // same pattern as the family Audience selector and assignBlank above. DB-only: never triggers a
   // regenerate or push (PO decision C, mirrored from the Garment row).

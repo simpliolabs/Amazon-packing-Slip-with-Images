@@ -1,4 +1,4 @@
--- 066_audience_lean_by_design.sql — PER-DESIGN seller-declared audience lean for multi-design
+-- 070_audience_lean_by_design.sql — PER-DESIGN seller-declared audience lean for multi-design
 -- families (PO ruling 2026-08-26, applying the garment per-design ruling — migration 062,
 -- blank_assignments — to audience). Idempotent; safe to re-run. Apply BY HAND in the Supabase SQL
 -- editor.

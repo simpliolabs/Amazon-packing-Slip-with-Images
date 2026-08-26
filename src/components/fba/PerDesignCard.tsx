@@ -68,7 +68,7 @@ interface PerDesignCardProps {
   /** Persist a per-design name override (migration 034). value='' clears it back to auto-detect.
    *  DB-only — relabels the card + seeds the NEXT regen; nothing pushes to Amazon. */
   onRenameDesign?: (designKey: string, value: string) => void
-  /** PER-DESIGN AUDIENCE (migration 066, PO 2026-08-26 — the garment per-design ruling applied to
+  /** PER-DESIGN AUDIENCE (migration 070, PO 2026-08-26 — the garment per-design ruling applied to
    *  audience). `assignedAudienceLean` is the RAW map entry for THIS design ('' = unassigned, so
    *  the select shows "Inherit family default" rather than a resolved value the seller could not
    *  tell apart from an explicit choice). `familyAudienceLean` is the family's own audience_lean
@@ -191,7 +191,7 @@ export function PerDesignCard({
       {/* ── Body (when expanded) — editable Title / Bullets / Description ── */}
       {expanded && (
         <div className="px-4 pb-4 pt-1 bg-slate-50/60 border-t border-slate-100 space-y-4">
-          {/* ── AUDIENCE (migration 066, PO 2026-08-26) — same select+badge idiom as the family
+          {/* ── AUDIENCE (migration 070, PO 2026-08-26) — same select+badge idiom as the family
               Garment row (page.tsx). Assigning writes audience_lean_by_design ONLY; it never
               triggers a regenerate or push — the helper text says so, mirroring the Garment row's
               "Regenerate to apply" copy. Unassigned = inherit the family's own audience_lean. ── */}
