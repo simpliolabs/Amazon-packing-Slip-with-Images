@@ -939,6 +939,12 @@ export async function POST(req: NextRequest) {
             // listing-page selector; re-weights gendered keywords + sets the title tail.
             audienceLean: (['male', 'female', 'lean_male', 'lean_female', 'unisex'].includes(pipelineScoreRow?.audience_lean ?? '')
               ? pipelineScoreRow?.audience_lean : null) as 'male' | 'female' | 'lean_male' | 'lean_female' | 'unisex' | null,
+            // PER-DESIGN seller-declared audience lean (migration 066, PO 2026-08-26 — the garment
+            // per-design ruling applied to audience). Rides the existing '*' select, exact same
+            // pattern as designNameOverridesByKey two lines up. resolveDesignAudienceLean validates
+            // each entry itself, so an unvalidated/legacy value here just falls through to the
+            // family audienceLean above rather than needing a second whitelist pass here.
+            audienceLeanByDesign: (pipelineScoreRow as { audience_lean_by_design?: Record<string, string> | null })?.audience_lean_by_design || undefined,
             // Vision-read design identity — the printed artwork is ground truth for the design name,
             // overriding a paraphrased title (PR: vision-based design recognition / Feature A).
             visionDesign,
