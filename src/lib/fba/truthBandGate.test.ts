@@ -40,7 +40,7 @@ import {
   runTruthBandHarness, DESIGNS, POOL, runLiveFailureRepro, LIVE_HDG_CANDIDATES, LIVE_LYING_PRIOR,
   type HarnessResult,
 } from './truthBandHarness'
-import { TITLE_BAND_LO, TITLE_BAND_HI, titleHasDuplicateConcept, titleHasPunctuationDefect, verdictForAssembledTitle } from './titleBand'
+import { TITLE_BAND_LO, TITLE_BAND_HI, TITLE_SHIP_FLOOR, titleHasDuplicateConcept, titleHasPunctuationDefect, verdictForAssembledTitle } from './titleBand'
 import { phraseTruthVerdict } from './contentTruth'
 
 const RESULT: HarnessResult = runTruthBandHarness()
@@ -366,7 +366,10 @@ describe('THE LIVE FAILURE REPRO — a hold must not keep a lie (PO ruling 2026-
   it('the hold still fires, under a DISTINCT decision value — the operator sees this, it never ships silently', () => {
     const r = runLiveFailureRepro()
     expect(r.hold).toBe(true)
-    expect(r.decision).toBe('shipped-truthful-under-band')
+    // 58 chars is below TITLE_SHIP_FLOOR (65) — the title-floor-baseline fix, not the ordinary 65-69
+    // 'shipped-truthful-under-band' zone. LENGTH decides the label, not just the presence of a hold.
+    expect(r.len, `shipped ${r.len} chars: "${r.title}"`).toBeLessThan(TITLE_SHIP_FLOOR)
+    expect(r.decision).toBe('shipped-truthful-below-floor')
   })
 
   it('the shipped title is a fixed point — nothing writes after settleTitle returns it here either', () => {
