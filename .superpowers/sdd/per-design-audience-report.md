@@ -2,8 +2,7 @@
 
 ## Status
 
-Code complete, committed, pushed. PR open. CI ("Build" workflow) fired and was **pending** as of
-this report — see CI status section below for the live check and how to re-verify.
+Code complete, committed, pushed. PR open. CI ("Build" workflow) **passed**.
 
 ## PR
 
@@ -23,9 +22,12 @@ Branch: `feat/per-design-audience` (worktree: `C:\Users\Admin\AppData\Local\Temp
 build	pending	0	https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/32999063233/job/98275774001
 ```
 Unlike the brief's warning example (a prior PR on this repo where GitHub Actions never fired), this
-run DID start — a real run ID/job exists. If it is still `pending`/`no checks reported` ~10+ minutes
-after this report, say so plainly rather than waiting indefinitely (per the brief's instruction) — do
-not re-run `gh pr checks 652` in a sleep loop without reporting a real result first.
+run DID start — a real run ID/job existed from the first push. A second, small commit (this report
+file) re-triggered the workflow on a new run; polled to completion ~4 minutes after that push:
+```
+build	pass	1m17s	https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/32999192645/job/98276208116
+```
+**CI is GREEN** — real, verified via `gh pr checks 652`, not fabricated.
 
 Only `build.yml`'s "Build" step is blocking; its "Lint" step is `continue-on-error: true`
 ("non-blocking — informational only") — two PRE-EXISTING lint errors unrelated to this change
@@ -228,10 +230,6 @@ JSONB map keyed by `designKey` — mirroring `design_name_overrides` (034) and `
   follow-up if the PO wants audience decoupled from blank resolution entirely (would need to change
   `buildGroupTruthCtx`'s early-return, which currently conflates "no per-design ctx at all" with "no
   per-design blank").
-- I could not fully verify CI (see CI status above) before this report — a real Actions run started
-  (unlike a prior PR on this repo, cited in an earlier report at
-  `.superpowers/sdd/parent-judge-gender-veto-report.md`, where it never fired), but was still
-  `pending` as of writing.
 - No route-level tests exist anywhere in this repo (confirmed via search) for any `/api/fba/*` route,
   so `/api/fba/audience-lean`'s new GET handler and `designKey` POST branch are verified by
   `tsc --noEmit` + the real `next build` compiling them, plus manual code review against the
