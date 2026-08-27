@@ -73,6 +73,7 @@ import {
   titleNetActsOn,
   buildPhraseTruthCtx,
   youthMarkerFor,
+  resolveGarmentAudience,
   type PhraseTruthCtx,
   type TruthGarmentFamily,
 } from '@/lib/fba/contentTruth'
@@ -11503,23 +11504,88 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       recommended_value: detailValueToString(p.recommended_value),
     }
   })
+  /* GARMENT AGE PRODUCER (PO ruling 2026-08-27, migration 071 — adversarial audit, 12 verified
+   * findings). `age_range_description` had ZERO deterministic producers (LLM-only, guessing from
+   * the listing's OWN EXISTING COPY); the audience-lean 3-way map just below is a GENDER selector
+   * whose vocabulary structurally cannot say "kids" (B0DP5H8QBT: 12 Gildan 64000B YOUTH-tee
+   * children shipped Department="Unisex" — a LEGAL enum member, so the push reports SUCCESS while
+   * the listing is filed as adult). ONE resolver (contentTruth.ts) decides whether the BLANK ITSELF
+   * states this family's age — a guess or the lean selector never overrides a PO-accepted push,
+   * only a stated blank fact may (the PO ruling this task implements). `truthGarmentFamily` /
+   * `blankSpec` are already resolved above (:9168/:9204) — this reads them, resolves nothing new. */
+  const aud = resolveGarmentAudience({
+    garmentFamily: truthGarmentFamily,
+    ageClass: blankSpec?.ageClass ?? null,
+    audienceLean: input.audienceLean,
+  })
+  // Prove the branch RAN (not just its output): asserted in tests via this log line's `source`.
+  if (apparelProduct) console.log(JSON.stringify({ tag: 'GARMENT_AUDIENCE', parent: input.parentAsin ?? null, ageClass: aud.ageClass, source: aud.source, dept: aud.departmentQualifier }))
+  /* DETERMINISTIC APPEND (task #82, 2026-08-04; HOISTED OUT of `if (blankSpec)` 2026-08-27 so the
+   * age-fact append below — which fires whenever the FAMILY states an age, independent of whether
+   * a `blankSpec` row separately resolved — can share it too). The overrides just below only
+   * REPLACE rows the audit happened to propose — when the LLM skipped the attribute, the
+   * PO-confirmed spec fact silently vanished (found in the #82 research pass; Item Highlights
+   * already appends unconditionally for exactly this reason). A spec fact must not depend on LLM
+   * initiative: if the live schema menu carries the attribute and no row proposed it, add the row
+   * ourselves. Keys live-probe-confirmed (?debug=1): apparel_fabric_stretch + fit_to_size_sentiment,
+   * both FLAT with display-name enums — the route's coerceDetailValue then snaps casing and flags
+   * any illegal member as enum_accepted. */
+  const appendSpecFact = (key: string, rowRe: RegExp, val: string | undefined): void => {
+    if (!val) return
+    const menuAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === key || rowRe.test(m.title))
+    if (!menuAttr || pdiFinal.some((p) => rowRe.test(String(p.field_name ?? '')))) return
+    pdiFinal.push({
+      field_name: menuAttr.title,
+      current_value: null,
+      recommended_value: val,
+      value_source: 'spec',
+      reason: `Ground-truth spec for the ${attributePinFinal || 'garment'} blank (blank_specs) — a confirmed product fact shoppers filter on, added deterministically rather than waiting for the optimizer to propose it.`,
+    })
+  }
   // AUDIENCE-LEAN override for audit-guessed DEMOGRAPHIC details: the audit echoes the
   // catalog's (often blank-boilerplate) demographics and ignored the seller's selector —
   // live failure: Department "Mens" + Target Gender "male" recommended on a FEMALE run.
   // Deterministic per-lean map; the validate-at-regen enum coercion downstream snaps these
   // to this product type's exact accepted members.
-  if (apparelProduct && lean) {
+  // WIDENED 2026-08-27 (age producer): a kids family with NO selector picked at all used to get
+  // nothing here — `aud.ageClass` alone now also opens this gate, COMPOSING with (never replacing)
+  // the lean map: `dept` layers `aud.departmentQualifier` over `dem.dept`; target_gender is
+  // UNTOUCHED by the age fact (still gated on `lean` alone, exactly as before this task) — Amazon's
+  // target_gender enum has no kids-flavored member for this to compose onto.
+  if (apparelProduct && (lean || aud.ageClass)) {
     const dem = lean === 'female' ? { dept: 'Womens', gender: 'Female' }
       : lean === 'male' ? { dept: 'Mens', gender: 'Male' }
       : { dept: 'Unisex', gender: 'Unisex' }
+    // Emit the HUMAN string ('Unisex Kids') — NEVER a hardcoded enum member. The route's live-schema
+    // coercion (coerceGenderToEnum, productTypeDefinitions.ts) snaps this to the exact accepted
+    // member downstream, degrading to plain 'Unisex' when this product type's schema has no
+    // kids-flavored department member.
+    const dept = aud.departmentQualifier ?? dem.dept
+    // PROVENANCE (the PO ruling this task implements): 'spec' ONLY when the BLANK spoke
+    // (aud.source !== 'none') — narrow by construction, an adult/unstated family can never earn
+    // it. This is what lets a stated blank fact re-propose Department over an ALREADY-ACCEPTED push
+    // (stickyDetails.ts honors 'spec'); keep the existing 'audience' stamp — which the sticky gate
+    // does NOT re-propose over an accepted push — when only the seller's lean selector spoke,
+    // unchanged from before this task.
+    const deptSource = aud.source !== 'none' ? ('spec' as const) : ('audience' as const)
+    const deptReason = aud.source !== 'none'
+      ? `Ground-truth blank age fact (${aud.ageClass}, blank_specs.${aud.source === 'blank-column' ? 'age_class' : 'garment_family'}) — overrides a value the optimizer inferred from the search-keyword pool or your Audience selection.`
+      : `Set by your Audience selection (${(lean ?? 'unisex').replace('_', ' ')}).`
     pdiFinal = pdiFinal.map((p) => {
       const f = p.field_name.toLowerCase().trim()
-      // value_source:'audience' (sticky-details): deterministic but SELECTOR-derived — a
-      // PO-accepted pushed Department/Target Gender is the NEWER declaration and wins at the gate.
-      if (f === 'department') return { ...p, recommended_value: dem.dept, value_source: 'audience' as const, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
-      if (f === 'target gender') return { ...p, recommended_value: dem.gender, value_source: 'audience' as const, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
+      // value_source: see deptSource comment above.
+      if (f === 'department') return { ...p, recommended_value: dept, value_source: deptSource, reason: deptReason }
+      if (f === 'target gender' && lean) return { ...p, recommended_value: dem.gender, value_source: 'audience' as const, reason: `Set by your Audience selection (${lean.replace('_', ' ')}).` }
       return p
     })
+    // APPEND the age row (age_range_description) — a NEW row, never a replace: the mega-audit
+    // prompt only names this field inside its `menu.length > 0` branch (:5715ish) and even then
+    // the LLM is free to skip it. `appendSpecFact` is itself a no-op when the live schema carries
+    // no such key (menuAttr undefined) or a row already proposed one — same override-only doctrine
+    // as every other deterministic append in this function. `aud.ageRangeCandidate` is null for
+    // EVERY unstated/adult family (never derived from garment_family alone), so this can never fire
+    // there — the no-op control for the ~600-family majority holds by construction.
+    if (aud.ageRangeCandidate) appendSpecFact('age_range_description', /age\s*range/i, aud.ageRangeCandidate)
   }
   // GROUND-TRUTH override: the features audit GUESSES Fit/Sleeve/Neck from the SEARCH keyword pool (full of
   // "oversized tshirt" demand), so it mislabels a relaxed Comfort Colors tee as "Oversized"/"Cap Sleeve" — a
@@ -11550,25 +11616,6 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     // casing/member mismatch surfaces as enum_accepted rather than a bad push.
     overrideField(/fabric stretch\b/i, blankSpec.stretch)
     overrideField(/fit\s*to\s*size/i, blankSpec.fitToSize)
-    /* DETERMINISTIC APPEND (task #82, 2026-08-04). The overrides above only REPLACE rows the audit
-     * happened to propose — when the LLM skipped the attribute, the PO-confirmed spec fact silently
-     * vanished (found in the #82 research pass; Item Highlights already appends unconditionally for
-     * exactly this reason). A spec fact must not depend on LLM initiative: if the live schema menu
-     * carries the attribute and no row proposed it, add the row ourselves. Keys live-probe-confirmed
-     * (?debug=1): apparel_fabric_stretch + fit_to_size_sentiment, both FLAT with display-name enums —
-     * the route's coerceDetailValue then snaps casing and flags any illegal member as enum_accepted. */
-    const appendSpecFact = (key: string, rowRe: RegExp, val: string | undefined): void => {
-      if (!val) return
-      const menuAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === key || rowRe.test(m.title))
-      if (!menuAttr || pdiFinal.some((p) => rowRe.test(String(p.field_name ?? '')))) return
-      pdiFinal.push({
-        field_name: menuAttr.title,
-        current_value: null,
-        recommended_value: val,
-        value_source: 'spec',
-        reason: `Ground-truth spec for the ${attributePinFinal || 'garment'} blank (blank_specs) — a confirmed product fact shoppers filter on, added deterministically rather than waiting for the optimizer to propose it.`,
-      })
-    }
     appendSpecFact('apparel_fabric_stretch', /fabric stretch\b/i, blankSpec.stretch)
     appendSpecFact('fit_to_size_sentiment', /fit\s*to\s*size/i, blankSpec.fitToSize)
     /* PO panel review (2026-08-04): two more spec-derivable rows the audit was guessing at.

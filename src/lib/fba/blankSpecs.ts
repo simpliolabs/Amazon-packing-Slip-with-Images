@@ -51,7 +51,18 @@ export interface BlankSpec {
    *  Drives the sizing-clarity copy in bullets/description/features — NEVER the title (PO rule).
    *  DB-only by design (seeds stay byte-identical to migration 053; fail-open = no claim). */
   unisex?: boolean
+  /** blank_specs.age_class (migration 071) — orthogonal to garment_family's SILHOUETTE enum below:
+   *  any garment_family may pair with any age_class. Absent = the blank does not state its age.
+   *  NEVER defaulted to 'adult' here or anywhere downstream (contentTruth.ts's
+   *  resolveGarmentAudience) — a default that is also a legal value would hide total failure the
+   *  same way Department="Unisex" already does for an un-stated kids family. */
+  ageClass?: AgeClass
 }
+
+/** blank_specs.age_class (migration 071). newborn|infant|toddler|kids|adult — see BlankSpec.ageClass
+ *  and contentTruth.ts's resolveGarmentAudience for the ONE precedence rule that reads it. */
+export type AgeClass = 'newborn' | 'infant' | 'toddler' | 'kids' | 'adult'
+const AGE_CLASSES: ReadonlySet<string> = new Set<AgeClass>(['newborn', 'infant', 'toddler', 'kids', 'adult'])
 
 /** blank_specs.garment_family (migration 058). Drives the garment-compatibility gate and the Item
  *  Highlights composer's truth stage (garment nouns + audience — kids_tee reaches it UNFOLDED). */
@@ -101,6 +112,7 @@ interface DbRow {
   active?: boolean | null
   style_code?: string | null
   garment_family?: string | null
+  age_class?: string | null
 }
 
 /** DB row → BlankSpecRow. Null columns become ABSENT fields (undefined) so every existing
@@ -133,6 +145,12 @@ export function rowToSpec(row: DbRow): BlankSpecRow | null {
   if (row.stretch) spec.stretch = row.stretch
   if (row.fit_to_size) spec.fitToSize = row.fit_to_size
   if (row.unisex === true) spec.unisex = true
+  // 071 column — fail-open: a pre-071 DB (or NULL, the ~600-family default) leaves it absent, i.e.
+  // "does not state its age". No default materializes here; only a REAL 'adult' column value would
+  // ever set spec.ageClass = 'adult'. Lives on `spec` (not `out`) because it must flow through
+  // intersectBlankSpecs — a mixed adult+kids family must never silently keep one child's age.
+  const ac = (row.age_class ?? '').trim()
+  if (AGE_CLASSES.has(ac)) spec.ageClass = ac as AgeClass
   const out: BlankSpecRow = { match, spec }
   // 058 columns — fail-open: a pre-058 DB (or NULL) leaves both absent = legacy regex behaviour.
   const code = (row.style_code ?? '').trim().toUpperCase()
@@ -351,7 +369,10 @@ export function resolveChildStyleCode(
 }
 
 /** Exact-match facts: a cut/neck/sleeve that differs between children is never claimed. */
-const INTERSECT_EXACT_KEYS = ['brand', 'fit', 'sleeve', 'neck', 'dye', 'stretch', 'fitToSize'] as const
+// 'ageClass' (071) added 2026-08-27: a mixed adult+kids family (e.g. a family that mixes a
+// 64000B kids-tee child with an unstated-age adult blank) must NEVER silently broadcast one
+// child's age fact as the family's own — exact-match, same as brand/fit/sleeve/neck/dye/stretch.
+const INTERSECT_EXACT_KEYS = ['brand', 'fit', 'sleeve', 'neck', 'dye', 'stretch', 'fitToSize', 'ageClass'] as const
 
 /** Case-insensitive token set of a material string ("100% Airlume Combed Ring-Spun Cotton" →
  *  {100%, airlume, combed, ring, spun, cotton}). */
@@ -376,7 +397,12 @@ export function intersectBlankSpecs(specs: readonly BlankSpec[]): BlankSpec | nu
   if (specs.some((s) => s.brandInCopy === false)) out.brandInCopy = false
   for (const k of INTERSECT_EXACT_KEYS) {
     const v = specs[0][k]
-    if (v && specs.every((s) => s[k] === v)) out[k] = v
+    // TS can't narrow `out[k]`'s type from a UNION key (`k` ranges over fields of different
+    // literal-union types, e.g. 'ageClass': AgeClass vs 'brand': string) — the assignment is sound
+    // at runtime (v was read off the SAME key k), so the generic-indexing cast is the standard
+    // escape hatch for this "iterate over heterogeneous keys" shape (same class as the DbRow reader
+    // above); no behavior change for any pre-existing key.
+    if (v && specs.every((s) => s[k] === v)) (out as Record<string, unknown>)[k] = v
   }
   const materials = specs.map((s) => (s.material ?? '').trim())
   if (materials.every(Boolean)) {

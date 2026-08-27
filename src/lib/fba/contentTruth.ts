@@ -213,13 +213,6 @@ const foreignAudienceHits = (phrase: string, re: RegExp, design: ReadonlySet<str
 const LEAN_FEM_RE = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/i
 const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
 
-/** Audience is a property of the BLANK FAMILY (64000B youth tee ⇒ kids), never inferred from a title. */
-export function audienceOfGarmentFamily(gf: TruthGarmentFamily | undefined): 'kids' | 'adult' | null {
-  if (gf === 'kids_tee') return 'kids'
-  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'sweatshirt' || gf === 'hoodie' || gf === 'hat') return 'adult'
-  return null
-}
-
 /** PipelineInput.audienceLean → the truth rule's view. `lean_male`/`lean_female` are SOFT
  *  re-weightings (cross-gender traffic is the point of a lean), so they are NOT unisex and never
  *  trigger the forced-gender rule. */
@@ -229,6 +222,119 @@ export function normalizeAudienceLean(
   if (lean === 'unisex') return 'unisex'
   if (lean === 'female' || lean === 'lean_female') return 'women'
   if (lean === 'male' || lean === 'lean_male') return 'men'
+  return null
+}
+
+/* ─── THE AGE PRODUCER (PO ruling 2026-08-27, migration 071) ────────────────────────────────────
+ *
+ * "The garment should touch everything from title to Product Detail values" (PO 2026-08-22)
+ * reached title/bullets/description/backend but NOT Amazon's Product Detail attributes.
+ * `age_range_description` had ZERO deterministic producers (LLM-only, guessing from the listing's
+ * OWN EXISTING COPY); `department`/`target_gender`'s one deterministic producer — the per-lean
+ * 3-way map at listingPipeline.ts's product-detail block — is the FAMILY GENDER SELECTOR, whose
+ * vocabulary (male|female|lean_male|lean_female|unisex) structurally cannot say "kids": a 12-child
+ * Gildan 64000B YOUTH-tee family ships Department="Unisex", a LEGAL enum member, so the push
+ * reports SUCCESS while the listing is filed as adult (B0DP5H8QBT).
+ *
+ * PO RULING: blank-derived garment truth MAY re-propose over a PO-accepted PUSHED value — but ONLY
+ * when the blank itself STATES the fact. A guess never overrides the PO; a selector-derived value
+ * (the lean map above) never overrides the PO either. This resolver is the ONE seam that decides
+ * "did the blank state it" — every Product Detail call site asks it the same question the same way,
+ * exactly like `phraseTruthVerdict` is the one seam for garment-noun/audience truth.
+ */
+
+/** blank_specs.age_class (migration 071) — orthogonal to garment_family's SILHOUETTE enum (058):
+ *  any garment_family may pair with any age_class. NEVER defaulted to 'adult' anywhere — DDL, this
+ *  resolver, or the settings UI — a default that is also a legal value would hide total failure
+ *  exactly the way Department="Unisex" already does. */
+export type AgeClass = 'newborn' | 'infant' | 'toddler' | 'kids' | 'adult'
+
+/** How `resolveGarmentAudience` decided — mirrors `BlankSource`'s "how was this blank decided" API
+ *  surface (blankSpecs.ts): a contract the caller's provenance stamp reads, not an internal label. */
+export type GarmentAudienceSource = 'blank-column' | 'garment-family' | 'none'
+
+export interface GarmentAudienceFacts {
+  garmentFamily: TruthGarmentFamily | undefined
+  /** The blank's OWN stated age_class column. Absent/null = "the blank does not state its age" —
+   *  never pass 'adult' as a stand-in default; only forward a REAL column value. */
+  ageClass?: AgeClass | null
+  /** RAW seller-declared lean (same shape `normalizeAudienceLean` takes) — used only to pick
+   *  Girls/Boys over the neutral default once the family is already known to be non-adult. */
+  audienceLean?: Parameters<typeof normalizeAudienceLean>[0]
+}
+
+export interface GarmentAudienceResolution {
+  ageClass: AgeClass | null
+  audience: 'kids' | 'adult' | null
+  source: GarmentAudienceSource
+  /** Human department string to COMPOSE with an existing dept string ('Unisex Kids') — the caller
+   *  hands this to the live-schema enum coercion (`coerceGenderToEnum`), never writes it raw. */
+  departmentQualifier: string | null
+  /** Candidate value for the age_range_description attribute — the caller matches this against the
+   *  LIVE enum (`detailAttributeMenu[].accepted`) before ever proposing it; a schema with no such
+   *  key makes appending it a structural no-op. */
+  ageRangeCandidate: string | null
+  /** Same neutral/gendered marker `youthMarkerFor` derives for the TITLE — Kids by default,
+   *  Girls/Boys only when the seller declared a lean. null when the audience isn't kids. */
+  youthMarker: string | null
+}
+
+const AGE_RANGE_LABEL: Record<AgeClass, string> = {
+  newborn: 'Newborn', infant: 'Infant', toddler: 'Toddler', kids: 'Kids', adult: 'Adult',
+}
+
+/** Girls/Boys/Kids — the ONE gendered-marker picker, shared by `youthMarkerFor` (title, legacy
+ *  normalized ctx.audienceLean) and `resolveGarmentAudience` (Product Detail, raw seller lean) so
+ *  the two surfaces can never pick different words for the same family. */
+function pickYouthWord(lean: TruthAudienceLean): string {
+  if (lean === 'women') return 'Girls'
+  if (lean === 'men') return 'Boys'
+  return 'Kids'
+}
+
+/**
+ * ONE resolver for garment age/audience facts. Every Product Detail call site asks this and
+ * nothing else — no inline `if (kids) dept = 'Unisex Kids'` anywhere else in the pipeline.
+ *
+ * PRECEDENCE — exactly these two rules, nothing else:
+ *   1. A STATED `facts.ageClass` wins outright.                        source: 'blank-column'
+ *   2. Else `facts.garmentFamily === 'kids_tee'` resolves 'kids' — the  source: 'garment-family'
+ *      ONE age fact the silhouette enum (058) already encodes.
+ * Every other combination (no stated ageClass, not kids_tee) yields ageClass:null, audience:null,
+ * source:'none'. 'adult' is NEVER INFERRED — it is returned ONLY when `facts.ageClass` arrives
+ * LITERALLY 'adult' (a real stated column value; the DB column has no default and nothing in this
+ * codebase ever synthesizes 'adult'). `tee → adult` is exactly the inference this resolver refuses
+ * to make: it would mislabel every future kids blank of a non-kids_tee silhouette (a kids hoodie,
+ * a toddler onesie) the moment one exists.
+ *
+ * Pure — no DB, no I/O.
+ */
+export function resolveGarmentAudience(facts: GarmentAudienceFacts): GarmentAudienceResolution {
+  let ageClass: AgeClass | null = facts.ageClass ?? null
+  let source: GarmentAudienceSource = ageClass ? 'blank-column' : 'none'
+  if (!ageClass && facts.garmentFamily === 'kids_tee') {
+    ageClass = 'kids'
+    source = 'garment-family'
+  }
+  const audience: 'kids' | 'adult' | null = ageClass === null ? null : ageClass === 'adult' ? 'adult' : 'kids'
+  const isKidsBucket = audience === 'kids'
+  const lean = normalizeAudienceLean(facts.audienceLean)
+  const youthMarker = isKidsBucket ? pickYouthWord(lean) : null
+  const departmentQualifier = isKidsBucket
+    ? (lean === 'women' ? 'Girls' : lean === 'men' ? 'Boys' : `Unisex ${AGE_RANGE_LABEL[ageClass as AgeClass]}`)
+    : null
+  const ageRangeCandidate = ageClass ? AGE_RANGE_LABEL[ageClass] : null
+  return { ageClass, audience, source, departmentQualifier, ageRangeCandidate, youthMarker }
+}
+
+/** Audience is a property of the BLANK FAMILY (64000B youth tee ⇒ kids), never inferred from a
+ *  title. THIN WRAPPER (2026-08-27) over `resolveGarmentAudience`'s garment-family rule so the two
+ *  can never disagree about which families are kids — the 'adult' branch is untouched (that
+ *  resolver deliberately never infers 'adult' from silhouette; this function's own callers have
+ *  relied on it doing exactly that since before this resolver existed, so it stays, unchanged). */
+export function audienceOfGarmentFamily(gf: TruthGarmentFamily | undefined): 'kids' | 'adult' | null {
+  if (resolveGarmentAudience({ garmentFamily: gf }).audience === 'kids') return 'kids'
+  if (gf === 'tee' || gf === 'long_sleeve_tee' || gf === 'sweatshirt' || gf === 'hoodie' || gf === 'hat') return 'adult'
   return null
 }
 
@@ -258,9 +364,11 @@ export function titleAssertsYouthAudience(title: string): boolean {
  */
 export function youthMarkerFor(ctx: PhraseTruthCtx | null | undefined): string | null {
   if (!ctx || ctx.audience !== 'kids') return null
-  if (ctx.audienceLean === 'women') return 'Girls'
-  if (ctx.audienceLean === 'men') return 'Boys'
-  return 'Kids'
+  // THIN WRAPPER (2026-08-27): shares `pickYouthWord` with `resolveGarmentAudience` so the title
+  // marker and the Product Detail department qualifier can never pick different words for the
+  // same family. ctx.audienceLean is already the NORMALIZED TruthAudienceLean (unlike
+  // resolveGarmentAudience's raw seller-lean parameter) — pickYouthWord takes that shape directly.
+  return pickYouthWord(ctx.audienceLean ?? null)
 }
 
 /* ─── ONE CTX BUILDER (PO 2026-08-23, live B0DP5H8QBT) ──────────────────────────────────────────── */
