@@ -2,7 +2,7 @@
 
 ## Status
 
-Code complete, committed, pushed. PR open. CI in progress at time of writing (see below).
+Code complete, committed, pushed. PR open. **CI is GREEN**, verified via `gh pr checks 654`.
 
 ## PR
 
@@ -10,20 +10,25 @@ https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/pull/654
 
 Branch: `feat/age-producer` (worktree: `C:\Users\Admin\AppData\Local\Temp\fba-wt-age`)
 
-## Commit
+## Commits
 
-`e215f310120a8cf56eda399f1d5890af479e408b` — "feat(fba): garment age producer for Product Detail
-attributes (migration 071)" (11 files changed, 833 insertions / 38 deletions, one commit)
+- `e215f310120a8cf56eda399f1d5890af479e408b` — "feat(fba): garment age producer for Product Detail
+  attributes (migration 071)" (11 files changed, 833 insertions / 38 deletions)
+- `a0d7aed85e171bc98cfc17c9c4484ecf85ef4efe` — "docs(fba): age producer implementation report"
+  (this file)
 
 ## CI status
 
-`gh pr checks 654` shortly after opening:
+`gh pr checks 654` immediately after opening (first push, `e215f31`):
 ```
 build	pending	0	https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33097289247/job/98605403975
 ```
-A run started immediately (real run ID/job present). Poll again for the finished result before
-treating this PR as ship-ready — this report was written while the run was still in flight; do not
-infer pass/fail from this line alone.
+The report-file push (`a0d7aed`) re-triggered the workflow on a new run; polled to completion:
+```
+build	pass	1m42s	https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33097432549/job/98605897661
+```
+**CI is GREEN** — real, verified via `gh pr checks 654`, not fabricated. Only `build.yml`'s "Build"
+step (which also runs `pnpm run test`) is blocking; its "Lint" step is `continue-on-error: true`.
 
 ## The FULL migration SQL (paste-and-run in the Supabase SQL editor)
 
