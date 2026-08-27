@@ -21,7 +21,7 @@ import {
 import { invalidateBlankCaches } from '@/lib/fba/blankSpecs'
 
 const WRITABLE_FIELDS = [
-  'match_pattern', 'style_code', 'garment_family', 'brand', 'brand_in_copy',
+  'match_pattern', 'style_code', 'garment_family', 'age_class', 'brand', 'brand_in_copy',
   'fit', 'sleeve', 'neck', 'weight_note', 'material', 'dye', 'stretch', 'fit_to_size',
   'unisex', 'active', 'notes',
 ] as const
@@ -94,6 +94,10 @@ export async function POST(req: NextRequest) {
     match_pattern: (body.match_pattern as string).trim(),
     style_code: (body.style_code as string).trim().toUpperCase(),
     garment_family: body.garment_family,
+    // age_class (071): OPTIONAL, unlike garment_family — absent/empty stays null ("not stated"),
+    // NEVER defaulted to 'adult'. body.age_class arrives '' from the settings-panel select's
+    // "not stated" option; `|| null` also covers a bare omission (undefined).
+    age_class: body.age_class?.trim() || null,
     brand: body.brand?.trim() || null,
     brand_in_copy: typeof body.brand_in_copy === 'boolean' ? body.brand_in_copy : true,
     fit: body.fit?.trim() || null,

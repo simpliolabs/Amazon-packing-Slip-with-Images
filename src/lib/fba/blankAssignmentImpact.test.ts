@@ -65,6 +65,35 @@ describe('validateBlankSpecInput', () => {
     const errors = validateBlankSpecInput({ garment_family: 'not-a-family' }, 'update')
     expect(errors.some((e) => e.field === 'garment_family')).toBe(true)
   })
+
+  // age_class (071) — UNLIKE garment_family, optional: absent on create is legal (the ~600-family
+  // default), and it must never be REQUIRED the way garment_family is.
+  it('age_class absent on CREATE is legal — never required, unlike garment_family', () => {
+    const errors = validateBlankSpecInput({ style_code: '9999', match_pattern: 'x', garment_family: 'tee' }, 'create')
+    expect(errors.filter((e) => e.field === 'age_class')).toHaveLength(0)
+  })
+
+  it('accepts every real age_class value, plus null/empty (both mean "not stated")', () => {
+    for (const ac of ['newborn', 'infant', 'toddler', 'kids', 'adult', null, '']) {
+      const errors = validateBlankSpecInput({ style_code: '9999', match_pattern: 'x', garment_family: 'tee', age_class: ac }, 'create')
+      expect(errors.filter((e) => e.field === 'age_class')).toHaveLength(0)
+    }
+  })
+
+  it('rejects a bad age_class WHEN the field is present', () => {
+    const errors = validateBlankSpecInput({ style_code: '9999', match_pattern: 'x', garment_family: 'tee', age_class: 'senior' }, 'create')
+    expect(errors.some((e) => e.field === 'age_class')).toBe(true)
+  })
+
+  it('update mode only validates age_class if the patch touches it', () => {
+    const errors = validateBlankSpecInput({ active: false }, 'update')
+    expect(errors.filter((e) => e.field === 'age_class')).toHaveLength(0)
+  })
+
+  it('update mode still rejects a bad age_class if the patch touches it', () => {
+    const errors = validateBlankSpecInput({ age_class: 'teen' }, 'update')
+    expect(errors.some((e) => e.field === 'age_class')).toBe(true)
+  })
 })
 
 describe('findDuplicateActiveStyleCode', () => {

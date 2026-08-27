@@ -13,6 +13,10 @@ import { useEffect, useState, useCallback } from 'react'
 import { toast } from 'sonner'
 
 const GARMENT_FAMILIES = ['tee', 'long_sleeve_tee', 'sweatshirt', 'hoodie', 'kids_tee'] as const
+// blank_specs.age_class (migration 071) — ORTHOGONAL to garment_family (silhouette). Optional, no
+// default: the form's empty-string option means "not stated" and saves as null, NEVER 'adult' — a
+// default that is also a legal value would hide total failure (see the migration's own header).
+const AGE_CLASSES = ['newborn', 'infant', 'toddler', 'kids', 'adult'] as const
 
 interface Blank {
   id: number
@@ -21,6 +25,7 @@ interface Blank {
   brand: string | null
   brand_in_copy: boolean
   garment_family: string | null
+  age_class: string | null
   fit: string | null
   sleeve: string | null
   neck: string | null
@@ -42,6 +47,7 @@ type FormState = {
   brand: string
   brand_in_copy: boolean
   garment_family: string
+  age_class: string
   fit: string
   sleeve: string
   neck: string
@@ -55,7 +61,7 @@ type FormState = {
 }
 
 const EMPTY_FORM: FormState = {
-  style_code: '', match_pattern: '', brand: '', brand_in_copy: true, garment_family: 'tee',
+  style_code: '', match_pattern: '', brand: '', brand_in_copy: true, garment_family: 'tee', age_class: '',
   fit: '', sleeve: '', neck: '', weight_note: '', material: '', dye: '', stretch: '', fit_to_size: '',
   unisex: false, notes: '',
 }
@@ -64,6 +70,8 @@ function blankToForm(b: Blank): FormState {
   return {
     style_code: b.style_code ?? '', match_pattern: b.match_pattern ?? '', brand: b.brand ?? '',
     brand_in_copy: b.brand_in_copy !== false, garment_family: b.garment_family ?? 'tee',
+    // NEVER default an unstated blank's age_class to 'adult' — the empty "not stated" option.
+    age_class: b.age_class ?? '',
     fit: b.fit ?? '', sleeve: b.sleeve ?? '', neck: b.neck ?? '', weight_note: b.weight_note ?? '',
     material: b.material ?? '', dye: b.dye ?? '', stretch: b.stretch ?? '', fit_to_size: b.fit_to_size ?? '',
     unisex: b.unisex === true, notes: b.notes ?? '',
@@ -173,6 +181,7 @@ export default function BlanksPanel() {
       brand: form.brand.trim() || null,
       brand_in_copy: form.brand_in_copy,
       garment_family: form.garment_family,
+      age_class: form.age_class || null,
       fit: form.fit.trim() || null,
       sleeve: form.sleeve.trim() || null,
       neck: form.neck.trim() || null,
@@ -258,6 +267,7 @@ export default function BlanksPanel() {
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Brand</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">In Copy</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Garment Family</th>
+                  <th className="text-left px-3 py-2 font-medium text-slate-500">Age Class</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Fit / Sleeve / Neck</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Material</th>
                   <th className="text-left px-3 py-2 font-medium text-slate-500">Weight</th>
@@ -278,6 +288,7 @@ export default function BlanksPanel() {
                         : <span className="text-[10px] font-medium bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">No</span>}
                     </td>
                     <td className="px-3 py-2.5 text-slate-700">{b.garment_family || '—'}</td>
+                    <td className="px-3 py-2.5 text-slate-700">{b.age_class || '—'}</td>
                     <td className="px-3 py-2.5 text-slate-600">{[b.fit, b.sleeve, b.neck].filter(Boolean).join(' / ') || '—'}</td>
                     <td className="px-3 py-2.5 text-slate-600 max-w-[220px] truncate" title={b.material || ''}>{b.material || '—'}</td>
                     <td className="px-3 py-2.5 text-slate-600 max-w-[180px] truncate" title={b.weight_note || ''}>{b.weight_note || '—'}</td>
@@ -334,6 +345,14 @@ export default function BlanksPanel() {
                   </select>
                 </Field>
               </div>
+
+              <Field label="Age Class" hint="ONLY set this when the blank ITSELF states an age (e.g. a youth/kids SKU) — leave “Not stated” for every adult/unknown blank. Never defaults to Adult.">
+                <select value={form.age_class} onChange={(e) => setForm((f) => ({ ...f, age_class: e.target.value }))}
+                  className="w-full px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-200 bg-white">
+                  <option value="">— Not stated —</option>
+                  {AGE_CLASSES.map((a) => <option key={a} value={a}>{a}</option>)}
+                </select>
+              </Field>
 
               <Field label="Match Pattern" required hint="Case-insensitive regex over the listing hay (title/SKU/attributes) — the legacy fallback when no child SKU carries this code.">
                 <input value={form.match_pattern} onChange={(e) => setForm((f) => ({ ...f, match_pattern: e.target.value }))}

@@ -25,10 +25,17 @@ import { extractStyleCode, matchBlankSpecRow, rowToSpec, type BlankSpecRow, type
 
 export const GARMENT_FAMILY_VALUES: readonly GarmentFamily[] = ['tee', 'long_sleeve_tee', 'sweatshirt', 'hoodie', 'kids_tee']
 
+// blank_specs.age_class (migration 071) — ORTHOGONAL to garment_family (any silhouette may pair
+// with any age). Unlike garment_family, this is OPTIONAL (NULL = "not stated") and has no default;
+// see validateBlankSpecInput below — never required on create, and 'adult' is a normal member here,
+// never a fallback the UI/route synthesizes on its own.
+export const AGE_CLASS_VALUES: readonly ['newborn', 'infant', 'toddler', 'kids', 'adult'] = ['newborn', 'infant', 'toddler', 'kids', 'adult']
+
 export interface BlankSpecInput {
   style_code?: string | null
   match_pattern?: string | null
   garment_family?: string | null
+  age_class?: string | null
   brand?: string | null
   brand_in_copy?: unknown
   fit?: string | null
@@ -82,6 +89,16 @@ export function validateBlankSpecInput(input: BlankSpecInput, mode: 'create' | '
     const v = input.garment_family
     if (!v || !(GARMENT_FAMILY_VALUES as readonly string[]).includes(v)) {
       errors.push({ field: 'garment_family', message: `garment_family must be one of: ${GARMENT_FAMILY_VALUES.join(', ')}` })
+    }
+  }
+
+  // age_class (071) — OPTIONAL, unlike garment_family: NULL/absent = "not stated", the legal
+  // default for ~600 unstated families, so this is validated ONLY when the field is PRESENT in
+  // the payload — never required on create, and never rejected merely for being absent.
+  if (has(input, 'age_class')) {
+    const v = input.age_class
+    if (v !== null && v !== undefined && v !== '' && !(AGE_CLASS_VALUES as readonly string[]).includes(v)) {
+      errors.push({ field: 'age_class', message: `age_class must be blank or one of: ${AGE_CLASS_VALUES.join(', ')}` })
     }
   }
 
@@ -139,6 +156,7 @@ export interface DbBlankRow {
   unisex?: boolean | null
   style_code?: string | null
   garment_family?: string | null
+  age_class?: string | null
   active?: boolean | null
 }
 

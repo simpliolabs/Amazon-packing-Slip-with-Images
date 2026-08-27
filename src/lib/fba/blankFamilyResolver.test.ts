@@ -152,6 +152,21 @@ describe('intersectBlankSpecs — a fact ships only when EVERY resolved blank ag
   it('empty input → null', () => {
     expect(intersectBlankSpecs([])).toBeNull()
   })
+
+  // ageClass (071) — added to INTERSECT_EXACT_KEYS 2026-08-27: a mixed adult+kids family must
+  // NEVER silently keep one child's age fact and broadcast it as the family's own.
+  it('ageClass (071): a mixed adult+kids family drops the fact — the brief\'s own pin', () => {
+    const s = intersectBlankSpecs([{ ageClass: 'adult' }, { ageClass: 'kids' }])!
+    expect(s.ageClass).toBeUndefined()
+  })
+  it('ageClass: EVERY blank agreeing keeps the fact', () => {
+    const s = intersectBlankSpecs([{ ageClass: 'kids' }, { ageClass: 'kids' }])!
+    expect(s.ageClass).toBe('kids')
+  })
+  it('ageClass: one blank stating it, one silent — dropped (exact-match, same as brand/fit/etc.)', () => {
+    const s = intersectBlankSpecs([{ ageClass: 'kids' }, {}])!
+    expect(s.ageClass).toBeUndefined()
+  })
 })
 
 describe('resolveFamilyBlank — per-child style codes → override → legacy regex → null', () => {
