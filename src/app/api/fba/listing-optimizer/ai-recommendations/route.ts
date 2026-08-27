@@ -406,6 +406,26 @@ Every CRITICAL and UPGRADE keyword must appear somewhere: in the title, in the b
   }
 }
 
+// ─── Manual-title-lock scope (2026-08-27 fix, live case B0DSCDZC6K) ──────────
+/**
+ * Decides what a FULL regen persists as `per_child_titles` when the parent title is locked
+ * (`title_source='manual'`) and this isn't an explicit title regen. `lock-title/route.ts` writes
+ * ONLY {title_source, recommended_title} — it never reads or writes per_child_titles, so the
+ * seller's manual lock never covers any child title. The answer is therefore always the FRESH
+ * per-child titles this run's pipeline just computed; the lock is parent-scoped only.
+ *
+ * Exported ONLY for direct unit testing — Next.js's route convention ignores exports that aren't
+ * its reserved handler names (GET/POST/etc.), so this costs nothing in production. The regression
+ * test drives this exact function (not a mirrored re-implementation) so the test proves the real
+ * call site, matching the one line below that invokes it inside the manual-lock branch.
+ */
+export function resolveLockedFullRegenPerChildTitles(
+  _storedPerChildTitles: unknown,
+  freshPerChildTitles: unknown,
+): unknown {
+  return freshPerChildTitles
+}
+
 // ─── POST Handler (Streaming) ────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -1635,9 +1655,12 @@ export async function POST(req: NextRequest) {
           // the manual push stamped title_source='manual' (pushExecutor). A WHOLE-listing AI Audit /
           // Regenerate must NOT silently overwrite it — read the flag fresh (storedRec is only loaded on
           // a partial regen) and, when locked AND this isn't an explicit "Regenerate title", KEEP the
-          // seller's title + its per_child_titles and HOLD the lock (so a bullets/description regen can't
-          // clear it either). An explicit title regen (regenerate_section==='title') is the seller asking
-          // for a fresh one → replace it and reset the lock to 'ai'.
+          // seller's PARENT title (recommended_title only — lock-title/route.ts never reads or writes
+          // per_child_titles, so the lock is parent-scoped; see resolveLockedFullRegenPerChildTitles
+          // above, PARENT-LOCK-FREEZES-CHILDREN fix 2026-08-27 / live case B0DSCDZC6K) and HOLD the lock
+          // (so a bullets/description regen can't clear it either). An explicit title regen
+          // (regenerate_section==='title') is the seller asking for a fresh one → replace it and reset
+          // the lock to 'ai'.
           let titleSourceOut: 'ai' | 'manual' = 'ai'
           let priorKwJson: string | null = null   // prior stored keywords, for the degraded-keywords preserve below
           let priorDesc: string | null = null     // prior stored description, for the degraded-description preserve (Phase 3)
@@ -1701,10 +1724,19 @@ export async function POST(req: NextRequest) {
                 console.log(`[ai-recommendations] LOCK SCRUB ${parent_asin} — the locked title carried a guarded phrase; shipped the scrubbed form: ${JSON.stringify({ typed, kept })}`)
               }
               if (kept) rec.recommended_title = kept
+              // PARENT-SCOPED LOCK FIX (2026-08-27, live case B0DSCDZC6K): this used to overwrite
+              // `rec.per_child_titles` with the STORED (prior-run) array whenever the parent was
+              // locked — freezing every child title forever on every regen of a locked family (a
+              // full regen looked fresh via `generated_at` while the per-child bytes were a straight
+              // copy-back). `lock-title/route.ts` never touches per_child_titles, so the lock never
+              // covered the children. `keptPct` (the STORED array) is retained below only to feed the
+              // immediate IH re-net against the titles that were live at lock-read time — the
+              // unconditional persist-boundary re-net further down re-keys against the titles that
+              // actually ship (now including the fresh per-child titles from resolveLockedFullRegenPerChildTitles).
               const keptPct = (lockRow as { per_child_titles?: unknown }).per_child_titles
-              if (Array.isArray(keptPct) && keptPct.length) rec.per_child_titles = keptPct as typeof rec.per_child_titles
+              rec.per_child_titles = resolveLockedFullRegenPerChildTitles(keptPct, rec.per_child_titles) as typeof rec.per_child_titles
               titleSourceOut = 'manual'
-              console.log(`[ai-recommendations] manual-title lock HELD for ${parent_asin} — kept the seller's title through a ${regenerate_section ?? 'full'} regen`)
+              console.log(`[ai-recommendations] manual-title lock HELD for ${parent_asin} — kept the seller's PARENT recommended_title through a ${regenerate_section ?? 'full'} regen (lock is parent-scoped only; per_child_titles refresh from this run's pipeline output)`)
               // IH/LOCK COHERENCE (adversarial MEDIUM, 2026-08-08): the fresh IH in `rec` was netted
               // against the pipeline's lockedTitle read taken at REQUEST START — a lock created (or a
               // transient failure of that read) during the multi-minute run means the IH may key on
@@ -1854,6 +1886,14 @@ export async function POST(req: NextRequest) {
           // LOCK-PRESERVE (fail closed, adversarial review 2026-08-08): when the lock/prior read
           // failed, the title columns are OMITTED so the upsert cannot overwrite a possibly-manual
           // stored title with this run's AI title. Every other column still persists normally.
+          // DELIBERATE, NOT WIDENED (2026-08-27, parent-lock-freezes-children fix): per_child_titles
+          // stays bundled into this omission even though the lock itself is parent-scoped (see the
+          // MANUAL-TITLE LOCK block above) — an unreadable lock/prior read is a rare, transient failure
+          // that self-heals on the NEXT successful regen, unlike the bug just fixed (which froze every
+          // locked family's children on EVERY regen, forever). Touching zero title-adjacent columns on
+          // an unknown state is this route's established fail-closed posture; decoupling per_child_titles
+          // here too is a real option (the lock never covered it) but is out of scope for a surgical fix
+          // with no live repro of THIS branch — revisit if lock-read failures are ever observed live.
           if (lockCheckFailed) {
             console.warn(`[ai-recommendations] lock-preserve for ${rec.parent_asin}: persisting WITHOUT recommended_title/per_child_titles (lock state unreadable this run)`)
           }
