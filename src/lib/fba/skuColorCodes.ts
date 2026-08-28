@@ -151,6 +151,14 @@ const SIZE_TOKEN_RE = "(?:XS|S|M|L|XL|XXL|XXXL|[2-5]XL|[2-6]X-?Large|X-?Small|XX
  * the FBM miss was the collapse), decodes the last segment via SKU_COLOR_CODES, and falls back
  * to the child's OWN title's trailing " - Color - Size" segment. Returns null when no color can
  * be determined — callers must treat null as "unknown", never as a shared bucket.
+ *
+ * NOT the entry point for resolving a variant's colour (2026-08-28, migration 072). This function
+ * is TEXT PARSING — it can never read a colour Amazon never wrote into the SKU/title, and an
+ * Amazon-generated opaque SKU (B0DP5H8QBT-class: "1V-C6WM-US5T") has no colour-bearing segment for
+ * it to find, no matter how many more heuristics are added here. Every caller resolving a VARIANT's
+ * colour must go through resolveChildColor (childColorResolver.ts), which reads Amazon's own stored
+ * catalog colour FIRST and calls this function only as the fallback. This function's own logic is
+ * intentionally left untouched by that change — it stays exactly what it was.
  */
 export function decodeSkuColor(sku: string, title?: string | null): string | null {
   const parts = sku.toUpperCase().split('-').filter(Boolean)

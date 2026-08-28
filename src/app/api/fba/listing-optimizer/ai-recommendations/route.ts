@@ -35,7 +35,7 @@ import { isOffNicheKeyword, hasDatedEventContamination } from '@/lib/keyword-eng
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep } from '@/lib/fba/trademarkGuard'
 import { scrubCelebrityNames } from '@/lib/fba/celebrityGuard'
 import { deriveActionPlan, type DeriveContentRow } from '@/lib/fba/pushFields'
-import { decodeSkuColor } from '@/lib/fba/skuColorCodes'
+import { resolveChildColor } from '@/lib/fba/childColorResolver'
 // CONTENT-RECONCILE (PO 2026-08-08, SELLER_PROFILE §10): ONE shared helper, called from BOTH
 // write paths (full dbPayload upsert + #79 partial early-return) — dual-write-path doctrine.
 // jsonChanged/perChildChanged/resolveTitleLocked are the shared PURE compare/lock rules
@@ -145,6 +145,10 @@ interface ChildRow {
   aplus_has_brand_story: boolean
   aplus_has_headline: boolean
   aplus_images_missing_alt: number
+  /** Catalog colour (migration 072) — Amazon's own per-variant truth, NULL = not fetched/unknown.
+   *  Consulted FIRST by resolveChildColor; never a decoded guess. Optional: a pre-migration
+   *  database's column-safe select (below) omits this key entirely rather than erroring. */
+  color?: string | null
 }
 
 export interface VariantCorrection {
@@ -440,14 +444,33 @@ export async function POST(req: NextRequest) {
     }
 
     const supabase = getAdminSupabase()
+    // `color` is migration 072, applied BY HAND (never a deploy-time step) — a not-yet-migrated
+    // database 42703s a `color` projection. Routed through an `any` handle (repo convention —
+    // rankAnalysis.ts's `const db = supabase as any` for the same "column may not exist yet"
+    // class) so `contentCols` can be downgraded and re-selected at runtime without fighting
+    // supabase-js's literal-string select-type inference, which only resolves a fixed shape for a
+    // `const` literal, not a value that can vary between the two retry branches below.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = supabase as any
 
     // Fetch all child content rows for this parent.
-    const contentCols = 'sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt'
-    let { data: childrenRaw, error } = await supabase
+    let contentCols = 'sku, asin, title, bullet_1, bullet_2, bullet_3, bullet_4, bullet_5, description, backend_keywords, image_count, has_aplus, aplus_module_count, aplus_has_brand_story, aplus_has_headline, aplus_images_missing_alt, color'
+    let { data: childrenRaw, error } = await db
       .from('listing_content')
       .select(contentCols)
       .eq('parent_asin', parent_asin)
       .order('sku', { ascending: true })
+    // COLUMN-SAFE (repo convention — rankAnalysis.ts/cacheService.ts's 42703 retry ladder):
+    // `color` is migration 072 — retry once without it so colour falls back to decodeSkuColor
+    // exactly as it did before 072, instead of a total outage of this route pre-migration.
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || /column .*color.* does not exist/i.test(error.message ?? ''))) {
+      contentCols = contentCols.replace(', color', '')
+      ;({ data: childrenRaw, error } = await db
+        .from('listing_content')
+        .select(contentCols)
+        .eq('parent_asin', parent_asin)
+        .order('sku', { ascending: true }))
+    }
 
     // LIVE-FAMILY RECONCILE: on EVERY regen, ask Amazon's catalog for this parent's live VARIATION
     // childAsins and re-attach any listing_content row currently stored under a DIFFERENT parent.
@@ -469,7 +492,7 @@ export async function POST(req: NextRequest) {
         if (rec.backfilled > 0) console.log(`[ai-recommendations] child backfill: created ${rec.backfilled} missing variation row(s) for parent ${parent_asin} (${rec.missingAsins} childAsins had no row)`)
         // Re-query once if EITHER re-attach or backfill changed the family.
         if (rec.reattached > 0 || rec.backfilled > 0) {
-          const retry = await supabase
+          const retry = await db
             .from('listing_content')
             .select(contentCols)
             .eq('parent_asin', parent_asin)
@@ -507,13 +530,17 @@ export async function POST(req: NextRequest) {
     }).join('\n\n')
 
     // Build the per-child keyword slots instruction.
-    // Color from SKU via the SHARED decoder (2026-07-09): the old inline version only stripped a
-    // trailing "-FBA" — on an all-FBM family every child returned the literal "FBM" as its color,
-    // 13 real colors collapsed into one, and the tail LLM hallucinated a shared "burgundy maroon
-    // wine" palette for all 91 children (B0FRYMM56C, PO-caught). decodeSkuColor strips FBA|FBM,
-    // decodes the code (BAY→Bay, CRI→Crimson, MUS→Mustard), falls back to the child's own title
-    // segment, and returns NULL for unknown — never a shared junk bucket.
-    const extractColor = (sku: string, title: string): string => decodeSkuColor(sku, title) ?? ''
+    // Color via the SHARED resolver (2026-08-28, migration 072): resolveChildColor reads Amazon's
+    // own stored catalog colour FIRST (listing_content.color) and falls back to decodeSkuColor
+    // (SKU/title text parsing) only when nothing is stored. The old text-only path (2026-07-09) —
+    // strip -FBA/-FBM, decode the last segment, scan for one unambiguous segment, fall back to the
+    // title tail — collapsed an all-FBM family's 13 real colors into one shared "FBM" bucket
+    // (B0FRYMM56C) and, worse, returns null outright for an Amazon-generated OPAQUE SKU
+    // (B0DP5H8QBT: "1V-C6WM-US5T" — no segment is ever a colour code), which froze that family's
+    // backend-keyword regen forever behind the degrade gate. decodeSkuColor is unchanged and still
+    // runs as the fallback for a child Amazon hasn't been asked about yet.
+    const extractColor = (sku: string, title: string, asin: string, storedColor?: string | null): string =>
+      resolveChildColor({ asin, sku, title, storedColor }).color ?? ''
 
     // V2: Auto-sync keyword intelligence if empty (self-healing)
     // This ensures Regenerate AI Audit works even if keyword cache was cleared
@@ -701,7 +728,7 @@ export async function POST(req: NextRequest) {
       // Current content is available in diagnosis_only fields below for issue detection only.
       current_description: rep.description || null,
       children: children.map((c: ChildRow) => {
-        const color = extractColor(c.sku, c.title || '')
+        const color = extractColor(c.sku, c.title || '', c.asin, c.color)
         // Extract size from SKU (3rd segment: AQS-TMB-{SIZE}-{COLOR})
         const skuParts = c.sku.split('-')
         const size = skuParts.length >= 3 ? skuParts[2] : null
@@ -787,13 +814,26 @@ export async function POST(req: NextRequest) {
 
     // Build the child list for the pipeline (color/size parsed from SKU)
     const pipelineChildren = children.map((c: ChildRow) => {
-      const color = extractColor(c.sku, c.title || '')
+      const color = extractColor(c.sku, c.title || '', c.asin, c.color)
       const skuParts = c.sku.split('-')
       const size = skuParts.length >= 3 ? skuParts[2] : null
       // title is threaded through so the pipeline can read each child's current capacity
       // (e.g. "...128GB...") for per-child capacity titles on storage-variation families.
       return { sku: c.sku, asin: c.asin, color: color || null, size: size || null, title: c.title || null }
     })
+    // COLOUR SOURCE breakdown (2026-08-28, migration 072) — best-effort diagnostic proving WHICH
+    // branch resolved each child's colour: 'catalog' (Amazon's own stored truth), 'sku'
+    // (decodeSkuColor text fallback), or 'none' (both failed — the B0DP5H8QBT-class opaque-SKU
+    // case the degrade gate flags). Never gates anything; backendOutputProblems below reads
+    // pipelineChildren[].color directly, unchanged.
+    try {
+      const bySource = children.reduce((acc: Record<string, number>, c: ChildRow) => {
+        const { source } = resolveChildColor({ asin: c.asin, sku: c.sku, title: c.title, storedColor: c.color })
+        acc[source] = (acc[source] || 0) + 1
+        return acc
+      }, {})
+      console.log(`[ai-recommendations] child colour sources for ${parent_asin}: catalog=${bySource.catalog || 0} sku=${bySource.sku || 0} none=${bySource.none || 0}`)
+    } catch { /* diagnostic only — never blocks a regen */ }
 
     // ── GROUND-TRUTH PRODUCT TYPE + dynamic detail menu (fetched BEFORE the pipeline) ─────────
     // The live SP-API productType (SHIRT, SELF_STICK_NOTE, …) decides apparel-vs-not framing for

@@ -62,3 +62,13 @@ export const spApiWriteBucket = new TokenBucket(5, 5)
  *  writes independently, so verifies run in parallel with pushes yet concurrent verifies (4 employees)
  *  can't collectively exceed 5 read rps → no more "Amazon throttled the check / couldn't read". */
 export const spApiReadBucket = new TokenBucket(5, 5)
+
+/** getCatalogItem / searchCatalogItems (Catalog Items API). ANOTHER separate per-operation bucket:
+ *  Amazon's own usage plan for this operation is 2 requests/sec, burst 2 — a THIRD of the 5/5
+ *  getListingsItem plan spApiReadBucket meters (see the @sp-api-sdk catalog-items-api-2022-04-01
+ *  type doc on getCatalogItem: "Rate (requests per second) | Burst — 2 | 2"; syncParentAsins.ts's
+ *  own searchCatalogItems comment states the same 2 rps). Sharing spApiReadBucket here would let
+ *  catalog reads burst past what Amazon actually grants this operation — exactly the class of
+ *  concurrent-call 429 this file exists to prevent (2026-08-28, migration 072 / childColorResolver
+ *  catalog backfill). */
+export const spApiCatalogReadBucket = new TokenBucket(2, 2)

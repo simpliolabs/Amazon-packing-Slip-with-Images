@@ -771,8 +771,11 @@ function fillBackendToBudget(
 /** Post-conditions for a backend-keywords regen — catches SILENT degradation. Every LLM step
  *  in the backend chain is try/catch best-effort, so a truncated/failed call doesn't error, it
  *  quietly ships garbage as if healthy (live 2026-06-12: 131-byte IDENTICAL token soup across
- *  82 children persisted without a whisper). Returns human-readable problems; [] = healthy. */
-function backendOutputProblems(
+ *  82 children persisted without a whisper). Returns human-readable problems; [] = healthy.
+ *  Exported ONLY for direct unit testing of the degrade gate (2026-08-28, migration 072
+ *  childColorResolver work) — every call site inside this module is unchanged, and this gate's
+ *  threshold/behaviour is deliberately NOT touched by that change. */
+export function backendOutputProblems(
   perChild: PipelinePerChildKeywords[],
   children: PipelineInput['children'],
   apparel: boolean,
