@@ -35,22 +35,71 @@ import {
 // Both are zero-import leaves (designName imports nothing; trademarkGuard imports nothing), so this
 // file stays cycle-free and unit-testable in isolation.
 import { BASIC_COLOR_WORDS } from './designName'
-import { classifyTail } from './poGoldCorpus'
+// NOT cycle-free: poGoldCorpus imports titleLearningMiner, which imports `verdictForAssembledTitle`
+// straight back from THIS file. It works today only because every cross-import here is consumed
+// inside a function body, never at a module's own top level (function declarations are hoisted
+// before any cyclic re-entry can matter; top-level CONST reads are not). `deriveTitleShipFloor`
+// below respects that constraint deliberately — see its own doc.
+import { classifyTail, measureGoldShape, SEED_GOLD_TITLES, type GoldShape } from './poGoldCorpus'
 import { hasTrademark } from './trademarkGuard'
 
 /** ONE source per bound — never a new magic number (generation-invariants INVARIANT 5). */
 export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
 export const TITLE_BAND_HI = CONTENT_CONTRACT.title.hardCap //      75
+
 /**
- * THE HARD SHIP FLOOR — 65. A title under `TITLE_BAND_LO` (70) misses the QUALITY target; a title
- * under `TITLE_SHIP_FLOOR` misses CORRECTNESS — it reads as broken/truncated to a shopper. Every ship
- * point in `settleTruthBand`/`enforceTitleTruthBand` below is judged against this, not a re-derived
- * literal (the prior attempt's constant, `TITLE_TRUTHFUL_SHIP_FLOOR = 65`, was correctly VALUED but
- * sat on a code path the shipped title never took — four other `done(...)`/return sites shipped
- * un-floored regardless of it. This constant has no power on its own; what matters is that every exit
- * below actually consults it).
+ * THE SHIP FLOOR, DERIVED — not hand-typed (PO ruling, band-supply-and-floor task, 2026-09-01).
+ *
+ * `poGoldCorpus.ts:100-103` states its own instruction verbatim: "Any length pressure must be
+ * derived from these [lenMin/lenMax], never from the literal '70-75'." `shipFloor` used to be
+ * `CONTENT_CONTRACT.title.shipFloor` — 65, hand-typed, no different in kind from the "70" the corpus
+ * comment names as the thing to stop doing. This derives it instead from `measureGoldShape`'s
+ * `lenMin` over the seller's own seed golds — the shortest title the seller has ever actually
+ * shipped/locked — clamped so a corpus edit can never push it below the absolute floor (50,
+ * `validateTitle`'s under-length trigger) or above the quality target (`TITLE_BAND_LO`, 70): a floor
+ * ABOVE the target it's a floor FOR would be incoherent.
+ *
+ * A title under this reads as broken/truncated to a shopper — CORRECTNESS, not quality (`TITLE_BAND_LO`
+ * misses only the latter). Every ship point in `settleTruthBand`/`enforceTitleTruthBand` below is
+ * judged against this, not a re-derived literal (the prior attempt's constant,
+ * `TITLE_TRUTHFUL_SHIP_FLOOR = 65`, was correctly VALUED but sat on a code path the shipped title
+ * never took — four other `done(...)`/return sites shipped un-floored regardless of it. This
+ * constant has no power on its own; what matters is that every exit below actually consults it).
+ *
+ * LAZY AND MEMOIZED, DELIBERATELY NOT A TOP-LEVEL `const`. `titleBand.ts` sits inside an existing
+ * import cycle (this file → poGoldCorpus.ts → titleLearningMiner.ts → back to THIS file for
+ * `verdictForAssembledTitle`) that already works today only because every cyclic access happens
+ * inside a function body, never during a module's own top-level evaluation — `SEED_GOLD_TITLES` is a
+ * plain `const` in poGoldCorpus.ts, not a hoisted function declaration, so a top-level
+ * `measureGoldShape(SEED_GOLD_TITLES)` call HERE would race that cycle: it reads correctly when this
+ * file is the one that starts the cycle, and reads `undefined` (TDZ) when poGoldCorpus.ts or
+ * titleLearningMiner.ts is the entry point instead — a bug that would only ever surface depending on
+ * which module a caller happens to import first. Deferring the call into a function invoked at real
+ * runtime (long after every module has finished loading) makes the result independent of import
+ * order. `deriveTitleShipFloor` is exported separately, taking the shape as a parameter, so a test
+ * can prove this constant equals a fresh, independently-computed `measureGoldShape` call.
  */
-export const TITLE_SHIP_FLOOR = CONTENT_CONTRACT.title.shipFloor // 65
+export function deriveTitleShipFloor(shape: Pick<GoldShape, 'lenMin'>): number {
+  return Math.min(TITLE_BAND_LO, Math.max(CONTENT_CONTRACT.title.floor, shape.lenMin))
+}
+let _shipFloorCache: number | null = null
+export function TITLE_SHIP_FLOOR(): number {
+  if (_shipFloorCache === null) _shipFloorCache = deriveTitleShipFloor(measureGoldShape(SEED_GOLD_TITLES))
+  return _shipFloorCache
+}
+
+/**
+ * THE GATE ITSELF — a title this short misses CORRECTNESS, not merely quality. Named and exported
+ * (replacing an anonymous local arrow that only ever fed a string template) so the floor is a
+ * predicate a caller or a test can call directly, not a comparison buried inside `settleTruthBand`'s
+ * reason-string interpolation. Every `done(...)` call site below wires its result onto
+ * `TruthBandResult.underFloor` — see that field's own doc for what "a gate" means here and what it
+ * deliberately does NOT do (it never manufactures an empty title or prefers an untrue prior; see the
+ * CRITICAL SAFETY note on the refusal branch a few lines down).
+ */
+export function titleUnderShipFloor(len: number): boolean {
+  return len < TITLE_SHIP_FLOOR()
+}
 
 /**
  * TITLE_RULING_OVER_FLOOR — off | on. Default off ⇒ byte-identical to today.
@@ -134,8 +183,20 @@ export interface TitleBandCtx {
   apparel: boolean
   /** BLANK_SPECS.brand, canonically cased (e.g. "Comfort Colors"). */
   garmentBrand?: string | null
-  /** BLANK_SPECS attributes. Only pass what the blank actually is. */
-  spec?: { fit?: string | null; sleeve?: string | null; neck?: string | null } | null
+  /** BLANK_SPECS attributes. Only pass what the blank actually is.
+   *  `material` (PO RULING 2026-09-01, band-supply-and-floor task): fabric/material words are
+   *  ADMISSIBLE title vocabulary — unlike `fit` ("Classic Fit") and "Unisex", which stay banned via
+   *  `isTitleWasteVocabulary` regardless of this ctx. Corpus support: "Cotton Twill" is attested in
+   *  PO gold #3 (poGoldCorpus.ts). Passed VERBATIM, exactly like `sleeve`/`neck` already are — no
+   *  extraction/parsing step, so this stays a data-supply change, not a new net. Safe against
+   *  `dropSpecOnlyTail`'s spec-only-tail dock: a material's own fabric noun ("cotton", "polyester")
+   *  is not in `SPEC_ALWAYS_WORDS` or matched by any `SPEC_CLAIM_RES` collocation in poGoldCorpus.ts,
+   *  so it always survives as non-spec residue in `classifyTail` — see titleBand.test.ts's dedicated
+   *  coverage. `dye` was evaluated and deliberately excluded: "Garment-Dyed" IS itself a
+   *  `SPEC_CLAIM_RES` match, so a dye+neck/sleeve pair (e.g. "Garment-Dyed Crewneck") can leave ZERO
+   *  non-spec residue and trip the specOnly dock — the one real hazard the brief's own "watch (i)"
+   *  flagged, and it materializes for dye but not for material. */
+  spec?: { fit?: string | null; sleeve?: string | null; neck?: string | null; material?: string | null } | null
   /** A garment surface form DISTINCT from the one already in the title (title says "Shirt" ⇒ "Tee").
    *  Amazon's golden format keeps both tokens; the caller derives this from `garmentFor`. */
   garmentSecond?: string | null
@@ -276,6 +337,28 @@ export function pickDistinctGarmentForm(title: string, aliases: readonly string[
   return pick ? pick.replace(/(^|[\s-])(\w)/g, (_m, sep: string, c: string) => sep + c.toUpperCase()) : null
 }
 
+/**
+ * TITLE-SAFE MATERIAL (OPTION B, band-supply-and-floor task). `blank_specs.material` is written for
+ * PROSE consumption ("50% Cotton / 50% Polyester" reads naturally in a description sentence) and was
+ * never meant to appear verbatim in a 75-char title — the percentage and slash are prose formatting,
+ * not part of the fact. Strips them; keeps every fabric WORD the blank states, in the blank's own
+ * casing, so the remaining phrase is still exactly what the spec claims — nothing added, nothing
+ * dropped except punctuation. "100% Ring-Spun Cotton" -> "Ring-Spun Cotton" (unchanged fabric noun,
+ * only the "100% " prose lead-in removed); "50% Cotton / 50% Polyester" -> "Cotton Polyester". A
+ * material already free of digits/slashes (every non-blend row in the catalog today) round-trips
+ * byte-identical. Delegated to this tested leaf rather than inlined at the listingPipeline.ts call
+ * site — same reasoning `pickDistinctGarmentForm`'s own doc gives: an inline regex in a 9,400-line
+ * file is unreviewable and has shipped invisible escaping bugs before. Pure. Null/empty in, null out.
+ */
+export function titleSafeMaterial(raw: string | null | undefined): string | null {
+  const cleaned = (raw ?? '')
+    .replace(/\d+%\s*/g, '')      // "50% " / "100% " prose lead-ins
+    .replace(/\s*\/\s*/g, ' ')    // blend separator -> a plain space
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  return cleaned || null
+}
+
 /** Ordered candidates, strongest product signal first. The garment BRAND leads because it is the
  *  highest-intent fact a shopper filters on ("comfort colors tshirt" is this listing's rank-1
  *  keyword and a genuine attribute of the blank). */
@@ -336,6 +419,14 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   push(ctx.spec?.fit)
   push(ctx.spec?.sleeve)
   push(ctx.spec?.neck)
+  // MATERIAL (OPTION B, band-supply-and-floor task, PO ruling 2026-09-01) — the same BLANK_SPECS
+  // attribute the description/bullets already assert for this listing (listingPipeline.ts's
+  // `blankFacts`), now also offered to the title. Pushed here (before `attributeCount` is captured)
+  // so it flows through the SAME GENERIC PAIRS loop below as fit/sleeve/neck already do — no new
+  // pairing logic, it just widens the existing attribute bank. This is what closes the starvation gap
+  // on a `brand_in_copy=false` Gildan family whose `fit` is banned waste vocabulary: material was the
+  // one BLANK_SPECS fact never offered, on a blank that HAS one.
+  push(ctx.spec?.material)
   const attributeCount = out.length          // everything above is a product ATTRIBUTE, not a noun
   push(ctx.garmentSecond)
   /* THE FAMILY'S OWN GARMENT VOCABULARY (2026-08-21) — the resolved blanks' surface forms, e.g.
@@ -1383,10 +1474,11 @@ export type TruthBandDecision =
   /** THE FLOOR (title-floor-baseline task, PO ruling "65-75 is shippable, 70 is the target"). Every
    *  one of `not-produced`/`refused-kept-prior`/`unreachable-no-prior`/`shipped-truthful-under-band`
    *  could previously ship ANY length down to empty — there was no hard minimum at all. This decision
-   *  fires whenever the terminal net is about to ship fewer than `TITLE_SHIP_FLOOR` (65) characters.
+   *  fires whenever the terminal net is about to ship fewer than `TITLE_SHIP_FLOOR()` characters
+   *  (derived from the gold corpus, not a hand literal — see that function's doc).
    *  It STILL SHIPS the honest material (truth outranks length — the standing PO ruling: "an in-band
    *  LIE must never outrank a truthful SHORT title" already grants the truthful alternative may be
-   *  short; a floor rejects everything below 65, it does not get to rank two truthful options against
+   *  short; a floor rejects everything below the ship floor, it does not get to rank two truthful options against
    *  each other by re-preferring an untrue prior). What changes is VISIBILITY: this is a distinct,
    *  greppable signal that a genuinely sub-floor title shipped, separate from the ordinary 65-69
    *  `shipped-truthful-under-band` case — a hold always fires alongside it so the operator sees it. */
@@ -1404,6 +1496,12 @@ export interface TruthBandResult {
   /** TRUE when the operator must see this — the caller raises the hold and logs
    *  TITLE_BAND_UNREACHABLE. Never true on a healthy exit. */
   hold: boolean
+  /** THE GATE, AS A TYPED FACT — not a string a caller has to parse or a decision value a caller has
+   *  to memorize (`decision === 'shipped-truthful-below-floor'`). `true` iff the returned `title`
+   *  itself is under `TITLE_SHIP_FLOOR()` — always `false` on a healthy 70-75 exit, since the floor
+   *  sits strictly below the band. Wired at every `done(...)` call site (below), so a caller or a
+   *  test can act on this directly instead of re-deriving it from `len`. */
+  underFloor: boolean
 }
 
 /**
@@ -1438,7 +1536,7 @@ export function settleTruthBand(args: {
   const produced = (args.produced || '').replace(/\s{2,}/g, ' ').trim()
   const prior = (args.prior || '').replace(/\s{2,}/g, ' ').trim()
   const done = (title: string, decision: TruthBandDecision, reason: string, tried: string[] = [], hold = false): TruthBandResult =>
-    ({ title, decision, len: title.length, tried, reason, hold })
+    ({ title, decision, len: title.length, tried, reason, hold, underFloor: titleUnderShipFloor(title.length) })
 
   // NEVER SHIP EMPTY (title-floor-baseline task, item 2). An empty `produced` used to ship verbatim —
   // and an empty title RATCHETS: it persists, becomes the NEXT run's `prior`, and the family can never
@@ -1576,7 +1674,7 @@ export function settleTruthBand(args: {
    * still outranks a known lie even below the floor, per the standing 2026-08-23 ruling two lines up —
    * only the DECISION LABEL changes, to a distinct, greppable signal the operator (and the ship census)
    * can act on. Nothing here ranks `best` against `prior`; each is judged only against the floor. */
-  const shipUnderFloor = (len: number): boolean => len < TITLE_SHIP_FLOOR
+  const shipUnderFloor = titleUnderShipFloor
   if (prior && prior.length <= TITLE_BAND_HI) {
     /* THE INVARIANT (PO ruling 2026-08-23): "a hold may keep the prior title ONLY IF the prior title
      * is TRUE." Truth is a correctness constraint; the 70-75 band is a quality target — an in-band
@@ -1591,7 +1689,7 @@ export function settleTruthBand(args: {
       // prior is not silently indistinguishable from a healthy 72-char one in the logs.
       return done(prior, 'refused-kept-prior',
         `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material — prior title kept, nothing shipped`
-        + (shipUnderFloor(prior.length) ? ` (note: the kept prior is itself only ${prior.length} chars — under the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
+        + (shipUnderFloor(prior.length) ? ` (note: the kept prior is itself only ${prior.length} chars — under the ${TITLE_SHIP_FLOOR()}-char ship floor)` : ''),
         tried, true)
     }
     // THE PRIOR FAILS TRUTH — it carries a sibling design's name, a forced gender on a unisex family,
@@ -1602,18 +1700,18 @@ export function settleTruthBand(args: {
     // hold. The hold still fires (`done(..., true)`) so the operator sees it.
     return done(best, shipUnderFloor(best.length) ? 'shipped-truthful-below-floor' : 'shipped-truthful-under-band',
       `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material, and the prior title fails truth (${priorVerdict.reason}) — shipping the truthful short title rather than keep a lie`
-      + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor — truth still outranks a known lie, but this family needs real product facts)` : ''),
+      + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR()}-char ship floor — truth still outranks a known lie, but this family needs real product facts)` : ''),
       tried, true)
   }
   if (prior) {
     return done(best, shipUnderFloor(best.length) ? 'shipped-truthful-below-floor' : 'unreachable-no-prior',
       `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and the prior title is ${prior.length} chars — over the ${TITLE_BAND_HI} cap, so it cannot be preserved`
-      + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
+      + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR()}-char ship floor)` : ''),
       tried, true)
   }
   return done(best, shipUnderFloor(best.length) ? 'shipped-truthful-below-floor' : 'unreachable-no-prior',
     `truthful title reached only ${best.length}/${TITLE_BAND_LO} from true material and there is no prior title to preserve`
-    + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
+    + (shipUnderFloor(best.length) ? ` (below the ${TITLE_SHIP_FLOOR()}-char ship floor)` : ''),
     tried, true)
 }
 
@@ -1785,12 +1883,12 @@ export function enforceTitleTruthBand(args: {
       // shipped the truthful netted material, floor-labelled the same way `settleTruthBand` labels it.
       const decision: TruthBandDecision = priorUsable
         ? 'refused-kept-prior'
-        : (keep.length < TITLE_SHIP_FLOOR ? 'shipped-truthful-below-floor' : 'shipped-truthful-under-band')
+        : (titleUnderShipFloor(keep.length) ? 'shipped-truthful-below-floor' : 'shipped-truthful-under-band')
       return {
         title: keep, decision, len: keep.length, tried: settled.tried,
         reason: `final whole-title verification failed (${verdict.reason}) on "${finalTitle}" — kept ${priorUsable ? 'the prior title' : 'the truthful net result'} rather than ship`
-          + (keep.length < TITLE_SHIP_FLOOR ? ` (below the ${TITLE_SHIP_FLOOR}-char ship floor)` : ''),
-        hold: true, netted,
+          + (titleUnderShipFloor(keep.length) ? ` (below the ${TITLE_SHIP_FLOOR()}-char ship floor)` : ''),
+        hold: true, netted, underFloor: titleUnderShipFloor(keep.length),
       }
     }
   }
