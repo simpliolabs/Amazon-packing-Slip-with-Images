@@ -83,7 +83,7 @@ import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
 import { nearestGolds, targetFromDesign } from '@/lib/fba/titleReferee'
-import { audienceSpans, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, settleTitle, stripInclusiveAudience, titleCasePhrase, type MoneyTailCtx, type TitleBandCtx } from '@/lib/fba/titleBand'
+import { audienceSpans, hasInclusiveAudience, isTitleWasteVocabulary, pickDistinctGarmentForm, settleTitle, stripInclusiveAudience, titleCasePhrase, titleSafeMaterial, type MoneyTailCtx, type TitleBandCtx } from '@/lib/fba/titleBand'
 import { shipCensus } from '@/lib/fba/shipCensus'
 // Per-design vision scans (Commit 2): one scan per design group via the existing vision helpers.
 import { scanDesignGroupIdentity, identityPhrases } from '@/lib/fba/designGroupIdentity'
@@ -9460,7 +9460,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
     factSegments: scope?.facts ?? bandFactSegments,
     poolSegments: scope?.pool ?? bandPoolSegments,
     truthOk: scope?.truthOk ?? bandTruthOk,
-    spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck } : null,
+    // `material` (OPTION B, band-supply-and-floor task, PO ruling 2026-09-01): the same BLANK_SPECS
+    // fact `blankFacts` below already asserts in the description/bullets for this same listing, now
+    // also offered to the title pad — through `titleSafeMaterial`, which strips prose-only percentage/
+    // slash formatting ("50% Cotton / 50% Polyester" -> "Cotton Polyester") but adds and judges
+    // nothing; every remaining word is still exactly what the blank states. `fit` and "Unisex" stay
+    // banned regardless (titleBand.ts's `isTitleWasteVocabulary`); this only widens the FACT SUPPLY,
+    // it does not touch what the door is allowed to keep.
+    spec: blankSpec ? { fit: blankSpec.fit ? `${blankSpec.fit} Fit` : null, sleeve: blankSpec.sleeve, neck: blankSpec.neck, material: titleSafeMaterial(blankSpec.material) } : null,
     // Delegated to the TESTED leaf. This was six inline lines here and shipped two invisible escaping
     // bugs: a word-boundary escape one backslash short inside a template literal (it compiled to the
     // BACKSPACE control character, so the match ALWAYS failed), plus a literal backspace byte in a

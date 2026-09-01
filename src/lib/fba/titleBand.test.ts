@@ -605,7 +605,7 @@ describe('settleTruthBand — THE FLOOR (title-floor-baseline task, PO ruling "6
     expect(r.title).not.toBe(prior)                 // never the lying prior
     expect(r.title.toLowerCase()).not.toContain('billionare')
     expect(r.len).toBe(42)
-    expect(r.len).toBeLessThan(TITLE_SHIP_FLOOR)
+    expect(r.len).toBeLessThan(TITLE_SHIP_FLOOR())
     expect(r.decision).toBe('shipped-truthful-below-floor')
     expect(r.hold).toBe(true)                        // the operator must see this
   })
@@ -614,14 +614,16 @@ describe('settleTruthBand — THE FLOOR (title-floor-baseline task, PO ruling "6
     const foreignTokens = new Set(['billionare', 'coming', 'soon'])
     const reject = (seg: string): boolean => isForeignToDesign(seg, foreignTokens)
     const prior = 'THE CEO Mother Hustler Sweatshirt Billionare Coming Soon Crewneck'
-    // 66 chars — true, in-cap, but below the 70 golden band and ABOVE the 65 floor.
-    const produced = 'THE CEO Mother Hustler Sweatshirt Crewneck Pullover Cozy Warm Gift'
-    expect(produced.length).toBe(66)
-    expect(produced.length).toBeGreaterThanOrEqual(TITLE_SHIP_FLOOR)
+    // 68 chars — true, in-cap, below the 70 golden band and exactly AT the derived floor (the corpus's
+    // own lenMin — see TITLE_SHIP_FLOOR's doc; NOT the old hand-typed 65, which this length would also
+    // have cleared, but the point of this fixture is to sit AT the real, derived boundary).
+    const produced = 'THE CEO Mother Hustler Sweatshirt Crewneck Pullover Cozy Toasty Gift'
+    expect(produced.length).toBe(68)
+    expect(produced.length).toBeGreaterThanOrEqual(TITLE_SHIP_FLOOR())
     expect(produced.length).toBeLessThan(TITLE_BAND_LO)
     const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
     const r = settleTruthBand({ produced, prior, apparel: true, band, truth: MIXED_SWEAT_HOODIE_UNISEX, foreignTokens, reject })
-    expect(r.len).toBeGreaterThanOrEqual(TITLE_SHIP_FLOOR)
+    expect(r.len).toBeGreaterThanOrEqual(TITLE_SHIP_FLOOR())
     expect(r.len).toBeLessThan(TITLE_BAND_LO)
     expect(r.decision).toBe('shipped-truthful-under-band')
     expect(r.hold).toBe(true)
@@ -630,7 +632,7 @@ describe('settleTruthBand — THE FLOOR (title-floor-baseline task, PO ruling "6
   it('a TRUE prior below the floor still ships (nothing better to rank it against) but the reason names the floor', () => {
     // The prior itself is true and short — e.g. a pre-band-standard legacy title.
     const shortTruePrior = 'THE CEO Mother Hustler Sweatshirt'
-    expect(shortTruePrior.length).toBeLessThan(TITLE_SHIP_FLOOR)
+    expect(shortTruePrior.length).toBeLessThan(TITLE_SHIP_FLOOR())
     const band: TitleBandCtx = { apparel: true, factSegments: [], poolSegments: [], truthOk: () => true }
     const r = settleTruthBand({ produced: 'THE CEO Mother Hustler', prior: shortTruePrior, apparel: true, band, truth: MIXED_SWEAT_HOODIE_UNISEX })
     expect(r.title).toBe(shortTruePrior)
