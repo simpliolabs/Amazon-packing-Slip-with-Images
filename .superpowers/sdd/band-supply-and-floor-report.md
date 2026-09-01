@@ -2,9 +2,9 @@
 
 ## Status
 
-Code complete, full suite green, `tsc --noEmit` clean. Committed on
-`feat/title-fabric-vocab-and-real-floor`, pushed, PR opened. See PR URL / CI result below (filled in
-after push).
+Code complete, full suite green, `tsc --noEmit` clean. Committed (`e664c85`) on
+`feat/title-fabric-vocab-and-real-floor`, pushed, PR #658 opened, CI `build` check **passed** (1m48s).
+Not merged — that's the PO's call.
 
 ## What shipped
 
@@ -162,6 +162,6 @@ different field-to-line mapping than listed).
 
 ## PR / CI
 
-- Commit SHA(s): _filled in after commit_
-- PR URL: _filled in after push_
-- `gh pr checks`: _filled in after CI completes_
+- Commit SHA: `e664c85083aa22692cf4977c7d68f27963da4302`
+- PR URL: https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/pull/658
+- `gh pr checks 658`: `build  pass  1m48s` — https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33533699490/job/99942734182
