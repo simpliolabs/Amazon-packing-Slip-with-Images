@@ -160,6 +160,38 @@ describe('AFTER (PR-C, live): the corpus outranks every hand-written rule', () =
     expect(scoreC(SEED_GOLD_TITLES[6])).toBe(100)
   })
 
+  it('QUANTIFIED (coordinator ask, PR #663 review, 2026-09-02): the audience-pair dock is real (-15), and the PO gold STILL outscores the machine title it replaced despite carrying it', () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    const GOLD = "THE CEO Don't Quit Tee Shirt | Motivational T-shirt for Kids & Children"
+    // The B0DP5H8QBT machine-produced title this gold replaced — the reported live defect, scored
+    // RAW (titleQualityJudge does not itself run scrubUnspecdGarmentClaims; that is a SEPARATE
+    // terminal-net stage — this measures the raw candidate's own quality, same as every other score
+    // in this file).
+    const MACHINE_TITLE_REPLACED = "THE CEO Don't Quit Motivational T-Shirt | Kids Oversized Tshirts Crew Neck"
+
+    const goldResult = titleQualityJudge(GOLD, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
+    const machineResult = titleQualityJudge(MACHINE_TITLE_REPLACED, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
+
+    // THE DOCK IS REAL: exactly one problem, the audience-pair analyzer gap (goldCorpusSelfTest's
+    // "EVERY seller gold passes through the analyzer byte-identical" test documents WHY it fires).
+    expect(goldResult.problems).toEqual(['"for Men and Women" — 0 of 10 seller golds carry it (-15)'])
+    expect(goldResult.score).toBe(86)
+
+    // THE ANSWER: despite carrying that -15 dock, the PO's gold (86) still outscores the machine
+    // title it replaced (76) — the machine title carries the SAME audience-pair dock PLUS an
+    // unattested-vocabulary dock ("crew neck" is not corpus-attested prose vocabulary). Reported for
+    // the PO ruling on the analyzer gap; NOT a claim that the dock should stay — only that it does
+    // not invert the comparison this gold exists to make.
+    expect(machineResult.score).toBe(76)
+    expect(goldResult.score).toBeGreaterThan(machineResult.score)
+
+    // Without the analyzer gap, the margin would be 24 points (100 vs 76), not 10 — the gap costs
+    // the gold real ground, even though it does not lose the comparison outright.
+    const scoreWithoutGapHypothetically = 100
+    expect(scoreWithoutGapHypothetically - machineResult.score).toBe(24)
+    expect(goldResult.score - machineResult.score).toBe(10)
+  })
+
   it('every attack and reject scores STRICTLY below every cap-compliant gold', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
     const worstCompliantGold = Math.min(...SEED_GOLD_TITLES.filter((g) => g.length <= 75).map(scoreC))

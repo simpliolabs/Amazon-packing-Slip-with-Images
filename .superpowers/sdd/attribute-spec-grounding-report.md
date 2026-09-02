@@ -111,21 +111,53 @@ highlights — the brief's own defect-class wording scopes this to the TITLE), a
 `listingPipeline.ts`'s separate `STYLE_CUT_WORDS` (a different, backend-keyword-admission gate with
 a different purpose — left alone to avoid an eighth rulebook).
 
+## UPDATE (2026-09-02, post-review) — end-to-end proof, not assumption
+The coordinator correctly blocked merge on this PR's first report: it proved the subtractive half
+(74→64 chars) only at the isolated net level and *asserted* — did not measure — that the downstream
+facts-pad/money-tail machinery would refill it, which is exactly the #630/#631 revert shape ("a
+subtractive net whose additive counterpart was assumed rather than proven"). That gap is now closed:
+`src/lib/fba/attributeSpecGroundingE2E.integration.test.ts` drives the REAL `runListingPipeline()`
+(same harness as `garmentAgeProducer.integration.test.ts` — stubbed OpenAI client, stubbed blank
+catalog, Supabase env nulled/restored) on a B0DP5H8QBT-shaped fixture and asserts on
+`result.recommended_title` — the actual `PipelineResult` field a single-design apparel family
+persists (`per_child_titles` is for capacity/size-spec variation families only, per that field's own
+doc comment in `listingPipeline.ts`; it does not apply to a same-design youth-tee family).
+
+**Real, measured, reproducible (4 consecutive runs, byte-identical) end-to-end result:**
+```
+IN:  THE CEO Don't Quit Motivational T-Shirt | Kids Oversized Tshirts Crew Neck   (74 chars)
+OUT: THE CEO Don't Quit Motivational T-Shirt | Kids Short Sleeve Crew Neck Tee    (73 chars)
+```
+**73 chars — inside the 70-75 golden band, 5 above the 68 floor, not merely at it.** `SHIP_SPEC_TRUTH`
+fires (`removed:["Oversized"], 74→64`, asserted as the decision tag, not string-absence), then the
+EXISTING, unmodified `TITLE_TRUTH_BAND` "refilled" stage pulls it back from 39 (after a money-tail
+attempt was tried and correctly refused as spec-only) to 73, using the blank's own TRUE facts —
+"Short Sleeve" and "Crew Neck" both appear in the shipped bytes, verbatim from `makeKidsBlankRow()`'s
+seeded spec, never invented.
+
+**A second, more important finding from driving this end-to-end**: doing so revealed that
+`scrubUnspecdGarmentClaims`'s pre-#663 `FIT_CLAIM_RE` *already* matched bare "oversized" — so the
+above case, run against the pre-fix `titleBand.ts`, produces the byte-identical 73-char result (I
+verified this directly, temporarily swapping in the pre-fix file and re-running). **The "oversized"
+case alone does not prove this PR's diff is load-bearing.** So the test file also runs a second case
+with **"fitted"** — one of the five words PR #663 actually added — same fixture, same blank:
+```
+IN:  THE CEO Don't Quit Motivational T-Shirt | Kids Fitted Tshirts Crew Neck      (71 chars)
+OUT: THE CEO Don't Quit Motivational T-Shirt | Kids Short Sleeve Crew Neck Tee    (73 chars)
+```
+Verified RED against the pre-fix `titleBand.ts` (the `specTruth` capture is `null` — the net never
+fires — and the word ships byte-for-byte at 71 chars, confirmed by re-running the actual test file
+against the pre-fix source) and GREEN against the fix (73 chars, identical clean result). This is the
+case that actually pins the diff end-to-end, not just at the unit level.
+
 ## Character counts — before/after, both families
-**B0DP5H8QBT (the live defect, isolated at the net that owns it):**
+**B0DP5H8QBT (end-to-end, `result.recommended_title`, not the net's intermediate output):**
 ```
 BEFORE: THE CEO Don't Quit Motivational T-Shirt | Kids Oversized Tshirts Crew Neck   (74 chars)
-AFTER:  THE CEO Don't Quit Motivational T-Shirt | Kids Tshirts Crew Neck             (64 chars)
+AFTER:  THE CEO Don't Quit Motivational T-Shirt | Kids Short Sleeve Crew Neck Tee    (73 chars)
 ```
-`removed: ["Oversized"]` (the decision tag, asserted in the test — not merely the word's absence).
-"Crew Neck" survives untouched. This is `scrubUnspecdGarmentClaims`'s own output, unit-tested
-directly (`titleBand.test.ts`, "THE LIVE CASE"). I did not attempt to simulate the full
-`settleTitle`/money-tail/facts-pad pipeline end-to-end in this sandbox (no DB, no live keyword pool)
-— a synthetic minimal ctx produced a misleading result during my own investigation (the
-money-position gate dropped the whole pipe-right tail because my stub's `specFactTokens` was empty,
-an artifact of the stub, not of my change), which is exactly the kind of misleading fixture the brief
-warns against, so I did not include it. The refill from 64→70-75 chars is the job of the EXISTING,
-unmodified facts-pad/money-tail stages in `settleTitle`, downstream of this net.
+73 is inside the golden 70-75 band. "Crew Neck" AND "Short Sleeve" — both true, spec-backed
+attributes — survive in the shipped bytes; "oversized" does not.
 
 **B0DSCDZC6K (the length-work family, "must remain 70-75"):**
 ```
@@ -195,6 +227,20 @@ brief's explicit instruction — three tests (`goldCorpusSelfTest.test.ts` ×2,
 silently patching the analyzer or silently leaving the suite red. **Flagged for a PO ruling**: should
 `'kids'`/`'children'` join the audience-span analyzer's attested vocabulary?
 
+**QUANTIFIED (coordinator's follow-up ask, 2026-09-02):** the dock is real — `goldResult.problems`
+is exactly `['"for Men and Women" — 0 of 10 seller golds carry it (-15)']`, one problem, -15,
+confirmed by a new permanent test (`goldCorpusSelfTest.test.ts`, "QUANTIFIED"). **The PO's gold does
+NOT score lower than the machine title it replaced.** Scored under the identical judge:
+| title | score | problems |
+|---|---|---|
+| PO gold ("...for Kids & Children") | **86** | 1: the audience-pair dock (-15) |
+| machine title it replaced ("...Kids Oversized Tshirts Crew Neck") | **76** | 2: the SAME audience-pair dock (-15) + unattested-vocabulary "crew neck" (-10) |
+
+The gold outscores the machine title by **10 points (86 vs 76)** even while carrying the analyzer
+gap — the machine title carries the identical false-positive dock PLUS a second, unrelated one.
+Without the gap the margin would be 24 points (100 vs 76); with it, 10. The gap costs the gold real
+ground but does not invert the comparison it exists to make.
+
 ## Tests
 `src/lib/fba/titleBand.test.ts`, new `describe('ATTRIBUTE CLAIMS ARE SPEC-GROUNDED...')` block, 9
 new `it`s:
@@ -220,13 +266,33 @@ re-ran `titleBand.test.ts` against the OLD implementation, and confirmed 7 of th
 (the other 2 error identically via the same missing-export path) — then restored the fix. Every
 test asserts on `.length`.
 
+`src/lib/fba/attributeSpecGroundingE2E.integration.test.ts` (NEW, added post-review), 2 `it`s, driving
+the REAL `runListingPipeline()` end-to-end (see the UPDATE section above for the full trace):
+- **THE LIVE SPECIMEN** ("oversized"): asserts the `SHIP_SPEC_TRUTH` decision tag, then
+  `result.recommended_title.length >= TITLE_SHIP_FLOOR()` (68) AND within `[TITLE_BAND_LO,
+  TITLE_BAND_HI]` (70-75), contains "Crew Neck", excludes "oversized", and pins the exact 73-char
+  reproducible result.
+- **THE NEW-VOCABULARY CASE** ("fitted"): identical shape, proving PR #663's actual diff (not the
+  pre-existing "oversized" handling) is load-bearing end-to-end. Verified RED against the pre-fix
+  `titleBand.ts` (net never fires, word ships untouched at 71 chars) and GREEN against the fix.
+
+`src/lib/fba/goldCorpusSelfTest.test.ts`, 1 new `it` ("QUANTIFIED..."): pins the audience-pair dock's
+exact problem string and score (86, one -15 problem) against the machine title it replaced (76, two
+problems), and asserts the gold's score is strictly greater — the coordinator's "does the gold score
+lower" question, answered with a number, not a claim.
+
 ## Verification
 - Baseline (`main`, before any change, this worktree): `npx vitest run --no-cache` — **98 test files,
   1877 passed, 4 expected fail (1881 total)**.
-- Final: `npx vitest run --no-cache` — **98 test files, 1886 passed, 4 expected fail (1890 total)**.
-  Net +9 (the new titleBand tests), zero regressions.
-- `npx tsc --noEmit -p .` — clean, both before writing tests and after (checked at each stage).
+- After the vocabulary/gold PR (pre-review): 98 test files, 1886 passed, 4 expected fail (1890
+  total).
+- **Final (post-review, with the end-to-end + quantify tests)**: `npx vitest run --no-cache` —
+  **99 test files, 1889 passed, 4 expected fail (1893 total)**. Net +12 over baseline, zero
+  regressions.
+- `npx tsc --noEmit -p .` — clean throughout, checked at every stage.
 - 11 test files referencing `B0DSCDZC6K` specifically (277 tests) — unchanged pass, before and after.
+- The end-to-end `recommended_title` result (73 chars, both cases) reproduced byte-identically
+  across 4 consecutive runs.
 
 ## Brief line numbers checked against the code
 - `058_blank_specs_style_codes.sql:87-89` (the 64000B `fit='Classic'` row) — **correct**, verified
