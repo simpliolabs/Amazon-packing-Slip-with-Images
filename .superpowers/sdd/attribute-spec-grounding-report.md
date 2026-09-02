@@ -6,8 +6,12 @@ exclusively in `C:\Users\Admin\AppData\Local\Temp\fba-wt-attrtruth` (branch
 `fix/attribute-claims-must-be-spec-grounded`); `/tmp/fba-portal` and sibling worktrees untouched.
 
 - PR: https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/pull/662
-- Commit: `d3dc00048ad85a6d7a1584340999daa88eb43c69`
-- CI: `build` check — SUCCESS (https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33669183964/job/100378253630)
+- Final commit: `4b35fa692971b2cf957606a70fe33f0f63a7f007` (fix commit: `d3dc00048ad85a6d7a1584340999daa88eb43c69`)
+- CI on final commit: `build` check — SUCCESS (https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33671163203/job/100384839914)
+- Post-review update (2026-09-02): coordinator blocked merge pending end-to-end proof of the
+  additive refill — see the "UPDATE" section below. Closed with a new integration test
+  (`attributeSpecGroundingE2E.integration.test.ts`) driving the real pipeline, plus a quantified
+  judge-dock test. Re-pushed, CI green again.
 
 ## PUSH BACK — read this before the diff
 The brief states "a spec-vs-search net exists for FABRIC vocabulary. It does not cover
