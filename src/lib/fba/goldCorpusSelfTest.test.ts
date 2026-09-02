@@ -23,7 +23,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { SEED_GOLD_TITLES, classifyTail, measureGoldShape, specClaimSpans, attestedUse } from './poGoldCorpus'
-import { collapseRepeatedWords, dropSpecOnlyTail, hasInclusiveAudience, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
+import { AUD_HARD, AUD_SOFT, classifyAudienceWord, collapseRepeatedWords, dropSpecOnlyTail, hasInclusiveAudience, stripInclusiveAudience, stripTitleWasteVocabulary } from './titleBand'
 import { buildApparelTitleBrief, titleQualityJudge } from './listingPipeline'
 
 const SHAPE = measureGoldShape(SEED_GOLD_TITLES)
@@ -141,16 +141,14 @@ describe('AFTER (PR-C, live): the corpus outranks every hand-written rule', () =
   it('no TASTE dock survives — every gold the derived ceiling admits scores a clean 100', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
     // Gold #4 is excluded here for the identity ceiling (a live defect, pinned in its own block
-    // below). The 2026-09-02 B0DP5H8QBT gold (PR #663) is excluded for a DIFFERENT, already-
-    // documented reason: it is docked -15 by the "for Men and Women" audience-pair rule
-    // (listingPipeline.ts ~:1837), which reuses `hasInclusiveAudience` — the SAME analyzer gap this
-    // file's "EVERY seller gold passes through the analyzer byte-identical" test documents (a
-    // conjunction-joined 'kids'/'children' trips the same shape as the pinned "Adults and Kids"
-    // attack). Reported for a PO ruling, not force-fixed here.
-    const KNOWN_GAP = "THE CEO Don't Quit Tee Shirt | Motivational T-shirt for Kids & Children"
+    // below). The 2026-09-02 B0DP5H8QBT gold (PR #663) used to be excluded too, docked -15 by the
+    // "for Men and Women" audience-pair rule reusing `hasInclusiveAudience` — RESOLVED by the PO
+    // ruling 2026-09-02 ("should 'for Kids & Children' be docked?" -> "no"): the analyzer is now
+    // axis+value (AUDIENCE_TERM_AXIS, titleBand.ts), so a same-axis same-value repeat like
+    // "Kids & Children" is a synonym, not reach-widening, and no longer docks. See "audience-span
+    // analyzer — the attack set" below for the full before/after.
     for (const g of SEED_GOLD_TITLES) {
       if (g === CEILING_VICTIM) continue
-      if (g === KNOWN_GAP) { expect(scoreC(g), g).toBe(86); continue }
       expect(scoreC(g), g).toBe(100)
     }
     // Gold #9 (69 chars, "funny"): scored 80 under the hand-typed rules. The corpus floor is 68 and
@@ -160,36 +158,33 @@ describe('AFTER (PR-C, live): the corpus outranks every hand-written rule', () =
     expect(scoreC(SEED_GOLD_TITLES[6])).toBe(100)
   })
 
-  it('QUANTIFIED (coordinator ask, PR #663 review, 2026-09-02): the audience-pair dock is real (-15), and the PO gold STILL outscores the machine title it replaced despite carrying it', () => {
+  it('RESOLVED (PO ruling 2026-09-02, "should for Kids & Children be docked?" -> "no"): the audience-pair dock no longer fires on a same-axis synonym, and the PO gold now scores a clean 100', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
     const GOLD = "THE CEO Don't Quit Tee Shirt | Motivational T-shirt for Kids & Children"
     // The B0DP5H8QBT machine-produced title this gold replaced — the reported live defect, scored
     // RAW (titleQualityJudge does not itself run scrubUnspecdGarmentClaims; that is a SEPARATE
     // terminal-net stage — this measures the raw candidate's own quality, same as every other score
-    // in this file).
+    // in this file). Its bare "Kids" is the SAME single-value, un-opposed audience term as the
+    // gold's — same fix, same cure, both call sites.
     const MACHINE_TITLE_REPLACED = "THE CEO Don't Quit Motivational T-Shirt | Kids Oversized Tshirts Crew Neck"
 
     const goldResult = titleQualityJudge(GOLD, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
     const machineResult = titleQualityJudge(MACHINE_TITLE_REPLACED, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
 
-    // THE DOCK IS REAL: exactly one problem, the audience-pair analyzer gap (goldCorpusSelfTest's
-    // "EVERY seller gold passes through the analyzer byte-identical" test documents WHY it fires).
-    expect(goldResult.problems).toEqual(['"for Men and Women" — 0 of 10 seller golds carry it (-15)'])
-    expect(goldResult.score).toBe(86)
+    // BEFORE THIS RULING (pinned in git history at 74ef17f): goldResult.score was 86, with exactly
+    // one problem — the audience-pair dock, `'"for Men and Women" — 0 of 10 seller golds carry it
+    // (-15)'`. That dock is GONE: "Kids" and "Children" are the same value on the age axis
+    // (AUDIENCE_TERM_AXIS, titleBand.ts), a synonym repeat, never reach-widening.
+    expect(goldResult.problems).toEqual([])
+    expect(goldResult.score).toBe(100)
 
-    // THE ANSWER: despite carrying that -15 dock, the PO's gold (86) still outscores the machine
-    // title it replaced (76) — the machine title carries the SAME audience-pair dock PLUS an
-    // unattested-vocabulary dock ("crew neck" is not corpus-attested prose vocabulary). Reported for
-    // the PO ruling on the analyzer gap; NOT a claim that the dock should stay — only that it does
-    // not invert the comparison this gold exists to make.
-    expect(machineResult.score).toBe(76)
+    // The machine title's bare "Kids" clears the SAME dock (it was single-value, un-opposed, exactly
+    // like the gold's — the class this PR closes, not a special case for the gold alone). What
+    // remains is the genuinely unrelated "crew neck" unattested-vocabulary dock — untouched by this
+    // fix, and the correct-and-still-live reason the machine title does not reach the gold's score.
+    expect(machineResult.problems).toEqual(['spec vocabulary the seller never uses: crew neck (-10)'])
+    expect(machineResult.score).toBe(91)
     expect(goldResult.score).toBeGreaterThan(machineResult.score)
-
-    // Without the analyzer gap, the margin would be 24 points (100 vs 76), not 10 — the gap costs
-    // the gold real ground, even though it does not lose the comparison outright.
-    const scoreWithoutGapHypothetically = 100
-    expect(scoreWithoutGapHypothetically - machineResult.score).toBe(24)
-    expect(goldResult.score - machineResult.score).toBe(10)
   })
 
   it('every attack and reject scores STRICTLY below every cap-compliant gold', () => {
@@ -355,24 +350,16 @@ describe('audience-span analyzer — the attack set', () => {
     expect(out, attack).not.toMatch(/\bfor\s+(the\s+)?(men|women|guys|girls|him|her|adults|kids|whole)\b.*\b(women|men|girls|her|kids|family)\b/i)
   })
 
-  it('EVERY seller gold passes through the analyzer byte-identical — including the dual-gender one', () => {
-    // NOTED GAP (PR #663, 2026-09-02) — reported, not force-fixed; out of THIS PR's scope (attribute
-    // spec-grounding, not the audience-span analyzer). The new B0DP5H8QBT gold's tail "for Kids &
-    // Children" trips the SAME mechanism this describe block's own attack set pins as intentional:
-    // "a non-gender axis (adults/kids)" ('THE CEO Soccer Cup Tee | Shirt for Adults and Kids') is a
-    // CONFIRMED EVASION this analyzer must catch, because 'kids' is not yet attested vocabulary and
-    // the phrase is conjunction-joined. The new gold hits reason (a) — unattested vocabulary — for
-    // the identical structural reason, even though "Kids & Children" names ONE audience twice
-    // (synonym repetition), not two DIFFERENT audiences the way "Adults and Kids" does. The analyzer
-    // cannot tell those apart from the regex shape alone. This is a real shape delta the gold
-    // demonstrates (see poGoldCorpus.ts's provenance comment) — flagged for a PO ruling on whether
-    // 'kids'/'children' should join AUD_ATTESTED, not silently patched here.
-    const KNOWN_GAP = "THE CEO Don't Quit Tee Shirt | Motivational T-shirt for Kids & Children"
+  it('EVERY seller gold passes through the analyzer byte-identical — including the dual-gender one AND the same-axis-synonym one', () => {
+    // RESOLVED (PO ruling 2026-09-02): the new B0DP5H8QBT gold's tail "for Kids & Children" USED TO
+    // trip the same mechanism as "a non-gender axis (adults/kids)" below, because the pre-ruling
+    // analyzer treated any audience term outside the tiny gender closure as inadmissible regardless
+    // of whether it had an OPPOSING partner. "Adults and Kids" is a genuine evasion (opposed values,
+    // age axis: adult vs kids) and must still fail this loop — "Kids & Children" is the SAME value
+    // (age:kids) named twice, a synonym, and must not. The axis+value analyzer
+    // (AUDIENCE_TERM_AXIS/classifyAudienceWord, titleBand.ts) tells these apart; the old regex-shape
+    // analyzer could not, which was exactly the bug.
     for (const g of SEED_GOLD_TITLES) {
-      if (g === KNOWN_GAP) {
-        expect(hasInclusiveAudience(g), g).toBe(true) // documents the gap; see comment above
-        continue
-      }
       expect(hasInclusiveAudience(g), g).toBe(false)
       expect(stripInclusiveAudience(g), g).toBe(g)
     }
@@ -388,6 +375,63 @@ describe('audience-span analyzer — the attack set', () => {
     expect(classifyTail('USA Mexico Canada Football Tee')).toBe('search')
     expect(classifyTail('Comfort Colors Alligator Tshirt for Women')).toBe('brand')
     expect(classifyTail('Funny Comfort Colors Shirt for Men Women')).toBe('brand')
+  })
+})
+
+/**
+ * PO RULING 2026-09-02 — axis+value, not a word-pair allowlist.
+ *
+ * "should 'for Kids & Children' be docked?" -> "no". The cure: every recognised audience term maps
+ * to an {axis, value} (AUDIENCE_TERM_AXIS, titleBand.ts). Dock a span only when it claims OPPOSED
+ * values on the SAME axis, or carries a single 'universal' term (self-opposing alone). Same axis +
+ * same value = synonym, admissible however many times repeated. SCOPE: the PO ruled on same-audience
+ * synonyms only — "for Men and Women" (opposed gender values) keeps its dock; that is untouched.
+ */
+describe('PO ruling 2026-09-02 — same-axis synonyms are admissible, opposed axis values still dock', () => {
+  it.each([
+    ['SAME axis, SAME value (age): "Kids & Children" — the PO\'s exact gold tail', 'THE CEO Foo Tee | Shirt for Kids & Children', false],
+    ['SAME axis, SAME value (age): "Youth and Kids"', 'THE CEO Foo Tee | Shirt for Youth and Kids', false],
+    ['SAME axis, SAME value (gender): "Guys & Dudes"', 'THE CEO Foo Tee | Shirt for Guys & Dudes', false],
+    ['a single un-paired term never opposes itself: bare "Kids"', 'THE CEO Foo Tee | Shirt for Kids', false],
+    ['OPPOSED values, age axis: "Adults and Kids" — the pinned attack, unchanged', 'THE CEO Foo Tee | Shirt for Adults and Kids', true],
+    ['OPPOSED values, gender axis: "Men and Women" — OUT OF SCOPE, the PO has not ruled on it, unchanged', 'THE CEO Foo Tee | Shirt for Men and Women', true],
+    ['a single UNIVERSAL term is self-opposing: bare "Unisex"', 'THE CEO Foo Tee | Shirt for Unisex Wear', true],
+  ])('%s', (_name, title, expected) => {
+    expect(hasInclusiveAudience(title), title).toBe(expected)
+  })
+
+  it('the PO\'s exact gold: the judge stops docking it (86 -> 100), and the machine title it replaced clears the SAME class (76 -> 91)', () => {
+    // Pins the RED->GREEN delta this ruling produces, not just the after-state — the "QUANTIFIED"
+    // test above already asserts the after-state in full; this one names the BEFORE numbers so a
+    // regression back to the old behaviour is caught even if someone only reads this test.
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    const GOLD = "THE CEO Don't Quit Tee Shirt | Motivational T-shirt for Kids & Children"
+    const before = 86
+    const r = titleQualityJudge(GOLD, { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
+    expect(r.score, 'the fix must be a net +14 over the pinned pre-ruling score').toBe(before + 14)
+  })
+
+  it('AXIS-DRIVEN, NOT LISTED: every word AUD_HARD/AUD_SOFT recognise as an audience term carries an axis mapping', () => {
+    // This is the enforcement a hand-typed pair allowlist could never carry: it iterates the REAL
+    // vocabulary sets `audienceSpans` tokenizes against, not a hand-copied list of words — so a
+    // future edit that adds a new audience term to AUD_HARD/AUD_SOFT without teaching
+    // AUDIENCE_TERM_AXIS its {axis, value} fails THIS test, loudly, before it can silently ship as
+    // "no conflict found" (an unmapped term is invisible to the opposed-value check and would pass
+    // review admissible by accident, not by ruling).
+    for (const w of [...AUD_HARD, ...AUD_SOFT]) {
+      const meaning = classifyAudienceWord(w)
+      expect(meaning, `"${w}" is recognised by AUD_HARD/AUD_SOFT but has no {axis,value} in AUDIENCE_TERM_AXIS`).not.toBeNull()
+      expect(['gender', 'age']).toContain(meaning!.axis)
+      expect(meaning!.value.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('PROVES THE BRANCH RAN: an axis conflict is reported on `problems` (a decision field), not inferred from the score alone', () => {
+    process.env.TITLE_SHAPE_JUDGE = 'on'
+    const opposed = titleQualityJudge('THE CEO Foo Tee | Shirt for Adults and Kids', { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
+    expect(opposed.problems.some((p) => p.includes('seller golds carry it'))).toBe(true)
+    const synonym = titleQualityJudge('THE CEO Foo Tee | Shirt for Kids & Children', { brandName: 'THE CEO', maxLeftWords: SHAPE.maxLeftWords, shape: SHAPE, apparel: true })
+    expect(synonym.problems.some((p) => p.includes('seller golds carry it'))).toBe(false)
   })
 })
 
