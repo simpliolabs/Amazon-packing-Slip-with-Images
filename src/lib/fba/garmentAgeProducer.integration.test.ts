@@ -82,6 +82,33 @@ function makeOpenAiStub() {
   } as unknown as PipelineInput['openai']
 }
 
+// THE LIVE CASE (B0DP5H8QBT, defect closed 2026-09-02): the mega-audit has ALREADY guessed an Age
+// Range Description row from the listing's own existing copy ("Big Kid", no value_source — exactly
+// what a real audit returns) in the SAME payload as the Department/Target Gender guesses. This is
+// what kitchenSink() alone never covered, which is why the original appendSpecFact bug shipped past
+// CI: every existing test's audit stub was silent on age, so the append's "skip if a row already
+// exists" guard never had a row to collide with.
+function kitchenSinkWithAgeGuess() {
+  const base = kitchenSink()
+  return {
+    ...base,
+    product_details_improvements: [
+      ...base.product_details_improvements,
+      { field_name: 'Age Range Description', current_value: null, recommended_value: 'Big Kid', reason: 'guessed from the listing\'s existing copy' },
+    ],
+  }
+}
+
+function makeOpenAiStubWithAgeGuess() {
+  return {
+    chat: {
+      completions: {
+        create: vi.fn(async () => ({ choices: [{ message: { content: JSON.stringify(kitchenSinkWithAgeGuess()) }, finish_reason: 'stop' }] })),
+      },
+    },
+  } as unknown as PipelineInput['openai']
+}
+
 function makeChildren(): PipelineChild[] {
   return [
     { sku: 'DINO64000B-M-BLK', asin: 'B0DINOMBLK1', color: 'Black', size: 'M' },
@@ -199,6 +226,43 @@ describe('garment age producer — real runListingPipeline, Product Detail block
     expect(ageRow?.value_source).toBe('spec')
     // The candidate came from the LIVE accepted enum this fixture declared, not a hardcoded literal.
     expect(AGE_RANGE_MENU_ATTR.accepted).toContain(ageRow?.recommended_value)
+  }, 30_000)
+
+  it('THE LIVE CASE (B0DP5H8QBT): a STATED blank-column age fact wins over an LLM guess that has ALREADY proposed a row for the same field in the SAME audit payload — the deterministic row ships, never the guess, even when the guess happens to look plausible', async () => {
+    mockedLoadBlankSpecRows.mockResolvedValueOnce([
+      { match: /\bshirt\b/i, spec: { brand: 'Gildan', brandInCopy: false, ageClass: 'kids' }, styleCode: '64000B', garmentFamily: 'kids_tee' },
+    ] as BlankSpecRow[])
+    // The mega-audit ALREADY guessed 'Big Kid' for Age Range Description — see kitchenSinkWithAgeGuess.
+    // This is the exact shape of the live defect: before the fix, appendSpecFact's "skip if a row
+    // already exists" guard treated that guess as reason to never even try the deterministic append.
+    const openai = makeOpenAiStubWithAgeGuess()
+    const logSpy = vi.spyOn(console, 'log')
+    const input: PipelineInput = { ...makeBaseInput(openai) }
+    const result = await runListingPipeline(input)
+    const aud = captureGarmentAudienceLog(logSpy)
+    logSpy.mockRestore()
+
+    // Prove the branch RAN (not just the output): the resolver's own decision.
+    expect(aud).not.toBeNull()
+    expect(aud!.source).toBe('blank-column')
+    expect(aud!.ageClass).toBe('kids')
+
+    const pdi = result.product_details_improvements
+    // Exactly ONE row ships for the field — the merge collapsed the guess and the deterministic
+    // row; it did not let both ride through to the seller-facing list.
+    const ageRows = pdi.filter((p) => /age\s*range/i.test(p.field_name))
+    expect(ageRows).toHaveLength(1)
+    const ageRow = ageRows[0]
+    // PROVE THE BRANCH RAN VIA PROVENANCE, not merely a value that happens to look right: 'Big Kid'
+    // (the LLM's own guess) reads as perfectly plausible too — value_source is the only signal that
+    // distinguishes a derivation from a guess that happened to agree. This is exactly the danger
+    // the brief calls out: on a family whose title once said "for Men & Women" the same guessing
+    // mechanism would have produced an ADULT age, and Amazon would have accepted it silently.
+    expect(ageRow.value_source).toBe('spec')
+    expect(ageRow.recommended_value).toBe('Kids')
+    expect(ageRow.recommended_value).not.toBe('Big Kid')
+    // Drawn from the LIVE accepted enum this fixture declared, not a hardcoded literal.
+    expect(AGE_RANGE_MENU_ATTR.accepted).toContain(ageRow.recommended_value)
   }, 30_000)
 
   it('GARMENT-FAMILY FALLBACK: a kids_tee family with NO stated age_class column still resolves kids — source garment-family, same Department/age-row effect', async () => {
