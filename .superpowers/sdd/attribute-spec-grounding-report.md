@@ -1,9 +1,13 @@
 # Attribute claims must be spec-grounded — report
 
 ## Status
-Fixed, tested, pushed. PR open (see below). No merge/deploy/Amazon push performed. Worked
+Fixed, tested, pushed, PR open, CI green. No merge/deploy/Amazon push performed. Worked
 exclusively in `C:\Users\Admin\AppData\Local\Temp\fba-wt-attrtruth` (branch
 `fix/attribute-claims-must-be-spec-grounded`); `/tmp/fba-portal` and sibling worktrees untouched.
+
+- PR: https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/pull/662
+- Commit: `d3dc00048ad85a6d7a1584340999daa88eb43c69`
+- CI: `build` check — SUCCESS (https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33669183964/job/100378253630)
 
 ## PUSH BACK — read this before the diff
 The brief states "a spec-vs-search net exists for FABRIC vocabulary. It does not cover
