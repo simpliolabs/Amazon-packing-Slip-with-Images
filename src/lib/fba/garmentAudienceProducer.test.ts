@@ -32,7 +32,7 @@ for (const key of SUPABASE_ENV_KEYS) { savedSupabaseEnv[key] = process.env[key];
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, it, expect, afterAll } from 'vitest'
+import { describe, it, expect, afterAll, vi } from 'vitest'
 import {
   resolveGarmentAudience, audienceOfGarmentFamily, youthMarkerFor, normalizeAudienceLean,
   type PhraseTruthCtx, type TruthGarmentFamily, type GarmentAudienceFacts,
@@ -132,6 +132,64 @@ describe('resolveGarmentAudience — Product Detail candidate shape', () => {
   it('ageRangeCandidate is a candidate to MATCH against the live enum, not a hardcoded write — callers gate it behind menuAttr.accepted (proven in the integration test)', () => {
     const r = resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'toddler' })
     expect(r.ageRangeCandidate).toBe('Toddler')
+  })
+})
+
+/*
+ * PO RULING 2026-09-02 — "kids -> Big Kid". `AGE_RANGE_LABEL.kids = 'Kids'` could NEVER validate
+ * against Amazon's real age_range_description enum for this product type (no bare "Kids" member),
+ * so the deterministic producer silently lost to whatever the LLM guessed. Cure: an ORDERED
+ * PREFERENCE per age class, resolved against the LIVE `ageRangeAccepted` at call time — first
+ * member present wins. End-to-end wiring (the live menu actually reaching this resolver) is proven
+ * in garmentAgeProducer.integration.test.ts; THIS block pins the pure resolver's own contract.
+ */
+describe('resolveGarmentAudience — ageRangeCandidate resolves against the LIVE accepted[] (PO ruling 2026-09-02)', () => {
+  it('the exact PO ruling: accepted=["Adult","Big Kid","Infant","Little Kid","Toddler"] + kids -> "Big Kid"', () => {
+    const r = resolveGarmentAudience({
+      garmentFamily: 'kids_tee', ageClass: 'kids',
+      ageRangeAccepted: ['Adult', 'Big Kid', 'Infant', 'Little Kid', 'Toddler'],
+    })
+    expect(r.ageRangeCandidate).toBe('Big Kid')
+  })
+
+  it('DERIVE, DON\'T REMEMBER: a completely different enum works with zero code change — ["Youth","Adult"] -> "Youth"', () => {
+    const r = resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'kids', ageRangeAccepted: ['Youth', 'Adult'] })
+    expect(r.ageRangeCandidate).toBe('Youth')
+  })
+
+  it('NO ACCEPTED LIST AVAILABLE: behaves exactly as before this ruling — the single fixed label, byte-identical', () => {
+    expect(resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'kids' }).ageRangeCandidate).toBe('Kids')
+    expect(resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'kids', ageRangeAccepted: null }).ageRangeCandidate).toBe('Kids')
+    expect(resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'kids', ageRangeAccepted: [] }).ageRangeCandidate).toBe('Kids')
+  })
+
+  it('NO MATCH: a real accepted list with nothing on the preference — NEVER invents a member, returns null, and logs loudly', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const r = resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'kids', ageRangeAccepted: ['Adult'] })
+    expect(r.ageRangeCandidate).toBeNull()
+    // PROVE THE BRANCH RAN via the decision fields on the log line, not merely the null return
+    // (which a totally unrelated bug could also produce).
+    const calls = warnSpy.mock.calls.map((c) => c[0]).filter((l): l is string => typeof l === 'string' && l.includes('AGE_RANGE_LABEL_NO_MATCH'))
+    warnSpy.mockRestore()
+    expect(calls).toHaveLength(1)
+    const parsed = JSON.parse(calls[0]) as { tag: string; ageClass: string; accepted: string[] }
+    expect(parsed.tag).toBe('AGE_RANGE_LABEL_NO_MATCH')
+    expect(parsed.ageClass).toBe('kids')
+    expect(parsed.accepted).toEqual(['Adult'])
+  })
+
+  it('case-insensitive, trimmed match — a differently-cased or whitespace-padded accepted member still resolves', () => {
+    const r = resolveGarmentAudience({ garmentFamily: 'kids_tee', ageClass: 'kids', ageRangeAccepted: [' big kid ', 'adult'] })
+    expect(r.ageRangeCandidate).toBe('Big Kid')
+  })
+
+  it('every AgeClass has an ordered preference that resolves against ITS OWN value when offered alone', () => {
+    // adult/toddler/infant/newborn each have a preference list too — not just kids, the one the PO
+    // ruled on by name.
+    expect(resolveGarmentAudience({ garmentFamily: 'tee', ageClass: 'adult', ageRangeAccepted: ['Adult'] }).ageRangeCandidate).toBe('Adult')
+    expect(resolveGarmentAudience({ garmentFamily: 'tee', ageClass: 'toddler', ageRangeAccepted: ['Toddler'] }).ageRangeCandidate).toBe('Toddler')
+    expect(resolveGarmentAudience({ garmentFamily: 'tee', ageClass: 'infant', ageRangeAccepted: ['Infant'] }).ageRangeCandidate).toBe('Infant')
+    expect(resolveGarmentAudience({ garmentFamily: 'tee', ageClass: 'newborn', ageRangeAccepted: ['Newborn'] }).ageRangeCandidate).toBe('Newborn')
   })
 })
 

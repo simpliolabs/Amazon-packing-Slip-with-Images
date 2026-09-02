@@ -2041,27 +2041,93 @@ const INCLUSIVE_JOIN = String.raw`(?:\s*(?:and|&|\+|,)\s*|\s+)`
  * redundancy with it; the answer is not to re-fork the predicate but to make it measure SPANS
  * instead of matching a pair.
  *
- * ADMISSIBILITY COMES FROM THE CORPUS, not a hand-typed allowlist. Across the nine golds the ONLY
- * attested audience vocabulary is the single-gender closure {men, mens, men's, women, womens,
- * women's, ladies}, and the only attested DUAL form is gold #7's juxtaposed, title-terminal
- * "for Men Women". Everything else is unattested and strips.
+ * ADMISSIBILITY IS AXIS+VALUE (revised 2026-09-02; see the AUDIENCE_TERM_AXIS block below for the
+ * full ruling). It is NOT "does the corpus literally contain this word" — that version is what
+ * docked the PO's own "Kids & Children" gold for naming one audience twice. A span is inadmissible
+ * only when it claims OPPOSED values on the SAME axis (or one 'universal' term claiming every
+ * value alone); the only attested DUAL-GENDER form is still gold #7's juxtaposed, title-terminal
+ * "for Men Women", preserved as its own shape exemption.
  *
  * PRONOUNS AND SOFT NOUNS ("him", "her", "girls", "boys", "family", "both") count ONLY inside a
  * `for …` run. That is what protects gold #4, "I Will Praise Him in Every Season Tee | Christian
  * Shirts for Women" — a devotional "Him" mid-title is not an audience claim.
  */
 const AUD_ATTESTED = new Set(['men', 'mens', "men's", "men’s", 'women', 'womens', "women's", "women’s", 'ladies'])
-const AUD_HARD = new Set([...AUD_ATTESTED, 'guys', 'gals', 'dudes', 'unisex', 'kids', 'youth', 'teens', 'adults'])
-const AUD_SOFT = new Set(['him', 'her', 'them', 'girls', 'boys', 'family', 'both', 'everyone', 'everybody', 'genders', 'ages', 'adult', 'teen', 'kid'])
+/** Exported ONLY so goldCorpusSelfTest.test.ts's exhaustiveness check can iterate the real,
+ *  table-driven vocabulary against `classifyAudienceWord` — never hand-typed twice. */
+export const AUD_HARD = new Set([...AUD_ATTESTED, 'guys', 'gals', 'dudes', 'unisex', 'kids', 'children', 'youth', 'teens', 'adults'])
+export const AUD_SOFT = new Set(['him', 'her', 'them', 'girls', 'boys', 'family', 'both', 'everyone', 'everybody', 'genders', 'ages', 'adult', 'teen', 'kid'])
 const AUD_JOIN = new Set(['and', '&', '+', 'or', ',', 'the', 'whole', 'all', 'any', 'every'])
 const audValue = (w: string): 'M' | 'F' | 'X' =>
   /^(men|mens|men['’]s|guys|dudes|boys|him|his)$/.test(w) ? 'M'
     : /^(women|womens|women['’]s|ladies|gals|girls|her)$/.test(w) ? 'F' : 'X'
 
+/*
+ * AXIS + VALUE — PO RULING 2026-09-02 ("should 'for Kids & Children' be docked?" -> "no").
+ *
+ * THE GAP THIS CLOSES. Rule (a) below used to reject any audience term outside the tiny
+ * gender-only `AUD_ATTESTED` closure as "unattested vocabulary" — so "Kids & Children" (the SAME
+ * age value, named twice — natural English) took the identical dock as "Men and Women" (two
+ * OPPOSED gender values — the seller's actual, ruled-on complaint, SELLER_PROFILE §4). One
+ * predicate was answering two different questions with one boolean.
+ *
+ * THE CURE IS STRUCTURAL, NOT A WORD-PAIR ALLOWLIST (a hand-typed list of admissible PAIRS was
+ * considered and rejected — the next synonym pair would escape it the same way "kids"/"children"
+ * escaped the old one). Every recognised audience term maps to an {axis, value}:
+ *   - two terms on the SAME axis with the SAME value are a synonym — admissible, however many
+ *     times repeated ("Kids & Children", "Guys & Dudes").
+ *   - two terms on the SAME axis with DIFFERENT values are opposed — reach-widening, dockable
+ *     ("Men and Women", "Adults and Kids").
+ *   - a term whose OWN value is 'universal' (unisex/family/everyone/both/ages — ONE word that by
+ *     itself claims every value on its axis) is self-opposing and dockable alone, no partner
+ *     required — the same character-waste the PO named, spent in one word instead of two.
+ *
+ * EXHAUSTIVE BY CONSTRUCTION, not by memory: `AUDIENCE_TERM_AXIS` must carry every member of
+ * AUD_HARD/AUD_SOFT. goldCorpusSelfTest.test.ts's "every recognised audience term carries an
+ * axis" test iterates both sets against this map at test time — table-driven, not enumerated by
+ * hand — so a future edit that adds a word to AUD_HARD/AUD_SOFT without adding it here fails
+ * loudly instead of silently falling through as "no conflict, ship it".
+ */
+export type AudienceAxis = 'gender' | 'age'
+export interface AudienceTermMeaning { axis: AudienceAxis; value: string }
+
+const AUDIENCE_TERM_AXIS: Readonly<Record<string, AudienceTermMeaning>> = {
+  // gender axis — specific values
+  men: { axis: 'gender', value: 'male' }, mens: { axis: 'gender', value: 'male' },
+  "men's": { axis: 'gender', value: 'male' }, "men’s": { axis: 'gender', value: 'male' },
+  guys: { axis: 'gender', value: 'male' }, dudes: { axis: 'gender', value: 'male' },
+  boys: { axis: 'gender', value: 'male' }, him: { axis: 'gender', value: 'male' },
+  women: { axis: 'gender', value: 'female' }, womens: { axis: 'gender', value: 'female' },
+  "women's": { axis: 'gender', value: 'female' }, "women’s": { axis: 'gender', value: 'female' },
+  ladies: { axis: 'gender', value: 'female' }, gals: { axis: 'gender', value: 'female' },
+  girls: { axis: 'gender', value: 'female' }, her: { axis: 'gender', value: 'female' },
+  // gender axis — universal: ONE word that itself claims every value on the axis
+  unisex: { axis: 'gender', value: 'universal' }, family: { axis: 'gender', value: 'universal' },
+  both: { axis: 'gender', value: 'universal' }, everyone: { axis: 'gender', value: 'universal' },
+  everybody: { axis: 'gender', value: 'universal' }, genders: { axis: 'gender', value: 'universal' },
+  them: { axis: 'gender', value: 'universal' },
+  // age axis — specific values
+  kids: { axis: 'age', value: 'kids' }, kid: { axis: 'age', value: 'kids' },
+  children: { axis: 'age', value: 'kids' }, youth: { axis: 'age', value: 'kids' },
+  teens: { axis: 'age', value: 'kids' }, teen: { axis: 'age', value: 'kids' },
+  adults: { axis: 'age', value: 'adult' }, adult: { axis: 'age', value: 'adult' },
+  // age axis — universal
+  ages: { axis: 'age', value: 'universal' },
+}
+
+/** Axis + value for one recognised audience term, or null for a word that carries no demographic
+ *  meaning (a join word like "and"/"for", or anything `audienceSpans` never collects in the first
+ *  place). PURE, case-insensitive. Exported so tests can verify the map is exhaustive over
+ *  AUD_HARD/AUD_SOFT rather than trusting it by inspection. */
+export function classifyAudienceWord(word: string): AudienceTermMeaning | null {
+  return AUDIENCE_TERM_AXIS[(word || '').toLowerCase()] ?? null
+}
+
 export interface AudienceSpan {
   start: number; end: number; text: string
   values: string[]        // 'M' | 'F' | 'X'
   attested: boolean       // every token inside the seller's single-gender closure
+  terms: readonly string[] // the raw audience tokens collected, lowercase — feeds classifyAudienceWord
   led: boolean            // introduced by "for"
   terminal: boolean       // ends the title
 }
@@ -2101,6 +2167,7 @@ export function audienceSpans(text: string): AudienceSpan[] {
       start, end, text: t.slice(start, end),
       values: [...new Set(words.map(audValue))],
       attested: words.every((w) => AUD_ATTESTED.has(w)),
+      terms: words,
       led,
       terminal: t.slice(end).trim().replace(/^[.,;|\s]+/, '') === '',
     })
@@ -2115,15 +2182,33 @@ function inadmissibleSpans(text: string): AudienceSpan[] {
   if (spans.length === 0) return []
   const bad: AudienceSpan[] = []
   for (const s of spans) {
-    // (a) unattested vocabulary — guys / kids / him / everyone / family never appear in the golds
-    if (!s.attested) { bad.push(s); continue }
-    // (b) a DUAL-gender span is admissible only in gold #7's exact attested form: juxtaposed
-    //     (no conjunction) AND title-terminal. Any conjoined dual — "and", "&", "+", "or" — is the
-    //     construct the seller banned outright.
-    if (s.values.includes('M') && s.values.includes('F')) {
-      const conjoined = /\b(and|or)\b|[&+,]/i.test(s.text)
-      if (conjoined || !s.terminal) bad.push(s)
+    // (a)/(b) AXIS CONFLICT (PO ruling 2026-09-02) — dock a span only when it claims OPPOSED
+    // values on the SAME axis, or carries a single 'universal' term (self-opposing by definition).
+    // Two terms on the SAME axis with the SAME value are a synonym repeat ("Kids & Children") and
+    // never dock, however many times the value is named.
+    const byAxis = new Map<AudienceAxis, Set<string>>()
+    let universal = false
+    for (const w of s.terms) {
+      const meaning = classifyAudienceWord(w)
+      if (!meaning) continue   // defensive only — every term audienceSpans collects is in the map
+      if (meaning.value === 'universal') universal = true
+      if (!byAxis.has(meaning.axis)) byAxis.set(meaning.axis, new Set())
+      byAxis.get(meaning.axis)!.add(meaning.value)
     }
+    let opposed = universal
+    if (!opposed) for (const vals of byAxis.values()) if (vals.size > 1) { opposed = true; break }
+    if (!opposed) continue
+    // EXEMPTION, unchanged from before this ruling: gold #7's exact attested shape — a dual-GENDER
+    // span, juxtaposed (no conjunction) and title-terminal ("…Shirt for Men Women"). This is a
+    // SHAPE rule (how the words are JOINED), orthogonal to axis/value, so it survives the rewrite
+    // scoped exactly as before — to gender, the only dual form the corpus attests.
+    const genderVals = byAxis.get('gender')
+    const dualGenderOnly = !universal && genderVals?.size === 2 && genderVals.has('male') && genderVals.has('female')
+    if (dualGenderOnly) {
+      const conjoined = /\b(and|or)\b|[&+,]/i.test(s.text)
+      if (!conjoined && s.terminal) continue   // admissible — the seller's own attested shape
+    }
+    bad.push(s)
   }
   // (c) two spans naming DIFFERENT genders = the title addresses both in pieces. Keep the terminal
   //     one, delete the rest. This is the headline attack ("…for Men Tee | Fan Shirt for Women"),

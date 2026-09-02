@@ -76,20 +76,12 @@ describe('THE IDENTITY CEILING — withdrawn at `on`, and the seller stops being
 
   it('ON: every one of the ten golds scores a clean 100 — no seller title is docked', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
-    // NOTED GAP (PR #663, 2026-09-02), NOT this describe block's concern and NOT force-fixed here —
-    // this block is about the IDENTITY CEILING dock withdrawn at `on`; the new B0DP5H8QBT gold is
-    // docked -15 by a DIFFERENT rule (the "for Men and Women" audience-pair dock, listingPipeline.ts
-    // ~:1837), which reuses `hasInclusiveAudience` — the SAME analyzer goldCorpusSelfTest.test.ts's
-    // "EVERY seller gold passes through the analyzer byte-identical" test documents as tripping on
-    // "for Kids & Children" (unattested 'kids'/'children' + conjunction shape, identical to the
-    // pinned "Adults and Kids" attack). One root cause, two call sites; see that test's comment for
-    // the full explanation and the PO-ruling this is flagged for.
-    const KNOWN_GAP = "THE CEO Don't Quit Tee Shirt | Motivational T-shirt for Kids & Children"
+    // The B0DP5H8QBT gold ("for Kids & Children") used to be excluded from this loop: it was docked
+    // -15 by the "for Men and Women" audience-pair rule (listingPipeline.ts ~:1838), which reuses
+    // `hasInclusiveAudience` — RESOLVED by the PO ruling 2026-09-02 (goldCorpusSelfTest.test.ts's
+    // "PO ruling 2026-09-02" describe block has the full axis+value explanation). No exception
+    // needed any more.
     for (const g of SEED_GOLD_TITLES) {
-      if (g === KNOWN_GAP) {
-        expect(withV4('on', () => judge(g)), g).toBe(86) // documents the gap; see comment above
-        continue
-      }
       expect(withV4('on', () => judge(g)), g).toBe(100)
     }
   })

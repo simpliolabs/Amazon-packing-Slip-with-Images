@@ -11523,11 +11523,20 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
    * the listing is filed as adult). ONE resolver (contentTruth.ts) decides whether the BLANK ITSELF
    * states this family's age — a guess or the lean selector never overrides a PO-accepted push,
    * only a stated blank fact may (the PO ruling this task implements). `truthGarmentFamily` /
-   * `blankSpec` are already resolved above (:9168/:9204) — this reads them, resolves nothing new. */
+   * `blankSpec` are already resolved above (:9168/:9204) — this reads them, resolves nothing new.
+   *
+   * ENUM-VALIDITY (PO ruling 2026-09-02): the live accepted[] for age_range_description — same
+   * lookup `appendSpecFact` below performs for its own menu match — is threaded in so the
+   * resolver's `ageRangeCandidate` is chosen FROM the real enum (first ordered-preference member
+   * present) instead of a hardcoded label that could never validate on a schema with no bare
+   * "Kids" member. Undefined menu/no matching key = `ageRangeAccepted` stays undefined, and the
+   * resolver degrades to its pre-ruling single-label behavior — a structural no-op, not a guess. */
+  const ageRangeMenuAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === 'age_range_description' || /age\s*range/i.test(m.title))
   const aud = resolveGarmentAudience({
     garmentFamily: truthGarmentFamily,
     ageClass: blankSpec?.ageClass ?? null,
     audienceLean: input.audienceLean,
+    ageRangeAccepted: ageRangeMenuAttr?.accepted ?? null,
   })
   // Prove the branch RAN (not just its output): asserted in tests via this log line's `source`.
   if (apparelProduct) console.log(JSON.stringify({ tag: 'GARMENT_AUDIENCE', parent: input.parentAsin ?? null, ageClass: aud.ageClass, source: aud.source, dept: aud.departmentQualifier }))

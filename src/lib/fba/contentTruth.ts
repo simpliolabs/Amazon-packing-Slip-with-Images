@@ -301,6 +301,12 @@ export interface GarmentAudienceFacts {
   /** RAW seller-declared lean (same shape `normalizeAudienceLean` takes) — used only to pick
    *  Girls/Boys over the neutral default once the family is already known to be non-adult. */
   audienceLean?: Parameters<typeof normalizeAudienceLean>[0]
+  /** LIVE accepted[] for this product type's age_range_description attribute
+   *  (`detailAttributeMenu[].accepted`) — how `ageRangeCandidate` is resolved against the real
+   *  enum instead of a hardcoded label (PO ruling 2026-09-02). Undefined/null = no live list
+   *  available (menu not loaded yet, or this product type's schema has no such key) — degrades to
+   *  the single best-guess label, byte-identical to this resolver's behavior before that ruling. */
+  ageRangeAccepted?: readonly string[] | null
 }
 
 export interface GarmentAudienceResolution {
@@ -321,6 +327,51 @@ export interface GarmentAudienceResolution {
 
 const AGE_RANGE_LABEL: Record<AgeClass, string> = {
   newborn: 'Newborn', infant: 'Infant', toddler: 'Toddler', kids: 'Kids', adult: 'Adult',
+}
+
+/*
+ * AGE_RANGE_PREFERENCE — PO ruling 2026-09-02: "kids -> Big Kid" (Gildan 64000B youth runs
+ * XS(4-5)-XL(14-16); Amazon's Little Kid tops out ~7, so most of the run is Big Kid; the PO
+ * separately named the target as "Big Kids, Youth, Teens", corroborating the band).
+ *
+ * THE DEFECT THIS CLOSES: `AGE_RANGE_LABEL.kids = 'Kids'` is a HAND-TYPED LABEL NEVER CHECKED
+ * against the live accepted enum (`detailAttributeMenu[].accepted`), and Amazon's real
+ * age_range_description enum for this product type — read live from the DB 2026-09-02 — is
+ * exactly {Adult, Big Kid, Infant, Little Kid, Toddler}. No "Kid"/"Kids"/"Youth"/"Newborn" member
+ * exists at all, so the deterministic producer could NEVER validate; PR #661's validity-outranks-
+ * provenance guard correctly refused it every time, and the field silently fell through to
+ * whatever the LLM happened to guess.
+ *
+ * THE CURE IS DERIVED, NOT REMEMBERED: an ORDERED PREFERENCE per age class, resolved against the
+ * LIVE `accepted[]` at runtime by `resolveAgeRangeLabel` below — the first member PRESENT wins.
+ * A different product type with a different enum works with zero code change (e.g. an enum of
+ * just {Youth, Adult} still resolves 'kids' -> 'Youth', the first preference entry it carries).
+ * Verify before extending: these lists are the PO's stated ruling plus adjacent, plausible Amazon
+ * vocabulary — not exhaustively confirmed against every product type's live schema.
+ */
+const AGE_RANGE_PREFERENCE: Record<AgeClass, readonly string[]> = {
+  newborn: ['Newborn', 'Infant', 'Baby'],
+  infant: ['Infant', 'Newborn', 'Baby'],
+  toddler: ['Toddler', 'Little Kid'],
+  kids: ['Big Kid', 'Little Kid', 'Kid', 'Youth', 'Kids'],
+  adult: ['Adult'],
+}
+
+/** Resolve the age-range candidate for `ageClass` against the live `accepted` enum — first
+ *  `AGE_RANGE_PREFERENCE` member present in `accepted` wins (case-insensitive, exact). PURE.
+ *
+ *  `accepted` undefined/null/empty = no live enum available — degrades to the single fixed label
+ *  (`AGE_RANGE_LABEL`), exactly this resolver's behavior before the 2026-09-02 ruling.
+ *  `accepted` a real, non-matching list = a genuine schema mismatch: returns `matched:false` and
+ *  a null label — the caller must NEVER invent a member and must skip the row entirely. */
+function resolveAgeRangeLabel(
+  ageClass: AgeClass,
+  accepted: readonly string[] | null | undefined,
+): { label: string | null; matched: boolean } {
+  if (!accepted || accepted.length === 0) return { label: AGE_RANGE_LABEL[ageClass], matched: true }
+  const acceptedSet = new Set(accepted.map((a) => (a || '').trim().toLowerCase()))
+  const hit = AGE_RANGE_PREFERENCE[ageClass].find((p) => acceptedSet.has(p.toLowerCase()))
+  return hit ? { label: hit, matched: true } : { label: null, matched: false }
 }
 
 /** Girls/Boys/Kids — the ONE gendered-marker picker, shared by `youthMarkerFor` (title, legacy
@@ -363,7 +414,21 @@ export function resolveGarmentAudience(facts: GarmentAudienceFacts): GarmentAudi
   const departmentQualifier = isKidsBucket
     ? (lean === 'women' ? 'Girls' : lean === 'men' ? 'Boys' : `Unisex ${AGE_RANGE_LABEL[ageClass as AgeClass]}`)
     : null
-  const ageRangeCandidate = ageClass ? AGE_RANGE_LABEL[ageClass] : null
+  let ageRangeCandidate: string | null = null
+  if (ageClass) {
+    const resolved = resolveAgeRangeLabel(ageClass, facts.ageRangeAccepted)
+    ageRangeCandidate = resolved.label
+    // LOUD, GREPPABLE, NEVER SILENT: a real accepted[] was supplied and NOTHING on the ordered
+    // preference matched it — this product type's schema genuinely does not carry any member this
+    // family could truthfully claim. Never invent one; log so the gap is visible instead of a
+    // silently-missing Product Detail row.
+    if (!resolved.matched) {
+      console.warn(JSON.stringify({
+        tag: 'AGE_RANGE_LABEL_NO_MATCH', ageClass, preference: AGE_RANGE_PREFERENCE[ageClass],
+        accepted: facts.ageRangeAccepted ?? null,
+      }))
+    }
+  }
   return { ageClass, audience, source, departmentQualifier, ageRangeCandidate, youthMarker }
 }
 

@@ -116,7 +116,11 @@ function makeChildren(): PipelineChild[] {
   ]
 }
 
-const AGE_RANGE_MENU_ATTR = { key: 'age_range_description', title: 'Age Range Description', accepted: ['Newborn', 'Infant', 'Toddler', 'Kids', 'Adult'] }
+// THE REAL LIVE ENUM (read from the DB 2026-09-02, PO ruling: "kids -> Big Kid"). NO bare
+// "Kids"/"Kid"/"Youth"/"Newborn" member exists — this is the exact list every test in this file
+// now resolves `ageRangeCandidate` against, so a fixture never again hides the enum-validity gap
+// the way the old "Kids"-inclusive list did (see the ENUM-VALIDITY block below for the history).
+const AGE_RANGE_MENU_ATTR = { key: 'age_range_description', title: 'Age Range Description', accepted: ['Adult', 'Big Kid', 'Infant', 'Little Kid', 'Toddler'] }
 
 function makeBaseInput(openai: PipelineInput['openai']): PipelineInput {
   const children = makeChildren()
@@ -222,19 +226,28 @@ describe('garment age producer — real runListingPipeline, Product Detail block
 
     const ageRow = findRow(pdi, /age\s*range/i)
     expect(ageRow).toBeDefined()
-    expect(ageRow?.recommended_value).toBe('Kids')
+    // PO ruling 2026-09-02: this product type's live enum has no bare "Kids" member, so the
+    // resolver's ordered preference (AGE_RANGE_PREFERENCE.kids, contentTruth.ts) picks "Big Kid" —
+    // the first entry AGE_RANGE_MENU_ATTR.accepted actually carries. (enum_valid/is_enum are only
+    // stamped when mergeDetailRowsByPrecedence arbitrates a MULTI-row field — this audit stub
+    // never guessed an age row, so this one ships alone; the validity proof for the competing-row
+    // shape lives in the "THE REAL LIVE ENUM" test below.)
+    expect(ageRow?.recommended_value).toBe('Big Kid')
     expect(ageRow?.value_source).toBe('spec')
     // The candidate came from the LIVE accepted enum this fixture declared, not a hardcoded literal.
     expect(AGE_RANGE_MENU_ATTR.accepted).toContain(ageRow?.recommended_value)
   }, 30_000)
 
-  it('THE LIVE CASE (B0DP5H8QBT): a STATED blank-column age fact wins over an LLM guess that has ALREADY proposed a row for the same field in the SAME audit payload — the deterministic row ships, never the guess, even when the guess happens to look plausible', async () => {
+  it('THE LIVE CASE (B0DP5H8QBT): a STATED blank-column age fact wins over an LLM guess that has ALREADY proposed a row for the same field in the SAME audit payload, by PROVENANCE — even though both now independently land on the same enum-valid value', async () => {
     mockedLoadBlankSpecRows.mockResolvedValueOnce([
       { match: /\bshirt\b/i, spec: { brand: 'Gildan', brandInCopy: false, ageClass: 'kids' }, styleCode: '64000B', garmentFamily: 'kids_tee' },
     ] as BlankSpecRow[])
     // The mega-audit ALREADY guessed 'Big Kid' for Age Range Description — see kitchenSinkWithAgeGuess.
-    // This is the exact shape of the live defect: before the fix, appendSpecFact's "skip if a row
-    // already exists" guard treated that guess as reason to never even try the deterministic append.
+    // This is the exact shape of the live defect: before the #654 fix, appendSpecFact's "skip if a
+    // row already exists" guard treated that guess as reason to never even try the deterministic
+    // append. PO ruling 2026-09-02 separately fixed WHAT the deterministic append proposes (Big Kid,
+    // not the unvalidatable "Kids") — so this fixture's LLM guess and the spec row now agree on the
+    // VALUE. What proves the deterministic path still ran, not a lucky coincidence, is `value_source`.
     const openai = makeOpenAiStubWithAgeGuess()
     const logSpy = vi.spyOn(console, 'log')
     const input: PipelineInput = { ...makeBaseInput(openai) }
@@ -254,13 +267,10 @@ describe('garment age producer — real runListingPipeline, Product Detail block
     expect(ageRows).toHaveLength(1)
     const ageRow = ageRows[0]
     // PROVE THE BRANCH RAN VIA PROVENANCE, not merely a value that happens to look right: 'Big Kid'
-    // (the LLM's own guess) reads as perfectly plausible too — value_source is the only signal that
-    // distinguishes a derivation from a guess that happened to agree. This is exactly the danger
-    // the brief calls out: on a family whose title once said "for Men & Women" the same guessing
-    // mechanism would have produced an ADULT age, and Amazon would have accepted it silently.
+    // is now what BOTH the LLM's guess and the deterministic producer propose, so the value alone
+    // cannot distinguish them — value_source is the only signal that the SPEC row won, not the guess.
     expect(ageRow.value_source).toBe('spec')
-    expect(ageRow.recommended_value).toBe('Kids')
-    expect(ageRow.recommended_value).not.toBe('Big Kid')
+    expect(ageRow.recommended_value).toBe('Big Kid')
     // Drawn from the LIVE accepted enum this fixture declared, not a hardcoded literal.
     expect(AGE_RANGE_MENU_ATTR.accepted).toContain(ageRow.recommended_value)
   }, 30_000)
@@ -284,19 +294,26 @@ describe('garment age producer — real runListingPipeline, Product Detail block
 
     const pdi = result.product_details_improvements
     const dept = findRow(pdi, /^department$/i)
+    // departmentQualifier composes "Unisex Kids" from AGE_RANGE_LABEL (unaffected by this ruling —
+    // it is a human-readable department phrase, snapped to Department's OWN enum downstream by
+    // coerceGenderToEnum, not age_range_description's enum). ageRangeCandidate below is the row this
+    // ruling actually changed.
     expect(dept?.recommended_value).toBe('Unisex Kids')
     expect(dept?.value_source).toBe('spec')
-    expect(findRow(pdi, /age\s*range/i)?.recommended_value).toBe('Kids')
+    expect(findRow(pdi, /age\s*range/i)?.recommended_value).toBe('Big Kid')
   }, 30_000)
 
-  // ENUM-VALIDITY defect class (closed 2026-09-02, this task's own follow-up to the precedence test
-  // above): every OTHER test in this file declares AGE_RANGE_MENU_ATTR.accepted with 'Kids' (plural)
-  // AS a member, so 'Kids' always wins on validity too and none of them can reproduce the actual live
-  // symptom. Amazon's real apparel age_range_description enum has no 'Kids' (plural) member — this
-  // test uses that REALISTIC accepted list to prove the pipeline now ships the LLM's valid 'Big Kid'
-  // instead of the deterministic-but-invalid 'Kids', end-to-end through the real runListingPipeline,
-  // not just the isolated mergeDetailRowsByPrecedence unit (productDetailAttrs.test.ts).
-  it('THE REAL LIVE ENUM (no "Kids" plural member): the deterministic "Kids" label is uncoercible, so the LLM\'s valid "Big Kid" ships — never the invalid deterministic guess, even though it outranks by provenance', async () => {
+  // ENUM-VALIDITY defect class (RESOLVED 2026-09-02, PO ruling "kids -> Big Kid"). Amazon's REAL
+  // apparel age_range_description enum for this product type — read live from the DB 2026-09-02 —
+  // is exactly ["Adult","Big Kid","Infant","Little Kid","Toddler"]. No bare "Kid"/"Kids"/"Youth"/
+  // "Newborn" member exists at all, so the OLD hardcoded `AGE_RANGE_LABEL.kids = 'Kids'` could
+  // NEVER validate — PR #661's validity-outranks-provenance guard correctly refused it every time,
+  // and the field silently fell through to whatever the LLM happened to guess. The cure
+  // (`AGE_RANGE_PREFERENCE` + `resolveAgeRangeLabel`, contentTruth.ts) makes the PRODUCER itself
+  // resolve against the live enum, so it proposes a member Amazon actually accepts — this test
+  // proves that end-to-end through the real runListingPipeline, not just the isolated
+  // mergeDetailRowsByPrecedence unit (productDetailAttrs.test.ts).
+  it('THE REAL LIVE ENUM: the deterministic producer now resolves "Big Kid" itself — enum_valid, is_enum, and value_source:spec together prove the SPEC row shipped, not an LLM fallback', async () => {
     mockedLoadBlankSpecRows.mockResolvedValueOnce([
       { match: /\bshirt\b/i, spec: { brand: 'Gildan', brandInCopy: false, ageClass: 'kids' }, styleCode: '64000B', garmentFamily: 'kids_tee' },
     ] as BlankSpecRow[])
@@ -306,17 +323,78 @@ describe('garment age producer — real runListingPipeline, Product Detail block
       detailAttributeMenu: [
         { key: 'department', title: 'Department' },
         { key: 'target_gender', title: 'Target Gender' },
-        { key: 'age_range_description', title: 'Age Range Description', accepted: ['Newborn', 'Infant', 'Toddler', 'Little Kid', 'Big Kid', 'Adult'] },
+        // The brief's EXACT live list — verbatim, not the file's default AGE_RANGE_MENU_ATTR — so
+        // this test stands on its own as the brief's required "accepted=[...] + age_class='kids' ->
+        // Big Kid, enum_valid:true, value_source:'spec'" proof.
+        { key: 'age_range_description', title: 'Age Range Description', accepted: ['Adult', 'Big Kid', 'Infant', 'Little Kid', 'Toddler'] },
       ],
     }
     const result = await runListingPipeline(input)
     const pdi = result.product_details_improvements
     const ageRows = pdi.filter((p) => /age\s*range/i.test(p.field_name))
-    expect(ageRows).toHaveLength(1)
+    expect(ageRows).toHaveLength(1)   // the merge collapsed the LLM guess and the spec row into one
     const ageRow = ageRows[0]
     expect(ageRow.recommended_value).not.toBe('Kids')   // THE live bug this task closes — must never ship
     expect(ageRow.recommended_value).toBe('Big Kid')
     expect(ageRow.enum_valid).toBe(true)                // prove the branch ran, not just the string
     expect(ageRow.is_enum).toBe(true)
+    expect(ageRow.value_source).toBe('spec')            // proves the SPEC row won, not the LLM's guess
+  }, 30_000)
+
+  it('DIFFERENT ENUM, ZERO CODE CHANGE: a product type whose age_range_description enum is only ["Youth","Adult"] resolves "kids" to "Youth" — the first ordered-preference member that enum actually carries', async () => {
+    mockedLoadBlankSpecRows.mockResolvedValueOnce([
+      { match: /\bshirt\b/i, spec: { brand: 'Gildan', brandInCopy: false, ageClass: 'kids' }, styleCode: '64000B', garmentFamily: 'kids_tee' },
+    ] as BlankSpecRow[])
+    const openai = makeOpenAiStub()   // no competing LLM guess this time — isolates the producer's own pick
+    const input: PipelineInput = {
+      ...makeBaseInput(openai),
+      detailAttributeMenu: [
+        { key: 'department', title: 'Department' },
+        { key: 'target_gender', title: 'Target Gender' },
+        { key: 'age_range_description', title: 'Age Range Description', accepted: ['Youth', 'Adult'] },
+      ],
+    }
+    const result = await runListingPipeline(input)
+    const pdi = result.product_details_improvements
+    const ageRow = findRow(pdi, /age\s*range/i)
+    expect(ageRow).toBeDefined()
+    expect(ageRow?.recommended_value).toBe('Youth')
+    expect(ageRow?.value_source).toBe('spec')
+  }, 30_000)
+
+  it('NO MATCH: a schema whose age_range_description enum is only ["Adult"] carries NO row a kids family could truthfully claim — NO row ships, and a loud, greppable log fires instead of inventing a value', async () => {
+    mockedLoadBlankSpecRows.mockResolvedValueOnce([
+      { match: /\bshirt\b/i, spec: { brand: 'Gildan', brandInCopy: false, ageClass: 'kids' }, styleCode: '64000B', garmentFamily: 'kids_tee' },
+    ] as BlankSpecRow[])
+    const openai = makeOpenAiStub()
+    const warnSpy = vi.spyOn(console, 'warn')
+    const input: PipelineInput = {
+      ...makeBaseInput(openai),
+      detailAttributeMenu: [
+        { key: 'department', title: 'Department' },
+        { key: 'target_gender', title: 'Target Gender' },
+        { key: 'age_range_description', title: 'Age Range Description', accepted: ['Adult'] },
+      ],
+    }
+    const result = await runListingPipeline(input)
+    const pdi = result.product_details_improvements
+    // NEVER invent a member: no candidate on the ordered preference is present, so no row appends.
+    expect(findRow(pdi, /age\s*range/i)).toBeUndefined()
+
+    // PROVE THE BRANCH RAN, not merely the absence of a row (which an unrelated bug could also
+    // produce): the resolver's own greppable log fired with the decision fields, not just a string.
+    const noMatchLog = warnSpy.mock.calls
+      .map((c) => c[0])
+      .filter((line): line is string => typeof line === 'string' && line.includes('AGE_RANGE_LABEL_NO_MATCH'))
+      .map((line) => JSON.parse(line) as { tag: string; ageClass: string; accepted: string[] })
+    warnSpy.mockRestore()
+    expect(noMatchLog).toHaveLength(1)
+    expect(noMatchLog[0].ageClass).toBe('kids')
+    expect(noMatchLog[0].accepted).toEqual(['Adult'])
+
+    // Department is UNAFFECTED — it composes from AGE_RANGE_LABEL (a different, human-phrase
+    // concern with its own downstream enum coercion), so the family is still filed correctly there
+    // even though age_range_description has nothing truthful to propose.
+    expect(findRow(pdi, /^department$/i)?.recommended_value).toBe('Unisex Kids')
   }, 30_000)
 })
