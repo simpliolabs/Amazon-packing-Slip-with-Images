@@ -51,7 +51,7 @@ import { guaranteedIdentitySynonyms, identitySynonymPhrases, getSeedPool, normal
 // title/bullets, studied by the multi-design parent-title council for keyword strategy + structure.
 import { getCompetitorSeoSnapshot, CompetitorSeoSnapshot } from '@/lib/fba/competitorSeo'
 import { SKU_COLOR_CODES } from '@/lib/fba/skuColorCodes'
-import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS } from '@/lib/fba/productDetailAttrs'
+import { detailValueToString, capItemHighlightRepeats, collarStyleForNeck, ihRepeatViolations, IH_MAX_WORD_REPEATS, mergeDetailRowsByPrecedence } from '@/lib/fba/productDetailAttrs'
 import { scrubTrademarks, scrubTrademarksArr, scrubTrademarksDeep, buildAdversaryTrademarkClause } from '@/lib/fba/trademarkGuard'
 import { deriveAudienceRelationalCompounds } from '@/lib/fba/audienceRelationalCompounds'
 import { resolveDesignAudienceLean } from '@/lib/fba/audienceAssignment'
@@ -11543,7 +11543,19 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   const appendSpecFact = (key: string, rowRe: RegExp, val: string | undefined): void => {
     if (!val) return
     const menuAttr = (input.detailAttributeMenu ?? []).find((m) => m.key === key || rowRe.test(m.title))
-    if (!menuAttr || pdiFinal.some((p) => rowRe.test(String(p.field_name ?? '')))) return
+    if (!menuAttr) return
+    // PRECEDENCE FIX (defect class, see productDetailAttrs.mergeDetailRowsByPrecedence): this used
+    // to no-op whenever ANY row already matched the field — including an unstamped mega-audit GUESS
+    // — so the LLM's row won by simply arriving first (it always runs before this). That silently
+    // dropped every deterministic age-fact append on a family whose audit had already guessed at
+    // Age Range Description (the live B0DP5H8QBT case). Now: skip ONLY when a row for this field is
+    // ALREADY spec-stamped (idempotent — an unconditional `overrideField` call just above already
+    // produced the authoritative row this run; do not push a redundant duplicate). Any OTHER
+    // existing row (unstamped LLM guess, 'audience', 'ruling') no longer blocks the push — it
+    // becomes a competing candidate, and `mergeDetailRowsByPrecedence` (called once, on the fully
+    // assembled array, right before this function returns its result) is the ONE place that then
+    // decides which row for the field ships. Precedence lives there now, not in this guard.
+    if (pdiFinal.some((p) => rowRe.test(String(p.field_name ?? '')) && p.value_source === 'spec')) return
     pdiFinal.push({
       field_name: menuAttr.title,
       current_value: null,
@@ -11947,6 +11959,14 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
   // and the empty result PERSISTED over approved content while reporting success. Abort-and-preserve
   // before the route can reach its upsert. Empty-only checks — never a count/length floor.
   assertCoreHealthy(input.openai, finalTitle, bullets, description)
+  // PRECEDENCE MERGE (defect class — see productDetailAttrs.mergeDetailRowsByPrecedence for the full
+  // account): pdiFinal can carry more than one row for the same field by now — the mega-audit LLM,
+  // the dedicated details-fill pass, and every deterministic producer above (appendSpecFact included)
+  // all write into the same array with no ordering guarantee between them. This is the ONE place,
+  // run ONCE on the fully-assembled array, that decides which row for a given field ships: a
+  // spec/ruling/audience-stamped row always outranks an unstamped (LLM-guessed) one; a field with no
+  // stamped row at all is left exactly as the audit produced it.
+  pdiFinal = mergeDetailRowsByPrecedence(pdiFinal)
   return scrubPublished({
     recommended_title: finalTitle,
     recommended_bullets: bullets,

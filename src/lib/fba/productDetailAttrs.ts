@@ -156,6 +156,83 @@ export function unpushableReason(fieldName: string): string | null {
 }
 
 /**
+ * PRECEDENCE between a deterministic-truth producer and the mega-audit LLM's own guess for the
+ * SAME detail field (defect class closed 2026-09-02 — the age producer, PR #654, shipped an audit
+ * guess instead of its own ground-truth row because nothing arbitrated the two). Higher wins.
+ * 'spec' (a stated blank_specs fact) and 'ruling' (a deterministic PO ruling) are both grounded in
+ * something the seller/PO actually stated; 'audience' is the seller's own lean selector — real, but
+ * weaker than a stated garment fact. An UNSTAMPED row (value_source undefined) is the mega-audit
+ * re-guessing from the listing's own existing copy every run, and never outranks any of the above —
+ * mirrors the ranking `stickyDetails.ts` already documents for "does a fresh row get to re-propose
+ * over an accepted push" (spec/ruling can re-propose, plain LLM churn never does).
+ */
+const VALUE_SOURCE_RANK: Record<string, number> = { spec: 3, ruling: 2, audience: 1 }
+
+/** Rank for a value_source; undefined/unrecognized (LLM guess) ranks lowest (0). */
+function valueSourceRank(vs: string | null | undefined): number {
+  return vs ? (VALUE_SOURCE_RANK[vs] ?? 0) : 0
+}
+
+/**
+ * THE PRECEDENCE RULE AT THE MERGE.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * DEFECT CLASS this closes: a deterministic, provenance-stamped producer (a stated blank_specs
+ * fact, an audience selector, a PO ruling) and the mega-audit LLM can BOTH emit a row for the SAME
+ * detail field in the SAME `product_details_improvements` array, and nothing decided which one
+ * SHIPS. Some fields (Department, Fit, Sleeve, Apparel Fabric Stretch, Fit to Size Sentiment,
+ * collar_style) happened to be safe only because their deterministic site OVERWRITES the existing
+ * row in place (an unconditional `pdiFinal.map`). The age producer (PR #654) used the OTHER shape —
+ * `appendSpecFact`'s original "add a row for this field, but only if none exists yet" — so on the
+ * live case (a mega-audit that already guessed "Big Kid" for Age Range Description from the
+ * listing's own existing copy) the deterministic 'Kids' row was never even proposed: whichever
+ * producer WROTE FIRST won, and the LLM audit always runs first. That is an ordering accident, not
+ * a rule — and every FUTURE `appendSpecFact` call for a NEW field inherits the same exposure unless
+ * its author remembers to also hand-write an unconditional override, the way the six existing
+ * overrides above happen to.
+ *
+ * THE FIX: `appendSpecFact` (listingPipeline.ts) no longer refuses to run just because a row
+ * already exists for the field — it always emits its candidate when the family states the fact.
+ * This function is the ONE place, called ONCE on the fully-assembled array, that then decides which
+ * of possibly several rows for the same field ships: the highest-precedence `value_source` wins. A
+ * field where EVERY row is unstamped (plain LLM output, nothing to arbitrate) is left exactly as
+ * it was — this function only ever resolves a conflict where a stamped row exists; it never invents
+ * a reason to drop a duplicate that has no deterministic competitor. A NEW producer for a NEW field
+ * therefore needs no defensive code of its own: stamp `value_source:'spec'|'ruling'|'audience'` and
+ * push the row — precedence is enforced HERE, structurally, not by convention at each call site.
+ *
+ * Pure, deterministic: ties (including two unstamped rows for the same field) keep the FIRST
+ * occurrence, so output order is stable and a field with no stamped competitor is byte-identical.
+ */
+export function mergeDetailRowsByPrecedence<T extends { field_name: string; value_source?: string | null }>(
+  rows: T[],
+): T[] {
+  const groups = new Map<string, { rows: T[]; bestRank: number }>()
+  const order: string[] = []
+  for (const row of rows) {
+    const key = normalizeFieldName(row.field_name)
+    const rank = valueSourceRank(row.value_source)
+    let g = groups.get(key)
+    if (!g) { g = { rows: [], bestRank: -1 }; groups.set(key, g); order.push(key) }
+    g.rows.push(row)
+    if (rank > g.bestRank) g.bestRank = rank
+  }
+  const out: T[] = []
+  for (const key of order) {
+    const g = groups.get(key)!
+    if (g.rows.length === 1 || g.bestRank <= 0) {
+      // Single row for this field, OR every row for it is unstamped — nothing to arbitrate; pass
+      // through untouched (preserves pre-existing behavior for any duplicate this function was
+      // never asked to resolve).
+      out.push(...g.rows)
+      continue
+    }
+    // At least one stamped row: keep the FIRST row at the highest rank, drop the rest.
+    out.push(g.rows.find((r) => valueSourceRank(r.value_source) === g.bestRank)!)
+  }
+  return out
+}
+
+/**
  * SP-API attribute keys that describe the SPECIFIC design rather than a garment fact.
  * ───────────────────────────────────────────────────────────────────────────────────
  * `style` / `style_name` on a print-on-demand family read off the artwork ("Vintage",
