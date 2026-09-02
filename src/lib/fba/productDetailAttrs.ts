@@ -173,6 +173,38 @@ function valueSourceRank(vs: string | null | undefined): number {
   return vs ? (VALUE_SOURCE_RANK[vs] ?? 0) : 0
 }
 
+/** Live product-type menu entry — the same shape `listingPipeline.ts` threads through as
+ *  `input.detailAttributeMenu` (fetched once per regen from the Product Type Definitions API).
+ *  `accepted` is the confirmed-live enum vocabulary (deprecated members already excluded);
+ *  absent/empty means free-text or the menu was unavailable — never validate against a guess. */
+export interface DetailMenuAttr { key: string; title: string; accepted?: string[] }
+
+/** The result shape `coerceToEnum`/`coerceGenderToEnum` (productTypeDefinitions.ts) return —
+ *  duplicated as a structural type (not imported) so this module stays free of that file's import,
+ *  which pulls in `@/lib/supabase/server`: this file is bundled into a CLIENT component
+ *  (`fba/listing/[asin]/page.tsx` imports its pushable-check helpers), and there is no reliable way
+ *  to prove tree-shaking drops it from that bundle in this worktree (`next build` fails here on an
+ *  unrelated Turbopack symlink error). The caller (listingPipeline.ts, server-only) injects the real
+ *  functions; this file only depends on their SHAPE. */
+export interface EnumCoercion { valid: boolean; value: string; accepted: string[]; changed: boolean }
+
+/** Injected coercer: (spApiKey, rawValue, acceptedMembers) -> the accepted-member verdict. The
+ *  caller supplies `coerceToEnum`/`coerceGenderToEnum` so this module validates with the EXACT same
+ *  rule the LLM path is already held to (productTypeDefinitions.ts's `coerceDetailValue`) — no
+ *  second rulebook. */
+export type EnumCoercer = (spApiKey: string, rawValue: string, accepted: string[]) => EnumCoercion
+
+/** Resolve the live menu entry for a field_name: the static ATTR_MAP key first (covers every field
+ *  a deterministic producer in this codebase currently stamps — department, target_gender,
+ *  age_range_description, fit_type, sleeve_type, apparel_fabric_stretch, fit_to_size_sentiment, …),
+ *  else a normalized-title match (covers a schema-only attribute the static map has never heard
+ *  of). Same "no hand-written case" guarantee `mergeDetailRowsByPrecedence` already gives
+ *  provenance: a brand-new deterministic producer for a brand-new field is covered by construction. */
+function menuAttrForField(fieldName: string, menu: DetailMenuAttr[]): DetailMenuAttr | undefined {
+  const staticKey = resolveDetailAttribute(fieldName)?.spApiKey
+  return menu.find((m) => (!!staticKey && m.key === staticKey) || normalizeFieldName(m.title) === normalizeFieldName(fieldName))
+}
+
 /**
  * THE PRECEDENCE RULE AT THE MERGE.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -202,9 +234,44 @@ function valueSourceRank(vs: string | null | undefined): number {
  *
  * Pure, deterministic: ties (including two unstamped rows for the same field) keep the FIRST
  * occurrence, so output order is stable and a field with no stamped competitor is byte-identical.
+ *
+ * VALIDITY EXTENSION (defect class closed 2026-09-02, PR #660 follow-up): provenance rank alone is
+ * not enough — a deterministic producer (`appendSpecFact` et al.) can stamp a HARDCODED label
+ * (`contentTruth.ts`'s `AGE_RANGE_LABEL.kids = 'Kids'`) that Amazon's live enum does not accept,
+ * while the mega-audit LLM's competing row for the same field WAS enum-accepted (the audit prompt
+ * requires "verbatim" menu members). Ranking by provenance alone then promotes the UNVALIDATED
+ * label over the VALIDATED guess — trading a value Amazon would accept for one it may reject
+ * (live: B0DP5H8QBT shipped Age Range Description="Kids", not a member of
+ * {Adult,Big Kid,Little Kid,Toddler,Infant,Newborn}, over the LLM's accepted "Big Kid").
+ *
+ * THE RULE IS NOW: validity outranks provenance. When `menu` + `coerce` are supplied and this
+ * field has a live accepted list, a row that coerces to an accepted member always beats one that
+ * doesn't, regardless of value_source; provenance rank only breaks ties WITHIN the same validity
+ * tier (so "a valid spec row beats a valid LLM row" still holds, and "an invalid spec row loses to
+ * a valid audience/LLM row" — the inversion #660 got wrong — now holds too). The winning row is
+ * coerced to the exact accepted member and stamped `is_enum`/`enum_valid`/`enum_accepted`/
+ * `normalized_from` — the same fields the route's own post-audit validation stamps on the LLM path
+ * — so this function's output is self-describing without waiting on that later pass. When every
+ * candidate is uncoercible, there is no valid alternative to prefer: fall back to the provenance
+ * winner exactly as before, but stamp it `enum_valid:false` (never a silent, unflagged pass) and
+ * log a greppable rejection so a knowingly-invalid value never ships quietly.
+ *
+ * NO-OP GUARANTEE: omit `menu`/`coerce`, or a field absent from the menu, or a menu entry with no
+ * `accepted` list (free-text attribute) — output is byte-identical to the provenance-only rule
+ * above. This function never invents an enum check where Amazon states none.
  */
-export function mergeDetailRowsByPrecedence<T extends { field_name: string; value_source?: string | null }>(
+export function mergeDetailRowsByPrecedence<T extends {
+  field_name: string
+  recommended_value: string
+  value_source?: string | null
+  is_enum?: boolean
+  enum_valid?: boolean
+  enum_accepted?: string[]
+  normalized_from?: string
+}>(
   rows: T[],
+  menu?: DetailMenuAttr[],
+  coerce?: EnumCoercer,
 ): T[] {
   const groups = new Map<string, { rows: T[]; bestRank: number }>()
   const order: string[] = []
@@ -226,8 +293,50 @@ export function mergeDetailRowsByPrecedence<T extends { field_name: string; valu
       out.push(...g.rows)
       continue
     }
-    // At least one stamped row: keep the FIRST row at the highest rank, drop the rest.
-    out.push(g.rows.find((r) => valueSourceRank(r.value_source) === g.bestRank)!)
+    const menuAttr = menu ? menuAttrForField(g.rows[0].field_name, menu) : undefined
+    const accepted = menuAttr?.accepted
+    if (!coerce || !accepted || accepted.length === 0) {
+      // No live enum to validate against (menu unavailable, field not on it, or free-text) —
+      // EXACT prior rule: keep the FIRST row at the highest provenance rank, drop the rest.
+      out.push(g.rows.find((r) => valueSourceRank(r.value_source) === g.bestRank)!)
+      continue
+    }
+    const spApiKey = menuAttr!.key
+    const scored = g.rows.map((r) => ({ row: r, rank: valueSourceRank(r.value_source), coerced: coerce(spApiKey, r.recommended_value, accepted) }))
+    const validPool = scored.filter((s) => s.coerced.valid)
+    if (validPool.length === 0) {
+      // No candidate coerces to an accepted member — nothing valid to prefer. Fall back to the
+      // provenance winner (unchanged pick), but NEVER ship it as a silent pass: stamp it invalid
+      // and log loudly so a hardcoded label that drifts from Amazon's enum is caught, not shipped.
+      const fallback = scored.find((s) => s.rank === g.bestRank)!
+      console.warn(JSON.stringify({
+        tag: 'ENUM_PRECEDENCE_NO_VALID_CANDIDATE', field: g.rows[0].field_name, spApiKey, accepted,
+        candidates: scored.map((s) => ({ source: s.row.value_source ?? null, value: s.row.recommended_value })),
+      }))
+      out.push({ ...fallback.row, is_enum: true, enum_valid: false, enum_accepted: fallback.coerced.accepted } as T)
+      continue
+    }
+    // Best VALID candidate wins — provenance rank only breaks ties within the valid pool (first
+    // occurrence on a tie, exactly like the no-menu rule above).
+    let best = validPool[0]
+    for (const s of validPool) if (s.rank > best.rank) best = s
+    for (const s of scored) {
+      if (s !== best && !s.coerced.valid) {
+        console.warn(JSON.stringify({
+          tag: 'ENUM_PRECEDENCE_REJECTED', field: g.rows[0].field_name, spApiKey,
+          rejectedSource: s.row.value_source ?? null, rejectedValue: s.row.recommended_value,
+          shippedSource: best.row.value_source ?? null, shippedValue: best.coerced.value, accepted,
+        }))
+      }
+    }
+    out.push({
+      ...best.row,
+      recommended_value: best.coerced.value,
+      is_enum: true,
+      enum_valid: true,
+      enum_accepted: best.coerced.accepted,
+      ...(best.coerced.changed ? { normalized_from: best.row.recommended_value } : {}),
+    } as T)
   }
   return out
 }

@@ -15,13 +15,18 @@
  * producer for a brand-new field is covered by construction, not by a hand-written case someone has
  * to remember to add.
  */
-import { describe, it, expect } from 'vitest'
-import { mergeDetailRowsByPrecedence } from './productDetailAttrs'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { mergeDetailRowsByPrecedence, type DetailMenuAttr, type EnumCoercer } from './productDetailAttrs'
+import { coerceToEnum, coerceGenderToEnum } from './productTypeDefinitions'
 
 interface Row {
   field_name: string
   recommended_value: string
   value_source?: 'spec' | 'audience' | 'ruling' | null
+  is_enum?: boolean
+  enum_valid?: boolean
+  enum_accepted?: string[]
+  normalized_from?: string
 }
 
 function row(field_name: string, recommended_value: string, value_source?: Row['value_source']): Row {
@@ -124,5 +129,180 @@ describe('mergeDetailRowsByPrecedence — the class test', () => {
     const age = out.find((r) => r.field_name === 'Age Range Description')
     expect(age?.value_source).toBe('spec')
     expect(age?.recommended_value).toBe('Kids')
+  })
+})
+
+/**
+ * VALIDITY OUTRANKS PROVENANCE — defect class closed 2026-09-02, PR #660 follow-up.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * PR #660 (the test suite above) taught the merge that a stamped `value_source` outranks an
+ * unstamped LLM guess. It did NOT check whether the stamped row's value is one Amazon's live
+ * schema actually accepts — so a deterministic producer emitting a hardcoded label
+ * (`contentTruth.ts`'s `AGE_RANGE_LABEL.kids = 'Kids'`) now OUTRANKS a competing LLM row that WAS
+ * enum-accepted (the audit prompt requires "verbatim" menu members). Live: B0DP5H8QBT shipped Age
+ * Range Description="Kids" — not a member of {Adult,Big Kid,Little Kid,Toddler,Infant,Newborn} —
+ * over the LLM's accepted "Big Kid".
+ *
+ * These tests inject the REAL `coerceToEnum`/`coerceGenderToEnum` (productTypeDefinitions.ts) — the
+ * exact primitives the LLM path is already validated with — via the same adapter shape
+ * listingPipeline.ts wires in, so a pass here proves the real coercion rule, not a hand-rolled
+ * stand-in that could silently drift from the production wire.
+ */
+const realCoerce: EnumCoercer = (spApiKey, rawValue, accepted) => {
+  const enumDef = { values: accepted, names: [] as string[], deprecated: [] as string[] }
+  const isGender = spApiKey === 'department' || spApiKey === 'target_gender'
+  return (isGender ? coerceGenderToEnum(rawValue, enumDef) : null) ?? coerceToEnum(rawValue, enumDef)
+}
+
+const AGE_ACCEPTED = ['Adult', 'Big Kid', 'Little Kid', 'Toddler', 'Infant', 'Newborn']
+const ageMenu: DetailMenuAttr[] = [{ key: 'age_range_description', title: 'Age Range Description', accepted: AGE_ACCEPTED }]
+
+// Mixes the real live field (Age Range Description) with fields no current producer stamps
+// (Battery Type, Some Brand New Attribute) — same "covered by construction" guarantee the
+// provenance class test above establishes, now extended to validity.
+const GENERIC_FIELD_LIST = ['Age Range Description', 'Department', 'Fabric Type', 'Battery Type', 'Some Brand New Attribute']
+const GENERIC_ACCEPTED = ['Valid Alpha', 'Valid Beta', 'Valid Gamma']
+
+describe('mergeDetailRowsByPrecedence — validity outranks provenance (enum-validation defect class, PR #660 follow-up)', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('THE LIVE CASE (B0DP5H8QBT): spec="Kids" (not an accepted member) never outranks the LLM\'s enum-accepted "Big Kid"', () => {
+    const out = mergeDetailRowsByPrecedence(
+      [
+        row('Age Range Description', 'Big Kid'),        // unstamped LLM guess — a REAL accepted member
+        row('Age Range Description', 'Kids', 'spec'),    // contentTruth.ts's hardcoded label — NOT a member
+      ],
+      ageMenu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].recommended_value).not.toBe('Kids')       // THE bug this closes: must never ship
+    expect(out[0].recommended_value).toBe('Big Kid')
+    expect(AGE_ACCEPTED).toContain(out[0].recommended_value)
+    expect(out[0].enum_valid).toBe(true)                    // prove the branch RAN, not just the string
+    expect(out[0].is_enum).toBe(true)
+    expect(out[0].value_source).not.toBe('spec')            // spec lost SPECIFICALLY because it was invalid
+  })
+
+  it('order-independent: an invalid spec row arriving FIRST still loses to the valid LLM row', () => {
+    const out = mergeDetailRowsByPrecedence(
+      [row('Age Range Description', 'Kids', 'spec'), row('Age Range Description', 'Big Kid')],
+      ageMenu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].recommended_value).toBe('Big Kid')
+    expect(out[0].enum_valid).toBe(true)
+  })
+
+  it('NO-MENU NO-OP: omitting menu/coerce (the pre-#660-follow-up call shape) reproduces the bug exactly — proves the fix is the injected validity check, not a change to the base rule', () => {
+    const out = mergeDetailRowsByPrecedence([
+      row('Age Range Description', 'Big Kid'),
+      row('Age Range Description', 'Kids', 'spec'),
+    ])
+    expect(out[0].recommended_value).toBe('Kids')   // unfixed baseline reproduced verbatim
+    expect(out[0].enum_valid).toBeUndefined()
+  })
+
+  it('NO-OP: menu carries this field but with NO accepted list (free-text attribute) — byte-identical to the provenance-only rule', () => {
+    const menu: DetailMenuAttr[] = [{ key: 'material', title: 'Material' }]   // no `accepted`
+    const input = [row('Material', 'llm guess'), row('Material', '100% Cotton', 'spec')]
+    const out = mergeDetailRowsByPrecedence(input, menu, realCoerce)
+    expect(out).toHaveLength(1)
+    expect(out[0].recommended_value).toBe('100% Cotton')   // provenance-only pick, unchanged
+    expect(out[0].enum_valid).toBeUndefined()               // never touched — no accepted list to check
+  })
+
+  it('NO-OP: field is absent from the menu entirely — byte-identical to the provenance-only rule', () => {
+    const menu: DetailMenuAttr[] = [{ key: 'department', title: 'Department', accepted: ['Unisex'] }]
+    const input = [row('Age Range Description', 'Big Kid'), row('Age Range Description', 'Kids', 'spec')]
+    const out = mergeDetailRowsByPrecedence(input, menu, realCoerce)
+    expect(out[0].recommended_value).toBe('Kids')   // this field isn't on the menu — untouched
+    expect(out[0].enum_valid).toBeUndefined()
+  })
+
+  it.each(GENERIC_FIELD_LIST)('%s: THE CLASS TEST — an invalid spec-stamped value never ships over a valid competing row (driven generically, not hand-cased per field)', (field) => {
+    const menu: DetailMenuAttr[] = [{ key: field.toLowerCase().replace(/\s+/g, '_'), title: field, accepted: GENERIC_ACCEPTED }]
+    const out = mergeDetailRowsByPrecedence(
+      [row(field, 'Valid Beta'), row(field, 'Not An Accepted Member At All', 'spec')],
+      menu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(GENERIC_ACCEPTED).toContain(out[0].recommended_value)
+    expect(out[0].recommended_value).not.toBe('Not An Accepted Member At All')
+    expect(out[0].enum_valid).toBe(true)
+    expect(out[0].value_source).not.toBe('spec')
+  })
+
+  it.each(GENERIC_FIELD_LIST)('%s: an invalid RULING row loses to a valid AUDIENCE row even though ruling outranks audience by provenance', (field) => {
+    const menu: DetailMenuAttr[] = [{ key: 'x', title: field, accepted: GENERIC_ACCEPTED }]
+    const out = mergeDetailRowsByPrecedence(
+      [row(field, 'Valid Gamma', 'audience'), row(field, 'Not Accepted', 'ruling')],
+      menu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].recommended_value).toBe('Valid Gamma')
+    expect(out[0].value_source).toBe('audience')
+    expect(out[0].enum_valid).toBe(true)
+  })
+
+  it.each(GENERIC_FIELD_LIST)('%s: when BOTH candidates are valid, provenance still decides — spec beats a valid unstamped guess', (field) => {
+    const menu: DetailMenuAttr[] = [{ key: 'x', title: field, accepted: GENERIC_ACCEPTED }]
+    const out = mergeDetailRowsByPrecedence(
+      [row(field, 'Valid Alpha'), row(field, 'Valid Beta', 'spec')],
+      menu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].recommended_value).toBe('Valid Beta')
+    expect(out[0].value_source).toBe('spec')
+    expect(out[0].enum_valid).toBe(true)
+  })
+
+  it('the winning candidate is coerced to the canonical accepted member — a casing mismatch is snapped and normalized_from records the raw input', () => {
+    const out = mergeDetailRowsByPrecedence(
+      [row('Age Range Description', 'BIG KID', 'spec'), row('Age Range Description', 'nonsense value')],
+      ageMenu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].recommended_value).toBe('Big Kid')
+    expect(out[0].normalized_from).toBe('BIG KID')
+    expect(out[0].enum_valid).toBe(true)
+    expect(out[0].value_source).toBe('spec')   // valid spec still beats an invalid unstamped row
+  })
+
+  it('when NO candidate is coercible, the provenance winner still ships (nothing valid to prefer) but is stamped enum_valid:false and logs a greppable rejection — never a silent invalid pass', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const menu: DetailMenuAttr[] = [{ key: 'age_range_description', title: 'Age Range Description', accepted: ['Adult', 'Big Kid'] }]
+    const out = mergeDetailRowsByPrecedence(
+      [row('Age Range Description', 'Youth'), row('Age Range Description', 'Kids', 'spec')],
+      menu,
+      realCoerce,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].value_source).toBe('spec')       // provenance still picks a winner among equally-invalid rows
+    expect(out[0].recommended_value).toBe('Kids')
+    expect(out[0].enum_valid).toBe(false)          // but FLAGGED, never a silent valid-looking pass
+    expect(out[0].is_enum).toBe(true)
+    expect(out[0].enum_accepted).toEqual(['Adult', 'Big Kid'])
+    expect(warn).toHaveBeenCalled()
+    const logged = warn.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(logged).toContain('ENUM_PRECEDENCE_NO_VALID_CANDIDATE')
+  })
+
+  it('logs a greppable ENUM_PRECEDENCE_REJECTED line naming the rejected value when a valid alternative displaces an invalid higher-provenance row', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mergeDetailRowsByPrecedence(
+      [row('Age Range Description', 'Big Kid'), row('Age Range Description', 'Kids', 'spec')],
+      ageMenu,
+      realCoerce,
+    )
+    expect(warn).toHaveBeenCalled()
+    const logged = warn.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(logged).toContain('ENUM_PRECEDENCE_REJECTED')
+    expect(logged).toContain('Kids')
   })
 })
