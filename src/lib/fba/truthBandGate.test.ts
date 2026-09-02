@@ -265,7 +265,14 @@ describe('THE SEVEN STRINGS — pinned', () => {
     expect(byScope.BB).toBe('THE CEO Business B*tch Graphic Casual | Long Sleeve Pullover Fall Crewneck')
     expect(byScope.BCS).toBe('THE CEO Billionare Coming Soon Sweatshirt | Long Sleeve Pullover Crewneck')
     expect(byScope.DQ).toBe("THE CEO Don't Quit Sweatshirt | Long Sleeve Pullover Crewneck Gift Set")
-    expect(byScope.ED).toBe('THE CEO Entrepreneur Definition Sweatshirt | Graphic Sweatshirts Pullover')
+    // ED changed on purpose (garment-repetition defect class, 2026-09-02): "Graphic Sweatshirts
+    // Pullover" itself named the sweatshirt class twice ("Sweatshirts" + "Pullover", the same
+    // defect class as the live "Funny Work Shirts Shirt" / "Graphic Top Tshirt" specimens this fix
+    // closes) and only shipped because `hasRedundantGarmentMention`'s adjacency exemption wrongly
+    // let it through. With that closed, the additive search backtracks past the redundant candidate
+    // to the next truthful one at the SAME length (73 chars, still 70-75) — a content correction,
+    // not a length regression.
+    expect(byScope.ED).toBe('THE CEO Entrepreneur Definition Sweatshirt | Graphic Sweatshirts Crewneck')
     expect(byScope.HD).toBe('THE CEO Hustle Definiton Sweatshirt | Long Sleeve Pullover Fall Crewneck')
     expect(byScope.MH).toBe('THE CEO Mother Hustler Hoodie | Long Sleeve Hooded Sweatshirt Cozy Gift')
   })
