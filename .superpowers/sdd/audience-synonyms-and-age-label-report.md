@@ -1,13 +1,14 @@
 # Audience synonyms + derived age label — report
 
 ## Status
-Fixed, tested, pushed. No merge/deploy/Amazon push performed. Worked exclusively in
-`C:\Users\Admin\AppData\Local\Temp\fba-wt-audage` (branch
+Fixed, tested, pushed, PR open, CI green. No merge/deploy/Amazon push performed. Worked
+exclusively in `C:\Users\Admin\AppData\Local\Temp\fba-wt-audage` (branch
 `fix/audience-synonyms-and-derived-age-label`); `/tmp/fba-portal` and sibling worktrees untouched.
 
-- PR: (filled in after push — see below)
-- Final commit: (filled in after push)
-- CI on final commit: (filled in after `gh pr checks`)
+- PR: https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/pull/663
+- Final commit: `720903ce4b1a3a72ec6ad7a879d612900e8edb1e`
+- CI on final commit: `build` check — SUCCESS, 1m46s
+  (https://github.com/simpliolabs/Amazon-packing-Slip-with-Images/actions/runs/33677811765/job/100406786654)
 
 **Worktree note:** the branch was created from `main`, but local `main` was one commit behind
 `origin/main` — missing exactly PR #662 (`74ef17f`), which the brief's Fix 1 section is built on
