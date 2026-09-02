@@ -98,18 +98,58 @@ export const APPAREL_BRAND_RE = /\b(?:pro\s?club|gild[ae]n|guildan|softstyle|hea
 export const GARMENT_SURFACE_RE = /\b(?:t[-\s]?shirts?|tees?|tshirts?|shirts?|apparel|tops?|clothing|hoodies?|sweatshirts?|garments?)\b/i
 
 /** Every garment noun the lexicon knows; longer multi-word forms FIRST so "hooded sweatshirt" /
- *  "tank top" match as one noun. `crewnecks?` is the one-word sweatshirt noun ("crew neck" two
- *  words is a neck style and not a noun). */
-const GARMENT_NOUN_RE = /\b(?:hooded[\s-]?sweatshirts?|tank[\s-]?tops?|t[\s-]?shirts?|tshirts?|tees?|shirts?|tops?|sweatshirts?|crewnecks?|pullovers?|hoodies?|hoodys?|hooded|jerseys?|tanks?|polos?|dress(?:es)?|sweaters?|jackets?|onesies?|bodysuits?|rompers?|leggings)\b/gi
+ *  "tank top" / "tee shirt" match as one noun. `crewnecks?` is the one-word sweatshirt noun ("crew
+ *  neck" two words is a neck style and not a noun).
+ *
+ *  `tee[\s-]?shirts?` (garment-repetition defect class, 2026-09-02): "Tee Shirt" is the two-WORD
+ *  spelling of the tee noun — SELLER_PROFILE §3's pinned "noun ×2" gold ("Tee Shirt | … TShirt") —
+ *  and belongs in this table exactly like "tank top" and "hooded sweatshirt" already do: a genuine
+ *  single lexical item gets ONE regex alternative, matched as ONE token, not left for a downstream
+ *  heuristic to guess at. Previously "Tee"+"Shirt" were TWO separate matches that `hasRedundantGarmentMention`
+ *  merged back into one mention via an adjacency proxy ("same class, ≤1 char apart ⇒ compound") —
+ *  a heuristic that cannot tell a real two-word noun from an ACCIDENTAL collision of two distinct
+ *  same-class words ("Shirts Shirt", "Top Tshirt" — both shipped live, see that function's doc).
+ *  Structurally recognizing the one genuine compound here is what lets that proxy be deleted. */
+export const GARMENT_NOUN_RE = /\b(?:hooded[\s-]?sweatshirts?|tank[\s-]?tops?|t[\s-]?shirts?|tshirts?|tee[\s-]?shirts?|tees?|shirts?|tops?|sweatshirts?|crewnecks?|pullovers?|hoodies?|hoodys?|hooded|jerseys?|tanks?|polos?|dress(?:es)?|sweaters?|jackets?|onesies?|bodysuits?|rompers?|leggings)\b/gi
 
-/** A matched noun → its garment class. `crewneck` is its own class: a crew neck contradicts a hood. */
-const garmentNounClass = (m: string): string => {
+/** A matched noun → its garment class. `crewneck` is its own class: a crew neck contradicts a hood.
+ *  `teeshirts?` folds the new "Tee Shirt" compound match (flattened, no space/hyphen) onto the SAME
+ *  'tee' class every other tee spelling already resolves to. */
+export const garmentNounClass = (m: string): string => {
   const k = m.toLowerCase().replace(/[\s-]+/g, '')
-  if (/^(?:t?shirts?|tees?|tops?)$/.test(k)) return 'tee'
+  if (/^(?:t?shirts?|tees?|tops?|teeshirts?)$/.test(k)) return 'tee'
   if (/^(?:sweatshirts?|pullovers?)$/.test(k)) return 'sweatshirt'
   if (/^crewnecks?$/.test(k)) return 'crewneck'
   if (/^(?:hoodies?|hoodys?|hooded|hoodedsweatshirts?)$/.test(k)) return 'hoodie'
   return k.replace(/s$/, '')
+}
+
+/**
+ * THE VOCABULARY, AS DATA — every concrete surface form `GARMENT_NOUN_RE`/`garmentNounClass` is
+ * claimed to fold onto one garment CLASS, keyed by that class. NOT the same table as
+ * `CLASS_DISPLAY_NOUNS` below (that one is prompt copy — singular, minimal, LLM-facing); this one
+ * exists so the fold's OWN CLAIM is machine-checkable rather than merely asserted in a comment.
+ *
+ * THIS IS THE EXTENSION POINT (garment-repetition defect class, 2026-09-02). A future alias — a new
+ * plural, a hyphenated or glued spelling, a brand-new synonym — gets added HERE, once. Two things
+ * happen automatically the moment it lands, both in `garmentRepetitionClass.test.ts`, neither
+ * hand-maintained:
+ *   1. a RECOGNITION check confirms `GARMENT_NOUN_RE` actually matches it and `garmentNounClass`
+ *      folds it to the class this table claims — so an alias added here without also updating the
+ *      regex/fold fails LOUDLY instead of silently not-matching;
+ *   2. an ENUMERATION check builds every ORDERED PAIR of distinct aliases within a class, drops the
+ *      pair into one title segment (adjacent and separated), and asserts `hasRedundantGarmentMention`
+ *      catches it — so a same-class alias pair can never again ship as an unflagged repeat, the way
+ *      "Funny Work Shirts" + "Shirt" and "Top" + "Tshirt" both did in production on 2026-09-02.
+ *
+ * Every entry must be a string `GARMENT_NOUN_RE` matches whole-word today; that is itself asserted
+ * (recognition check 1 above), so this table can never silently drift out of sync with the regex.
+ */
+export const GARMENT_NOUN_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  tee: ['Shirt', 'Shirts', 'Tee', 'Tees', 'Top', 'Tops', 'Tshirt', 'Tshirts', 'T-Shirt', 'T Shirt', 'Tee Shirt', 'Tee-Shirt', 'TeeShirt'],
+  sweatshirt: ['Sweatshirt', 'Sweatshirts', 'Pullover', 'Pullovers'],
+  crewneck: ['Crewneck', 'Crewnecks'],
+  hoodie: ['Hoodie', 'Hoodies', 'Hoody', 'Hoodys', 'Hooded', 'Hooded Sweatshirt', 'Hooded-Sweatshirt'],
 }
 const TEE_CLASSES: ReadonlySet<string> = new Set(['tee'])
 const SWEATSHIRT_CLASSES: ReadonlySet<string> = new Set(['sweatshirt', 'crewneck'])
@@ -685,19 +725,34 @@ export function garmentGroupsIn(text: string): Set<string> {
 }
 
 /**
- * Does TEXT restate the SAME garment NOUN CLASS via more than one, non-adjacent mention (live
- * B0DP5H8QBT, 2026-08-23: "T-Shirt Graphic Tee Shirt" names the tee class three times in one
- * segment)? Adjacent matches of the SAME class — "Tee" immediately followed by "Shirt" — are ONE
- * mention, the compound noun `garmentNoun.ts`'s `SHIRT_BASE.display` already treats as a single
- * garment name ("Tee Shirt"); a SEPARATE, non-adjacent match of that same class elsewhere in the
- * text is a second, redundant one.
+ * Does TEXT restate the SAME garment NOUN CLASS via more than one mention (live B0DP5H8QBT,
+ * 2026-08-23: "T-Shirt Graphic Tee Shirt" names the tee class three times in one segment; live
+ * B0DSCDZC6K, 2026-09-02: "Funny Work Shirts Shirt" and "Graphic Top Tshirt" each name it twice)?
+ *
+ * NO ADJACENCY EXEMPTION (garment-repetition defect class, 2026-09-02 — this function's own PRIOR
+ * version had one: "same class, ≤1 char apart ⇒ collapse to one mention", meant to let "Tee"+"Shirt"
+ * read as the single compound "Tee Shirt"). That heuristic was a POSITION proxy standing in for a
+ * VOCABULARY fact, and a proxy cannot tell a genuine two-word noun from an ACCIDENTAL collision of
+ * two distinct same-class words that simply happen to sit next to each other: "Funny Work Shirts
+ * Shirt" (plural then singular of the SAME word) and "Graphic Top Tshirt" (two DIFFERENT tee-class
+ * nouns) both shipped live because both are "same class, adjacent" exactly like "Tee Shirt" is. The
+ * cure moves the compound recognition to where it structurally belongs: `GARMENT_NOUN_RE` now has
+ * `tee[\s-]?shirts?` as its own multi-word alternative (the same tier as `tank[\s-]?tops?` and
+ * `hooded[\s-]?sweatshirts?`), so "Tee Shirt" is captured as ONE regex match, not two — this
+ * function never sees it as two mentions to begin with, and needs no position-based exemption for
+ * it. With the one true compound handled at the tokenizer, ANY two SEPARATE matches of the same
+ * class — adjacent or not, a plural-of-the-same-word or a different alias entirely — are what they
+ * plainly are: two mentions of one concept. Every surface variant this repo's vocabulary knows
+ * (plural, hyphen, glued, alias) is caught by construction, because it is caught by the SAME fold
+ * `phraseTruthVerdict`'s wrong-garment-noun rule (a) and every other truth check in this file share
+ * — no second table, and nothing to keep in sync by hand when a new alias is added to it.
  *
  * DELIBERATELY `garmentNounClass`, NOT the coarser `garmentGroup` — "Pullover" and "Crewneck" fold to
  * the SAME group (`garmentGroup('crewneck') === 'sweatshirt'`) for the UNRELATED one-class-per-title
  * rule, but they are the PO's own sanctioned noun-x2 VARIETY, not a repeat ("Long Sleeve Pullover Fall
  * Crewneck" is a pinned gold pattern — see `truthBandGate.test.ts`'s seven strings). `garmentNounClass`
  * keeps them apart (`'sweatshirt'` vs `'crewneck'`) while still collapsing every true respelling of the
- * SAME word ("T-Shirt"/"TShirt"/"Tee"/"Shirt"/"Top" all → `'tee'`).
+ * SAME word ("T-Shirt"/"TShirt"/"Tee"/"Tee Shirt"/"Shirt"/"Top" all → `'tee'`).
  *
  * SAME VOCABULARY, NO SECOND TABLE: this reuses `GARMENT_NOUN_RE`/`garmentNounClass` — the exact
  * per-noun classification `phraseTruthVerdict`'s wrong-garment-noun rule (a) already keys off — so
@@ -707,18 +762,10 @@ export function hasRedundantGarmentMention(text: string): boolean {
   const matches = [...(text ?? '').matchAll(GARMENT_NOUN_RE)]
   if (matches.length < 2) return false
   const seenClasses = new Set<string>()
-  let lastClass: string | null = null
-  let lastEnd = -1
   for (const m of matches) {
     const cls = garmentNounClass(m[0])
-    const start = m.index ?? 0
-    const adjacent = cls === lastClass && start - lastEnd <= 1
-    if (!adjacent) {
-      if (seenClasses.has(cls)) return true
-      seenClasses.add(cls)
-    }
-    lastClass = cls
-    lastEnd = start + m[0].length
+    if (seenClasses.has(cls)) return true
+    seenClasses.add(cls)
   }
   return false
 }
