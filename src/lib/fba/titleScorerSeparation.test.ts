@@ -87,7 +87,7 @@ describe('MEASURE — the current separation, printed as fact', () => {
       `SEPARATION MARGIN=${worstGold - bestAttack}  (contract: > 0)\n` +
       `anagram: gold=${ag} twin=${at} margin=${ag - at}  (contract: > 0)\n`,
     )
-    expect(golds).toHaveLength(9)
+    expect(golds).toHaveLength(10) // 9 + the 2026-09-02 B0DP5H8QBT attribute-truth gold (PR #663)
   })
 })
 

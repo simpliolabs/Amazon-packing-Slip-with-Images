@@ -64,6 +64,19 @@ export const SEED_GOLD_TITLES: readonly string[] = [
 
   "THE CEO Darlin' T-Shirt, Comfort Colors Graphic Tee for Women, Rodeo Shirt",     // 74 — DOUBLE comma, three segments
   'THE CEO The Rod Father T-Shirt Funny Fishing Mens Graphic Tee for Men',          // 69 — UNDER our 70 floor (see note)
+  // PO GOLD 2026-09-02 (verbatim, listing B0DP5H8QBT — the youth-tee "Oversized" attribute-truth
+  // fix, PR #663). Handed as the correction for a shipped title that ASSERTED a false product
+  // attribute ("Kids Oversized Tshirts Crew Neck" — the blank's own fit is 'Classic', never
+  // 'Oversized'). Three shape rulings live in this one gold, alongside the attribute-truth fix
+  // itself, and none may be "corrected" away:
+  //   1. The garment noun follows the design name DIRECTLY — "Don't Quit Tee Shirt", not after a
+  //      modifier ("Don't Quit Motivational T-Shirt"). The modifier moved to the RIGHT segment.
+  //   2. The right segment is a READABLE PHRASE carrying a preposition — "Motivational T-shirt for
+  //      Kids & Children" — not stacked keyword fragments ("Kids Oversized Tshirts Crew Neck").
+  //   3. The garment concept repeats ACROSS the pipe — "Tee Shirt" (left) … "T-shirt" (right) — and
+  //      the PO ruled 2026-09-02 this is FINE. Do NOT add a rule against cross-pipe repetition; the
+  //      existing noun ×2 doctrine (see the alligator/Later-Gator golds above) already covers it.
+  'THE CEO Don\'t Quit Tee Shirt | Motivational T-shirt for Kids & Children', // 71 — PO gold, attribute-truth fix
 ] as const
 
 /*

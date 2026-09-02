@@ -15,19 +15,20 @@ import {
 
 describe('measureGoldShape', () => {
   it('measures the seed corpus rather than asserting a shape', () => {
-    // The seed is the seller's verbatim 2026-08-11 list (nine titles, streamed in one sitting).
-    // Their own range is 69–78 — one UNDER our 70 floor, one OVER Amazon's 75 — so the tests pin
-    // the MEASURED median, not the hand-written band.
+    // The seed is the seller's verbatim 2026-08-11 list (nine titles, streamed in one sitting) PLUS
+    // the 2026-09-02 B0DP5H8QBT attribute-truth gold (PR #663) — ten titles total.
     const s = measureGoldShape(SEED_GOLD_TITLES)
-    expect(s.count).toBe(9)
+    expect(s.count).toBe(10)
     expect(s.medianLen).toBe(74)
-    expect(s.pipedShare).toBe(0.56)                 // 5 of 9 — the pipe is common, NOT mandatory
-    expect(s.leftWordsFrom).toBe(5)                 // left stats from the piped subset only
-    expect(s.medianLeftWords).toBe(6)               // 4 / 6 / 6 / 7 / 10 piped lefts
+    expect(s.pipedShare).toBe(0.6)                  // 6 of 10 — the pipe is common, NOT mandatory
+    expect(s.leftWordsFrom).toBe(6)                 // left stats from the piped subset only
+    expect(s.medianLeftWords).toBe(6)               // 4 / 6 / 6 / 6 / 7 / 10 piped lefts
     // 7, NOT the corpus maximum of 10. The seller's 2026-08-12 revision of gold #7 (one word out of
     // the identity, 8 -> 7) flipped `trimmedMax`'s outlier test — 10 > 7+2 is true where 10 > 8+2 was
     // not — so the ceiling dropped to the runner-up and now EXCLUDES gold #4, a member of the very
     // corpus it is measured from. Pinned as a defect, not a target: goldCorpusSelfTest 'LIVE DEFECT'.
+    // The new gold's own left segment is 6 words ("THE CEO Don't Quit Tee Shirt") — inside the
+    // ceiling, so it does not move this number.
     expect(s.maxLeftWords).toBe(7)
   })
 
@@ -35,13 +36,15 @@ describe('measureGoldShape', () => {
     const s = measureGoldShape(SEED_GOLD_TITLES)
     // 68-75 since the seller's 2026-08-12 revision: the over-cap 78 is gone, so nothing in the
     // corpus is unshippable. One gold still sits under OUR 70 floor — which is why that floor goes.
+    // The 2026-09-02 gold (71) sits inside this range and moves neither end.
     expect([s.lenMin, s.lenMax]).toEqual([68, 75])
-    expect(s.sepMix).toEqual({ pipe: 5, comma: 2, plain: 2 }) // the pipe is common, never mandatory
-    expect(s.tails.length).toBe(5)                            // every pipe-right, verbatim
+    expect(s.sepMix).toEqual({ pipe: 6, comma: 2, plain: 2 }) // the pipe is common, never mandatory
+    expect(s.tails.length).toBe(6)                            // every pipe-right, verbatim
     expect(s.tails[4]).toBe('Funny Comfort Colors Shirt for Women')
-    expect(s.tailClass).toEqual({ search: 2, brand: 3, specOnly: 0 })  // ZERO spec-only tails, ever
-    expect(s.garment).toEqual({ twice: 8, once: 1 })          // adjacency-collapsed; Espana is the 1
-    expect(s.audienceMix).toEqual({ gendered: 7, inclusive: 0, none: 2 })
+    expect(s.tails[5]).toBe('Motivational T-shirt for Kids & Children')
+    expect(s.tailClass).toEqual({ search: 3, brand: 3, specOnly: 0 })  // ZERO spec-only tails, ever
+    expect(s.garment).toEqual({ twice: 9, once: 1 })          // adjacency-collapsed; Espana is the 1
+    expect(s.audienceMix).toEqual({ gendered: 7, inclusive: 0, none: 3 })
   })
 
   it('an ALL-UNPIPED corpus falls back to whole-title counts rather than reporting 0', () => {

@@ -3,6 +3,7 @@ import {
   collapseRepeatedWords, enforceMoneyTail, enforceTitleBand, pickDistinctGarmentForm,
   scrubUnspecdGarmentClaims, settleTruthBand, settleTitle, titleHasDuplicateConcept, titleHasPunctuationDefect,
   verdictForAssembledTitle, TITLE_BAND_LO, TITLE_BAND_HI, TITLE_SHIP_FLOOR, type TitleBandCtx, type SettleTitleCtx,
+  ATTRIBUTE_CLAIM_STATUS, FIT_CLAIM_BARE_WORDS, FIT_CLAIM_SUFFIX_WORDS, FIT_WORD_CANON,
 } from './titleBand'
 import type { PhraseTruthCtx } from './contentTruth'
 import { isForeignToDesign } from './designScope'
@@ -412,6 +413,135 @@ describe('scrubUnspecdGarmentClaims', () => {
     const twice = scrubUnspecdGarmentClaims(once.title, CC_SPEC)
     expect(twice.removed).toEqual([])
     expect(twice.title).toBe(once.title)
+  })
+})
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * ATTRIBUTE-CLAIM CLASS TEST (PR #663, 2026-09-02, live B0DP5H8QBT) — "a pool-sourced phrase
+ * carrying a product-attribute adjective is admitted to the title without checking it against the
+ * resolved blank's own attribute fields". Closes the class, not just the one word: table-driven off
+ * `FIT_CLAIM_BARE_WORDS`/`FIT_CLAIM_SUFFIX_WORDS` (titleBand.ts) so a word added to either array is
+ * automatically exercised here with no new test code, and every case asserts on `r.removed` — the
+ * net's own DECISION record — never merely on the word's absence from `r.title` (four fixes this
+ * repo shipped green while reproducing a failure's vocabulary but not its shape).
+ */
+describe('ATTRIBUTE CLAIMS ARE SPEC-GROUNDED, NOT A WORD BLOCKLIST (PR #663, 2026-09-02)', () => {
+  // The exact resolved spec for B0DP5H8QBT's blank (migration 058, style_code 64000B): a Gildan
+  // youth tee. `fit='Classic'` — nothing in blank_specs or any migration ever states 'oversized'.
+  const KIDS_64000B_SPEC = { fit: 'Classic', weightNote: 'lightweight 4.5 oz ring-spun' }
+
+  it('THE LIVE CASE: a fit=Classic kids blank ships WITHOUT the pool-leaked "Oversized" and KEEPS the true "Crew Neck"', () => {
+    const live = "THE CEO Don't Quit Motivational T-Shirt | Kids Oversized Tshirts Crew Neck"
+    expect(live.length).toBe(74) // the exact live specimen, character-for-character
+    const r = scrubUnspecdGarmentClaims(live, KIDS_64000B_SPEC)
+    // The DECISION tag — the net must have actually decided to remove it, not merely ship a string
+    // that happens not to contain the word.
+    expect(r.removed).toEqual(['Oversized'])
+    expect(r.title).not.toMatch(/oversized/i)
+    expect(r.title).toContain('Crew Neck') // the TRUE attribute survives untouched
+    expect(r.title).toBe("THE CEO Don't Quit Motivational T-Shirt | Kids Tshirts Crew Neck")
+    expect(r.title.length).toBe(64)
+  })
+
+  it('THE POSITIVE CONTROL: a blank whose OWN fit states it MAY use the word — spec-grounding, not censorship', () => {
+    const oversizedBlank = { fit: 'Oversized' } // a hypothetical future blank_specs row, zero code change needed
+    const r = scrubUnspecdGarmentClaims('THE CEO Street Style Oversized Tee for Women', oversizedBlank)
+    expect(r.removed).toEqual([]) // decision: nothing removed
+    expect(r.title).toContain('Oversized')
+    expect(r.title.length).toBe('THE CEO Street Style Oversized Tee for Women'.length)
+  })
+
+  it('containment, not equality: a multi-word fit value still backs each single claimed word (the fitOk robustness fix)', () => {
+    const compoundBlank = { fit: 'Oversized Boxy' } // hypothetical compound catalog value
+    const r1 = scrubUnspecdGarmentClaims('THE CEO Street Oversized Tee', compoundBlank)
+    expect(r1.removed).toEqual([])
+    const r2 = scrubUnspecdGarmentClaims('THE CEO Street Boxy Tee', compoundBlank)
+    expect(r2.removed).toEqual([])
+  })
+
+  it('the class test: EVERY bare fit word the blank does NOT state is refused (table-driven off FIT_CLAIM_BARE_WORDS)', () => {
+    const REFUSED_BASE = 'THE CEO Design Name Tee for Kids'
+    for (const word of FIT_CLAIM_BARE_WORDS) {
+      const cap = word[0].toUpperCase() + word.slice(1)
+      const title = `THE CEO Design Name ${cap} Tee for Kids`
+      const r = scrubUnspecdGarmentClaims(title, KIDS_64000B_SPEC) // fit=Classic; none of these words is 'classic'
+      expect(r.removed, `expected "${word}" to be refused against fit=Classic`).toHaveLength(1)
+      expect(r.title.toLowerCase(), `"${word}" leaked into the shipped title`).not.toContain(word)
+      expect(r.title).toBe(REFUSED_BASE)
+      expect(r.title.length).toBe(REFUSED_BASE.length)
+    }
+  })
+
+  it('the class test: EVERY bare fit word the blank DOES state is admitted (table-driven off FIT_CLAIM_BARE_WORDS)', () => {
+    for (const word of FIT_CLAIM_BARE_WORDS) {
+      const canon = FIT_WORD_CANON[word] ?? word
+      const cap = word[0].toUpperCase() + word.slice(1)
+      const title = `THE CEO Design Name ${cap} Tee for Kids`
+      // spec.fit stores the CANONICAL form — the realistic DB shape (a PO types 'Oversized', never
+      // the informal 'Oversize') — proving the word's own claim normalizes to match it.
+      const spec = { fit: canon[0].toUpperCase() + canon.slice(1) }
+      const r = scrubUnspecdGarmentClaims(title, spec)
+      expect(r.removed, `expected "${word}" to be admitted against fit=${spec.fit}`).toEqual([])
+      expect(r.title).toBe(title)
+      expect(r.title.length).toBe(title.length)
+    }
+  })
+
+  it('the class test: EVERY suffix ("<word> Fit") the blank does NOT state is refused (table-driven off FIT_CLAIM_SUFFIX_WORDS)', () => {
+    const RETAIL_SPEC = { fit: 'Retail' } // the real BC3001 catalog value — none of these words
+    const REFUSED_BASE = 'THE CEO Design Name Tee for Kids'
+    for (const word of FIT_CLAIM_SUFFIX_WORDS) {
+      const cap = word[0].toUpperCase() + word.slice(1)
+      const title = `THE CEO Design Name ${cap} Fit Tee for Kids`
+      const r = scrubUnspecdGarmentClaims(title, RETAIL_SPEC)
+      expect(r.removed, `expected "${word} Fit" to be refused against fit=Retail`).toHaveLength(1)
+      expect(r.title).toBe(REFUSED_BASE)
+      expect(r.title.length).toBe(REFUSED_BASE.length)
+    }
+  })
+
+  it('the class test: EVERY suffix ("<word> Fit") the blank DOES state is admitted (table-driven off FIT_CLAIM_SUFFIX_WORDS)', () => {
+    for (const word of FIT_CLAIM_SUFFIX_WORDS) {
+      const cap = word[0].toUpperCase() + word.slice(1)
+      const title = `THE CEO Design Name ${cap} Fit Tee for Kids`
+      const spec = { fit: cap }
+      const r = scrubUnspecdGarmentClaims(title, spec)
+      expect(r.removed, `expected "${word} Fit" to be admitted against fit=${cap}`).toEqual([])
+      expect(r.title).toBe(title)
+      expect(r.title.length).toBe(title.length)
+    }
+  })
+
+  it('bare ambiguous words stay UNMATCHED without "Fit": ("Loose Cannon", "Fitted for the role") never lose real design vocabulary', () => {
+    // Sibling of the existing "Classic Car Shirt"/"Relaxed Weekend" proof above — every SUFFIX word
+    // is deliberately excluded from the bare alternation for the same false-positive reason.
+    for (const word of FIT_CLAIM_SUFFIX_WORDS) {
+      const cap = word[0].toUpperCase() + word.slice(1)
+      const title = `THE CEO ${cap} Cannon Tee for Kids` // bare, no "Fit" suffix
+      const r = scrubUnspecdGarmentClaims(title, KIDS_64000B_SPEC)
+      expect(r.removed, `bare "${word}" (no "Fit") must NOT be treated as a claim`).toEqual([])
+      expect(r.title).toBe(title)
+      expect(r.title.length).toBe(title.length)
+    }
+  })
+
+  it('ATTRIBUTE_CLAIM_STATUS is the compile-time exhaustiveness gate: every BlankSpec attribute field is a DELIBERATE, documented decision', () => {
+    const entries = Object.entries(ATTRIBUTE_CLAIM_STATUS)
+    // Documents the full field set this registry currently classifies. tsc --noEmit is the REAL
+    // enforcement (a field added to BlankSpec without a matching key here fails to compile — see
+    // the registry's own doc comment in titleBand.ts) — this assertion is a runtime double-check
+    // that every classified field carries a real, non-empty justification, never a silent gap.
+    expect(entries.map(([k]) => k).sort()).toEqual(
+      ['dye', 'fit', 'fitToSize', 'material', 'neck', 'sleeve', 'stretch', 'weightNote'].sort(),
+    )
+    for (const [field, s] of entries) {
+      if (s.status === 'net') continue // 'fit' — judged by scrubUnspecdGarmentClaims itself, proven above
+      if (s.status === 'legacy-net') {
+        expect(s.note?.length, `${field}'s legacy-net status needs a real note`).toBeGreaterThan(0)
+      } else {
+        expect(s.reason?.length, `${field}'s unclaimed status needs a real reason, not a silent gap`).toBeGreaterThan(0)
+      }
+    }
   })
 })
 
