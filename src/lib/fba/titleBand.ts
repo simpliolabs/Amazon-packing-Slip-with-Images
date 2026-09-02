@@ -42,6 +42,10 @@ import { BASIC_COLOR_WORDS } from './designName'
 // below respects that constraint deliberately — see its own doc.
 import { classifyTail, measureGoldShape, SEED_GOLD_TITLES, type GoldShape } from './poGoldCorpus'
 import { hasTrademark } from './trademarkGuard'
+// TYPE-ONLY (erased at compile time, no runtime import, no cycle risk even if one existed): the
+// ATTRIBUTE_CLAIM_STATUS compile-time gate below needs the REAL BlankSpec shape, not the ad hoc
+// `{fit?, weightNote?}` object scrubUnspecdGarmentClaims has always taken — see that gate's doc.
+import type { BlankSpec } from './blankSpecs'
 
 /** ONE source per bound — never a new magic number (generation-invariants INVARIANT 5). */
 export const TITLE_BAND_LO = CONTENT_CONTRACT.title.goldenBandLo // 70
@@ -656,22 +660,89 @@ export function collapseRepeatedWords(
 /** The weight classes a title can CLAIM. A claim is allowed only when the blank's own weightNote
  *  contains that word; with no spec the rule is "claim NO weight" (SELLER_PROFILE §2). */
 const WEIGHT_CLAIM_RE = /\b(heavyweight|midweight|lightweight)\b/gi
-/** Fit claims as the explicit "<X> Fit" phrase (both orders are covered by the pad side; the claim
- *  surface the LLM emits is "<X> Fit"). Bare "classic"/"relaxed" are NOT matched — "Classic Car
- *  Shirt" is a design, not a fit claim. Standalone "oversized" IS matched: §2's rule is that it
- *  never appears in visible copy unless the blank is actually oversized. */
-const FIT_CLAIM_RE = /\b(relaxed|classic|slim|regular|oversized|boxy)\s+fit\b|\boversized\b/gi
 
 /**
- * SPEC-TRUTH NET (2026-08-04). Remove garment fabric-weight and fit CLAIMS that the blank spec does
- * not back. LIVE DEFECT that forced this: the first fresh title regen after the POOL_STRATA flip on
- * B0GF49RLDL shipped "THE CEO Cupid Valentine Women's Heavyweight Cotton T-Shirt Classic Fit Crew" —
- * "Heavyweight" arrived FROM THE SEARCH POOL ("comfort colors heavyweight t shirt" is a live pool
- * row: the market calls Comfort Colors heavyweight, but the PO-confirmed spec says MIDWEIGHT
- * 6.1 oz) and "Classic Fit" contradicts the blank's Relaxed fit. The pad half of this module was
- * already facts-only; this is the missing REMOVAL half of the same rule, so a pool-leaked or
- * hallucinated claim cannot survive to the shipped bytes. Chars freed here are re-fillable by
- * enforceTitleBand's facts-only pad, which runs after.
+ * ATTRIBUTE-CLAIM FIELD REGISTRY (PR #663, 2026-09-02, live B0DP5H8QBT: 12x Gildan 64000B youth
+ * tees shipped "…Kids Oversized Tshirts Crew Neck" — `blank_specs` states `fit='Classic'` for
+ * 64000B, NOWHERE does any blank/migration state "oversized"; the word arrived from the KEYWORD
+ * POOL, i.e. market/search vocabulary promoted to a product claim. THE SAME CLASS `WEIGHT_CLAIM_RE`
+ * above already cures for fabric weight — `FIT_CLAIM_RE` below already existed and already catches
+ * bare "oversized" for exactly this reason (see `scrubUnspecdGarmentClaims`'s tests), but its list
+ * was six words (relaxed/classic/slim/regular/oversized/boxy) — "fitted"/"cropped"/"baggy"/
+ * "tapered"/"loose" all escaped it. This registry is the compile-time promise that the NEXT gap is
+ * never silent again.
+ *
+ * WHY A COMPILE-TIME GATE AND NOT A RUNTIME ONE. `BlankSpec` is a TypeScript interface — it has no
+ * runtime shape to `Object.keys()` over, so a vitest assertion can never observe "a field was added
+ * and nobody classified it". The mapped type below (`{ [K in BlankAttributeField]: ... }`) is what
+ * makes that observable: add a field to `BlankSpec` (blankSpecs.ts) and DON'T add a matching key to
+ * `ATTRIBUTE_CLAIM_STATUS`, and `tsc --noEmit` fails with "Property '<field>' is missing" — the
+ * predicate can never silently go stale for a field nobody consulted, which is exactly how "fit"
+ * itself went unread for two weeks (`PhraseTruthCtx.spec` widened to carry it 2026-08-22; nothing
+ * READ it until this file's original six-word FIT_CLAIM_RE, and even that stayed a closed list).
+ *
+ * Every field is a deliberate decision, never a silent omission:
+ *   - 'net'        — this module judges it (today: `fit`, via FIT_CLAIM_RE/fitOk below).
+ *   - 'legacy-net' — judged by a DIFFERENT existing mechanism, named in `note`, left untouched here
+ *                    to avoid regression risk on a working, separately-tested net.
+ *   - 'unclaimed'  — no evidence yet of a live/plausible pool-vocabulary claim for this field;
+ *                    `reason` is mandatory so this can never be a lazy blanket exemption — the
+ *                    class-test (titleBand.test.ts) asserts every 'unclaimed' entry carries one.
+ */
+type BlankIdentityField = 'brand' | 'brandInCopy' | 'unisex' | 'ageClass'
+export type BlankAttributeField = Exclude<keyof BlankSpec, BlankIdentityField>
+export type AttributeClaimStatus =
+  | { status: 'net' }
+  | { status: 'legacy-net'; note: string }
+  | { status: 'unclaimed'; reason: string }
+export const ATTRIBUTE_CLAIM_STATUS: { [K in BlankAttributeField]: AttributeClaimStatus } = {
+  fit: { status: 'net' },
+  weightNote: { status: 'legacy-net', note: 'WEIGHT_CLAIM_RE/weightOk immediately above pre-date this registry and stay untouched — a working, separately-tested mechanism.' },
+  sleeve: { status: 'unclaimed', reason: 'no live/plausible pool phrase seen asserting a false sleeve length; Short/Long Sleeve already ship correctly from BLANK_SPECS via the facts-only pad. Add a net here the day one is.' },
+  neck: { status: 'unclaimed', reason: 'no live/plausible pool phrase seen asserting a false neck style; Crew Neck already ships correctly from BLANK_SPECS via the facts-only pad. Add a net here the day one is.' },
+  material: { status: 'unclaimed', reason: 'no live/plausible pool phrase seen asserting a false material/fabric-type claim in the title. Add a net here the day one is.' },
+  dye: { status: 'unclaimed', reason: 'no live/plausible pool phrase seen asserting a false dye claim in the title. Add a net here the day one is.' },
+  stretch: { status: 'unclaimed', reason: 'stretch claims are already netted on prose surfaces by enforceFabricTruth (blankSpecs.ts); the title fill never emits a stretch claim today. Add a net here the day one is.' },
+  fitToSize: { status: 'unclaimed', reason: 'no live/plausible pool phrase seen asserting a false fit-to-size claim in the title. Add a net here the day one is.' },
+}
+
+/** Fit/silhouette/cut claim vocabulary. SUFFIX words double as ordinary English/design vocabulary
+ *  ("Classic Car Shirt", "Relaxed Weekend", "Let It Loose") — matched ONLY as the explicit
+ *  "<word> Fit" claim, never bare, so a design title is never mistaken for a spec assertion. BARE
+ *  words are unambiguous garment cut/fit terms (confirmed by their SEPARATE listing as backend
+ *  STYLE_CUT_WORDS in listingPipeline.ts, a different net for a different surface) — matched
+ *  standalone, the same treatment "oversized" already had. Exported so the class-test is
+ *  table-driven off THESE arrays, not a second hand-copied word list that could drift from them. */
+export const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular', 'loose'] as const
+export const FIT_CLAIM_BARE_WORDS = ['oversized', 'oversize', 'boxy', 'fitted', 'cropped', 'crop', 'baggy', 'tapered', 'taper'] as const
+const FIT_CLAIM_RE = new RegExp(
+  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\s+fit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
+)
+/** Spelling variants normalize to the canonical class word BEFORE the spec check, so a blank whose
+ *  `fit` states "Oversized" backs a claim spelled "oversize" too (and vice versa) — the truth check
+ *  is symmetric, never keyed to which exact spelling happened to match. */
+export const FIT_WORD_CANON: Readonly<Record<string, string>> = { oversize: 'oversized', crop: 'cropped', taper: 'tapered' }
+
+/**
+ * SPEC-TRUTH NET (2026-08-04, widened 2026-09-02 — see ATTRIBUTE_CLAIM_STATUS above). Remove
+ * garment fabric-weight and fit CLAIMS that the blank spec does not back. LIVE DEFECT that forced
+ * this: the first fresh title regen after the POOL_STRATA flip on B0GF49RLDL shipped "THE CEO Cupid
+ * Valentine Women's Heavyweight Cotton T-Shirt Classic Fit Crew" — "Heavyweight" arrived FROM THE
+ * SEARCH POOL ("comfort colors heavyweight t shirt" is a live pool row: the market calls Comfort
+ * Colors heavyweight, but the PO-confirmed spec says MIDWEIGHT 6.1 oz) and "Classic Fit" contradicts
+ * the blank's Relaxed fit. The pad half of this module was already facts-only; this is the missing
+ * REMOVAL half of the same rule, so a pool-leaked or hallucinated claim cannot survive to the
+ * shipped bytes. Chars freed here are re-fillable by enforceTitleBand's facts-only pad, which runs
+ * after — this net never needs its own length-refill machinery.
+ *
+ * SPEC-DRIVEN, NOT A BLOCKLIST: the accept/reject decision is always "does `spec`'s own field state
+ * this claim" (`fitOk`/`weightOk`, containment not equality — a multi-word spec value still backs a
+ * single claimed word). Recognizing WHICH words are candidate claims at all still needs an English
+ * vocabulary (there is no way to derive "oversized means a fit claim" from our own small catalog,
+ * which has never stored that value) — but a word being recognized never means it is banned: a
+ * blank whose OWN `fit` states it (the Comfort Colors 'Relaxed' row already proves this for
+ * "Relaxed Fit") ships it, and a future blank with `fit='Oversized'` makes "Oversized" true for
+ * THAT blank with zero code change (the positive-control test below proves this).
  *
  * Pure, deterministic, idempotent. `spec` null/absent = claim nothing (all weight/fit claims go).
  */
@@ -682,7 +753,10 @@ export function scrubUnspecdGarmentClaims(
   const t0 = (title || '').replace(/\s{2,}/g, ' ').trim()
   if (!t0) return { title, removed: [] }
   const weightOk = (w: string): boolean => !!spec?.weightNote && spec.weightNote.toLowerCase().includes(w.toLowerCase())
-  const fitOk = (f: string): boolean => !!spec?.fit && spec.fit.toLowerCase() === f.toLowerCase()
+  const fitOk = (raw: string): boolean => {
+    const claim = FIT_WORD_CANON[raw.toLowerCase()] ?? raw.toLowerCase()
+    return !!spec?.fit && spec.fit.toLowerCase().includes(claim)
+  }
 
   const removed: string[] = []
   let out = t0.replace(WEIGHT_CLAIM_RE, (m) => {
@@ -690,8 +764,8 @@ export function scrubUnspecdGarmentClaims(
     removed.push(m)
     return ''
   })
-  out = out.replace(FIT_CLAIM_RE, (m, fitWord: string | undefined) => {
-    const claim = fitWord ?? 'oversized' // the alternation's bare-"oversized" branch has no group
+  out = out.replace(FIT_CLAIM_RE, (m, suffixWord: string | undefined, bareWord: string | undefined) => {
+    const claim = suffixWord ?? bareWord ?? ''
     if (fitOk(claim)) return m
     removed.push(m)
     return ''

@@ -27,14 +27,14 @@ describe('MEASURE — money novelty across the corpus and the live specimens', (
       )
       return m.novelty
     }
-    console.log('\n── THE SELLER\'S NINE GOLDS ──')
+    console.log('\n── THE SELLER\'S TEN GOLDS ──') // 9 + the 2026-09-02 B0DP5H8QBT attribute-truth gold (PR #663)
     const golds = SEED_GOLD_TITLES.map((t, i) => line(`gold #${i + 1}`, t))
     console.log('\n── THE LIVE 2026-08-12 SPECIMENS (B0GVV3XL4T) ──')
     const picked = line('council PICKED (judge: 100/100)', LIVE_PICKED)
     const shipped = line('SHIPPED', LIVE_SHIPPED)
     const gold = line('PO GOLD', LIVE_GOLD)
     console.log(`\nmin(gold corpus)=${Math.min(...golds).toFixed(2)}  picked=${picked.toFixed(2)}  shipped=${shipped.toFixed(2)}  gold=${gold.toFixed(2)}\n`)
-    expect(golds).toHaveLength(9)
+    expect(golds).toHaveLength(10)
   })
 })
 
