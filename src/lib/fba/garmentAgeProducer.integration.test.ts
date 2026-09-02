@@ -288,4 +288,35 @@ describe('garment age producer — real runListingPipeline, Product Detail block
     expect(dept?.value_source).toBe('spec')
     expect(findRow(pdi, /age\s*range/i)?.recommended_value).toBe('Kids')
   }, 30_000)
+
+  // ENUM-VALIDITY defect class (closed 2026-09-02, this task's own follow-up to the precedence test
+  // above): every OTHER test in this file declares AGE_RANGE_MENU_ATTR.accepted with 'Kids' (plural)
+  // AS a member, so 'Kids' always wins on validity too and none of them can reproduce the actual live
+  // symptom. Amazon's real apparel age_range_description enum has no 'Kids' (plural) member — this
+  // test uses that REALISTIC accepted list to prove the pipeline now ships the LLM's valid 'Big Kid'
+  // instead of the deterministic-but-invalid 'Kids', end-to-end through the real runListingPipeline,
+  // not just the isolated mergeDetailRowsByPrecedence unit (productDetailAttrs.test.ts).
+  it('THE REAL LIVE ENUM (no "Kids" plural member): the deterministic "Kids" label is uncoercible, so the LLM\'s valid "Big Kid" ships — never the invalid deterministic guess, even though it outranks by provenance', async () => {
+    mockedLoadBlankSpecRows.mockResolvedValueOnce([
+      { match: /\bshirt\b/i, spec: { brand: 'Gildan', brandInCopy: false, ageClass: 'kids' }, styleCode: '64000B', garmentFamily: 'kids_tee' },
+    ] as BlankSpecRow[])
+    const openai = makeOpenAiStubWithAgeGuess()   // the LLM already guessed 'Big Kid' — see kitchenSinkWithAgeGuess
+    const input: PipelineInput = {
+      ...makeBaseInput(openai),
+      detailAttributeMenu: [
+        { key: 'department', title: 'Department' },
+        { key: 'target_gender', title: 'Target Gender' },
+        { key: 'age_range_description', title: 'Age Range Description', accepted: ['Newborn', 'Infant', 'Toddler', 'Little Kid', 'Big Kid', 'Adult'] },
+      ],
+    }
+    const result = await runListingPipeline(input)
+    const pdi = result.product_details_improvements
+    const ageRows = pdi.filter((p) => /age\s*range/i.test(p.field_name))
+    expect(ageRows).toHaveLength(1)
+    const ageRow = ageRows[0]
+    expect(ageRow.recommended_value).not.toBe('Kids')   // THE live bug this task closes — must never ship
+    expect(ageRow.recommended_value).toBe('Big Kid')
+    expect(ageRow.enum_valid).toBe(true)                // prove the branch ran, not just the string
+    expect(ageRow.is_enum).toBe(true)
+  }, 30_000)
 })
