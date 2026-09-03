@@ -37,7 +37,7 @@ import {
   type PhraseTruthCtx, type TruthGarmentFamily,
 } from './contentTruth'
 import {
-  settleTitle, pickDistinctGarmentForm, titleCasePhrase, isTitleWasteVocabulary, titleSafeMaterial,
+  settleTitle, pickDistinctGarmentForm, titleCasePhrase, isTitleWasteVocabulary,
   TITLE_BAND_LO, TITLE_BAND_HI, type TitleBandCtx, type MoneyTailCtx, type SettleTitleCtx,
   type TruthBandDecision,
 } from './titleBand'
@@ -583,89 +583,14 @@ export function runLiveFailureRepro(): HarnessRow {
   }
 }
 
-/**
- * THE SAME LIVE FAILURE, WITH THE BLANK'S MATERIAL SUPPLIED (Option B, band-supply-and-floor task,
- * PO ruling 2026-09-01) — byte-for-byte `runLiveFailureRepro()` above EXCEPT for one line
- * (`spec: null` -> the Gildan 18000 sweatshirt row's real `material`), so a diff against that
- * function's output isolates EXACTLY what widening the fact bank changes, on the EXACT historical
- * defect (58 chars, `shipped-truthful-below-floor`) rather than a fresh, hand-picked fixture.
- *
- * `runLiveFailureRepro` itself is NOT touched — its candidate pool is explicitly locked ("no richer
- * than live") and this is a genuinely separate scenario (a blank fact newly offered, not a richer
- * pool), so it gets its own function rather than a parameter threaded through the protected one.
- *
- * `material` is the caller's choice of raw (pre-`titleSafeMaterial`) blank_specs value, so a test can
- * exercise both the real Gildan 18000 blend string ("50% Cotton / 50% Polyester") and a clean one —
- * `titleSafeMaterial` runs INSIDE here, exactly mirroring listingPipeline.ts's own ctx-builder, so
- * this proves the real wiring end to end, not a hand-cleaned stand-in.
- */
-export function runLiveFailureReproWithMaterial(material: string): HarnessRow {
-  const truth: PhraseTruthCtx = {
-    garmentFamily: 'sweatshirt',
-    mixedFamilies: ['sweatshirt', 'hoodie'],
-    spec: null,
-    allowedBrand: null,
-    audience: 'adult',
-    designTokens: designNames(),
-    audienceLean: 'unisex',
-    field: 'title',
-  }
-  const foreignFor = buildForeignDesignTokens(
-    DESIGNS.map((d) => ({ key: d.key, name: d.name })),
-    { familyTitleText: '', poolKeywords: [], strictNames: true },
-  )
-  const foreign = foreignFor('HD')
-  const reject = (seg: string): boolean => isForeignToDesign(seg, foreign)
-  const truthOk = (s: string): boolean => phraseTruthVerdict(s, truth).ok
-  const bandCtxFor = (title: string): TitleBandCtx => ({
-    apparel: true,
-    customizable: false,
-    garmentBrand: null,
-    factSegments: LIVE_HDG_CANDIDATES,
-    poolSegments: [],
-    truthOk,
-    // THE ONLY LINE THAT DIFFERS FROM `runLiveFailureRepro` — the Gildan 18000 blank's own material,
-    // run through the SAME `titleSafeMaterial` the real ctx-builder (listingPipeline.ts) calls.
-    spec: { fit: null, sleeve: null, neck: null, material: titleSafeMaterial(material) },
-    garmentSecond: pickDistinctGarmentForm(title, ['sweatshirt', 'hoodie']),
-  })
-  const moneyCtx: MoneyTailCtx = {
-    apparel: true, lean: AUDIENCE_LEAN, spec: null, protect: 'Hustle Definiton', garmentBrand: null,
-    truth, foreignTokens: foreign, allowAppend: true,
-  }
-  const ctx: SettleTitleCtx = {
-    produced: true,
-    apparel: true,
-    bandCtxFor,
-    moneyKws: null,
-    moneyTailMode: envMoneyTailMode(),
-    moneyCtx,
-    spec: null,
-    capTitle75: capTitle75Like,
-    colorProtect: 'Hustle Definiton',
-    lean: AUDIENCE_LEAN,
-    v4NoPad: true,
-    v4Mode: 'on',
-    specFactTokens: [],
-    truth,
-    protect: 'Hustle Definiton',
-    reject,
-    foreignTokens: foreign,
-    scrubProtectedOverlap: false,
-    prior: LIVE_LYING_PRIOR,
-    holdScope: 'HDG',
-    parentAsin: PARENT_ASIN,
-  }
-  const r = settleTitle(LIVE_RAW, ctx)
-  const r2 = settleTitle(r.title, { ...ctx, produced: true })
-  return {
-    scope: 'HDG', design: 'Hustle Definiton (live failure repro + material supply)',
-    garmentFamily: 'sweatshirt', union: ['sweatshirt', 'hoodie'],
-    raw: LIVE_RAW, rawLen: LIVE_RAW.length,
-    title: r.title, len: r.title.length, decision: r.decision, hold: r.hold, reason: r.reason, tried: r.tried,
-    idempotent: r2.title === r.title,
-  }
-}
+// runLiveFailureReproWithMaterial() (Option B, band-supply-and-floor task, PO ruling 2026-09-01)
+// DELETED 2026-09-03 — the PO's follow-up ruling ("We do not Put material in Title!", verbatim)
+// revoked Option B outright: PR #658's `spec.material` fact never reaches the title pad any more
+// (titleBand.ts's `TitleBandCtx.spec` no longer even carries the field). `runLiveFailureRepro()`
+// above (the 58-char, material-free scenario) is the one still-live reproduction. The starvation
+// gap Option B closed is now closed by the pre-existing, truth-gated pool bank
+// (`candidateSegments`'s `poolSegments` loop, titleBand.ts) drawing theme/occasion vocabulary from
+// the listing's own researched keyword pool — never by a fabric word.
 
 /* ── DIRECT RUN: `npx tsx src/lib/fba/truthBandHarness.ts` ────────────────────────────────────── */
 function report(): void {

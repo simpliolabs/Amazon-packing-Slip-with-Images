@@ -103,8 +103,19 @@ describe('titleQualityJudge — the gradient toward the seller\'s shape', () => 
    * identity length cannot be the rule, since the seller's Rod Father gold and the keyword soup both
    * run 13 words — not re-tuning the number, which would be the third amendment to this statistic. */
   const CEILING_DOCKED = 'THE CEO I Will Praise Him in Every Season Tee | Christian Shirts for Women'
+  /** SECOND KNOWN EXCEPTION, added 2026-09-03: the PO ruling "We do not Put material in Title!"
+   *  (Fix 1, no-material-and-longsleeve-alias-bleed) extended `TITLE_WASTE_SOURCE`
+   *  (titleBand.ts) — the door's own banned-vocabulary predicate this judge deliberately shares,
+   *  "so the producer and the door can never drift apart" (this file's own header) — to include
+   *  fabric words. This PRE-EXISTING gold (PO 2026-07-xx, predates the material ruling) states
+   *  "Cotton Twill" and now takes the SAME -10 wasteDock any OTHER title carrying a fabric word
+   *  would. This is the new ruling working as designed, not a defect: the shared predicate is
+   *  what makes the producer stop writing what the door would delete, applied retroactively to
+   *  the judge's own measurement of this one historical exemplar. Not a reason to widen the
+   *  exception list further — a THIRD regressing gold would still be a new defect. */
+  const MATERIAL_DOCKED = 'THE CEO Cashflow Cap | Puff Embroidery Cotton Twill Snapback Hat for Men'
 
-  it('ON: no PO gold scores LOWER than it does today — the change must not dock the seller', () => {
+  it('ON: no PO gold scores LOWER than it does today, except the two known/explained exceptions — the change must not dock the seller elsewhere', () => {
     const shape = measureGoldShape(SEED_GOLD_TITLES)
     const regressed: string[] = []
     for (const g of SEED_GOLD_TITLES) {
@@ -112,8 +123,8 @@ describe('titleQualityJudge — the gradient toward the seller\'s shape', () => 
       const on = withFlag('on', () => titleQualityJudge(g, { brandName: 'THE CEO', maxLeftWords: shape.maxLeftWords }).score)
       if (on < off) regressed.push(g)
     }
-    // Exactly one, and exactly the known one. Any other gold regressing is a new defect.
-    expect(regressed).toEqual([CEILING_DOCKED])
+    // Exactly the two known/explained ones, in corpus order. Any OTHER gold regressing is a new defect.
+    expect(regressed).toEqual([MATERIAL_DOCKED, CEILING_DOCKED])
   })
 
   it('ON: an unpiped gold takes a left-segment dock of exactly 0', () => {

@@ -67,18 +67,25 @@ const scoreA = (t: string) => titleQualityJudge(t, { brandName: 'THE CEO', maxLe
 afterEach(() => { delete process.env.TITLE_SHAPE_JUDGE })
 
 describe('BEFORE STATE (pinned at PR-A) — the hand-written rules dock the seller and reward the attack', () => {
-  it('the judge docks TWO of the seller\'s own canonical golds', () => {
+  it('the judge docks THREE of the seller\'s own canonical golds', () => {
     process.env.TITLE_SHAPE_JUDGE = 'on'
     const scores = CORPUS_AT_PR_A.map(scoreA)
+    // Gold #3 ("Cashflow Cap | Puff Embroidery Cotton Twill Snapback Hat for Men"): 95 — added
+    // 2026-09-03 (Fix 1, no-material-and-longsleeve-alias-bleed): the PO ruling "We do not Put
+    // material in Title!" extended TITLE_WASTE_SOURCE (titleBand.ts) to fabric words, and this
+    // PRE-EXISTING gold states "Cotton Twill" — the SAME -10 wasteDock any other fabric-word title
+    // now takes, via the SAME predicate this judge shares with the door by design (100 + the +5
+    // piped-format bonus, clamped at 100 before, now landing at 95 with the dock applied).
+    expect(scores[2]).toBe(95)
     // Gold #7 ("| Funny Comfort Colors Shirt…", 78 chars): 55 — docked for Amazon's cap (a real,
     // external rule) AND for "funny" (a taste rule the seller's own corpus attests x2).
     expect(scores[6]).toBe(55)
     // Gold #9 ("…Funny Fishing Mens Graphic Tee for Men", 69 chars): 80 — docked for being under
     // OUR floor (the seller's own gold breaks it) AND for "funny" again.
     expect(scores[8]).toBe(80)
-    // The other seven score 100 — the docks are not noise; they single out exactly the two golds
-    // that use the seller's vocabulary the hand-written list bans.
-    expect(scores.filter((s) => s === 100).length).toBe(7)
+    // The other six score 100 — the docks are not noise; they single out exactly the three golds
+    // that use vocabulary a PO ruling (hand-written list, or the 2026-09-03 material ban) bans.
+    expect(scores.filter((s) => s === 100).length).toBe(6)
   })
 
   it('the spec-stuffed ATTACK outscores the seller\'s own golds — the defect in one line', () => {

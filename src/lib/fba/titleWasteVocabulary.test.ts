@@ -220,7 +220,10 @@ describe('stripTitleWasteVocabulary', () => {
   it('CARVE-OUT: a pipe-right made of pure waste is the money tail\'s region, not this net\'s', () => {
     // Deleting "| Classic Fit" here would delete the PIPE, and enforceMoneyTail returns 'no-tail'
     // on a tail-less title — the removal would destroy the slot the ruling wants the keyword in.
-    const t = 'THE CEO See You Later Alligator Graphic Tee Shirt Cotton | Classic Fit'
+    // (Left-side filler is deliberately NEUTRAL — "Retro", not "Cotton" — since 2026-09-03's
+    // material ban widened this net's own word list; a fabric word on the LEFT of the pipe is no
+    // longer inert filler for this fixture and would confound the carve-out this test targets.)
+    const t = 'THE CEO See You Later Alligator Graphic Tee Shirt Retro | Classic Fit'
     const v = stripTitleWasteVocabulary(t, ctx({ moneyKws: null }))
     expect(v.decision).toBe('money-tail-owns')
     expect(v.title).toBe(t)

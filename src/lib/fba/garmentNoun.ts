@@ -251,16 +251,39 @@ export interface GarmentResolution extends GarmentNoun {
   blankFamily: string | null
 }
 
+/** SLEEVE-LENGTH CLASSIFICATION of SHIRT_BASE's own aliases (garment-family alias-inheritance
+ *  class, PO ruling 2026-09-03, live B0DSCDZC6K: "...Long Sleeve Cotton Polyester Tshirt" — a
+ *  LONG-SLEEVE blank's title calling itself a Tshirt). 'tshirt'/'t-shirt'/'tee'/'graphic tee'
+ *  specifically name the short-sleeve tee silhouette (unqualified, "tee"/"tshirt" reads as
+ *  short-sleeve by convention — the long-sleeve FORM always spells it out: "long sleeve tee").
+ *  Bare 'shirt' is silhouette-NEUTRAL (a shirt may be any sleeve length) and stays available to
+ *  every family. Named and exported so a family base is built by FILTERING this set, never by
+ *  hand-picking which one word to drop — any future sleeve-specific family (a 3/4-sleeve base,
+ *  say) reuses the same filter and is correct by construction instead of by memory. */
+export const SHORT_SLEEVE_IMPLYING_ALIASES: ReadonlySet<string> = new Set(['tshirt', 't-shirt', 'tee', 'graphic tee'])
+/** SHIRT_BASE's aliases with every short-sleeve-implying word removed — "these words assert the
+ *  WRONG sleeve length on a long-sleeve family" derived structurally from SHIRT_BASE itself (the
+ *  short-sleeve default family), not retyped. */
+const SHIRT_BASE_SLEEVE_NEUTRAL_ALIASES = SHIRT_BASE.aliases.filter((a) => !SHORT_SLEEVE_IMPLYING_ALIASES.has(a))
+
 /** Long-sleeve tee = the SHIRT family (same head nouns, same scans, same niche-head namespace as
  *  its short-sleeve siblings — the design niche is shared) with a long-sleeve seed + category
  *  head so the universe carries long-sleeve vocabulary instead of sweatshirt vocabulary. The
  *  overlay is long-sleeve phrases ONLY: the title may refine to "long sleeve tee" but a bare
- *  "tee"/"shirt" in the title can never drop the sleeve. */
+ *  "tee"/"shirt" in the title can never drop the sleeve.
+ *
+ *  ALIASES EXCLUDE SHORT_SLEEVE_IMPLYING_ALIASES (PO ruling 2026-09-03): this list used to spread
+ *  `...SHIRT_BASE.aliases` WHOLESALE, handing 'tshirt'/'t-shirt'/'tee'/'graphic tee' to every
+ *  consumer of `.aliases` (listingPipeline.ts's `garmentFactSegments`, which title-cases every
+ *  alias into a candidate title-pad segment) as if they were true of a LONG-SLEEVE blank — the
+ *  live defect. `SHIRT_BASE_SLEEVE_NEUTRAL_ALIASES` keeps only the sleeve-neutral remainder
+ *  ('shirt'), so any future consumer of `.aliases` is correct by construction, not by a
+ *  hand-picked exception for this one family. */
 const LONG_SLEEVE_OVERLAY = ['long sleeve t-shirt', 'long sleeve tshirt', 'long sleeve tee', 'long sleeve shirt', 'longsleeve shirt', 'longsleeve tee']
 const LONG_SLEEVE_TEE_BASE: FamilyBase = {
   family: 'shirt',
   noun: 'shirt',
-  aliases: [...LONG_SLEEVE_OVERLAY, 'long sleeve', ...SHIRT_BASE.aliases],
+  aliases: [...LONG_SLEEVE_OVERLAY, 'long sleeve', ...SHIRT_BASE_SLEEVE_NEUTRAL_ALIASES],
   overlay: LONG_SLEEVE_OVERLAY,
   defaultSeed: 'long sleeve shirt',
   defaultDisplay: 'Long Sleeve Shirt',
@@ -268,7 +291,14 @@ const LONG_SLEEVE_TEE_BASE: FamilyBase = {
 }
 /** Kids tee = the SHIRT family with a kids/youth audience head. The category head ignores the
  *  title-inferred adult audience (a kids family never seeds "for women" — SELLER_PROFILE IH truth
- *  ruling 2026-08-21). */
+ *  ruling 2026-08-21).
+ *
+ *  UNFILTERED `...SHIRT_BASE.aliases` IS CORRECT HERE (verified 2026-09-03, the same pass that
+ *  fixed LONG_SLEEVE_TEE_BASE above): migration 058's 64000B row states `sleeve: 'Short Sleeve'`,
+ *  so 'tshirt'/'t-shirt'/'tee' are TRUE of this family — spreading them wholesale asserts no wrong
+ *  sleeve length. This is the inverse-direction check the alias-bleed class calls for: a
+ *  short-sleeve family inheriting short-sleeve words is not the bug; only a family inheriting a
+ *  WRONG-sleeve word (LONG_SLEEVE_TEE_BASE inheriting SHORT-sleeve words) was. */
 const KIDS_OVERLAY = ['toddler shirt', 'toddler tee', 'youth shirt', 'youth tee', 'kids shirt', 'kids tee', 'boys shirt', 'girls shirt']
 const KIDS_TEE_BASE: FamilyBase = {
   family: 'shirt',
