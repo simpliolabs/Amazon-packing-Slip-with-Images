@@ -8,6 +8,10 @@ import { SECTION_WEIGHTS, weightedPoints } from '@/lib/fba/scoreWeights'
 import { missingBulletKeywords } from '@/lib/keyword-engine/bulletCoverage'   // SAME token predicate the scorer/generator use (R5: no .includes())
 import { stripVariantSuffix, squashEquals } from '@/lib/fba/pushFields'      // SAME comparator/suffix-strip the server deriver + verify use (ship-truth 2026-07-09)
 import { groupByDesign, isMultiDesign, resolveMultiDesign, perChildValueResolver, perDesignEntries, type PerDesignGroup } from '@/lib/fba/perDesign'
+import {
+  SOURCE_LABEL, resolveDesignGarment, buildDesignAssignmentRequests, buildDesignClearRequests,
+  type GarmentResolution, type ChildGarmentResolution,
+} from '@/lib/fba/garmentPerDesign'
 import { perDesignIhRows, collapseSharedIhRows, type PerChildItemHighlight, type PerDesignIhRow } from '@/lib/fba/perDesignItemHighlights'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
@@ -452,18 +456,21 @@ export default function ListingDetailPage() {
   // resolved blank, its source, and the active-blanks list for the assign dropdown. Read-only
   // resolution comes from /api/fba/blank-assignment; writes go through the same route (scope
   // 'family'|'child') and NEVER auto-queue a regenerate (PO decision C) — the "Regenerate to apply"
-  // note is the only feedback an assignment gives.
-  interface GarmentResolution { styleCode: string | null; source: string | null; blankId: number | null }
-  interface GarmentChildResolution extends GarmentResolution { sku: string | null; asin: string | null }
-  interface GarmentData { family: GarmentResolution; children: GarmentChildResolution[]; assignments: { family: string | null; child: Record<string, string> } }
+  // note is the only feedback an assignment gives. GarmentResolution/ChildGarmentResolution/
+  // SOURCE_LABEL come from garmentPerDesign.ts (imported above) — the SAME shapes/strings the
+  // per-design Garment control (PerDesignCard) uses, so the family row, the per-SKU Variant
+  // Breakdown row, and the per-design row can never show different labels for the same source.
+  interface GarmentData { family: GarmentResolution; children: ChildGarmentResolution[]; assignments: { family: string | null; child: Record<string, string> } }
   interface ActiveBlank { id: number; style_code: string | null; brand: string | null; garment_family: string | null }
-  const SOURCE_LABEL: Record<string, string> = {
-    'child-assignment': 'assignment', 'sku-code': 'from SKU code', 'family-assignment': 'family default', 'legacy': 'guessed from title',
-  }
   const [garmentData, setGarmentData] = useState<GarmentData | null>(null)
   const [activeBlanks, setActiveBlanks] = useState<ActiveBlank[]>([])
   const [garmentSaving, setGarmentSaving] = useState<string | null>(null)
   const [garmentSavedKey, setGarmentSavedKey] = useState<string | null>(null)
+  // Per-DESIGN garment save state (PO 2026-09-03) — keyed by designKey, not SKU: a multi-SKU design's
+  // assign/clear fans out to every SKU in the design (buildDesignAssignmentRequests/
+  // buildDesignClearRequests below), so ONE key must represent the whole in-flight fan-out.
+  const [garmentDesignSaving, setGarmentDesignSaving] = useState<string | null>(null)
+  const [garmentDesignSavedKey, setGarmentDesignSavedKey] = useState<string | null>(null)
   const loadGarment = useCallback(async () => {
     if (!asin) return
     try {
@@ -535,6 +542,55 @@ export default function ListingDetailPage() {
     () => groupByDesign(aiRecs?.per_child_titles, aiRecs?.per_child_bullets, aiRecs?.per_child_descriptions, designNameOverrides),
     [aiRecs, designNameOverrides],
   )
+  // Per-design garment assign/clear (PO 2026-09-03) — fan the SAME PUT/DELETE contract
+  // (assignBlank above) out to every SKU in the design, no second write path (route.ts's header
+  // comment). Looked up by designKey against designGroups rather than closed over via an extra
+  // argument, mirroring onAssignDesignAudience's (designKey, value) signature below — PerDesignCard
+  // only ever needs to hand back the designKey it already has.
+  const assignDesignBlank = useCallback(async (designKey: string, styleCode: string) => {
+    const skus = designGroups.find((g) => g.designKey === designKey)?.skus ?? []
+    const requests = buildDesignAssignmentRequests(skus, styleCode)
+    if (requests.length === 0) return
+    setGarmentDesignSaving(designKey)
+    setGarmentDesignSavedKey(null)
+    try {
+      await Promise.all(requests.map(async (body) => {
+        const resp = await fetch('/api/fba/blank-assignment', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        })
+        const data = await resp.json()
+        if (!resp.ok) throw new Error(data.error || 'Assignment failed')
+      }))
+      setGarmentDesignSavedKey(designKey)
+      await loadGarment()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Assignment failed')
+    } finally {
+      setGarmentDesignSaving(null)
+    }
+  }, [designGroups, loadGarment])
+  const clearDesignBlank = useCallback(async (designKey: string) => {
+    const skus = designGroups.find((g) => g.designKey === designKey)?.skus ?? []
+    const requests = buildDesignClearRequests(skus)
+    if (requests.length === 0) return
+    setGarmentDesignSaving(designKey)
+    setGarmentDesignSavedKey(null)
+    try {
+      await Promise.all(requests.map(async (body) => {
+        const resp = await fetch('/api/fba/blank-assignment', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        })
+        const data = await resp.json()
+        if (!resp.ok) throw new Error(data.error || 'Clear failed')
+      }))
+      setGarmentDesignSavedKey(designKey)
+      await loadGarment()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Clear failed')
+    } finally {
+      setGarmentDesignSaving(null)
+    }
+  }, [designGroups, loadGarment])
   // PR-4: DERIVE each design's verify chip from LIVE truth — score.children (the cached listing_content the
   // VARIANT COHESION panel already reads) compared to the design's own recommended title. This makes the
   // chip truthful on LOAD (no more "Not verified" for everything), survive reloads, and flip to "Live
@@ -3679,6 +3735,12 @@ export default function ListingDetailPage() {
                       familyAudienceLean={score?.audience_lean ?? null}
                       audienceSaving={audienceAssignSaving === g.designKey}
                       onAssignAudience={onAssignDesignAudience}
+                      designGarment={garmentData ? resolveDesignGarment(g.skus, garmentData.children) : null}
+                      garmentActiveBlanks={activeBlanks}
+                      garmentSaving={garmentDesignSaving === g.designKey}
+                      garmentJustSaved={garmentDesignSavedKey === g.designKey}
+                      onAssignGarment={garmentData ? assignDesignBlank : undefined}
+                      onClearGarment={garmentData ? clearDesignBlank : undefined}
                     />
                   ))}
                 </div>

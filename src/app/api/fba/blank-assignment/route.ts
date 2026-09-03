@@ -1,7 +1,17 @@
 /**
  * GET    /api/fba/blank-assignment?parentAsin=X — the family's + each child's CURRENT resolved
  *                                                  blank, its source, and the raw assignment rows.
- *                                                  Powers the listing page's Garment card.
+ *                                                  Powers the listing page's Garment card AND the
+ *                                                  per-design Garment control (PerDesignCard.tsx —
+ *                                                  garmentPerDesign.ts's resolveDesignGarment groups
+ *                                                  these SAME per-child rows by design client-side;
+ *                                                  no design-specific query needed here). Each child
+ *                                                  ALSO carries `fallback` — what it would resolve
+ *                                                  to if its own explicit child assignment were
+ *                                                  cleared (PO 2026-09-03: clearing must show the
+ *                                                  seller this BEFORE they confirm, since for
+ *                                                  BB64000XL-BK-FBA that fallback is the wrong 64000
+ *                                                  Tee code that motivated the assignment).
  * PUT    /api/fba/blank-assignment  {scope:'family'|'child', key, style_code} — upsert an assignment.
  * DELETE /api/fba/blank-assignment  {scope, key} — clear an assignment (falls back to SKU/legacy).
  *
@@ -9,13 +19,15 @@
  * unified `blank_assignments` table (owned by a concurrent agent's migration 062 — this route reads
  * and writes it but does not create it). Auth is the standing /api/fba middleware — any signed-in
  * user may write (never admin-gated), stamped with `set_by` for accountability. An assignment never
- * auto-queues a regenerate (decision C) — this route only ever touches blank_assignments.
+ * auto-queues a regenerate (decision C) — this route only ever touches blank_assignments. The
+ * per-design control (PO 2026-09-03) writes/clears one {scope:'child', key:<sku>} row per SKU in
+ * the design through this SAME PUT/DELETE contract — no second write path.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { resolveUserName } from '@/lib/fba/claims'
 import {
-  toCatalogRows, groupFamilies, buildAssignmentMaps, resolveFamily, styleCodeExists,
+  toCatalogRows, groupFamilies, buildAssignmentMaps, resolveFamily, resolveChildFallback, styleCodeExists,
   type AssignmentRow, type DbBlankRow,
 } from '@/lib/fba/blankAssignmentImpact'
 import { invalidateBlankCaches } from '@/lib/fba/blankSpecs'
@@ -69,7 +81,15 @@ export async function GET(req: NextRequest) {
   const childResolutions = children.map((c) => {
     const oneChild = { parentAsin: family.parentAsin, skus: c.sku ? [c.sku] : [], hay: family.hay }
     const res = resolveFamily(oneChild, catalog, childCodeBySku, familyCodeByAsin)
-    return { sku: c.sku ?? null, asin: c.asin ?? null, styleCode: res.styleCode, source: res.source, blankId: res.rowId }
+    // fallback: what THIS sku would resolve to with its own child assignment excluded — null/null
+    // for a sku-less row (nothing to exclude, nothing to preview).
+    const fallbackRes = c.sku
+      ? resolveChildFallback(c.sku, family.parentAsin, family.hay, catalog, childCodeBySku, familyCodeByAsin)
+      : { styleCode: null, source: null, rowId: null }
+    return {
+      sku: c.sku ?? null, asin: c.asin ?? null, styleCode: res.styleCode, source: res.source, blankId: res.rowId,
+      fallback: { styleCode: fallbackRes.styleCode, source: fallbackRes.source, blankId: fallbackRes.rowId },
+    }
   })
 
   return NextResponse.json({
