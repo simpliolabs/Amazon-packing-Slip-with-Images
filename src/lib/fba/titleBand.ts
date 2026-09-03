@@ -188,19 +188,14 @@ export interface TitleBandCtx {
   /** BLANK_SPECS.brand, canonically cased (e.g. "Comfort Colors"). */
   garmentBrand?: string | null
   /** BLANK_SPECS attributes. Only pass what the blank actually is.
-   *  `material` (PO RULING 2026-09-01, band-supply-and-floor task): fabric/material words are
-   *  ADMISSIBLE title vocabulary — unlike `fit` ("Classic Fit") and "Unisex", which stay banned via
-   *  `isTitleWasteVocabulary` regardless of this ctx. Corpus support: "Cotton Twill" is attested in
-   *  PO gold #3 (poGoldCorpus.ts). Passed VERBATIM, exactly like `sleeve`/`neck` already are — no
-   *  extraction/parsing step, so this stays a data-supply change, not a new net. Safe against
-   *  `dropSpecOnlyTail`'s spec-only-tail dock: a material's own fabric noun ("cotton", "polyester")
-   *  is not in `SPEC_ALWAYS_WORDS` or matched by any `SPEC_CLAIM_RES` collocation in poGoldCorpus.ts,
-   *  so it always survives as non-spec residue in `classifyTail` — see titleBand.test.ts's dedicated
-   *  coverage. `dye` was evaluated and deliberately excluded: "Garment-Dyed" IS itself a
-   *  `SPEC_CLAIM_RES` match, so a dye+neck/sleeve pair (e.g. "Garment-Dyed Crewneck") can leave ZERO
-   *  non-spec residue and trip the specOnly dock — the one real hazard the brief's own "watch (i)"
-   *  flagged, and it materializes for dye but not for material. */
-  spec?: { fit?: string | null; sleeve?: string | null; neck?: string | null; material?: string | null } | null
+   *  NO `material` FIELD (PO RULING 2026-09-03, VERBATIM: "We do not Put material in Title!") —
+   *  this REVOKES the 2026-09-01 ruling's Option B (PR #658), which briefly added a `material`
+   *  field here. Removed from the TYPE, not merely unpopulated, so a future caller cannot silently
+   *  re-thread a fabric word back into the title pad by adding the field — see `candidateSegments`
+   *  below for the full ruling + the additive replacement (the pre-existing pool bank). `fit` stays
+   *  excluded (already was, via `isTitleWasteVocabulary`); `neck`/`sleeve` stay admissible —
+   *  silhouette facts, not material. */
+  spec?: { fit?: string | null; sleeve?: string | null; neck?: string | null } | null
   /** A garment surface form DISTINCT from the one already in the title (title says "Shirt" ⇒ "Tee").
    *  Amazon's golden format keeps both tokens; the caller derives this from `garmentFor`. */
   garmentSecond?: string | null
@@ -341,27 +336,13 @@ export function pickDistinctGarmentForm(title: string, aliases: readonly string[
   return pick ? pick.replace(/(^|[\s-])(\w)/g, (_m, sep: string, c: string) => sep + c.toUpperCase()) : null
 }
 
-/**
- * TITLE-SAFE MATERIAL (OPTION B, band-supply-and-floor task). `blank_specs.material` is written for
- * PROSE consumption ("50% Cotton / 50% Polyester" reads naturally in a description sentence) and was
- * never meant to appear verbatim in a 75-char title — the percentage and slash are prose formatting,
- * not part of the fact. Strips them; keeps every fabric WORD the blank states, in the blank's own
- * casing, so the remaining phrase is still exactly what the spec claims — nothing added, nothing
- * dropped except punctuation. "100% Ring-Spun Cotton" -> "Ring-Spun Cotton" (unchanged fabric noun,
- * only the "100% " prose lead-in removed); "50% Cotton / 50% Polyester" -> "Cotton Polyester". A
- * material already free of digits/slashes (every non-blend row in the catalog today) round-trips
- * byte-identical. Delegated to this tested leaf rather than inlined at the listingPipeline.ts call
- * site — same reasoning `pickDistinctGarmentForm`'s own doc gives: an inline regex in a 9,400-line
- * file is unreviewable and has shipped invisible escaping bugs before. Pure. Null/empty in, null out.
- */
-export function titleSafeMaterial(raw: string | null | undefined): string | null {
-  const cleaned = (raw ?? '')
-    .replace(/\d+%\s*/g, '')      // "50% " / "100% " prose lead-ins
-    .replace(/\s*\/\s*/g, ' ')    // blend separator -> a plain space
-    .replace(/\s{2,}/g, ' ')
-    .trim()
-  return cleaned || null
-}
+// TITLE-SAFE MATERIAL (`titleSafeMaterial`, Option B, band-supply-and-floor task) DELETED
+// 2026-09-03 — PO ruling "We do not Put material in Title!" revoked the ONLY caller (this file's
+// `candidateSegments` and listingPipeline.ts's `titleBandCtx` builder both stopped supplying
+// material to the title pad). It stays available for description/bullets/Product-Detail prose via
+// `blank_specs.material` directly (untouched — that surface was never in question); only the
+// title-pad formatting helper is gone, so it cannot be quietly re-wired back into the title by a
+// future caller who finds it "conveniently already there".
 
 /** Ordered candidates, strongest product signal first. The garment BRAND leads because it is the
  *  highest-intent fact a shopper filters on ("comfort colors tshirt" is this listing's rank-1
@@ -423,14 +404,24 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
   push(ctx.spec?.fit)
   push(ctx.spec?.sleeve)
   push(ctx.spec?.neck)
-  // MATERIAL (OPTION B, band-supply-and-floor task, PO ruling 2026-09-01) — the same BLANK_SPECS
-  // attribute the description/bullets already assert for this listing (listingPipeline.ts's
-  // `blankFacts`), now also offered to the title. Pushed here (before `attributeCount` is captured)
-  // so it flows through the SAME GENERIC PAIRS loop below as fit/sleeve/neck already do — no new
-  // pairing logic, it just widens the existing attribute bank. This is what closes the starvation gap
-  // on a `brand_in_copy=false` Gildan family whose `fit` is banned waste vocabulary: material was the
-  // one BLANK_SPECS fact never offered, on a blank that HAS one.
-  push(ctx.spec?.material)
+  // MATERIAL IS BANNED FROM THE TITLE, FULL STOP (PO RULING 2026-09-03, VERBATIM: "We do not Put
+  // material in Title!"). This REVOKES Option B of the 2026-09-01 band-supply-and-floor ruling
+  // (PR #658), which briefly offered `ctx.spec.material` here as a fourth generic-pairs attribute
+  // alongside fit/sleeve/neck — live example that had to be undone: "...Long Sleeve Cotton
+  // Polyester Tshirt". `TitleBandCtx.spec` no longer even carries a `material` field (see its
+  // interface above) — the ban is structural, not a skipped push, so a future caller cannot
+  // silently re-thread it back in by adding the field. `fit`/"Unisex" stay banned as before
+  // (`isTitleWasteVocabulary`); `neck`/`sleeve` stay admissible — they are silhouette facts, not
+  // material.
+  //
+  // THE ADDITIVE REPLACEMENT for the character budget material used to fill is NOT a new mechanism
+  // — it is the pool bank a few lines below (`ctx.poolSegments`, PO 2026-08-22): every listing's
+  // OWN researched keyword pool already carries theme/occasion vocabulary when the design has any
+  // ("motivational", "gift", "funny") and that bank is truth-gated (`ctx.truthOk`) exactly like
+  // this one. Removing material from THIS bank does not remove any wiring; it only means the same
+  // downstream pool search now runs one candidate sooner. A design whose researched pool carries no
+  // on-theme/occasion phrase legitimately ships shorter — see the report for which specimens hit
+  // that gap; nothing here fabricates a value to hide it.
   const attributeCount = out.length          // everything above is a product ATTRIBUTE, not a noun
   push(ctx.garmentSecond)
   /* THE FAMILY'S OWN GARMENT VOCABULARY (2026-08-21) — the resolved blanks' surface forms, e.g.
@@ -2518,11 +2509,26 @@ export function stripVariantColorWords(
  * the second one.
  */
 
-/** The two phrases, and nothing else. A blocklist that grows by vibes is how a net starts eating
- *  genuine copy; each entry here is a phrase the PO named in the ruling. `unisex` is a single word
- *  wherever it appears; `classic fit` is matched as the two-word CLAIM only, so a design called
- *  "Classic Car Shirt" is untouched — the same distinction FIT_CLAIM_RE already draws above. */
-const TITLE_WASTE_SOURCE = String.raw`\bunisex\b|\bclassic\s+fit\b`
+/** Two PO rulings, and nothing else. A blocklist that grows by vibes is how a net starts eating
+ *  genuine copy; each entry here is a phrase/word the PO named in a ruling. `unisex` is a single
+ *  word wherever it appears; `classic fit` is matched as the two-word CLAIM only, so a design
+ *  called "Classic Car Shirt" is untouched — the same distinction FIT_CLAIM_RE already draws above.
+ *
+ *  MATERIAL/FABRIC WORDS (PO RULING 2026-09-03, VERBATIM: "We do not Put material in Title!") —
+ *  added to this SAME seam rather than a parallel one (the fix's own doctrine: "reuse the same
+ *  seam, not a parallel one"). This is DELIBERATELY the belt-and-suspenders half of the fix:
+ *  `candidateSegments` below no longer OFFERS material as a candidate (Fix 1's primary cure), but
+ *  this net additionally SCRUBS any material word that reaches an assembled title by any OTHER
+ *  route — a raw council draft that ignores its own "no dry specs in the title" instruction, or a
+ *  stale `priorTitle` written before this ruling existed (live case: B0DP5H8QBT's DB-stored title
+ *  already read "...Kids Ring-Spun Cotton Crew Neck" — truthful and in-band, so nothing else would
+ *  have touched it). Grounded to the fabric nouns actually seen in `blank_specs.material` across
+ *  the catalog (cotton, polyester, ring-spun) plus the other common apparel fabric nouns a future
+ *  blank could state, so the SAME class is closed structurally rather than one word at a time.
+ *  Deliberately excludes ambiguous words that are not fabric-specific ("blend" is ordinary English;
+ *  "jersey" collides with sports-jersey designs and the US state) — same "phrase the PO actually
+ *  named" discipline as `unisex`/`classic fit` above. */
+const TITLE_WASTE_SOURCE = String.raw`\bunisex\b|\bclassic\s+fit\b|\bcotton\b|\bpolyester\b|\bring[\s-]?spun\b|\bcombed\b|\bairlume\b|\bspandex\b|\brayon\b|\blinen\b|\bnylon\b|\belastane\b|\bviscose\b|\bdenim\b|\bfleece\b`
 /** Built fresh per call — a shared /g/ regex carries `lastIndex` across calls, which is exactly how
  *  a "deterministic" net stops being deterministic (same reason as `inclusiveAudienceRe`). */
 const titleWasteRe = (): RegExp => new RegExp(TITLE_WASTE_SOURCE, 'gi')
