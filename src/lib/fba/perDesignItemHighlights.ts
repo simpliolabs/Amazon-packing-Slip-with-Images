@@ -23,7 +23,24 @@
  *    a SKU whose design has no composed line is SKIPPED with reason 'no-line-for-design' — it is
  *    never handed another design's line, and never the broadcast value.
  */
-import type { IhHoldReason } from './listingPipeline'
+import { CONTENT_CONTRACT } from './contentContract'
+
+/** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action.
+ *  MOVED HERE (2026-09-04, closing the SILENT-HOLD defect class) from listingPipeline.ts: this
+ *  module is pure/client-safe (no OpenAI import), so the type + message map can be read by the
+ *  listing page (client component) without pulling the whole server-only pipeline (`import OpenAI
+ *  from 'openai'`) into the browser bundle. listingPipeline.ts re-exports both names for every
+ *  existing importer — this is a relocation, not a behavior change. */
+export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated'
+export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
+  'unrated-pool': 'Held: pool is unrated — run research/theme rating first',
+  'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
+  'under-floor': `Held: truthful phrases + blank facts cannot reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor — harvest more keywords for this family`,
+  'no-spec': 'Held: no blank spec resolved for this family — set its blank (child SKU style code or a family override)',
+  // Multi-design only (PO 2026-08-21): the shared line is a judgment under EVERY design, so it never
+  // composes from a partial one. The PO action: POST keyword-pool/rerate { parent_asin, per_design: true }.
+  'designs-unrated': 'Held: the pool is not rated against every design — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
+}
 
 /** One entry per SKU — mirrors per_child_titles' {sku, asin, <field>, designName?, designKey?}. */
 export interface PerChildItemHighlight {

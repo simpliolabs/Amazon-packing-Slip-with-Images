@@ -52,7 +52,7 @@ import { resolveBlankRowForNet, applyBlankBrandNetToDetails, applyBlankBrandNetP
 // re-propose over it. See stickyDetails.ts for the dual-write-path argument (the #79 partial
 // never rebuilds details).
 import { applyStickyDetails, collectAcceptedDetailPushes, type AcceptedPushRow } from '@/lib/fba/stickyDetails'
-import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
+import type { PerChildItemHighlight, IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
 // LOCKED-TITLE TRUTH (PO 2026-08-22, live case B0DSCDZC6K): a lock must still block AI rewrites, but a
 // locked title that contradicts the resolved product must be VISIBLE, not silently ship forever. This
 // is READ-ONLY analysis — it never edits recommended_title, never touches Amazon. Served from THIS GET
@@ -182,6 +182,13 @@ export interface ProductDetailImprovement {
   sp_api_key?: string
   attr_scope?: 'broadcast' | 'per-variant'
   pushable?: boolean
+  /** Item Highlight on a MULTI-DESIGN family (PO 2026-08-21): per-design MARKER — recommended_value
+   *  is '' by construction; lines live in per_child_item_highlights. */
+  per_design?: boolean
+  /** SILENT-HOLD CLASS CLOSED (2026-09-04): why recommended_value is '' — set only when it IS
+   *  empty; null/absent once a real value ships (incl. after the sticky gate restores a prior
+   *  accepted push). See productDetailAttrs.ts's isProductDetailGap. */
+  hold?: IhHoldReason | null
 }
 
 export interface PerChildKeywords {
@@ -1475,19 +1482,19 @@ export async function POST(req: NextRequest) {
             // PREVIOUS regen's (stale) product-detail count. Override with THIS regen's fresh count.
             // MATERIALITY (#85): count only TRUE gaps (empty value OR enum-invalid), not the full proactive
             // spec-sheet length (which wrongly docked already-filled fields — the "10/12 but 8 to push"
-            // confusion). The enum validation ran just above, so is_enum/enum_valid are set here — using the
-            // SAME predicate as syncListingContent keeps THIS regen's score == the next sync's (no flip-flop).
+            // confusion). isProductDetailGap is the SAME predicate syncListingContent calls, so THIS
+            // regen's score == the next sync's (no flip-flop) — including its HELD-row exemption
+            // (SILENT-HOLD class, 2026-09-04): a row the deterministic composer refused to fill must not
+            // dock Features just because we now always push it visible.
             if (Array.isArray(result.product_details_improvements)) {
-              const { isWriteBlockedPreLaunch, getItemHighlightsApiState } = await import('@/lib/fba/productDetailAttrs')
+              const { isProductDetailGap, getItemHighlightsApiState } = await import('@/lib/fba/productDetailAttrs')
               // Read the SAME app_settings probe flag the next sync will read, so THIS regen's Features
               // score == the next sync's (the #85 no-flip-flop invariant — both consult one source).
               const ihState = await getItemHighlightsApiState(supabase)
-              const isEmpty = (v: string | null) => !v || !String(v).trim()
               // Item Highlights stay write-BLOCKED by Amazon ("currently unsupported") until the probe
               // flips the flag — not a closable gap, so they must not dock Features (mirrors sync).
               ctx.productDetailsGaps = result.product_details_improvements.filter((p) =>
-                !isWriteBlockedPreLaunch(p.field_name, (p as unknown as { sp_api_key?: string }).sp_api_key, new Date(), { apiSupported: ihState?.supported ?? null }) &&
-                (isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false)),
+                isProductDetailGap(p, { apiSupported: ihState?.supported ?? null }),
               ).length
             }
             // KeywordPlan (#92/#93): recommendations persist AFTER this block, so feed THIS regen's FRESH plan

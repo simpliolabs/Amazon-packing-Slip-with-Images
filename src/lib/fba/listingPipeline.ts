@@ -79,7 +79,12 @@ import {
   type TruthGarmentFamily,
 } from '@/lib/fba/contentTruth'
 import { buildForeignDesignTokens, designScopeTokens, fillNormTok, isForeignToDesign } from '@/lib/fba/designScope'
-import type { PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
+import { IH_HOLD_MESSAGES, type IhHoldReason, type PerChildItemHighlight } from '@/lib/fba/perDesignItemHighlights'
+// Re-exported for every existing importer (buildItemHighlights callers, tests) — the type + message
+// map now LIVE in perDesignItemHighlights.ts (pure, no OpenAI import) so the client-side listing page
+// can read them without bundling this server-only pipeline module. See that file for the doc comment.
+export { IH_HOLD_MESSAGES }
+export type { IhHoldReason }
 import { CONTENT_CONTRACT } from '@/lib/fba/contentContract'
 import { SEED_GOLD_TITLES, SEED_REJECT_PAIRS, classifyTail, countGarmentMentions, goldSpecBlock, measureGoldShape, rejectPairBlock, specClaimSpans, type GoldShape } from '@/lib/fba/poGoldCorpus'
 // NEAREST-GOLD ANCHORING: pure, deterministic, no LLM and no I/O — see buildApparelTitleBrief.
@@ -118,6 +123,13 @@ export interface PipelineProductDetailImprovement {
    *  recommended_value is '' by construction and the lines live in per_child_item_highlights. A
    *  broadcast push of this row is impossible (the push seam resolves per SKU from the array). */
   per_design?: boolean
+  /** SILENT-HOLD CLASS CLOSED (2026-09-04): why this row's value is '' — set ONLY when
+   *  recommended_value is empty; null/absent whenever a real value shipped (incl. after the sticky
+   *  gate snaps a held row back to a previously-accepted push — that row carries a real value again
+   *  and must never be treated as held downstream). The Features scorer (isProductDetailGap) exempts
+   *  a held row from the gap count — visible-but-not-docking, never absent, never visible-and-docking
+   *  (the unfillable-gap trust trap doctrine). Today only the Item Highlights producers stamp this. */
+  hold?: IhHoldReason | null
 }
 export interface PipelineKeywordReconciliation { keyword: string; action_type: 'CRITICAL' | 'UPGRADE' | 'REINFORCE'; search_volume: number; placed_in: string[]; planned_in?: string[]; exact_text: string; why: string }
 
@@ -2328,17 +2340,8 @@ function ihFloorDoor(line: string): string {
   return line
 }
 
-/** Why an Item Highlight is HELD (the composer returned null). Each names ONE PO action. */
-export type IhHoldReason = 'unrated-pool' | 'thin-candidates' | 'under-floor' | 'no-spec' | 'designs-unrated'
-export const IH_HOLD_MESSAGES: Record<IhHoldReason, string> = {
-  'unrated-pool': 'Held: pool is unrated — run research/theme rating first',
-  'thin-candidates': 'Held: too few truthful ranking phrases in the pool — harvest more keywords for this family',
-  'under-floor': `Held: truthful phrases + blank facts cannot reach the ${CONTENT_CONTRACT.itemHighlights.min}-char floor — harvest more keywords for this family`,
-  'no-spec': 'Held: no blank spec resolved for this family — set its blank (child SKU style code or a family override)',
-  // Multi-design only (PO 2026-08-21): the shared line is a judgment under EVERY design, so it never
-  // composes from a partial one. The PO action: POST keyword-pool/rerate { parent_asin, per_design: true }.
-  'designs-unrated': 'Held: the pool is not rated against every design — run the per-design theme rating (keyword-pool/rerate { per_design: true }) first',
-}
+// IhHoldReason / IH_HOLD_MESSAGES moved to perDesignItemHighlights.ts (2026-09-04) — imported +
+// re-exported at the top of this file so every existing importer is unaffected.
 
 export interface ItemHighlightsInput {
   finalTitle: string
@@ -11828,27 +11831,39 @@ export async function runListingPipeline(input: PipelineInput): Promise<Pipeline
       })
       perChildItemHighlights = built.perChild
       const composed = built.perDesign.filter((d) => d.value).length
-      if (composed > 0) {
-        pdiFinal.push({
-          field_name: highlightsAttr.title,
-          current_value: null,
-          recommended_value: '',
-          per_design: true,
-          reason: `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): ONE shared line, design names stripped, every phrase rated >= 2 under EVERY design (${built.shared.designKeys.length} designs) — carried per SKU through per_child_item_highlights.`,
-        })
-      } else if (built.shared.hold) {
+      // SILENT-HOLD CLASS CLOSED (2026-09-04): the marker row ships EVERY TIME the attribute is in
+      // the menu — composed>0 or not. Before this, `composed === 0` (every design held, e.g. a family
+      // whose pool carries FAMILY-level theme_fit but no per-design rating — migration 061) pushed
+      // NOTHING, so the field read as "no recommendation" instead of "held, here's why": the whole
+      // per-design UI block (page.tsx) is keyed off THIS row existing, including the "Rate designs
+      // against pool" control (PR #667) — an absent row hid it inside a container that could never
+      // render. `hold` rides the row so the Features scorer can exempt it from the gap count (never
+      // dock an unfillable field) without needing a value.
+      if (built.shared.hold) {
         console.warn(JSON.stringify({ tag: 'IH_SHARED_HELD', parent: input.parentAsin ?? null, hold: built.shared.hold, missing: built.shared.missingDesigns }))
       }
+      pdiFinal.push({
+        field_name: highlightsAttr.title,
+        current_value: null,
+        recommended_value: '',
+        per_design: true,
+        hold: built.shared.hold,
+        reason: composed > 0
+          ? `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): ONE shared line, design names stripped, every phrase rated >= 2 under EVERY design (${built.shared.designKeys.length} designs) — carried per SKU through per_child_item_highlights.`
+          : `${IH_REASON} MULTI-DESIGN family (PO 2026-08-21): HELD for every design — ${IH_HOLD_MESSAGES[built.shared.hold ?? 'under-floor']}${built.shared.missingDesigns.length ? ` (unrated: ${built.shared.missingDesigns.join(', ')})` : ''}.`,
+      })
     } else {
-      const { value: hl } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })
-      if (hl) {
-        pdiFinal.push({
-          field_name: highlightsAttr.title,
-          current_value: null,
-          recommended_value: hl,
-          reason: IH_REASON,
-        })
-      }
+      const { value: hl, hold } = buildItemHighlights({ finalTitle, pool: hlPool, apparelProduct, blankBrand: blankBrandNetRow, netTitles: ihNetTitles })
+      // SILENT-HOLD CLASS CLOSED (2026-09-04): same fix as the multi-design branch above — a held
+      // single-design family (hl === '') used to push NO row at all. Always push; carry `hold` so the
+      // seller sees the field, the reason, and the Features scorer never docks it.
+      pdiFinal.push({
+        field_name: highlightsAttr.title,
+        current_value: null,
+        recommended_value: hl,
+        hold: hl ? null : hold,
+        reason: hl ? IH_REASON : `${IH_REASON} HELD: ${IH_HOLD_MESSAGES[hold ?? 'under-floor']}.`,
+      })
     }
   }
 

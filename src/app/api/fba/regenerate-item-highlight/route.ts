@@ -164,7 +164,9 @@ export async function POST(req: NextRequest) {
           per_design: built.perDesign.map((d) => ({ designKey: d.designKey, designName: d.designName, hold: d.hold })),
         }, { status: 422 })
       }
-      const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: '', per_design: true } : p))
+      // hold:null — this branch only reaches here when composed.length > 0 (the held case returns
+      // 422 above without writing), so any stale hold reason on the existing row must clear too.
+      const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: '', per_design: true, hold: null } : p))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const db = supabase as any
       const { error: updErr } = await db.from('listing_seo_recommendations')
@@ -195,7 +197,9 @@ export async function POST(req: NextRequest) {
 
     // Single-design: the broadcast row carries the line; any stale per-design marker/array is cleared
     // (a family forced back to single-design must not keep per-design lines the push would prefer).
-    const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: hl, per_design: false } : p))
+    // hold:null — reached only when hl is truthy (the held case returns 422 above without writing),
+    // so a stale hold reason on the existing row (e.g. a prior held run) must clear here too.
+    const updated = details.map((p, i) => (i === ihIdx ? { ...p, recommended_value: hl, per_design: false, hold: null } : p))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = supabase as any
     let { error: updErr } = await db.from('listing_seo_recommendations')

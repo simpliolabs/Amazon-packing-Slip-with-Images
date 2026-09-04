@@ -46,7 +46,7 @@ import { seasonsIn, isOffSeasonKeyword, isSeasonalKeywordLegacy } from '@/lib/ke
 import { selectionMode, isRankingTarget } from '@/lib/keyword-engine/selection-core'
 import { readWindow } from '@/lib/keyword-engine/selectionContext'
 import { isOffNicheKeyword } from '@/lib/keyword-engine/nicheGuards'
-import { isWriteBlockedPreLaunch, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
+import { isProductDetailGap, getItemHighlightsApiState } from '@/lib/fba/productDetailAttrs'
 import { appendScoreHistory } from '@/lib/fba/scoreHistory'  // Phase C §4-D: conditional score-trend append
 import { pickRescoreRepresentative } from '@/lib/fba/rescoreRepresentative'  // single representative-selection path (parity with push re-score)
 import { spApiReadBucket } from '@/lib/fba/spApiRateLimiter'   // global 5-rps read ceiling shared with pushExecutor + verify-push (task #23 / 2026-07-20 audit)
@@ -641,7 +641,6 @@ export async function fetchScoringContext(
         // raw length docked Features for fields that aren't actually gaps (the "10/12 but 8 to push"
         // confusion). Count only TRUE gaps: a field with no live value, or an enum field whose current
         // value is invalid against the live Amazon schema (is_enum/enum_valid persisted by validate-at-regen).
-        const isEmpty = (v: unknown) => !v || !String(v).trim()
         // Item Highlights are write-BLOCKED by Amazon ("currently unsupported") until it opens API
         // writes — an empty one is not a closable gap, so it must not dock Features. The verdict now
         // comes from the persisted VALIDATION_PREVIEW probe flag (marketplace-wide, one app_settings
@@ -653,9 +652,13 @@ export async function fetchScoringContext(
         void import('@/lib/fba/pushExecutor')
           .then((m) => m.maybeRefreshItemHighlightsProbe(supabase, ihState))
           .catch(() => { /* best-effort */ })
-        ctx.productDetailsGaps = pdi.filter((p: { field_name?: string; sp_api_key?: string; current_value?: unknown; is_enum?: boolean; enum_valid?: boolean }) =>
-          !isWriteBlockedPreLaunch(p.field_name, p.sp_api_key, new Date(), { apiSupported: ihState?.supported ?? null }) &&
-          (isEmpty(p.current_value) || (p.is_enum === true && p.enum_valid === false)),
+        // isProductDetailGap (productDetailAttrs.ts) is the ONE gap predicate — also called by the
+        // ai-recommendations route's own live-rescore so a regen's Features score and the next sync's
+        // agree (#85 no-flip-flop). It additionally exempts a HELD row (SILENT-HOLD class, 2026-09-04):
+        // an Item Highlight the deterministic composer refused to compose is visible but not a
+        // closable gap, same doctrine as the write-blocked exemption above.
+        ctx.productDetailsGaps = pdi.filter((p: { field_name?: string; sp_api_key?: string; current_value?: unknown; is_enum?: boolean; enum_valid?: boolean; hold?: unknown }) =>
+          isProductDetailGap(p, { apiSupported: ihState?.supported ?? null }),
         ).length
       }
     }
