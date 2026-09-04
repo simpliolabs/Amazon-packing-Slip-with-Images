@@ -1835,7 +1835,17 @@ export function titleQualityJudge(title: string, opts: {
       // THE UNIVERSAL TAIL, corpus-measured: audienceMix.inclusive is 0 of 9. The soft -3 elsewhere
       // let a candidate carrying 23 chars of banned filler WIN on 2026-08-11 and starve the money
       // slot. Zero-attested constructs dock like the rest of the not-their-voice vocabulary.
-      if (opts.shape.audienceMix.inclusive === 0 && hasInclusiveAudience(t)) {
+      //
+      // EXCEPT ON A DECLARED-UNISEX FAMILY (PO ruling 2026-09-04, verbatim: "you have Keywords
+      // From the Bank you Can Add - For Man And Wome[n]... Etc"). `audienceMix.inclusive === 0` is
+      // a CORPUS-FREQUENCY inference — "the seller has never shipped this" — and an explicit PO
+      // ruling outranks a corpus inference. `opts.lean` is the SAME axis-adjacent field the
+      // AUDIENCE-WHEN-LEAN dock two blocks down already reads (extending that seam, not a second
+      // audience rulebook): on `unisex` the phrase is not reach-widening, it is a restatement of
+      // the family's own declared audience — TRUE — so it must not be scored as absent voice. Every
+      // OTHER lean value (`male`/`female`/`lean_male`/`lean_female`, or no lean classified) keeps
+      // the dock exactly as before — claiming both genders on a leaned family is still wrong.
+      if (opts.shape.audienceMix.inclusive === 0 && hasInclusiveAudience(t) && opts.lean !== 'unisex') {
         score -= 15
         problems.push(`"for Men and Women" — 0 of ${opts.shape.count} seller golds carry it (-15)`)
       }

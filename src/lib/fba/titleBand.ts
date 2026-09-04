@@ -458,6 +458,36 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
       push(`${a} ${g}`)
     }
   }
+  /* INCLUSIVE AUDIENCE, CONSTRUCTED (PO ruling 2026-09-04, verbatim: "you have Keywords From the
+   * Bank you Can Add - For Man And Wome[n]... Etc"). A TRUTH CONDITION, not a blanket allow — gated
+   * to EXACTLY `ctx.lean === 'unisex'`.
+   *
+   * WHY THIS IS A FACT, NOT MARKET COPY. On every OTHER lean value, claiming both genders is
+   * reach-widening and stays banned (PO ruling 2026-08-09, §4 — unchanged; `crossGenderLeanVeto`
+   * only screens a SINGLE-gender candidate against a lean, so a dual-gender phrase must gate
+   * itself here). On a family whose `audience_lean` is declared 'unisex', "for Men and Women" is
+   * not a market phrase pulled from the pool — it is a restatement of a fact the seller has
+   * already stated about THIS product (the identical `ctx.lean` field `crossGenderLeanVeto` reads
+   * a few lines above). `phraseTruthVerdict`'s own audience-lean-lie rule (contentTruth.ts) already
+   * agrees: a phrase naming BOTH genders is inclusive, not forced, and passes it on a unisex title.
+   *
+   * THREE PO-NAMED EQUIVALENTS (titleBand.ts's own DEFECT-1 doc above lists all four the PO named:
+   * "for Men and Women", "for Men & Women", "Men's and Women's", "Mens Womens"). Offered longest
+   * (most natural) FIRST so a family with room enough uses the seller's own literal wording; the
+   * third is gold #7's exact attested terminal shape ("…Shirt for Men Women", no conjunction) —
+   * the corpus's OWN shortest true form, not an invented one. `push` applies every existing gate
+   * (waste vocabulary, `ctx.truthOk`, the one-class rule, the concept gate, `alreadyStates`) so
+   * this can never re-add a phrase the title already carries or fight a garment class it committed
+   * to; ORDINARY DFS re-filtration in `settleTruthBand` tries each in turn and any COMBINATION with
+   * every other candidate, so whichever length actually fits a given family's remaining band gap is
+   * the one that ships — never a fixed guess. Sits AFTER product facts (spec-grounding beats
+   * coverage, unchanged) and BEFORE the pool bank two lines below: a declared product fact ranks
+   * above a scraped market phrase the same way every other fact on this list already does. */
+  if (ctx.lean === 'unisex') {
+    push('for Men and Women')
+    push('for Men & Women')
+    push('for Men Women')
+  }
   /* TRUTHFUL POOL PHRASES — LAST, and only what the product's own facts could not reach.
    *
    * Every entry passes the SAME four gates a spec fact does (`push` applies the waste check, the
@@ -465,7 +495,12 @@ function candidateSegments(title: string, ctx: TitleBandCtx): string[] {
    * word the title already spends. Being last means a family with a healthy fact bank pads exactly
    * as it does today: `enforceTitleBand` returns on the FIRST candidate that lands in band, so
    * these are only ever reached when the facts genuinely ran out — which is the starvation case
-   * that took the truth spine off production. */
+   * that took the truth spine off production. THIS BANK IS NOT GENDER- OR AUDIENCE-SPECIFIC
+   * VOCABULARY ONLY: a pool phrase naming a use-case/theme/occasion ("Gift", "Motivational") is
+   * ordinary truthful title fill exactly like a spec fact — it is judged the identical way
+   * (`ctx.truthOk`, waste vocabulary, the garment-class and concept gates), never specially barred
+   * for being "not in the golds" (that corpus-frequency inference lives ONLY in
+   * `titleQualityJudge`'s scorer, listingPipeline.ts, and is not this pad's business). */
   for (const p of ctx.poolSegments ?? []) if (wordsAreNew(title, p)) push(p)
   return out
 }
