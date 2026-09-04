@@ -609,6 +609,41 @@ export function isWriteBlockedPreLaunch(
   return now < new Date('2026-07-27T00:00:00Z')   // never probed → legacy date fallback
 }
 
+/** TRUE when this value reads as empty for gap-counting purposes (mirrors the inline `isEmpty`
+ *  arrows syncListingContent.ts / ai-recommendations/route.ts used to each define locally). */
+export function isEmptyDetailValue(v: unknown): boolean {
+  return !v || !String(v).trim()
+}
+
+/**
+ * THE product-details GAP predicate — the SINGLE definition syncListingContent.ts's
+ * fetchScoringContext AND the ai-recommendations route's live-rescore both call, closing the
+ * "using the SAME predicate... keeps THIS regen's score == the next sync's" duplication the route's
+ * own comment names (a hand-copied inline filter drifting between the two sites is exactly how the
+ * #85 no-flip-flop invariant breaks).
+ *
+ * TRUE = this row docks the Features score (a real, closable gap). FALSE for three reasons:
+ *   1. write-blocked (isWriteBlockedPreLaunch) — Amazon refuses the write; unrelated to content.
+ *   2. HELD (`row.hold` set) AND the live value is empty — the deterministic producer refused to
+ *      compose a truthful line (SILENT-HOLD class, 2026-09-04): the seller cannot close this by
+ *      pushing harder, so it must not dock like a plain missing recommendation. Gated on
+ *      current_value being empty (not recommended_value) — a `hold` that survived a downstream
+ *      snap-back to a real accepted value (stickyDetails.ts) no longer describes an empty field and
+ *      must NOT suppress a gap that no longer exists (current_value would be non-empty by then, so
+ *      this branch never fires for it — the field is simply not a gap either way).
+ *   3. otherwise: a true gap when the live value is empty, or an enum row whose current value is no
+ *      longer a valid member of Amazon's live schema.
+ */
+export function isProductDetailGap(
+  row: { field_name?: string | null; sp_api_key?: string | null; current_value?: unknown; is_enum?: boolean; enum_valid?: boolean; hold?: unknown },
+  opts?: { apiSupported?: boolean | null },
+): boolean {
+  if (isWriteBlockedPreLaunch(row.field_name, row.sp_api_key, new Date(), opts)) return false
+  const currentEmpty = isEmptyDetailValue(row.current_value)
+  if (currentEmpty && row.hold != null) return false
+  return currentEmpty || (row.is_enum === true && row.enum_valid === false)
+}
+
 /**
  * Read the listing's CURRENT value for an attribute key from the cached attributes blob.
  * Listings Items returns attributes as `Record<string, Array<{value, ...}>>`. We pull the

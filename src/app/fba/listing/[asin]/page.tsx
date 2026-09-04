@@ -12,7 +12,7 @@ import {
   SOURCE_LABEL, resolveDesignGarment, buildDesignAssignmentRequests, buildDesignClearRequests,
   type GarmentResolution, type ChildGarmentResolution,
 } from '@/lib/fba/garmentPerDesign'
-import { perDesignIhRows, collapseSharedIhRows, type PerChildItemHighlight, type PerDesignIhRow } from '@/lib/fba/perDesignItemHighlights'
+import { perDesignIhRows, collapseSharedIhRows, IH_HOLD_MESSAGES, type PerChildItemHighlight, type PerDesignIhRow, type IhHoldReason } from '@/lib/fba/perDesignItemHighlights'
 import { runThemeRerate, type ThemeRerateOutcome } from '@/lib/fba/themeRerateControl'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
@@ -64,7 +64,7 @@ interface PerChildKeywords { sku: string; asin: string; keywords: string }
 
 interface VariantCorrection { sku: string; field: string; current: string; replace_with: string; reason: string }
 interface CannibalizationWarning { keyword: string; affected_skus: string[]; issue: string; recommendation: string }
-interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; sp_api_key?: string; attr_scope?: 'broadcast' | 'per-variant'; pushable?: boolean; /** Item Highlight on a multi-design family: per-design MARKER (no broadcast line; lines in per_child_item_highlights). */ per_design?: boolean }
+interface ProductDetailImprovement { field_name: string; current_value: string | null; recommended_value: string; reason: string; is_enum?: boolean; enum_valid?: boolean; enum_accepted?: string[]; normalized_from?: string; sp_api_key?: string; attr_scope?: 'broadcast' | 'per-variant'; pushable?: boolean; /** Item Highlight on a multi-design family: per-design MARKER (no broadcast line; lines in per_child_item_highlights). */ per_design?: boolean; /** SILENT-HOLD class closed 2026-09-04: why recommended_value is '' — null/absent once a real value ships. */ hold?: IhHoldReason | null }
 
 /** Some Amazon enums store machine tokens, not labels — SHIRT sleeve accepts "short_sleeve"
  *  while the editor displays "Short Sleeve" (PO: "Short_sleeve should be Short Sleeve").
@@ -4423,8 +4423,18 @@ export default function ListingDetailPage() {
                         const ihRows = isIhRow ? perDesignIhRows(aiRecs?.per_child_item_highlights) : []
                         const perDesignIh = isIhRow && (pd.per_design === true || ihRows.some((r) => !!r.line))
                         const ihBroadcastLeak = isIhRow && familyMulti && !perDesignIh
-                        const pushable = !styleLeak && !ihBroadcastLeak && (pd.pushable ?? isPushableDetail(pd.field_name)) && (!perDesignIh || ihRows.some((r) => !!r.line))
-                        const blockedReason = pushable ? null : styleLeak ? SINGLE_DESIGN_ONLY_LEAK_REASON : ihBroadcastLeak ? 'Multi-design family: the Item Highlight ships one line PER DESIGN — this single line would be false on the other designs. Click ↻ Regen to compose one per design.' : perDesignIh ? 'Every design is held — no truthful line could be composed yet.' : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
+                        // SILENT-HOLD CLASS CLOSED (2026-09-04): a held row (composer refused — see
+                        // buildItemHighlights/buildItemHighlightsPerDesign) now ALWAYS ships so the
+                        // seller sees the reason, but it must never be Push-ABLE — an empty value must
+                        // never reach Amazon (the server's loadDetailContext already refuses an empty
+                        // recommended_value too; this keeps the button itself honest instead of relying
+                        // solely on that 400). Gated on the row's OWN recommended_value being empty, not
+                        // on `pd.hold` alone: the sticky-details gate can snap a held row back to a
+                        // PRIOR ACCEPTED value (a real, live, non-empty value) — `hold` may still ride
+                        // along on that snapped row, but it no longer describes an empty field.
+                        const heldEmpty = !!pd.hold && !(pd.recommended_value ?? '').trim()
+                        const pushable = !styleLeak && !ihBroadcastLeak && !heldEmpty && (pd.pushable ?? isPushableDetail(pd.field_name)) && (!perDesignIh || ihRows.some((r) => !!r.line))
+                        const blockedReason = pushable ? null : styleLeak ? SINGLE_DESIGN_ONLY_LEAK_REASON : ihBroadcastLeak ? 'Multi-design family: the Item Highlight ships one line PER DESIGN — this single line would be false on the other designs. Click ↻ Regen to compose one per design.' : heldEmpty ? (IH_HOLD_MESSAGES[pd.hold as IhHoldReason] ?? 'Held — no truthful line could be composed yet.') : perDesignIh ? 'Every design is held — no truthful line could be composed yet.' : (pd.attr_scope === 'per-variant' ? 'Differs per variant — set it on each child SKU in Seller Central.' : unpushableReason(pd.field_name))
                         // Pushed/up-to-date state (PO: "no notice after PUSH"): the push write-through
                         // sets current_value = recommended_value (server-side at push; mirrored locally
                         // by the modal + Auto Push), so equality IS the "this is on Amazon" signal.
@@ -4535,13 +4545,23 @@ export default function ListingDetailPage() {
                                       <span className="text-[10px] text-slate-400">· {r.skuCount} SKU{r.skuCount === 1 ? '' : 's'}</span>
                                       {r.line && <span className={`text-[10px] ${r.line.length < 107 ? 'text-amber-600' : 'text-slate-400'}`}>· {r.line.length}/125</span>}
                                       {r.line && r.onAmazon && <span className="text-[10px] px-1 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">✓ On Amazon</span>}
-                                      {!r.line && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={r.hold === 'designs-unrated' ? 'The pool is not rated against every design yet — run the per-design theme rating (keyword-pool/rerate { per_design: true }), then Regen.' : 'These designs ship NO Item Highlight until a truthful line composes — never another design’s line.'}>Held{r.hold ? ` · ${r.hold}` : ''}</span>}
+                                      {/* Every hold reason gets ITS OWN explanation (IH_HOLD_MESSAGES) — never a generic
+                                          blank, and never lumped into one bucket regardless of which reason fired. */}
+                                      {!r.line && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium" title={r.hold ? IH_HOLD_MESSAGES[r.hold] : 'These designs ship NO Item Highlight until a truthful line composes — never another design’s line.'}>Held{r.hold ? ` · ${r.hold}` : ''}</span>}
                                     </div>
                                     {r.line ? <p className="text-xs text-slate-700 break-words">{r.line}</p> : <p className="text-[11px] text-amber-800 italic">Skipped at push (no-line-for-design)</p>}
                                   </div>
                                 ))}
                               </div>
                               </>
+                            ) : heldEmpty ? (
+                              // SINGLE-DESIGN HELD (the :11843/pipeline path, SILENT-HOLD class closed
+                              // 2026-09-04): field name (card header above), Held badge, the named reason,
+                              // and what to do about it — never a blank paragraph where a value used to be.
+                              <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-2.5 py-1.5">
+                                <span className="text-[10px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 font-medium">Held{pd.hold ? ` · ${pd.hold}` : ''}</span>
+                                <p className="text-[11px] text-amber-800 italic mt-1">{IH_HOLD_MESSAGES[pd.hold as IhHoldReason] ?? 'No truthful line could be composed yet.'}</p>
+                              </div>
                             ) : (
                               <p className="text-xs text-slate-700">{prettyDetailValue(pd.recommended_value, pd.enum_accepted)}</p>
                             )}
@@ -4551,7 +4571,12 @@ export default function ListingDetailPage() {
                             {pd.sp_api_key && aiRecs?.field_pushed_at?.[`details:${pd.sp_api_key}`] && (
                               <p className="text-[10px] text-slate-400 mt-1" title={`Last shipped to Amazon ${new Date(aiRecs.field_pushed_at[`details:${pd.sp_api_key}`]).toLocaleString()}`}>shipped {relDate(aiRecs.field_pushed_at[`details:${pd.sp_api_key}`])}</p>
                             )}
-                            {!pushable && blockedReason && (
+                            {/* Suppressed when heldEmpty && !perDesignIh — the single-design Held box
+                                above already shows this exact reason visibly (not just on hover), so
+                                repeating it here would be the same sentence twice. Multi-design keeps it:
+                                the per-row badges below only carry their reason in a hover tooltip, so
+                                this plain-text line is the seller's one guaranteed-visible copy of it. */}
+                            {!pushable && blockedReason && !(heldEmpty && !perDesignIh) && (
                               <p className="text-[10px] text-slate-500 italic mt-1">{blockedReason}</p>
                             )}
                           </div>
