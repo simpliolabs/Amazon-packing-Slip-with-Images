@@ -13,6 +13,7 @@ import {
   type GarmentResolution, type ChildGarmentResolution,
 } from '@/lib/fba/garmentPerDesign'
 import { perDesignIhRows, collapseSharedIhRows, type PerChildItemHighlight, type PerDesignIhRow } from '@/lib/fba/perDesignItemHighlights'
+import { runThemeRerate, type ThemeRerateOutcome } from '@/lib/fba/themeRerateControl'
 import { PerDesignCard } from '@/components/fba/PerDesignCard'
 import { ModalShell, ModalCloseButton } from '@/components/fba/ModalShell'
 import { ParentManualUpdateModal } from './ParentManualUpdateModal'
@@ -2123,6 +2124,31 @@ export default function ListingDetailPage() {
       setRegenIhBusy(false)
     }
   }, [asin, regenIhBusy])
+
+  // PER-DESIGN THEME RATING TRIGGER (PO 2026-09-04: the "Held · designs-unrated" badge's own
+  // tooltip told the seller to run `keyword-pool/rerate { per_design: true }` — a POST-only route
+  // with no button anywhere to fire it). This calls that EXISTING route unchanged; it never rates
+  // anything itself. It is slow (sequential per design, up to the platform's 300s ceiling) and
+  // LLM-billed (OpenAI only — reads the cached pool, makes ZERO Jungle Scout calls), so it is never
+  // auto-run: an explicit click only. `runThemeRerate`'s own busy-gate (not just the disabled
+  // attribute) prevents a double-fire race; see themeRerateControl.ts for the classified outcomes.
+  const [themeRerateBusy, setThemeRerateBusy] = useState(false)
+  const [themeRerateOutcome, setThemeRerateOutcome] = useState<ThemeRerateOutcome | null>(null)
+  const onRateDesignsAgainstPool = useCallback(async () => {
+    if (themeRerateBusy) return
+    setThemeRerateBusy(true)
+    setThemeRerateOutcome(null)
+    try {
+      const token = await getToken()
+      const outcome = await runThemeRerate(asin, false, {
+        fetchImpl: fetch,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      setThemeRerateOutcome(outcome)
+    } finally {
+      setThemeRerateBusy(false)
+    }
+  }, [asin, themeRerateBusy, getToken])
 
   const bulkEligibleDetails = useMemo(() => {
     const rows = aiRecs?.product_details_improvements ?? []
@@ -4453,9 +4479,47 @@ export default function ListingDetailPage() {
                               </div>
                             </div>
                             {perDesignIh ? (
-                              /* PO 2026-08-21: ONE shared line across every design (design names stripped, every phrase
+                              <>
+                              {/* PER-DESIGN THEME RATING TRIGGER (PO 2026-09-04): the "Held · designs-unrated"
+                                  badge below tells the seller to run the per-design rating — this is the control
+                                  to do it, shown only while at least one design is actually held on that reason.
+                                  Credit-free (reads the cached pool, OpenAI only) but slow + LLM-billed, so it is
+                                  never automatic. */}
+                              {ihRows.some((row) => !row.line && row.hold === 'designs-unrated') && (
+                                <div className="mt-1.5 mb-1 flex flex-wrap items-center gap-2 bg-amber-50/60 border border-amber-200 rounded-lg px-2.5 py-2">
+                                  <button
+                                    onClick={onRateDesignsAgainstPool}
+                                    disabled={themeRerateBusy}
+                                    title="Rates the EXISTING cached keyword pool against each design's own vision identity — an AI pass only (ZERO Jungle Scout calls, no research credits spent), not new research. Runs designs sequentially and can take several minutes on a large family. Then click ↻ Regen to compose the Item Highlight."
+                                    className="text-[10px] px-2 py-0.5 rounded border border-amber-400 bg-white text-amber-800 hover:bg-amber-100 font-semibold whitespace-nowrap disabled:opacity-50"
+                                  >
+                                    {themeRerateBusy ? 'Rating designs… (can take minutes)' : 'Rate designs against pool'}
+                                  </button>
+                                  <span className="text-[10px] text-amber-700">AI rating pass over the cached pool — no research credits spent</span>
+                                </div>
+                              )}
+                              {themeRerateOutcome && (
+                                <div className={`mt-1 mb-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] ${
+                                  themeRerateOutcome.kind === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                  : themeRerateOutcome.kind === 'cooldown' || themeRerateOutcome.kind === 'no-card' ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                  : themeRerateOutcome.kind === 'empty' || themeRerateOutcome.kind === 'not-multi-design' ? 'bg-slate-50 border-slate-200 text-slate-600'
+                                  : 'bg-rose-50 border-rose-200 text-rose-800'
+                                }`}>
+                                  {themeRerateOutcome.message}
+                                  {themeRerateOutcome.kind === 'cooldown' && (
+                                    <span className="block mt-0.5 text-[10px] opacity-80">Retry in ~{Math.max(1, Math.ceil(themeRerateOutcome.retryAfterMs / 60000))} min.</span>
+                                  )}
+                                  {themeRerateOutcome.kind === 'no-card' && themeRerateOutcome.noCard.length > 0 && (
+                                    <span className="block mt-0.5 text-[10px] opacity-80">No identity for: {themeRerateOutcome.noCard.join(', ')}.</span>
+                                  )}
+                                  {themeRerateOutcome.kind === 'failed' && themeRerateOutcome.failed.length > 0 && (
+                                    <span className="block mt-0.5 text-[10px] opacity-80">Failed: {themeRerateOutcome.failed.join(', ')}.</span>
+                                  )}
+                                </div>
+                              )}
+                              {/* PO 2026-08-21: ONE shared line across every design (design names stripped, every phrase
                                  true under EVERY design) — identical per-design rows collapse into one "shared across N
-                                 designs" row naming the designs it covers. Rows that ever differ still render per design. */
+                                 designs" row naming the designs it covers. Rows that ever differ still render per design. */}
                               <div className="mt-1 divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white">
                                 {collapseSharedIhRows(ihRows).map((r, ri) => (
                                   <div key={`${ri}-${r.designs[0]?.designKey ?? ''}`} className={`px-2 py-1.5 ${r.line ? '' : 'bg-amber-50/60'}`}>
@@ -4477,6 +4541,7 @@ export default function ListingDetailPage() {
                                   </div>
                                 ))}
                               </div>
+                              </>
                             ) : (
                               <p className="text-xs text-slate-700">{prettyDetailValue(pd.recommended_value, pd.enum_accepted)}</p>
                             )}
