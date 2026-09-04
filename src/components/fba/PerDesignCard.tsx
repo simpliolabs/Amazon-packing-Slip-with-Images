@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react'
 import type { PerDesignGroup } from '@/lib/fba/perDesign'
+import { SOURCE_LABEL, type ChildGarmentResolution } from '@/lib/fba/garmentPerDesign'
 
 // ── Inline SVG icons (no emoji — matches the app's Icon set in page.tsx) ──
 type IconProps = { className?: string }
@@ -80,6 +81,22 @@ interface PerDesignCardProps {
   familyAudienceLean?: string | null
   audienceSaving?: boolean
   onAssignAudience?: (designKey: string, value: string) => void
+  /** PER-DESIGN GARMENT (PO 2026-09-03 — B0DSCDZC6K "Business B*tch" shipped a Tee title for a
+   *  design the PO says IS a sweatshirt, because a wrong `scope='child'` blank_assignments row was
+   *  visible/editable only via hand-written SQL). Same select+badge idiom as the family Garment row
+   *  (page.tsx) and the AUDIENCE row above: `designGarment` is this design's RESOLVED blank AND
+   *  which precedence level decided it (child assignment / SKU code / family assignment / legacy
+   *  match) — undefined/null while garment data is still loading. Assigning writes a
+   *  `scope='child'` row for EVERY SKU in this design (never a live rewrite/push — same
+   *  "Regenerate to apply" contract as Audience/family Garment). Clearing is gated behind an inline
+   *  confirm that shows `designGarment.fallback` — what resolution the design would fall back to —
+   *  BEFORE the delete fires, so a clear can never silently reintroduce a wrong garment. */
+  designGarment?: ChildGarmentResolution | null
+  garmentActiveBlanks?: { id: number; style_code: string | null; brand: string | null }[]
+  garmentSaving?: boolean
+  garmentJustSaved?: boolean
+  onAssignGarment?: (designKey: string, styleCode: string) => void
+  onClearGarment?: (designKey: string) => void
 }
 
 const AUDIENCE_LABEL: Record<string, string> = {
@@ -105,6 +122,7 @@ export function PerDesignCard({
   expanded, onToggle, edit, dirty, busy, status,
   onEditTitle, onEditBullet, onEditDescription, onSave, onShipField, onVerify, onRenameDesign,
   assignedAudienceLean, familyAudienceLean, audienceSaving, onAssignAudience,
+  designGarment, garmentActiveBlanks, garmentSaving, garmentJustSaved, onAssignGarment, onClearGarment,
 }: PerDesignCardProps) {
   // Resolved display values: live edit > group's own per-child content > broadcast fallback.
   const title = edit?.title ?? group.title
@@ -124,6 +142,11 @@ export function PerDesignCard({
     if (next !== group.designName.trim()) onRenameDesign?.(group.designKey, next)
   }
   const cancelName = () => { setEditingName(false); setNameDraft(group.designName) }
+
+  // ── Garment clear confirmation (local UI state only — the fallback preview itself comes from the
+  //    server via designGarment.fallback, computed by resolveChildFallback in blankAssignmentImpact.ts
+  //    so it can never drift from what an actual clear + reload would show). ──
+  const [clearConfirming, setClearConfirming] = useState(false)
 
   return (
     <div className={`bg-white border border-slate-200 rounded-2xl overflow-hidden border-l-4 ${ACCENT[status]}`}>
@@ -191,6 +214,76 @@ export function PerDesignCard({
       {/* ── Body (when expanded) — editable Title / Bullets / Description ── */}
       {expanded && (
         <div className="px-4 pb-4 pt-1 bg-slate-50/60 border-t border-slate-100 space-y-4">
+          {/* ── GARMENT (PO 2026-09-03) — this design's resolved blank + WHICH precedence level
+              decided it, same select+badge idiom as the family Garment row (page.tsx). A wrong
+              child-scope assignment (the B0DSCDZC6K defect class) is now visible at a glance instead
+              of requiring SQL. Assigning writes scope='child' for every SKU in this design; clearing
+              requires an inline confirm that shows the fallback target FIRST. ── */}
+          {onAssignGarment && (
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Garment</label>
+              {designGarment?.styleCode ? (
+                <span className="font-mono text-xs font-semibold text-slate-700 bg-slate-100 rounded px-2 py-0.5">{designGarment.styleCode}</span>
+              ) : (
+                <span className="text-xs text-slate-400">unresolved</span>
+              )}
+              {designGarment?.source && (
+                <span className="text-[10px] font-medium bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full">
+                  {SOURCE_LABEL[designGarment.source] ?? designGarment.source}
+                </span>
+              )}
+              <select
+                value={designGarment?.source === 'child-assignment' ? (designGarment.styleCode ?? '') : ''}
+                onChange={(e) => e.target.value && onAssignGarment(group.designKey, e.target.value)}
+                disabled={!!garmentSaving}
+                title={`Assigns this blank to all ${group.skus.length} SKU${group.skus.length === 1 ? '' : 's'} in this design`}
+                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-violet-200 cursor-pointer disabled:opacity-50"
+              >
+                <option value="">Assign a blank…</option>
+                {(garmentActiveBlanks ?? []).map((b) => (
+                  <option key={b.id} value={b.style_code ?? ''}>{b.style_code} — {b.brand || 'no brand'}</option>
+                ))}
+              </select>
+              {garmentSaving && <span className="text-[10px] text-slate-400">Saving…</span>}
+              {/* Clear is only offered when there IS an explicit assignment to clear (source ===
+                  'child-assignment'); clicking it never deletes immediately — it shows what the
+                  design would fall back to and requires a second confirming click. */}
+              {designGarment?.source === 'child-assignment' && onClearGarment && (
+                clearConfirming ? (
+                  <span className="inline-flex items-center gap-1.5 text-[10px] bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-2 py-1">
+                    <span>
+                      Falls back to{' '}
+                      {designGarment.fallback.styleCode ? (
+                        <span className="font-mono font-semibold">{designGarment.fallback.styleCode}</span>
+                      ) : (
+                        <span className="italic">unresolved</span>
+                      )}
+                      {designGarment.fallback.source && ` (${SOURCE_LABEL[designGarment.fallback.source] ?? designGarment.fallback.source})`}
+                    </span>
+                    <button
+                      onClick={() => { setClearConfirming(false); onClearGarment(group.designKey) }}
+                      className="font-semibold text-amber-900 hover:underline cursor-pointer"
+                    >
+                      Confirm clear
+                    </button>
+                    <button onClick={() => setClearConfirming(false)} className="text-slate-500 hover:underline cursor-pointer">Cancel</button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => setClearConfirming(true)}
+                    disabled={!!garmentSaving}
+                    className="text-[10px] text-slate-500 hover:text-red-600 underline decoration-dotted disabled:opacity-40 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )
+              )}
+              <span className="text-[10px] text-slate-400">
+                {garmentJustSaved ? 'Assigned — stored copy unchanged. Regenerate to apply.' : 'Changes what the generator believes — no live copy rewrite, no Amazon push.'}
+              </span>
+            </div>
+          )}
+
           {/* ── AUDIENCE (migration 070, PO 2026-08-26) — same select+badge idiom as the family
               Garment row (page.tsx). Assigning writes audience_lean_by_design ONLY; it never
               triggers a regenerate or push — the helper text says so, mirroring the Garment row's

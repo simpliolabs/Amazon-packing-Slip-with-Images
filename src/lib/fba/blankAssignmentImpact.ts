@@ -276,6 +276,30 @@ export function resolveFamily(
   return { styleCode: null, source: null, rowId: null }
 }
 
+/**
+ * The resolution ONE child SKU would fall back to if its own explicit `scope='child'` assignment
+ * were removed — family assignment / legacy match / another child's SKU-code within the SAME
+ * family still apply unchanged, since only THIS sku's key is excluded from `childCodeBySku`.
+ * Powers the per-design Garment control's "show the fallback BEFORE the seller confirms a clear"
+ * safety requirement (PO per-design garment UI, 2026-09-03) — reuses `resolveFamily` unchanged, so
+ * the preview can never drift from what an actual DELETE + reload would show. Treats `sku` as a
+ * one-SKU family so the SAME "most children win" dominance rule resolveFamily already proves out
+ * applies identically to a single SKU (trivially: the lone SKU's own code, or nothing).
+ */
+export function resolveChildFallback(
+  sku: string,
+  parentAsin: string,
+  hay: string,
+  catalog: readonly CatalogRow[],
+  childCodeBySku: ReadonlyMap<string, string>,
+  familyCodeByAsin: ReadonlyMap<string, string>,
+): FamilyResolution {
+  const withoutOwn = new Map(childCodeBySku)
+  withoutOwn.delete(sku.trim().toUpperCase())
+  const oneChild: FamilyGroup = { parentAsin, skus: [sku], hay }
+  return resolveFamily(oneChild, catalog, withoutOwn, familyCodeByAsin)
+}
+
 /** Map<rowId, count of families currently resolving to that row> — powers the "used by N families"
  *  column on GET /api/fba/blanks. */
 export function computeUsageCounts(

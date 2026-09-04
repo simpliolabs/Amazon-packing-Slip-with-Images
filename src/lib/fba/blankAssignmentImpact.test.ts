@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   validateBlankSpecInput, findDuplicateActiveStyleCode, styleCodeExists,
-  toCatalogRows, groupFamilies, computeUsageCounts, computeBlankImpact, resolveFamily, buildAssignmentMaps,
+  toCatalogRows, groupFamilies, computeUsageCounts, computeBlankImpact, resolveFamily, resolveChildFallback, buildAssignmentMaps,
   type DbBlankRow, type AssignmentRow,
 } from './blankAssignmentImpact'
 
@@ -189,6 +189,115 @@ describe('resolveFamily — fixture SKUs from the task spec', () => {
     const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps([])
     const res = resolveFamily(family, catalog, childCodeBySku, familyCodeByAsin)
     expect(res).toEqual({ styleCode: null, source: null, rowId: null })
+  })
+})
+
+// ─── Table-driven precedence chain (PO per-design garment UI, 2026-09-03) ──────────────────────
+// The per-design/per-child Garment control (garmentPerDesign.ts, PerDesignCard.tsx) renders
+// whatever resolveFamily decides, verbatim. This table exercises every level of the documented
+// precedence — child assignment -> SKU style code -> family assignment -> legacy regex ->
+// unresolved — in ONE place, over the SAME fixture family, so a future 5th level only needs a new
+// row here (the individual-`it` coverage above stays as narrative/regression documentation).
+describe('resolveFamily — table-driven precedence chain (child > sku > family > legacy > none)', () => {
+  const catalog = toCatalogRows(FIXTURE_ROWS)
+  const family = groupFamilies([{ parent_asin: 'B0TABLE01', sku: 'BB64000XL-BK-FBA', title: 'A genuine Comfort Colors sweatshirt' }]).get('B0TABLE01')!
+
+  const CASES: { name: string; assignments: AssignmentRow[]; expectCode: string | null; expectSource: string | null }[] = [
+    {
+      name: 'child assignment beats the SKU-extracted code',
+      assignments: [{ scope: 'child', key: 'BB64000XL-BK-FBA', style_code: '6014' }],
+      expectCode: '6014', expectSource: 'child-assignment',
+    },
+    {
+      name: 'SKU style code wins when no child assignment exists',
+      assignments: [],
+      expectCode: '64000', expectSource: 'sku-code',
+    },
+  ]
+
+  for (const c of CASES) {
+    it(c.name, () => {
+      const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(c.assignments)
+      const res = resolveFamily(family, catalog, childCodeBySku, familyCodeByAsin)
+      expect(res.styleCode).toBe(c.expectCode)
+      expect(res.source).toBe(c.expectSource)
+    })
+  }
+
+  // family-assignment / legacy / unresolved need a family whose SKU carries no recognizable code
+  // at all — a separate fixture family, table-driven over the SAME three remaining levels.
+  const opaqueFamilyAssigned = groupFamilies([{ parent_asin: 'B0TABLE02', sku: 'OPAQUE-1', title: 'Some Hat' }]).get('B0TABLE02')!
+  const opaqueFamilyLegacy = groupFamilies([{ parent_asin: 'B0TABLE03', sku: 'OPAQUE-2', title: 'A genuine Comfort Colors garment' }]).get('B0TABLE03')!
+  const opaqueFamilyNone = groupFamilies([{ parent_asin: 'B0TABLE04', sku: 'OPAQUE-3', title: 'A Ceramic Mug' }]).get('B0TABLE04')!
+
+  const REMAINING_CASES: { name: string; family: typeof opaqueFamilyAssigned; assignments: AssignmentRow[]; expectCode: string | null; expectSource: string | null }[] = [
+    { name: 'family assignment when no SKU carries a code', family: opaqueFamilyAssigned, assignments: [{ scope: 'family', key: 'B0TABLE02', style_code: '64000' }], expectCode: '64000', expectSource: 'family-assignment' },
+    { name: 'legacy match_pattern as the last resort', family: opaqueFamilyLegacy, assignments: [], expectCode: '1717', expectSource: 'legacy' },
+    { name: 'unresolved when nothing matches at any level', family: opaqueFamilyNone, assignments: [], expectCode: null, expectSource: null },
+  ]
+
+  for (const c of REMAINING_CASES) {
+    it(c.name, () => {
+      const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(c.assignments)
+      const res = resolveFamily(c.family, catalog, childCodeBySku, familyCodeByAsin)
+      expect(res.styleCode).toBe(c.expectCode)
+      expect(res.source).toBe(c.expectSource)
+    })
+  }
+})
+
+// ─── resolveChildFallback — the "clear must show the fallback BEFORE you confirm" safety net ────
+describe('resolveChildFallback', () => {
+  const catalog = toCatalogRows(FIXTURE_ROWS)
+
+  it('B0DSCDZC6K exactly: clearing BB64000XL-BK-FBA\'s child assignment (6014) falls back to 64000 via sku-code — the wrong Tee code that motivated the assignment in the first place', () => {
+    const assignments: AssignmentRow[] = [{ scope: 'child', key: 'BB64000XL-BK-FBA', style_code: '6014' }]
+    const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(assignments)
+    const fallback = resolveChildFallback('BB64000XL-BK-FBA', 'B0DSCDZC6K', 'Business Btch Tee Shirt BB64000XL-BK-FBA', catalog, childCodeBySku, familyCodeByAsin)
+    expect(fallback.styleCode).toBe('64000')
+    expect(fallback.source).toBe('sku-code')
+  })
+
+  it('falls back to a FAMILY assignment when one exists and no child SKU carries a code of its own', () => {
+    const assignments: AssignmentRow[] = [
+      { scope: 'child', key: 'OPAQUE-HAT-1', style_code: '6014' },
+      { scope: 'family', key: 'B0FAM-HAT', style_code: '64000' },
+    ]
+    const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(assignments)
+    const fallback = resolveChildFallback('OPAQUE-HAT-1', 'B0FAM-HAT', 'Some Hat', catalog, childCodeBySku, familyCodeByAsin)
+    expect(fallback.styleCode).toBe('64000')
+    expect(fallback.source).toBe('family-assignment')
+  })
+
+  it('falls back to the legacy match_pattern when no assignment survives the exclusion', () => {
+    const assignments: AssignmentRow[] = [{ scope: 'child', key: 'OPAQUE-CC-1', style_code: '6014' }]
+    const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(assignments)
+    const fallback = resolveChildFallback('OPAQUE-CC-1', 'B0FAM-CC', 'A genuine Comfort Colors garment', catalog, childCodeBySku, familyCodeByAsin)
+    expect(fallback.styleCode).toBe('1717')
+    expect(fallback.source).toBe('legacy')
+  })
+
+  it('falls back to null/null/null when nothing else resolves — the clear preview must show "unresolved", never crash', () => {
+    const assignments: AssignmentRow[] = [{ scope: 'child', key: 'OPAQUE-MUG-1', style_code: '6014' }]
+    const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(assignments)
+    const fallback = resolveChildFallback('OPAQUE-MUG-1', 'B0FAM-MUG', 'A Ceramic Mug', catalog, childCodeBySku, familyCodeByAsin)
+    expect(fallback).toEqual({ styleCode: null, source: null, rowId: null })
+  })
+
+  it('previews ONE sku in isolation (mirrors the GET route\'s per-child resolution) — a sibling SKU\'s own assignment never leaks into this sku\'s fallback', () => {
+    // Two children share a family; SKU-1 carries the (wrong) assignment being cleared, SKU-2 has
+    // its own, different, still-active assignment. resolveChildFallback treats the target sku as a
+    // one-SKU family (exactly like the GET route's childResolutions loop already does for the
+    // PRIMARY resolution) — so SKU-2's code plays no part in SKU-1's OWN fallback preview, and with
+    // no code of its own, no family assignment, and no legacy match, SKU-1 falls back to nothing.
+    const assignments: AssignmentRow[] = [
+      { scope: 'child', key: 'MULTI-SKU-1', style_code: '6014' },
+      { scope: 'child', key: 'MULTI-SKU-2', style_code: '64000' },
+    ]
+    const { childCodeBySku, familyCodeByAsin } = buildAssignmentMaps(assignments)
+    const fallback = resolveChildFallback('MULTI-SKU-1', 'B0FAM-MULTI', 'irrelevant hay', catalog, childCodeBySku, familyCodeByAsin)
+    expect(fallback.styleCode).toBeNull()
+    expect(fallback.source).toBeNull()
   })
 })
 
