@@ -45,11 +45,20 @@ This is stronger evidence than the competitor sample, where an empty field would
 
 **Two further defects surfaced by the same read, both live right now:**
 
-1. **The tail is STALE.** `<title>` says `THE CEO Billionare Coming Soon Sweatshirt ...` while the
-   live `#productTitle` is `THE CEO Motivational Entrepreneur Sweatshirt | Long Sleeve Crewneck Gift`
-   (72 chars). **It is describing a different design.** Exactly the staleness found on competitors
-   #2 and #14 — sellers change the title and never touch this field, because nobody sees it.
-2. **It carries a falsehood** — `relaxed unisex fit` on blank 18000, which is **Classic** fit.
+1. **The tab describes a DIFFERENT DESIGN than the page shows.** `<title>` says `THE CEO Billionare
+   Coming Soon Sweatshirt ...` while the live `#productTitle` is `THE CEO Motivational Entrepreneur
+   Sweatshirt | Long Sleeve Crewneck Gift` (72 chars).
+
+   **CORRECTION — this is NOT staleness, and I first recorded it wrongly.** A follow-up read settles
+   the mechanism: `canonical = /dp/B0DSCDZC6K`, but `displayedASIN = B0DSB467TB`. The `<title>` is
+   built from the **requested** ASIN's own item_name + item_highlights; the body renders a
+   **different variation child** Amazon auto-selected. Nothing is stale — the two surfaces are
+   showing two different children of one family. The SEO consequence is still real and arguably
+   worse: **Google indexes this URL as "Billionare Coming Soon" while a shopper landing on it sees
+   "Motivational Entrepreneur".** (The competitor "staleness" in the research doc §4 was read the
+   same way and is likewise **unconfirmed** — variation selection fits that evidence equally well.)
+2. **It carries a falsehood** — `relaxed unisex fit` on blank 18000, which is **Classic** fit. This
+   one is unaffected by the correction above: the string is B0DSCDZC6K's own, and it is untrue.
 
 ## 1. GOAL
 

@@ -100,3 +100,22 @@ Across **all 20 listings** — PDP, Amazon Best-Seller list rows, and live Amazo
 - **Brand-less titles** (55% of sample) — if any generation rule mandates "THE CEO" must open every title, that rule is stricter than roughly half the winning field, though it does match the other ~45%.
 - **Extreme garment-noun repetition** (up to 6 mentions in one sweatshirt title, #11) — a coherence/dedup net that treats repeated garment-type tokens as fold/collapse candidates would strip a pattern some winners lean on hard, especially in sweatshirts. This reinforces the standing caution already on file (`coverage-token-folding-shirt-hub-trap.md`) against folding "shirt"-family tokens.
 - **No visible Item Highlight anywhere** — since the field doesn't render to shoppers on any surface checked, a rule that optimizes Item Highlight copy for on-page persuasive/SEO conversion is optimizing for a surface that, per this sample, does not exist for the shopper. That doesn't mean skip the field, but it reframes what it can realistically be doing for THE CEO.
+
+---
+
+## ADDENDUM 2026-09-05 — correction to the "stale tail" reading in §4.3
+
+§4.3 reported that the `<title>`-tag text on competitors #2 and #14 "has gone completely stale."
+**That reading is UNCONFIRMED and a competing explanation fits the same evidence better.**
+
+Verified on THE CEO's own family: requesting `/dp/B0DSCDZC6K` returns `canonical = /dp/B0DSCDZC6K`
+but `displayedASIN = B0DSB467TB`. The `<title>` is composed from the **requested** ASIN's item_name
+plus its item_highlights; the page body renders a **different variation child** that Amazon
+auto-selected. The two surfaces therefore describe two different children of one family — no
+staleness required.
+
+Competitors #2 and #14 are both variation families, so the same mechanism explains them. **Do not
+cite "sellers never update this field" as established.** What IS established, and is enough for the
+decision: **the item-highlight text appears in the HTML `<title>` and nowhere in the visible page**
+(probed against `centerCol` and `document.body.innerText` on a populated listing), and the URL is
+indexed under a design different from the one a landing shopper sees.

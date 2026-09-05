@@ -95,9 +95,16 @@ marker row (#668), not the hold reasons.
 - **"We are optimising a field nobody sees."** Correct — and it is still worth doing, because Google
   indexes it and it currently carries a lie. But it should be **priced as SEO hygiene, not as a
   conversion lever**, and the PO should know that before spending more on it.
-- **"The stale-tail problem."** Research found these tails routinely go stale because sellers update
-  the visible title and never touch this field — exactly what happened here ("relaxed unisex fit"
-  survived every title change). **Whatever ships must regenerate with the title, or it rots again.**
+- **"The tab shows a different child than the page."** VERIFIED on B0DSCDZC6K: `canonical =
+  /dp/B0DSCDZC6K` but `displayedASIN = B0DSB467TB` — the `<title>` carries the REQUESTED ASIN's
+  item_name + highlights while the body renders a sibling design Amazon auto-selected. **I first
+  recorded this as "the tail went stale"; that was wrong** — nothing rotted, the two surfaces just
+  show different children. It still means **Google indexes this URL under one design while shoppers
+  landing on it see another**, which per-design lines make *better*, not worse: each child's tab
+  would then describe that child.
+- **"Regenerating with the title is still required."** Independent of the above: a highlight line
+  derived from design + blank must be re-derived whenever either changes, or it will drift from the
+  title it sits beside in the tab.
 
 ## 4. APPROVAL
 
