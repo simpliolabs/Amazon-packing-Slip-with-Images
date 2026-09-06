@@ -138,3 +138,51 @@ This test is the acceptance for the whole plan: it proves Tasks 1 and 2 produce 
 boundary will actually send, downstream of the consumer, not just that the functions exist.
 
 **Verify:** as Task 1.
+
+## Task 4: `ihTruthVerdict` gains a fit-claim rule grounded in `blank_specs.fit`
+
+**Added by controller ruling after Task 1** (see ledger): the plan assumed this rule existed; the Task 1
+implementer proved empirically that it does not — a `relaxed fit tee` pool phrase composes through
+unchanged on a `Classic` blank today. This is the exact class behind the LIVE falsehood
+(`relaxed unisex fit` on Gildan 18000, Classic fit) that Task 3's push is meant to kill; without this
+rule the next pool can reintroduce it.
+
+**File:** `src/lib/fba/contentTruth.ts` — `ihTruthVerdict` (find with `grep -n "ihTruthVerdict"`). Extend
+the ONE shared predicate; do NOT add a separate net anywhere. The weight-class rule already in it is
+the pattern to follow.
+
+**Rule:** a phrase asserting a FIT (`relaxed`, `classic`, `oversized`, `slim`, `fitted`, `boxy`,
+`regular` — build the list from the existing fit vocabulary in `blankSpecs.ts`/`garmentNoun.ts`, do not
+invent one) is truthful ONLY if it matches `spec.fit` (case-insensitive, after the existing fold). No
+spec → no fit claim may pass (fail CLOSED for this one class — a fit claim with no blank behind it is
+exactly how the live lie shipped). Phrases with no fit word are unaffected.
+
+**Tests (RED first):** `relaxed fit tee` on a Classic blank → rejected with a named reason; `classic
+fit sweatshirt` on a Classic blank → ok; `oversized` on a Comfort Colors Relaxed blank → rejected
+(Relaxed ≠ Oversized — the PO's 2026-08-20 wear-style ruling is a SEPARATE, opt-in fact and must not be
+conflated); a phrase with no fit word → unchanged verdict; `relaxed` with `spec: null` → rejected.
+Then re-run the Task 1 test file and assert the "relaxed never appears on a Classic blank" case now
+holds with a `relaxed` phrase PRESENT in the pool (Task 1 could only prove the ordinary case).
+
+**Verify:** as Task 1.
+
+## Task 5: per-design audience truth in the Item Highlight composer
+
+**Added by controller ruling after Task 1** (see ledger): the plan's audience bullet assumed per-design
+audience-lean plumbing in the IH path; none exists (the gender rule is title-only). The PO's complaint
+"Women repeating twice" was on a UNISEX family.
+
+**Files:** `src/lib/fba/itemHighlightComposer.ts` and/or `buildItemHighlightsPerDesign` — wherever the
+per-design pool is scoped (Task 1's partition). REUSE the title path's audience predicate (find it:
+`grep -n "stripInclusiveAudience\|enforceHardAudience\|audienceLean\|designPhraseCarriesGender"
+src/lib/fba/listingPipeline.ts src/lib/fba/titleBand.ts src/lib/fba/contentTruth.ts`) — do not write a
+second gender rule. A design whose lean is `unisex` may not carry a bare `Women`/`Men`/`Ladies`/`Mens`
+phrase unless the DESIGN PHRASE itself carries the gender (that exemption already exists for titles);
+`lean_female` / `lean_male` designs may.
+
+**Tests (RED first):** unisex design with a women-heavy pool → returned line carries no bare gendered
+audience word; `lean_female` sibling in the same family → its line MAY carry `Women`; a unisex design
+whose design phrase itself is gendered (e.g. "Mother Hustler") keeps its own phrase. Assert on returned
+bytes.
+
+**Verify:** as Task 1.
