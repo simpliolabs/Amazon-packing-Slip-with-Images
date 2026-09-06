@@ -88,6 +88,33 @@ describe('(b) garment truth — "funny work shirts" is a LIE on a sweatshirt/hoo
   })
 })
 
+/* ── FIX ROUND (final fix wave, 2026-09-06) — rule (f) fit-claim-lie is ITEM HIGHLIGHTS ONLY
+ * (Important #1). REPRODUCED against HEAD 7c53fc2 (see the wave's report, probe 1): rule (f) was
+ * field-agnostic and fired on EVERY field including title/backend — a SECOND fit oracle on the title
+ * path the plan forbade touching, provably disagreeing with the title path's OWN oracle
+ * (titleBand.ts:747-753 `scrubUnspecdGarmentClaims` + its `FIT_WORD_CANON`, titleBand.ts:758). Gated
+ * exactly like rule (c2) above (an `if (ctx.field === ...)` guard) — unifying the two oracles is
+ * Phase 4 of the title programme, not this task. ───────────────────────────────────────────────── */
+
+describe('(f) fit-claim-lie — ITEM HIGHLIGHTS ONLY (Important #1)', () => {
+  const CLASSIC_FIT_TEE: PhraseTruthCtx = {
+    garmentFamily: 'tee',
+    spec: { fit: 'Classic' },
+    allowedBrand: null,
+    audience: audienceOfGarmentFamily('tee'),
+    audienceLean: null,
+    field: 'highlights',
+  }
+  it('does NOT fire on title/backend — REPRODUCED as a defect against HEAD 7c53fc2 (rule (f) used to return fit-claim-lie here)', () => {
+    for (const field of ['title', 'backend'] as const) {
+      expect(phraseTruthVerdict('relaxed fit tee', { ...CLASSIC_FIT_TEE, field })).toEqual({ ok: true })
+    }
+  })
+  it('still fires on highlights — the ONE field with no fit oracle at all before Task 4', () => {
+    expect(phraseTruthVerdict('relaxed fit tee', CLASSIC_FIT_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+})
+
 /* ── DEFECT (c): the audience lie, TITLE-ONLY by design ────────────────────────────────────────── */
 
 describe('(c) audience-lean-lie — a unisex family forces no gender on its TITLE', () => {

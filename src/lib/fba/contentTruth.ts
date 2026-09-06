@@ -267,9 +267,14 @@ const LEAN_MASC_RE = /\b(?:m[ae]n['’]?s?)\b/i
  *  still forced-gender). Kept SEPARATE from the two above rather than adding 'g' to them: those stay
  *  single-shot `.test()` calls on the TITLE branch, and a shared global instance's mutable
  *  `lastIndex` would make repeated `.test()` calls silently skip matches (the same gotcha
- *  `ADULT_AUDIENCE_RE`/`KIDS_AUDIENCE_RE` above avoid by never being `.test()`'d). */
-const LEAN_FEM_RE_G = /\b(?:wom[ae]n['’]?s?|ladies|lady)\b/gi
-const LEAN_MASC_RE_G = /\b(?:m[ae]n['’]?s?)\b/gi
+ *  `ADULT_AUDIENCE_RE`/`KIDS_AUDIENCE_RE` above avoid by never being `.test()`'d).
+ *  FIX ROUND (final fix wave, 2026-09-06, T5-d): derived from `LEAN_FEM_RE`/`LEAN_MASC_RE`'s own
+ *  `.source` instead of re-typing the lexicon literally — a second hand-copied word list is exactly
+ *  how the title and highlight branches could drift (the fold-word lexicons in this file already
+ *  learned this lesson once). The separate-CONST reason above (shared `lastIndex`) is satisfied
+ *  either way; only the SOURCE of the word list changes, not the flags/behavior. */
+const LEAN_FEM_RE_G = new RegExp(LEAN_FEM_RE.source, 'gi')
+const LEAN_MASC_RE_G = new RegExp(LEAN_MASC_RE.source, 'gi')
 
 /** PipelineInput.audienceLean → the truth rule's view. `lean_male`/`lean_female` are SOFT
  *  re-weightings (cross-gender traffic is the point of a lean), so they are NOT unisex and never
@@ -555,10 +560,11 @@ export function buildPhraseTruthCtx(facts: PhraseTruthFacts, field: ContentField
  * anywhere in the same comma-delimited segment — never bare), so a genuine design phrase is never
  * mistaken for a spec assertion, and a fit word in one Item-Highlight segment cannot bind to an
  * unrelated "fit" sitting in a different segment. BARE words are unambiguous garment cut/fit terms —
- * matched standalone. Exactly the seven words the PO named live; not invented, not the fuller
- * title-only list (oversize/loose/cropped/crop/baggy/tapered/taper stay title-only — this predicate
- * is field-agnostic and a broader list here would widen every field's fill/filter at once, which is
- * outside what this task was asked to close).
+ * matched standalone. Exactly the seven words the PO named live, PLUS `oversize` (final fix wave,
+ * T4-b — the informal spelling of the already-approved `oversized`, not an eighth word); not
+ * invented, not the fuller title-only list (loose/cropped/crop/baggy/tapered/taper stay title-only —
+ * this predicate is scoped to `field:'highlights'` only (Important #1) and a broader list here would
+ * widen that one field's fill/filter, which is outside what this task was asked to close).
  *
  * NOT CAUGHT, ON PURPOSE (fix-round-1 self-review, 2026-09-06): a bare suffix word with no "fit"
  * anywhere in its segment — plain "Classic Rock Shirt", or "relaxed" with `spec: null` and no "fit"
@@ -571,12 +577,34 @@ export function buildPhraseTruthCtx(facts: PhraseTruthFacts, field: ContentField
  * (a word sits between them) — nor "relaxed-fit" (hyphen, not whitespace). Fixed by letting the span
  * between the claim word and "fit" be ANY run of non-comma characters (lazy, so it stops at the
  * nearest "fit" and never crosses into a different comma segment) instead of a single `\s+`.
+ *
+ * FIX ROUND 2 (final fix wave, 2026-09-06, Important #2): fix-round-1's lazy span could still cross
+ * OVER a second claim word to reach a "fit" that truthfully belongs to the FIRST word, laundering the
+ * second — "relaxed oversized fit tee" on a Relaxed blank matched suffix "relaxed" all the way through
+ * to "fit", swallowing the bare word "oversized" INSIDE that one match so it was never independently
+ * judged (`relaxed oversized fit tee` => `{ok:true}` even though "oversized" is a false claim on a
+ * Relaxed blank). The span now also refuses to cross any OTHER recognized claim word (suffix or bare),
+ * so "oversized" breaks the "relaxed ... fit" match and is left to be caught on its own by the bare
+ * alternative — all three orderings (`relaxed oversized fit`, `relaxed fit oversized`, `oversized
+ * relaxed fit`) now agree.
  */
 const FIT_CLAIM_SUFFIX_WORDS = ['relaxed', 'classic', 'slim', 'regular'] as const
-const FIT_CLAIM_BARE_WORDS = ['oversized', 'fitted', 'boxy'] as const
+/** FIX ROUND 2 (final fix wave, 2026-09-06, T4-b): `oversize` added alongside the already-approved
+ *  `oversized` — the SAME word, the informal spelling, not an eighth word (the seven the PO named
+ *  live are unchanged); without it `FIT_WORD_CANON` below has nothing to normalize, since a claim
+ *  spelled "oversize" never reached rule (f) at all. */
+const FIT_CLAIM_BARE_WORDS = ['oversized', 'oversize', 'fitted', 'boxy'] as const
 const FIT_CLAIM_RE = new RegExp(
-  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\b(?:(?!,).)*?\\bfit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
+  `\\b(${FIT_CLAIM_SUFFIX_WORDS.join('|')})\\b(?:(?!,)(?!\\b(?:${[...FIT_CLAIM_SUFFIX_WORDS, ...FIT_CLAIM_BARE_WORDS].join('|')})\\b).)*?\\bfit\\b|\\b(${FIT_CLAIM_BARE_WORDS.join('|')})\\b`, 'gi',
 )
+/** Spelling variants normalize to the canonical class word BEFORE the spec-containment check, so a
+ *  blank whose `fit` states "Oversized" still backs a claim spelled "oversize" (final fix wave,
+ *  2026-09-06, T4-b). MIRRORS titleBand.ts:758's `FIT_WORD_CANON` verbatim — a local copy, not an
+ *  import (same cross-cycle reason as the word lists above). `crop`/`taper` are inert here today:
+ *  IH's own vocabulary has no `cropped`/`tapered` claim words to canonicalize (title-only, see the
+ *  vocabulary doc above) — kept for byte-parity with titleBand's map so the two never drift apart if
+ *  IH's vocabulary ever widens to match. */
+const FIT_WORD_CANON: Readonly<Record<string, string>> = { oversize: 'oversized', crop: 'cropped', taper: 'tapered' }
 
 /* ─── THE PREDICATE ───────────────────────────────────────────────────────────────────────────── */
 
@@ -664,10 +692,25 @@ export function phraseTruthVerdict(phrase: string, ctx: PhraseTruthCtx): PhraseT
   // FIX ROUND 1 (2026-09-06): FIT_CLAIM_RE now carries 'g' and every match is examined — a phrase
   // can assert MORE THAN ONE fit/cut claim ("relaxed fit oversized tee": "relaxed fit" true, bare
   // "oversized" false) and the first true match must never launder a later false one.
-  const fit = ctx.spec?.fit?.toLowerCase()
-  for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
-    const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
-    if (!fit || !fit.includes(claim)) return { ok: false, reason: 'fit-claim-lie' }
+  // FIX ROUND 2 (final fix wave, 2026-09-06, Important #1): ITEM HIGHLIGHTS ONLY. This rule used to be
+  // field-agnostic, so it reached the TITLE and BACKEND paths the plan forbade touching — and it is a
+  // SECOND fit oracle there, provably disagreeing with the title path's own (titleBand.ts:747-753
+  // `scrubUnspecdGarmentClaims`, which accepts "oversize"/"cropped"/"baggy"/"tapered"/"loose" this
+  // rule has never known about — Probe, spec.fit='Oversize': rule (f) rejected a true "oversized"
+  // while `scrubUnspecdGarmentClaims` would accept it). Gated exactly like rule (c2) above: the title
+  // path keeps its own fit oracle; unifying the two oracles into one is Phase 4 of the title
+  // programme, not this task. `highlights` is the ONE field that had NO fit oracle at all before
+  // Task 4 — this rule exists for it.
+  if (ctx.field === 'highlights') {
+    const fit = ctx.spec?.fit?.toLowerCase()
+    for (const fm of phrase.matchAll(FIT_CLAIM_RE)) {
+      const claim = (fm[1] ?? fm[2] ?? '').toLowerCase()
+      // T4-b: normalize a spelling variant (e.g. "oversize") to the canonical class word before the
+      // containment check — mirrors titleBand.ts's `fitOk`, so a blank spelled "Oversized" still
+      // backs a claim spelled "oversize".
+      const canonClaim = FIT_WORD_CANON[claim] ?? claim
+      if (!fit || !fit.includes(canonClaim)) return { ok: false, reason: 'fit-claim-lie' }
+    }
   }
   return { ok: true }
 }

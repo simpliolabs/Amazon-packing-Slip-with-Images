@@ -24,13 +24,36 @@
  * FIXTURE NOTE: the six-design family (KEYS/kw/GROUPS/FAMILY_TITLE/GILDAN/OWN_* phrases) is carried
  * over VERBATIM from `itemHighlightPerDesign.test.ts` (Task 1) so this test stays in step with that
  * fixture, per the brief. The SHARED pool below is NOT copied from Task 1 — Task 1's own SHARED
- * bank is large enough that every design's line clears the 107-char floor from pool phrases (+ at
- * most the material filler) alone, so the `fit` filler ("Classic Fit") never gets exercised there.
- * This file's SHARED bank is deliberately SMALLER (2 short phrases) so every design's pool-only
- * length falls far enough under the floor that the composer's pad chain must walk past `material`
- * into `fit` to reach 107 (verified empirically against unmodified source: every one of the six
- * lines below is 107-121 chars and contains "Classic Fit") — this is what makes the Classic-present
- * assertion non-vacuous instead of a coincidence of Task 1's own numbers.
+ * bank is large enough (10 phrases, ~12 candidates surviving per design once truth/coverage filter)
+ * that it never sits anywhere near the `MIN_CANDIDATES` cliff this file's own fixture originally did
+ * — CHECKED (final fix wave, Important #6) and confirmed it does NOT share the cliff, so it needed
+ * no re-baseline. This file's SHARED bank is deliberately SMALLER so every design's pool-only length
+ * falls far enough under the floor that the composer's pad chain must walk past `material` into
+ * `fit` to reach 107 — that is what makes the Classic-present assertion non-vacuous instead of a
+ * coincidence of Task 1's own numbers.
+ *
+ * MARGIN-BEARING BY DESIGN (final fix wave, 2026-09-06, Important #6 — re-baselined after the final
+ * reviewer found TWO zero-margin cliffs here). Both axes now carry explicit slack:
+ *   - CANDIDATES: `MARGIN` below adds 3 more phrases per design (6 total vs the original 3), so
+ *     losing any ONE `SHARED` phrase — the plan's OWN acceptance-test scenario, and exactly the
+ *     defect that used to flip ALL SIX designs to `thin-candidates`/0 — now leaves 5, nowhere near
+ *     `MIN_CANDIDATES` (3). Proven by the dedicated test below.
+ *   - LENGTH: composed lines now land in [108, 118] (BD 118, BM 114, DQ 110, RIACG 108, RK 111, SM
+ *     108 — verified empirically, see the wave's report for the pad-chain trace), never AT the exact
+ *     107 floor the way BD used to sit before this fix (a one-character shrink in ANY filler word
+ *     would have reversed a passing test). The full [112,118] band the plan asked for is not reachable
+ *     for EVERY design simultaneously: `poolOnly` must stay under 89 chars for the LONGEST own-name
+ *     design (BD, "Boss Definition Motivation Wear", 31 chars) or `material` alone would cross the
+ *     floor and `fit` would never be reached at all (89 = 107 - 16, the material filler's length) —
+ *     and `landing = poolOnly + 31` (material+fit, always, once poolOnly < 89) is IDENTICAL in form
+ *     for every design, so the fixed ~10-char spread between the longest and shortest own-name
+ *     phrase in Task 1's own fixture (31 vs 21 chars, which this file must not touch — see the note
+ *     above) reproduces itself as a ~10-char spread in landing length no matter how the SHARED bank
+ *     is sized. [108,118] is the tightest, safest band achievable under that constraint (BD's
+ *     `poolOnly` is 87, two full characters of headroom below the hard 89 ceiling).
+ * Pool-only (the 3 truthful pool phrases alone, before any pad filler) stays 77-87 chars for every
+ * design — under 89 — so `Classic Fit` is still produced ONLY by the pad, never a coincidence of the
+ * pool phrases' own wording.
  */
 import { describe, it, expect, vi } from 'vitest'
 
@@ -86,14 +109,44 @@ const OWN_PHRASES = [OWN_BD, OWN_BM, OWN_DQ, OWN_RIACG, OWN_RK, OWN_SM]
  *  every design, small enough that pool-only + the material filler alone cannot reach the 107
  *  floor, so the pad chain must walk into the `fit` filler for every one of the six designs. */
 const SHARED: AnalyzedKeyword[] = [
-  kw('graphic tee mens', 9000, 3),
-  kw('funny tee gift', 8000, 3),
+  kw('graphic novelty tee for men', 9000, 3),
+  kw('funny tee gift idea today', 8000, 3),
 ]
 
-const POOL: AnalyzedKeyword[] = [...OWN_PHRASES, ...SHARED]
+/**
+ * MARGIN BANK (final fix wave, 2026-09-06, Important #6): three more phrases, rated true for every
+ * design, RANKED BELOW `SHARED` (lower searchVolume, same themeFit) so the sort order (fit DESC then
+ * volume DESC) always evaluates them AFTER both `SHARED` phrases have already been picked. Every
+ * significant token in each of these three (folded: graphic/funny/tee/men/gift) is a SUBSET of the
+ * union of `SHARED`'s own tokens — `classifyTier` (itemHighlightComposer.ts) finds nothing NEW in
+ * them once `SHARED` is in `usedFolded`, so they are NEVER selected into the composed line (verified
+ * empirically — see the wave's report's pad-chain trace) — they exist ONLY to widen `candidates`
+ * (the array `MIN_CANDIDATES` gates on, BEFORE selection) from 3 to 6 per design, so losing any ONE
+ * shared phrase (the plan's own acceptance test) leaves 5, nowhere near the `MIN_CANDIDATES` (3)
+ * cliff the pre-fix fixture sat on exactly. They add ZERO bytes to any composed line by construction.
+ */
+const MARGIN: AnalyzedKeyword[] = [
+  kw('funny graphic tees', 2000, 3),
+  kw('mens gift tees', 1900, 3),
+  kw('tee gift funny', 1800, 3),
+]
+
+const POOL: AnalyzedKeyword[] = [...OWN_PHRASES, ...SHARED, ...MARGIN]
 
 const build = (pool: AnalyzedKeyword[]) =>
   buildItemHighlightsPerDesign({ groups: GROUPS, pool, apparelProduct: true, blankBrand: GILDAN, familyTitleText: FAMILY_TITLE })
+
+describe('Important #6: the fixture no longer sits on the zero-margin candidate cliff', () => {
+  it('losing ONE shared phrase (the exact cliff the pre-fix fixture sat on: 3 candidates -> 2, ALL SIX designs thin-candidates/0) now leaves every design still composing — MARGIN keeps candidates at 5, safely above MIN_CANDIDATES (3)', () => {
+    const minusOne = [...OWN_PHRASES, SHARED[0], ...MARGIN]   // drop SHARED[1] — the plan's own acceptance-test scenario
+    const r = build(minusOne)
+    for (const k of KEYS) {
+      const d = r.perDesign.find((p) => p.designKey === k)!
+      expect(d.hold).toBeNull()
+      expect(d.value.length).toBeGreaterThanOrEqual(107)
+    }
+  })
+})
 
 describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuItemHighlightMap', () => {
   const r = build(POOL)
@@ -120,12 +173,22 @@ describe('push seam wire: real buildItemHighlightsPerDesign -> real buildPerSkuI
     }
   })
 
-  it('no mapped value contains "relaxed" for this Classic-fit blank — NOTE (Task 4, not yet built): `ihTruthVerdict` has no fit-claim rule keyed on "relaxed" vs `spec.fit` today, so this assertion is only meaningful because this pool never harvests a "relaxed ..." phrase (verified: SHARED/OWN_* contain no such phrase). It proves the ORDINARY case — a Classic blank\'s own spec pad never INVENTS "Relaxed" — not the adversarial one; closing that gap is Task 4\'s job, not this task\'s.', () => {
+  it('no mapped value contains "relaxed" for this Classic-fit blank — Task 4 SHIPPED (final fix wave, 2026-09-06, Minor #9: renamed from "NOTE (Task 4, not yet built)"): the assertion is now REAL. A "relaxed ..." phrase is PRESENT in the pool (rated a strong candidate for every design) and would otherwise win a slot on volume/fit alone — `ihTruthVerdict`\'s fit-claim rule (Task 4) is what keeps it out, proven here through the REAL wire (buildItemHighlightsPerDesign -> buildPerSkuItemHighlightMap), not phraseTruthVerdict called in isolation.', () => {
     expect(GILDAN.spec.fit).toBe('Classic')
-    for (const v of values.values()) expect(v.toLowerCase()).not.toContain('relaxed')
+    const adversarial = kw('relaxed fit graphic tee', 9993, 3)
+    const rAdv = build([adversarial, ...POOL])
+    const { values: advValues } = buildPerSkuItemHighlightMap(rAdv.perChild, ALL_TARGETS, null)
+    for (const v of advValues.values()) expect(v.toLowerCase()).not.toContain('relaxed')
+    // sanity: every design still composed a real line (the adversarial phrase was excluded by truth,
+    // not by starving the pool below MIN_CANDIDATES).
+    for (const k of KEYS) {
+      const d = rAdv.perDesign.find((p) => p.designKey === k)!
+      expect(d.hold).toBeNull()
+      expect(d.value.length).toBeGreaterThanOrEqual(107)
+    }
   })
 
-  it('at least one mapped value contains "Classic" — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit", itemHighlightComposer.ts:340) that must ship over the live "relaxed unisex fit" defect this plan was opened against', () => {
+  it('at least one mapped value contains "Classic" — the spec-fact pad truth-fix (blank_specs.fit -> "${fit} Fit", itemHighlightComposer.ts:359-361) that must ship over the live "relaxed unisex fit" defect this plan was opened against', () => {
     expect(Array.from(values.values()).some((v) => v.includes('Classic'))).toBe(true)
   })
 })

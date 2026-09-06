@@ -384,6 +384,35 @@ describe('ihTruthVerdict — fit-claim truth (Task 4, 2026-09-06: live B0DSCDZC6
     const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
     expect(ihTruthVerdict('relaxed fit oversized tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
   })
+
+  // --- FIX ROUND 2 (final fix wave, 2026-09-06, Important #2) — reproduced against HEAD 7c53fc2 by
+  // calling phraseTruthVerdict directly (see the wave's report): on a Relaxed blank, "relaxed oversized
+  // fit tee" returned `{ ok: true }` — the lazy span between "relaxed" and "fit" swallowed the bare
+  // word "oversized" INSIDE one match, so it was never independently judged (a TRUE claim laundered a
+  // LATER FALSE one). "relaxed fit oversized tee" and "oversized relaxed fit tee" already rejected
+  // correctly (the false claim sits outside any span). All three orderings must now agree.
+  it('Important #2: all three orderings of "relaxed"/"oversized"/"fit" on a Relaxed blank agree — none may let "oversized" be swallowed by the "relaxed ... fit" span', () => {
+    const TRUTH_CC = { garmentFamily: 'tee' as const, spec: SPEC, allowedBrand: 'Comfort Colors', audience: ihAudienceOf('tee') }
+    // REPRODUCED AS A DEFECT against HEAD 7c53fc2: this ordering alone returned { ok: true } (see the
+    // probe in the wave's report) — the fix must flip it to fit-claim-lie, matching the other two.
+    expect(ihTruthVerdict('relaxed oversized fit tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+    expect(ihTruthVerdict('relaxed fit oversized tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+    expect(ihTruthVerdict('oversized relaxed fit tee', TRUTH_CC)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+
+  // --- FIX ROUND 2 (final fix wave, 2026-09-06, T4-b) — FIT_WORD_CANON (titleBand.ts:758) was never
+  // mirrored into this rule, and IH's own word list did not even recognize the informal spelling
+  // "oversize" (no trailing "d") as a fit claim at all — so a FALSE "oversize" claim on a blank whose
+  // spec does NOT back it silently shipped uncaught (the phrase never reached rule (f) in the first
+  // place). Recognizing it (mirroring titleBand's own bare-word list) plus the canon map closes that
+  // gap without widening the PO's seven-word vocabulary — "oversize" is the SAME word as the
+  // already-approved "oversized", not an eighth one.
+  it('T4-b (the defect this closes): "oversize tee" (informal spelling) on a Classic blank is now REJECTED — before this fix the word was not recognized at all, so a false claim silently passed', () => {
+    expect(ihTruthVerdict('oversize tee', TRUTH_TEE)).toEqual({ ok: false, reason: 'fit-claim-lie' })
+  })
+  it('T4-b (FIT_WORD_CANON pin, spec.fit=\'Oversized\'): "oversize tee" (informal) is accepted once the blank\'s OWN spec states the canonical spelling — GREEN both before and after by construction (see the wave\'s report: before this fix "oversize" was not a recognized claim word at all, so the phrase passed trivially; after the fix it passes for the RIGHT reason — recognized, and the canon/containment backs it)', () => {
+    expect(ihTruthVerdict('oversize tee', { ...TRUTH_TEE, spec: { ...GILDAN_SPEC, fit: 'Oversized' } })).toEqual({ ok: true })
+  })
   it('no false positive: "classic rock shirt" on Classic passes — the suffix ruling stands (a SUFFIX word with no "fit" anywhere in the phrase is ordinary design vocabulary, never a claim)', () => {
     expect(ihTruthVerdict('classic rock shirt', TRUTH_TEE)).toEqual({ ok: true })
   })

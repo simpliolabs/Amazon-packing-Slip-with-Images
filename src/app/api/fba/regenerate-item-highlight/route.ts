@@ -7,12 +7,14 @@
  * PO 2026-08-21) — then persists the updated product_details_improvements row. Isolated: does NOT
  * run the full pipeline. Auth is enforced by the /api/fba middleware (task #49). Never blanks the
  * field: a HOLD answers 422 with the named reason and keeps the stored value.
- * MULTI-DESIGN (PO 2026-08-21, refined the same day): composes ONE SHARED line — design names
- * stripped, every phrase rated >= 2 under EVERY design (theme_fit_by_design, migration 061; min
- * over designs) — through buildItemHighlightsPerDesign (the same producer the pipeline ships) into
- * per_child_item_highlights (identical per SKU by construction); the broadcast row becomes a
- * per-design marker with no line. Holds `designs-unrated` (422, missing keys named) until
- * keyword-pool/rerate { per_design: true } has rated the pool under every design.
+ * MULTI-DESIGN (PO ruling 2026-09-06, refining the 2026-08-21 "one shared line" ruling — Minor
+ * #10/#11, final fix wave): composes ONE LINE PER DESIGN — each design's OWN theme-fit rating
+ * (theme_fit_by_design, migration 061), never a minimum over siblings — through
+ * buildItemHighlightsPerDesign (the same producer the pipeline ships) into
+ * per_child_item_highlights (one line per SKU, per its OWN design); the broadcast row becomes a
+ * per-design marker with no line (a per-design family has no single line true of every design).
+ * A design whose OWN rated share is thin holds `designs-unrated` in ISOLATION (siblings still
+ * compose) until keyword-pool/rerate { per_design: true } has rated the pool under that design.
  * READ-ONLY identity (no vision call) — see designGroupIdentity.ts.
  */
 import { NextRequest, NextResponse } from 'next/server'
@@ -120,8 +122,9 @@ export async function POST(req: NextRequest) {
       titles: [title, ...storedPct.map((t) => String(t?.title ?? ''))],
     })
 
-    // ── MULTI-DESIGN (PO 2026-08-21): ONE SHARED line through the SAME producer the pipeline
-    // ships (min-over-designs fit, all design names stripped, union of per-design titles). Groups =
+    // ── MULTI-DESIGN (PO ruling 2026-09-06): ONE LINE PER DESIGN through the SAME producer the
+    // pipeline ships (each design's OWN theme-fit rating, never a minimum over siblings; every
+    // OTHER design's name/identity is foreign to this design's line, never its own). Groups =
     // the stored per_child_titles' design keys (the ONE grouping — never a second resolver);
     // identity per design = the READ-ONLY cached vision identity of the group's first scanned
     // child (this route never spends a vision call — POST scan-identity {per_design:true}

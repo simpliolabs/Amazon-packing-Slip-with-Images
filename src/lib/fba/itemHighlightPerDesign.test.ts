@@ -34,6 +34,19 @@
  *     the other five (fully rated) still compose (this is exactly what the fix enables).
  *   - "UI collapses 5 identical rows into 1" -> distinct lines no longer collapse; kept as a test that
  *     the capability (rows that DO differ don't collapse) still works, now via the ordinary case.
+ *   - "`r.shared.foreignDropped` equals a fixed count (3)" -> DELETED, not replaced by an equivalent
+ *     pin. The shared aggregate no longer names a single meaningful count under per-design isolation
+ *     (each design drops a DIFFERENT number of foreign phrases); the replacement test (the "excluded
+ *     from every OTHER design" case below) asserts per-design phrase exclusion directly instead of an
+ *     aggregate number. Per-design counts still live on each `PerDesignItemHighlight.foreignDropped`.
+ *   - the cross-design-name exclusion check narrowed from a WORD-LEVEL regex (`/beast|king|quit/` —
+ *     matching any line containing any of a sibling's bare name-words anywhere) to WHOLE-PHRASE
+ *     matching (`/beast mode shirt|real king tee|dont quit shirts/` — matching the exact candidate
+ *     phrase) — per-design partition excludes the CANDIDATE PHRASE that names a sibling, not every
+ *     line that happens to contain one of a sibling's bare words for an unrelated reason.
+ *   - `IH_HOLD_MESSAGES['designs-unrated']`'s assertion widened from `toMatch(/per_design: true/)` to
+ *     `toMatch(/per_design: true|per-design theme rating/)` to accommodate the per-design-isolated
+ *     hold message's wording (see Minors #10/#11 in the final fix wave for the message text itself).
  *
  * PROPERTY ASSERTIONS ONLY (never an exact composed string): the composer's phrase-ordering inside a
  * design's own line is not this task's contract — a follow-up task reorders picks (Tier A/B repeat
@@ -147,19 +160,31 @@ describe('each design composes its OWN line (PO 2026-09-06, refining the shared-
   })
 
   it('a phrase fit 3 on five designs / fit 1 on RK is excluded from RK on FIT alone — the min-over-designs verdict is still 1, no longer the caller\'s gate', () => {
-    // CHANGED (Task 5, 2026-09-06 item-highlights-per-design plan, controller-carried guardrail): this
-    // test used to ALSO assert `for (const k of ['BD','BM','DQ','RIACG','SM']) expect(lineFor(r, k))
-    // .toContain('motivational shirts women')` — correct for Task 1's contract (fit-based partition,
-    // NO audience rule existed yet). Task 5 wires the family's audience_lean into the composer, and on
-    // a UNISEX family (this is one — B0DSCDZC6K, the live complaint "Why is Women repeating Twice?")
-    // a bare gendered market phrase is now a lie regardless of fit. That inverted assertion moved to
-    // the dedicated Task 5 describe block below (smaller pool there, deliberately NOT this describe
-    // block's big SHARED bank, which is heavily "for Men" market copy and would starve every design's
-    // candidate count for a reason orthogonal to the audience rule this task adds). What's still true
-    // and still proven HERE, on the ORIGINAL fixture: RK's exclusion is a FIT fact, independent of
-    // audience — this build never sets `audienceLean`, so the forced-gender rule cannot be why RK's
-    // line lacks the phrase.
+    // RESTORED (final fix wave, 2026-09-06, Important #3): the POSITIVE half of this assertion was
+    // deleted with a factually WRONG justification. The comment used to claim it moved to the Task 5
+    // describe block below because "Task 5 wires the family's audience_lean into the composer" and
+    // this build would therefore trigger the forced-gender rule on the five non-RK designs. It does
+    // not: `build()` (this file's own helper, defined above) never passes `audienceLean` to
+    // `buildItemHighlightsPerDesign` — rule (c2) is a no-op on every case in THIS describe block, so
+    // the phrase composes for the five non-RK designs for the ORIGINAL reason (Task 1's fit-based
+    // partition), unchanged, exactly as it did before Task 5 existed.
+    //
+    // This was the ONLY guard against a silent reversal to min-over-designs: if
+    // `themeFit: minFitOverDesigns(k, designKeys)` were ever restored at listingPipeline.ts:2495 (the
+    // pre-Task-1 shared-line gate this task replaced), WOMEN's min-over-designs verdict — asserted
+    // below to be 1 (RK's fit) — would exclude the phrase from EVERY design, not just RK. With the
+    // positive half deleted, no remaining test in this file would have caught that regression (see
+    // the wave's report for a one-time RED demonstration: temporarily restoring the min-over-designs
+    // line at :2495 turns this exact assertion red).
+    //
+    // The genuinely audience-rule-driven case (a UNISEX family, a bare gendered phrase excluded from
+    // ALL designs including RK, because of `audienceLean`, not fit) is a DIFFERENT fixture entirely —
+    // it lives in its own Task 5 describe block below, with its own dedicated small pool (this
+    // block's big SHARED bank is heavily "for Men" market copy and would starve every design's
+    // candidate count for a reason orthogonal to the rule that block exists to test). That block is
+    // not a replacement for this one; both are needed.
     expect(minFitOverDesigns(WOMEN, [...KEYS])).toBe(1)
+    for (const k of ['BD', 'BM', 'DQ', 'RIACG', 'SM']) expect(lineFor(r, k)).toContain('motivational shirts women')
     expect(lineFor(r, 'RK')).not.toContain('motivational shirts women')
   })
 
@@ -400,5 +425,43 @@ describe('Task 5: per-design audience truth in the Item Highlight composer', () 
     })
     expect(lineFor(r, 'LB')).toContain('lady boss motivation apparel')
     expect(lineFor(r, 'LB')).not.toContain('motivational shirts women')
+  })
+})
+
+/**
+ * PROMOTED MINOR T5-g (final fix wave, 2026-09-06): the final whole-branch reviewer's own probe,
+ * converted into a permanent pin — "the highest-value missing pin on the branch". The REALISTIC
+ * six-design fixture (Task 1's own POOL — OWN_PHRASES + SHARED + WOMEN, the same one every other
+ * describe block above uses) run with `audienceLean: 'unisex'`, exercising BOTH fixed rules at once
+ * on a single realistic family: the fit-based per-design partition (Task 1) AND the forced-gender
+ * rule now wired into Item Highlights (Task 5) — WOMEN (fit 1 on RK, a bare gendered market phrase)
+ * must be absent from every line for TWO independent reasons depending on the design (fit for RK,
+ * audience for the other five), and every design must still reach the floor truthfully, on its own
+ * name, with the Classic-fit blank's OWN pad fact ("Classic Fit") present and never "Relaxed".
+ * GREEN BY CONSTRUCTION, not vacuous: `buildItemHighlightsPerDesign` did not even accept an
+ * `audienceLean` parameter before Task 5 (see this file's Task 5 describe block above, whose own
+ * pins ARE the RED/GREEN proof for the rule this test exercises) — this test's job is to prove the
+ * SAME rule holds on the ordinary, larger, everyday-shaped family, not merely a dedicated small one.
+ */
+describe('T5-g: the realistic six-design fixture composes cleanly under a UNISEX family lean', () => {
+  it('all six designs compose >= 107 chars, no hold, no "relaxed", "Classic" present — on the SAME pool every other describe block above uses, now with audienceLean: unisex', () => {
+    const r = buildItemHighlightsPerDesign({
+      groups: GROUPS, pool: POOL, apparelProduct: true, blankBrand: GILDAN,
+      familyTitleText: FAMILY_TITLE, audienceLean: 'unisex',
+    })
+    expect(GILDAN.spec.fit).toBe('Classic')
+    for (const k of KEYS) {
+      const line = lineFor(r, k)
+      expect(holdFor(r, k)).toBeNull()
+      expect(line.length).toBeGreaterThanOrEqual(107)
+      expect(line).not.toContain('relaxed')
+      expect(line).toContain('classic')   // lineFor() lowercases; the pad's "${spec.fit} Fit" filler
+    }
+    // Also assert on the RETURNED BYTES directly (per_child/perDesign values, not the lowercased
+    // helper) — the promoted minor's own wording ("assert on returned bytes").
+    for (const d of r.perDesign) {
+      expect(d.value.length).toBeGreaterThanOrEqual(107)
+      expect(d.value.toLowerCase()).not.toContain('relaxed')
+    }
   })
 })
