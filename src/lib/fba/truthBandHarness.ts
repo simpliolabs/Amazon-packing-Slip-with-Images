@@ -43,6 +43,8 @@ import {
 } from './titleBand'
 import { resolveGarment } from './garmentNoun'
 import { buildForeignDesignTokens, isForeignToDesign } from './designScope'
+// The REAL cap, not a twin — see the capTitle75Like deletion note below.
+import { capTitle75 } from './titleCap'
 
 /* ── THE CATALOG, exactly as migrations 053 + 058 seed `blank_specs` ──────────────────────────── */
 
@@ -242,22 +244,22 @@ function blankSpecFactTokensLike(spec: BlankSpec | null): string[] {
     .filter(Boolean)
 }
 
-/** Twin of `capTitle75` (listingPipeline.ts), minus the inclusive-audience-tail special-casing this
- *  fixture never needs — word-boundary truncation + dangling-connector cleanup. Kept local for the
- *  same zero-database-leaf reason as `blankSpecFactTokensLike` above. */
-function capTitle75Like(title: string): string {
-  let t = (title || '').replace(/\s{2,}/g, ' ').trim()
-  if (t.length <= 75) return t
-  let cut = t.slice(0, 76)
-  const lastSpace = cut.lastIndexOf(' ')
-  cut = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut.slice(0, 75)).trim()
-  for (let guard = 0; guard < 6; guard++) {
-    const tidied = cut.replace(/[\s,;:&|\-–—]+$/g, '').replace(/\s(?:for|and|with|in|of|to|a|an|the|or|by)$/i, '').trim()
-    if (tidied === cut) break
-    cut = tidied
-  }
-  return cut
-}
+/* `capTitle75Like` DELETED 2026-09-06.
+ *
+ * It was a hand-copied twin of production's cap whose own docstring admitted it ran "MINUS the
+ * inclusive-audience-tail special-casing this fixture never needs", with its own hardcoded 75. So
+ * the acceptance harness for the truth+band door measured a DIFFERENT cap than the pipeline
+ * shipped, and the moment the working ceiling moves it would have truncated to the OLD ceiling and
+ * reported GREEN on a change it had reverted — [[test-proves-the-mock-not-the-wire]] (#652).
+ *
+ * The reason it was copied at all was that `capTitle75` lived inside `listingPipeline.ts`, which
+ * has database leaves this fixture must not pull in. That root is now gone: the cap lives in the
+ * PURE module `titleCap.ts`, so the harness imports the real thing.
+ *
+ * NOTE, a deliberate behaviour change: the harness now ALSO drops truncation-mangled
+ * "for Men"/"for Women" fragments, because production does. That is the point — the fixture was
+ * wrong, not production.
+ */
 
 /**
  * ENV-DRIVEN FLAGS — mirrors `listingPipeline.ts`'s `titleV4Mode()`/`v4Applies()`/`moneyTailMode`
@@ -328,7 +330,7 @@ function buildSettleCtx(params: {
     moneyTailMode: envMoneyTailMode(),
     moneyCtx,
     spec: params.spec,
-    capTitle75: capTitle75Like,
+    capTitle75,
     colorProtect: params.protect || null,
     lean: AUDIENCE_LEAN,
     v4NoPad: envTitleV4Mode() === 'on',
@@ -557,7 +559,7 @@ export function runLiveFailureRepro(): HarnessRow {
     moneyTailMode: envMoneyTailMode(),
     moneyCtx,
     spec: null,
-    capTitle75: capTitle75Like,
+    capTitle75,
     colorProtect: 'Hustle Definiton',
     lean: AUDIENCE_LEAN,
     v4NoPad: true,                      // PRODUCTION: TITLE_V4=on — this is the live-diagnosed config

@@ -2228,52 +2228,18 @@ function parseJsonLoose<T>(raw: string): T {
   }
 }
 
-// ─── 75-char WORKING CAP — CORRECTED 2026-09-05: this is OUR ceiling, not Amazon's (its schema allows 200); 75 is the Item Highlights precondition (error 100476). ──────
-// Deterministic last line of defense: never emit a title Amazon would auto-rewrite. Cuts at a
-// word boundary from the END (brand + design name + money keyword are all front-loaded by the
-// agent, so the tail holds the lowest-value supporting keyphrases), tidies dangling connectors/
-// punctuation, and — rather than silently narrowing the audience — DROPS a truncation-mangled
-// "for Men"/"for Women" fragment when the full title said "for Men and Women".
-export function capTitle75(title: string): string {
-  let t = (title || '').replace(/\s{2,}/g, ' ').trim()
-  t = deduplicatePhrases(t)
-  if (t.length <= 75) return t
-  // Every inclusive-audience form the pipeline can emit: "for Men and Women", "Men's and
-  // Women's" (the widen-guard's possessive swap), and "&" variants.
-  const hadInclusiveAudience = /\bfor Men (?:and|&) Women\b|\bMen['’]s (?:and|&) Women['’]s\b/i.test(t)
-  let cut = t.slice(0, 76)
-  const lastSpace = cut.lastIndexOf(' ')
-  cut = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut.slice(0, 75)).trim()
-  // Strip trailing punctuation + dangling FUNCTION words left by the cut ("... Tee for" → "... Tee").
-  // A dangling content word from a split keyphrase can survive — acceptable for a last-line backstop;
-  // the agent's prompts + retries keep real titles under the cap in the normal path.
-  for (let guard = 0; guard < 6; guard++) {
-    const tidied = cut.replace(/[\s,;:&|\-–—]+$/g, '').replace(/\s(?:for|and|with|in|of|to|a|an|the|or|by)$/i, '').trim()
-    if (tidied === cut) break
-    cut = tidied
-  }
-  if (hadInclusiveAudience && /\s*\b(?:for\s+)?(?:Men|Women)[‘’]?s?(?:\s(?:and|&))?$/i.test(cut)) {
-    cut = cut.replace(/\s*\b(?:for\s+)?(?:Men|Women)[‘’]?s?(?:\s(?:and|&))?$/i, '').trim().replace(/[\s,;:&\-–—]+$/g, '')
-  }
-  // Strip dangling garment fragments from truncation
-  cut = cut.replace(/\s+(?:Men[‘’]?s?|Women[‘’]?s?)\s+(?:Short|Long)$/i, '').trim().replace(/[\s,;:&\-–—]+$/g, '')
-  return cut
-}
-
-function deduplicatePhrases(title: string): string {
-  const words = title.split(/\s+/)
-  for (let len = 3; len >= 2; len--) {
-    for (let i = 0; i <= words.length - len * 2; i++) {
-      const phrase = words.slice(i, i + len).join(' ').toLowerCase()
-      const next = words.slice(i + len, i + len * 2).join(' ').toLowerCase()
-      if (phrase === next) {
-        words.splice(i + len, len)
-        return words.join(' ')
-      }
-    }
-  }
-  return title
-}
+// ─── TITLE CAP ─────────────────────────────────────────────────────────────────
+// MOVED 2026-09-06 to `titleCap.ts`. `capTitle75` and `deduplicatePhrases` used to live here, in a
+// module with database leaves — which is exactly WHY pure consumers copied them instead of
+// importing them (truthBandHarness.ts carried a deliberately-divergent twin with its own hardcoded
+// 75). Re-exported under the same name so the ~20 call sites and the tests are unchanged.
+//
+// The cap now follows CONTENT_CONTRACT.title.hardCap instead of three raw 75 literals, and
+// `capTitleReport` exposes WHETHER it cut — a truncation nobody can observe is the #643 class.
+export { capTitle75, capTitle, capTitleReport, deduplicatePhrases } from './titleCap'
+// Only `capTitle75` is called in this file (22 sites); `deduplicatePhrases` was a private helper of
+// the moved function and is re-exported above for other consumers, not imported here.
+import { capTitle75 } from './titleCap'
 
 // ─── ITEM HIGHLIGHTS (Amazon's companion to the 75-char title, July 27 2026) ────
 // Item Highlights is a customer-facing, fully indexed companion field, NOT backend keywords
