@@ -126,6 +126,26 @@ const significantFolded = (phrase: string): string[] =>
     .map((w) => { const f = ihFoldWord(w); return GENDER_FOLDS[f] ?? f })
     .filter((w) => w && !IH_INSIGNIFICANT.has(w))
 
+/** TASK 2 (2026-09-06, PO "Why is Women repeating Twice?"): a candidate that adds ONE new token
+ *  while repeating others used to outrank a candidate whose tokens are ALL new, merely by sorting
+ *  higher on theme-fit/volume — "Fall Sweatshirts for Women" (adds only `fall`) beat "Graphic
+ *  Pullover Top" (adds three) to a slot, and the line repeated `sweatshirts`/`women`. Amazon's ≤2
+ *  cap let it through because each repeat landed exactly twice.
+ *
+ *  Tier A = every significant token is new (zero overlap with `usedFolded`). Tier B = adds at least
+ *  one new token but repeats at least one used token (today's rule, now the FALLBACK tier). `null` =
+ *  adds nothing new — never composes, same as before this task.
+ *
+ *  Shared by BOTH selection loops (pool phrases below, spec-fact pad further down) so the tier rule
+ *  lives in exactly one place — the two loops rank different candidate shapes but must never fork
+ *  the definition of "new" vs "repeat". */
+type CandidateTier = 'A' | 'B' | null
+const classifyTier = (folded: readonly string[], usedFolded: ReadonlySet<string>): CandidateTier => {
+  const addsNew = folded.some((w) => !usedFolded.has(w))
+  if (!addsNew) return null
+  return folded.some((w) => usedFolded.has(w)) ? 'B' : 'A'
+}
+
 export interface ComposerOpts {
   spec?: Pick<BlankSpec, 'brand' | 'weightNote' | 'stretch' | 'material' | 'fit' | 'neck' | 'sleeve' | 'dye' | 'unisex'> | null
   garmentFamily?: ComposerGarmentFamily
@@ -259,29 +279,34 @@ export function composeItemHighlightDetailed(
     if (gm) usedGarmentSurfaces.add(gm)
   }
 
-  // Two passes: first prefer candidates introducing a NEW garment surface (the variety craft),
-  // then fill remaining budget with any novel candidate.
-  for (const preferNewGarment of [true, false]) {
-    for (const c of candidates) {
-      if (picked.length >= 7 || lineLen() >= AIM) break
-      const phrase = titleCasePhrase(c.keyword)
-      if (picked.includes(phrase) || phrase === brandPick) continue
-      const folded = significantFolded(c.keyword)
-      if (!folded.some((w) => !usedFolded.has(w))) continue            // must add something new
-      const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
-      if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
-      if (preferNewGarment && !gm) continue
-      const nextLen = lineLen() + (picked.length ? 2 : 0) + phrase.length
-      if (nextLen > MAX) continue
-      const draft = withBrand([...picked, phrase]).join(', ')
-      if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
-      // PO ruling 2026-08-21 (B0GWFFK1W7 "comfort colors tshirt, comfort colors graphic tee…" —
-      // "repeating CC 2 times"): the blank brand appears in AT MOST ONE picked phrase. Amazon's
-      // ≤2-per-word cap allows two; the PO does not. The reserved waterfall phrase counts as it.
-      if (brandRe && brandRe.test(phrase) && (brandPick || picked.some((pp) => brandRe.test(pp)))) continue
-      picked.push(phrase)
-      folded.forEach((w) => usedFolded.add(w))
-      if (gm) usedGarmentSurfaces.add(gm)
+  // TASK 2: Tier A (all-new candidates) fills BEFORE Tier B (repeats a used token) — never the
+  // reverse, even when a Tier-B candidate outranks a Tier-A one on fit/volume. Within each tier, the
+  // existing two-pass order holds: first prefer candidates introducing a NEW garment surface (the
+  // variety craft), then fill remaining budget with any novel-in-tier candidate. Tier B is reached
+  // only once every Tier-A candidate (both passes) has been considered.
+  for (const tier of ['A', 'B'] as const) {
+    for (const preferNewGarment of [true, false]) {
+      for (const c of candidates) {
+        if (picked.length >= 7 || lineLen() >= AIM) break
+        const phrase = titleCasePhrase(c.keyword)
+        if (picked.includes(phrase) || phrase === brandPick) continue
+        const folded = significantFolded(c.keyword)
+        if (classifyTier(folded, usedFolded) !== tier) continue        // must add something new, tier order
+        const gm = c.keyword.match(GARMENT_SURFACE_RE)?.[0]?.toLowerCase().replace(/[-\s]/g, '').replace(/s$/, '')
+        if (preferNewGarment && gm && usedGarmentSurfaces.has(gm)) continue
+        if (preferNewGarment && !gm) continue
+        const nextLen = lineLen() + (picked.length ? 2 : 0) + phrase.length
+        if (nextLen > MAX) continue
+        const draft = withBrand([...picked, phrase]).join(', ')
+        if (ihRepeatViolations(draft).length > 0) continue               // Amazon's ≤2 per-word rule
+        // PO ruling 2026-08-21 (B0GWFFK1W7 "comfort colors tshirt, comfort colors graphic tee…" —
+        // "repeating CC 2 times"): the blank brand appears in AT MOST ONE picked phrase. Amazon's
+        // ≤2-per-word cap allows two; the PO does not. The reserved waterfall phrase counts as it.
+        if (brandRe && brandRe.test(phrase) && (brandPick || picked.some((pp) => brandRe.test(pp)))) continue
+        picked.push(phrase)
+        folded.forEach((w) => usedFolded.add(w))
+        if (gm) usedGarmentSurfaces.add(gm)
+      }
     }
   }
   // A pool-sourced brand phrase IS a pool pick for the viability count; the spec phrase is not.
@@ -318,16 +343,32 @@ export function composeItemHighlightDetailed(
       sp.sleeve || '',
       sp.dye ? `${sp.dye} Fabric` : '',
     ].filter(Boolean)
-    for (const f of factFillers) {
-      if (lineLen() >= MIN) break
-      const phrase = titleCasePhrase(f)
-      if (picked.includes(phrase)) continue
-      const folded = significantFolded(f)
-      if (!folded.some((w) => !usedFolded.has(w))) continue
-      if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
-      if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
-      picked.push(phrase)
-      folded.forEach((w) => usedFolded.add(w))
+    // TASK 2: same tier order as the pool loop above — a filler that merely repeats a token the
+    // line ALREADY SHOWS (pool phrases / brand / the wear-fact) loses its priority-order slot to a
+    // later, non-repeating filler whenever that non-repeating one alone can still reach the floor.
+    // Tier is judged against `usedBeforePad` — a SNAPSHOT taken here, before this bank's own picks
+    // start accumulating — not the live `usedFolded`. These six facts are independent spec truths,
+    // not competing keyword candidates: `fit` ("Relaxed Fit") and `unisex` ("Unisex Fit") share only
+    // the literal word "Fit" this bank's own templates append to both, and living off the live set
+    // would wrongly read "Unisex Fit" as a repeat OF "Relaxed Fit" the instant this same loop had
+    // just added it — demoting a PO-mandated fact (2026-08-06: unisex sizing must be explicit when
+    // true) below a lower-priority filler ("Crew Neck") for no reason a customer would recognize as
+    // "repetition". A pool phrase repeating pool/brand/wear-fact vocabulary (a real customer-visible
+    // repeat) still correctly falls to Tier B against this snapshot.
+    const usedBeforePad = new Set(usedFolded)
+    for (const tier of ['A', 'B'] as const) {
+      for (const f of factFillers) {
+        if (lineLen() >= MIN) break
+        const phrase = titleCasePhrase(f)
+        if (picked.includes(phrase)) continue
+        const folded = significantFolded(f)
+        if (!folded.some((w) => !usedFolded.has(w))) continue           // must add something new (live)
+        if (classifyTier(folded, usedBeforePad) !== tier) continue     // tier vs. the pre-pad line only
+        if (lineLen() + 2 + phrase.length > CONTENT_CONTRACT.itemHighlights.max) continue
+        if (ihRepeatViolations([...picked, phrase].join(', ')).length > 0) continue
+        picked.push(phrase)
+        folded.forEach((w) => usedFolded.add(w))
+      }
     }
   }
   why.picked = picked.length; why.lineLen = lineLen()

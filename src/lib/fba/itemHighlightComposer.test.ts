@@ -434,3 +434,87 @@ describe('brand waterfall INSIDE the composer (B0FKFHSCS9: 1717 by override, tit
     if (out) expect(out.toLowerCase()).not.toMatch(/comfort colors|gildan/)
   })
 })
+
+/* ─── TASK 2 (2026-09-06, PO "Why is Women repeating Twice?") ──────────────────────────────────
+ *
+ * Root cause: the selection loops accepted a candidate that added only ONE new folded token
+ * ("Fall Sweatshirts for Women" adds only `fall`) ahead of an all-new candidate ("Graphic Pullover
+ * Top" / "Novelty Retro Graphic"), purely because the repeat-heavy one sorted higher on theme-fit
+ * or volume. Amazon's ≤2-per-word cap then passed the line because each repeat landed exactly
+ * twice. The fix ranks in two tiers — Tier A (every token new) fills before Tier B (repeats a used
+ * token) — in BOTH the pool-phrase loop and the spec-fact floor-pad loop, falling back to Tier B
+ * only once Tier A is exhausted and the line is still short of the fill band.
+ *
+ * NOTE: the brief's own illustrative pool ("Graphic Pullover Top" as the all-new candidate) does
+ * NOT discriminate old vs. new code with these keywords — "top" matches GARMENT_SURFACE_RE, so the
+ * PRE-EXISTING "prefer a new garment surface" pass already promotes it ahead of "Fall Sweatshirts
+ * for Women" on unmodified source (verified: `npx tsx` probe against 148aca0 produced the correct
+ * order even without this task's fix). The tests below keep the same shape (fit/volume, the
+ * `women`/`sweatshirt`/`crewneck` repeats) but swap the all-new candidate for one with NO garment
+ * surface match ("Novelty Retro Graphic"/"Weekend Adventure Look"), which genuinely isolates the
+ * tier rule this task adds. */
+describe('TASK 2: a phrase repeating a used token loses its slot to one that does not', () => {
+  it('Tier A (all-new tokens) is picked before Tier B (repeats `sweatshirt`/`women`) despite Tier B sorting higher on volume', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // Tier B: adds only `fall`
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // Tier A: all new, no garment-surface head start
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // Tier B: adds `long`/`sleeve`, repeats `crewneck`
+    ]
+    const spec = { material: '100% Cotton Blend' } // pads the line into the [MIN, MAX] band
+    const out = composeItemHighlight(pool, [], { spec: spec as any })!
+    expect(out).toBeTruthy()
+    expect(out.length).toBeGreaterThanOrEqual(MIN)
+    expect(out.length).toBeLessThanOrEqual(MAX)
+    const idxTierA = out.toLowerCase().indexOf('novelty retro graphic')
+    const idxTierB = out.toLowerCase().indexOf('fall sweatshirts for women')
+    expect(idxTierA).toBeGreaterThanOrEqual(0)
+    expect(idxTierB).toBeGreaterThanOrEqual(0)
+    expect(idxTierA).toBeLessThan(idxTierB)
+    // Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic") sums to well under the
+    // 110-char fill target, so the Tier-B fallback legitimately engages and `women` MAY repeat —
+    // that repeat is not itself a defect (Amazon's ≤2 cap still governs); the ORDER above is the rule.
+    const womenCount = (out.match(/\bwomen\b/gi) ?? []).length
+    expect(womenCount).toBeLessThanOrEqual(2)
+  })
+
+  it('the Tier-B fallback is real: it fires (and reaches the 107-char floor) when Tier A alone cannot, with no spec to pad', () => {
+    const pool = [
+      { keyword: 'crewneck sweatshirts women', searchVolume: 900, themeFit: 3 },
+      { keyword: 'fall sweatshirts for women', searchVolume: 850, themeFit: 3 },   // Tier B
+      { keyword: 'novelty retro graphic', searchVolume: 800, themeFit: 3 },        // Tier A
+      { keyword: 'long sleeve crewneck', searchVolume: 600, themeFit: 2 },         // Tier B
+      { keyword: 'sleeve detail graphic', searchVolume: 550, themeFit: 2 },        // Tier B (adds `detail`)
+    ]
+    // Tier A alone ("Crewneck Sweatshirts Women" + "Novelty Retro Graphic") is ~50 chars — nowhere
+    // near the 107 floor. No `spec` is passed, so the ONLY way this reaches MIN is the pool loop's
+    // own Tier-B fallback; if that fallback were dead, this would return null (under-floor-after-pad).
+    const out = composeItemHighlight(pool, [], {})
+    expect(out).toBeTruthy()
+    expect(out!.length).toBeGreaterThanOrEqual(MIN)
+    expect(out!.length).toBeLessThanOrEqual(MAX)
+    expect(out!.toLowerCase()).toContain('fall sweatshirts for women')
+    const idxTierA = out!.toLowerCase().indexOf('novelty retro graphic')
+    const idxTierB = out!.toLowerCase().indexOf('fall sweatshirts for women')
+    expect(idxTierA).toBeLessThan(idxTierB)
+  })
+
+  it('the spec-fact PAD loop applies the same tier rule: a repeat-token filler (`material` restating `cotton`) loses its slot to a non-repeating one (`fit`) that alone reaches the floor', () => {
+    const pool = [
+      { keyword: 'soft cotton graphic tee', searchVolume: 900, themeFit: 3 },
+      { keyword: 'retro vibes design', searchVolume: 800, themeFit: 3 },
+      { keyword: 'casual weekend style', searchVolume: 700, themeFit: 3 },
+      { keyword: 'weekend adventure look', searchVolume: 650, themeFit: 3 },
+    ]
+    // `material` is FIRST in the filler priority bank but repeats `cotton` (Tier B); `fit` is later
+    // in priority but all-new (Tier A) and, alone, sufficient to cross MIN. The Tier-A filler must
+    // be tried first and, once it reaches the floor, the Tier-B filler must never be added at all.
+    const spec = { material: '100% Cotton', fit: 'Super Relaxed' }
+    const out = composeItemHighlight(pool, [], { spec: spec as any })!
+    expect(out).toBeTruthy()
+    expect(out.length).toBeGreaterThanOrEqual(MIN)
+    expect(out.length).toBeLessThanOrEqual(MAX)
+    expect(out).toContain('Super Relaxed Fit')
+    expect(out).not.toContain('100% Cotton')
+  })
+})
