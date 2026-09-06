@@ -1,6 +1,6 @@
 # GOAL / PLAN / ADVERSARY — Item Highlight is an SEO surface, not conversion copy
 
-approved: false   <!-- PO sets true. Never self-approve. -->
+approved: true   <!-- PO 2026-09-05: "A/B: GO" (IH truth-fix); 2026-09-06: "it shouldnt be [design-blind] as we gave it VISION"; "proceed with full /superpowers:subagent-driven-development" -->
 
 **REVISION 2 (2026-09-05).** R1 was written to make this field "copy that converts, laid out below
 the title." **Market research plus the PO's own live listing proved that premise false**, so R1 is

@@ -1,6 +1,6 @@
 # GOAL / PLAN / ADVERSARY — model bake-off: which model for which contract
 
-approved: false   <!-- PO sets true. Never self-approve. -->
+approved: true   <!-- PO 2026-09-05: "A: go, The AI key is stored in the Platform Secrects" / "B: Approved"; 2026-09-06: "And BAKE off is Still on hold? Clear the Way please with the person holding it ASAP!" -->
 
 ## 1. GOAL
 
